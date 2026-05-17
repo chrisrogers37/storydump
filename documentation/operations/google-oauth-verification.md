@@ -24,7 +24,7 @@ Before opening the OAuth Brand / consent screen submission form:
 - [x] **Terms of Service URL** — `https://storydump.app/terms` (`landing/src/app/(marketing)/terms/page.tsx`)
 - [ ] **App icon** — 120×120 PNG, no transparency. Need to design.
 - [ ] **Authorized domain** — `storydump.app` verified via Google Search Console.
-- [ ] **OAuth Redirect URI registered** — `${OAUTH_REDIRECT_BASE_URL}/auth/google-drive/callback`. Currently `https://storyline-ai-production.up.railway.app/auth/google-drive/callback` on Railway. Should be added under the OAuth client in Google Cloud Console.
+- [ ] **OAuth Redirect URI registered** — `${OAUTH_REDIRECT_BASE_URL}/auth/google-drive/callback`. Currently `https://storyline-ai-production.up.railway.app/auth/google-drive/callback` on Railway. Add it under **APIs & Services → Credentials → [OAuth 2.0 Client] → Authorized redirect URIs**. (`OAUTH_REDIRECT_BASE_URL` is documented in [`documentation/guides/cloud-deployment.md`](../guides/cloud-deployment.md).)
 - [ ] **Scope justification copy** — short text explaining why we need `drive.readonly` (see template below).
 - [ ] **Demo video** — screencast (≤ 5 min) demonstrating each requested scope in use. YouTube unlisted is fine.
 
@@ -72,7 +72,7 @@ Under **Scopes**, make sure these are listed:
 
 For each, click **Edit scope** → fill in the justification. **`drive.readonly` is the one Google will scrutinize.** Suggested copy:
 
-> Storydump is an Instagram Story scheduling tool. Users connect a Google Drive folder containing the media they want Storydump to post. We list files recursively under that single user-chosen folder to build a content catalog (filename, MIME type, thumbnail URL, category from subfolder structure) and read each file's bytes once per post to upload to Instagram. We never write to, modify, or delete files in the user's Drive. We do not access files outside the folder the user explicitly pointed us at, but the `drive.file` scope is too restrictive for this workflow because it doesn't grant folder-traversal of pre-existing user files. We use `drive.readonly` to enable read-only access to one user-chosen folder; we discard scope to any other Drive content via app-side filtering on `parents` chain.
+> Storydump is an Instagram Story scheduling tool. Users connect a Google Drive folder containing the media they want Storydump to post. We use `files.list` to enumerate files recursively under that single user-chosen folder (building a content catalog of filename, MIME type, thumbnail URL, and category from subfolder structure) and `files.get` with `alt=media` to read each file's bytes once per post for upload to Instagram. We never write to, modify, or delete files in the user's Drive — no `files.create`, `files.update`, or `files.delete`. We restrict access to the user-chosen folder via app-side filtering on the `parents` chain and never read files outside it. The `drive.file` scope was evaluated and rejected because it does not grant traversal of pre-existing user files, only files the app itself creates or the user opens via the Picker — incompatible with our "point at an existing folder" workflow.
 
 (Adjust wording to current implementation — the gist is: read-only, narrow folder scope, no writes, no exfiltration.)
 
@@ -83,12 +83,13 @@ Bottom of the consent screen → **Submit for verification**.
 Google will ask for the demo video URL. Record one that shows:
 
 1. A user signing into Storydump.
-2. Granting the Drive scope.
-3. Storydump listing files from the connected folder.
-4. A post going out (which reads file bytes from Drive).
-5. The user disconnecting / revoking access.
+2. Reaching the **Google OAuth consent screen** — pause long enough to clearly show the requested scopes listed (reviewers commonly reject videos that skip past this; they want to see the scope list on-screen).
+3. Granting the Drive scope.
+4. Storydump listing files from the connected folder.
+5. A post going out (which reads file bytes from Drive).
+6. The user disconnecting / revoking access.
 
-YouTube unlisted is the standard hosting. Keep the video under 5 minutes.
+YouTube unlisted is the standard hosting. Aim for under 5 minutes (convention, not a hard limit — Google will accept longer if the content justifies it).
 
 ### 6. Wait + respond to review
 
@@ -96,7 +97,7 @@ Google review timeline is typically **2–6 weeks**. The team may send back a li
 
 While waiting:
 - The unverified-app warning continues to show. Users still have the "Go to storydump (unsafe)" workaround.
-- Testing-mode allowlists (added under OAuth consent → Test users) bypass the warning for whitelisted Google accounts. Useful for letting beta testers in without the scary screen.
+- Google accounts added under **OAuth consent → Test users** (up to 100) **bypass the warning entirely** — they see a clean consent screen. Every other user sees the red "Google hasn't verified this app" page. Useful for letting beta testers in without the scary screen.
 
 ### 7. After approval
 
@@ -118,6 +119,11 @@ For internal/closed beta until verification clears:
 
 - Add each beta tester's Google account under **OAuth consent → Test users**. Up to 100 testers. They bypass the unverified warning entirely.
 - Stays valid even after re-submitting verification.
+
+## See also
+
+- [`documentation/guides/cloud-deployment.md`](../guides/cloud-deployment.md) — `OAUTH_REDIRECT_BASE_URL` and Railway env-var setup.
+- [`documentation/planning/2026-03-31-meta-app-launch-design.md`](../planning/2026-03-31-meta-app-launch-design.md) — sibling Meta/Instagram OAuth verification story (different provider, similar shape).
 
 ## Related issues
 
