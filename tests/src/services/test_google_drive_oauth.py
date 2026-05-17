@@ -348,6 +348,181 @@ class TestGDriveGetUserCredentials:
         assert call_kwargs["refresh_token"] == "decrypted_encrypted_refresh"
         assert call_kwargs["client_id"] == "client-id"
 
+    @patch("src.services.integrations.google_drive_oauth.settings")
+    def test_credentials_include_expiry(self, mock_settings):
+        """Credentials constructor receives expires_at from the DB token row."""
+        from datetime import datetime, timezone
+
+        mock_settings.GOOGLE_CLIENT_ID = "client-id"
+        mock_settings.GOOGLE_CLIENT_SECRET = "client-secret"
+
+        mock_chat = Mock()
+        mock_chat.id = uuid.uuid4()
+        self.service.settings_repo.get_by_chat_id.return_value = mock_chat
+
+        expires = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+        mock_access = Mock()
+        mock_access.token_value = "encrypted_access"
+        mock_access.expires_at = expires
+        mock_refresh = Mock()
+        mock_refresh.token_value = "encrypted_refresh"
+
+        def get_token_side_effect(service_name, token_type, chat_id):
+            if token_type == "oauth_access":
+                return mock_access
+            return mock_refresh
+
+        self.service.token_repo.get_token_for_chat.side_effect = get_token_side_effect
+        self.service._encryption.decrypt.side_effect = lambda v: f"decrypted_{v}"
+
+        with patch("google.oauth2.credentials.Credentials") as MockCreds:
+            MockCreds.return_value = Mock()
+            self.service.get_user_credentials(-100123)
+
+        call_kwargs = MockCreds.call_args[1]
+        assert call_kwargs["expiry"] == expires
+
+    @patch("src.services.integrations.google_drive_oauth.settings")
+    def test_credentials_expiry_none_when_not_set(self, mock_settings):
+        """Credentials expiry is None when access_row.expires_at is None."""
+        mock_settings.GOOGLE_CLIENT_ID = "client-id"
+        mock_settings.GOOGLE_CLIENT_SECRET = "client-secret"
+
+        mock_chat = Mock()
+        mock_chat.id = uuid.uuid4()
+        self.service.settings_repo.get_by_chat_id.return_value = mock_chat
+
+        mock_access = Mock()
+        mock_access.token_value = "encrypted_access"
+        mock_access.expires_at = None
+
+        self.service.token_repo.get_token_for_chat.side_effect = lambda sn, tt, cid: (
+            mock_access if tt == "oauth_access" else None
+        )
+        self.service._encryption.decrypt.side_effect = lambda v: f"decrypted_{v}"
+
+        with patch("google.oauth2.credentials.Credentials") as MockCreds:
+            MockCreds.return_value = Mock()
+            self.service.get_user_credentials(-100123)
+
+        call_kwargs = MockCreds.call_args[1]
+        assert call_kwargs["expiry"] is None
+
+
+# ==================== Persist Refreshed Credentials Tests ====================
+
+
+@pytest.mark.unit
+class TestGDrivePersistRefreshedCredentials:
+    """Tests for persist_refreshed_credentials."""
+
+    @pytest.fixture(autouse=True)
+    def setup_service(self):
+        with patch.object(GoogleDriveOAuthService, "__init__", lambda self: None):
+            self.service = GoogleDriveOAuthService()
+            self.service.service_run_repo = Mock()
+            self.service.service_name = "GoogleDriveOAuthService"
+            self.service._encryption = Mock()
+            self.service.token_repo = Mock()
+            self.service.settings_repo = Mock()
+            self.service.SERVICE_NAME = "google_drive"
+            self.service.TOKEN_TYPE_ACCESS = "oauth_access"
+
+    def test_persists_when_token_changed(self):
+        """Writes new token to DB when credentials.token differs from stored."""
+        from datetime import datetime, timezone
+
+        mock_chat = Mock()
+        mock_chat.id = uuid.uuid4()
+        self.service.settings_repo.get_by_chat_id.return_value = mock_chat
+
+        mock_access = Mock()
+        mock_access.token_value = "encrypted_old"
+        self.service.token_repo.get_token_for_chat.return_value = mock_access
+        self.service._encryption.decrypt.return_value = "old_access_token"
+        self.service._encryption.encrypt.return_value = "encrypted_new"
+
+        new_expiry = datetime(2026, 6, 1, 13, 0, 0, tzinfo=timezone.utc)
+        creds = Mock()
+        creds.token = "new_access_token"
+        creds.expiry = new_expiry
+
+        result = self.service.persist_refreshed_credentials(-100123, creds)
+
+        assert result is True
+        self.service.token_repo.create_or_update_for_chat.assert_called_once_with(
+            service_name="google_drive",
+            token_type="oauth_access",
+            token_value="encrypted_new",
+            chat_settings_id=str(mock_chat.id),
+            expires_at=new_expiry,
+        )
+
+    def test_skips_when_token_unchanged(self):
+        """Returns False and does not write when token is the same."""
+        mock_chat = Mock()
+        mock_chat.id = uuid.uuid4()
+        self.service.settings_repo.get_by_chat_id.return_value = mock_chat
+
+        mock_access = Mock()
+        mock_access.token_value = "encrypted_same"
+        self.service.token_repo.get_token_for_chat.return_value = mock_access
+        self.service._encryption.decrypt.return_value = "same_token"
+
+        creds = Mock()
+        creds.token = "same_token"
+
+        result = self.service.persist_refreshed_credentials(-100123, creds)
+
+        assert result is False
+        self.service.token_repo.create_or_update_for_chat.assert_not_called()
+
+    def test_returns_false_for_none_credentials(self):
+        """Returns False when credentials is None."""
+        assert self.service.persist_refreshed_credentials(-100123, None) is False
+
+    def test_returns_false_when_no_chat_settings(self):
+        """Returns False when chat has no settings."""
+        self.service.settings_repo.get_by_chat_id.return_value = None
+
+        creds = Mock()
+        creds.token = "some_token"
+
+        assert self.service.persist_refreshed_credentials(-100123, creds) is False
+
+    def test_returns_false_when_no_access_row(self):
+        """Returns False when no access token exists in DB."""
+        mock_chat = Mock()
+        mock_chat.id = uuid.uuid4()
+        self.service.settings_repo.get_by_chat_id.return_value = mock_chat
+        self.service.token_repo.get_token_for_chat.return_value = None
+
+        creds = Mock()
+        creds.token = "some_token"
+
+        assert self.service.persist_refreshed_credentials(-100123, creds) is False
+
+    def test_persists_when_stored_token_decrypt_fails(self):
+        """Persists new token when the stored token can't be decrypted."""
+        mock_chat = Mock()
+        mock_chat.id = uuid.uuid4()
+        self.service.settings_repo.get_by_chat_id.return_value = mock_chat
+
+        mock_access = Mock()
+        mock_access.token_value = "corrupted"
+        self.service.token_repo.get_token_for_chat.return_value = mock_access
+        self.service._encryption.decrypt.side_effect = ValueError("bad key")
+        self.service._encryption.encrypt.return_value = "encrypted_new"
+
+        creds = Mock()
+        creds.token = "new_token"
+        creds.expiry = None
+
+        result = self.service.persist_refreshed_credentials(-100123, creds)
+
+        assert result is True
+        self.service.token_repo.create_or_update_for_chat.assert_called_once()
+
 
 # ==================== Notify Telegram Tests ====================
 

@@ -231,6 +231,10 @@ class MediaSyncService(BaseService):
 
             self._deactivate_missing_items(ctx)
 
+            # Persist any token the google-auth library refreshed in-memory
+            if resolved_type == "google_drive" and telegram_chat_id:
+                self._persist_refreshed_gdrive_credentials(provider, telegram_chat_id)
+
             logger.info(
                 f"[MediaSyncService] Sync complete: "
                 f"{ctx.result.new} new, {ctx.result.updated} updated, "
@@ -397,6 +401,33 @@ class MediaSyncService(BaseService):
             )
         else:
             return MediaSourceFactory.create(source_type)
+
+    def _persist_refreshed_gdrive_credentials(
+        self, provider, telegram_chat_id: int
+    ) -> None:
+        """Persist refreshed Google Drive OAuth credentials back to the DB.
+
+        During API calls, the google-auth library may refresh the access_token
+        in-memory. Without this step, the next sync cycle would start with
+        the old expired token and need another refresh round-trip.
+        """
+        from google.oauth2.credentials import Credentials as UserCredentials
+
+        creds = provider.credentials
+        if not isinstance(creds, UserCredentials) or not creds.refresh_token:
+            return
+
+        from src.services.integrations.google_drive_oauth import (
+            GoogleDriveOAuthService,
+        )
+
+        try:
+            with GoogleDriveOAuthService() as oauth_service:
+                oauth_service.persist_refreshed_credentials(telegram_chat_id, creds)
+        except Exception:  # noqa: BLE001 — best-effort, must not break sync
+            logger.warning(
+                "[MediaSyncService] Failed to persist refreshed GDrive credentials"
+            )
 
     def _get_file_hash(self, file_info: MediaFileInfo, provider) -> str:
         """Get content hash for a file. Uses provider-side hash if available."""
