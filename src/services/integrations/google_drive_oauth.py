@@ -266,17 +266,24 @@ class GoogleDriveOAuthService(BaseService):
         return None
 
     async def notify_telegram(
-        self, chat_id: int, message: str, success: bool = True
+        self,
+        chat_id: int,
+        message: str,
+        success: bool = True,
+        parse_mode: str | None = "Markdown",
     ) -> None:
         """Send a notification message to the Telegram chat."""
         try:
             bot = Bot(token=settings.TELEGRAM_BOT_TOKEN)
             emoji = "\U0001f4c1" if success else "\u26a0\ufe0f"
-            full_message = f"{emoji} *Google Drive OAuth*\n\n{message}"
+            if parse_mode:
+                full_message = f"{emoji} *Google Drive OAuth*\n\n{message}"
+            else:
+                full_message = f"{emoji} Google Drive OAuth\n\n{message}"
             await bot.send_message(
                 chat_id=chat_id,
                 text=full_message,
-                parse_mode="Markdown",
+                parse_mode=parse_mode,
             )
         except Exception as e:  # noqa: BLE001 — best-effort notification, swallow all errors
             logger.error(
@@ -373,8 +380,42 @@ class GoogleDriveOAuthService(BaseService):
                 scopes=self.REQUIRED_SCOPES,
             )
         except (ValueError, InvalidToken) as e:
-            logger.error(f"Failed to construct Google credentials: {e}")
+            logger.critical(
+                f"Google Drive token decryption failed for chat "
+                f"{telegram_chat_id}: {e} — likely encryption key rotation "
+                f"left tokens unreadable"
+            )
+            self._notify_decrypt_failure(telegram_chat_id)
             return None
+
+    def _notify_decrypt_failure(self, telegram_chat_id: int) -> None:
+        """Fire-and-forget Telegram alert when token decryption fails."""
+        import asyncio
+
+        try:
+            auth_url = self.generate_authorization_url(telegram_chat_id)
+            message = (
+                "Google Drive token could not be decrypted — "
+                "please reconnect:\n"
+                f"{auth_url}"
+            )
+        except Exception:
+            message = (
+                "Google Drive token could not be decrypted — "
+                "please reconnect using /connect_drive"
+            )
+
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(
+                self.notify_telegram(
+                    telegram_chat_id, message, success=False, parse_mode=None
+                )
+            )
+        except RuntimeError:
+            logger.warning(
+                f"No event loop to send decrypt-failure alert to chat {telegram_chat_id}"
+            )
 
     def _validate_config(self) -> None:
         """Validate that all required Google OAuth settings are configured."""
