@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Google OAuth verification submission runbook** — new `documentation/operations/google-oauth-verification.md` walks through the manual steps to clear the "Google hasn't verified this app" warning on the Drive consent screen: domain verification via Google Search Console, OAuth consent screen field-by-field, scope justification copy for `drive.readonly`, demo video requirements, submission flow, and the test-user allowlist as a stop-gap while review is pending. Captures the #327 outcome ("`drive.readonly` is the minimum viable scope") as the rationale for taking this route. Closes the documentation half of #333; the submission itself remains a manual operations task.
 - **`ensure_utc(dt)` datetime helper** (`src/utils/datetime_utils.py`) — single source of truth for "naive datetime → UTC-aware" coercion. Returns `None` unchanged; passes already-aware datetimes through without re-allocating. Replaces 5 copies of the same inline idiom in `setup_state_service.py`, `telegram_commands.py`, `scheduler.py`, `dashboard_history_queries.py`, and `telegram_utils.py`. Also used in `ApiToken.is_expired` and `ApiToken.hours_until_expiry`, which previously compared `expires_at` to a naive `datetime.utcnow()` — that latent bug never surfaced because both sides happened to be naive, but it would have broken the moment either side became aware (e.g., a future column migration to `DateTime(timezone=True)`). Closes #335.
 
 ### Security
