@@ -194,6 +194,7 @@ class TestExchangeAndStore:
     async def test_exchange_new_account_creates_it(self, service):
         """When Instagram account is new, add_account is called."""
         service.account_service.get_account_by_instagram_id.return_value = None
+        service.account_service.get_active_account.return_value = None
         service.account_service.add_account.return_value = Mock()
 
         with (
@@ -230,6 +231,7 @@ class TestExchangeAndStore:
         """When Instagram account exists, update_account_token is called."""
         existing = Mock()
         service.account_service.get_account_by_instagram_id.return_value = existing
+        service.account_service.get_active_account.return_value = None
         service.account_service.update_account_token.return_value = existing
 
         with (
@@ -261,6 +263,7 @@ class TestExchangeAndStore:
         """When several IG accounts are linked across FB Pages, all are stored
         and only the first is set active for the chat (#331)."""
         service.account_service.get_account_by_instagram_id.return_value = None
+        service.account_service.get_active_account.return_value = None
         service.account_service.add_account.return_value = Mock()
 
         with (
@@ -390,6 +393,138 @@ class TestExchangeAndStore:
         assert summary["username"] == "testuser"
         assert summary["expires_in_days"] == 60
         assert summary["account_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_exchange_preserves_existing_active_account(self, service):
+        """Re-auth must not silently flip the chat's chosen active account.
+
+        Scenario: user has an existing active account (set explicitly via
+        Settings → Accounts). They re-run OAuth. Even if Meta returns a
+        different IG first, the existing active stays active.
+        """
+        existing_active = Mock()
+        existing_other = Mock()
+        # Chat already has an active account
+        service.account_service.get_active_account.return_value = existing_active
+
+        # Both detected accounts already exist in the DB
+        def lookup(ig_id):
+            return existing_other if ig_id == "17841000000001" else existing_active
+
+        service.account_service.get_account_by_instagram_id.side_effect = lookup
+
+        with (
+            patch.object(
+                service, "_exchange_code_for_token", new_callable=AsyncMock
+            ) as mock_code,
+            patch.object(
+                service, "_exchange_for_long_lived_token", new_callable=AsyncMock
+            ) as mock_long,
+            patch.object(
+                service, "_get_instagram_accounts_info", new_callable=AsyncMock
+            ) as mock_info,
+        ):
+            mock_code.return_value = "short_token"
+            mock_long.return_value = ("long_token", 5184000)
+            mock_info.return_value = [
+                {"id": "17841000000001", "username": "first"},
+                {"id": "17841000000002", "username": "second"},
+            ]
+
+            await service.exchange_and_store("auth_code", -100123)
+
+        # Neither call should set_as_active because chat already has one.
+        assert service.account_service.update_account_token.call_count == 2
+        for call in service.account_service.update_account_token.call_args_list:
+            assert call[1]["set_as_active"] is False
+            assert call[1]["telegram_chat_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_exchange_continues_on_per_account_storage_failure(self, service):
+        """One bad row shouldn't drop the rest — log and continue."""
+        service.account_service.get_active_account.return_value = None
+        service.account_service.get_account_by_instagram_id.return_value = None
+
+        # First call raises; second succeeds
+        call_count = {"n": 0}
+
+        def add(**_kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise RuntimeError("simulated DB failure")
+            return Mock()
+
+        service.account_service.add_account.side_effect = add
+
+        with (
+            patch.object(
+                service, "_exchange_code_for_token", new_callable=AsyncMock
+            ) as mock_code,
+            patch.object(
+                service, "_exchange_for_long_lived_token", new_callable=AsyncMock
+            ) as mock_long,
+            patch.object(
+                service, "_get_instagram_accounts_info", new_callable=AsyncMock
+            ) as mock_info,
+        ):
+            mock_code.return_value = "short_token"
+            mock_long.return_value = ("long_token", 5184000)
+            mock_info.return_value = [
+                {"id": "17841000000001", "username": "first"},
+                {"id": "17841000000002", "username": "second"},
+            ]
+
+            result = await service.exchange_and_store("auth_code", -100123)
+
+        # 2 attempts, 1 successful — account_count reflects what we actually stored.
+        assert service.account_service.add_account.call_count == 2
+        assert result["account_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_get_instagram_accounts_info_dedupes_same_ig_from_multiple_pages(
+        self, service
+    ):
+        """Two FB Pages can link to the same IG Business Account — dedupe."""
+
+        class _Resp:
+            def __init__(self, data):
+                self.status_code = 200
+                self._data = data
+
+            def json(self):
+                return self._data
+
+            @property
+            def text(self):
+                return str(self._data)
+
+        responses = iter(
+            [
+                # GET /me/accounts (single page, two FB Pages, no further paging)
+                _Resp({"data": [{"id": "page_A"}, {"id": "page_B"}]}),
+                # GET /{page_A}?fields=instagram_business_account
+                _Resp({"instagram_business_account": {"id": "ig_42"}}),
+                # GET /{ig_42}?fields=username
+                _Resp({"username": "shared"}),
+                # GET /{page_B}?fields=instagram_business_account — same IG
+                _Resp({"instagram_business_account": {"id": "ig_42"}}),
+                # No username call for page_B: dedupe short-circuits before it
+            ]
+        )
+
+        mock_client = AsyncMock()
+        mock_client.__aenter__.return_value = mock_client
+        mock_client.__aexit__.return_value = False
+
+        async def fake_get(_url, params=None, timeout=None):
+            return next(responses)
+
+        mock_client.get = fake_get
+
+        with patch("src.services.core.oauth_service.httpx.AsyncClient", return_value=mock_client):
+            accounts = await service._get_instagram_accounts_info("token")
+
+        assert accounts == [{"id": "ig_42", "username": "shared"}]
 
 
 class TestNotifyTelegram:

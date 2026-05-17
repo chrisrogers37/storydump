@@ -183,52 +183,77 @@ class OAuthService(BaseService):
             expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
             active_account = accounts_info[0]
 
+            # Preserve the chat's existing active selection. Only set active
+            # when the chat has no active account (first connect, or the
+            # previous active was removed). Otherwise a re-auth could
+            # silently flip a user's chosen active back to whichever Page
+            # Meta returns first.
+            chat_has_active = bool(
+                self.account_service.get_active_account(telegram_chat_id)
+            )
+
+            stored = 0
             for idx, info in enumerate(accounts_info):
                 ig_account_id = info["id"]
                 ig_username = info["username"]
-                # First detected account becomes active to preserve the
-                # single-account behavior; the rest land as inactive.
-                set_active = idx == 0
+                set_active = idx == 0 and not chat_has_active
                 existing = self.account_service.get_account_by_instagram_id(
                     ig_account_id
                 )
 
-                if existing:
-                    self.account_service.update_account_token(
-                        instagram_account_id=ig_account_id,
-                        access_token=long_token,
-                        instagram_username=ig_username,
-                        token_expires_at=expires_at,
-                        set_as_active=set_active,
-                        telegram_chat_id=telegram_chat_id if set_active else None,
-                        auth_method=AUTH_METHOD_OAUTH,
+                try:
+                    if existing:
+                        self.account_service.update_account_token(
+                            instagram_account_id=ig_account_id,
+                            access_token=long_token,
+                            instagram_username=ig_username,
+                            token_expires_at=expires_at,
+                            set_as_active=set_active,
+                            telegram_chat_id=telegram_chat_id if set_active else None,
+                            auth_method=AUTH_METHOD_OAUTH,
+                        )
+                        logger.info(
+                            f"OAuth: Updated token for existing account @{ig_username} "
+                            f"(active={set_active})"
+                        )
+                    else:
+                        display_name = (
+                            f"@{ig_username}" if ig_username else ig_account_id
+                        )
+                        self.account_service.add_account(
+                            display_name=display_name,
+                            instagram_account_id=ig_account_id,
+                            instagram_username=ig_username,
+                            access_token=long_token,
+                            token_expires_at=expires_at,
+                            set_as_active=set_active,
+                            telegram_chat_id=telegram_chat_id if set_active else None,
+                            auth_method=AUTH_METHOD_OAUTH,
+                        )
+                        logger.info(
+                            f"OAuth: Created new account @{ig_username} "
+                            f"(active={set_active})"
+                        )
+                    stored += 1
+                except Exception as e:  # noqa: BLE001 — log + continue so one bad row doesn't drop the rest
+                    logger.error(
+                        f"OAuth: Failed to store account @{ig_username} ({ig_account_id}): {e}",
+                        exc_info=True,
                     )
-                    logger.info(
-                        f"OAuth: Updated token for existing account @{ig_username} "
-                        f"(active={set_active})"
-                    )
-                else:
-                    display_name = f"@{ig_username}" if ig_username else ig_account_id
-                    self.account_service.add_account(
-                        display_name=display_name,
-                        instagram_account_id=ig_account_id,
-                        instagram_username=ig_username,
-                        access_token=long_token,
-                        token_expires_at=expires_at,
-                        set_as_active=set_active,
-                        telegram_chat_id=telegram_chat_id if set_active else None,
-                        auth_method=AUTH_METHOD_OAUTH,
-                    )
-                    logger.info(
-                        f"OAuth: Created new account @{ig_username} "
-                        f"(active={set_active})"
-                    )
+
+            if stored == 0:
+                # Every account failed to persist — propagate so the caller
+                # surfaces a real failure rather than a silent "connected".
+                raise ValueError(
+                    "Detected Instagram accounts but failed to store any of them. "
+                    "Check the server logs and try again."
+                )
 
             result = {
                 "username": active_account["username"] or "unknown",
                 "account_id": active_account["id"],
                 "expires_in_days": expires_in // 86400,
-                "account_count": len(accounts_info),
+                "account_count": stored,
             }
 
             self.set_result_summary(run_id, result)
@@ -299,31 +324,40 @@ class OAuthService(BaseService):
         """
         Fetch all Instagram Business Accounts linked to the user's FB Pages.
 
-        Traverses: token -> Facebook Pages -> Instagram Business Account (per page).
-        Pages without a linked IG account are skipped.
+        Traverses: token -> Facebook Pages (paginated) -> Instagram Business
+        Account (per page). Pages without a linked IG account are skipped;
+        IGs linked from multiple Pages are deduped.
 
         Returns:
             list of dicts with 'id' and 'username' — possibly empty if the user
             has no Pages or no Pages with linked Instagram Business Accounts.
         """
+        accounts: list[dict] = []
+        seen_ig_ids: set[str] = set()
+
         async with httpx.AsyncClient() as client:
-            pages_resp = await client.get(
-                f"{settings.meta_graph_base}/me/accounts",
-                params={"access_token": token},
-                timeout=30.0,
-            )
+            # /me/accounts paginates at ~25 Pages per response. Walk
+            # paging.next until exhausted so users with many FB Pages
+            # don't silently lose accounts past the first page.
+            pages: list[dict] = []
+            next_url: Optional[str] = f"{settings.meta_graph_base}/me/accounts"
+            next_params: Optional[dict] = {"access_token": token}
+            while next_url:
+                resp = await client.get(next_url, params=next_params, timeout=30.0)
+                if resp.status_code != 200:
+                    logger.error(f"Failed to fetch Facebook Pages: {resp.text}")
+                    if pages:
+                        break  # partial page set is still useful
+                    return []
+                body = resp.json()
+                pages.extend(body.get("data", []))
+                next_url = body.get("paging", {}).get("next")
+                # `paging.next` is a fully-qualified URL with all params baked in.
+                next_params = None
 
-            if pages_resp.status_code != 200:
-                logger.error(f"Failed to fetch Facebook Pages: {pages_resp.text}")
-                return []
-
-            pages = pages_resp.json().get("data", [])
             if not pages:
                 logger.warning("No Facebook Pages found for this token")
                 return []
-
-            accounts: list[dict] = []
-            seen_ig_ids: set[str] = set()
 
             for page in pages:
                 page_id = page.get("id")
