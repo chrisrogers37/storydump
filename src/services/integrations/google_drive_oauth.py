@@ -266,17 +266,24 @@ class GoogleDriveOAuthService(BaseService):
         return None
 
     async def notify_telegram(
-        self, chat_id: int, message: str, success: bool = True
+        self,
+        chat_id: int,
+        message: str,
+        success: bool = True,
+        parse_mode: str | None = "Markdown",
     ) -> None:
         """Send a notification message to the Telegram chat."""
         try:
             bot = Bot(token=settings.TELEGRAM_BOT_TOKEN)
             emoji = "\U0001f4c1" if success else "\u26a0\ufe0f"
-            full_message = f"{emoji} *Google Drive OAuth*\n\n{message}"
+            if parse_mode:
+                full_message = f"{emoji} *Google Drive OAuth*\n\n{message}"
+            else:
+                full_message = f"{emoji} Google Drive OAuth\n\n{message}"
             await bot.send_message(
                 chat_id=chat_id,
                 text=full_message,
-                parse_mode="Markdown",
+                parse_mode=parse_mode,
             )
         except Exception as e:  # noqa: BLE001 — best-effort notification, swallow all errors
             logger.error(
@@ -401,7 +408,9 @@ class GoogleDriveOAuthService(BaseService):
         try:
             loop = asyncio.get_running_loop()
             loop.create_task(
-                self.notify_telegram(telegram_chat_id, message, success=False)
+                self.notify_telegram(
+                    telegram_chat_id, message, success=False, parse_mode=None
+                )
             )
         except RuntimeError:
             logger.warning(

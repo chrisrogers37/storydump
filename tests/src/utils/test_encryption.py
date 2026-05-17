@@ -509,3 +509,21 @@ class TestMultiKeyDecryptFallback:
         # Original ciphertext no longer decrypts (old key removed)
         with pytest.raises(ValueError, match="None of the 1 configured"):
             new_enc.decrypt(ciphertext)
+
+    @patch("src.utils.encryption.settings")
+    def test_per_key_fallback_when_multifernet_fails(self, mock_settings):
+        """Fallback loop decrypts even when MultiFernet's fast path raises."""
+        from cryptography.fernet import InvalidToken
+
+        from src.utils.encryption import TokenEncryption
+
+        key = Fernet.generate_key().decode()
+        _mock_single_key(mock_settings, key=key)
+        enc = TokenEncryption()
+        ciphertext = enc.encrypt("secret")
+
+        # Patch MultiFernet.decrypt to always fail — forces the per-key loop
+        with patch.object(enc._cipher, "decrypt", side_effect=InvalidToken):
+            result = enc.decrypt(ciphertext)
+
+        assert result == "secret"
