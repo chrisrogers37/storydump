@@ -373,8 +373,40 @@ class GoogleDriveOAuthService(BaseService):
                 scopes=self.REQUIRED_SCOPES,
             )
         except (ValueError, InvalidToken) as e:
-            logger.error(f"Failed to construct Google credentials: {e}")
+            logger.critical(
+                f"Google Drive token decryption failed for chat "
+                f"{telegram_chat_id}: {e} — likely encryption key rotation "
+                f"left tokens unreadable"
+            )
+            self._notify_decrypt_failure(telegram_chat_id)
             return None
+
+    def _notify_decrypt_failure(self, telegram_chat_id: int) -> None:
+        """Fire-and-forget Telegram alert when token decryption fails."""
+        import asyncio
+
+        try:
+            auth_url = self.generate_authorization_url(telegram_chat_id)
+            message = (
+                "Google Drive token could not be decrypted — "
+                "please reconnect:\n"
+                f"{auth_url}"
+            )
+        except Exception:
+            message = (
+                "Google Drive token could not be decrypted — "
+                "please reconnect using /connect_drive"
+            )
+
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(
+                self.notify_telegram(telegram_chat_id, message, success=False)
+            )
+        except RuntimeError:
+            logger.warning(
+                f"No event loop to send decrypt-failure alert to chat {telegram_chat_id}"
+            )
 
     def _validate_config(self) -> None:
         """Validate that all required Google OAuth settings are configured."""
