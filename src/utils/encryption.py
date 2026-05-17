@@ -47,6 +47,8 @@ class TokenEncryption:
             cls._instance = super().__new__(cls)
         return cls._instance
 
+    _fernets: Optional[list] = None
+
     def __init__(self):
         """Initialize encryption cipher with key(s) from settings."""
         if self._cipher is not None:
@@ -67,6 +69,7 @@ class TokenEncryption:
 
         try:
             fernets = [Fernet(k.encode()) for k in key_strings]
+            self._fernets = fernets
             self._cipher = MultiFernet(fernets)
         except (ValueError, binascii.Error) as e:
             raise ValueError(f"Invalid ENCRYPTION_KEY format: {e}")
@@ -90,6 +93,10 @@ class TokenEncryption:
         """
         Decrypt a token, trying all configured keys in order.
 
+        First attempts MultiFernet (fast path). On failure, falls back to
+        trying each individual Fernet key so that a token encrypted with
+        any key in ENCRYPTION_KEYS can be recovered.
+
         Args:
             ciphertext: The encrypted token from database
 
@@ -97,20 +104,36 @@ class TokenEncryption:
             Original plaintext token
 
         Raises:
-            ValueError: If decryption fails (no matching key or corrupted data)
+            ValueError: If decryption fails with all keys or data is corrupted
         """
         if not ciphertext:
             raise ValueError("Cannot decrypt empty string")
 
+        ciphertext_bytes = ciphertext.encode()
+
+        # Fast path: MultiFernet tries all keys internally.
         try:
-            return self._cipher.decrypt(ciphertext.encode()).decode()
+            return self._cipher.decrypt(ciphertext_bytes).decode()
         except InvalidToken:
-            logger.error("Token decryption failed - no matching key or corrupted data")
-            raise ValueError(
-                "Failed to decrypt token. "
-                "This may indicate none of the configured keys can decrypt "
-                "this data, or the data is corrupted."
-            )
+            pass
+
+        # Explicit per-key fallback — handles edge cases where MultiFernet
+        # gives up early (e.g. version-byte mismatch before HMAC check).
+        for i, fernet in enumerate(self._fernets):
+            try:
+                result = fernet.decrypt(ciphertext_bytes).decode()
+                logger.info(f"Token decrypted by key index {i} (per-key fallback)")
+                return result
+            except InvalidToken:
+                continue
+
+        key_count = len(self._fernets)
+        logger.error(f"Token decryption failed — all {key_count} keys exhausted")
+        raise ValueError(
+            f"Failed to decrypt token. "
+            f"None of the {key_count} configured encryption keys can "
+            f"decrypt this data, or the data is corrupted."
+        )
 
     def rotate(self, ciphertext: str) -> str:
         """

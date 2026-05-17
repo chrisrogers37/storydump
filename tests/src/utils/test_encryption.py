@@ -418,3 +418,112 @@ class TestKeyRotation:
         # Direct Fernet should also work (it's the only key)
         f = Fernet(key.encode())
         assert f.decrypt(encrypted.encode()).decode() == original
+
+
+@pytest.mark.unit
+class TestMultiKeyDecryptFallback:
+    """Verify decrypt's per-key fallback after MultiFernet fast-path fails."""
+
+    @pytest.fixture(autouse=True)
+    def reset_singleton(self):
+        """Reset the singleton instance before each test."""
+        from src.utils.encryption import TokenEncryption
+
+        TokenEncryption.reset()
+        yield
+        TokenEncryption.reset()
+
+    @patch("src.utils.encryption.settings")
+    def test_decrypt_with_third_key_in_chain(self, mock_settings):
+        """Token encrypted with key index 2 decrypts via the fallback loop."""
+        from src.utils.encryption import TokenEncryption
+
+        key_a = Fernet.generate_key().decode()
+        key_b = Fernet.generate_key().decode()
+        key_c = Fernet.generate_key().decode()
+
+        # Encrypt with key_c alone
+        _mock_single_key(mock_settings, key=key_c)
+        enc_c = TokenEncryption()
+        ciphertext = enc_c.encrypt("deep-secret")
+
+        # Configure with all three, key_c last
+        TokenEncryption.reset()
+        _mock_multi_keys(mock_settings, f"{key_a},{key_b},{key_c}")
+        multi_enc = TokenEncryption()
+
+        assert multi_enc.decrypt(ciphertext) == "deep-secret"
+
+    @patch("src.utils.encryption.settings")
+    def test_all_keys_exhausted_raises_with_count(self, mock_settings):
+        """Error message includes the number of keys that were tried."""
+        from src.utils.encryption import TokenEncryption
+
+        key_a = Fernet.generate_key().decode()
+        key_b = Fernet.generate_key().decode()
+        unrelated = Fernet.generate_key().decode()
+
+        # Encrypt with unrelated key
+        _mock_single_key(mock_settings, key=unrelated)
+        enc = TokenEncryption()
+        ciphertext = enc.encrypt("unreachable")
+
+        # Try with different keys
+        TokenEncryption.reset()
+        _mock_multi_keys(mock_settings, f"{key_a},{key_b}")
+        wrong_enc = TokenEncryption()
+
+        with pytest.raises(ValueError, match="None of the 2 configured"):
+            wrong_enc.decrypt(ciphertext)
+
+    @patch("src.utils.encryption.settings")
+    def test_full_rotation_lifecycle(self, mock_settings):
+        """Encrypt → rotate keys → decrypt → rotate token → remove old key."""
+        from src.utils.encryption import TokenEncryption
+
+        old_key = Fernet.generate_key().decode()
+        new_key = Fernet.generate_key().decode()
+
+        # Step 1: encrypt with old key
+        _mock_single_key(mock_settings, key=old_key)
+        old_enc = TokenEncryption()
+        ciphertext = old_enc.encrypt("rotate-me")
+
+        # Step 2: add new key, old key still present
+        TokenEncryption.reset()
+        _mock_multi_keys(mock_settings, f"{new_key},{old_key}")
+        both_enc = TokenEncryption()
+
+        # Old ciphertext decrypts
+        assert both_enc.decrypt(ciphertext) == "rotate-me"
+
+        # Step 3: rotate token to new key
+        rotated = both_enc.rotate(ciphertext)
+
+        # Step 4: remove old key — rotated token decrypts with new key only
+        TokenEncryption.reset()
+        _mock_single_key(mock_settings, key=new_key)
+        new_enc = TokenEncryption()
+        assert new_enc.decrypt(rotated) == "rotate-me"
+
+        # Original ciphertext no longer decrypts (old key removed)
+        with pytest.raises(ValueError, match="None of the 1 configured"):
+            new_enc.decrypt(ciphertext)
+
+    @patch("src.utils.encryption.settings")
+    def test_per_key_fallback_when_multifernet_fails(self, mock_settings):
+        """Fallback loop decrypts even when MultiFernet's fast path raises."""
+        from cryptography.fernet import InvalidToken
+
+        from src.utils.encryption import TokenEncryption
+
+        key = Fernet.generate_key().decode()
+        _mock_single_key(mock_settings, key=key)
+        enc = TokenEncryption()
+        ciphertext = enc.encrypt("secret")
+
+        # Patch MultiFernet.decrypt to always fail — forces the per-key loop
+        with patch.object(enc._cipher, "decrypt", side_effect=InvalidToken):
+            result = enc.decrypt(ciphertext)
+
+        assert result == "secret"
