@@ -562,6 +562,125 @@ class TestMediaSyncServiceProviderCreation:
         mock_factory.create.assert_called_once_with("local", base_path="/tmp/media")
 
 
+# ==================== Credential Persistence Tests ====================
+
+
+@pytest.mark.unit
+class TestMediaSyncCredentialPersistence:
+    """Tests for _persist_refreshed_gdrive_credentials and its integration with sync."""
+
+    @patch("src.services.core.media_sync.MediaSourceFactory")
+    @patch("src.services.core.media_sync.settings")
+    def test_sync_persists_refreshed_gdrive_credentials(
+        self, mock_settings, mock_factory, sync_service
+    ):
+        """After a google_drive sync, persist_refreshed_credentials is called."""
+        from google.oauth2.credentials import Credentials as UserCredentials
+
+        mock_creds = Mock(spec=UserCredentials)
+        mock_creds.refresh_token = "refresh_tok"
+        mock_creds.token = "new_access_token"
+
+        mock_provider = Mock()
+        mock_provider.credentials = mock_creds
+        mock_provider.is_configured.return_value = True
+        mock_provider.list_files.return_value = []
+        mock_factory.create.return_value = mock_provider
+
+        mock_settings.TELEGRAM_CHANNEL_ID = -100123
+        sync_service.media_repo.get_active_by_source_type.return_value = []
+
+        with patch(
+            "src.services.integrations.google_drive_oauth.GoogleDriveOAuthService"
+        ) as MockOAuth:
+            mock_oauth = MockOAuth.return_value
+            mock_oauth.__enter__ = Mock(return_value=mock_oauth)
+            mock_oauth.__exit__ = Mock(return_value=False)
+            mock_oauth.persist_refreshed_credentials.return_value = True
+
+            sync_service.sync(
+                source_type="google_drive",
+                source_root="folder_xyz",
+                telegram_chat_id=-100999,
+            )
+
+            mock_oauth.persist_refreshed_credentials.assert_called_once_with(
+                -100999, mock_creds
+            )
+
+    @patch("src.services.core.media_sync.MediaSourceFactory")
+    @patch("src.services.core.media_sync.settings")
+    def test_sync_skips_persistence_for_local_provider(
+        self, mock_settings, mock_factory, sync_service
+    ):
+        """Local provider sync does not attempt credential persistence."""
+        mock_provider = Mock()
+        mock_provider.is_configured.return_value = True
+        mock_provider.list_files.return_value = []
+        mock_factory.create.return_value = mock_provider
+
+        mock_settings.MEDIA_DIR = "/media"
+        sync_service.media_repo.get_active_by_source_type.return_value = []
+
+        with patch(
+            "src.services.integrations.google_drive_oauth.GoogleDriveOAuthService"
+        ) as MockOAuth:
+            sync_service.sync(source_type="local", source_root="/media")
+
+            MockOAuth.assert_not_called()
+
+    def test_persist_skips_non_oauth_credentials(self, sync_service):
+        """Does not persist when provider uses service account credentials."""
+        from google.oauth2.service_account import Credentials as SACredentials
+
+        mock_creds = Mock(spec=SACredentials)
+        mock_provider = Mock()
+        mock_provider.credentials = mock_creds
+
+        with patch(
+            "src.services.integrations.google_drive_oauth.GoogleDriveOAuthService"
+        ) as MockOAuth:
+            sync_service._persist_refreshed_gdrive_credentials(mock_provider, -100123)
+            MockOAuth.assert_not_called()
+
+    def test_persist_skips_when_no_refresh_token(self, sync_service):
+        """Does not persist when credentials have no refresh_token."""
+        from google.oauth2.credentials import Credentials as UserCredentials
+
+        mock_creds = Mock(spec=UserCredentials)
+        mock_creds.refresh_token = None
+        mock_provider = Mock()
+        mock_provider.credentials = mock_creds
+
+        with patch(
+            "src.services.integrations.google_drive_oauth.GoogleDriveOAuthService"
+        ) as MockOAuth:
+            sync_service._persist_refreshed_gdrive_credentials(mock_provider, -100123)
+            MockOAuth.assert_not_called()
+
+    def test_persist_failure_does_not_break_sync(self, sync_service):
+        """Credential persistence error is swallowed — sync must not fail."""
+        from google.oauth2.credentials import Credentials as UserCredentials
+
+        mock_creds = Mock(spec=UserCredentials)
+        mock_creds.refresh_token = "refresh_tok"
+        mock_provider = Mock()
+        mock_provider.credentials = mock_creds
+
+        with patch(
+            "src.services.integrations.google_drive_oauth.GoogleDriveOAuthService"
+        ) as MockOAuth:
+            mock_oauth = MockOAuth.return_value
+            mock_oauth.__enter__ = Mock(return_value=mock_oauth)
+            mock_oauth.__exit__ = Mock(return_value=False)
+            mock_oauth.persist_refreshed_credentials.side_effect = RuntimeError(
+                "DB down"
+            )
+
+            # Should not raise
+            sync_service._persist_refreshed_gdrive_credentials(mock_provider, -100123)
+
+
 # ==================== File Path Building Tests ====================
 
 
