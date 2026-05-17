@@ -37,9 +37,15 @@ _DOWNLOAD_TIMEOUT_SECONDS = 300
 
 
 def _is_retryable(exc: BaseException) -> bool:
-    """Return True for transient errors that should trigger a retry."""
+    """Return True for transient errors that should trigger a retry.
+
+    Includes 401: after the initial access_token expires, AuthorizedHttp
+    refreshes it in-memory.  If that refresh itself hits a transient failure
+    (network blip, Google-side propagation delay), a single retry gives the
+    refreshed token a second chance before we surface a terminal auth error.
+    """
     if isinstance(exc, HttpError):
-        return exc.resp.status in (429, 500, 502, 503, 504)
+        return exc.resp.status in (401, 429, 500, 502, 503, 504)
     return isinstance(exc, (ConnectionError, TimeoutError, OSError))
 
 
@@ -136,6 +142,13 @@ class GoogleDriveProvider(MediaSourceProvider):
 
         self._credentials = credentials
         self._folder_cache: dict[str, str] = {}
+
+    @property
+    def credentials(
+        self,
+    ) -> UserCredentials | ServiceAccountCredentials:
+        """Expose credentials so callers can persist refreshed tokens."""
+        return self._credentials
 
     @property
     def service(self):

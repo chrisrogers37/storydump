@@ -535,14 +535,26 @@ class TestGoogleDriveProviderRetry:
             provider._execute_with_retry(mock_request)
         assert mock_request.execute.call_count == 1
 
-    def test_no_retry_on_401(self, provider, mock_drive_service):
-        """Does not retry on 401 (auth error, not transient)."""
+    def test_retry_on_401(self, provider, mock_drive_service):
+        """Retries on 401 — gives AuthorizedHttp a second chance after refresh."""
+        mock_request = mock_drive_service.files().get()
+        mock_request.execute.side_effect = [
+            _make_http_error(401, "Unauthorized"),
+            {"id": "file1"},
+        ]
+
+        result = provider._execute_with_retry(mock_request)
+        assert result == {"id": "file1"}
+        assert mock_request.execute.call_count == 2
+
+    def test_401_exhausts_retries(self, provider, mock_drive_service):
+        """Persistent 401 raises after exhausting retries."""
         mock_request = mock_drive_service.files().get()
         mock_request.execute.side_effect = _make_http_error(401, "Unauthorized")
 
         with pytest.raises(HttpError):
             provider._execute_with_retry(mock_request)
-        assert mock_request.execute.call_count == 1
+        assert mock_request.execute.call_count == 3
 
     def test_download_chunk_retries_on_transient(self, provider):
         """Download chunk retry works on transient errors."""

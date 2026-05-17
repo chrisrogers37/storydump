@@ -378,6 +378,7 @@ class GoogleDriveOAuthService(BaseService):
                 client_id=settings.GOOGLE_CLIENT_ID,
                 client_secret=settings.GOOGLE_CLIENT_SECRET,
                 scopes=self.REQUIRED_SCOPES,
+                expiry=access_row.expires_at,
             )
         except (ValueError, InvalidToken) as e:
             logger.critical(
@@ -387,6 +388,56 @@ class GoogleDriveOAuthService(BaseService):
             )
             self._notify_decrypt_failure(telegram_chat_id)
             return None
+
+    def persist_refreshed_credentials(self, telegram_chat_id: int, credentials) -> bool:
+        """Persist refreshed OAuth credentials back to the database.
+
+        After API operations, the google-auth library may have refreshed the
+        access_token in-memory. This method writes the new token back to the
+        DB so the next provider creation cycle starts with a valid token.
+
+        Args:
+            telegram_chat_id: The Telegram chat that owns the credentials.
+            credentials: google.oauth2.credentials.Credentials instance.
+
+        Returns:
+            True if the token was updated in the DB, False otherwise.
+        """
+        if not credentials or not credentials.token:
+            return False
+
+        chat_settings = self.settings_repo.get_by_chat_id(telegram_chat_id)
+        if not chat_settings:
+            return False
+
+        chat_settings_id = str(chat_settings.id)
+
+        access_row = self.token_repo.get_token_for_chat(
+            self.SERVICE_NAME, self.TOKEN_TYPE_ACCESS, chat_settings_id
+        )
+        if not access_row:
+            return False
+
+        try:
+            stored_token = self.encryption.decrypt(access_row.token_value)
+        except (ValueError, InvalidToken):
+            stored_token = None
+
+        if stored_token == credentials.token:
+            return False
+
+        self.token_repo.create_or_update_for_chat(
+            service_name=self.SERVICE_NAME,
+            token_type=self.TOKEN_TYPE_ACCESS,
+            token_value=self.encryption.encrypt(credentials.token),
+            chat_settings_id=chat_settings_id,
+            expires_at=credentials.expiry,
+        )
+
+        logger.info(
+            f"Google Drive OAuth: persisted refreshed token for chat {telegram_chat_id}"
+        )
+        return True
 
     def _notify_decrypt_failure(self, telegram_chat_id: int) -> None:
         """Fire-and-forget Telegram alert when token decryption fails."""
