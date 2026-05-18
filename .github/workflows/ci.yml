@@ -144,10 +144,24 @@ jobs:
 
       - name: Check CHANGELOG.md was updated
         run: |
-          if git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -q "CHANGELOG.md"; then
+          CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+
+          # Docs-only PRs (everything under documentation/ or root .md files
+          # other than CHANGELOG itself) don't need a CHANGELOG entry — the
+          # changelog tracks user-facing behavior changes, not docs.
+          NON_DOC=$(echo "$CHANGED" | grep -v -E '^(documentation/|.*\.md$|\.github/)' || true)
+          if [ -z "$NON_DOC" ]; then
+            echo "✅ Docs-only PR — CHANGELOG.md update not required"
+            exit 0
+          fi
+
+          if echo "$CHANGED" | grep -q "^CHANGELOG\.md$"; then
             echo "✅ CHANGELOG.md was updated"
           else
             echo "⚠️ WARNING: CHANGELOG.md was not updated"
             echo "Please add an entry under ## [Unreleased] describing your changes"
+            echo ""
+            echo "Files changed:"
+            echo "$CHANGED" | sed 's/^/  /'
             exit 1
           fi
