@@ -147,6 +147,7 @@ class TestInstagramLoginExchange:
         mock_settings.OAUTH_REDIRECT_BASE_URL = "https://example.com"
 
         self.service.account_service.get_account_by_instagram_id.return_value = None
+        self.service.account_service.get_account_by_username.return_value = None
 
         # Mock HTTP calls
         short_response = Mock(status_code=200)
@@ -200,7 +201,8 @@ class TestInstagramLoginExchange:
         mock_settings.OAUTH_REDIRECT_BASE_URL = "https://example.com"
 
         self.service.account_service.get_account_by_instagram_id.return_value = Mock(
-            id="existing-uuid"
+            id="existing-uuid",
+            instagram_account_id="12345",
         )
 
         short_response = Mock(status_code=200)
@@ -232,6 +234,64 @@ class TestInstagramLoginExchange:
         assert result["username"] == "existing_user"
         self.service.account_service.update_account_token.assert_called_once()
         self.service.account_service.add_account.assert_not_called()
+        # Username fallback wasn't needed because we found by ID first.
+        self.service.account_service.get_account_by_username.assert_not_called()
+
+    @patch("src.services.integrations.instagram_login_oauth.settings")
+    @pytest.mark.asyncio
+    async def test_exchange_cross_flow_username_fallback(self, mock_settings):
+        """If get_by_id misses (FB Login stored a different ID), fall back to
+        username lookup and update the existing row in place rather than
+        failing on the duplicate-username uniqueness check."""
+        mock_settings.INSTAGRAM_APP_ID = "app_id"
+        mock_settings.INSTAGRAM_APP_SECRET = "secret"
+        mock_settings.OAUTH_REDIRECT_BASE_URL = "https://example.com"
+
+        # No match by IG Login user_id (88888) — FB Login stored a different ID.
+        self.service.account_service.get_account_by_instagram_id.return_value = None
+        # But username match: row stored under the FB Login Business Account ID.
+        self.service.account_service.get_account_by_username.return_value = Mock(
+            id="existing-uuid",
+            instagram_account_id="17841000000001",  # the stored FB Login ID
+            instagram_username="gatortails",
+        )
+
+        short_response = Mock(status_code=200)
+        short_response.json.return_value = {
+            "data": [{"access_token": "short", "user_id": "88888"}]
+        }
+        long_response = Mock(status_code=200)
+        long_response.json.return_value = {
+            "access_token": "long",
+            "expires_in": 5184000,
+        }
+        username_response = Mock(status_code=200)
+        username_response.json.return_value = {"username": "gatortails"}
+
+        with patch(
+            "src.services.integrations.instagram_login_oauth.httpx.AsyncClient"
+        ) as MockClient:
+            mock_client = AsyncMock()
+            MockClient.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            mock_client.post.return_value = short_response
+            mock_client.get.side_effect = [long_response, username_response]
+
+            await self.service.exchange_and_store("auth_code", -100123)
+
+        # Username fallback was used.
+        self.service.account_service.get_account_by_username.assert_called_once_with(
+            "gatortails"
+        )
+        # update_account_token called with the EXISTING stored ID — not the new
+        # IG Login user_id. Rotating it would break FB Login lookups.
+        self.service.account_service.update_account_token.assert_called_once()
+        call_kwargs = self.service.account_service.update_account_token.call_args[1]
+        assert call_kwargs["instagram_account_id"] == "17841000000001"
+        assert call_kwargs["instagram_username"] == "gatortails"
+        assert call_kwargs["auth_method"] == "instagram_login"
+        self.service.account_service.add_account.assert_not_called()
 
     @patch("src.services.integrations.instagram_login_oauth.settings")
     @pytest.mark.asyncio
@@ -242,6 +302,7 @@ class TestInstagramLoginExchange:
         mock_settings.OAUTH_REDIRECT_BASE_URL = "https://example.com"
 
         self.service.account_service.get_account_by_instagram_id.return_value = None
+        self.service.account_service.get_account_by_username.return_value = None
 
         short_response = Mock(status_code=200)
         short_response.json.return_value = {
