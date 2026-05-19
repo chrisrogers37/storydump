@@ -6,9 +6,18 @@ from unittest.mock import Mock, patch
 from fastapi.testclient import TestClient
 
 from src.api.app import app
+from src.api.rate_limit import limiter
 
 VALID_USER = {"user_id": 12345, "first_name": "Chris"}
 CHAT_ID = -1001234567890
+
+
+@pytest.fixture(autouse=True)
+def _disable_rate_limits():
+    """Disable SlowAPI rate limiting during tests to avoid cross-test 429s."""
+    limiter.enabled = False
+    yield
+    limiter.enabled = True
 
 
 @pytest.fixture

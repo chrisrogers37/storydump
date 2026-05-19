@@ -558,7 +558,7 @@ async def onboarding_media_thumbnail(
         raise HTTPException(status_code=upstream.status_code, detail="Upstream error")
 
     content_type = upstream.headers.get("content-type", "")
-    if not content_type.startswith("image/"):
+    if not content_type.startswith("image/") or "svg" in content_type.lower():
         raise HTTPException(status_code=502, detail="Unexpected upstream content type")
 
     return Response(

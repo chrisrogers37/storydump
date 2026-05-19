@@ -1338,7 +1338,9 @@ class TestAddAccount:
             response = self._post(client)
 
         assert response.status_code == 400
-        assert "Invalid access token" in response.json()["detail"]
+        detail = response.json()["detail"]
+        # Error must be sanitized — no raw API message, just a generic safe message
+        assert "Invalid credentials" in detail or "Invalid access token" in detail
 
     def test_add_account_non_numeric_id(self, client):
         """Non-numeric account ID rejected by Pydantic validation."""

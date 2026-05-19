@@ -2,9 +2,10 @@
 
 import html
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
+from src.api.rate_limit import limiter
 from src.api.routes.onboarding.helpers import service_error_handler
 from src.services.core.oauth_service import OAuthService
 from src.services.integrations.google_drive_oauth import GoogleDriveOAuthService
@@ -15,7 +16,9 @@ router = APIRouter(tags=["oauth"])
 
 
 @router.get("/instagram/start")
+@limiter.limit("5/minute")
 async def instagram_oauth_start(
+    request: Request,
     chat_id: int = Query(..., description="Telegram chat ID initiating the flow"),
 ):
     """
@@ -30,7 +33,9 @@ async def instagram_oauth_start(
 
 
 @router.get("/instagram/callback")
+@limiter.limit("10/minute")
 async def instagram_oauth_callback(
+    request: Request,
     code: str = Query(None, description="Authorization code from Meta"),
     state: str = Query(..., description="Signed state token"),
     error: str = Query(None, description="Error code if user denied"),
@@ -109,7 +114,9 @@ async def instagram_oauth_callback(
 
 
 @router.get("/instagram-login/callback")
+@limiter.limit("10/minute")
 async def instagram_login_oauth_callback(
+    request: Request,
     code: str = Query(None, description="Authorization code from Instagram"),
     state: str = Query(..., description="Signed state token"),
     error: str = Query(None, description="Error code if user denied"),
@@ -183,7 +190,9 @@ async def instagram_login_oauth_callback(
 
 
 @router.get("/google-drive/start")
+@limiter.limit("5/minute")
 async def google_drive_oauth_start(
+    request: Request,
     chat_id: int = Query(..., description="Telegram chat ID initiating the flow"),
 ):
     """
@@ -198,7 +207,9 @@ async def google_drive_oauth_start(
 
 
 @router.get("/google-drive/callback")
+@limiter.limit("10/minute")
 async def google_drive_oauth_callback(
+    request: Request,
     code: str = Query(None, description="Authorization code from Google"),
     state: str = Query(..., description="Signed state token"),
     error: str = Query(None, description="Error code if user denied"),

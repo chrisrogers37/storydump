@@ -3,19 +3,39 @@
 import time
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from src.api.rate_limit import limiter
 from src.api.routes.oauth import router as oauth_router
 from src.api.routes.onboarding import router as onboarding_router
 from src.config.settings import settings
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Add standard security headers to every response."""
+
+    async def dispatch(self, request: Request, call_next) -> Response:
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Strict-Transport-Security"] = (
+            "max-age=63072000; includeSubDomains"
+        )
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data:; frame-ancestors 'none'"
+        )
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        return response
+
 
 _START_TIME = time.time()
 
@@ -24,6 +44,9 @@ app = FastAPI(
     description="OAuth and API endpoints for Storydump",
     version="0.1.0",
 )
+
+# Security headers — HSTS, CSP, X-Frame-Options, X-Content-Type-Options
+app.add_middleware(SecurityHeadersMiddleware)
 
 # Proxy headers — trust X-Forwarded-For/Proto from Railway's load balancer
 # so request.client.host returns the real client IP, not the proxy IP.

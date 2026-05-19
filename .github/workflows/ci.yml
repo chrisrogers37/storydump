@@ -75,6 +75,10 @@ jobs:
       - name: Install package
         run: pip install -e .
 
+      - name: Generate test encryption key
+        id: gen-key
+        run: echo "key=$(python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')" >> "$GITHUB_OUTPUT"
+
       - name: Run tests with coverage
         env:
           # Database configuration (individual components for Settings class)
@@ -88,8 +92,9 @@ jobs:
           TELEGRAM_BOT_TOKEN: test_token
           TELEGRAM_CHANNEL_ID: -1001234567890
           ADMIN_TELEGRAM_CHAT_ID: -1001234567890
-          # Security
-          ENCRYPTION_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+          # Security — generate a fresh Fernet key per run instead of
+          # committing a static test key in the workflow file.
+          ENCRYPTION_KEY: ${{ steps.gen-key.outputs.key }}
           # Development
           DRY_RUN_MODE: "true"
           LOG_LEVEL: DEBUG

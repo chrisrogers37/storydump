@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **HTTP security headers on all API responses** — Added `SecurityHeadersMiddleware` with HSTS (`max-age=63072000; includeSubDomains`), `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, CSP (`default-src 'self'`, `frame-ancestors 'none'`), and `Referrer-Policy: strict-origin-when-cross-origin`. Closes #382.
+- **Thumbnail proxy blocks SVG content type** — SVG files can contain embedded JavaScript. The thumbnail proxy now rejects `image/svg+xml` responses from upstream, in addition to non-image types. Closes #383.
+- **Instagram API errors no longer leak internal details** — The `/add-account` endpoint previously forwarded raw Instagram Graph API error messages (which can contain token fragments, internal endpoint paths, or OAuth details) to the client. Now logs the raw error server-side and returns one of three sanitized messages depending on the error category. Closes #384.
+- **Required secrets validated at startup** — `ENCRYPTION_KEY` or `ENCRYPTION_KEYS` is now checked during `validate_all()` at boot. Missing encryption keys previously only surfaced at runtime when an OAuth flow tried to encrypt a token. Closes #385.
+- **Auth endpoints have stricter rate limits** — OAuth start endpoints limited to 5/min, OAuth callbacks to 10/min, and `/add-account` to 5/min (down from the 30/min global default). Closes #386.
+- **CI no longer commits a test encryption key** — The hardcoded Fernet key in `.github/workflows/ci.yml` is replaced with a dynamically generated key per CI run. Closes #387.
+
 ### Fixed
 
 - **Posting window `start == end` causes division by zero** — When `posting_hours_start` equals `posting_hours_end` (e.g., both set to 0), `_posting_window_hours()` returned 0 and `is_slot_due()` divided by it. `_in_posting_window()` also returned False because `start <= x < end` is never true when `start == end`. Now treats `start == end` as "always on" (24h window). Closes #360.
