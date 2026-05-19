@@ -11,7 +11,7 @@ from src.repositories.instagram_account_repository import InstagramAccountReposi
 from src.utils.encryption import TokenEncryption
 from src.config.constants import IG_LOGIN_GRAPH_BASE
 from src.config.settings import settings
-from src.exceptions import TokenExpiredError
+from src.exceptions import TokenExpiredError, TokenRevokedError
 from src.utils.logger import logger
 
 
@@ -120,6 +120,19 @@ class TokenRefreshService(BaseService):
             )
         return self.token_repo.get_token("instagram", "access_token")
 
+    def _get_current_token_locked(self, instagram_account_id: Optional[str] = None):
+        """Retrieve the current token with a row lock for safe concurrent refresh.
+
+        Uses SELECT ... FOR UPDATE SKIP LOCKED. If another process is already
+        refreshing this token, returns None to avoid clobbering.
+
+        Returns:
+            The locked token DB record, or None if not found / already locked.
+        """
+        return self.token_repo.get_token_for_update(
+            "instagram", "access_token", instagram_account_id
+        )
+
     async def _call_meta_refresh(
         self, current_token: str, instagram_account_id: Optional[str]
     ) -> httpx.Response:
@@ -193,11 +206,16 @@ class TokenRefreshService(BaseService):
             method_name="refresh_instagram_token",
             input_params={"account_id": account_label},
         ) as run_id:
-            db_token = self._get_current_token(instagram_account_id)
+            # Acquire row lock to prevent concurrent refresh clobbering.
+            # SKIP LOCKED: if another process is already refreshing, skip.
+            db_token = self._get_current_token_locked(instagram_account_id)
             if not db_token:
-                logger.error(f"No Instagram token found to refresh for {account_label}")
+                logger.info(
+                    f"Token refresh skipped for {account_label}: "
+                    "not found or locked by another process"
+                )
                 self.set_result_summary(
-                    run_id, {"success": False, "reason": "no_token"}
+                    run_id, {"success": False, "reason": "no_token_or_locked"}
                 )
                 return False
 
@@ -210,6 +228,30 @@ class TokenRefreshService(BaseService):
 
                 if response.status_code != 200:
                     error_data = response.json()
+                    error_info = error_data.get("error", {})
+                    error_subcode = error_info.get("error_subcode")
+
+                    # Distinguish revocation from normal refresh failure
+                    if error_subcode in TokenRevokedError.REVOCATION_SUBCODES:
+                        logger.error(
+                            f"Instagram token REVOKED for {account_label} "
+                            f"(subcode {error_subcode}): {error_data}"
+                        )
+                        self.set_result_summary(
+                            run_id,
+                            {
+                                "success": False,
+                                "reason": "token_revoked",
+                                "error_subcode": error_subcode,
+                                "error": error_data,
+                            },
+                        )
+                        raise TokenRevokedError(
+                            f"Instagram token revoked for {account_label}. "
+                            "User must reconnect their account.",
+                            error_subcode=error_subcode,
+                        )
+
                     logger.error(
                         f"Instagram token refresh failed for {account_label}: {error_data}"
                     )

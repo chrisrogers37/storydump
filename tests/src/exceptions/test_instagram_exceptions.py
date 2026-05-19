@@ -7,6 +7,7 @@ from src.exceptions.instagram import (
     InstagramAPIError,
     RateLimitError,
     TokenExpiredError,
+    TokenRevokedError,
     MediaUploadError,
 )
 
@@ -97,6 +98,39 @@ class TestTokenExpiredError:
     def test_default_message(self):
         err = TokenExpiredError()
         assert "expired" in str(err).lower()
+
+
+@pytest.mark.unit
+class TestTokenRevokedError:
+    """Tests for TokenRevokedError."""
+
+    def test_inherits_from_instagram_api_error(self):
+        assert issubclass(TokenRevokedError, InstagramAPIError)
+
+    def test_not_caught_by_token_expired(self):
+        """TokenRevokedError is NOT a subclass of TokenExpiredError."""
+        assert not issubclass(TokenRevokedError, TokenExpiredError)
+
+    def test_can_be_raised(self):
+        with pytest.raises(TokenRevokedError, match="disconnected"):
+            raise TokenRevokedError()
+
+    def test_caught_by_parent(self):
+        with pytest.raises(InstagramAPIError):
+            raise TokenRevokedError("revoked")
+
+    def test_default_message(self):
+        err = TokenRevokedError()
+        assert "reconnect" in str(err).lower()
+
+    def test_revocation_subcodes(self):
+        assert 458 in TokenRevokedError.REVOCATION_SUBCODES
+        assert 460 in TokenRevokedError.REVOCATION_SUBCODES
+        assert 467 in TokenRevokedError.REVOCATION_SUBCODES
+
+    def test_error_subcode_attribute(self):
+        err = TokenRevokedError("revoked", error_subcode=458)
+        assert err.error_subcode == 458
 
 
 @pytest.mark.unit

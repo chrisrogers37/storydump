@@ -74,6 +74,32 @@ class TokenExpiredError(InstagramAPIError):
         super().__init__(message, **kwargs)
 
 
+class TokenRevokedError(InstagramAPIError):
+    """
+    Instagram refresh token has been revoked.
+
+    Raised when the user has deauthorized the app, changed their password,
+    or Instagram has otherwise invalidated the refresh token. Unlike
+    TokenExpiredError (which can be resolved by refreshing), this requires
+    the user to fully reconnect their account via OAuth.
+
+    Meta error subcodes that indicate revocation:
+    - 458: App not installed (user deauthorized)
+    - 460: Password changed since token issuance
+    - 467: Token invalidated on server side
+    """
+
+    # Meta error subcodes that indicate refresh token revocation
+    REVOCATION_SUBCODES = {458, 460, 467}
+
+    def __init__(
+        self,
+        message: str = "Instagram account has been disconnected. Please reconnect.",
+        **kwargs,
+    ):
+        super().__init__(message, **kwargs)
+
+
 class MediaUploadError(StorydumpError):
     """
     Cloud storage upload failed.

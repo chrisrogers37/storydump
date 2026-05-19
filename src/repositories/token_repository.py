@@ -47,6 +47,42 @@ class TokenRepository(BaseRepository):
         self.end_read_transaction()
         return result
 
+    def get_token_for_update(
+        self,
+        service_name: str,
+        token_type: str = "access_token",
+        instagram_account_id: Optional[str] = None,
+    ) -> Optional[ApiToken]:
+        """
+        Get token with a row-level lock for safe concurrent refresh.
+
+        Uses SELECT ... FOR UPDATE SKIP LOCKED so concurrent processes
+        won't block or clobber each other's refresh. If another process
+        already holds the lock, returns None (skip).
+
+        The caller MUST commit or rollback to release the lock.
+
+        Args:
+            service_name: Service identifier (e.g., 'instagram')
+            token_type: Token type (e.g., 'access_token')
+            instagram_account_id: UUID of Instagram account
+
+        Returns:
+            Locked ApiToken, or None if not found or already locked by another process
+        """
+        query = self.db.query(ApiToken).filter(
+            ApiToken.service_name == service_name,
+            ApiToken.token_type == token_type,
+            ApiToken.revoked_at.is_(None),
+        )
+
+        if instagram_account_id:
+            query = query.filter(ApiToken.instagram_account_id == instagram_account_id)
+        else:
+            query = query.filter(ApiToken.instagram_account_id.is_(None))
+
+        return query.with_for_update(skip_locked=True).first()
+
     def get_token_for_account(
         self,
         instagram_account_id: str,
