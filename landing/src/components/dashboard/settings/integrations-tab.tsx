@@ -1,11 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { postApi, getApi } from "@/lib/dashboard-api";
+import { postApi, openOAuthWindow } from "@/lib/dashboard-api";
 
 interface IntegrationsTabProps {
   gdriveConnected: boolean;
@@ -29,15 +29,25 @@ export function IntegrationsTab({
   const [disconnecting, setDisconnecting] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const oauthPending = useRef(false);
+
+  useEffect(() => {
+    function onVisible() {
+      if (document.visibilityState === "visible" && oauthPending.current) {
+        oauthPending.current = false;
+        router.refresh();
+      }
+    }
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [router]);
 
   async function connectGdrive() {
     setError(null);
     setConnecting(true);
     try {
-      const data = await getApi("oauth-url/google-drive");
-      if (data.auth_url) {
-        window.open(data.auth_url, "_blank", "noopener,noreferrer");
-      }
+      await openOAuthWindow("google-drive");
+      oauthPending.current = true;
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to connect Google Drive");
     } finally {
