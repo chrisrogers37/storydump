@@ -222,6 +222,42 @@ class TestGDriveExchangeAndStore:
         )
 
     @pytest.mark.asyncio
+    async def test_exchange_stores_issued_at_on_refresh_token(self, service):
+        """Exchange stores issued_at on refresh token for TTL tracking."""
+        mock_chat_settings = Mock()
+        mock_chat_settings.id = uuid.uuid4()
+        service.settings_repo.get_or_create.return_value = mock_chat_settings
+
+        with (
+            patch.object(
+                service,
+                "_exchange_code_for_tokens",
+                new_callable=AsyncMock,
+            ) as mock_exchange,
+            patch.object(
+                service,
+                "_get_user_email",
+                new_callable=AsyncMock,
+            ) as mock_email,
+        ):
+            mock_exchange.return_value = {
+                "access_token": "access_123",
+                "refresh_token": "refresh_456",
+                "expires_in": 3600,
+            }
+            mock_email.return_value = "user@gmail.com"
+
+            await service.exchange_and_store("auth_code", -100123)
+
+        # Find the refresh token call (second call, token_type=oauth_refresh)
+        calls = service.token_repo.create_or_update_for_chat.call_args_list
+        refresh_call = [
+            c for c in calls if c.kwargs.get("token_type") == "oauth_refresh"
+        ]
+        assert len(refresh_call) == 1
+        assert refresh_call[0].kwargs.get("issued_at") is not None
+
+    @pytest.mark.asyncio
     async def test_exchange_without_refresh_token(self, service):
         """Exchange without refresh_token only stores access token."""
         mock_chat_settings = Mock()

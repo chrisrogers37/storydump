@@ -49,6 +49,9 @@ class Settings(BaseSettings):
     # Google Drive OAuth (Phase 05 Multi-Tenant)
     GOOGLE_CLIENT_ID: Optional[str] = None
     GOOGLE_CLIENT_SECRET: Optional[str] = None
+    # In Testing mode, Google silently expires refresh tokens after 7 days.
+    # Set to 0 after moving to Production mode (refresh tokens don't expire).
+    GOOGLE_REFRESH_TOKEN_TTL_DAYS: int = 7
 
     # Cloudinary Configuration (Phase 2 Only)
     CLOUD_STORAGE_PROVIDER: str = "cloudinary"  # Currently only cloudinary supported

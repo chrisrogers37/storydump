@@ -588,6 +588,43 @@ class HealthCheckService(BaseService):
             }
 
         auto_refreshable = token_health.get("auto_refreshable", False)
+        refresh_token_expires_in_days = token_health.get(
+            "refresh_token_expires_in_days"
+        )
+
+        # Check refresh token age BEFORE the generic valid guard —
+        # Testing mode's 7-day TTL is more specific and actionable.
+        if refresh_token_expires_in_days is not None:
+            if refresh_token_expires_in_days <= 0:
+                return {
+                    "healthy": False,
+                    "message": (
+                        "Google Drive refresh token has likely expired "
+                        "(Testing mode 7-day limit) — reconnect required"
+                    ),
+                    "expires_in_days": 0,
+                }
+            if refresh_token_expires_in_days <= self.TOKEN_CRITICAL_DAYS:
+                return {
+                    "healthy": False,
+                    "message": (
+                        f"Google Drive refresh token expires in "
+                        f"{refresh_token_expires_in_days:.0f} day(s) "
+                        f"(Testing mode) — reconnect soon"
+                    ),
+                    "expires_in_days": refresh_token_expires_in_days,
+                }
+            if refresh_token_expires_in_days <= self.TOKEN_WARNING_DAYS:
+                return {
+                    "healthy": False,
+                    "message": (
+                        f"Google Drive refresh token expires in "
+                        f"{refresh_token_expires_in_days:.0f} days "
+                        f"(Testing mode) — reconnect soon"
+                    ),
+                    "expires_in_days": refresh_token_expires_in_days,
+                    "needs_refresh": True,
+                }
 
         if not token_health["valid"]:
             return {
