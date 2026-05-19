@@ -173,6 +173,7 @@ class TestTokenRefreshService:
         refresh_token = Mock()
         refresh_token.expires_at = None  # Refresh tokens don't expire
         refresh_token.is_expired = False
+        refresh_token.issued_at = datetime.now(timezone.utc) - timedelta(days=1)
 
         token_service.token_repo.get_token_for_chat.side_effect = (
             lambda svc, token_type, cid: (
@@ -217,6 +218,7 @@ class TestTokenRefreshService:
         refresh_token = Mock()
         refresh_token.expires_at = datetime.now(timezone.utc) - timedelta(days=1)
         refresh_token.is_expired = True
+        refresh_token.issued_at = datetime.now(timezone.utc) - timedelta(days=1)
 
         token_service.token_repo.get_token_for_chat.side_effect = (
             lambda svc, token_type, cid: (
@@ -239,6 +241,112 @@ class TestTokenRefreshService:
         assert result["valid"] is False
         assert result["exists"] is False
         assert result["auto_refreshable"] is False
+        assert result["refresh_token_age_days"] is None
+        assert result["refresh_token_expires_in_days"] is None
+
+    # ==================== Refresh Token Age Tests ====================
+
+    @patch("src.services.integrations.token_refresh.settings")
+    def test_refresh_token_age_within_ttl(
+        self, mock_settings, token_service, mock_db_token
+    ):
+        """Refresh token within TTL is healthy."""
+        mock_settings.GOOGLE_REFRESH_TOKEN_TTL_DAYS = 7
+
+        refresh_token = Mock()
+        refresh_token.is_expired = False
+        refresh_token.issued_at = datetime.now(timezone.utc) - timedelta(days=2)
+
+        mock_db_token.is_expired = False
+        token_service.token_repo.get_token_for_chat.side_effect = (
+            lambda svc, token_type, cid: (
+                mock_db_token if token_type == "oauth_access" else refresh_token
+            )
+        )
+
+        result = token_service.check_token_health_for_chat("google_drive", "chat-1")
+
+        assert result["valid"] is True
+        assert result["auto_refreshable"] is True
+        assert result["refresh_token_age_days"] == pytest.approx(2.0, abs=0.1)
+        assert result["refresh_token_expires_in_days"] == pytest.approx(5.0, abs=0.1)
+
+    @patch("src.services.integrations.token_refresh.settings")
+    def test_refresh_token_age_past_ttl(
+        self, mock_settings, token_service, mock_db_token
+    ):
+        """Refresh token past TTL makes auto_refreshable=False."""
+        mock_settings.GOOGLE_REFRESH_TOKEN_TTL_DAYS = 7
+
+        refresh_token = Mock()
+        refresh_token.is_expired = False  # DB says not expired (no expires_at)
+        refresh_token.issued_at = datetime.now(timezone.utc) - timedelta(days=8)
+
+        mock_db_token.is_expired = True  # Access token expired
+        mock_db_token.expires_at = datetime.now(timezone.utc) - timedelta(hours=1)
+
+        token_service.token_repo.get_token_for_chat.side_effect = (
+            lambda svc, token_type, cid: (
+                mock_db_token if token_type == "oauth_access" else refresh_token
+            )
+        )
+
+        result = token_service.check_token_health_for_chat("google_drive", "chat-1")
+
+        assert result["valid"] is False
+        assert result["auto_refreshable"] is False
+        assert result["refresh_token_expires_in_days"] < 0
+
+    @patch("src.services.integrations.token_refresh.settings")
+    def test_refresh_token_age_ttl_zero_disables_check(
+        self, mock_settings, token_service, mock_db_token
+    ):
+        """TTL of 0 (Production mode) skips age check."""
+        mock_settings.GOOGLE_REFRESH_TOKEN_TTL_DAYS = 0
+
+        refresh_token = Mock()
+        refresh_token.is_expired = False
+        refresh_token.issued_at = datetime.now(timezone.utc) - timedelta(days=30)
+
+        mock_db_token.is_expired = True
+        mock_db_token.expires_at = datetime.now(timezone.utc) - timedelta(hours=1)
+
+        token_service.token_repo.get_token_for_chat.side_effect = (
+            lambda svc, token_type, cid: (
+                mock_db_token if token_type == "oauth_access" else refresh_token
+            )
+        )
+
+        result = token_service.check_token_health_for_chat("google_drive", "chat-1")
+
+        assert result["valid"] is True
+        assert result["auto_refreshable"] is True
+        assert result["refresh_token_age_days"] is None
+
+    @patch("src.services.integrations.token_refresh.settings")
+    def test_refresh_token_no_issued_at_skips_age_check(
+        self, mock_settings, token_service, mock_db_token
+    ):
+        """Refresh token without issued_at skips age check."""
+        mock_settings.GOOGLE_REFRESH_TOKEN_TTL_DAYS = 7
+
+        refresh_token = Mock()
+        refresh_token.is_expired = False
+        refresh_token.issued_at = None
+
+        mock_db_token.is_expired = False
+
+        token_service.token_repo.get_token_for_chat.side_effect = (
+            lambda svc, token_type, cid: (
+                mock_db_token if token_type == "oauth_access" else refresh_token
+            )
+        )
+
+        result = token_service.check_token_health_for_chat("google_drive", "chat-1")
+
+        assert result["valid"] is True
+        assert result["auto_refreshable"] is True
+        assert result["refresh_token_age_days"] is None
 
     # ==================== refresh_instagram_token Tests ====================
 

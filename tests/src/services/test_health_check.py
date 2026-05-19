@@ -271,7 +271,9 @@ class TestHealthCheckService:
         """Returns healthy with enabled=False when admin chat has sync disabled."""
         mock_settings.ADMIN_TELEGRAM_CHAT_ID = -100123
         admin_chat = Mock(media_sync_enabled=False)
-        mock_settings_service = mock_settings_service_cls.return_value.__enter__.return_value
+        mock_settings_service = (
+            mock_settings_service_cls.return_value.__enter__.return_value
+        )
         mock_settings_service.get_settings_if_exists.return_value = admin_chat
 
         result = health_service._check_media_sync()
@@ -293,7 +295,9 @@ class TestHealthCheckService:
             media_source_type="local",
             media_source_root="/media/stories",
         )
-        mock_settings_service = mock_settings_service_cls.return_value.__enter__.return_value
+        mock_settings_service = (
+            mock_settings_service_cls.return_value.__enter__.return_value
+        )
         mock_settings_service.get_settings_if_exists.return_value = admin_chat
         mock_settings.MEDIA_SYNC_INTERVAL_SECONDS = 300
 
@@ -340,7 +344,9 @@ class TestHealthCheckService:
             media_source_type="local",
             media_source_root="/media/stories",
         )
-        mock_settings_service = mock_settings_service_cls.return_value.__enter__.return_value
+        mock_settings_service = (
+            mock_settings_service_cls.return_value.__enter__.return_value
+        )
         mock_settings_service.get_settings_if_exists.return_value = admin_chat
 
         with (
@@ -373,7 +379,9 @@ class TestHealthCheckService:
             media_source_type="local",
             media_source_root="/media/stories",
         )
-        mock_settings_service = mock_settings_service_cls.return_value.__enter__.return_value
+        mock_settings_service = (
+            mock_settings_service_cls.return_value.__enter__.return_value
+        )
         mock_settings_service.get_settings_if_exists.return_value = admin_chat
         mock_settings.MEDIA_SYNC_INTERVAL_SECONDS = 300  # 5 min
 
@@ -419,9 +427,7 @@ class TestHealthCheckService:
             media_source_type="google_drive",
             media_source_root="folder123",
         )
-        mock_settings_service_cls.return_value.__enter__.return_value.get_settings_if_exists.return_value = (
-            admin_chat
-        )
+        mock_settings_service_cls.return_value.__enter__.return_value.get_settings_if_exists.return_value = admin_chat
 
         with patch(
             "src.services.media_sources.factory.MediaSourceFactory"
@@ -450,7 +456,9 @@ class TestHealthCheckService:
             media_source_type="local",
             media_source_root="/media/stories",
         )
-        mock_settings_service = mock_settings_service_cls.return_value.__enter__.return_value
+        mock_settings_service = (
+            mock_settings_service_cls.return_value.__enter__.return_value
+        )
         mock_settings_service.get_settings_if_exists.return_value = admin_chat
 
         mock_sync_info = {
@@ -785,6 +793,72 @@ class TestHealthCheckService:
 
         assert result["healthy"] is True
         assert result["enabled"] is False
+
+    def test_gdrive_refresh_token_expired_testing_mode(self, token_service):
+        """Refresh token past TTL in Testing mode triggers unhealthy.
+
+        The access token may still be valid (not yet expired) while the
+        refresh token has already passed its 7-day TTL. The Testing mode
+        check must fire before the generic not-valid guard.
+        """
+        chat = self._gdrive_chat()
+        token_service._token_service.check_token_health_for_chat.return_value = {
+            "valid": True,
+            "exists": True,
+            "expires_in_hours": 48,
+            "needs_refresh": False,
+            "auto_refreshable": True,
+            "refresh_token_exists": True,
+            "refresh_token_age_days": 8.0,
+            "refresh_token_expires_in_days": -1.0,
+            "error": None,
+        }
+
+        result = token_service.check_gdrive_token_for_chat(-123, chat_settings=chat)
+
+        assert result["healthy"] is False
+        assert "testing mode" in result["message"].lower()
+        assert "7-day" in result["message"].lower()
+
+    def test_gdrive_refresh_token_expiring_soon_testing_mode(self, token_service):
+        """Refresh token approaching TTL triggers warning."""
+        chat = self._gdrive_chat()
+        token_service._token_service.check_token_health_for_chat.return_value = {
+            "valid": True,
+            "exists": True,
+            "expires_in_hours": 0,
+            "needs_refresh": True,
+            "auto_refreshable": True,
+            "refresh_token_exists": True,
+            "refresh_token_age_days": 6.5,
+            "refresh_token_expires_in_days": 0.5,
+            "error": None,
+        }
+
+        result = token_service.check_gdrive_token_for_chat(-123, chat_settings=chat)
+
+        assert result["healthy"] is False
+        assert "Testing mode" in result["message"]
+        assert "reconnect" in result["message"].lower()
+
+    def test_gdrive_refresh_token_no_age_data(self, token_service):
+        """No refresh token age data falls through to normal checks."""
+        chat = self._gdrive_chat()
+        token_service._token_service.check_token_health_for_chat.return_value = {
+            "valid": True,
+            "exists": True,
+            "expires_in_hours": 30 * 24,
+            "needs_refresh": False,
+            "auto_refreshable": True,
+            "refresh_token_exists": True,
+            "refresh_token_age_days": None,
+            "refresh_token_expires_in_days": None,
+            "error": None,
+        }
+
+        result = token_service.check_gdrive_token_for_chat(-123, chat_settings=chat)
+
+        assert result["healthy"] is True
 
     def test_format_token_alert_expiring(self, token_service):
         """Format alert includes expiry countdown and re-auth link."""

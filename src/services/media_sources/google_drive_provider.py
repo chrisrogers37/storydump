@@ -6,6 +6,7 @@ import time
 from datetime import datetime
 from typing import Optional
 
+from google.auth.exceptions import RefreshError
 from google.oauth2.credentials import Credentials as UserCredentials
 from google.oauth2.service_account import Credentials as ServiceAccountCredentials
 from googleapiclient.discovery import build
@@ -311,14 +312,31 @@ class GoogleDriveProvider(MediaSourceProvider):
 
         Retry-After header is respected via the custom wait function
         (_wait_for_retry) in the tenacity decorator.
+
+        Catches ``RefreshError`` from google-auth (raised when the refresh
+        token is expired or revoked, e.g. Google OAuth Testing mode 7-day
+        TTL) and converts it to ``GoogleDriveAuthError`` so the existing
+        reconnect-alert path handles it.
         """
-        return request.execute()
+        try:
+            return request.execute()
+        except RefreshError as e:
+            raise GoogleDriveAuthError(
+                f"Google Drive refresh token expired or revoked — "
+                f"reconnect required: {e}",
+            ) from e
 
     @staticmethod
     @_api_retry
     def _download_chunk_with_retry(downloader: MediaIoBaseDownload):
         """Execute a single download chunk with retry on transient errors."""
-        return downloader.next_chunk()
+        try:
+            return downloader.next_chunk()
+        except RefreshError as e:
+            raise GoogleDriveAuthError(
+                f"Google Drive refresh token expired or revoked — "
+                f"reconnect required: {e}",
+            ) from e
 
     # ==================== Private Helpers ====================
 

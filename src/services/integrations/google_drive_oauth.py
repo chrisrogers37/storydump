@@ -207,6 +207,7 @@ class GoogleDriveOAuthService(BaseService):
                     token_type=self.TOKEN_TYPE_REFRESH,
                     token_value=self.encryption.encrypt(refresh_token),
                     chat_settings_id=chat_settings_id,
+                    issued_at=datetime.now(timezone.utc),
                     metadata={"email": email},
                 )
 
