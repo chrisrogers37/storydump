@@ -356,10 +356,19 @@ class TokenRefreshService(BaseService):
                     )
                     continue
 
-                # Refresh this token
-                success = await self.refresh_instagram_token(
-                    instagram_account_id=account_id
-                )
+                # Refresh this token — catch revocation per-account so one
+                # revoked account doesn't abort the loop for the rest.
+                try:
+                    success = await self.refresh_instagram_token(
+                        instagram_account_id=account_id
+                    )
+                except TokenRevokedError as e:
+                    logger.error(f"Token revoked for {account_label}: {e}")
+                    results["failed"] += 1
+                    results["details"].append(
+                        {"account": account_label, "status": "revoked"}
+                    )
+                    continue
 
                 if success:
                     results["refreshed"] += 1

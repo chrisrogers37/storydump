@@ -363,6 +363,71 @@ class TestTokenRefreshService:
                 await token_service.refresh_instagram_token()
 
     @pytest.mark.asyncio
+    async def test_refresh_instagram_token_server_invalidated(
+        self, token_service, mock_db_token
+    ):
+        """Test refresh raises TokenRevokedError for server-invalidated subcode 467."""
+        token_service.token_repo.get_token_for_update.return_value = mock_db_token
+        token_service._encryption.decrypt.return_value = "current_token"
+
+        mock_response = Mock()
+        mock_response.status_code = 400
+        mock_response.json.return_value = {
+            "error": {
+                "message": "Token invalidated on server side",
+                "error_subcode": 467,
+            }
+        }
+
+        with patch(
+            "src.services.integrations.token_refresh.httpx.AsyncClient"
+        ) as mock_client:
+            mock_client.return_value.__aenter__ = AsyncMock(
+                return_value=mock_client.return_value
+            )
+            mock_client.return_value.__aexit__ = AsyncMock(return_value=False)
+            mock_client.return_value.get = AsyncMock(return_value=mock_response)
+
+            with pytest.raises(TokenRevokedError):
+                await token_service.refresh_instagram_token()
+
+    @pytest.mark.asyncio
+    async def test_refresh_all_catches_revoked_per_account(
+        self, token_service, mock_db_token
+    ):
+        """Test refresh_all continues to next account when one is revoked."""
+        token_expiring = Mock()
+        token_expiring.instagram_account_id = "acc-1"
+        token_expiring.hours_until_expiry = lambda: 48  # within 7-day buffer
+
+        token_expiring_2 = Mock()
+        token_expiring_2.instagram_account_id = "acc-2"
+        token_expiring_2.hours_until_expiry = lambda: 48
+
+        token_service.token_repo.get_all_instagram_tokens.return_value = [
+            token_expiring,
+            token_expiring_2,
+        ]
+
+        call_count = 0
+
+        async def mock_refresh(instagram_account_id=None):
+            nonlocal call_count
+            call_count += 1
+            if instagram_account_id == "acc-1":
+                raise TokenRevokedError("App deauthorized", error_subcode=458)
+            return True
+
+        token_service.refresh_instagram_token = mock_refresh
+
+        results = await token_service.refresh_all_instagram_tokens()
+
+        assert call_count == 2
+        assert results["failed"] == 1
+        assert results["refreshed"] == 1
+        assert any(d["status"] == "revoked" for d in results["details"])
+
+    @pytest.mark.asyncio
     async def test_refresh_instagram_token_network_error(
         self, token_service, mock_db_token
     ):
