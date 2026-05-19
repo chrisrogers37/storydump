@@ -12,6 +12,7 @@ from src.utils.encryption import TokenEncryption
 from src.config.constants import IG_LOGIN_GRAPH_BASE
 from src.config.settings import settings
 from src.exceptions import TokenExpiredError, TokenRevokedError
+from src.utils.datetime_utils import ensure_utc
 from src.utils.logger import logger
 
 
@@ -451,6 +452,10 @@ class TokenRefreshService(BaseService):
         For services with refresh tokens (e.g., Google Drive), an expired
         access token is normal — the OAuth library auto-refreshes it. Only
         report unhealthy when the refresh token is missing or expired.
+
+        Also checks refresh token age against GOOGLE_REFRESH_TOKEN_TTL_DAYS
+        (default 7 — Google Testing mode silently expires refresh tokens
+        after 7 days).
         """
         db_token = self.token_repo.get_token_for_chat(
             service, "oauth_access", chat_settings_id
@@ -466,6 +471,8 @@ class TokenRefreshService(BaseService):
                 "needs_refresh": False,
                 "auto_refreshable": False,
                 "refresh_token_exists": False,
+                "refresh_token_age_days": None,
+                "refresh_token_expires_in_days": None,
                 "last_refreshed": None,
                 "error": f"No {service} token found for this chat",
             }
@@ -475,6 +482,25 @@ class TokenRefreshService(BaseService):
         )
         refresh_token_exists = refresh_token is not None
         auto_refreshable = refresh_token_exists and not refresh_token.is_expired
+
+        # Check refresh token age against TTL (Testing mode: 7 days)
+        refresh_token_age_days = None
+        refresh_token_expires_in_days = None
+        ttl_days = settings.GOOGLE_REFRESH_TOKEN_TTL_DAYS
+
+        if refresh_token_exists and ttl_days > 0:
+            issued_at = (
+                ensure_utc(refresh_token.issued_at) if refresh_token.issued_at else None
+            )
+            if issued_at:
+                age = datetime.now(timezone.utc) - issued_at
+                refresh_token_age_days = round(age.total_seconds() / 86400, 1)
+                refresh_token_expires_in_days = round(
+                    ttl_days - refresh_token_age_days, 1
+                )
+
+                if refresh_token_expires_in_days <= 0:
+                    auto_refreshable = False
 
         expires_in_hours = db_token.hours_until_expiry()
         needs_refresh = (
@@ -499,6 +525,8 @@ class TokenRefreshService(BaseService):
             "needs_refresh": needs_refresh,
             "auto_refreshable": auto_refreshable,
             "refresh_token_exists": refresh_token_exists,
+            "refresh_token_age_days": refresh_token_age_days,
+            "refresh_token_expires_in_days": refresh_token_expires_in_days,
             "last_refreshed": db_token.last_refreshed_at,
             "error": error,
         }

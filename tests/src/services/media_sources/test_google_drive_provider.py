@@ -601,3 +601,45 @@ class TestGoogleDriveProviderRetry:
         # Verify the call succeeds after retry
         result = provider._execute_with_retry(mock_request)
         assert result == {"id": "file1"}
+
+    def test_refresh_error_raises_auth_error(self, provider, mock_drive_service):
+        """RefreshError from google-auth is converted to GoogleDriveAuthError."""
+        from google.auth.exceptions import RefreshError
+
+        mock_request = mock_drive_service.files().get()
+        mock_request.execute.side_effect = RefreshError(
+            "invalid_grant: Token has been revoked"
+        )
+
+        with pytest.raises(
+            GoogleDriveAuthError, match="refresh token expired or revoked"
+        ):
+            provider._execute_with_retry(mock_request)
+        # RefreshError is terminal — should not retry
+        assert mock_request.execute.call_count == 1
+
+    def test_refresh_error_in_download_chunk(self, provider):
+        """RefreshError during download chunk is converted to GoogleDriveAuthError."""
+        from google.auth.exceptions import RefreshError
+
+        mock_downloader = Mock()
+        mock_downloader.next_chunk.side_effect = RefreshError("invalid_grant")
+
+        with pytest.raises(
+            GoogleDriveAuthError, match="refresh token expired or revoked"
+        ):
+            provider._download_chunk_with_retry(mock_downloader)
+        assert mock_downloader.next_chunk.call_count == 1
+
+    def test_refresh_error_propagates_through_list_files(
+        self, provider, mock_drive_service
+    ):
+        """RefreshError during list_files raises GoogleDriveAuthError."""
+        from google.auth.exceptions import RefreshError
+
+        mock_drive_service.files().list().execute.side_effect = RefreshError(
+            "invalid_grant"
+        )
+
+        with pytest.raises(GoogleDriveAuthError):
+            provider.list_files()
