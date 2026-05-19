@@ -226,10 +226,16 @@ class InstagramAccountService(BaseService):
     ) -> None:
         """Validate that an account doesn't already exist.
 
+        Checks both the credential-keyed lookup (api_tokens.meta_account_id)
+        and the legacy account-table lookup, then the username uniqueness
+        constraint.
+
         Raises:
             ValueError: If account already exists by ID or username
         """
-        existing = self.account_repo.get_by_instagram_id(instagram_account_id)
+        existing = self.account_repo.get_by_meta_account_id(instagram_account_id)
+        if not existing:
+            existing = self.account_repo.get_by_instagram_id(instagram_account_id)
         if existing:
             raise ValueError(
                 f"Account with ID {instagram_account_id} already exists "
@@ -363,8 +369,10 @@ class InstagramAccountService(BaseService):
             triggered_by="user",
             input_params={"instagram_account_id": instagram_account_id},
         ) as run_id:
-            # Find existing account
-            account = self.account_repo.get_by_instagram_id(instagram_account_id)
+            # Find existing account (credential-keyed, with legacy fallback)
+            account = self.account_repo.get_by_meta_account_id(instagram_account_id)
+            if not account:
+                account = self.account_repo.get_by_instagram_id(instagram_account_id)
             if not account:
                 raise ValueError(f"Account with ID {instagram_account_id} not found")
 
@@ -424,10 +432,29 @@ class InstagramAccountService(BaseService):
 
             return account
 
+    def get_account_by_meta_id(
+        self, meta_account_id: str
+    ) -> Optional[InstagramAccount]:
+        """Lookup keyed by the Meta-side identifier on any credential row.
+
+        Resolves across OAuth flows: both Business Account ID (FB Login)
+        and IG User ID (IG Login) land in api_tokens.meta_account_id.
+        Falls back to the legacy instagram_accounts.instagram_account_id
+        column for rows not yet backfilled.
+        """
+        account = self.account_repo.get_by_meta_account_id(meta_account_id)
+        if not account:
+            account = self.account_repo.get_by_instagram_id(meta_account_id)
+        return account
+
     def get_account_by_instagram_id(
         self, instagram_account_id: str
     ) -> Optional[InstagramAccount]:
-        """Get account by Instagram's numeric ID."""
+        """Get account by Instagram's numeric ID.
+
+        Deprecated: prefer get_account_by_meta_id which resolves across
+        OAuth flows via api_tokens.meta_account_id.
+        """
         return self.account_repo.get_by_instagram_id(instagram_account_id)
 
     def deactivate_account(

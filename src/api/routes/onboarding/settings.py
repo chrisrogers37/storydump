@@ -311,9 +311,7 @@ async def onboarding_add_account(request: Request, body: AddAccountRequest) -> d
 
     # Create or update account
     with InstagramAccountService() as account_service, service_error_handler():
-        existing = account_service.get_account_by_instagram_id(
-            body.instagram_account_id
-        )
+        existing = account_service.get_account_by_meta_id(body.instagram_account_id)
 
         if existing:
             account = account_service.update_account_token(
