@@ -198,6 +198,7 @@ export function GeneralTab({ settings }: { settings: GeneralSettings }) {
                   checked={toggleState[toggle.key]}
                   onCheckedChange={() => handleToggle(toggle.key)}
                   disabled={togglingKey === toggle.key}
+                  aria-label={toggle.label}
                 />
               </div>
             </div>
