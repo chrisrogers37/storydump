@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { CheckCircle2, Loader2, ExternalLink } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -87,7 +87,7 @@ export function SetupWizard({ initialState, initialAccounts = [] }: SetupWizardP
     initialState.schedule_configured === true && initialState.onboarding_completed
   );
 
-  async function refreshState() {
+  const refreshState = useCallback(async () => {
     setError(null);
     try {
       const data = await getApi("init");
@@ -102,7 +102,7 @@ export function SetupWizard({ initialState, initialAccounts = [] }: SetupWizardP
       setError(e instanceof Error ? e.message : "Operation failed");
       return undefined;
     }
-  }
+  }, []);
 
   async function handleOAuth(provider: "instagram" | "google-drive") {
     setError(null);
@@ -117,6 +117,16 @@ export function SetupWizard({ initialState, initialAccounts = [] }: SetupWizardP
     }
   }
 
+  const refreshAccounts = useCallback(async () => {
+    setError(null);
+    try {
+      const data = await getApi("accounts");
+      if (data?.accounts) setAccounts(data.accounts);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load accounts");
+    }
+  }, []);
+
   useEffect(() => {
     function onVisible() {
       if (document.visibilityState === "visible" && oauthPending.current) {
@@ -127,7 +137,7 @@ export function SetupWizard({ initialState, initialAccounts = [] }: SetupWizardP
     }
     document.addEventListener("visibilitychange", onVisible);
     return () => document.removeEventListener("visibilitychange", onVisible);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [refreshState, refreshAccounts]);
 
   async function handleRefreshConnection() {
     setLoading(true);
@@ -137,16 +147,6 @@ export function SetupWizard({ initialState, initialAccounts = [] }: SetupWizardP
       await Promise.allSettled([refreshState(), refreshAccounts()]);
     } finally {
       setLoading(false);
-    }
-  }
-
-  async function refreshAccounts() {
-    setError(null);
-    try {
-      const data = await getApi("accounts");
-      if (data?.accounts) setAccounts(data.accounts);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load accounts");
     }
   }
 
