@@ -1308,3 +1308,18 @@ class TestCloudUrlNotInDryRunLog:
         ]
         assert "cloud_url" not in log_ctx
         assert "cloud_public_id" in log_ctx
+
+
+@pytest.mark.unit
+class TestGetUserFriendlyError:
+    """Tests for _get_user_friendly_error static method."""
+
+    def test_token_revoked_returns_disconnected_message(self):
+        """TokenRevokedError produces a distinct 'disconnected' message."""
+        from src.exceptions.instagram import TokenRevokedError
+
+        err = TokenRevokedError("App deauthorized", error_subcode=458)
+        msg = TelegramAutopostHandler._get_user_friendly_error(err)
+
+        assert "disconnected" in msg.lower()
+        assert "reconnect" in msg.lower()

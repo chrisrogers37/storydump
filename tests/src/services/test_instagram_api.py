@@ -10,6 +10,7 @@ from src.exceptions import (
     InstagramAPIError,
     RateLimitError,
     TokenExpiredError,
+    TokenRevokedError,
 )
 from tests.src.services.conftest import mock_track_execution
 
@@ -359,9 +360,7 @@ class TestInstagramAPIService:
 
     @pytest.mark.asyncio
     @patch("src.services.integrations.instagram_api.settings")
-    async def test_post_story_network_error(
-        self, mock_api_settings, instagram_service
-    ):
+    async def test_post_story_network_error(self, mock_api_settings, instagram_service):
         """Test post_story handles network errors."""
         mock_api_settings.INSTAGRAM_POSTS_PER_HOUR = 25
         instagram_service.history_repo.count_by_method.return_value = 0
@@ -700,3 +699,22 @@ class TestInstagramAPIService:
 
         assert result["valid"] is True
         assert result["size_bytes"] is None
+
+    # ==================== _check_response_errors Tests ====================
+
+    def test_check_response_errors_revocation_subcode_458(self, instagram_service):
+        """Test _check_response_errors raises TokenRevokedError for subcode 458."""
+        response = Mock()
+        response.status_code = 400
+        response.json.return_value = {
+            "error": {
+                "message": "App not installed",
+                "code": 190,
+                "error_subcode": 458,
+            }
+        }
+
+        with pytest.raises(TokenRevokedError) as exc_info:
+            instagram_service._check_response_errors(response)
+
+        assert exc_info.value.error_subcode == 458

@@ -57,6 +57,34 @@ class TestTokenRepository:
 
         assert result is mock_token
 
+    def test_get_token_for_update_found(self, token_repo, mock_db):
+        """Test getting a token with row lock."""
+        mock_token = Mock(spec=ApiToken)
+        mock_db.query.return_value.filter.return_value.filter.return_value.with_for_update.return_value.first.return_value = mock_token
+
+        result = token_repo.get_token_for_update("instagram", "access_token")
+
+        assert result is mock_token
+
+    def test_get_token_for_update_skip_locked(self, token_repo, mock_db):
+        """Test SKIP LOCKED returns None when row is locked."""
+        mock_db.query.return_value.filter.return_value.filter.return_value.with_for_update.return_value.first.return_value = None
+
+        result = token_repo.get_token_for_update("instagram", "access_token")
+
+        assert result is None
+
+    def test_get_token_for_update_with_account_id(self, token_repo, mock_db):
+        """Test row-lock with account ID filter."""
+        mock_token = Mock(spec=ApiToken)
+        mock_db.query.return_value.filter.return_value.filter.return_value.with_for_update.return_value.first.return_value = mock_token
+
+        result = token_repo.get_token_for_update(
+            "instagram", "access_token", instagram_account_id="acc-uuid-1"
+        )
+
+        assert result is mock_token
+
     def test_get_token_for_account(self, token_repo, mock_db):
         """Test convenience method for getting Instagram token by account."""
         mock_token = Mock(spec=ApiToken)

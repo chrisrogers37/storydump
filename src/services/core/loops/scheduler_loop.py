@@ -15,6 +15,8 @@ from src.services.core.loops.heartbeat import record_heartbeat
 from src.services.core.loops.lifecycle import session_state
 from src.services.core.posting import PostingService
 from src.services.core.scheduler import SchedulerService
+from src.exceptions.instagram import TokenRevokedError
+from src.services.integrations.token_refresh import TokenRefreshService
 from src.utils.logger import logger
 
 # Retention policy: delete service_runs older than 7 days
@@ -23,6 +25,8 @@ SERVICE_RUNS_RETENTION_DAYS = 7
 RETENTION_INTERVAL_TICKS = 60
 # Pool depletion check interval (hourly, same cadence as retention)
 POOL_CHECK_INTERVAL_TICKS = 60
+# Token refresh interval: once per day (1440 ticks at 1-minute intervals)
+TOKEN_REFRESH_INTERVAL_TICKS = 1440
 # Throttle pool alerts to once per 24h per chat
 POOL_ALERT_COOLDOWN_SECONDS = 86400
 
@@ -236,6 +240,31 @@ async def _token_health_tick(
         logger.warning(f"Token health check failed: {e}")
 
 
+async def _token_refresh_tick(
+    token_refresh_service: TokenRefreshService,
+) -> None:
+    """Refresh Instagram tokens that are approaching expiry."""
+    try:
+        results = await token_refresh_service.refresh_all_instagram_tokens()
+        if results["refreshed"] > 0 or results["failed"] > 0:
+            logger.info(
+                f"Token refresh: {results['refreshed']} refreshed, "
+                f"{results['failed']} failed, {results['skipped']} skipped"
+            )
+    except TokenRevokedError as e:
+        # Revocation is not a crash — log clearly so the user sees it
+        logger.error(f"Token revoked during refresh: {e}")
+    except Exception as e:
+        logger.warning(f"Token refresh tick failed: {e}")
+    finally:
+        try:
+            token_refresh_service.cleanup_transactions()
+        except Exception as cleanup_err:
+            logger.warning(
+                f"cleanup_transactions failed for TokenRefreshService: {cleanup_err}"
+            )
+
+
 async def run_scheduler_loop(
     scheduler_service: SchedulerService,
     posting_service: PostingService,
@@ -261,8 +290,10 @@ async def run_scheduler_loop(
     queue_repo = QueueRepository()
     service_run_repo = ServiceRunRepository()
     health_check_service = HealthCheckService()
+    token_refresh_service = TokenRefreshService()
     retention_tick_counter = 0
     pool_check_tick_counter = 0
+    token_refresh_tick_counter = 0
     pool_alert_last_sent: dict[int, float] = {}
     token_alert_last_sent: dict[int, float] = {}
     is_first_tick = True
@@ -338,5 +369,11 @@ async def run_scheduler_loop(
                         f"cleanup_transactions failed for "
                         f"HealthCheckService: {cleanup_err}"
                     )
+
+        # --- Daily: refresh Instagram tokens approaching expiry ---
+        token_refresh_tick_counter += 1
+        if token_refresh_tick_counter >= TOKEN_REFRESH_INTERVAL_TICKS:
+            token_refresh_tick_counter = 0
+            await _token_refresh_tick(token_refresh_service)
 
         await asyncio.sleep(60)

@@ -4,7 +4,7 @@ import pytest
 from unittest.mock import Mock, patch, AsyncMock
 from datetime import datetime, timedelta, timezone
 
-from src.exceptions import TokenExpiredError
+from src.exceptions import TokenExpiredError, TokenRevokedError
 from tests.src.services.conftest import mock_track_execution
 
 
@@ -245,7 +245,7 @@ class TestTokenRefreshService:
     @pytest.mark.asyncio
     async def test_refresh_instagram_token_success(self, token_service, mock_db_token):
         """Test successful token refresh."""
-        token_service.token_repo.get_token.return_value = mock_db_token
+        token_service.token_repo.get_token_for_update.return_value = mock_db_token
         token_service._encryption.decrypt.return_value = "current_token"
         token_service._encryption.encrypt.return_value = "encrypted_new_token"
 
@@ -273,8 +273,8 @@ class TestTokenRefreshService:
 
     @pytest.mark.asyncio
     async def test_refresh_instagram_token_no_existing_token(self, token_service):
-        """Test refresh fails when no token exists."""
-        token_service.token_repo.get_token.return_value = None
+        """Test refresh skips when no token exists or locked by another process."""
+        token_service.token_repo.get_token_for_update.return_value = None
 
         result = await token_service.refresh_instagram_token()
 
@@ -285,7 +285,7 @@ class TestTokenRefreshService:
         self, token_service, mock_db_token
     ):
         """Test refresh handles API errors."""
-        token_service.token_repo.get_token.return_value = mock_db_token
+        token_service.token_repo.get_token_for_update.return_value = mock_db_token
         token_service._encryption.decrypt.return_value = "current_token"
 
         mock_response = Mock()
@@ -307,13 +307,134 @@ class TestTokenRefreshService:
         token_service.token_repo.create_or_update.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_refresh_instagram_token_revoked(self, token_service, mock_db_token):
+        """Test refresh raises TokenRevokedError for revocation subcodes."""
+        token_service.token_repo.get_token_for_update.return_value = mock_db_token
+        token_service._encryption.decrypt.return_value = "current_token"
+
+        mock_response = Mock()
+        mock_response.status_code = 400
+        mock_response.json.return_value = {
+            "error": {
+                "message": "App not installed",
+                "error_subcode": 458,
+            }
+        }
+
+        with patch(
+            "src.services.integrations.token_refresh.httpx.AsyncClient"
+        ) as mock_client:
+            mock_client.return_value.__aenter__ = AsyncMock(
+                return_value=mock_client.return_value
+            )
+            mock_client.return_value.__aexit__ = AsyncMock(return_value=False)
+            mock_client.return_value.get = AsyncMock(return_value=mock_response)
+
+            with pytest.raises(TokenRevokedError):
+                await token_service.refresh_instagram_token()
+
+    @pytest.mark.asyncio
+    async def test_refresh_instagram_token_password_changed(
+        self, token_service, mock_db_token
+    ):
+        """Test refresh raises TokenRevokedError for password-changed subcode."""
+        token_service.token_repo.get_token_for_update.return_value = mock_db_token
+        token_service._encryption.decrypt.return_value = "current_token"
+
+        mock_response = Mock()
+        mock_response.status_code = 400
+        mock_response.json.return_value = {
+            "error": {
+                "message": "Password changed",
+                "error_subcode": 460,
+            }
+        }
+
+        with patch(
+            "src.services.integrations.token_refresh.httpx.AsyncClient"
+        ) as mock_client:
+            mock_client.return_value.__aenter__ = AsyncMock(
+                return_value=mock_client.return_value
+            )
+            mock_client.return_value.__aexit__ = AsyncMock(return_value=False)
+            mock_client.return_value.get = AsyncMock(return_value=mock_response)
+
+            with pytest.raises(TokenRevokedError):
+                await token_service.refresh_instagram_token()
+
+    @pytest.mark.asyncio
+    async def test_refresh_instagram_token_server_invalidated(
+        self, token_service, mock_db_token
+    ):
+        """Test refresh raises TokenRevokedError for server-invalidated subcode 467."""
+        token_service.token_repo.get_token_for_update.return_value = mock_db_token
+        token_service._encryption.decrypt.return_value = "current_token"
+
+        mock_response = Mock()
+        mock_response.status_code = 400
+        mock_response.json.return_value = {
+            "error": {
+                "message": "Token invalidated on server side",
+                "error_subcode": 467,
+            }
+        }
+
+        with patch(
+            "src.services.integrations.token_refresh.httpx.AsyncClient"
+        ) as mock_client:
+            mock_client.return_value.__aenter__ = AsyncMock(
+                return_value=mock_client.return_value
+            )
+            mock_client.return_value.__aexit__ = AsyncMock(return_value=False)
+            mock_client.return_value.get = AsyncMock(return_value=mock_response)
+
+            with pytest.raises(TokenRevokedError):
+                await token_service.refresh_instagram_token()
+
+    @pytest.mark.asyncio
+    async def test_refresh_all_catches_revoked_per_account(
+        self, token_service, mock_db_token
+    ):
+        """Test refresh_all continues to next account when one is revoked."""
+        token_expiring = Mock()
+        token_expiring.instagram_account_id = "acc-1"
+        token_expiring.hours_until_expiry = lambda: 48  # within 7-day buffer
+
+        token_expiring_2 = Mock()
+        token_expiring_2.instagram_account_id = "acc-2"
+        token_expiring_2.hours_until_expiry = lambda: 48
+
+        token_service.token_repo.get_all_instagram_tokens.return_value = [
+            token_expiring,
+            token_expiring_2,
+        ]
+
+        call_count = 0
+
+        async def mock_refresh(instagram_account_id=None):
+            nonlocal call_count
+            call_count += 1
+            if instagram_account_id == "acc-1":
+                raise TokenRevokedError("App deauthorized", error_subcode=458)
+            return True
+
+        token_service.refresh_instagram_token = mock_refresh
+
+        results = await token_service.refresh_all_instagram_tokens()
+
+        assert call_count == 2
+        assert results["failed"] == 1
+        assert results["refreshed"] == 1
+        assert any(d["status"] == "revoked" for d in results["details"])
+
+    @pytest.mark.asyncio
     async def test_refresh_instagram_token_network_error(
         self, token_service, mock_db_token
     ):
         """Test refresh handles network errors."""
         import httpx
 
-        token_service.token_repo.get_token.return_value = mock_db_token
+        token_service.token_repo.get_token_for_update.return_value = mock_db_token
         token_service._encryption.decrypt.return_value = "current_token"
 
         with patch(
@@ -336,7 +457,7 @@ class TestTokenRefreshService:
         self, token_service, mock_db_token
     ):
         """Test refresh handles missing token in response."""
-        token_service.token_repo.get_token.return_value = mock_db_token
+        token_service.token_repo.get_token_for_update.return_value = mock_db_token
         token_service._encryption.decrypt.return_value = "current_token"
 
         mock_response = Mock()
@@ -355,6 +476,16 @@ class TestTokenRefreshService:
             result = await token_service.refresh_instagram_token()
 
         assert result is False
+
+    @pytest.mark.asyncio
+    async def test_refresh_skips_when_locked_by_another_process(self, token_service):
+        """Test refresh returns False when row is locked (SKIP LOCKED)."""
+        token_service.token_repo.get_token_for_update.return_value = None
+
+        result = await token_service.refresh_instagram_token()
+
+        assert result is False
+        token_service.token_repo.get_token_for_update.assert_called_once()
 
     # ==================== get_tokens_needing_refresh Tests ====================
 
