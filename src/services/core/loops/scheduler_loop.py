@@ -59,6 +59,13 @@ async def _scheduler_tick(
     if discarded > 0:
         logger.warning(f"Discarded {discarded} abandoned processing item(s) (>24h old)")
 
+    # Wait for at least one media sync to complete before posting.
+    # Posting against a stale or empty media_items table leads to
+    # "no eligible media" failures or wrong selections.
+    if not session_state.initial_sync_complete:
+        logger.debug("Scheduler tick: waiting for initial media sync")
+        return []
+
     if settings_service:
         active_chats = settings_service.get_all_active_chats()
     else:

@@ -32,6 +32,16 @@ _SYNC = "src.services.core.loops.media_sync_loop"
 class TestSchedulerLoop:
     """Tests for run_scheduler_loop JIT multi-tenant behavior."""
 
+    @pytest.fixture(autouse=True)
+    def _open_sync_gate(self):
+        """Ensure initial_sync_complete is True so the sync gate doesn't block."""
+        from src.services.core.loops.lifecycle import session_state
+
+        original = session_state.initial_sync_complete
+        session_state.initial_sync_complete = True
+        yield
+        session_state.initial_sync_complete = original
+
     @pytest.mark.asyncio
     async def test_scheduler_loop_iterates_over_active_chats(self):
         """Scheduler loop calls process_slot for each active chat."""

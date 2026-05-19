@@ -186,6 +186,9 @@ async def main_async():
                 )
             )
         )
+    else:
+        # No sync loop — open the scheduler gate immediately
+        session_state.initial_sync_complete = True
 
     tasks.append(
         asyncio.create_task(
