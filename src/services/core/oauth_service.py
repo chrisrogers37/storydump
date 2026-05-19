@@ -189,9 +189,7 @@ class OAuthService(BaseService):
                 # First detected account becomes active to preserve the
                 # single-account behavior; the rest land as inactive.
                 set_active = idx == 0
-                existing = self.account_service.get_account_by_instagram_id(
-                    ig_account_id
-                )
+                existing = self.account_service.get_account_by_meta_id(ig_account_id)
 
                 if existing:
                     self.account_service.update_account_token(
