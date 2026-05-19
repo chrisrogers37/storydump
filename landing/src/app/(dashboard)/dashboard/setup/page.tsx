@@ -1,6 +1,6 @@
 import { redirect } from "next/navigation";
 import { getSession } from "@/lib/session";
-import { backendPost, backendFetchJson } from "@/lib/backend";
+import { backendFetchJson } from "@/lib/backend";
 import { SetupWizard } from "@/components/dashboard/setup-wizard";
 
 export const metadata = {
@@ -13,11 +13,10 @@ export default async function SetupPage() {
 
   const { activeChatId, userId } = session;
 
-  const [initRes, accountsData] = await Promise.all([
-    backendPost("init", activeChatId!, userId),
+  const [data, accountsData] = await Promise.all([
+    backendFetchJson("init", activeChatId!, userId, { revalidate: 60 }),
     backendFetchJson("accounts", activeChatId!, userId, { revalidate: 60 }),
   ]);
-  const data = initRes.ok ? await initRes.json() : null;
 
   const setupState = data?.setup_state ?? {
     instagram_connected: false,
