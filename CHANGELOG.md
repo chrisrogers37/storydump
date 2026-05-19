@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`api_tokens.meta_account_id` column** — Phase 1 of the Instagram credential refactor (#380). Adds an explicit, indexed column on `api_tokens` to store the Meta-side identifier (Business Account ID or Instagram User ID) that issued the token. Additive only — no behavior changes, no columns removed. Migration 035. See `documentation/planning/2026-05-18-instagram-credential-refactor.md` for the full 5-PR plan.
+
 ### Security
 
 - **HTTP security headers on all API responses** — Added `SecurityHeadersMiddleware` with HSTS (`max-age=63072000; includeSubDomains`), `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, CSP (`default-src 'self'`, `frame-ancestors 'none'`), and `Referrer-Policy: strict-origin-when-cross-origin`. Closes #382.
