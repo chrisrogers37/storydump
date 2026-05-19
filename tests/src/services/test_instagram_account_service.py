@@ -193,6 +193,7 @@ class TestAddAccount:
         self, service, mock_account_repo, mock_token_repo, sample_account
     ):
         """Should create account and store token."""
+        mock_account_repo.get_by_meta_account_id.return_value = None
         mock_account_repo.get_by_instagram_id.return_value = None
         mock_account_repo.get_by_username.return_value = None
         mock_account_repo.create.return_value = sample_account
@@ -212,7 +213,7 @@ class TestAddAccount:
         self, service, mock_account_repo, sample_account
     ):
         """Should raise ValueError when account ID already exists."""
-        mock_account_repo.get_by_instagram_id.return_value = sample_account
+        mock_account_repo.get_by_meta_account_id.return_value = sample_account
 
         with pytest.raises(ValueError, match="already exists"):
             service.add_account(
@@ -226,6 +227,7 @@ class TestAddAccount:
         self, service, mock_account_repo, sample_account
     ):
         """Should raise ValueError when username already exists."""
+        mock_account_repo.get_by_meta_account_id.return_value = None
         mock_account_repo.get_by_instagram_id.return_value = None
         mock_account_repo.get_by_username.return_value = sample_account
 
@@ -247,6 +249,7 @@ class TestAddAccount:
         sample_settings,
     ):
         """Should set account as active when set_as_active=True."""
+        mock_account_repo.get_by_meta_account_id.return_value = None
         mock_account_repo.get_by_instagram_id.return_value = None
         mock_account_repo.get_by_username.return_value = None
         mock_account_repo.create.return_value = sample_account
@@ -467,6 +470,7 @@ class TestSeparationOfConcerns:
         self, service, mock_account_repo, mock_token_repo, sample_account
     ):
         """Account creation should create both account (identity) and token (credentials) separately."""
+        mock_account_repo.get_by_meta_account_id.return_value = None
         mock_account_repo.get_by_instagram_id.return_value = None
         mock_account_repo.get_by_username.return_value = None
         mock_account_repo.create.return_value = sample_account

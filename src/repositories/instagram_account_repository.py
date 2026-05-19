@@ -75,6 +75,30 @@ class InstagramAccountRepository(BaseRepository):
         self.end_read_transaction()
         return result
 
+    def get_by_meta_account_id(
+        self, meta_account_id: str
+    ) -> Optional[InstagramAccount]:
+        """Find an InstagramAccount via any of its api_tokens.meta_account_id.
+
+        This resolves across OAuth flows: both the Business Account ID
+        (FB Login) and the Instagram User ID (IG Login) land in
+        api_tokens.meta_account_id, so a single lookup finds the account
+        regardless of which flow originally connected it.
+        """
+        from src.models.api_token import ApiToken
+
+        result = (
+            self.db.query(InstagramAccount)
+            .join(ApiToken, ApiToken.instagram_account_id == InstagramAccount.id)
+            .filter(
+                ApiToken.meta_account_id == meta_account_id,
+                ApiToken.revoked_at.is_(None),
+            )
+            .first()
+        )
+        self.end_read_transaction()
+        return result
+
     def get_by_username(self, username: str) -> Optional[InstagramAccount]:
         """Get account by Instagram username."""
         # Strip @ if present

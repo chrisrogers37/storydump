@@ -177,31 +177,11 @@ class InstagramLoginOAuthService(BaseService):
 
             # Step 4: Create or update account
             expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
-            existing = self.account_service.get_account_by_instagram_id(ig_user_id)
-
-            # Cross-flow fallback: if the account was previously connected via
-            # Facebook Login, it was stored under the Instagram **Business**
-            # Account ID (from /me/accounts), which differs from the IG **User**
-            # ID returned by Instagram Login's /me endpoint for the same
-            # physical account. Look up by username so we update the existing
-            # row instead of failing on the duplicate-username uniqueness check.
-            if not existing and username:
-                existing = self.account_service.get_account_by_username(username)
-                if existing:
-                    logger.info(
-                        "Instagram Login: matched existing account @%s by username "
-                        "(stored id=%s, new id=%s) — updating in place",
-                        username,
-                        existing.instagram_account_id,
-                        ig_user_id,
-                    )
+            existing = self.account_service.get_account_by_meta_id(ig_user_id)
 
             if existing:
-                # Use the existing row's stored ID so update_account_token's
-                # internal lookup hits. Do not overwrite the stored ID:
-                # rotating it would break the FB Login lookup path.
                 self.account_service.update_account_token(
-                    instagram_account_id=existing.instagram_account_id,
+                    instagram_account_id=ig_user_id,
                     access_token=long_token,
                     instagram_username=username,
                     token_expires_at=expires_at,

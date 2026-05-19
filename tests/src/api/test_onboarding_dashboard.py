@@ -1285,7 +1285,7 @@ class TestAddAccount:
             mock_client = MockHttpx.return_value.__aenter__.return_value
             mock_client.get.return_value = ig_response
             mock_svc = service_ctx(MockIGService)
-            mock_svc.get_account_by_instagram_id.return_value = None
+            mock_svc.get_account_by_meta_id.return_value = None
             mock_svc.add_account.return_value = acct
 
             response = self._post(client)
@@ -1312,7 +1312,7 @@ class TestAddAccount:
             mock_client = MockHttpx.return_value.__aenter__.return_value
             mock_client.get.return_value = ig_response
             mock_svc = service_ctx(MockIGService)
-            mock_svc.get_account_by_instagram_id.return_value = existing
+            mock_svc.get_account_by_meta_id.return_value = existing
             mock_svc.update_account_token.return_value = existing
 
             response = self._post(client)
