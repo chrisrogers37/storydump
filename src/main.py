@@ -6,6 +6,7 @@ import os
 import signal
 import sys
 from time import time
+from typing import Optional
 
 from src.services.core.loops.guarded import guarded
 from src.services.core.loops.heartbeat import get_loop_liveness
@@ -186,7 +187,18 @@ async def main_async():
 
     log_service_summary()
 
-    # Setup signal handlers for graceful shutdown
+    # Setup signal handlers for graceful shutdown.
+    #
+    # The handler is wrapped in a tracked task so the main coroutine can
+    # explicitly await its completion below \u2014 otherwise asyncio.create_task
+    # is fire-and-forget and the process can exit before stop_polling()
+    # finishes telling Telegram the session is over. That's exactly what
+    # caused new worker deploys to fail with
+    # `telegram.error.Conflict: terminated by other getUpdates request` \u2014 the
+    # old worker's Python process died before Telegram noticed the session
+    # was released. See #392.
+    shutdown_task: Optional[asyncio.Task] = None
+
     async def shutdown_handler(sig):
         """Handle shutdown signals gracefully."""
         # Guard against duplicate signals
@@ -210,24 +222,31 @@ async def main_async():
         except Exception as e:
             logger.warning(f"Failed to send shutdown notification: {e}")
 
-        # Cleanup
+        # Stop Telegram polling FIRST. This is the critical step: it calls
+        # application.updater.stop() \u2192 application.stop() \u2192
+        # application.shutdown(), which closes the long-poll HTTP connection
+        # cleanly so Telegram releases the session for the next worker.
         try:
             await telegram_service.stop_polling()
         except Exception as e:
             logger.warning(f"Error stopping Telegram polling: {e}")
 
-        # Cancel all tasks
+        # Now cancel the background tasks (scheduler loop, etc.)
         for task in tasks:
             task.cancel()
 
         logger.info("\u2713 Shutdown complete")
 
+    def _on_signal(sig):
+        """Synchronous signal callback \u2014 schedules the async handler exactly once."""
+        nonlocal shutdown_task
+        if shutdown_task is None:
+            shutdown_task = asyncio.create_task(shutdown_handler(sig))
+
     # Register signal handlers
     loop = asyncio.get_event_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(
-            sig, lambda s=sig: asyncio.create_task(shutdown_handler(s))
-        )
+        loop.add_signal_handler(sig, _on_signal, sig)
 
     # Wait for all tasks
     try:
@@ -238,6 +257,16 @@ async def main_async():
     except KeyboardInterrupt:
         logger.info("Received keyboard interrupt...")
         await shutdown_handler(signal.SIGINT)
+
+    # Block until the shutdown handler has fully released Telegram and run
+    # cleanup. Without this await, the process can exit while stop_polling
+    # is still mid-call \u2014 Telegram never sees the session close and the
+    # next deploy hits a polling-conflict on startup.
+    if shutdown_task is not None:
+        try:
+            await shutdown_task
+        except Exception as e:
+            logger.warning(f"Shutdown handler raised: {e}")
 
 
 def main():

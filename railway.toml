@@ -7,3 +7,9 @@ healthcheckPath = "/health"
 healthcheckTimeout = 30
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10
+# Give the old worker 60s to release its Telegram polling session before
+# SIGKILL fires. Without this, new worker deploys fail with
+# `telegram.error.Conflict: terminated by other getUpdates request` because
+# Telegram still sees the old session as active when the new worker tries
+# to start. See issue #392.
+drainingSeconds = 60
