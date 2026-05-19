@@ -10,7 +10,7 @@
 BEGIN;
 
 ALTER TABLE api_tokens
-ADD COLUMN IF NOT EXISTS meta_account_id TEXT;
+ADD COLUMN IF NOT EXISTS meta_account_id VARCHAR(100);
 
 CREATE INDEX IF NOT EXISTS api_tokens_meta_account_id_idx
     ON api_tokens (meta_account_id)
