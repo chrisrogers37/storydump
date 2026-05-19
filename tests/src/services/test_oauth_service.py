@@ -193,7 +193,7 @@ class TestExchangeAndStore:
     @pytest.mark.asyncio
     async def test_exchange_new_account_creates_it(self, service):
         """When Instagram account is new, add_account is called."""
-        service.account_service.get_account_by_instagram_id.return_value = None
+        service.account_service.get_account_by_meta_id.return_value = None
         service.account_service.add_account.return_value = Mock()
 
         with (
@@ -229,7 +229,7 @@ class TestExchangeAndStore:
     async def test_exchange_existing_account_updates_token(self, service):
         """When Instagram account exists, update_account_token is called."""
         existing = Mock()
-        service.account_service.get_account_by_instagram_id.return_value = existing
+        service.account_service.get_account_by_meta_id.return_value = existing
         service.account_service.update_account_token.return_value = existing
 
         with (
@@ -260,7 +260,7 @@ class TestExchangeAndStore:
     async def test_exchange_multiple_accounts_stores_all_first_active(self, service):
         """When several IG accounts are linked across FB Pages, all are stored
         and only the first is set active for the chat (#331)."""
-        service.account_service.get_account_by_instagram_id.return_value = None
+        service.account_service.get_account_by_meta_id.return_value = None
         service.account_service.add_account.return_value = Mock()
 
         with (
@@ -304,7 +304,7 @@ class TestExchangeAndStore:
         def lookup(ig_id):
             return existing if ig_id == "17841000000002" else None
 
-        service.account_service.get_account_by_instagram_id.side_effect = lookup
+        service.account_service.get_account_by_meta_id.side_effect = lookup
 
         with (
             patch.object(
@@ -363,7 +363,7 @@ class TestExchangeAndStore:
     @pytest.mark.asyncio
     async def test_exchange_tracks_execution(self, service):
         """exchange_and_store sets result summary for observability."""
-        service.account_service.get_account_by_instagram_id.return_value = None
+        service.account_service.get_account_by_meta_id.return_value = None
         service.account_service.add_account.return_value = Mock()
 
         with (
