@@ -4,6 +4,7 @@ import asyncio
 
 from src.config.settings import settings
 from src.services.core.loops.heartbeat import record_heartbeat
+from src.services.core.loops.lifecycle import session_state
 from src.services.core.media_sync import MediaSyncService
 from src.utils.logger import logger
 
@@ -75,6 +76,11 @@ async def media_sync_loop(
                         f"{result.reactivated} reactivated, "
                         f"{result.errors} errors"
                     )
+
+            # Signal scheduler that media state is now known
+            if not session_state.initial_sync_complete:
+                session_state.initial_sync_complete = True
+                logger.info("Initial media sync complete — scheduler gate open")
 
             # Reset failure counter on success
             consecutive_failures = 0

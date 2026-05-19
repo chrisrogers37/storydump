@@ -14,6 +14,7 @@ class _SessionState:
         self.start_time: float | None = None
         self.posts_sent: int = 0
         self.shutdown_in_progress: bool = False
+        self.initial_sync_complete: bool = False
 
 
 # Singleton instance — import this to read/write session state.

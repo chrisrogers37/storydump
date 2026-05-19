@@ -143,6 +143,7 @@ class SchedulerService(BaseService):
         """
         # Defense-in-depth: clean up failed/stale queue items from prior ticks
         self.queue_repo.delete_stale_pending(max_age_minutes=10)
+        self.queue_repo.requeue_stale_processing(max_age_minutes=10)
 
         chat_settings = self.settings_service.get_settings(telegram_chat_id)
 
@@ -281,6 +282,11 @@ class SchedulerService(BaseService):
                 last_post_sent_at (used during catch-up to advance
                 by one interval rather than jumping to now).
         """
+        from src.services.core.loops.lifecycle import session_state
+
+        if session_state.shutdown_in_progress:
+            return {"posted": False, "reason": "shutdown_in_progress"}
+
         with self.track_execution(
             method_name="select_and_send",
             user_id=user_id,
@@ -566,6 +572,8 @@ class SchedulerService(BaseService):
 
         Posting hours are in the user's local timezone (chat_settings.posting_timezone).
         Converts UTC now to local time before comparing.
+
+        When start == end, the window is treated as "always on" (full 24h).
         """
 
         tz_name = getattr(chat_settings, "posting_timezone", None)
@@ -584,6 +592,9 @@ class SchedulerService(BaseService):
         start = chat_settings.posting_hours_start
         end = chat_settings.posting_hours_end
 
+        if start == end:
+            return True
+
         if end < start:
             # Window crosses midnight (e.g., 22-2)
             return current_hour >= start or current_hour < end
@@ -592,9 +603,14 @@ class SchedulerService(BaseService):
 
     @staticmethod
     def _posting_window_hours(chat_settings) -> float:
-        """Compute the length of the posting window in hours."""
+        """Compute the length of the posting window in hours.
+
+        When start == end, returns 24.0 (full day).
+        """
         start = chat_settings.posting_hours_start
         end = chat_settings.posting_hours_end
+        if start == end:
+            return 24.0
         if end < start:
             return (24 - start) + end
         return end - start
