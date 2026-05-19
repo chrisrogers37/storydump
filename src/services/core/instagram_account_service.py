@@ -271,6 +271,7 @@ class InstagramAccountService(BaseService):
             token_value=encrypted_token,
             expires_at=token_expires_at,
             instagram_account_id=str(account.id),
+            meta_account_id=instagram_account_id,
             metadata={
                 "account_id": instagram_account_id,
                 "username": instagram_username,
@@ -384,6 +385,7 @@ class InstagramAccountService(BaseService):
                 token_value=encrypted_token,
                 expires_at=token_expires_at,
                 instagram_account_id=str(account.id),
+                meta_account_id=instagram_account_id,
                 metadata={
                     "account_id": instagram_account_id,
                     "username": account.instagram_username,

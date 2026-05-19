@@ -147,6 +147,7 @@ class TokenRepository(BaseRepository):
         scopes: Optional[List[str]] = None,
         metadata: Optional[dict] = None,
         instagram_account_id: Optional[str] = None,
+        meta_account_id: Optional[str] = None,
     ) -> ApiToken:
         """
         Create or update a token (UPSERT pattern).
@@ -165,6 +166,8 @@ class TokenRepository(BaseRepository):
             scopes: OAuth scopes granted
             metadata: Additional service-specific data
             instagram_account_id: UUID of Instagram account (for multi-account support)
+            meta_account_id: Meta-side identifier that issued this token
+                (Business Account ID for FB Login, User ID for IG Login)
 
         Returns:
             Created or updated ApiToken
@@ -195,6 +198,8 @@ class TokenRepository(BaseRepository):
                 existing.scopes = scopes
             if metadata is not None:
                 existing.token_metadata = metadata
+            if meta_account_id is not None:
+                existing.meta_account_id = meta_account_id
             self.db.commit()
             self.db.refresh(existing)
             return existing
@@ -209,6 +214,7 @@ class TokenRepository(BaseRepository):
                 scopes=scopes,
                 token_metadata=metadata,
                 instagram_account_id=instagram_account_id,
+                meta_account_id=meta_account_id,
             )
             self.db.add(token)
             self.db.commit()
