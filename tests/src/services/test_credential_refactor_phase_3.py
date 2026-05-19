@@ -87,9 +87,6 @@ class TestRepoGetByMetaAccountId:
 
         assert result is None
 
-    def test_method_exists(self, repo):
-        assert hasattr(repo, "get_by_meta_account_id")
-
 
 # ---------------------------------------------------------------------------
 # Service: get_account_by_meta_id (with legacy fallback)
