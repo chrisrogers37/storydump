@@ -429,10 +429,16 @@ class InstagramAccountService(BaseService):
     ) -> Optional[InstagramAccount]:
         """Lookup keyed by the Meta-side identifier on any credential row.
 
-        Resolves across OAuth flows: both Business Account ID (FB Login)
-        and IG User ID (IG Login) land in api_tokens.meta_account_id.
-        Falls back to the legacy instagram_accounts.instagram_account_id
-        column for rows not yet backfilled.
+        Cross-flow resolution: FB Login stores the ``instagram_business_account.id``
+        from ``/{page_id}?fields=instagram_business_account`` and IG Login stores the
+        ``user_id`` from its token exchange.  For professional (Business / Creator)
+        accounts these are the **same Instagram-Scoped User ID (IGSID)**, so a single
+        ``meta_account_id`` lookup finds the account regardless of which flow
+        originally connected it — no username fallback needed.
+
+        Falls back to the legacy ``instagram_accounts.instagram_account_id``
+        column for rows whose ``api_tokens.meta_account_id`` has not yet been
+        backfilled by migration 036.
         """
         account = self.account_repo.get_by_meta_account_id(meta_account_id)
         if not account:
