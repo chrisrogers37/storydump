@@ -290,6 +290,43 @@ class QueueRepository(BaseRepository):
 
         return count
 
+    def requeue_stale_processing(self, max_age_minutes: int = 10) -> int:
+        """Reset processing items that were never sent to Telegram back to pending.
+
+        Catches items that got stuck in 'processing' due to a crash or SIGTERM
+        before the Telegram send completed. These have no telegram_message_id,
+        so resetting to 'pending' is safe — no duplicate notification risk.
+
+        Args:
+            max_age_minutes: Minutes after which a processing item without a
+                telegram_message_id is considered stale (default: 10).
+
+        Returns:
+            Number of items requeued.
+        """
+        cutoff = datetime.utcnow() - timedelta(minutes=max_age_minutes)
+        stale = (
+            self.db.query(PostingQueue)
+            .filter(
+                PostingQueue.status == "processing",
+                PostingQueue.telegram_message_id.is_(None),
+                PostingQueue.created_at <= cutoff,
+            )
+            .all()
+        )
+
+        for item in stale:
+            logger.info(
+                f"Requeuing stale processing item {item.id} "
+                f"(no telegram_message_id, age={datetime.utcnow() - item.created_at})"
+            )
+            item.status = "pending"
+
+        if stale:
+            self.db.commit()
+
+        return len(stale)
+
     def discard_abandoned_processing(self, abandon_threshold_hours: int = 24) -> int:
         """Delete queue items stuck in 'processing' for too long.
 

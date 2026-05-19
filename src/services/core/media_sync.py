@@ -256,22 +256,29 @@ class MediaSyncService(BaseService):
         2. Hash matches existing record -> rename/move
         3. Inactive record with same identifier -> reactivate
         4. No match -> new file, index it
+
+        The identifier is added to seen_identifiers only AFTER successful
+        processing, so a per-file exception doesn't prevent deactivation
+        detection on the next sync cycle.
         """
         identifier = file_info.identifier
-        ctx.seen_identifiers.add(identifier)
 
         if self._handle_identifier_match(file_info, ctx):
+            ctx.seen_identifiers.add(identifier)
             return
 
         file_hash = self._get_file_hash(file_info, ctx.provider)
 
         if self._handle_hash_match(file_info, file_hash, ctx):
+            ctx.seen_identifiers.add(identifier)
             return
 
         if self._handle_reactivation(file_info, ctx):
+            ctx.seen_identifiers.add(identifier)
             return
 
         self._index_new_file(file_info, file_hash, ctx)
+        ctx.seen_identifiers.add(identifier)
 
     def _handle_identifier_match(
         self, file_info: MediaFileInfo, ctx: SyncContext
