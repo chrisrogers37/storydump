@@ -90,6 +90,16 @@ async def main_async():
     """Main async application entry point."""
     validate_and_log_startup()
 
+    # Start the health check server IMMEDIATELY, before any awaits that could
+    # delay Railway's healthcheck. Originally the server was started inside
+    # the task list at the bottom of this function (behind telegram_service
+    # init + send_startup_notification), which meant any slowness in those
+    # steps would cause Railway to time out on /health and mark the deploy
+    # FAILED — even though Python was fine. Start now, record the start
+    # time so the 120s startup grace in `_build_health_response` activates.
+    session_state.start_time = time()
+    health_task = asyncio.create_task(_health_check_server())
+
     # Initialize services
     from src.services.core.settings_service import SettingsService
     from src.services.core.posting import PostingService
@@ -111,8 +121,8 @@ async def main_async():
     await telegram_service.initialize()
     scheduler_service.telegram_service = telegram_service
 
-    # Send startup notification
-    session_state.start_time = time()
+    # Send startup notification (health server is already up, so a hang
+    # here no longer fails Railway's healthcheck).
     await telegram_service.send_startup_notification()
 
     # Create tasks
@@ -126,6 +136,9 @@ async def main_async():
     bot = telegram_service.bot
 
     tasks = [
+        # health_task was started above and is included here so it gets
+        # cancelled cleanly during shutdown along with the rest.
+        health_task,
         asyncio.create_task(
             guarded(
                 "scheduler",
@@ -139,7 +152,6 @@ async def main_async():
             guarded("lock_cleanup", lambda: cleanup_locks_loop(lock_service), bot=bot)
         ),
         asyncio.create_task(telegram_service.start_polling()),
-        asyncio.create_task(_health_check_server()),
     ]
 
     # Add cloud storage cleanup loop if Cloudinary is configured
