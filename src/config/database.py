@@ -18,8 +18,24 @@ engine = create_engine(
     echo=False,  # Set to True for SQL debugging
 )
 
-# Create session factory
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+# Create session factory.
+#
+# expire_on_commit=False — required for our long-running worker + background-loop
+# architecture. Without this, every session.commit() expires all attributes on
+# ORM instances loaded in that session. The transaction_cleanup_loop commits
+# idle sessions every 30s; any ORM instance held in flight by a concurrent
+# code path (e.g., chat_settings in send_notification) becomes unusable on the
+# next attribute access — refresh attempt against the now-closed session
+# raises "Instance <X> is not bound to a Session" (#388). For a worker that
+# fans ORM instances across services and async tasks, expire_on_commit=True
+# is the wrong default; slightly staler reads between commits are fine and
+# code re-fetches where freshness matters.
+SessionLocal = sessionmaker(
+    autocommit=False,
+    autoflush=False,
+    bind=engine,
+    expire_on_commit=False,
+)
 
 # Base class for models
 Base = declarative_base()
