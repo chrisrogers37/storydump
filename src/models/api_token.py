@@ -43,6 +43,11 @@ class ApiToken(Base):
         index=True,
     )
 
+    # Meta-side identifier that issued this token (Business Account ID
+    # for FB Login, Instagram User ID for IG Login).  Nullable during
+    # the dual-write migration window; backfilled in phase 3.
+    meta_account_id = Column(String(100), nullable=True, index=True)
+
     # Per-tenant scoping (used by Google Drive OAuth tokens)
     chat_settings_id = Column(
         UUID(as_uuid=True),
