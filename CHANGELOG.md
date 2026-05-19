@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **`api_tokens.meta_account_id` column** — Phase 1 of the Instagram credential refactor (#380). Adds an explicit, indexed column on `api_tokens` to store the Meta-side identifier (Business Account ID or Instagram User ID) that issued the token. Additive only — no behavior changes, no columns removed. Migration 035. See `documentation/planning/2026-05-18-instagram-credential-refactor.md` for the full 5-PR plan.
+- **Credential refactor dual-write** — Phase 2 (#380). `_create_account_with_token` and `update_account_token` now write the Meta-side ID to both the new `api_tokens.meta_account_id` column and the existing `token_metadata.account_id` JSONB field. `TokenRepository.create_or_update` accepts the new `meta_account_id` parameter and preserves existing values when not passed (safe for the token refresh path). No read-path changes — rollback-safe.
 
 ### Changed
 
