@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **HTTP security headers on all API responses** — Added `SecurityHeadersMiddleware` with HSTS (`max-age=63072000; includeSubDomains`), `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, CSP (`default-src 'self'`, `frame-ancestors 'none'`), and `Referrer-Policy: strict-origin-when-cross-origin`. Closes #382.
+- **Thumbnail proxy blocks SVG content type** — SVG files can contain embedded JavaScript. The thumbnail proxy now rejects `image/svg+xml` responses from upstream, in addition to non-image types. Closes #383.
+- **Instagram API errors no longer leak internal details** — The `/add-account` endpoint previously forwarded raw Instagram Graph API error messages (which can contain token fragments, internal endpoint paths, or OAuth details) to the client. Now logs the raw error server-side and returns one of three sanitized messages depending on the error category. Closes #384.
+- **Required secrets validated at startup** — `ENCRYPTION_KEY` or `ENCRYPTION_KEYS` is now checked during `validate_all()` at boot. Missing encryption keys previously only surfaced at runtime when an OAuth flow tried to encrypt a token. Closes #385.
+- **Auth endpoints have stricter rate limits** — OAuth start endpoints limited to 5/min, OAuth callbacks to 10/min, and `/add-account` to 5/min (down from the 30/min global default). Closes #386.
+- **CI no longer commits a test encryption key** — The hardcoded Fernet key in `.github/workflows/ci.yml` is replaced with a dynamically generated key per CI run. Closes #387.
+
 ### Fixed
 
 - **All Telegram posts failed for 5 days — session-detach race in `transaction_cleanup_loop`** — The SQLAlchemy `SessionLocal` factory in `src/config/database.py` did not set `expire_on_commit=False`, leaving it at SQLAlchemy's default of `True`. Every 30 seconds the worker's `transaction_cleanup_loop` called `end_read_transaction()` on every repo, which committed the session and (because `expire_on_commit=True`) expired every ORM instance loaded in that session. Any code path holding a `ChatSettings` instance across that 30s window — most importantly `send_notification` reading `chat_settings.caption_style` and `chat_settings.enable_instagram_api` — would raise `Instance <ChatSettings> is not bound to a Session; attribute refresh operation cannot proceed` on the next attribute access. The race was always present but masked by `chat_settings.X or env_settings.X` fallback chains; commit `7ea90ff` ("DB is source of truth for per-chat config; remove env fallbacks") removed those fallbacks and the race became a 100%-failure-rate outage. Last successful post was 2026-05-13 02:33 UTC; 909+ consecutive `send_notification` failures observed during investigation. Fix sets `expire_on_commit=False` on the session factory — for a long-running worker that fans ORM instances across services and async tasks, this is the right default. Closes #388. Pin in `tests/src/config/test_database.py` so a future flip back to the SQLAlchemy default doesn't silently re-introduce the outage.

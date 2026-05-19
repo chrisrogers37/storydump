@@ -253,23 +253,24 @@ async def onboarding_queue_preview(request: InitRequest) -> dict:
 
 
 @router.post("/add-account")
-async def onboarding_add_account(request: AddAccountRequest) -> dict:
+@limiter.limit("5/minute")
+async def onboarding_add_account(request: Request, body: AddAccountRequest) -> dict:
     """Add an Instagram account via secure Mini App form.
 
     Validates credentials against Instagram Graph API, then creates
     or updates the account. Credentials are transmitted via HTTPS
     and never appear in Telegram chat history.
     """
-    _validate_request(request.init_data, request.chat_id)
+    _validate_request(body.init_data, body.chat_id)
 
     # Validate credentials against Instagram API
     try:
         async with httpx.AsyncClient() as client:
             response = await client.get(
-                f"{settings.meta_graph_base}/{request.instagram_account_id}",
+                f"{settings.meta_graph_base}/{body.instagram_account_id}",
                 params={
                     "fields": "username",
-                    "access_token": request.access_token,
+                    "access_token": body.access_token,
                 },
                 timeout=30.0,
             )
@@ -282,13 +283,23 @@ async def onboarding_add_account(request: AddAccountRequest) -> dict:
 
     if response.status_code != 200:
         error_data = response.json()
-        error_msg = error_data.get("error", {}).get("message", "Unknown error")
-        # Replace technical OAuth errors with user-friendly message
-        if "Invalid OAuth" in error_msg or "access token" in error_msg.lower():
-            error_msg = (
-                "Invalid access token. Please check it hasn't expired and try again."
+        raw_msg = error_data.get("error", {}).get("message", "")
+        logger.warning(
+            f"Instagram API rejected add-account (HTTP {response.status_code}): "
+            f"{raw_msg}"
+        )
+        # Never expose raw API error messages — they may contain token
+        # fragments, internal endpoint paths, or OAuth implementation details.
+        if response.status_code == 429:
+            detail = "Too many requests to Instagram. Please wait and try again."
+        elif "does not exist" in raw_msg.lower():
+            detail = "Instagram account not found. Please check the account ID."
+        else:
+            detail = (
+                "Invalid credentials. Please verify your account ID and "
+                "access token, then try again."
             )
-        raise HTTPException(status_code=400, detail=error_msg)
+        raise HTTPException(status_code=400, detail=detail)
 
     api_data = response.json()
     username = api_data.get("username")
@@ -301,27 +312,27 @@ async def onboarding_add_account(request: AddAccountRequest) -> dict:
     # Create or update account
     with InstagramAccountService() as account_service, service_error_handler():
         existing = account_service.get_account_by_instagram_id(
-            request.instagram_account_id
+            body.instagram_account_id
         )
 
         if existing:
             account = account_service.update_account_token(
-                instagram_account_id=request.instagram_account_id,
-                access_token=request.access_token,
+                instagram_account_id=body.instagram_account_id,
+                access_token=body.access_token,
                 instagram_username=username,
                 set_as_active=True,
-                telegram_chat_id=request.chat_id,
+                telegram_chat_id=body.chat_id,
                 auth_method=AUTH_METHOD_MANUAL,
             )
             is_update = True
         else:
             account = account_service.add_account(
-                display_name=request.display_name,
-                instagram_account_id=request.instagram_account_id,
+                display_name=body.display_name,
+                instagram_account_id=body.instagram_account_id,
                 instagram_username=username,
-                access_token=request.access_token,
+                access_token=body.access_token,
                 set_as_active=True,
-                telegram_chat_id=request.chat_id,
+                telegram_chat_id=body.chat_id,
                 auth_method=AUTH_METHOD_MANUAL,
             )
             is_update = False

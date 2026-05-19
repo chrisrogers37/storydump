@@ -67,6 +67,24 @@ class ConfigValidator:
         if not settings.DB_NAME:
             errors.append("DB_NAME is required")
 
+        # Validate encryption keys — required for OAuth token storage.
+        # TokenEncryption defers this to first use, but a missing key at
+        # startup means every OAuth flow will fail at runtime.
+        if not settings.ENCRYPTION_KEY and not settings.ENCRYPTION_KEYS:
+            errors.append(
+                "ENCRYPTION_KEY or ENCRYPTION_KEYS is required — "
+                "OAuth token storage will fail without it"
+            )
+
+        # Validate database connectivity — catch misconfigured DATABASE_URL
+        # or missing DB_PASSWORD before the first real query fails deep in
+        # a service call.
+        if not settings.DATABASE_URL and not settings.DB_PASSWORD:
+            logger.warning(
+                "DB_PASSWORD is empty and DATABASE_URL is not set — "
+                "database connection may fail if password is required"
+            )
+
         # Validate paths — auto-create MEDIA_DIR for cloud deployments
         media_dir = Path(settings.MEDIA_DIR)
         if not media_dir.exists():
