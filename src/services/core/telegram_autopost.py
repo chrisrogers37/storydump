@@ -14,6 +14,7 @@ from src.exceptions.instagram import (
     MediaUploadError,
     RateLimitError,
     TokenExpiredError,
+    TokenRevokedError,
 )
 from src.repositories.history_repository import HistoryCreateParams
 from src.services.core.telegram_service import _escape_markdown
@@ -604,6 +605,8 @@ class TelegramAutopostHandler:
             return "Failed to prepare media for Instagram. This is a server issue — please contact the admin."
         if isinstance(e, RateLimitError):
             return "Instagram rate limit reached. Please try again later."
+        if isinstance(e, TokenRevokedError):
+            return "Instagram account has been disconnected (password change or app removed). Please reconnect in Settings."
         if isinstance(e, TokenExpiredError):
             return "Instagram connection has expired. Please reconnect your account in Settings."
         if isinstance(e, InstagramAPIError):

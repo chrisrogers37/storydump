@@ -20,6 +20,7 @@ from src.exceptions import (
     InstagramAPIError,
     RateLimitError,
     TokenExpiredError,
+    TokenRevokedError,
 )
 from src.utils.logger import logger
 
@@ -343,8 +344,14 @@ class InstagramAPIService(BaseService):
                 error_subcode=error_subcode,
             )
 
-        # Token errors
+        # Token errors — distinguish revocation from normal expiry
         if error_code == 190:
+            if error_subcode in TokenRevokedError.REVOCATION_SUBCODES:
+                raise TokenRevokedError(
+                    error_message,
+                    error_code=str(error_code),
+                    error_subcode=error_subcode,
+                )
             raise TokenExpiredError(
                 error_message,
                 error_code=str(error_code),

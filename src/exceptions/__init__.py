@@ -11,6 +11,7 @@ from src.exceptions.instagram import (
     InstagramAPIError,
     RateLimitError,
     TokenExpiredError,
+    TokenRevokedError,
     MediaUploadError,
 )
 from src.exceptions.backfill import (
@@ -28,6 +29,7 @@ __all__ = [
     "InstagramAPIError",
     "RateLimitError",
     "TokenExpiredError",
+    "TokenRevokedError",
     "MediaUploadError",
     "BackfillError",
     "BackfillMediaExpiredError",
