@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -15,17 +15,11 @@ import {
   DialogTrigger,
   DialogClose,
 } from "@/components/ui/dialog";
-import { postApi, getApi } from "@/lib/dashboard-api";
-
-interface Account {
-  id: string;
-  display_name: string;
-  instagram_username: string;
-  is_active: boolean;
-}
+import { postApi, openOAuthWindow } from "@/lib/dashboard-api";
+import type { InstagramAccount } from "@/lib/types";
 
 interface AccountsTabProps {
-  accounts: Account[];
+  accounts: InstagramAccount[];
 }
 
 export function AccountsTab({ accounts }: AccountsTabProps) {
@@ -34,6 +28,18 @@ export function AccountsTab({ accounts }: AccountsTabProps) {
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [removingDialogOpen, setRemovingDialogOpen] = useState<string | null>(null);
+  const oauthPending = useRef(false);
+
+  useEffect(() => {
+    function onVisible() {
+      if (document.visibilityState === "visible" && oauthPending.current) {
+        oauthPending.current = false;
+        router.refresh();
+      }
+    }
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [router]);
 
   async function switchAccount(accountId: string) {
     setError(null);
@@ -66,10 +72,8 @@ export function AccountsTab({ accounts }: AccountsTabProps) {
     setError(null);
     setConnecting(true);
     try {
-      const data = await getApi("oauth-url/instagram");
-      if (data.auth_url) {
-        window.open(data.auth_url, "_blank", "noopener,noreferrer");
-      }
+      await openOAuthWindow("instagram");
+      oauthPending.current = true;
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to connect Instagram");
     } finally {

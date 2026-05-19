@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { CheckCircle2, Loader2, ExternalLink } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -23,7 +23,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { postApi, getApi } from "@/lib/dashboard-api";
+import { postApi, getApi, openOAuthWindow } from "@/lib/dashboard-api";
+import type { InstagramAccount } from "@/lib/types";
 import { CategoryMixCard } from "@/components/dashboard/settings/category-mix-card";
 
 interface SetupState {
@@ -39,13 +40,6 @@ interface SetupState {
   posting_hours_end: number;
   schedule_configured?: boolean;
   onboarding_completed: boolean;
-}
-
-interface InstagramAccount {
-  id: string;
-  display_name: string;
-  instagram_username: string;
-  is_active: boolean;
 }
 
 interface SetupWizardProps {
@@ -76,6 +70,7 @@ export function SetupWizard({ initialState, initialAccounts = [] }: SetupWizardP
   const [error, setError] = useState<string | null>(null);
   const [accounts, setAccounts] = useState<InstagramAccount[]>(initialAccounts);
   const [accountActionId, setAccountActionId] = useState<string | null>(null);
+  const oauthPending = useRef(false);
 
   // Single source of truth for "Instagram connected" in this component.
   // setup_state.instagram_connected can drift from the accounts list between
@@ -92,7 +87,7 @@ export function SetupWizard({ initialState, initialAccounts = [] }: SetupWizardP
     initialState.schedule_configured === true && initialState.onboarding_completed
   );
 
-  async function refreshState() {
+  const refreshState = useCallback(async () => {
     setError(null);
     try {
       const data = await getApi("init");
@@ -107,20 +102,42 @@ export function SetupWizard({ initialState, initialAccounts = [] }: SetupWizardP
       setError(e instanceof Error ? e.message : "Operation failed");
       return undefined;
     }
-  }
+  }, []);
 
   async function handleOAuth(provider: "instagram" | "google-drive") {
     setError(null);
     setLoading(true);
     try {
-      const data = await getApi(`oauth-url/${provider}`);
-      if (data?.auth_url) window.open(data.auth_url, "_blank", "noopener,noreferrer");
+      await openOAuthWindow(provider);
+      oauthPending.current = true;
     } catch (e) {
       setError(e instanceof Error ? e.message : "Operation failed");
     } finally {
       setLoading(false);
     }
   }
+
+  const refreshAccounts = useCallback(async () => {
+    setError(null);
+    try {
+      const data = await getApi("accounts");
+      if (data?.accounts) setAccounts(data.accounts);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load accounts");
+    }
+  }, []);
+
+  useEffect(() => {
+    function onVisible() {
+      if (document.visibilityState === "visible" && oauthPending.current) {
+        oauthPending.current = false;
+        refreshState();
+        refreshAccounts();
+      }
+    }
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [refreshState, refreshAccounts]);
 
   async function handleRefreshConnection() {
     setLoading(true);
@@ -130,16 +147,6 @@ export function SetupWizard({ initialState, initialAccounts = [] }: SetupWizardP
       await Promise.allSettled([refreshState(), refreshAccounts()]);
     } finally {
       setLoading(false);
-    }
-  }
-
-  async function refreshAccounts() {
-    setError(null);
-    try {
-      const data = await getApi("accounts");
-      if (data?.accounts) setAccounts(data.accounts);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load accounts");
     }
   }
 
@@ -599,7 +606,6 @@ function OAuthStep({
           <Badge variant="secondary">Not connected</Badge>
         )}
       </div>
-      {/* TODO: Add polling (setInterval + refreshState every 3s, capped at 60s) to auto-detect OAuth completion */}
       {!connected && (
         <div className="flex gap-2">
           <Button onClick={onConnect} disabled={loading}>

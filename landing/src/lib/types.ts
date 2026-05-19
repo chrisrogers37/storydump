@@ -1,3 +1,11 @@
+/** Instagram account returned by backend. */
+export interface InstagramAccount {
+  id: string;
+  display_name: string;
+  instagram_username: string;
+  is_active: boolean;
+}
+
 /** Backend instance summary returned by GET /api/instances. */
 export interface Instance {
   chat_settings_id: string;
