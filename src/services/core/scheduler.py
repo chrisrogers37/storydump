@@ -324,7 +324,7 @@ class SchedulerService(BaseService):
 
             # Auto-approve previously-approved media (skip Telegram)
             if media_item.times_posted > 0 and triggered_by == "scheduler":
-                result = self._auto_approve(
+                result = await self._auto_approve(
                     media_item, chat_settings, sent_at_override=sent_at_override
                 )
                 self.set_result_summary(
@@ -492,7 +492,7 @@ class SchedulerService(BaseService):
                 f"network outage. Last error: {error_message}"
             )
 
-    def _auto_approve(
+    async def _auto_approve(
         self,
         media_item,
         chat_settings,
@@ -501,7 +501,10 @@ class SchedulerService(BaseService):
         """Auto-approve a previously-approved media item without Telegram interaction.
 
         Creates a transient queue item, records history, applies a repost lock,
-        and increments times_posted. Sends a quiet log notification to Telegram.
+        and increments times_posted.
+
+        When Instagram API is enabled, uploads to Cloudinary and posts via the
+        Graph API. Falls back to reapproval-only on failure.
         """
         from src.repositories.history_repository import HistoryCreateParams
 
@@ -517,6 +520,16 @@ class SchedulerService(BaseService):
         )
         queue_id = str(queue_item.id)
 
+        posting_method = "auto_reapproval"
+        instagram_story_id = None
+
+        # Post to Instagram when API is enabled
+        if chat_settings.enable_instagram_api and not chat_settings.dry_run_mode:
+            ig_result = await self._auto_approve_instagram(media_item, chat_settings)
+            if ig_result:
+                posting_method = "instagram_api"
+                instagram_story_id = ig_result
+
         self.history_repo.create(
             HistoryCreateParams(
                 media_item_id=media_id,
@@ -527,7 +540,8 @@ class SchedulerService(BaseService):
                 posted_at=now,
                 status="posted",
                 success=True,
-                posting_method="auto_reapproval",
+                posting_method=posting_method,
+                instagram_story_id=instagram_story_id,
                 chat_settings_id=cs_id,
             )
         )
@@ -547,9 +561,15 @@ class SchedulerService(BaseService):
             chat_settings.telegram_chat_id, sent_at_override or now
         )
 
+        method_label = (
+            f"instagram_api (story_id={instagram_story_id})"
+            if posting_method == "instagram_api"
+            else "auto_reapproval"
+        )
         logger.info(
             f"Auto-approved returning media: {media_item.file_name} "
-            f"[{media_item.category}] (posted {media_item.times_posted}x before)"
+            f"[{media_item.category}] (posted {media_item.times_posted}x before, "
+            f"method={method_label})"
         )
 
         return {
@@ -561,6 +581,91 @@ class SchedulerService(BaseService):
             "category": media_item.category,
             "error": None,
         }
+
+    async def _auto_approve_instagram(
+        self,
+        media_item,
+        chat_settings,
+    ) -> Optional[str]:
+        """Post auto-approved media to Instagram.
+
+        Runs safety check, uploads to Cloudinary, posts via Graph API,
+        cleans up Cloudinary. Returns story_id on success, None on failure.
+        """
+        from src.services.integrations.cloud_storage import (
+            CloudStorageService,
+            CLOUD_UPLOAD_FOLDER,
+        )
+        from src.services.integrations.instagram_api import InstagramAPIService
+        from src.services.media_sources.factory import MediaSourceFactory
+
+        instagram_service = InstagramAPIService()
+        cloud_service = CloudStorageService()
+        cloud_public_id = None
+
+        try:
+            safety = instagram_service.safety_check_before_post(
+                telegram_chat_id=chat_settings.telegram_chat_id
+            )
+            if not safety["safe_to_post"]:
+                logger.warning(
+                    f"Auto-approve Instagram safety check failed: {safety['errors']}"
+                )
+                return None
+
+            provider = MediaSourceFactory.get_provider_for_media_item(
+                media_item, telegram_chat_id=chat_settings.telegram_chat_id
+            )
+            file_bytes = provider.download_file(media_item.source_identifier)
+
+            folder = f"{CLOUD_UPLOAD_FOLDER}/{chat_settings.id}"
+            upload_result = cloud_service.upload_media(
+                file_bytes=file_bytes,
+                filename=media_item.file_name,
+                folder=folder,
+            )
+            cloud_url = upload_result.get("url")
+            cloud_public_id = upload_result.get("public_id")
+
+            if not cloud_url:
+                logger.warning("Auto-approve Cloudinary upload returned no URL")
+                return None
+
+            media_type = (
+                "VIDEO"
+                if media_item.file_path
+                and media_item.file_path.lower().endswith((".mp4", ".mov"))
+                else "IMAGE"
+            )
+            story_url = (
+                cloud_service.get_story_optimized_url(cloud_url)
+                if media_type == "IMAGE"
+                else cloud_url
+            )
+
+            post_result = await instagram_service.post_story(
+                media_url=story_url,
+                media_type=media_type,
+                telegram_chat_id=chat_settings.telegram_chat_id,
+            )
+
+            return post_result.get("story_id")
+
+        except Exception as e:
+            logger.warning(
+                f"Auto-approve Instagram posting failed for "
+                f"{media_item.file_name}, falling back to reapproval: {e}"
+            )
+            return None
+
+        finally:
+            if cloud_public_id:
+                try:
+                    cloud_service.delete_media(cloud_public_id)
+                except Exception:
+                    pass
+            instagram_service.close()
+            cloud_service.close()
 
     # ------------------------------------------------------------------
     # Internal: slot timing

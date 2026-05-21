@@ -42,6 +42,8 @@ def _make_chat_settings(
     telegram_chat_id=-100123,
     settings_id=None,
     posting_timezone=None,
+    enable_instagram_api=False,
+    dry_run_mode=False,
 ):
     """Helper to build a mock chat_settings object."""
     cs = Mock()
@@ -53,6 +55,8 @@ def _make_chat_settings(
     cs.telegram_chat_id = telegram_chat_id
     cs.id = settings_id or uuid4()
     cs.posting_timezone = posting_timezone
+    cs.enable_instagram_api = enable_instagram_api
+    cs.dry_run_mode = dry_run_mode
     return cs
 
 
@@ -1020,7 +1024,7 @@ class TestAutoApproval:
         cs = _make_chat_settings()
 
         with patch("src.services.core.media_lock.MediaLockService") as MockLock:
-            result = scheduler_service._auto_approve(media, cs)
+            result = await scheduler_service._auto_approve(media, cs)
 
         assert result["posted"] is True
         assert result["auto_approved"] is True
@@ -1028,6 +1032,229 @@ class TestAutoApproval:
         scheduler_service.media_repo.increment_times_posted.assert_called_once()
         MockLock.return_value.create_lock.assert_called_once()
         scheduler_service.queue_repo.delete.assert_called_once()
+
+
+# ------------------------------------------------------------------
+# Auto-approve Instagram posting
+# ------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestAutoApproveInstagram:
+    """Tests for Instagram posting within the auto-approve flow."""
+
+    @pytest.fixture
+    def scheduler_service(self):
+        with patch.object(SchedulerService, "__init__", lambda self: None):
+            service = SchedulerService()
+            service.media_repo = Mock()
+            service.queue_repo = Mock()
+            service.history_repo = Mock()
+            service.lock_repo = Mock()
+            service.category_mix_repo = Mock()
+            service.settings_service = Mock()
+            service.telegram_service = AsyncMock()
+            service.service_run_repo = Mock()
+            service.service_name = "SchedulerService"
+            service.SCHEDULE_JITTER_MINUTES = 30
+            service.track_execution = mock_track_execution
+            service.set_result_summary = Mock()
+            return service
+
+    async def test_posts_to_instagram_when_enabled(self, scheduler_service):
+        """Auto-approve calls Instagram API when enable_instagram_api is True."""
+        media = Mock(
+            id=uuid4(),
+            file_name="meme.jpg",
+            file_path="meme.jpg",
+            category="memes",
+            times_posted=3,
+            source_identifier="test/meme.jpg",
+            mime_type="image/jpeg",
+        )
+        queue_item = Mock(id=uuid4())
+        scheduler_service.queue_repo.create.return_value = queue_item
+        cs = _make_chat_settings(enable_instagram_api=True)
+
+        mock_ig = Mock()
+        mock_ig.safety_check_before_post.return_value = {
+            "safe_to_post": True,
+            "errors": [],
+        }
+        mock_ig.post_story = AsyncMock(
+            return_value={
+                "success": True,
+                "story_id": "17890012345678901",
+            }
+        )
+
+        mock_cloud = Mock()
+        mock_cloud.upload_media.return_value = {
+            "url": "https://res.cloudinary.com/test/image/upload/v1/test.jpg",
+            "public_id": "test/meme",
+        }
+        mock_cloud.get_story_optimized_url.return_value = (
+            "https://res.cloudinary.com/test/image/upload/transformed/test.jpg"
+        )
+
+        mock_provider = Mock()
+        mock_provider.download_file.return_value = b"fake-bytes"
+
+        with (
+            patch("src.services.core.media_lock.MediaLockService"),
+            patch(
+                "src.services.integrations.instagram_api.InstagramAPIService",
+                return_value=mock_ig,
+            ),
+            patch(
+                "src.services.integrations.cloud_storage.CloudStorageService",
+                return_value=mock_cloud,
+            ),
+            patch(
+                "src.services.media_sources.factory.MediaSourceFactory"
+            ) as mock_factory,
+        ):
+            mock_factory.get_provider_for_media_item.return_value = mock_provider
+            result = await scheduler_service._auto_approve(media, cs)
+
+        assert result["posted"] is True
+        params = scheduler_service.history_repo.create.call_args[0][0]
+        assert params.posting_method == "instagram_api"
+        assert params.instagram_story_id == "17890012345678901"
+        mock_ig.post_story.assert_awaited_once()
+        mock_cloud.delete_media.assert_called_once_with("test/meme")
+
+    async def test_falls_back_to_reapproval_on_safety_failure(self, scheduler_service):
+        """Falls back to auto_reapproval when safety check fails."""
+        media = Mock(
+            id=uuid4(),
+            file_name="meme.jpg",
+            file_path="meme.jpg",
+            category="memes",
+            times_posted=3,
+        )
+        queue_item = Mock(id=uuid4())
+        scheduler_service.queue_repo.create.return_value = queue_item
+        cs = _make_chat_settings(enable_instagram_api=True)
+
+        mock_ig = Mock()
+        mock_ig.safety_check_before_post.return_value = {
+            "safe_to_post": False,
+            "errors": ["No valid token"],
+        }
+
+        with (
+            patch("src.services.core.media_lock.MediaLockService"),
+            patch(
+                "src.services.integrations.instagram_api.InstagramAPIService",
+                return_value=mock_ig,
+            ),
+            patch("src.services.integrations.cloud_storage.CloudStorageService"),
+            patch("src.services.media_sources.factory.MediaSourceFactory"),
+        ):
+            result = await scheduler_service._auto_approve(media, cs)
+
+        assert result["posted"] is True
+        params = scheduler_service.history_repo.create.call_args[0][0]
+        assert params.posting_method == "auto_reapproval"
+        assert params.instagram_story_id is None
+
+    async def test_falls_back_on_instagram_api_error(self, scheduler_service):
+        """Falls back to auto_reapproval when Instagram API raises an error."""
+        from src.exceptions.instagram import InstagramAPIError
+
+        media = Mock(
+            id=uuid4(),
+            file_name="meme.jpg",
+            file_path="meme.jpg",
+            category="memes",
+            times_posted=3,
+            source_identifier="test/meme.jpg",
+            mime_type="image/jpeg",
+        )
+        queue_item = Mock(id=uuid4())
+        scheduler_service.queue_repo.create.return_value = queue_item
+        cs = _make_chat_settings(enable_instagram_api=True)
+
+        mock_ig = Mock()
+        mock_ig.safety_check_before_post.return_value = {
+            "safe_to_post": True,
+            "errors": [],
+        }
+        mock_ig.post_story = AsyncMock(
+            side_effect=InstagramAPIError("Container failed")
+        )
+
+        mock_cloud = Mock()
+        mock_cloud.upload_media.return_value = {
+            "url": "https://example.com/img.jpg",
+            "public_id": "test/meme",
+        }
+        mock_cloud.get_story_optimized_url.return_value = "https://example.com/img.jpg"
+
+        mock_provider = Mock()
+        mock_provider.download_file.return_value = b"fake-bytes"
+
+        with (
+            patch("src.services.core.media_lock.MediaLockService"),
+            patch(
+                "src.services.integrations.instagram_api.InstagramAPIService",
+                return_value=mock_ig,
+            ),
+            patch(
+                "src.services.integrations.cloud_storage.CloudStorageService",
+                return_value=mock_cloud,
+            ),
+            patch(
+                "src.services.media_sources.factory.MediaSourceFactory"
+            ) as mock_factory,
+        ):
+            mock_factory.get_provider_for_media_item.return_value = mock_provider
+            result = await scheduler_service._auto_approve(media, cs)
+
+        assert result["posted"] is True
+        params = scheduler_service.history_repo.create.call_args[0][0]
+        assert params.posting_method == "auto_reapproval"
+        mock_cloud.delete_media.assert_called_once_with("test/meme")
+
+    async def test_skips_instagram_when_disabled(self, scheduler_service):
+        """Does not attempt Instagram posting when enable_instagram_api is False."""
+        media = Mock(
+            id=uuid4(),
+            file_name="meme.jpg",
+            category="memes",
+            times_posted=3,
+        )
+        queue_item = Mock(id=uuid4())
+        scheduler_service.queue_repo.create.return_value = queue_item
+        cs = _make_chat_settings(enable_instagram_api=False)
+
+        with patch("src.services.core.media_lock.MediaLockService"):
+            result = await scheduler_service._auto_approve(media, cs)
+
+        assert result["posted"] is True
+        params = scheduler_service.history_repo.create.call_args[0][0]
+        assert params.posting_method == "auto_reapproval"
+
+    async def test_skips_instagram_in_dry_run(self, scheduler_service):
+        """Does not post to Instagram when dry_run_mode is True."""
+        media = Mock(
+            id=uuid4(),
+            file_name="meme.jpg",
+            category="memes",
+            times_posted=3,
+        )
+        queue_item = Mock(id=uuid4())
+        scheduler_service.queue_repo.create.return_value = queue_item
+        cs = _make_chat_settings(enable_instagram_api=True, dry_run_mode=True)
+
+        with patch("src.services.core.media_lock.MediaLockService"):
+            result = await scheduler_service._auto_approve(media, cs)
+
+        assert result["posted"] is True
+        params = scheduler_service.history_repo.create.call_args[0][0]
+        assert params.posting_method == "auto_reapproval"
 
 
 # ------------------------------------------------------------------
@@ -1225,7 +1452,7 @@ class TestCatchupAfterRestart:
         cs = _make_chat_settings()
 
         with patch("src.services.core.media_lock.MediaLockService"):
-            service._auto_approve(media, cs, sent_at_override=override_time)
+            await service._auto_approve(media, cs, sent_at_override=override_time)
 
         service.settings_service.update_last_post_sent_at.assert_called_once_with(
             cs.telegram_chat_id, override_time
