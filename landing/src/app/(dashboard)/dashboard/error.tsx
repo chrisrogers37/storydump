@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
+import { useRouter } from "next/navigation";
 import { AlertCircle, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -18,6 +19,8 @@ export default function DashboardError({
   error: Error & { digest?: string };
   reset: () => void;
 }) {
+  const router = useRouter();
+
   useEffect(() => {
     console.error("Dashboard error:", error);
   }, [error]);
@@ -38,7 +41,7 @@ export default function DashboardError({
           </p>
         </CardContent>
         <CardFooter className="flex justify-center gap-3">
-          <Button variant="outline" onClick={() => (window.location.href = "/dashboard")}>
+          <Button variant="outline" onClick={() => router.push("/dashboard")}>
             Go to Overview
           </Button>
           <Button onClick={reset}>
