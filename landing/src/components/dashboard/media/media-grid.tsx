@@ -1,9 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { ImageOff } from "lucide-react";
 import { getApi } from "@/lib/dashboard-api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { EmptyState } from "@/components/dashboard/empty-state";
 import {
   Card,
   CardContent,
@@ -134,9 +136,14 @@ export function MediaGrid({
         )}
       >
         {data.items.length === 0 ? (
-          <p className="col-span-full text-center text-sm text-muted-foreground py-12">
-            No media items found.
-          </p>
+          <div className="col-span-full">
+            <EmptyState
+              icon={ImageOff}
+              title="No media items found"
+              description="Upload your first image or connect Google Drive to get started."
+              action={{ label: "Upload Media", href: "/dashboard/media" }}
+            />
+          </div>
         ) : (
           data.items.map((item) => (
             <Card key={item.id} className="overflow-hidden">

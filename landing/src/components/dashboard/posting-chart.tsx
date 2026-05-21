@@ -9,7 +9,9 @@ import {
   Tooltip,
   CartesianGrid,
 } from "recharts";
+import { BarChart3 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { EmptyState } from "@/components/dashboard/empty-state";
 
 interface DailyCount {
   date: string;
@@ -35,9 +37,11 @@ export function PostingChart({ data }: { data: DailyCount[] }) {
       </CardHeader>
       <CardContent>
         {formatted.length === 0 ? (
-          <p className="text-sm text-muted-foreground py-8 text-center">
-            No posting data yet.
-          </p>
+          <EmptyState
+            icon={BarChart3}
+            title="No posting data yet"
+            description="Chart data will appear once your first posts go out."
+          />
         ) : (
           <ResponsiveContainer width="100%" height={300}>
             <BarChart data={formatted}>

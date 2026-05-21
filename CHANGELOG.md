@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Dashboard empty states upgraded with icons and CTAs** — Replaced plain "No activity yet" / "No media items found" / "No posting data yet" text with a reusable `EmptyState` component featuring a Lucide icon, descriptive message, and action button where applicable (e.g., "Go to Settings", "Upload Media"). Applied to recent activity, posting chart, category breakdown, media grid, and dead content chart.
+
 ### Fixed
 
 - **Auto-approved posts now actually post to Instagram** — The scheduler's auto-approve path (for previously-posted media) recorded posts as successful in `posting_history` but never called the Instagram Graph API. Auto-approved items now go through the full Instagram posting flow (safety check, Cloudinary upload, Graph API publish) when `enable_instagram_api` is enabled. Falls back to reapproval-only recording on failure so the scheduler is never blocked.
