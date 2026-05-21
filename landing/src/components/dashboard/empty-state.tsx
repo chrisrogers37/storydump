@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { type LucideIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -24,7 +25,7 @@ export function EmptyState({ icon: Icon, title, description, action }: EmptyStat
         <div className="mt-4">
           {action.href ? (
             <Button variant="outline" size="sm" asChild>
-              <a href={action.href}>{action.label}</a>
+              <Link href={action.href}>{action.label}</Link>
             </Button>
           ) : (
             <Button variant="outline" size="sm" onClick={action.onClick}>
