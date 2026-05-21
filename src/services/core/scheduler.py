@@ -523,7 +523,6 @@ class SchedulerService(BaseService):
         posting_method = "auto_reapproval"
         instagram_story_id = None
 
-        # Post to Instagram when API is enabled
         if chat_settings.enable_instagram_api and not chat_settings.dry_run_mode:
             ig_result = await self._auto_approve_instagram(media_item, chat_settings)
             if ig_result:
@@ -561,15 +560,11 @@ class SchedulerService(BaseService):
             chat_settings.telegram_chat_id, sent_at_override or now
         )
 
-        method_label = (
-            f"instagram_api (story_id={instagram_story_id})"
-            if posting_method == "instagram_api"
-            else "auto_reapproval"
-        )
         logger.info(
             f"Auto-approved returning media: {media_item.file_name} "
             f"[{media_item.category}] (posted {media_item.times_posted}x before, "
-            f"method={method_label})"
+            f"method={posting_method}"
+            f"{f', story_id={instagram_story_id}' if instagram_story_id else ''})"
         )
 
         return {
