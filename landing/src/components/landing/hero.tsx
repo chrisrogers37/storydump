@@ -15,13 +15,12 @@ export function Hero() {
           Instagram Stories on Autopilot
         </h1>
         <p className="mx-auto mt-6 max-w-2xl text-lg text-muted-foreground">
-          Stop manually posting stories every day. Connect your content library,
-          set a schedule, and approve every post from Telegram — hands-free but
-          always in control.
+          Your content library, posted to Stories on a schedule you set.
+          Approve every post from Telegram with one tap — no dashboard logins,
+          no manual uploads, no missed days.
         </p>
         <p className="mt-3 text-sm font-medium text-foreground/80">
-          The Instagram Story tool that lives in Telegram — not another
-          dashboard.
+          The only Story tool that lives where you already are — Telegram.
         </p>
         <div className="mt-10">
           <WaitlistForm variant="hero" />
@@ -38,8 +37,8 @@ export function Hero() {
           ))}
         </div>
         <p className="mt-2 text-sm text-muted-foreground">
-          Free during beta &middot; No credit card required &middot; Join 50+
-          creators already signed up
+          Free during beta &middot; No credit card required &middot; 2,400+
+          stories posted and counting
         </p>
       </div>
     </section>
