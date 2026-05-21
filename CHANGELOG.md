@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Auto-approved posts now actually post to Instagram** — The scheduler's auto-approve path (for previously-posted media) recorded posts as successful in `posting_history` but never called the Instagram Graph API. Auto-approved items now go through the full Instagram posting flow (safety check, Cloudinary upload, Graph API publish) when `enable_instagram_api` is enabled. Falls back to reapproval-only recording on failure so the scheduler is never blocked.
+
 ### Added
 
 - **`api_tokens.meta_account_id` column** — Phase 1 of the Instagram credential refactor (#380). Adds an explicit, indexed column on `api_tokens` to store the Meta-side identifier (Business Account ID or Instagram User ID) that issued the token. Additive only — no behavior changes, no columns removed. Migration 035. See `documentation/planning/2026-05-18-instagram-credential-refactor.md` for the full 5-PR plan.
