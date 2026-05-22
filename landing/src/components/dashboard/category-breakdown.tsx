@@ -1,6 +1,8 @@
 "use client";
 
+import { Layers } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { EmptyState } from "@/components/dashboard/empty-state";
 
 interface CategoryData {
   category: string;
@@ -19,9 +21,11 @@ export function CategoryBreakdown({ categories }: { categories: CategoryData[] }
       </CardHeader>
       <CardContent>
         {categories.length === 0 ? (
-          <p className="text-sm text-muted-foreground py-4 text-center">
-            No category data yet.
-          </p>
+          <EmptyState
+            icon={Layers}
+            title="No category data yet"
+            description="Category performance appears after your first posts."
+          />
         ) : (
           <div className="space-y-4">
             {categories.map((cat) => {

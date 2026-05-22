@@ -9,12 +9,14 @@ import {
   Tooltip,
   CartesianGrid,
 } from "recharts";
+import { Sparkles } from "lucide-react";
 import {
   Card,
   CardContent,
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { EmptyState } from "@/components/dashboard/empty-state";
 
 interface CategoryDead {
   category: string;
@@ -30,9 +32,11 @@ export function DeadContentChart({ data }: { data: CategoryDead[] }) {
           <CardTitle className="text-base">Dead Content by Category</CardTitle>
         </CardHeader>
         <CardContent>
-          <p className="text-sm text-muted-foreground py-8 text-center">
-            No dead content found.
-          </p>
+          <EmptyState
+            icon={Sparkles}
+            title="No dead content"
+            description="All your content is getting posted. Nice work!"
+          />
         </CardContent>
       </Card>
     );
