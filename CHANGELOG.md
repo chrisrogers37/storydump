@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`dry_run_mode` model default aligned with code default** — The SQLAlchemy column default for `dry_run_mode` was `True`, contradicting the code-level `DEFAULT_DRY_RUN_MODE = False` used by the repository bootstrap. Any chat_settings row created outside the repository (raw SQL, migration, direct ORM) would silently default to dry-run mode, blocking Instagram posting. Changed model default to `False` to match.
 - **Auto-approved posts now actually post to Instagram** — The scheduler's auto-approve path (for previously-posted media) recorded posts as successful in `posting_history` but never called the Instagram Graph API. Auto-approved items now go through the full Instagram posting flow (safety check, Cloudinary upload, Graph API publish) when `enable_instagram_api` is enabled. Falls back to reapproval-only recording on failure so the scheduler is never blocked.
 
 ### Added
