@@ -36,7 +36,7 @@ class ChatSettings(Base):
     display_name = Column(String(100), nullable=True)
 
     # Operational settings
-    dry_run_mode = Column(Boolean, default=True)
+    dry_run_mode = Column(Boolean, default=False)
     enable_instagram_api = Column(Boolean, default=False)
     is_paused = Column(Boolean, default=False)
     paused_at = Column(DateTime)

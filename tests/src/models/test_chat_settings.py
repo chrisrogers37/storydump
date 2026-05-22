@@ -23,8 +23,8 @@ class TestChatSettingsModel:
     def test_telegram_chat_id_is_unique(self):
         assert ChatSettings.telegram_chat_id.unique is True
 
-    def test_dry_run_mode_defaults_to_true(self):
-        assert ChatSettings.dry_run_mode.default.arg is True
+    def test_dry_run_mode_defaults_to_false(self):
+        assert ChatSettings.dry_run_mode.default.arg is False
 
     def test_enable_instagram_api_defaults_to_false(self):
         assert ChatSettings.enable_instagram_api.default.arg is False
