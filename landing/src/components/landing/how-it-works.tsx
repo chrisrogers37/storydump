@@ -26,9 +26,9 @@ const steps = [
 
 export function HowItWorks() {
   return (
-    <section className="bg-muted/50 py-16 md:py-24">
+    <section aria-labelledby="how-it-works-heading" className="bg-muted/50 py-16 md:py-24">
       <div className="mx-auto max-w-5xl px-4">
-        <h2 className="text-center text-3xl font-bold tracking-tight">
+        <h2 id="how-it-works-heading" className="text-center text-3xl font-bold tracking-tight">
           How It Works
         </h2>
         <div className="relative mt-12 grid gap-8 md:grid-cols-3 md:gap-12">

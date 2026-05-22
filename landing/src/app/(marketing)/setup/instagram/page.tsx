@@ -6,8 +6,10 @@ import { Callout } from "@/components/setup/callout"
 import { Screenshot } from "@/components/setup/screenshot"
 
 export const metadata: Metadata = {
-  title: "Instagram Account Setup — Storydump",
-  robots: { index: false, follow: false },
+  title: "Instagram Business Account Setup",
+  description:
+    "How to switch your Instagram account to Business or Creator and link it to a Facebook Page for API access and automated Story posting.",
+  alternates: { canonical: "/setup/instagram" },
 }
 
 export default function InstagramSetup() {

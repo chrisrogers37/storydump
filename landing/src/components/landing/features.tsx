@@ -47,9 +47,9 @@ const features = [
 
 export function Features() {
   return (
-    <section className="bg-muted/50 py-16 md:py-24">
+    <section aria-labelledby="features-heading" className="bg-muted/50 py-16 md:py-24">
       <div className="mx-auto max-w-5xl px-4">
-        <h2 className="text-center text-3xl font-bold tracking-tight">
+        <h2 id="features-heading" className="text-center text-3xl font-bold tracking-tight">
           Features
         </h2>
         <div className="mt-12 grid gap-6 sm:grid-cols-2 lg:grid-cols-3">

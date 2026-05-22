@@ -4,8 +4,10 @@ import { ArrowRight, Clock } from "lucide-react"
 import { Checklist } from "@/components/setup/checklist"
 
 export const metadata: Metadata = {
-  title: "Getting Started — Storydump",
-  robots: { index: false, follow: false },
+  title: "Getting Started",
+  description:
+    "Set up Storydump in under an hour. Connect your Instagram Business account, Google Drive, and Telegram to start automating your Stories.",
+  alternates: { canonical: "/setup" },
 }
 
 const prerequisites = [

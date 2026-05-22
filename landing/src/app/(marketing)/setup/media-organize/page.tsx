@@ -5,8 +5,10 @@ import { StepCard } from "@/components/setup/step-card"
 import { Callout } from "@/components/setup/callout"
 
 export const metadata: Metadata = {
-  title: "Organize Your Media — Storydump",
-  robots: { index: false, follow: false },
+  title: "Organize Your Media",
+  description:
+    "How to structure your Google Drive folders for Storydump. Folder layout determines content categories and posting mix for your Instagram Stories.",
+  alternates: { canonical: "/setup/media-organize" },
 }
 
 export default function MediaOrganize() {

@@ -6,7 +6,7 @@ export function Footer() {
     <footer className="border-t py-8">
       <div className="mx-auto flex max-w-5xl flex-col items-center justify-between gap-4 px-4 text-sm text-muted-foreground sm:flex-row">
         <p>&copy; {new Date().getFullYear()} {siteConfig.name}</p>
-        <p>
+        <nav aria-label="Footer">
           Built by{" "}
           <a
             href={siteConfig.contact.portfolio}
@@ -44,7 +44,7 @@ export function Footer() {
           >
             Terms
           </Link>
-        </p>
+        </nav>
       </div>
     </footer>
   )

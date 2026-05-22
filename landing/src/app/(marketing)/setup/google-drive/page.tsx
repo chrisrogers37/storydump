@@ -7,8 +7,10 @@ import { Screenshot } from "@/components/setup/screenshot"
 import { CopyButton } from "@/components/setup/copy-button"
 
 export const metadata: Metadata = {
-  title: "Google Drive Setup — Storydump",
-  robots: { index: false, follow: false },
+  title: "Google Drive Setup",
+  description:
+    "Create a Google Cloud project with Drive API enabled and OAuth credentials so Storydump can read your media files for Instagram Story automation.",
+  alternates: { canonical: "/setup/google-drive" },
 }
 
 export default function GoogleDriveSetup() {

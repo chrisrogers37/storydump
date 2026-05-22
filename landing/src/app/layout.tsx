@@ -17,7 +17,10 @@ const geistMono = Geist_Mono({
 })
 
 export const metadata: Metadata = {
-  title: siteConfig.name + " — " + "Keep Your Stories Alive",
+  title: {
+    template: "%s | Storydump",
+    default: siteConfig.name + " — Keep Your Stories Alive",
+  },
   description: siteConfig.description,
   keywords: siteConfig.keywords,
   authors: [{ name: "Chris Rogers", url: siteConfig.contact.portfolio }],
