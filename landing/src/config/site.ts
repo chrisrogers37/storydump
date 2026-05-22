@@ -1,7 +1,7 @@
 export const siteConfig = {
   name: "Storydump",
   description:
-    "Keep your Instagram Stories alive. Automatically rotate your content library through Stories — powered by Telegram.",
+    "Automate your Instagram Stories from Telegram. Connect Google Drive, set a schedule, approve each post with one tap. Free during beta.",
   url: "https://storydump.app",
   keywords: [
     "instagram story automation",

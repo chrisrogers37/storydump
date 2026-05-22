@@ -1,7 +1,7 @@
 const stats = [
-  { value: "2,400+", label: "Stories posted" },
-  { value: "5,000+", label: "Content items managed" },
-  { value: "50+", label: "Active creators" },
+  { value: "2,400+", label: "Stories posted automatically" },
+  { value: "5,000+", label: "Content items in rotation" },
+  { value: "50+", label: "Creators on the waitlist" },
 ]
 
 export function SocialProof() {
