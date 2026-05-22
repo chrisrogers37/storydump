@@ -1,7 +1,9 @@
 "use client";
 
+import { Clock } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { EmptyState } from "@/components/dashboard/empty-state";
 
 interface HistoryItem {
   posted_at: string;
@@ -26,9 +28,12 @@ export function RecentActivity({ items }: { items: HistoryItem[] }) {
       </CardHeader>
       <CardContent>
         {items.length === 0 ? (
-          <p className="text-sm text-muted-foreground py-4 text-center">
-            No activity yet.
-          </p>
+          <EmptyState
+            icon={Clock}
+            title="No activity yet"
+            description="Posts will appear here once your scheduler starts running."
+            action={{ label: "Go to Settings", href: "/dashboard/settings" }}
+          />
         ) : (
           <div className="space-y-3">
             {items.map((item, i) => (
