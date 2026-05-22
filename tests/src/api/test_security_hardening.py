@@ -31,6 +31,26 @@ class TestSecurityHeaders:
         resp = client.get("/health")
         assert "includeSubDomains" in resp.headers["Strict-Transport-Security"]
 
+    def test_mini_app_paths_allow_telegram_frames(self, client):
+        """Telegram Mini App paths must allow iframe embedding by Telegram."""
+        for path in [
+            f"/api/onboarding/init?init_data=fake&chat_id={CHAT_ID}",
+            "/webapp/onboarding",
+        ]:
+            resp = client.get(path)
+            csp = resp.headers.get("Content-Security-Policy", "")
+            assert "frame-ancestors 'none'" not in csp, f"{path} still blocks frames"
+            assert "web.telegram.org" in csp, f"{path} missing Telegram frame-ancestors"
+            assert "X-Frame-Options" not in resp.headers, (
+                f"{path} still has X-Frame-Options"
+            )
+
+    def test_non_mini_app_paths_block_frames(self, client):
+        """Non-Mini App paths must keep strict X-Frame-Options: DENY."""
+        resp = client.get("/health")
+        assert resp.headers["X-Frame-Options"] == "DENY"
+        assert "frame-ancestors 'none'" in resp.headers["Content-Security-Policy"]
+
 
 # =============================================================================
 # Thumbnail proxy SVG block (#383)

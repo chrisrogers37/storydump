@@ -20,20 +20,36 @@ from src.config.settings import settings
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
-    """Add standard security headers to every response."""
+    """Add standard security headers to every response.
+
+    Telegram Mini Apps load inside iframes, so /webapp/ and /api/onboarding/
+    paths use frame-ancestors that allow Telegram's web client domains instead
+    of the blanket DENY used everywhere else.
+    """
+
+    # Paths served inside Telegram's Mini App iframe
+    _MINI_APP_PREFIXES = ("/webapp/", "/api/onboarding/", "/static/onboarding/")
 
     async def dispatch(self, request: Request, call_next) -> Response:
         response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "DENY"
         response.headers["Strict-Transport-Security"] = (
             "max-age=63072000; includeSubDomains"
         )
-        response.headers["Content-Security-Policy"] = (
-            "default-src 'self'; style-src 'self' 'unsafe-inline'; "
-            "img-src 'self' data:; frame-ancestors 'none'"
-        )
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+
+        if request.url.path.startswith(self._MINI_APP_PREFIXES):
+            response.headers["Content-Security-Policy"] = (
+                "default-src 'self'; style-src 'self' 'unsafe-inline'; "
+                "img-src 'self' data:; "
+                "frame-ancestors https://web.telegram.org https://*.telegram.org"
+            )
+        else:
+            response.headers["X-Frame-Options"] = "DENY"
+            response.headers["Content-Security-Policy"] = (
+                "default-src 'self'; style-src 'self' 'unsafe-inline'; "
+                "img-src 'self' data:; frame-ancestors 'none'"
+            )
         return response
 
 

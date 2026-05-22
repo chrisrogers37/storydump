@@ -64,10 +64,11 @@ const App = {
 
         // Fetch initial state
         try {
-            const response = await this._api('/api/onboarding/init', {
+            const params = new URLSearchParams({
                 init_data: this.initData,
                 chat_id: this.chatId,
             });
+            const response = await this._apiGet('/api/onboarding/init?' + params.toString());
             this.setupState = response.setup_state;
 
             // Resume from where the user left off
@@ -1229,10 +1230,11 @@ const App = {
      */
     async _refreshHome(opts) {
         try {
-            const response = await this._api('/api/onboarding/init', {
+            const params = new URLSearchParams({
                 init_data: this.initData,
                 chat_id: this.chatId,
             });
+            const response = await this._apiGet('/api/onboarding/init?' + params.toString());
             this.setupState = response.setup_state;
             this._populateHome(opts);
 
@@ -1353,10 +1355,11 @@ const App = {
         this.mode = 'home';
 
         try {
-            const response = await this._api('/api/onboarding/init', {
+            const params = new URLSearchParams({
                 init_data: this.initData,
                 chat_id: this.chatId,
             });
+            const response = await this._apiGet('/api/onboarding/init?' + params.toString());
             this.setupState = response.setup_state;
         } catch (err) {
             // Non-critical: show home with stale data
@@ -1544,10 +1547,11 @@ const App = {
 
         this.pollInterval = setInterval(async () => {
             try {
-                const response = await this._api('/api/onboarding/init', {
+                const params = new URLSearchParams({
                     init_data: this.initData,
                     chat_id: this.chatId,
                 });
+                const response = await this._apiGet('/api/onboarding/init?' + params.toString());
                 this.setupState = response.setup_state;
 
                 const connected = provider === 'instagram'
