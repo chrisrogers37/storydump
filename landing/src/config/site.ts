@@ -10,6 +10,12 @@ export const siteConfig = {
     "instagram story scheduler",
     "social media automation",
     "telegram instagram bot",
+    "auto post instagram stories",
+    "instagram story planner",
+    "schedule instagram stories automatically",
+    "instagram content rotation",
+    "story scheduling app",
+    "instagram stories on autopilot",
   ],
   contact: {
     portfolio: "https://crog.gg",

@@ -6,7 +6,7 @@ const stats = [
 
 export function SocialProof() {
   return (
-    <section className="border-y bg-muted/50 py-12">
+    <section aria-label="Social proof" className="border-y bg-muted/50 py-12">
       <div className="mx-auto max-w-5xl px-4">
         <div className="grid grid-cols-3 gap-4 text-center">
           {stats.map((stat) => (

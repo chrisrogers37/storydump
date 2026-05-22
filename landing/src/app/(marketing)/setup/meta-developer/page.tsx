@@ -7,8 +7,10 @@ import { Screenshot } from "@/components/setup/screenshot"
 import { CopyButton } from "@/components/setup/copy-button"
 
 export const metadata: Metadata = {
-  title: "Meta Developer Setup — Storydump",
-  robots: { index: false, follow: false },
+  title: "Meta Developer App Setup",
+  description:
+    "Step-by-step guide to creating a Meta Developer app with Instagram Graph API permissions for automated Story publishing.",
+  alternates: { canonical: "/setup/meta-developer" },
 }
 
 export default function MetaDeveloperSetup() {
