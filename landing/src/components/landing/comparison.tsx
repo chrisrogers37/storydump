@@ -26,6 +26,11 @@ const rows = [
     others: "Manual re-scheduling",
   },
   {
+    feature: "Your data",
+    storydump: "Never stored on our servers",
+    others: "Uploaded and stored by them",
+  },
+  {
     feature: "Price",
     storydump: "Free during beta",
     others: "$15–50/mo",
