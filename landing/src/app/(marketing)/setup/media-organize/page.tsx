@@ -3,12 +3,16 @@ import Link from "next/link"
 import { ArrowLeft, ArrowRight } from "lucide-react"
 import { StepCard } from "@/components/setup/step-card"
 import { Callout } from "@/components/setup/callout"
+import { ogMeta } from "@/lib/og"
+
+const description =
+  "How to structure your Google Drive folders for Storydump. Folder layout determines content categories and posting mix for your Instagram Stories."
 
 export const metadata: Metadata = {
   title: "Organize Your Media",
-  description:
-    "How to structure your Google Drive folders for Storydump. Folder layout determines content categories and posting mix for your Instagram Stories.",
+  description,
   alternates: { canonical: "/setup/media-organize" },
+  ...ogMeta("Organize Your Media", description),
 }
 
 export default function MediaOrganize() {
