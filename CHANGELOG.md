@@ -13,8 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **`dry_run_mode` model default aligned with code default** — The SQLAlchemy column default for `dry_run_mode` was `True`, contradicting the code-level `DEFAULT_DRY_RUN_MODE = False` used by the repository bootstrap. Any chat_settings row created outside the repository (raw SQL, migration, direct ORM) would silently default to dry-run mode, blocking Instagram posting. Changed model default to `False` to match.
-- **Auto-approved posts now actually post to Instagram** — The scheduler's auto-approve path (for previously-posted media) recorded posts as successful in `posting_history` but never called the Instagram Graph API. Auto-approved items now go through the full Instagram posting flow (safety check, Cloudinary upload, Graph API publish) when `enable_instagram_api` is enabled. Falls back to reapproval-only recording on failure so the scheduler is never blocked.
+- **`dry_run_mode` DB column default fixed (migration 037)** — Migration 006 created the `dry_run_mode` column with `DEFAULT true`, contradicting `DEFAULT_DRY_RUN_MODE = False` in code. Commit 6ca43d3 fixed the SQLAlchemy model default but not the PostgreSQL column default. Existing rows created via raw SQL or ORM without explicit values were stuck on `true`, silently blocking Instagram posting. Migration 037 fixes the column default and flips existing rows.
+- **Auto-approve no longer records success when Instagram API fails** — When `enable_instagram_api` is enabled and the Graph API call fails during auto-approval, the scheduler previously recorded `status=posted, success=True` with `posting_method=auto_reapproval`, incremented `times_posted`, and created a 30-day lock — hiding the failure. Now the failure is surfaced: no history record, no lock, no increment. The item remains eligible for future selection.
+- **Auto-approved posts now actually post to Instagram** — The scheduler's auto-approve path (for previously-posted media) recorded posts as successful in `posting_history` but never called the Instagram Graph API. Auto-approved items now go through the full Instagram posting flow (safety check, Cloudinary upload, Graph API publish) when `enable_instagram_api` is enabled.
 
 ### Added
 
