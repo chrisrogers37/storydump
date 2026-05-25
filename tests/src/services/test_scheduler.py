@@ -1125,8 +1125,8 @@ class TestAutoApproveInstagram:
         mock_ig.post_story.assert_awaited_once()
         mock_cloud.delete_media.assert_called_once_with("test/meme")
 
-    async def test_falls_back_to_reapproval_on_safety_failure(self, scheduler_service):
-        """Falls back to auto_reapproval when safety check fails."""
+    async def test_surfaces_failure_on_safety_check_failure(self, scheduler_service):
+        """Returns posted=False and skips history when safety check fails."""
         media = Mock(
             id=uuid4(),
             file_name="meme.jpg",
@@ -1145,7 +1145,7 @@ class TestAutoApproveInstagram:
         }
 
         with (
-            patch("src.services.core.media_lock.MediaLockService"),
+            patch("src.services.core.media_lock.MediaLockService") as mock_lock_cls,
             patch(
                 "src.services.integrations.instagram_api.InstagramAPIService",
                 return_value=mock_ig,
@@ -1155,13 +1155,14 @@ class TestAutoApproveInstagram:
         ):
             result = await scheduler_service._auto_approve(media, cs)
 
-        assert result["posted"] is True
-        params = scheduler_service.history_repo.create.call_args[0][0]
-        assert params.posting_method == "auto_reapproval"
-        assert params.instagram_story_id is None
+        assert result["posted"] is False
+        assert result["error"] == "Instagram API posting failed"
+        scheduler_service.history_repo.create.assert_not_called()
+        scheduler_service.media_repo.increment_times_posted.assert_not_called()
+        mock_lock_cls.return_value.create_lock.assert_not_called()
 
-    async def test_falls_back_on_instagram_api_error(self, scheduler_service):
-        """Falls back to auto_reapproval when Instagram API raises an error."""
+    async def test_surfaces_failure_on_instagram_api_error(self, scheduler_service):
+        """Returns posted=False and skips history when Instagram API raises."""
         from src.exceptions.instagram import InstagramAPIError
 
         media = Mock(
@@ -1197,7 +1198,7 @@ class TestAutoApproveInstagram:
         mock_provider.download_file.return_value = b"fake-bytes"
 
         with (
-            patch("src.services.core.media_lock.MediaLockService"),
+            patch("src.services.core.media_lock.MediaLockService") as mock_lock_cls,
             patch(
                 "src.services.integrations.instagram_api.InstagramAPIService",
                 return_value=mock_ig,
@@ -1213,9 +1214,11 @@ class TestAutoApproveInstagram:
             mock_factory.get_provider_for_media_item.return_value = mock_provider
             result = await scheduler_service._auto_approve(media, cs)
 
-        assert result["posted"] is True
-        params = scheduler_service.history_repo.create.call_args[0][0]
-        assert params.posting_method == "auto_reapproval"
+        assert result["posted"] is False
+        assert result["error"] == "Instagram API posting failed"
+        scheduler_service.history_repo.create.assert_not_called()
+        scheduler_service.media_repo.increment_times_posted.assert_not_called()
+        mock_lock_cls.return_value.create_lock.assert_not_called()
         mock_cloud.delete_media.assert_called_once_with("test/meme")
 
     async def test_skips_instagram_when_disabled(self, scheduler_service):

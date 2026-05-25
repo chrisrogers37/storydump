@@ -330,7 +330,7 @@ class SchedulerService(BaseService):
                 self.set_result_summary(
                     run_id,
                     {
-                        "posted": True,
+                        "posted": result["posted"],
                         "auto_approved": True,
                         "media_file": media_item.file_name,
                         "category": media_item.category,
@@ -504,7 +504,10 @@ class SchedulerService(BaseService):
         and increments times_posted.
 
         When Instagram API is enabled, uploads to Cloudinary and posts via the
-        Graph API. Falls back to reapproval-only on failure.
+        Graph API. On API failure the item is NOT recorded as successful —
+        the queue item is cleaned up and the scheduler advances its clock,
+        but times_posted and locks are not touched so the item stays eligible
+        for future selection.
         """
         from src.repositories.history_repository import HistoryCreateParams
 
@@ -528,6 +531,29 @@ class SchedulerService(BaseService):
             if ig_result:
                 posting_method = "instagram_api"
                 instagram_story_id = ig_result
+            else:
+                # Instagram API failed — do NOT record as successful.
+                # Clean up the transient queue item and advance the clock
+                # so the scheduler doesn't re-fire this slot, but leave
+                # times_posted and locks untouched so the item remains
+                # eligible for future selection.
+                self.queue_repo.delete(queue_id)
+                self.settings_service.update_last_post_sent_at(
+                    chat_settings.telegram_chat_id, sent_at_override or now
+                )
+                logger.warning(
+                    f"Auto-approve Instagram failed for {media_item.file_name} "
+                    f"[{media_item.category}] — not recording as posted"
+                )
+                return {
+                    "posted": False,
+                    "auto_approved": True,
+                    "queue_item_id": queue_id,
+                    "media_item": media_item,
+                    "media_file": media_item.file_name,
+                    "category": media_item.category,
+                    "error": "Instagram API posting failed",
+                }
 
         self.history_repo.create(
             HistoryCreateParams(
