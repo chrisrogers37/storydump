@@ -4,12 +4,16 @@ import { ArrowLeft, ArrowRight } from "lucide-react"
 import { StepCard } from "@/components/setup/step-card"
 import { Callout } from "@/components/setup/callout"
 import { Screenshot } from "@/components/setup/screenshot"
+import { ogMeta } from "@/lib/og"
+
+const description =
+  "How to switch your Instagram account to Business or Creator and link it to a Facebook Page for API access and automated Story posting."
 
 export const metadata: Metadata = {
   title: "Instagram Business Account Setup",
-  description:
-    "How to switch your Instagram account to Business or Creator and link it to a Facebook Page for API access and automated Story posting.",
+  description,
   alternates: { canonical: "/setup/instagram" },
+  ...ogMeta("Instagram Business Account Setup", description),
 }
 
 export default function InstagramSetup() {

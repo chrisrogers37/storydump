@@ -5,12 +5,16 @@ import { StepCard } from "@/components/setup/step-card"
 import { Callout } from "@/components/setup/callout"
 import { Screenshot } from "@/components/setup/screenshot"
 import { CopyButton } from "@/components/setup/copy-button"
+import { ogMeta } from "@/lib/og"
+
+const description =
+  "Step-by-step guide to creating a Meta Developer app with Instagram Graph API permissions for automated Story publishing."
 
 export const metadata: Metadata = {
   title: "Meta Developer App Setup",
-  description:
-    "Step-by-step guide to creating a Meta Developer app with Instagram Graph API permissions for automated Story publishing.",
+  description,
   alternates: { canonical: "/setup/meta-developer" },
+  ...ogMeta("Meta Developer App Setup", description),
 }
 
 export default function MetaDeveloperSetup() {
