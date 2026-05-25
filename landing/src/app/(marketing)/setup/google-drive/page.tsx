@@ -5,12 +5,16 @@ import { StepCard } from "@/components/setup/step-card"
 import { Callout } from "@/components/setup/callout"
 import { Screenshot } from "@/components/setup/screenshot"
 import { CopyButton } from "@/components/setup/copy-button"
+import { ogMeta } from "@/lib/og"
+
+const description =
+  "Create a Google Cloud project with Drive API enabled and OAuth credentials so Storydump can read your media files for Instagram Story automation."
 
 export const metadata: Metadata = {
   title: "Google Drive Setup",
-  description:
-    "Create a Google Cloud project with Drive API enabled and OAuth credentials so Storydump can read your media files for Instagram Story automation.",
+  description,
   alternates: { canonical: "/setup/google-drive" },
+  ...ogMeta("Google Drive Setup", description),
 }
 
 export default function GoogleDriveSetup() {

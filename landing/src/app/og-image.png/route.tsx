@@ -1,8 +1,14 @@
 import { ImageResponse } from "next/og"
+import type { NextRequest } from "next/server"
 
 export const runtime = "edge"
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const { searchParams } = request.nextUrl
+  const title = searchParams.get("title") || "Storydump"
+  const subtitle =
+    searchParams.get("subtitle") || "Instagram Stories on Autopilot"
+
   return new ImageResponse(
     (
       <div
@@ -24,41 +30,41 @@ export async function GET() {
             flexDirection: "column",
             alignItems: "center",
             gap: "24px",
+            padding: "0 80px",
           }}
         >
           <div
             style={{
-              fontSize: "72px",
-              fontWeight: 700,
-              letterSpacing: "-0.02em",
+              fontSize: "20px",
+              fontWeight: 600,
+              color: "#a855f7",
+              letterSpacing: "0.05em",
+              textTransform: "uppercase" as const,
             }}
           >
             Storydump
           </div>
           <div
             style={{
-              fontSize: "32px",
-              color: "#a1a1aa",
-              maxWidth: "800px",
+              fontSize: "64px",
+              fontWeight: 700,
+              letterSpacing: "-0.02em",
               textAlign: "center",
+              lineHeight: 1.1,
             }}
           >
-            Instagram Stories on Autopilot
+            {title}
           </div>
           <div
             style={{
-              display: "flex",
-              gap: "32px",
-              marginTop: "16px",
-              fontSize: "20px",
-              color: "#71717a",
+              fontSize: "28px",
+              color: "#a1a1aa",
+              maxWidth: "800px",
+              textAlign: "center",
+              lineHeight: 1.4,
             }}
           >
-            <span>Google Drive</span>
-            <span>→</span>
-            <span>Telegram Approval</span>
-            <span>→</span>
-            <span>Auto-Posted</span>
+            {subtitle}
           </div>
         </div>
       </div>
