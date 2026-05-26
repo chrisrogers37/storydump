@@ -146,7 +146,7 @@ class TestInstagramLoginExchange:
         mock_settings.INSTAGRAM_APP_SECRET = "secret"
         mock_settings.OAUTH_REDIRECT_BASE_URL = "https://example.com"
 
-        self.service.account_service.get_account_by_meta_id.return_value = None
+        self.service.account_service.find_existing_account_for_oauth.return_value = None
 
         # Mock HTTP calls
         short_response = Mock(status_code=200)
@@ -199,9 +199,12 @@ class TestInstagramLoginExchange:
         mock_settings.INSTAGRAM_APP_SECRET = "secret"
         mock_settings.OAUTH_REDIRECT_BASE_URL = "https://example.com"
 
-        self.service.account_service.get_account_by_meta_id.return_value = Mock(
-            id="existing-uuid",
-            instagram_account_id="12345",
+        self.service.account_service.find_existing_account_for_oauth.return_value = (
+            Mock(
+                id="existing-uuid",
+                instagram_account_id="12345",
+                instagram_username="existing_user",
+            )
         )
 
         short_response = Mock(status_code=200)
@@ -252,10 +255,12 @@ class TestInstagramLoginExchange:
         # Account was originally connected via FB Login — stored under the
         # IGSID that FB Login's /instagram_business_account returned.
         igsid = "17841400123"
-        self.service.account_service.get_account_by_meta_id.return_value = Mock(
-            id="existing-uuid",
-            instagram_account_id=igsid,
-            instagram_username="gatortails",
+        self.service.account_service.find_existing_account_for_oauth.return_value = (
+            Mock(
+                id="existing-uuid",
+                instagram_account_id=igsid,
+                instagram_username="gatortails",
+            )
         )
 
         # IG Login returns the SAME IGSID as user_id.
@@ -284,8 +289,10 @@ class TestInstagramLoginExchange:
             result = await self.service.exchange_and_store("auth_code", -100123)
 
         # Resolved via meta_account_id — updates existing, does NOT create.
-        self.service.account_service.get_account_by_meta_id.assert_called_once_with(
-            igsid
+        # No cross-flow log line because stored ID matches the new ig_user_id.
+        self.service.account_service.find_existing_account_for_oauth.assert_called_once_with(
+            meta_account_id=igsid,
+            username="gatortails",
         )
         self.service.account_service.update_account_token.assert_called_once()
         call_kwargs = self.service.account_service.update_account_token.call_args[1]
@@ -296,13 +303,87 @@ class TestInstagramLoginExchange:
 
     @patch("src.services.integrations.instagram_login_oauth.settings")
     @pytest.mark.asyncio
+    async def test_exchange_recovers_via_username_when_meta_id_mismatches(
+        self, mock_settings
+    ):
+        """Legacy FB-Login rows whose backfilled meta_account_id no longer
+        matches the live IG Login user_id are recovered via the username
+        branch of find_existing_account_for_oauth, and the row's stored
+        meta-side identifier is self-healed to the new user_id.
+
+        Regression for the 2026-05-25 prod incident where @gatortails and
+        @thursday.lines could not reconnect: migration 036 backfilled
+        api_tokens.meta_account_id from instagram_accounts.instagram_account_id
+        (an FB-Login-era IGSID), but IG Login's /oauth/access_token returns a
+        different user_id for these rows. PR #408 removed the prior username
+        fallback assuming the migration made it redundant.
+        """
+        mock_settings.INSTAGRAM_APP_ID = "app_id"
+        mock_settings.INSTAGRAM_APP_SECRET = "secret"
+        mock_settings.OAUTH_REDIRECT_BASE_URL = "https://example.com"
+
+        igsid_stored = "17841400123"  # what's on the row (FB-Login era)
+        igsid_new = "17841438002131111"  # what IG Login returns now
+
+        # Primary lookup misses (both meta_account_id and legacy
+        # instagram_account_id are igsid_stored, not igsid_new).
+        # The new helper resolves via the username branch.
+        self.service.account_service.find_existing_account_for_oauth.return_value = (
+            Mock(
+                id="existing-uuid",
+                instagram_account_id=igsid_stored,
+                instagram_username="gatortails",
+            )
+        )
+
+        short_response = Mock(status_code=200)
+        short_response.json.return_value = {
+            "data": [{"access_token": "short", "user_id": igsid_new}]
+        }
+        long_response = Mock(status_code=200)
+        long_response.json.return_value = {
+            "access_token": "long_token",
+            "expires_in": 5184000,
+        }
+        username_response = Mock(status_code=200)
+        username_response.json.return_value = {"username": "gatortails"}
+
+        with patch(
+            "src.services.integrations.instagram_login_oauth.httpx.AsyncClient"
+        ) as MockClient:
+            mock_client = AsyncMock()
+            MockClient.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            mock_client.post.return_value = short_response
+            mock_client.get.side_effect = [long_response, username_response]
+
+            result = await self.service.exchange_and_store("auth_code", -100123)
+
+        # Resolved through the new helper, passing both meta_id and username.
+        self.service.account_service.find_existing_account_for_oauth.assert_called_once_with(
+            meta_account_id=igsid_new,
+            username="gatortails",
+        )
+        # Updated (not added), and the NEW user_id is written so api_tokens
+        # .meta_account_id self-heals on this reconnect.
+        self.service.account_service.update_account_token.assert_called_once()
+        call_kwargs = self.service.account_service.update_account_token.call_args[1]
+        assert call_kwargs["instagram_account_id"] == igsid_new
+        assert call_kwargs["auth_method"] == "instagram_login"
+        self.service.account_service.add_account.assert_not_called()
+        assert result["username"] == "gatortails"
+        assert result["account_id"] == igsid_new
+
+    @patch("src.services.integrations.instagram_login_oauth.settings")
+    @pytest.mark.asyncio
     async def test_exchange_strips_hash_suffix(self, mock_settings):
         """Auth code has #_ suffix stripped before exchange."""
         mock_settings.INSTAGRAM_APP_ID = "app_id"
         mock_settings.INSTAGRAM_APP_SECRET = "secret"
         mock_settings.OAUTH_REDIRECT_BASE_URL = "https://example.com"
 
-        self.service.account_service.get_account_by_meta_id.return_value = None
+        self.service.account_service.find_existing_account_for_oauth.return_value = None
 
         short_response = Mock(status_code=200)
         short_response.json.return_value = {

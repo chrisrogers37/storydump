@@ -177,9 +177,23 @@ class InstagramLoginOAuthService(BaseService):
 
             # Step 4: Create or update account
             expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
-            existing = self.account_service.get_account_by_meta_id(ig_user_id)
+            existing = self.account_service.find_existing_account_for_oauth(
+                meta_account_id=ig_user_id,
+                username=username,
+            )
 
             if existing:
+                if existing.instagram_account_id != ig_user_id:
+                    # Cross-flow recovery: username branch matched a legacy row
+                    # whose stored Meta-side ID predates IG Login. Note the
+                    # mismatch so the self-heal that follows is auditable.
+                    logger.info(
+                        f"Instagram Login: matched existing account @{username} "
+                        f"by username (stored instagram_account_id="
+                        f"{existing.instagram_account_id}, new ig_user_id="
+                        f"{ig_user_id}) — updating in place and self-healing "
+                        f"meta_account_id"
+                    )
                 self.account_service.update_account_token(
                     instagram_account_id=ig_user_id,
                     access_token=long_token,
@@ -202,7 +216,10 @@ class InstagramLoginOAuthService(BaseService):
                     telegram_chat_id=telegram_chat_id,
                     auth_method=AUTH_METHOD_INSTAGRAM_LOGIN,
                 )
-                logger.info(f"Instagram Login: Created new account @{username}")
+                logger.info(
+                    f"Instagram Login: Created new account @{username} "
+                    f"(ig_user_id={ig_user_id})"
+                )
 
             result = {
                 "username": username or "unknown",

@@ -267,6 +267,66 @@ class TestAddAccount:
         mock_settings_repo.update.assert_called_once()
 
 
+class TestUpdateAccountToken:
+    """Tests for update_account_token's cross-flow lookup behavior."""
+
+    def test_resolves_by_username_when_meta_id_misses(
+        self,
+        service,
+        mock_account_repo,
+        mock_token_repo,
+        sample_account,
+    ):
+        """When the live IG Login user_id doesn't match the stored Meta-side
+        identifier (legacy FB-Login row whose backfilled meta_account_id was
+        copied from the old instagram_account_id column), the username branch
+        of find_existing_account_for_oauth resolves the account and the token
+        write self-heals meta_account_id to the new value.
+        """
+        # The credential-keyed and legacy-column lookups both miss because
+        # the stored Meta-side ID predates IG Login.
+        mock_account_repo.get_by_meta_account_id.return_value = None
+        mock_account_repo.get_by_instagram_id.return_value = None
+        # Username branch finds the account.
+        mock_account_repo.get_by_username.return_value = sample_account
+        # update() returns the unchanged account for the username/auth_method
+        # update path (no-op here since instagram_username matches).
+        mock_account_repo.update.return_value = sample_account
+
+        new_ig_user_id = "17841438002131111"  # what IG Login returns now
+
+        service.update_account_token(
+            instagram_account_id=new_ig_user_id,
+            access_token="new_long_lived_token",
+            instagram_username=sample_account.instagram_username,
+            auth_method="instagram_login",
+        )
+
+        # The token row's meta_account_id is rewritten to the live IG Login
+        # value, so subsequent reconnects resolve via the credential-keyed
+        # primary branch instead of needing the username fallback again.
+        mock_token_repo.create_or_update.assert_called_once()
+        call_kwargs = mock_token_repo.create_or_update.call_args[1]
+        assert call_kwargs["meta_account_id"] == new_ig_user_id
+        assert call_kwargs["instagram_account_id"] == str(sample_account.id)
+
+    def test_raises_when_no_lookup_branch_resolves(self, service, mock_account_repo):
+        """If neither meta_account_id, legacy instagram_account_id, nor
+        username matches any row, update_account_token raises ValueError
+        (not silently creates a new account)."""
+        mock_account_repo.get_by_meta_account_id.return_value = None
+        mock_account_repo.get_by_instagram_id.return_value = None
+        mock_account_repo.get_by_username.return_value = None
+
+        with pytest.raises(ValueError, match="not found"):
+            service.update_account_token(
+                instagram_account_id="17841438002131111",
+                access_token="tok",
+                instagram_username="nobody",
+                auth_method="instagram_login",
+            )
+
+
 class TestDeactivateAccount:
     """Tests for deactivate_account method."""
 

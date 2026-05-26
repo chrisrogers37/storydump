@@ -295,13 +295,24 @@ class TestOAuthCallsitesUseMetaId:
         assert "get_account_by_instagram_id" not in source
 
     def test_instagram_login_uses_meta_id(self):
+        """IG Login resolves accounts via the credential-keyed helper
+        (find_existing_account_for_oauth), which internally checks
+        api_tokens.meta_account_id first. The deprecated direct
+        get_account_by_instagram_id is not used at the callsite.
+
+        The helper also accepts a ``username`` arg used for cross-flow
+        recovery on legacy rows whose backfilled meta_account_id doesn't
+        match the live IG Login user_id — guarded by
+        ``test_cross_flow_username_recovery_present_in_exchange_and_store``
+        below.
+        """
         import inspect
         from src.services.integrations.instagram_login_oauth import (
             InstagramLoginOAuthService,
         )
 
         source = inspect.getsource(InstagramLoginOAuthService.exchange_and_store)
-        assert "get_account_by_meta_id" in source
+        assert "find_existing_account_for_oauth" in source
         assert "get_account_by_instagram_id" not in source
 
     def test_settings_endpoint_uses_meta_id(self):
@@ -314,20 +325,35 @@ class TestOAuthCallsitesUseMetaId:
 
 
 # ---------------------------------------------------------------------------
-# PR #378 username fallback removed from Instagram Login
+# Cross-flow username recovery (re-introduced after the 2026-05-25 incident)
 # ---------------------------------------------------------------------------
+#
+# The credential refactor assumed migration 036's backfill would make a
+# username fallback unnecessary, on the theory that
+# api_tokens.meta_account_id (copied from instagram_accounts.instagram_account_id)
+# would match what IG Login returns as user_id. For legacy FB-Login-era rows
+# this assumption is false — see 00_INVESTIGATION.md in the
+# documentation/planning/investigations/ig-oauth-cross-flow-reconnect_2026-05-25/
+# directory for the prod stack traces. The username branch is now carried by
+# find_existing_account_for_oauth as the third lookup tier (after
+# meta_account_id and the legacy column). It self-heals on first reconnect.
 
 
 @pytest.mark.unit
-class TestUsernameCallbackRemoved:
-    """PR #378's cross-flow username fallback is no longer in IG Login."""
+class TestCrossFlowUsernameRecovery:
+    """Username branch of find_existing_account_for_oauth is reachable from
+    IG Login and is the recovery path for legacy rows whose backfilled
+    meta_account_id doesn't match the live IG Login user_id."""
 
-    def test_no_username_fallback_in_exchange_and_store(self):
+    def test_exchange_and_store_passes_username_to_helper(self):
+        """IG Login passes both meta_account_id and username to the helper
+        so the cross-flow recovery branch is available when needed."""
         import inspect
         from src.services.integrations.instagram_login_oauth import (
             InstagramLoginOAuthService,
         )
 
         source = inspect.getsource(InstagramLoginOAuthService.exchange_and_store)
-        assert "get_account_by_username" not in source
-        assert "Cross-flow fallback" not in source
+        assert "find_existing_account_for_oauth" in source
+        assert "meta_account_id=ig_user_id" in source
+        assert "username=username" in source

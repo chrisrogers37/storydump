@@ -363,8 +363,12 @@ class InstagramAccountService(BaseService):
             triggered_by="user",
             input_params={"instagram_account_id": instagram_account_id},
         ) as run_id:
-            # Find existing account (credential-keyed, with legacy fallback)
-            account = self.get_account_by_meta_id(instagram_account_id)
+            # Find existing account. Use the cross-flow helper so reconnects
+            # for legacy FB-Login rows resolve via the username branch when
+            # their stored Meta-side ID doesn't match the live IG Login one.
+            account = self.find_existing_account_for_oauth(
+                instagram_account_id, username=instagram_username
+            )
             if not account:
                 raise ValueError(f"Account with ID {instagram_account_id} not found")
 
@@ -424,26 +428,46 @@ class InstagramAccountService(BaseService):
 
             return account
 
+    def find_existing_account_for_oauth(
+        self,
+        meta_account_id: str,
+        username: Optional[str] = None,
+    ) -> Optional[InstagramAccount]:
+        """Resolve an existing Instagram account for an OAuth refresh.
+
+        Lookup order:
+          1. ``api_tokens.meta_account_id`` — credential-keyed, the credential
+             refactor's target state (#380, phase 3).
+          2. ``instagram_accounts.instagram_account_id`` — legacy column,
+             retained until phase 5 drops it.
+          3. ``instagram_accounts.instagram_username`` — cross-flow recovery
+             for legacy rows whose stored Meta-side identifier doesn't match
+             what the current OAuth flow returns. Only consulted when
+             ``username`` is provided.
+
+        The username branch is the only path that can succeed when migration
+        036's backfill put an FB-Login-era IGSID into ``meta_account_id`` for
+        an account whose IG Login ``user_id`` is a different value. Callers
+        that hit it should write the new ``meta_account_id`` back to the
+        token row so subsequent reconnects resolve via branch 1.
+        """
+        account = self.account_repo.get_by_meta_account_id(meta_account_id)
+        if account:
+            return account
+        account = self.account_repo.get_by_instagram_id(meta_account_id)
+        if account:
+            return account
+        if username:
+            account = self.account_repo.get_by_username(username)
+        return account
+
     def get_account_by_meta_id(
         self, meta_account_id: str
     ) -> Optional[InstagramAccount]:
-        """Lookup keyed by the Meta-side identifier on any credential row.
-
-        Cross-flow resolution: FB Login stores the ``instagram_business_account.id``
-        from ``/{page_id}?fields=instagram_business_account`` and IG Login stores the
-        ``user_id`` from its token exchange.  For professional (Business / Creator)
-        accounts these are the **same Instagram-Scoped User ID (IGSID)**, so a single
-        ``meta_account_id`` lookup finds the account regardless of which flow
-        originally connected it — no username fallback needed.
-
-        Falls back to the legacy ``instagram_accounts.instagram_account_id``
-        column for rows whose ``api_tokens.meta_account_id`` has not yet been
-        backfilled by migration 036.
+        """Narrow Meta-side-identifier lookup. Alias for callers that don't
+        want the cross-flow username recovery (e.g. ``_validate_new_account``).
         """
-        account = self.account_repo.get_by_meta_account_id(meta_account_id)
-        if not account:
-            account = self.account_repo.get_by_instagram_id(meta_account_id)
-        return account
+        return self.find_existing_account_for_oauth(meta_account_id, username=None)
 
     def get_account_by_instagram_id(
         self, instagram_account_id: str
