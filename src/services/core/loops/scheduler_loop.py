@@ -15,7 +15,7 @@ from src.services.core.loops.heartbeat import record_heartbeat
 from src.services.core.loops.lifecycle import session_state
 from src.services.core.posting import PostingService
 from src.services.core.scheduler import SchedulerService
-from src.exceptions.instagram import TokenRevokedError
+from src.exceptions.instagram import TokenCorruptError, TokenRevokedError
 from src.services.integrations.token_refresh import TokenRefreshService
 from src.utils.logger import logger
 
@@ -242,8 +242,13 @@ async def _token_health_tick(
 
 async def _token_refresh_tick(
     token_refresh_service: TokenRefreshService,
+    scheduler_service: SchedulerService = None,
 ) -> None:
-    """Refresh Instagram tokens that are approaching expiry."""
+    """Refresh Instagram tokens that are approaching expiry.
+
+    When refresh fails >= N consecutive times for an account, sends a
+    Telegram alert to the admin so they know re-auth is needed.
+    """
     try:
         results = await token_refresh_service.refresh_all_instagram_tokens()
         if results["refreshed"] > 0 or results["failed"] > 0:
@@ -251,9 +256,29 @@ async def _token_refresh_tick(
                 f"Token refresh: {results['refreshed']} refreshed, "
                 f"{results['failed']} failed, {results['skipped']} skipped"
             )
-    except TokenRevokedError as e:
-        # Revocation is not a crash — log clearly so the user sees it
-        logger.error(f"Token revoked during refresh: {e}")
+
+        # Send Telegram alerts for accounts with persistent refresh failures
+        alerts = results.get("alerts", [])
+        if alerts and scheduler_service and scheduler_service.telegram_service:
+            from src.config.settings import settings as app_settings
+
+            bot = scheduler_service.telegram_service.application.bot
+            admin_chat_id = app_settings.ADMIN_TELEGRAM_CHAT_ID
+            for alert in alerts:
+                try:
+                    await bot.send_message(
+                        chat_id=admin_chat_id,
+                        text=(f"[Token Alert] {alert['message']}"),
+                    )
+                    logger.info(
+                        f"Sent token refresh alert for account {alert['account']}"
+                    )
+                except Exception as send_err:
+                    logger.warning(f"Failed to send token refresh alert: {send_err}")
+
+    except (TokenRevokedError, TokenCorruptError) as e:
+        # Revocation / corruption is not a crash — log clearly
+        logger.error(f"Token revoked/corrupt during refresh: {e}")
     except Exception as e:
         logger.warning(f"Token refresh tick failed: {e}")
     finally:
@@ -374,6 +399,6 @@ async def run_scheduler_loop(
         token_refresh_tick_counter += 1
         if token_refresh_tick_counter >= TOKEN_REFRESH_INTERVAL_TICKS:
             token_refresh_tick_counter = 0
-            await _token_refresh_tick(token_refresh_service)
+            await _token_refresh_tick(token_refresh_service, scheduler_service)
 
         await asyncio.sleep(60)

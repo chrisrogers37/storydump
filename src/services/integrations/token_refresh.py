@@ -11,7 +11,7 @@ from src.repositories.instagram_account_repository import InstagramAccountReposi
 from src.utils.encryption import TokenEncryption
 from src.config.constants import IG_LOGIN_GRAPH_BASE
 from src.config.settings import settings
-from src.exceptions import TokenExpiredError, TokenRevokedError
+from src.exceptions import TokenCorruptError, TokenExpiredError, TokenRevokedError
 from src.utils.datetime_utils import ensure_utc
 from src.utils.logger import logger
 
@@ -44,11 +44,16 @@ class TokenRefreshService(BaseService):
     # Refresh buffer: refresh tokens this many hours before expiry
     REFRESH_BUFFER_HOURS = 168  # 7 days
 
+    # After this many consecutive refresh failures per account, flag for alert
+    CONSECUTIVE_FAILURE_ALERT_THRESHOLD = 3
+
     def __init__(self):
         super().__init__()
         self.token_repo = TokenRepository()
         self.account_repo = InstagramAccountRepository()
         self._encryption: Optional[TokenEncryption] = None
+        # Track consecutive refresh failures per account label
+        self._consecutive_failures: dict[str, int] = {}
 
     @property
     def encryption(self) -> TokenEncryption:
@@ -319,6 +324,8 @@ class TokenRefreshService(BaseService):
                 - failed: int - count of failed refreshes
                 - skipped: int - count skipped (not expiring soon)
                 - details: list - per-account results
+                - alerts: list - accounts that have failed >= threshold
+                  consecutive times and need user attention
         """
         with self.track_execution(method_name="refresh_all_instagram_tokens") as run_id:
             results = {
@@ -326,6 +333,7 @@ class TokenRefreshService(BaseService):
                 "failed": 0,
                 "skipped": 0,
                 "details": [],
+                "alerts": [],
             }
 
             # Get all Instagram tokens
@@ -363,8 +371,11 @@ class TokenRefreshService(BaseService):
                     success = await self.refresh_instagram_token(
                         instagram_account_id=account_id
                     )
-                except TokenRevokedError as e:
-                    logger.error(f"Token revoked for {account_label}: {e}")
+                except (TokenRevokedError, TokenCorruptError) as e:
+                    logger.error(f"Token revoked/corrupt for {account_label}: {e}")
+                    self._consecutive_failures[account_label] = (
+                        self._consecutive_failures.get(account_label, 0) + 1
+                    )
                     results["failed"] += 1
                     results["details"].append(
                         {"account": account_label, "status": "revoked"}
@@ -372,6 +383,7 @@ class TokenRefreshService(BaseService):
                     continue
 
                 if success:
+                    self._consecutive_failures.pop(account_label, None)
                     results["refreshed"] += 1
                     results["details"].append(
                         {
@@ -380,6 +392,9 @@ class TokenRefreshService(BaseService):
                         }
                     )
                 else:
+                    self._consecutive_failures[account_label] = (
+                        self._consecutive_failures.get(account_label, 0) + 1
+                    )
                     results["failed"] += 1
                     results["details"].append(
                         {
@@ -388,10 +403,31 @@ class TokenRefreshService(BaseService):
                         }
                     )
 
+            # Flag accounts that have hit the consecutive failure threshold
+            for label, count in self._consecutive_failures.items():
+                if count >= self.CONSECUTIVE_FAILURE_ALERT_THRESHOLD:
+                    results["alerts"].append(
+                        {
+                            "account": label,
+                            "consecutive_failures": count,
+                            "message": (
+                                f"Instagram token refresh has failed {count} "
+                                f"consecutive times. The token may be corrupt "
+                                f"or invalidated. Please reconnect the account "
+                                f"in Settings."
+                            ),
+                        }
+                    )
+
             logger.info(
                 f"Token refresh complete: {results['refreshed']} refreshed, "
                 f"{results['failed']} failed, {results['skipped']} skipped"
             )
+            if results["alerts"]:
+                logger.warning(
+                    f"Token refresh alerts: {len(results['alerts'])} account(s) "
+                    f"need attention"
+                )
 
             self.set_result_summary(run_id, results)
             return results

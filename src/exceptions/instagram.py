@@ -74,6 +74,28 @@ class TokenExpiredError(InstagramAPIError):
         super().__init__(message, **kwargs)
 
 
+class TokenCorruptError(InstagramAPIError):
+    """
+    Instagram access token cannot be parsed by Meta's API.
+
+    Raised when Meta returns error code 190 with a message indicating the
+    token value itself is unparseable (e.g., "Cannot parse access token").
+    Unlike TokenExpiredError (time-based), this means the token bytes are
+    wrong — truncated, corrupted, or invalidated server-side without a
+    revocation subcode.
+
+    Resolution requires a full OAuth re-authorization to obtain a new token.
+    Token refresh will also fail because it passes the same broken token.
+    """
+
+    def __init__(
+        self,
+        message: str = "Instagram access token is invalid and cannot be used. Please reconnect your account.",
+        **kwargs,
+    ):
+        super().__init__(message, **kwargs)
+
+
 class TokenRevokedError(InstagramAPIError):
     """
     Instagram refresh token has been revoked.
