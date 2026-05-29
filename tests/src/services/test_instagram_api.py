@@ -9,6 +9,7 @@ import httpx
 from src.exceptions import (
     InstagramAPIError,
     RateLimitError,
+    TokenCorruptError,
     TokenExpiredError,
     TokenRevokedError,
 )
@@ -229,6 +230,67 @@ class TestInstagramAPIService:
 
         with pytest.raises(TokenExpiredError):
             instagram_service._check_response_errors(mock_response)
+
+    def test_check_response_errors_token_corrupt_cannot_parse(self, instagram_service):
+        """Test TokenCorruptError for code 190 + 'cannot parse access token'."""
+        mock_response = Mock()
+        mock_response.status_code = 400
+        mock_response.json.return_value = {
+            "error": {
+                "code": 190,
+                "message": "Error validating access token: Cannot parse access token",
+            }
+        }
+
+        with pytest.raises(TokenCorruptError):
+            instagram_service._check_response_errors(mock_response)
+
+    def test_check_response_errors_token_corrupt_malformed(self, instagram_service):
+        """Test TokenCorruptError for code 190 + 'malformed access token'."""
+        mock_response = Mock()
+        mock_response.status_code = 400
+        mock_response.json.return_value = {
+            "error": {
+                "code": 190,
+                "message": "Malformed access token",
+            }
+        }
+
+        with pytest.raises(TokenCorruptError):
+            instagram_service._check_response_errors(mock_response)
+
+    def test_check_response_errors_code_190_invalid_stays_expired(
+        self, instagram_service
+    ):
+        """Regression: 'Invalid OAuth access token' must remain TokenExpiredError.
+
+        Meta uses 'invalid' for legitimately expired tokens — classifying it
+        as corrupt would prevent refresh attempts that could succeed.
+        """
+        mock_response = Mock()
+        mock_response.status_code = 401
+        mock_response.json.return_value = {
+            "error": {"code": 190, "message": "Invalid OAuth access token"}
+        }
+
+        with pytest.raises(TokenExpiredError):
+            instagram_service._check_response_errors(mock_response)
+
+    def test_check_response_errors_revocation_subcode_458(self, instagram_service):
+        """Test TokenRevokedError for subcode 458 (app removed)."""
+        mock_response = Mock()
+        mock_response.status_code = 400
+        mock_response.json.return_value = {
+            "error": {
+                "code": 190,
+                "message": "App not installed",
+                "error_subcode": 458,
+            }
+        }
+
+        with pytest.raises(TokenRevokedError) as exc_info:
+            instagram_service._check_response_errors(mock_response)
+        assert exc_info.value.error_subcode == 458
 
     def test_check_response_errors_oauth_error_102(self, instagram_service):
         """Test TokenExpiredError for OAuth error code 102."""

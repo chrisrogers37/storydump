@@ -19,10 +19,18 @@ from src.config.settings import settings
 from src.exceptions import (
     InstagramAPIError,
     RateLimitError,
+    TokenCorruptError,
     TokenExpiredError,
     TokenRevokedError,
 )
 from src.utils.logger import logger
+
+# Phrases in Meta code-190 error messages that indicate a corrupt/unparseable
+# token rather than a genuinely expired one.
+_TOKEN_CORRUPT_PHRASES = (
+    "cannot parse access token",
+    "malformed access token",
+)
 
 
 class InstagramAPIService(BaseService):
@@ -344,10 +352,19 @@ class InstagramAPIService(BaseService):
                 error_subcode=error_subcode,
             )
 
-        # Token errors — distinguish revocation from normal expiry
+        # Token errors — distinguish revocation, corruption, and expiry
         if error_code == 190:
             if error_subcode in TokenRevokedError.REVOCATION_SUBCODES:
                 raise TokenRevokedError(
+                    error_message,
+                    error_code=str(error_code),
+                    error_subcode=error_subcode,
+                )
+            # "Cannot parse access token" means the token value itself is
+            # wrong — not expired, but corrupt or invalidated server-side.
+            # Refresh will also fail; only a full OAuth re-auth fixes this.
+            if any(p in error_message.lower() for p in _TOKEN_CORRUPT_PHRASES):
+                raise TokenCorruptError(
                     error_message,
                     error_code=str(error_code),
                     error_subcode=error_subcode,
