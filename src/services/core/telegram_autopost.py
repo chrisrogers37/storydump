@@ -13,6 +13,7 @@ from src.exceptions.instagram import (
     InstagramAPIError,
     MediaUploadError,
     RateLimitError,
+    TokenCorruptError,
     TokenExpiredError,
     TokenRevokedError,
 )
@@ -607,6 +608,8 @@ class TelegramAutopostHandler:
             return "Instagram rate limit reached. Please try again later."
         if isinstance(e, TokenRevokedError):
             return "Instagram account has been disconnected (password change or app removed). Please reconnect in Settings."
+        if isinstance(e, TokenCorruptError):
+            return "Instagram token is invalid and cannot be used. Please reconnect your account in Settings."
         if isinstance(e, TokenExpiredError):
             return "Instagram connection has expired. Please reconnect your account in Settings."
         if isinstance(e, InstagramAPIError):

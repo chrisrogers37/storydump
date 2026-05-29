@@ -4,7 +4,7 @@ import pytest
 from unittest.mock import Mock, patch, AsyncMock
 from datetime import datetime, timedelta, timezone
 
-from src.exceptions import TokenExpiredError, TokenRevokedError
+from src.exceptions import TokenCorruptError, TokenExpiredError, TokenRevokedError
 from tests.src.services.conftest import mock_track_execution
 
 
@@ -534,6 +534,91 @@ class TestTokenRefreshService:
         assert results["failed"] == 1
         assert results["refreshed"] == 1
         assert any(d["status"] == "revoked" for d in results["details"])
+
+    @pytest.mark.asyncio
+    async def test_refresh_all_alerts_after_consecutive_failures(self, token_service):
+        """Test alerts generated after N consecutive refresh failures."""
+        token_expiring = Mock()
+        token_expiring.instagram_account_id = "acc-failing"
+        token_expiring.hours_until_expiry = lambda: 48
+
+        token_service.token_repo.get_all_instagram_tokens.return_value = [
+            token_expiring,
+        ]
+
+        async def mock_refresh_fail(instagram_account_id=None):
+            raise TokenCorruptError("Cannot parse access token")
+
+        token_service.refresh_instagram_token = mock_refresh_fail
+
+        # Run refresh 3 times (the threshold) to accumulate failures
+        for _ in range(token_service.CONSECUTIVE_FAILURE_ALERT_THRESHOLD):
+            results = await token_service.refresh_all_instagram_tokens()
+
+        assert results["failed"] == 1
+        assert len(results["alerts"]) == 1
+        assert results["alerts"][0]["account"] == "acc-failing"
+        assert (
+            results["alerts"][0]["consecutive_failures"]
+            >= token_service.CONSECUTIVE_FAILURE_ALERT_THRESHOLD
+        )
+
+    @pytest.mark.asyncio
+    async def test_refresh_all_no_alert_below_threshold(self, token_service):
+        """Test no alerts before reaching consecutive failure threshold."""
+        token_expiring = Mock()
+        token_expiring.instagram_account_id = "acc-flaky"
+        token_expiring.hours_until_expiry = lambda: 48
+
+        token_service.token_repo.get_all_instagram_tokens.return_value = [
+            token_expiring,
+        ]
+
+        async def mock_refresh_fail(instagram_account_id=None):
+            raise TokenRevokedError("App deauthorized", error_subcode=458)
+
+        token_service.refresh_instagram_token = mock_refresh_fail
+
+        # Run one fewer than the threshold
+        for _ in range(token_service.CONSECUTIVE_FAILURE_ALERT_THRESHOLD - 1):
+            results = await token_service.refresh_all_instagram_tokens()
+
+        assert results["failed"] == 1
+        assert results["alerts"] == []
+
+    @pytest.mark.asyncio
+    async def test_refresh_all_resets_consecutive_failures_on_success(
+        self, token_service
+    ):
+        """Test success resets the consecutive failure counter — no stale alert."""
+        token_expiring = Mock()
+        token_expiring.instagram_account_id = "acc-recovery"
+        token_expiring.hours_until_expiry = lambda: 48
+
+        token_service.token_repo.get_all_instagram_tokens.return_value = [
+            token_expiring,
+        ]
+
+        call_count = 0
+
+        async def mock_refresh_then_succeed(instagram_account_id=None):
+            nonlocal call_count
+            call_count += 1
+            # Fail twice, then succeed
+            if call_count <= 2:
+                raise TokenCorruptError("Cannot parse access token")
+            return True
+
+        token_service.refresh_instagram_token = mock_refresh_then_succeed
+
+        # Two failures
+        for _ in range(2):
+            await token_service.refresh_all_instagram_tokens()
+        # One success — should reset
+        results = await token_service.refresh_all_instagram_tokens()
+
+        assert results["refreshed"] == 1
+        assert results["alerts"] == []
 
     @pytest.mark.asyncio
     async def test_refresh_instagram_token_network_error(
