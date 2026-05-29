@@ -30,7 +30,6 @@ from src.utils.logger import logger
 _TOKEN_CORRUPT_PHRASES = (
     "cannot parse access token",
     "malformed access token",
-    "invalid access token",
 )
 
 
