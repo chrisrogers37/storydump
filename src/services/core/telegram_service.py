@@ -290,6 +290,8 @@ class TelegramService(BaseService):
             "settings_toggle": self.settings_handler.handle_settings_toggle,
             "schedule_action": self.settings_handler.handle_schedule_action,
             "schedule_confirm": self.settings_handler.handle_schedule_confirm,
+            # Instance management (telegram_settings.py)
+            "instance_manage": self.settings_handler.handle_instance_manage,
             # Account management (telegram_accounts.py)
             "switch_account": self.accounts.handle_account_switch,
             "account_remove": self.accounts.handle_account_remove_confirm,
@@ -337,6 +339,32 @@ class TelegramService(BaseService):
                 await self.accounts.handle_remove_account_menu(user, query)
             elif data == "noop":
                 await query.answer()
+            return True
+
+        elif action == "instance_new":
+            if query.message.chat.type != "private":
+                await query.answer("Use this in a DM with me.", show_alert=True)
+                return True
+
+            from src.services.core.conversation_service import ConversationService
+
+            with ConversationService() as conv_service:
+                session = conv_service.start_onboarding(str(user.id))
+
+            context.user_data["onboarding_session_id"] = str(session.id)
+
+            await query.edit_message_text(
+                "Let's set up a new instance!\n\n"
+                "What do you want to call it?\n"
+                '(e.g. "TL Enterprises", "Personal Brand")'
+            )
+
+            self.interaction_service.log_callback(
+                user_id=str(user.id),
+                callback_name="instance_new",
+                telegram_chat_id=query.message.chat_id,
+                telegram_message_id=query.message.message_id,
+            )
             return True
 
         return False
