@@ -82,6 +82,19 @@ class TestHandleStartRouting:
 
         mock_group.assert_called_once()
 
+    async def test_dm_with_login_payload(self, router):
+        """DM + 'login' payload → _handle_login_redirect (mobile OAuth)."""
+        update = _make_update(chat_type="private")
+        context = _make_context(args=["login"])
+        router.service._get_or_create_user.return_value = Mock(id="user-1")
+
+        with patch.object(
+            router, "_handle_login_redirect", new_callable=AsyncMock
+        ) as mock_redirect:
+            await router.handle_start(update, context)
+
+        mock_redirect.assert_called_once_with(update)
+
     async def test_dm_with_active_session(self, router):
         """DM + active onboarding session → _handle_resume_onboarding."""
         update = _make_update(chat_type="private")
@@ -385,6 +398,48 @@ class TestHandleGroupStart:
         text = update.message.reply_text.call_args[0][0]
         assert "/status" in text
         assert "/next" in text
+
+
+# ──────────────────────────────────────────────────────────────
+# _handle_login_redirect
+# ──────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestHandleLoginRedirect:
+    @patch("src.services.core.start_command_router.build_webapp_button")
+    @patch("src.services.core.start_command_router.settings")
+    async def test_sends_dashboard_button(self, mock_settings, mock_button, router):
+        """With OAUTH_REDIRECT_BASE_URL set, sends a WebApp dashboard button."""
+        mock_settings.OAUTH_REDIRECT_BASE_URL = "https://app.example.com"
+        mock_button.return_value = Mock()
+        update = _make_update(chat_type="private")
+
+        await router._handle_login_redirect(update)
+
+        mock_button.assert_called_once_with(
+            text="Open Dashboard",
+            webapp_url="https://app.example.com/dashboard",
+            chat_type="private",
+            chat_id=update.effective_chat.id,
+            user_id=update.effective_user.id,
+        )
+        update.message.reply_text.assert_called_once()
+        call_kwargs = update.message.reply_text.call_args[1]
+        assert call_kwargs.get("reply_markup") is not None
+
+    @patch("src.services.core.start_command_router.settings")
+    async def test_fallback_without_oauth_url(self, mock_settings, router):
+        """Without OAUTH_REDIRECT_BASE_URL, shows fallback text."""
+        mock_settings.OAUTH_REDIRECT_BASE_URL = None
+        update = _make_update(chat_type="private")
+
+        await router._handle_login_redirect(update)
+
+        update.message.reply_text.assert_called_once()
+        text = update.message.reply_text.call_args[0][0]
+        assert "not configured" in text
 
 
 # ──────────────────────────────────────────────────────────────
