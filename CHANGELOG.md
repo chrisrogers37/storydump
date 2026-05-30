@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **"Manage Chat" and "+ New Instance" inline buttons unresponsive** — Buttons created by `/instances`, `/start` (returning user), and `/new` sent `instance_manage:{id}` and `instance_new` callback data, but neither action was registered in the Telegram callback dispatch table. Added `handle_instance_manage` (shows settings panel for the selected instance) and `instance_new` (starts onboarding flow) handlers, plus a `get_by_id()` repository method to resolve chat settings by UUID (#454).
+
 ### Changed
 
 - **Dashboard empty states upgraded with icons and CTAs** — Replaced plain "No activity yet" / "No media items found" / "No posting data yet" text with a reusable `EmptyState` component featuring a Lucide icon, descriptive message, and action button where applicable (e.g., "Go to Settings", "Upload Media"). Applied to recent activity, posting chart, category breakdown, media grid, and dead content chart.

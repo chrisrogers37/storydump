@@ -398,3 +398,73 @@ class TestMediaSyncToggleButton:
         sync_buttons = [b for b in all_buttons if "Media Sync" in b.text]
         assert len(sync_buttons) == 1
         assert "OFF" in sync_buttons[0].text
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestHandleInstanceManage:
+    """Tests for handle_instance_manage callback handler."""
+
+    async def test_found_shows_settings(self, mock_settings_handlers):
+        """Test that a valid UUID shows the settings panel for that instance."""
+        mock_cs = Mock()
+        mock_cs.telegram_chat_id = -100999
+
+        mock_settings_handlers.service.settings_service.get_settings_display.return_value = {
+            "dry_run_mode": False,
+            "enable_instagram_api": False,
+            "is_paused": False,
+            "posts_per_day": 3,
+            "posting_hours_start": 9,
+            "posting_hours_end": 21,
+            "show_verbose_notifications": False,
+            "media_sync_enabled": False,
+            "media_source_type": None,
+            "media_source_root": None,
+        }
+        mock_settings_handlers.service.ig_account_service.get_accounts_for_display.return_value = {
+            "active_account_id": None,
+            "active_account_name": "Not selected",
+        }
+
+        query = AsyncMock()
+        query.from_user = Mock(id=12345)
+        query.message.chat.type = "private"
+        user = Mock(id=uuid4())
+
+        mock_repo = Mock()
+        mock_repo.get_by_id.return_value = mock_cs
+        mock_repo.__enter__ = Mock(return_value=mock_repo)
+        mock_repo.__exit__ = Mock(return_value=False)
+
+        with patch(
+            "src.repositories.chat_settings_repository.ChatSettingsRepository",
+            return_value=mock_repo,
+        ):
+            await mock_settings_handlers.handle_instance_manage(
+                "some-uuid", user, query
+            )
+
+        mock_repo.get_by_id.assert_called_once_with("some-uuid")
+        query.edit_message_text.assert_called_once()
+        call_kwargs = query.edit_message_text.call_args.kwargs
+        assert "Quick Setup" in call_kwargs["text"]
+
+    async def test_not_found_answers_with_alert(self, mock_settings_handlers):
+        """Test that a missing UUID shows 'Instance not found.' alert."""
+        query = AsyncMock()
+        user = Mock(id=uuid4())
+
+        mock_repo = Mock()
+        mock_repo.get_by_id.return_value = None
+        mock_repo.__enter__ = Mock(return_value=mock_repo)
+        mock_repo.__exit__ = Mock(return_value=False)
+
+        with patch(
+            "src.repositories.chat_settings_repository.ChatSettingsRepository",
+            return_value=mock_repo,
+        ):
+            await mock_settings_handlers.handle_instance_manage("bad-uuid", user, query)
+
+        query.answer.assert_called_once_with("Instance not found.", show_alert=True)
+        query.edit_message_text.assert_not_called()
