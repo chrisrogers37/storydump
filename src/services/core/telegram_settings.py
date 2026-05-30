@@ -207,6 +207,33 @@ class TelegramSettingsHandlers:
         if show_answer:
             await query.answer("Setting updated!")
 
+    async def handle_instance_manage(self, data: str, user, query):
+        """Handle instance_manage callback — show settings for a specific instance.
+
+        Args:
+            data: chat_settings UUID from the callback payload.
+        """
+        from src.repositories.chat_settings_repository import ChatSettingsRepository
+
+        with ChatSettingsRepository() as repo:
+            cs = repo.get_by_id(data)
+
+        if not cs:
+            await query.answer("Instance not found.", show_alert=True)
+            return
+
+        message, reply_markup = self.build_settings_message_and_keyboard(
+            cs.telegram_chat_id,
+            user_id=query.from_user.id,
+            is_private=query.message.chat.type == "private",
+        )
+
+        await query.edit_message_text(
+            text=message,
+            parse_mode="Markdown",
+            reply_markup=reply_markup,
+        )
+
     async def handle_settings_close(self, query):
         """Handle Close button - delete the settings message."""
         try:

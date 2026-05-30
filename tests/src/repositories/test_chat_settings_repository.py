@@ -58,9 +58,7 @@ class TestChatSettingsRepository:
         assert result is mock_settings
         mock_db.add.assert_not_called()
 
-    def test_get_or_create_bootstraps_from_code_defaults(
-        self, settings_repo, mock_db
-    ):
+    def test_get_or_create_bootstraps_from_code_defaults(self, settings_repo, mock_db):
         """Test get_or_create creates a new record from src.config.defaults."""
         from src.config import defaults
 
@@ -77,9 +75,7 @@ class TestChatSettingsRepository:
         assert added_obj.telegram_chat_id == -100123
         assert added_obj.dry_run_mode is defaults.DEFAULT_DRY_RUN_MODE
         assert added_obj.posts_per_day == defaults.DEFAULT_POSTS_PER_DAY
-        assert (
-            added_obj.posting_hours_start == defaults.DEFAULT_POSTING_HOURS_START
-        )
+        assert added_obj.posting_hours_start == defaults.DEFAULT_POSTING_HOURS_START
         assert added_obj.caption_style == defaults.DEFAULT_CAPTION_STYLE
         assert added_obj.onboarding_completed is True
 
@@ -196,3 +192,24 @@ class TestChatSettingsRepository:
         result = settings_repo.get_all_sync_enabled()
 
         assert result == []
+
+    def test_get_by_id_found(self, settings_repo, mock_db):
+        """Test getting settings by UUID primary key."""
+        mock_settings = Mock(spec=ChatSettings)
+        mock_settings.id = "abc-123"
+        mock_db.query.return_value.filter.return_value.first.return_value = (
+            mock_settings
+        )
+
+        result = settings_repo.get_by_id("abc-123")
+
+        assert result is mock_settings
+        mock_db.commit.assert_called_once()  # end_read_transaction
+
+    def test_get_by_id_not_found(self, settings_repo, mock_db):
+        """Test getting settings by non-existent UUID returns None."""
+        mock_db.query.return_value.filter.return_value.first.return_value = None
+
+        result = settings_repo.get_by_id("nonexistent-uuid")
+
+        assert result is None

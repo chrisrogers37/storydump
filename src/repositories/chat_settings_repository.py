@@ -19,6 +19,16 @@ class ChatSettingsRepository(BaseRepository):
     fallback after bootstrap.
     """
 
+    def get_by_id(self, chat_settings_id: str) -> Optional[ChatSettings]:
+        """Get settings by UUID primary key."""
+        result = (
+            self.db.query(ChatSettings)
+            .filter(ChatSettings.id == chat_settings_id)
+            .first()
+        )
+        self.end_read_transaction()
+        return result
+
     def get_by_chat_id(self, telegram_chat_id: int) -> Optional[ChatSettings]:
         """Get settings for a specific chat."""
         result = (
