@@ -47,19 +47,24 @@ class StartCommandRouter:
                 await self._handle_group_start(update, user, chat_id)
         else:
             # DM context
-            with ConversationService() as conv_service:
-                active_session = conv_service.get_current_session(str(user.id))
+            payload = context.args[0] if context.args else None
 
-            if active_session:
-                await self._handle_resume_onboarding(update, user, active_session)
+            if payload == "login":
+                await self._handle_login_redirect(update)
             else:
-                with MembershipRepository() as membership_repo:
-                    memberships = membership_repo.get_for_user(str(user.id))
+                with ConversationService() as conv_service:
+                    active_session = conv_service.get_current_session(str(user.id))
 
-                if memberships:
-                    await self._handle_returning_user(update, user)
+                if active_session:
+                    await self._handle_resume_onboarding(update, user, active_session)
                 else:
-                    await self._handle_new_user(update, user, context)
+                    with MembershipRepository() as membership_repo:
+                        memberships = membership_repo.get_for_user(str(user.id))
+
+                    if memberships:
+                        await self._handle_returning_user(update, user)
+                    else:
+                        await self._handle_new_user(update, user, context)
 
         # Log interaction
         self.service.interaction_service.log_command(
@@ -181,6 +186,39 @@ class StartCommandRouter:
                 "/help - Show all commands",
                 parse_mode="Markdown",
             )
+
+    # ------------------------------------------------------------------
+    # Branch 2b: DM + login payload → redirect to web dashboard
+    # ------------------------------------------------------------------
+
+    async def _handle_login_redirect(self, update):
+        """Mobile Telegram OAuth lands here via t.me/bot?start=login.
+
+        Instead of showing the normal /start flow, send a single WebApp
+        button that opens the dashboard — completing the login redirect.
+        """
+        if not settings.OAUTH_REDIRECT_BASE_URL:
+            await update.message.reply_text(
+                "Welcome to *Storydump*!\n\n"
+                "Web dashboard is not configured. "
+                "Use /start to manage your instances here.",
+                parse_mode="Markdown",
+            )
+            return
+
+        webapp_url = f"{settings.OAUTH_REDIRECT_BASE_URL}/dashboard"
+        button = build_webapp_button(
+            text="Open Dashboard",
+            webapp_url=webapp_url,
+            chat_type="private",
+            chat_id=update.effective_chat.id,
+            user_id=update.effective_user.id,
+        )
+        keyboard = InlineKeyboardMarkup([[button]])
+        await update.message.reply_text(
+            "You're signed in! Tap below to open your dashboard.",
+            reply_markup=keyboard,
+        )
 
     # ------------------------------------------------------------------
     # Branch 3: DM + active onboarding → resume
