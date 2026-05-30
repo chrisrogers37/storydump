@@ -45,6 +45,15 @@ class TestSecurityHeaders:
                 f"{path} still has X-Frame-Options"
             )
 
+    def test_mini_app_paths_allow_telegram_sdk_script(self, client):
+        """Mini App CSP must allow the Telegram WebApp SDK from telegram.org."""
+        resp = client.get("/webapp/onboarding")
+        csp = resp.headers.get("Content-Security-Policy", "")
+        assert "script-src" in csp, "Missing script-src directive"
+        assert "https://telegram.org" in csp, (
+            "CSP must allow https://telegram.org for WebApp SDK"
+        )
+
     def test_non_mini_app_paths_block_frames(self, client):
         """Non-Mini App paths must keep strict X-Frame-Options: DENY."""
         resp = client.get("/health")

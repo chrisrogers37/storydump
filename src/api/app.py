@@ -22,12 +22,14 @@ from src.config.settings import settings
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     """Add standard security headers to every response.
 
-    Telegram Mini Apps load inside iframes, so /webapp/ and /api/onboarding/
-    paths use frame-ancestors that allow Telegram's web client domains instead
-    of the blanket DENY used everywhere else.
+    Telegram Mini Apps load inside Telegram's webview/iframe, so /webapp/,
+    /api/onboarding/, and /static/onboarding/ paths need relaxed CSP:
+    - script-src must allow https://telegram.org for the WebApp SDK
+    - frame-ancestors must allow Telegram's web client domains
+    Without the SDK loading, Telegram.WebApp.ready() never fires and
+    the native loading overlay stays on top — freezing all interaction.
     """
 
-    # Paths served inside Telegram's Mini App iframe
     _MINI_APP_PREFIXES = ("/webapp/", "/api/onboarding/", "/static/onboarding/")
 
     async def dispatch(self, request: Request, call_next) -> Response:
@@ -40,9 +42,11 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
         if request.url.path.startswith(self._MINI_APP_PREFIXES):
             response.headers["Content-Security-Policy"] = (
-                "default-src 'self'; style-src 'self' 'unsafe-inline'; "
+                "default-src 'self'; "
+                "script-src 'self' https://telegram.org; "
+                "style-src 'self' 'unsafe-inline'; "
                 "img-src 'self' data:; "
-                "frame-ancestors https://web.telegram.org https://*.telegram.org"
+                "frame-ancestors 'self' https://web.telegram.org https://*.telegram.org"
             )
         else:
             response.headers["X-Frame-Options"] = "DENY"
@@ -50,6 +54,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
                 "default-src 'self'; style-src 'self' 'unsafe-inline'; "
                 "img-src 'self' data:; frame-ancestors 'none'"
             )
+
         return response
 
 
