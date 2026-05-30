@@ -6,7 +6,6 @@ from datetime import datetime
 from uuid import uuid4
 
 from src.config import defaults
-from src.config.settings import settings
 from src.services.core.telegram_service import TelegramService
 from src.services.core.telegram_callbacks import TelegramCallbackHandlers
 from src.services.core.telegram_autopost import TelegramAutopostHandler
@@ -503,10 +502,10 @@ class TestInlineAccountSelector:
         mock_active_account.instagram_username = "mainaccount"
 
         caption = mock_telegram_service._build_caption(
-                mock_media_item,
-                queue_item=None,
-                active_account=mock_active_account,
-            )
+            mock_media_item,
+            queue_item=None,
+            active_account=mock_active_account,
+        )
 
         assert "📸 Account: Main Account" in caption
 
@@ -520,10 +519,10 @@ class TestInlineAccountSelector:
         mock_media_item.tags = []
 
         caption = mock_telegram_service._build_caption(
-                mock_media_item,
-                queue_item=None,
-                active_account=None,  # No active account
-            )
+            mock_media_item,
+            queue_item=None,
+            active_account=None,  # No active account
+        )
 
         assert "📸 Account: Not set" in caption
 
@@ -718,8 +717,8 @@ class TestVerboseEnhancedCaption:
         mock_media.tags = []
 
         caption = mock_telegram_service._build_caption(
-                mock_media, verbose=True, active_account=None
-            )
+            mock_media, verbose=True, active_account=None
+        )
 
         assert "Click & hold image" in caption
         assert "Open Instagram" in caption
@@ -734,8 +733,8 @@ class TestVerboseEnhancedCaption:
         mock_media.tags = []
 
         caption = mock_telegram_service._build_caption(
-                mock_media, verbose=False, active_account=None
-            )
+            mock_media, verbose=False, active_account=None
+        )
 
         assert "Click & hold image" not in caption
         assert "Open Instagram" not in caption
@@ -753,8 +752,8 @@ class TestVerboseEnhancedCaption:
         mock_account.display_name = "My Brand"
 
         caption = mock_telegram_service._build_caption(
-                mock_media, verbose=False, active_account=mock_account
-            )
+            mock_media, verbose=False, active_account=mock_account
+        )
 
         assert "My Brand" in caption
 
@@ -775,8 +774,8 @@ class TestVerboseSimpleCaption:
         mock_media.tags = []
 
         caption = mock_telegram_service._build_caption(
-                mock_media, verbose=True, active_account=None
-            )
+            mock_media, verbose=True, active_account=None
+        )
 
         assert "File: image.jpg" in caption
         assert "ID:" in caption
@@ -793,8 +792,8 @@ class TestVerboseSimpleCaption:
         mock_media.tags = []
 
         caption = mock_telegram_service._build_caption(
-                mock_media, verbose=False, active_account=None
-            )
+            mock_media, verbose=False, active_account=None
+        )
 
         assert "File:" not in caption
         assert "ID:" not in caption
@@ -813,8 +812,8 @@ class TestVerboseSimpleCaption:
         mock_account.display_name = "Brand Account"
 
         caption = mock_telegram_service._build_caption(
-                mock_media, verbose=True, active_account=mock_account
-            )
+            mock_media, verbose=True, active_account=mock_account
+        )
 
         assert "Brand Account" in caption
 
@@ -862,3 +861,68 @@ class TestCleanupTransactions:
 
 # TestBuildSettingsKeyboard has been moved to test_telegram_settings.py
 # TestAccountSelectorCallbacks has been moved to test_telegram_accounts.py
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestInstanceNewSpecialCase:
+    """Tests for instance_new callback in _handle_callback_special_cases."""
+
+    async def test_dm_starts_onboarding(self, mock_telegram_service):
+        """Happy path: instance_new in DM starts onboarding session."""
+        service = mock_telegram_service
+        user = Mock(id=uuid4())
+
+        query = AsyncMock()
+        query.message.chat.type = "private"
+        query.message.chat_id = 12345
+        query.message.message_id = 42
+        query.from_user = Mock(id=99999)
+
+        context = Mock()
+        context.user_data = {}
+
+        mock_session = Mock()
+        mock_session.id = uuid4()
+
+        mock_conv_svc = Mock()
+        mock_conv_svc.start_onboarding.return_value = mock_session
+
+        mock_conv = Mock()
+        mock_conv.__enter__ = Mock(return_value=mock_conv_svc)
+        mock_conv.__exit__ = Mock(return_value=False)
+
+        with patch(
+            "src.services.core.conversation_service.ConversationService",
+            return_value=mock_conv,
+        ):
+            handled = await service._handle_callback_special_cases(
+                "instance_new", None, user, query, context
+            )
+
+        assert handled is True
+        mock_conv_svc.start_onboarding.assert_called_once_with(str(user.id))
+        assert context.user_data["onboarding_session_id"] == str(mock_session.id)
+        query.edit_message_text.assert_called_once()
+        assert "new instance" in query.edit_message_text.call_args.args[0].lower()
+
+    async def test_group_chat_rejected(self, mock_telegram_service):
+        """instance_new in a group chat shows alert and does not start onboarding."""
+        service = mock_telegram_service
+        user = Mock(id=uuid4())
+
+        query = AsyncMock()
+        query.message.chat.type = "group"
+
+        context = Mock()
+        context.user_data = {}
+
+        handled = await service._handle_callback_special_cases(
+            "instance_new", None, user, query, context
+        )
+
+        assert handled is True
+        query.answer.assert_called_once_with(
+            "Use this in a DM with me.", show_alert=True
+        )
+        query.edit_message_text.assert_not_called()
