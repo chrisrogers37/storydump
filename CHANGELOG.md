@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Accounts settings — "Switch" button renamed to "Make Active"** — The button that promotes an inactive Instagram account to be the chat's active one was labeled "Switch" / "Switching…", which was ambiguous (switch what to what?). Renamed to "Make Active" / "Activating…" so it pairs cleanly with the existing green "Active" badge on the currently-selected row.
+
 ### Fixed
 
 - **Instagram posting restored — route IG-Login tokens to `graph.instagram.com`** — Every `instagram_api` post had failed since 2026-05-19 14:10 with Meta error code 190 "Cannot parse access token", even with a freshly-issued OAuth token. Root cause: the Instagram Login OAuth flow issues tokens that are valid only on `graph.instagram.com`, but `_create_media_container`, `_wait_for_container_ready`, `_publish_container`, `InstagramCredentialManager.get_account_info`, and three sites in `backfill_downloader.py` all hardcoded `settings.meta_graph_base` (= `graph.facebook.com`). PR #441 had fixed the OAuth reconnect codepath but never touched posting. New `settings.meta_ig_graph_base` property targets the correct IG host; all seven call sites updated. Added an `auth_method == 'instagram_login'` guard in `get_active_account_credentials` so legacy/unmigrated accounts surface a clear "reconnect via /dashboard/settings" log instead of silently sending the wrong-flow token. Full investigation: `documentation/planning/investigations/ig-host-routing_2026-06-02/`.

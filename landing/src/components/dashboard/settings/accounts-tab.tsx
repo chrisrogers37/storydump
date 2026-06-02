@@ -129,8 +129,8 @@ export function AccountsTab({ accounts }: AccountsTabProps) {
                         disabled={loadingAction === `switch-${account.id}`}
                       >
                         {loadingAction === `switch-${account.id}`
-                          ? "Switching..."
-                          : "Switch"}
+                          ? "Activating..."
+                          : "Make Active"}
                       </Button>
                     )}
                     <Dialog open={removingDialogOpen === account.id} onOpenChange={(open) => setRemovingDialogOpen(open ? account.id : null)}>
