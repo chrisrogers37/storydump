@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- **Postmortem for May 17-19 Telegram delivery failure burst (#467)** — new `documentation/operations/2026-05-telegram-delivery-burst-postmortem.md` documents the 958-failure `telegram_manual` burst that ran 2026-05-17 → 2026-05-19. Traces the lossy code path (`send_notification` swallows the actual exception and returns False → scheduler substitutes the placeholder string `"send_notification returned False"` → DB never sees what really went wrong) and enumerates four systemic issues: opaque error_message, no circuit breaker, no operator alert on send-loop failures, and a too-broad `except Exception`. Sketches five follow-up fixes (F1: propagate exception text; F2: circuit breaker + alert; F3: narrow exception handling; F4: structured logging; F5: dashboard breakdown by error class) to ship as separate PRs.
+
 ### Changed
 
 - **Accounts settings — "Switch" button renamed to "Make Active"** — The button that promotes an inactive Instagram account to be the chat's active one was labeled "Switch" / "Switching…", which was ambiguous (switch what to what?). Renamed to "Make Active" / "Activating…" so it pairs cleanly with the existing green "Active" badge on the currently-selected row.
