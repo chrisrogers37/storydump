@@ -202,6 +202,7 @@ class InstagramLoginOAuthService(BaseService):
                     set_as_active=True,
                     telegram_chat_id=telegram_chat_id,
                     auth_method=AUTH_METHOD_INSTAGRAM_LOGIN,
+                    issuing_app_id=settings.INSTAGRAM_APP_ID,
                 )
                 logger.info(f"Instagram Login: Updated token for @{username}")
             else:
@@ -215,6 +216,7 @@ class InstagramLoginOAuthService(BaseService):
                     set_as_active=True,
                     telegram_chat_id=telegram_chat_id,
                     auth_method=AUTH_METHOD_INSTAGRAM_LOGIN,
+                    issuing_app_id=settings.INSTAGRAM_APP_ID,
                 )
                 logger.info(
                     f"Instagram Login: Created new account @{username} "

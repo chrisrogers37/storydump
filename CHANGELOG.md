@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Dual-write `auth_method` + `issuing_app_id` to api_tokens at OAuth callbacks (#468)** — Continues the credential refactor. `InstagramAccountService._create_account_with_token` and `update_account_token` now pass both fields to `TokenRepository.create_or_update` alongside the existing `instagram_accounts.auth_method` write. Wired into both OAuth callbacks: Instagram Login (`instagram_login_oauth.py`) passes `settings.INSTAGRAM_APP_ID`; Facebook Login (`oauth_service.py`) passes `settings.FACEBOOK_APP_ID`. Manual entry leaves `issuing_app_id` unset (no app context). After this PR every newly-issued or refreshed IG token carries its own provenance; the read-switch sub-PR drops the JOIN.
+
 ### Added
 
 - **`api_tokens.auth_method` + `api_tokens.issuing_app_id` columns (#468)** — Credential refactor phase 4. The OAuth-flow discriminator (`instagram_login` / `fb_login` / `manual`) and the issuing Meta App ID move onto the credential row itself so the token becomes self-describing. Today posting code has to JOIN `instagram_accounts` to discover provenance; after the read-switch sub-PR that follows, it'll read directly off the token. Three migrations: 038 adds the columns + partial index, 039 backfills `auth_method` from `instagram_accounts.auth_method` (default `instagram_login` for any unset row), 040 expands the UNIQUE constraint to include `auth_method` so an account can hold both an `instagram_login` token AND an `fb_login` token simultaneously (#380 acceptance criteria). `TokenRepository.create_or_update()` accepts both new kwargs with sensible "preserve existing on omit" semantics so the refresh path doesn't accidentally null them.
