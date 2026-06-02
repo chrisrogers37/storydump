@@ -55,6 +55,21 @@ class InstagramCredentialManager:
         )
 
         if active_account:
+            # Posting uses graph.instagram.com (the IG Login content publishing
+            # surface). Tokens issued by the legacy Facebook Login flow are
+            # only valid against graph.facebook.com and will return Meta
+            # error 190 ("Cannot parse access token") if sent here. Require
+            # an instagram_login account; surface a clear reconnect prompt
+            # for anything else.
+            if active_account.auth_method != "instagram_login":
+                logger.error(
+                    f"@{active_account.instagram_username} cannot post via the "
+                    f"Instagram Graph API: account auth_method is "
+                    f"{active_account.auth_method!r}, but posting requires "
+                    f"'instagram_login'. Reconnect via /dashboard/settings."
+                )
+                return (None, None, None)
+
             # Get token for this specific account
             token_record = self.service.token_repo.get_token_for_account(
                 str(active_account.id), token_type="access_token"
@@ -205,7 +220,7 @@ class InstagramCredentialManager:
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{settings.meta_graph_base}/{account_id}",
+                    f"{settings.meta_ig_graph_base}/{account_id}",
                     params={
                         "fields": "username,name",
                         "access_token": token,
