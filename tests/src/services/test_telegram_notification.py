@@ -51,7 +51,9 @@ class TestBuildCaption:
             tags=[],
         )
 
-        result = notification_service._build_caption(media, active_account=None, caption_style="enhanced")
+        result = notification_service._build_caption(
+            media, active_account=None, caption_style="enhanced"
+        )
 
         # Enhanced caption includes "Account: Not set" for no account
         assert "Account: Not set" in result
@@ -86,7 +88,9 @@ class TestBuildCaption:
         )
         account = Mock(display_name="Main Account")
 
-        result = notification_service._build_caption(media, active_account=account, caption_style="enhanced")
+        result = notification_service._build_caption(
+            media, active_account=account, caption_style="enhanced"
+        )
 
         assert "Account: Main Account" in result
 
@@ -100,7 +104,9 @@ class TestBuildCaption:
             tags=[],
         )
 
-        result = notification_service._build_caption(media, active_account=None, caption_style="enhanced")
+        result = notification_service._build_caption(
+            media, active_account=None, caption_style="enhanced"
+        )
 
         assert "Account: Not set" in result
 
@@ -303,6 +309,55 @@ class TestBuildEnhancedCaption:
 
         assert "File:" not in result
         assert "ID:" not in result
+
+    def test_verbose_with_ig_login_account_hides_workflow_instructions(
+        self, notification_service
+    ):
+        """Active account on instagram_login has Auto Post — manual steps hidden."""
+        media = Mock(
+            title="Test",
+            caption=None,
+            generated_caption=None,
+            link_url=None,
+            tags=[],
+            file_name="image.jpg",
+            id="12345678-abcd-efgh",
+        )
+        account = Mock(display_name="GT", auth_method="instagram_login")
+
+        result = notification_service._build_enhanced_caption(
+            media, verbose=True, active_account=account
+        )
+
+        # Debug info still rendered
+        assert "File: image.jpg" in result
+        assert "ID: 12345678" in result
+        # Manual instructions suppressed for Auto Post chats
+        assert "Click & hold image" not in result
+        assert "Open Instagram" not in result
+        assert "Post your story" not in result
+
+    def test_verbose_with_fb_login_account_still_shows_workflow_instructions(
+        self, notification_service
+    ):
+        """Legacy fb_login accounts have no Auto Post — manual steps still shown."""
+        media = Mock(
+            title="Test",
+            caption=None,
+            generated_caption=None,
+            link_url=None,
+            tags=[],
+            file_name="image.jpg",
+            id="12345678-abcd-efgh",
+        )
+        account = Mock(display_name="Legacy", auth_method="fb_login")
+
+        result = notification_service._build_enhanced_caption(
+            media, verbose=True, active_account=account
+        )
+
+        assert "Click & hold image" in result
+        assert "Open Instagram" in result
 
     def test_verbose_off_still_shows_account(self, notification_service):
         """Test verbose=False still shows the account indicator."""
@@ -694,9 +749,8 @@ class TestSendNotification:
         ) as mock_factory:
             mock_factory.get_provider_for_media_item.return_value = mock_provider
 
-
             with pytest.raises(GoogleDriveAuthError, match="Token expired"):
-                    await notification_service.send_notification("some-id")
+                await notification_service.send_notification("some-id")
 
     async def test_refresh_error_converted_to_google_drive_auth_error(
         self, notification_service, mock_telegram_service
@@ -738,9 +792,8 @@ class TestSendNotification:
         ) as mock_factory:
             mock_factory.get_provider_for_media_item.return_value = mock_provider
 
-
             with pytest.raises(GoogleDriveAuthError, match="expired or revoked"):
-                    await notification_service.send_notification("some-id")
+                await notification_service.send_notification("some-id")
 
     async def test_non_auth_error_still_returns_false(
         self, notification_service, mock_telegram_service
