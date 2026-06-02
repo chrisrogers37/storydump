@@ -282,15 +282,26 @@ class TelegramNotificationService:
             tags_str = " ".join([f"#{tag}" for tag in media_item.tags])
             lines.append(f"\n{tags_str}")
 
-        # Verbose: debug info + workflow instructions (consistent across modes)
+        # Verbose: debug info + workflow instructions.
+        # The 3-step manual instructions are only useful when Auto Post is
+        # unavailable. For accounts connected via Instagram Login the worker
+        # publishes directly via the Graph API; the manual flow is dead
+        # weight that clutters every card. Hide the steps for those accounts;
+        # keep the file/ID debug lines whenever verbose is on so the user
+        # still has identifiers in the message.
         if verbose:
             lines.append(f"\n📝 File: {media_item.file_name}")
             lines.append(f"🆔 ID: {str(media_item.id)[:8]}")
 
-            lines.append(f"\n{'━' * 20}")
-            lines.append("1️⃣ Click & hold image → Save")
-            lines.append('2️⃣ Tap "Open Instagram" below')
-            lines.append("3️⃣ Post your story!")
+            has_auto_post = (
+                active_account is not None
+                and getattr(active_account, "auth_method", None) == "instagram_login"
+            )
+            if not has_auto_post:
+                lines.append(f"\n{'━' * 20}")
+                lines.append("1️⃣ Click & hold image → Save")
+                lines.append('2️⃣ Tap "Open Instagram" below')
+                lines.append("3️⃣ Post your story!")
 
         return "\n".join(lines)
 
