@@ -81,8 +81,19 @@ class Settings(BaseSettings):
 
     @property
     def meta_graph_base(self) -> str:
-        """Base URL for Meta Graph API calls."""
+        """Base URL for Facebook Graph API calls (FB Login flow / legacy)."""
         return f"https://graph.facebook.com/{self.META_GRAPH_API_VERSION}"
+
+    @property
+    def meta_ig_graph_base(self) -> str:
+        """Base URL for Instagram Graph API calls (IG Login flow).
+
+        Tokens issued by the Instagram Login OAuth flow are valid only against
+        graph.instagram.com, not graph.facebook.com. Use this for content
+        publishing and read endpoints when the account auth_method is
+        'instagram_login'.
+        """
+        return f"https://graph.instagram.com/{self.META_GRAPH_API_VERSION}"
 
     @property
     def database_url(self) -> str:
