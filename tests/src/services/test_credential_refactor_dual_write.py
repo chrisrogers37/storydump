@@ -197,3 +197,108 @@ class TestAccountServiceDualWrite:
         account_service.account_repo.create.assert_called_once()
         create_kwargs = account_service.account_repo.create.call_args.kwargs
         assert create_kwargs["instagram_account_id"] == "BIZ_ACCT_ID_999"
+
+
+@pytest.mark.unit
+class TestAccountServiceDualWriteAuthMethodAndAppId:
+    """Phase 4 dual-write (#468): auth_method + issuing_app_id."""
+
+    @pytest.fixture
+    def account_service(self):
+        with (
+            patch(
+                "src.services.core.instagram_account_service.InstagramAccountRepository"
+            ) as mock_repo_cls,
+            patch(
+                "src.services.core.instagram_account_service.TokenRepository"
+            ) as mock_token_cls,
+            patch("src.services.core.instagram_account_service.ChatSettingsRepository"),
+            patch(
+                "src.services.core.instagram_account_service.TokenEncryption"
+            ) as mock_enc_cls,
+        ):
+            from src.services.core.instagram_account_service import (
+                InstagramAccountService,
+            )
+
+            svc = InstagramAccountService()
+            svc.account_repo = mock_repo_cls.return_value
+            svc.token_repo = mock_token_cls.return_value
+            svc.encryption = mock_enc_cls.return_value
+            svc.encryption.encrypt.return_value = "encrypted_token_value"
+
+            @contextmanager
+            def _fake_track(*_a, **_kw):
+                yield "fake-run-id"
+
+            svc.track_execution = _fake_track
+            svc.set_result_summary = Mock()
+            yield svc
+
+    def test_create_account_writes_auth_method_and_app_id_to_token(
+        self, account_service
+    ):
+        """New token rows carry the OAuth flow + issuing app."""
+        mock_account = Mock(id="uuid-1")
+        account_service.account_repo.create.return_value = mock_account
+
+        account_service._create_account_with_token(
+            display_name="GT",
+            instagram_account_id="26060527550287223",
+            instagram_username="gatortails",
+            access_token="token",
+            auth_method="instagram_login",
+            issuing_app_id="ig_app_456",
+        )
+
+        kwargs = account_service.token_repo.create_or_update.call_args.kwargs
+        assert kwargs["auth_method"] == "instagram_login"
+        assert kwargs["issuing_app_id"] == "ig_app_456"
+        # Account-side write still happens during the dual-write
+        # window — the legacy column is dropped in PR 5 of #468.
+        account_service.account_repo.create.assert_called_once()
+        create_kwargs = account_service.account_repo.create.call_args.kwargs
+        assert create_kwargs["auth_method"] == "instagram_login"
+
+    def test_update_account_token_writes_auth_method_and_app_id(self, account_service):
+        """Reconnect path threads auth_method + issuing_app_id to the
+        token row, not just to instagram_accounts."""
+        mock_account = Mock(
+            id="uuid-1",
+            instagram_username="gatortails",
+            is_active=True,
+            auth_method="instagram_login",
+        )
+        account_service.account_repo.get_by_username.return_value = mock_account
+        account_service.account_repo.get_by_meta_account_id.return_value = mock_account
+        account_service.account_repo.get_by_instagram_id.return_value = mock_account
+
+        account_service.update_account_token(
+            instagram_account_id="26060527550287223",
+            access_token="new_token",
+            auth_method="instagram_login",
+            issuing_app_id="ig_app_456",
+        )
+
+        kwargs = account_service.token_repo.create_or_update.call_args.kwargs
+        assert kwargs["auth_method"] == "instagram_login"
+        assert kwargs["issuing_app_id"] == "ig_app_456"
+
+    def test_omitting_app_id_passes_none(self, account_service):
+        """Manual entry has no app context; passing None reaches the
+        repo so it falls through to the "preserve existing on omit"
+        semantics rather than overwriting with a placeholder."""
+        mock_account = Mock(id="uuid-1")
+        account_service.account_repo.create.return_value = mock_account
+
+        account_service._create_account_with_token(
+            display_name="Manual",
+            instagram_account_id="123",
+            instagram_username="manualuser",
+            access_token="token",
+            auth_method="manual",
+        )
+
+        kwargs = account_service.token_repo.create_or_update.call_args.kwargs
+        assert kwargs["auth_method"] == "manual"
+        assert kwargs["issuing_app_id"] is None
