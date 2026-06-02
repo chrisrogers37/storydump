@@ -108,6 +108,64 @@ class TestAccountSelectorCallbacks:
         # Should call edit_message_caption to rebuild the posting workflow
         mock_query.edit_message_caption.assert_called()
 
+    async def test_rebuild_posting_workflow_respects_show_verbose_notifications(
+        self, mock_account_handlers
+    ):
+        """Regression for #465.
+
+        rebuild_posting_workflow used to call _build_caption without
+        passing verbose=, so the per-chat show_verbose_notifications=false
+        toggle was silently ignored after account-switcher round trips.
+        Now the chat's verbose preference must flow through.
+        """
+        queue_id = str(uuid4())
+
+        mock_queue_item = Mock()
+        mock_queue_item.id = queue_id
+        mock_queue_item.media_item_id = uuid4()
+        mock_account_handlers.service.queue_repo.get_by_id.return_value = (
+            mock_queue_item
+        )
+
+        mock_media_item = Mock(
+            title="Test",
+            caption=None,
+            generated_caption=None,
+            link_url=None,
+            tags=[],
+        )
+        mock_account_handlers.service.media_repo.get_by_id.return_value = (
+            mock_media_item
+        )
+
+        mock_account_handlers.service.ig_account_service = Mock()
+        mock_account_handlers.service.ig_account_service.count_active_accounts.return_value = 1
+        mock_account_handlers.service.ig_account_service.get_active_account.return_value = None
+
+        # chat_settings says verbose is OFF
+        mock_account_handlers.service.settings_service = Mock()
+        mock_account_handlers.service.settings_service.get_settings.return_value = Mock(
+            enable_instagram_api=False,
+            show_verbose_notifications=False,
+        )
+        mock_account_handlers.service._is_verbose = Mock(return_value=False)
+        mock_account_handlers.service._build_caption = Mock(return_value="caption")
+
+        mock_query = AsyncMock()
+        mock_query.message = Mock(chat_id=-100123, message_id=1)
+
+        await mock_account_handlers.rebuild_posting_workflow(queue_id, mock_query)
+
+        # The rebuild must propagate the chat's verbose preference to the
+        # caption builder. If it doesn't, _build_caption defaults to True
+        # and the verbose block re-renders despite the toggle.
+        mock_account_handlers.service._build_caption.assert_called_once()
+        _, kwargs = mock_account_handlers.service._build_caption.call_args
+        assert kwargs.get("verbose") is False, (
+            "rebuild_posting_workflow must pass verbose= from chat_settings; "
+            "omitting it causes the verbose block to re-render after switches."
+        )
+
     async def test_handle_post_account_switch_stays_in_selector(
         self, mock_account_handlers
     ):
