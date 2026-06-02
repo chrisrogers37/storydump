@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`api_tokens.auth_method` + `api_tokens.issuing_app_id` columns (#468)** — Credential refactor phase 4. The OAuth-flow discriminator (`instagram_login` / `fb_login` / `manual`) and the issuing Meta App ID move onto the credential row itself so the token becomes self-describing. Today posting code has to JOIN `instagram_accounts` to discover provenance; after the read-switch sub-PR that follows, it'll read directly off the token. Three migrations: 038 adds the columns + partial index, 039 backfills `auth_method` from `instagram_accounts.auth_method` (default `instagram_login` for any unset row), 040 expands the UNIQUE constraint to include `auth_method` so an account can hold both an `instagram_login` token AND an `fb_login` token simultaneously (#380 acceptance criteria). `TokenRepository.create_or_update()` accepts both new kwargs with sensible "preserve existing on omit" semantics so the refresh path doesn't accidentally null them.
+
 ### Fixed
 
 - **Token refresh — `_call_meta_refresh` now sends FB app credentials on the `graph.facebook.com` path (#470)** — Meta exposes two refresh contracts: `graph.instagram.com/refresh_access_token` (IG Login) accepts `grant_type=ig_refresh_token` + `access_token` alone; `graph.facebook.com/.../oauth/access_token` (FB Login / legacy) requires `grant_type=fb_exchange_token`, `client_id`, `client_secret`, and `fb_exchange_token`. The previous implementation always sent IG-flavored params, so any refresh against the FB host failed with Meta error 101 "Missing client_id parameter." Now branches on the resolved URL: IG-host gets the IG payload, FB-host gets credentials. Latent fix — production currently has no `fb_login` tokens to refresh, but the bug would have fired immediately if any tenant connected via Facebook Login.
