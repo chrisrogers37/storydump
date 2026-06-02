@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Token refresh — `_call_meta_refresh` now sends FB app credentials on the `graph.facebook.com` path (#470)** — Meta exposes two refresh contracts: `graph.instagram.com/refresh_access_token` (IG Login) accepts `grant_type=ig_refresh_token` + `access_token` alone; `graph.facebook.com/.../oauth/access_token` (FB Login / legacy) requires `grant_type=fb_exchange_token`, `client_id`, `client_secret`, and `fb_exchange_token`. The previous implementation always sent IG-flavored params, so any refresh against the FB host failed with Meta error 101 "Missing client_id parameter." Now branches on the resolved URL: IG-host gets the IG payload, FB-host gets credentials. Latent fix — production currently has no `fb_login` tokens to refresh, but the bug would have fired immediately if any tenant connected via Facebook Login.
+
 ### Changed
 
 - **Accounts settings — "Switch" button renamed to "Make Active"** — The button that promotes an inactive Instagram account to be the chat's active one was labeled "Switch" / "Switching…", which was ambiguous (switch what to what?). Renamed to "Make Active" / "Activating…" so it pairs cleanly with the existing green "Active" badge on the currently-selected row.
