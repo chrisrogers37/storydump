@@ -379,6 +379,7 @@ class TestInstagramAPIService:
             id="acct-uuid",
             instagram_account_id="12345678",
             instagram_username="testaccount",
+            auth_method="instagram_login",
         )
         instagram_service.account_service.get_active_account.return_value = (
             active_account
@@ -430,6 +431,7 @@ class TestInstagramAPIService:
             id="acct-uuid",
             instagram_account_id="12345678",
             instagram_username="testaccount",
+            auth_method="instagram_login",
         )
         instagram_service.account_service.get_active_account.return_value = (
             active_account
@@ -780,3 +782,126 @@ class TestInstagramAPIService:
             instagram_service._check_response_errors(response)
 
         assert exc_info.value.error_subcode == 458
+
+    # ==================== IG Login host routing (PR 1) ====================
+
+    @pytest.mark.asyncio
+    async def test_create_media_container_posts_to_ig_graph_host(
+        self, instagram_service
+    ):
+        """Container creation must POST to graph.instagram.com — IG-Login tokens
+        return Meta code 190 'Cannot parse access token' on graph.facebook.com."""
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"id": "container_xyz"}
+
+        with patch(
+            "src.services.integrations.instagram_api.httpx.AsyncClient"
+        ) as mock_client:
+            mock_instance = mock_client.return_value
+            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_instance.__aexit__ = AsyncMock(return_value=False)
+            mock_instance.post = AsyncMock(return_value=mock_response)
+
+            await instagram_service._create_media_container(
+                token="t",
+                account_id="12345",
+                media_url="https://example.com/img.jpg",
+                media_type="IMAGE",
+            )
+
+        url = mock_instance.post.call_args[0][0]
+        assert url.startswith("https://graph.instagram.com/"), url
+        assert "graph.facebook.com" not in url
+
+    @pytest.mark.asyncio
+    async def test_publish_container_posts_to_ig_graph_host(self, instagram_service):
+        """media_publish must hit graph.instagram.com for the same reason."""
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"id": "story_xyz"}
+
+        with patch(
+            "src.services.integrations.instagram_api.httpx.AsyncClient"
+        ) as mock_client:
+            mock_instance = mock_client.return_value
+            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_instance.__aexit__ = AsyncMock(return_value=False)
+            mock_instance.post = AsyncMock(return_value=mock_response)
+
+            await instagram_service._publish_container(
+                token="t",
+                account_id="12345",
+                container_id="container_xyz",
+            )
+
+        url = mock_instance.post.call_args[0][0]
+        assert url.startswith("https://graph.instagram.com/"), url
+        assert "media_publish" in url
+        assert "graph.facebook.com" not in url
+
+    @pytest.mark.asyncio
+    async def test_wait_for_container_ready_uses_ig_graph_host(self, instagram_service):
+        """Container status polling must hit graph.instagram.com."""
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"status_code": "FINISHED"}
+
+        with patch(
+            "src.services.integrations.instagram_api.httpx.AsyncClient"
+        ) as mock_client:
+            mock_instance = mock_client.return_value
+            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_instance.__aexit__ = AsyncMock(return_value=False)
+            mock_instance.get = AsyncMock(return_value=mock_response)
+
+            await instagram_service._wait_for_container_ready("t", "container_xyz")
+
+        url = mock_instance.get.call_args[0][0]
+        assert url.startswith("https://graph.instagram.com/"), url
+        assert "graph.facebook.com" not in url
+
+    def test_get_active_account_credentials_rejects_non_ig_login_auth_method(
+        self, instagram_service
+    ):
+        """An account whose auth_method != 'instagram_login' (e.g. legacy
+        Facebook Login) returns (None, None, None) and logs a reconnect
+        prompt. The token bytes would not be valid on graph.instagram.com."""
+        active_account = Mock(
+            id="acct-uuid",
+            instagram_account_id="12345678",
+            instagram_username="legacy",
+            auth_method="fb_login",
+        )
+        instagram_service.account_service.get_active_account.return_value = (
+            active_account
+        )
+
+        token, account_id, username = instagram_service._get_active_account_credentials(
+            -100123
+        )
+
+        assert token is None
+        assert account_id is None
+        assert username is None
+        # Token repo lookup is short-circuited — we never fetch a stale token.
+        instagram_service.token_repo.get_token_for_account.assert_not_called()
+
+    def test_get_active_account_credentials_rejects_null_auth_method(
+        self, instagram_service
+    ):
+        """Accounts pre-dating the auth_method column have auth_method=None
+        and must not be served credentials for IG Login posting."""
+        active_account = Mock(
+            id="acct-uuid",
+            instagram_account_id="12345678",
+            instagram_username="legacy",
+            auth_method=None,
+        )
+        instagram_service.account_service.get_active_account.return_value = (
+            active_account
+        )
+
+        token, _, _ = instagram_service._get_active_account_credentials(-100123)
+        assert token is None
+        instagram_service.token_repo.get_token_for_account.assert_not_called()
