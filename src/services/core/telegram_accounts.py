@@ -498,20 +498,29 @@ class TelegramAccountHandlers:
 
         chat_id = query.message.chat_id
 
-        # Get active account for caption and button
-        active_account = self.service.ig_account_service.get_active_account(chat_id)
-
-        # Rebuild caption with current account
-        caption = self.service._build_caption(
-            media_item, queue_item, active_account=active_account
-        )
-
-        # Rebuild keyboard with account selector
+        # Fetch chat settings first so the caption rebuild respects the chat's
+        # show_verbose_notifications preference. Without this the rebuild path
+        # silently forced verbose=True (the _build_caption default), making the
+        # per-chat toggle no-op after account-switcher round trips.
         chat_settings = self.service.settings_service.get_settings(
             chat_id, create_if_missing=False
         )
         if not chat_settings:
             return
+        verbose = self.service._is_verbose(chat_id, chat_settings=chat_settings)
+
+        # Get active account for caption and button
+        active_account = self.service.ig_account_service.get_active_account(chat_id)
+
+        # Rebuild caption with current account
+        caption = self.service._build_caption(
+            media_item,
+            queue_item,
+            verbose=verbose,
+            active_account=active_account,
+        )
+
+        # Rebuild keyboard with account selector
         if account_count is None:
             account_count = self.service.ig_account_service.count_active_accounts()
         reply_markup = build_queue_action_keyboard(

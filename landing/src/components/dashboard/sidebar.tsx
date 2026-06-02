@@ -22,8 +22,20 @@ const navItems = [
   { href: "/dashboard/analytics", label: "Analytics", icon: BarChart3 },
 ];
 
-export function Sidebar({ mobile }: { mobile?: boolean }) {
+export function Sidebar({
+  mobile,
+  showSetupWizard = true,
+}: {
+  mobile?: boolean;
+  showSetupWizard?: boolean;
+}) {
   const pathname = usePathname();
+  // Once onboarding is complete the Setup Wizard page server-redirects to
+  // /dashboard, so the link silently bounces back to Overview. Drop the
+  // entry rather than confuse the user with a no-op nav item (#464).
+  const visibleItems = showSetupWizard
+    ? navItems
+    : navItems.filter((item) => item.href !== "/dashboard/setup");
 
   return (
     <aside className={mobile ? "w-56 bg-card" : "hidden w-56 shrink-0 border-r bg-card md:block"}>
@@ -33,7 +45,7 @@ export function Sidebar({ mobile }: { mobile?: boolean }) {
         </Link>
       </div>
       <nav className="space-y-1 p-3">
-        {navItems.map((item) => {
+        {visibleItems.map((item) => {
           const active =
             item.href === "/dashboard"
               ? pathname === "/dashboard"

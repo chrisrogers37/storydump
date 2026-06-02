@@ -9,7 +9,13 @@ import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import { Sidebar } from "@/components/dashboard/sidebar";
 
-export function DashboardHeader({ user }: { user: SessionPayload }) {
+export function DashboardHeader({
+  user,
+  showSetupWizard = true,
+}: {
+  user: SessionPayload;
+  showSetupWizard?: boolean;
+}) {
   const router = useRouter();
   const [instances, setInstances] = useState<Pick<Instance, "telegram_chat_id" | "display_name">[]>([]);
   const [switcherOpen, setSwitcherOpen] = useState(false);
@@ -69,7 +75,7 @@ export function DashboardHeader({ user }: { user: SessionPayload }) {
             </Button>
           </SheetTrigger>
           <SheetContent side="left" className="w-56 p-0">
-            <Sidebar mobile />
+            <Sidebar mobile showSetupWizard={showSetupWizard} />
           </SheetContent>
         </Sheet>
 
