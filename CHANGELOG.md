@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Telegram card "show_verbose_notifications=false" toggle no longer ignored after account switch (#465)** — `rebuild_posting_workflow` in `telegram_accounts.py` called `_build_caption()` without forwarding the `verbose=` kwarg, so the function fell back to its default of `True` and re-rendered the file name / ID / 3-step manual instructions block whenever a user clicked the account switcher and returned to a post — even when the chat had verbose notifications turned off. Now reads `chat_settings.show_verbose_notifications` up front and threads it through, matching the sibling `_batch_update_pending_captions` pattern. Regression test added.
+
+### Changed
+
+- **Telegram cards — hide 3-step manual instructions for Auto Post chats (#469)** — The "1️⃣ Click & hold image → Save / 2️⃣ Tap Open Instagram / 3️⃣ Post your story" block was rendered on every verbose card. It's only useful when Auto Post isn't available. Now hidden when the active account's `auth_method='instagram_login'` (Auto Post enabled); still shown when there's no active account or for legacy `fb_login` accounts that need the manual flow. File name + truncated ID remain visible for debugging in both modes.
+
 ### Changed
 
 - **Sidebar — hide "Setup Wizard" entry once onboarding is complete (#464)** — `/dashboard/setup` server-redirects to `/dashboard` when `setupState.onboarding_completed` is true, so the sidebar link silently bounced users back to Overview, looking like dead nav. The dashboard layout now fetches the init payload (with `revalidate: 60`) and passes a `showSetupWizard` boolean to `Sidebar` and `DashboardHeader`. The Setup Wizard entry is filtered out of the nav once onboarding is done. New chats with onboarding still in progress see the link as before.
