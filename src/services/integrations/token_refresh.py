@@ -144,19 +144,40 @@ class TokenRefreshService(BaseService):
     ) -> httpx.Response:
         """Call Meta's token refresh endpoint.
 
+        Meta exposes two different long-lived token refresh contracts that
+        share neither parameter names nor required fields:
+
+        - `graph.instagram.com/refresh_access_token` (IG Login flow) —
+          accepts the token alone: `grant_type=ig_refresh_token` +
+          `access_token`.
+        - `graph.facebook.com/.../oauth/access_token` (FB Login / legacy
+          flow) — requires the FB-style grant + app credentials:
+          `grant_type=fb_exchange_token`, `client_id`, `client_secret`,
+          and `fb_exchange_token` (the existing long-lived token).
+
+        The previous implementation always sent the IG-flavored params,
+        so any refresh against the FB host failed with Meta error 101
+        "Missing client_id parameter." Branch on the resolved URL so
+        each host gets its expected payload.
+
         Returns:
             The HTTP response from Meta's API.
         """
         refresh_url = self._get_refresh_endpoint(instagram_account_id)
+        if refresh_url == self.IG_LOGIN_REFRESH_ENDPOINT:
+            params = {
+                "grant_type": "ig_refresh_token",
+                "access_token": current_token,
+            }
+        else:
+            params = {
+                "grant_type": "fb_exchange_token",
+                "client_id": settings.FACEBOOK_APP_ID,
+                "client_secret": settings.FACEBOOK_APP_SECRET,
+                "fb_exchange_token": current_token,
+            }
         async with httpx.AsyncClient() as client:
-            return await client.get(
-                refresh_url,
-                params={
-                    "grant_type": "ig_refresh_token",
-                    "access_token": current_token,
-                },
-                timeout=30.0,
-            )
+            return await client.get(refresh_url, params=params, timeout=30.0)
 
     def _store_refreshed_token(
         self, new_token: str, expires_in: int, instagram_account_id: Optional[str]
