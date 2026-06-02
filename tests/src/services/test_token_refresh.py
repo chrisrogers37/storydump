@@ -697,3 +697,98 @@ class TestTokenRefreshService:
         )
 
     # _get_env_token tests removed in PR-7 — env-fallback path is gone.
+
+    # ==================== _call_meta_refresh Tests ====================
+
+    @pytest.mark.asyncio
+    async def test_call_meta_refresh_ig_login_uses_ig_params(self, token_service):
+        """IG Login refresh hits graph.instagram.com with the IG-style params."""
+        from src.services.integrations.token_refresh import TokenRefreshService
+
+        account = Mock(auth_method="instagram_login")
+        token_service.account_repo = Mock()
+        token_service.account_repo.get_by_id.return_value = account
+
+        with patch(
+            "src.services.integrations.token_refresh.httpx.AsyncClient"
+        ) as mock_client:
+            mock_instance = mock_client.return_value
+            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_instance.__aexit__ = AsyncMock(return_value=False)
+            mock_instance.get = AsyncMock(return_value=Mock(status_code=200))
+
+            await token_service._call_meta_refresh("the_token", "acct-uuid")
+
+        url = mock_instance.get.call_args[0][0]
+        params = mock_instance.get.call_args[1]["params"]
+        assert url == TokenRefreshService.IG_LOGIN_REFRESH_ENDPOINT
+        assert params == {
+            "grant_type": "ig_refresh_token",
+            "access_token": "the_token",
+        }
+
+    @pytest.mark.asyncio
+    @patch("src.services.integrations.token_refresh.settings")
+    async def test_call_meta_refresh_fb_login_includes_client_credentials(
+        self, mock_settings, token_service
+    ):
+        """Regression for #470.
+
+        FB Login / legacy refresh hits graph.facebook.com, which Meta
+        rejects with error 101 "Missing client_id parameter" unless we
+        include the app credentials and use the FB-style grant_type.
+        """
+        mock_settings.FACEBOOK_APP_ID = "fb_app_123"
+        mock_settings.FACEBOOK_APP_SECRET = "fb_secret_xyz"
+        mock_settings.meta_graph_base = "https://graph.facebook.com/v21.0"
+
+        account = Mock(auth_method="fb_login")
+        token_service.account_repo = Mock()
+        token_service.account_repo.get_by_id.return_value = account
+
+        with patch(
+            "src.services.integrations.token_refresh.httpx.AsyncClient"
+        ) as mock_client:
+            mock_instance = mock_client.return_value
+            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_instance.__aexit__ = AsyncMock(return_value=False)
+            mock_instance.get = AsyncMock(return_value=Mock(status_code=200))
+
+            await token_service._call_meta_refresh("legacy_token", "acct-uuid")
+
+        url = mock_instance.get.call_args[0][0]
+        params = mock_instance.get.call_args[1]["params"]
+        assert url == "https://graph.facebook.com/v21.0/oauth/access_token"
+        assert params == {
+            "grant_type": "fb_exchange_token",
+            "client_id": "fb_app_123",
+            "client_secret": "fb_secret_xyz",
+            "fb_exchange_token": "legacy_token",
+        }
+
+    @pytest.mark.asyncio
+    @patch("src.services.integrations.token_refresh.settings")
+    async def test_call_meta_refresh_legacy_no_account_uses_fb_params(
+        self, mock_settings, token_service
+    ):
+        """Orphan tokens (no instagram_account_id) take the FB legacy
+        branch and must still include app credentials."""
+        mock_settings.FACEBOOK_APP_ID = "fb_app_123"
+        mock_settings.FACEBOOK_APP_SECRET = "fb_secret_xyz"
+        mock_settings.meta_graph_base = "https://graph.facebook.com/v21.0"
+
+        with patch(
+            "src.services.integrations.token_refresh.httpx.AsyncClient"
+        ) as mock_client:
+            mock_instance = mock_client.return_value
+            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_instance.__aexit__ = AsyncMock(return_value=False)
+            mock_instance.get = AsyncMock(return_value=Mock(status_code=200))
+
+            await token_service._call_meta_refresh("orphan_token", None)
+
+        params = mock_instance.get.call_args[1]["params"]
+        assert params["client_id"] == "fb_app_123"
+        assert params["client_secret"] == "fb_secret_xyz"
+        assert params["fb_exchange_token"] == "orphan_token"
+        assert "access_token" not in params
