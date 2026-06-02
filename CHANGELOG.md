@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Sidebar — hide "Setup Wizard" entry once onboarding is complete (#464)** — `/dashboard/setup` server-redirects to `/dashboard` when `setupState.onboarding_completed` is true, so the sidebar link silently bounced users back to Overview, looking like dead nav. The dashboard layout now fetches the init payload (with `revalidate: 60`) and passes a `showSetupWizard` boolean to `Sidebar` and `DashboardHeader`. The Setup Wizard entry is filtered out of the nav once onboarding is done. New chats with onboarding still in progress see the link as before.
+
 - **Accounts settings — "Switch" button renamed to "Make Active"** — The button that promotes an inactive Instagram account to be the chat's active one was labeled "Switch" / "Switching…", which was ambiguous (switch what to what?). Renamed to "Make Active" / "Activating…" so it pairs cleanly with the existing green "Active" badge on the currently-selected row.
 
 ### Fixed
