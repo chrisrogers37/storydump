@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Telegram card "show_verbose_notifications=false" toggle no longer ignored after account switch (#465)** — `rebuild_posting_workflow` in `telegram_accounts.py` called `_build_caption()` without forwarding the `verbose=` kwarg, so the function fell back to its default of `True` and re-rendered the file name / ID / 3-step manual instructions block whenever a user clicked the account switcher and returned to a post — even when the chat had verbose notifications turned off. Now reads `chat_settings.show_verbose_notifications` up front and threads it through, matching the sibling `_batch_update_pending_captions` pattern. Regression test added.
 
+### Documentation
+
+- **Postmortem for May 17-19 Telegram delivery failure burst (#467)** — new `documentation/operations/2026-05-telegram-delivery-burst-postmortem.md` documents the 958-failure `telegram_manual` burst that ran 2026-05-17 → 2026-05-19. Traces the lossy code path (`send_notification` swallows the actual exception and returns False → scheduler substitutes the placeholder string `"send_notification returned False"` → DB never sees what really went wrong) and enumerates four systemic issues: opaque error_message, no circuit breaker, no operator alert on send-loop failures, and a too-broad `except Exception`. Sketches five follow-up fixes (F1: propagate exception text; F2: circuit breaker + alert; F3: narrow exception handling; F4: structured logging; F5: dashboard breakdown by error class) to ship as separate PRs.
+
 ### Changed
 
 - **Telegram cards — hide 3-step manual instructions for Auto Post chats (#469)** — The "1️⃣ Click & hold image → Save / 2️⃣ Tap Open Instagram / 3️⃣ Post your story" block was rendered on every verbose card. It's only useful when Auto Post isn't available. Now hidden when the active account's `auth_method='instagram_login'` (Auto Post enabled); still shown when there's no active account or for legacy `fb_login` accounts that need the manual flow. File name + truncated ID remain visible for debugging in both modes.
