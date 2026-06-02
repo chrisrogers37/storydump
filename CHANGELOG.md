@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Token refresh — `_call_meta_refresh` now sends FB app credentials on the `graph.facebook.com` path (#470)** — Meta exposes two refresh contracts: `graph.instagram.com/refresh_access_token` (IG Login) accepts `grant_type=ig_refresh_token` + `access_token` alone; `graph.facebook.com/.../oauth/access_token` (FB Login / legacy) requires `grant_type=fb_exchange_token`, `client_id`, `client_secret`, and `fb_exchange_token`. The previous implementation always sent IG-flavored params, so any refresh against the FB host failed with Meta error 101 "Missing client_id parameter." Now branches on the resolved URL: IG-host gets the IG payload, FB-host gets credentials. Latent fix — production currently has no `fb_login` tokens to refresh, but the bug would have fired immediately if any tenant connected via Facebook Login.
+
 - **Telegram card "show_verbose_notifications=false" toggle no longer ignored after account switch (#465)** — `rebuild_posting_workflow` in `telegram_accounts.py` called `_build_caption()` without forwarding the `verbose=` kwarg, so the function fell back to its default of `True` and re-rendered the file name / ID / 3-step manual instructions block whenever a user clicked the account switcher and returned to a post — even when the chat had verbose notifications turned off. Now reads `chat_settings.show_verbose_notifications` up front and threads it through, matching the sibling `_batch_update_pending_captions` pattern. Regression test added.
 
 ### Changed
