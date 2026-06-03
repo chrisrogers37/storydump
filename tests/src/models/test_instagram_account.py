@@ -33,9 +33,13 @@ class TestInstagramAccountModel:
         """Credential refactor PR 5 (#468) — auth_method moved to
         api_tokens.auth_method (migration 041 drops the legacy column
         on instagram_accounts). The mapper must no longer expose it."""
-        assert not hasattr(InstagramAccount, "auth_method") or (
-            "auth_method" not in InstagramAccount.__table__.columns
-        )
+        # `and` (not `or`) — both conditions must hold. If we use `or`
+        # the test passes vacuously when EITHER half is true, which
+        # makes it impossible to fail (a re-added Column would still
+        # leave the model lacking… etc.). Two explicit asserts are
+        # clearer than one compound expression.
+        assert not hasattr(InstagramAccount, "auth_method")
+        assert "auth_method" not in InstagramAccount.__table__.columns
 
     def test_repr_format(self):
         item = InstagramAccount(display_name="My Brand", instagram_username="mybrand")
