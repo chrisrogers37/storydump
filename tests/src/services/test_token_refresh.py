@@ -702,12 +702,16 @@ class TestTokenRefreshService:
 
     @pytest.mark.asyncio
     async def test_call_meta_refresh_ig_login_uses_ig_params(self, token_service):
-        """IG Login refresh hits graph.instagram.com with the IG-style params."""
+        """IG Login refresh hits graph.instagram.com with the IG-style params.
+
+        After #468's read-switch, _get_refresh_endpoint reads
+        auth_method off the token row (not the account row), so the
+        token repo is what we mock.
+        """
         from src.services.integrations.token_refresh import TokenRefreshService
 
-        account = Mock(auth_method="instagram_login")
-        token_service.account_repo = Mock()
-        token_service.account_repo.get_by_id.return_value = account
+        token_row = Mock(auth_method="instagram_login")
+        token_service.token_repo.get_token_for_account.return_value = token_row
 
         with patch(
             "src.services.integrations.token_refresh.httpx.AsyncClient"
@@ -742,9 +746,10 @@ class TestTokenRefreshService:
         mock_settings.FACEBOOK_APP_SECRET = "fb_secret_xyz"
         mock_settings.meta_graph_base = "https://graph.facebook.com/v21.0"
 
-        account = Mock(auth_method="fb_login")
-        token_service.account_repo = Mock()
-        token_service.account_repo.get_by_id.return_value = account
+        # Token row whose auth_method indicates the FB Login flow
+        # (anything not 'instagram_login' takes the FB-host branch).
+        token_row = Mock(auth_method="fb_login")
+        token_service.token_repo.get_token_for_account.return_value = token_row
 
         with patch(
             "src.services.integrations.token_refresh.httpx.AsyncClient"

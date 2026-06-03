@@ -102,14 +102,23 @@ class TokenRefreshService(BaseService):
         return None
 
     def _get_refresh_endpoint(self, instagram_account_id: Optional[str]) -> str:
-        """Return the correct token refresh URL based on account auth method.
+        """Return the correct token refresh URL based on the token's
+        OAuth flow.
 
         Instagram Login tokens refresh via graph.instagram.com.
         Facebook Login / legacy tokens refresh via graph.facebook.com.
+
+        Reads ``auth_method`` directly off the token row rather than
+        joining through ``instagram_accounts.auth_method`` — part of
+        the credential refactor (#468) that moves provenance onto the
+        credential itself. Falls back to the FB host when no token is
+        found or the field is unset.
         """
         if instagram_account_id:
-            account = self.account_repo.get_by_id(instagram_account_id)
-            if account and account.auth_method == "instagram_login":
+            token = self.token_repo.get_token_for_account(
+                instagram_account_id, token_type="access_token"
+            )
+            if token and token.auth_method == "instagram_login":
                 return self.IG_LOGIN_REFRESH_ENDPOINT
 
         return f"{settings.meta_graph_base}/oauth/access_token"

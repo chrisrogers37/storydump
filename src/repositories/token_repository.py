@@ -87,6 +87,7 @@ class TokenRepository(BaseRepository):
         self,
         instagram_account_id: str,
         token_type: str = "access_token",
+        auth_method: Optional[str] = None,
     ) -> Optional[ApiToken]:
         """
         Get active Instagram token for a specific account.
@@ -96,20 +97,25 @@ class TokenRepository(BaseRepository):
         Args:
             instagram_account_id: UUID of Instagram account
             token_type: Token type (default: 'access_token')
+            auth_method: Optional OAuth-flow filter. After migration 040
+                an account can hold multiple tokens (one per flow), so
+                consumer services that only handle one flow should pass
+                their required auth_method to disambiguate.  Omitting
+                is back-compatible — returns the first matching token
+                regardless of flow (matches pre-refactor behavior).
 
         Returns:
             ApiToken or None if not found
         """
-        result = (
-            self.db.query(ApiToken)
-            .filter(
-                ApiToken.service_name == "instagram",
-                ApiToken.token_type == token_type,
-                ApiToken.instagram_account_id == instagram_account_id,
-                ApiToken.revoked_at.is_(None),
-            )
-            .first()
+        query = self.db.query(ApiToken).filter(
+            ApiToken.service_name == "instagram",
+            ApiToken.token_type == token_type,
+            ApiToken.instagram_account_id == instagram_account_id,
+            ApiToken.revoked_at.is_(None),
         )
+        if auth_method is not None:
+            query = query.filter(ApiToken.auth_method == auth_method)
+        result = query.first()
         self.end_read_transaction()
         return result
 

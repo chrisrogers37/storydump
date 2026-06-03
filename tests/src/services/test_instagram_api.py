@@ -864,9 +864,11 @@ class TestInstagramAPIService:
     def test_get_active_account_credentials_rejects_non_ig_login_auth_method(
         self, instagram_service
     ):
-        """An account whose auth_method != 'instagram_login' (e.g. legacy
-        Facebook Login) returns (None, None, None) and logs a reconnect
-        prompt. The token bytes would not be valid on graph.instagram.com."""
+        """When the active account has no instagram_login token (e.g. it
+        only has a legacy fb_login row), the lookup returns None and we
+        surface a reconnect prompt rather than serving an incompatible
+        credential. After #468 the auth_method filter happens in the
+        repo query — no row matches, so we just hand back (None, …)."""
         active_account = Mock(
             id="acct-uuid",
             instagram_account_id="12345678",
@@ -876,6 +878,9 @@ class TestInstagramAPIService:
         instagram_service.account_service.get_active_account.return_value = (
             active_account
         )
+        # Repo returns nothing for the (account, auth_method='instagram_login')
+        # filter — no IG-Login token exists for this account.
+        instagram_service.token_repo.get_token_for_account.return_value = None
 
         token, account_id, username = instagram_service._get_active_account_credentials(
             -100123
@@ -884,14 +889,20 @@ class TestInstagramAPIService:
         assert token is None
         assert account_id is None
         assert username is None
-        # Token repo lookup is short-circuited — we never fetch a stale token.
-        instagram_service.token_repo.get_token_for_account.assert_not_called()
+        # Lookup was filtered by auth_method='instagram_login'.
+        call_kwargs = (
+            instagram_service.token_repo.get_token_for_account.call_args.kwargs
+        )
+        assert call_kwargs.get("auth_method") == "instagram_login"
 
     def test_get_active_account_credentials_rejects_null_auth_method(
         self, instagram_service
     ):
-        """Accounts pre-dating the auth_method column have auth_method=None
-        and must not be served credentials for IG Login posting."""
+        """Accounts that have no IG-Login token at all (e.g. legacy
+        rows from before migration 039 backfilled auth_method) must
+        not be served credentials. The repo query filtered by
+        auth_method='instagram_login' returns None and we hand back
+        (None, …) so the safety check surfaces a clear error."""
         active_account = Mock(
             id="acct-uuid",
             instagram_account_id="12345678",
@@ -901,7 +912,11 @@ class TestInstagramAPIService:
         instagram_service.account_service.get_active_account.return_value = (
             active_account
         )
+        instagram_service.token_repo.get_token_for_account.return_value = None
 
         token, _, _ = instagram_service._get_active_account_credentials(-100123)
         assert token is None
-        instagram_service.token_repo.get_token_for_account.assert_not_called()
+        call_kwargs = (
+            instagram_service.token_repo.get_token_for_account.call_args.kwargs
+        )
+        assert call_kwargs.get("auth_method") == "instagram_login"
