@@ -385,12 +385,14 @@ class InstagramAccountService(BaseService):
             if not account:
                 raise ValueError(f"Account with ID {instagram_account_id} not found")
 
-            # Update username and auth_method if provided
+            # Update username if changed. ``auth_method`` is no longer
+            # written here — it lives on api_tokens (#468 PR 5;
+            # migration 041 dropped the legacy column on
+            # instagram_accounts) and is dual-written via the token
+            # repo call below.
             update_kwargs = {}
             if instagram_username and instagram_username != account.instagram_username:
                 update_kwargs["instagram_username"] = instagram_username
-            if auth_method and auth_method != account.auth_method:
-                update_kwargs["auth_method"] = auth_method
             if update_kwargs:
                 account = self.account_repo.update(str(account.id), **update_kwargs)
 

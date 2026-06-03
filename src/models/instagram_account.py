@@ -35,7 +35,11 @@ class InstagramAccount(Base):
 
     # Status
     is_active = Column(Boolean, default=True)
-    auth_method = Column(String(20), nullable=True, default=None)
+
+    # NOTE: ``auth_method`` was removed in migration 041 (#468 PR 5);
+    # provenance now lives on ``api_tokens.auth_method``. The module-
+    # level AUTH_METHOD_* constants are still exported for the OAuth
+    # callbacks that label tokens at creation time.
 
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow)
