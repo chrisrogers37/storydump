@@ -77,7 +77,7 @@ class InstagramCredentialManager:
                 )
                 return (None, None, None)
 
-            if token_record and not token_record.is_expired:
+            if not token_record.is_expired:
                 # Decrypt the token
                 try:
                     decrypted_token = self.service.encryption.decrypt(
