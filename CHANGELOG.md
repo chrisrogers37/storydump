@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **`instagram_accounts.auth_method` legacy column dropped (#468 PR 5)** — Final sub-PR of the credential refactor. After PR 4 the application reads provenance off `api_tokens.auth_method` exclusively; PRs 2-4 made the account-side column write-only, and this PR removes both the writes (in `instagram_account_service.update_account_token` and `instagram_account_repository.create`) and the column itself (migration 041). `instagram_accounts` is one step closer to pure-identity. The `instagram_accounts.instagram_account_id` legacy column remains — its consumers (backfill, OAuth heal logic, credential lookup) need a separate refactor to read from `api_tokens.meta_account_id` instead, filed as a follow-up.
+
 ### Changed
 
 - **Posting + refresh read `auth_method` from the token, not the account (#468)** — Read-switch sub-PR of the credential refactor. `InstagramCredentialManager.get_active_account_credentials()` now filters its token lookup by `auth_method='instagram_login'` (new optional kwarg on `TokenRepository.get_token_for_account()`); legacy/unmigrated accounts get a clear "no instagram_login token — reconnect" error instead of a stale-flow token. `TokenRefreshService._get_refresh_endpoint()` reads `token.auth_method` instead of joining through `instagram_accounts.auth_method` to pick its host. Provenance now lives wherever the credential lives — the `instagram_accounts.auth_method` column becomes unused (gets dropped in PR 5).

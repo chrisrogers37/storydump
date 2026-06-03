@@ -29,6 +29,14 @@ class TestInstagramAccountModel:
     def test_is_active_defaults_to_true(self):
         assert InstagramAccount.is_active.default.arg is True
 
+    def test_auth_method_column_removed(self):
+        """Credential refactor PR 5 (#468) — auth_method moved to
+        api_tokens.auth_method (migration 041 drops the legacy column
+        on instagram_accounts). The mapper must no longer expose it."""
+        assert not hasattr(InstagramAccount, "auth_method") or (
+            "auth_method" not in InstagramAccount.__table__.columns
+        )
+
     def test_repr_format(self):
         item = InstagramAccount(display_name="My Brand", instagram_username="mybrand")
         result = repr(item)
