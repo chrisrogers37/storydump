@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Posting + refresh read `auth_method` from the token, not the account (#468)** — Read-switch sub-PR of the credential refactor. `InstagramCredentialManager.get_active_account_credentials()` now filters its token lookup by `auth_method='instagram_login'` (new optional kwarg on `TokenRepository.get_token_for_account()`); legacy/unmigrated accounts get a clear "no instagram_login token — reconnect" error instead of a stale-flow token. `TokenRefreshService._get_refresh_endpoint()` reads `token.auth_method` instead of joining through `instagram_accounts.auth_method` to pick its host. Provenance now lives wherever the credential lives — the `instagram_accounts.auth_method` column becomes unused (gets dropped in PR 5).
+
 - **Dual-write `auth_method` + `issuing_app_id` to api_tokens at OAuth callbacks (#468)** — Continues the credential refactor. `InstagramAccountService._create_account_with_token` and `update_account_token` now pass both fields to `TokenRepository.create_or_update` alongside the existing `instagram_accounts.auth_method` write. Wired into both OAuth callbacks: Instagram Login (`instagram_login_oauth.py`) passes `settings.INSTAGRAM_APP_ID`; Facebook Login (`oauth_service.py`) passes `settings.FACEBOOK_APP_ID`. Manual entry leaves `issuing_app_id` unset (no app context). After this PR every newly-issued or refreshed IG token carries its own provenance; the read-switch sub-PR drops the JOIN.
 
 ### Added

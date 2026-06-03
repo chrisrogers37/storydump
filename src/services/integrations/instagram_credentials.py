@@ -58,22 +58,25 @@ class InstagramCredentialManager:
             # Posting uses graph.instagram.com (the IG Login content publishing
             # surface). Tokens issued by the legacy Facebook Login flow are
             # only valid against graph.facebook.com and will return Meta
-            # error 190 ("Cannot parse access token") if sent here. Require
-            # an instagram_login account; surface a clear reconnect prompt
-            # for anything else.
-            if active_account.auth_method != "instagram_login":
+            # error 190 ("Cannot parse access token") if sent here. Filter
+            # the lookup by auth_method so we only ever pick an IG-Login
+            # token. Reading provenance off the token row (not the account)
+            # is the read-switch sub-PR of the credential refactor (#468):
+            # the token is self-describing, no JOIN through
+            # instagram_accounts.auth_method.
+            token_record = self.service.token_repo.get_token_for_account(
+                str(active_account.id),
+                token_type="access_token",
+                auth_method="instagram_login",
+            )
+            if token_record is None:
                 logger.error(
                     f"@{active_account.instagram_username} cannot post via the "
-                    f"Instagram Graph API: account auth_method is "
-                    f"{active_account.auth_method!r}, but posting requires "
-                    f"'instagram_login'. Reconnect via /dashboard/settings."
+                    f"Instagram Graph API: no instagram_login token found for "
+                    f"this account. Reconnect via /dashboard/settings."
                 )
                 return (None, None, None)
 
-            # Get token for this specific account
-            token_record = self.service.token_repo.get_token_for_account(
-                str(active_account.id), token_type="access_token"
-            )
             if token_record and not token_record.is_expired:
                 # Decrypt the token
                 try:
