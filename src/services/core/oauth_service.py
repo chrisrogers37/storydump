@@ -200,6 +200,7 @@ class OAuthService(BaseService):
                         set_as_active=set_active,
                         telegram_chat_id=telegram_chat_id if set_active else None,
                         auth_method=AUTH_METHOD_OAUTH,
+                        issuing_app_id=settings.FACEBOOK_APP_ID,
                     )
                     logger.info(
                         f"OAuth: Updated token for existing account @{ig_username} "
@@ -216,6 +217,7 @@ class OAuthService(BaseService):
                         set_as_active=set_active,
                         telegram_chat_id=telegram_chat_id if set_active else None,
                         auth_method=AUTH_METHOD_OAUTH,
+                        issuing_app_id=settings.FACEBOOK_APP_ID,
                     )
                     logger.info(
                         f"OAuth: Created new account @{ig_username} "

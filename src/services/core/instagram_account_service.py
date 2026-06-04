@@ -154,6 +154,7 @@ class InstagramAccountService(BaseService):
         set_as_active: bool = False,
         telegram_chat_id: Optional[int] = None,
         auth_method: Optional[str] = None,
+        issuing_app_id: Optional[str] = None,
     ) -> InstagramAccount:
         """
         Add a new Instagram account with its token.
@@ -168,6 +169,10 @@ class InstagramAccountService(BaseService):
             set_as_active: If True, set this as the active account
             telegram_chat_id: Required if set_as_active is True
             auth_method: How account was connected ('oauth', 'manual', or None)
+            issuing_app_id: Meta App ID that issued the token; dual-
+                written to api_tokens.issuing_app_id alongside
+                auth_method so the credential is self-describing
+                (#468 dual-write phase).
 
         Returns:
             Created InstagramAccount
@@ -193,6 +198,7 @@ class InstagramAccountService(BaseService):
                 access_token=access_token,
                 token_expires_at=token_expires_at,
                 auth_method=auth_method,
+                issuing_app_id=issuing_app_id,
             )
 
             # Optionally set as active
@@ -251,11 +257,15 @@ class InstagramAccountService(BaseService):
         access_token: str,
         token_expires_at: Optional[datetime] = None,
         auth_method: Optional[str] = None,
+        issuing_app_id: Optional[str] = None,
     ) -> InstagramAccount:
         """Create account record and store its encrypted token.
 
-        Returns:
-            Created InstagramAccount
+        Dual-writes ``auth_method`` and ``issuing_app_id`` to the new
+        ``api_tokens`` columns alongside the existing write to
+        ``instagram_accounts.auth_method``. After the read-switch
+        sub-PR (#468), consumers read these straight off the token
+        and the account-side column gets dropped.
         """
         account = self.account_repo.create(
             display_name=display_name,
@@ -272,6 +282,8 @@ class InstagramAccountService(BaseService):
             expires_at=token_expires_at,
             instagram_account_id=str(account.id),
             meta_account_id=instagram_account_id,
+            auth_method=auth_method,
+            issuing_app_id=issuing_app_id,
             metadata={
                 "account_id": instagram_account_id,
                 "username": instagram_username,
@@ -334,6 +346,7 @@ class InstagramAccountService(BaseService):
         set_as_active: bool = False,
         telegram_chat_id: Optional[int] = None,
         auth_method: Optional[str] = None,
+        issuing_app_id: Optional[str] = None,
     ) -> InstagramAccount:
         """
         Update the token for an existing Instagram account.
@@ -381,7 +394,9 @@ class InstagramAccountService(BaseService):
             if update_kwargs:
                 account = self.account_repo.update(str(account.id), **update_kwargs)
 
-            # Encrypt and update/create token
+            # Encrypt and update/create token. Dual-write auth_method and
+            # issuing_app_id alongside the existing fields so the token
+            # carries its own provenance (#468 dual-write phase).
             encrypted_token = self.encryption.encrypt(access_token)
             self.token_repo.create_or_update(
                 service_name="instagram",
@@ -390,6 +405,8 @@ class InstagramAccountService(BaseService):
                 expires_at=token_expires_at,
                 instagram_account_id=str(account.id),
                 meta_account_id=instagram_account_id,
+                auth_method=auth_method,
+                issuing_app_id=issuing_app_id,
                 metadata={
                     "account_id": instagram_account_id,
                     "username": account.instagram_username,
