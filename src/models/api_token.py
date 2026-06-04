@@ -48,6 +48,21 @@ class ApiToken(Base):
     # the dual-write migration window; backfilled in phase 3.
     meta_account_id = Column(String(100), nullable=True, index=True)
 
+    # Which OAuth flow / Meta app issued this token. Values today:
+    # 'instagram_login' (graph.instagram.com), 'fb_login' (legacy,
+    # graph.facebook.com), 'manual' (admin-pasted). Lives here rather
+    # than on instagram_accounts because it's a property of the
+    # credential, not the identity — an account can hold tokens from
+    # multiple flows simultaneously (per #380 acceptance criteria).
+    # Nullable during the dual-write migration window (#468); backfilled
+    # by migration 039.
+    auth_method = Column(String(50), nullable=True, index=True)
+
+    # Which Meta App ID issued this token (explicit, not env-derived
+    # at use time). Eliminates env-var drift as a failure mode and
+    # gives an audit trail of which app produced which credential.
+    issuing_app_id = Column(String(100), nullable=True)
+
     # Per-tenant scoping (used by Google Drive OAuth tokens)
     chat_settings_id = Column(
         UUID(as_uuid=True),
@@ -81,12 +96,19 @@ class ApiToken(Base):
     instagram_account = relationship("InstagramAccount", back_populates="tokens")
 
     __table_args__ = (
-        # One token per service per account (allows multiple IG accounts with separate tokens)
+        # One token per (service, type, account, auth_method) — the
+        # auth_method dimension lets a single account hold both an
+        # instagram_login token AND an fb_login token simultaneously
+        # (#380 acceptance criteria). Constraint name matches
+        # migration 040 (`unique_credential_per_account`); the old
+        # `unique_service_token_type_account` is dropped by that
+        # migration.
         UniqueConstraint(
             "service_name",
             "token_type",
             "instagram_account_id",
-            name="unique_service_token_type_account",
+            "auth_method",
+            name="unique_credential_per_account",
         ),
     )
 

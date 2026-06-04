@@ -148,6 +148,8 @@ class TokenRepository(BaseRepository):
         metadata: Optional[dict] = None,
         instagram_account_id: Optional[str] = None,
         meta_account_id: Optional[str] = None,
+        auth_method: Optional[str] = None,
+        issuing_app_id: Optional[str] = None,
     ) -> ApiToken:
         """
         Create or update a token (UPSERT pattern).
@@ -168,6 +170,12 @@ class TokenRepository(BaseRepository):
             instagram_account_id: UUID of Instagram account (for multi-account support)
             meta_account_id: Meta-side identifier that issued this token
                 (Business Account ID for FB Login, User ID for IG Login)
+            auth_method: OAuth flow that issued this token
+                ('instagram_login', 'fb_login', 'manual'). Lives on the
+                credential rather than the account so the token is
+                self-describing (#468).
+            issuing_app_id: Meta App ID that issued this token; stored
+                explicitly to eliminate env-var drift as a failure mode.
 
         Returns:
             Created or updated ApiToken
@@ -200,6 +208,10 @@ class TokenRepository(BaseRepository):
                 existing.token_metadata = metadata
             if meta_account_id is not None:
                 existing.meta_account_id = meta_account_id
+            if auth_method is not None:
+                existing.auth_method = auth_method
+            if issuing_app_id is not None:
+                existing.issuing_app_id = issuing_app_id
             self.db.commit()
             self.db.refresh(existing)
             return existing
@@ -215,6 +227,8 @@ class TokenRepository(BaseRepository):
                 token_metadata=metadata,
                 instagram_account_id=instagram_account_id,
                 meta_account_id=meta_account_id,
+                auth_method=auth_method,
+                issuing_app_id=issuing_app_id,
             )
             self.db.add(token)
             self.db.commit()
