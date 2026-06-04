@@ -303,6 +303,10 @@ class TestGetAnalytics:
             "instagram_api": 60,
             "telegram_manual": 20,
         }
+        service.history_repo.get_stats_by_method_and_status.return_value = {
+            "instagram_api": {"posted": 60},
+            "telegram_manual": {"posted": 20, "skipped": 10, "failed": 5},
+        }
         service.history_repo.get_daily_counts.return_value = [
             {"date": "2026-04-10", "posted": 4, "skipped": 1},
             {"date": "2026-04-11", "posted": 5},
@@ -333,12 +337,58 @@ class TestGetAnalytics:
         assert len(result["category_breakdown"]) == 1
         assert result["days"] == 30
 
+    def test_method_split_summary_fields(self):
+        """Regression for #466.
+
+        The legacy "success_rate" lumped Instagram posts with Telegram
+        delivery attempts: when 595 Telegram cards failed delivery in a
+        burst, the dashboard read "Success Rate: 1%" even though every
+        Instagram post had succeeded. The method-split fields below
+        compute IG success rate against only IG attempts so that
+        Telegram delivery health and Instagram publish health are
+        separately observable.
+        """
+        service = self._setup_analytics_service()
+
+        service.history_repo.get_stats_by_status.return_value = {
+            "posted": 7,
+            "skipped": 8,
+            "failed": 595,
+        }
+        service.history_repo.get_stats_by_method.return_value = {"instagram_api": 7}
+        service.history_repo.get_stats_by_method_and_status.return_value = {
+            "instagram_api": {"posted": 7},
+            "telegram_manual": {"skipped": 8, "failed": 595},
+        }
+        service.history_repo.get_daily_counts.return_value = []
+        service.history_repo.get_hourly_distribution.return_value = []
+        service.history_repo.get_stats_by_category.return_value = []
+
+        result = service.get_analytics(telegram_chat_id=123, days=30)
+        summary = result["summary"]
+
+        # Legacy field — IG and Telegram lumped together
+        assert summary["success_rate"] == round(7 / 610, 2)
+
+        # New method-split fields — IG is 100% successful, Telegram
+        # delivery has a separate 595-count "delivery issues" bucket
+        assert summary["ig_posted"] == 7
+        assert summary["ig_failed"] == 0
+        assert summary["ig_success_rate"] == 1.0
+        assert summary["telegram_skipped"] == 8
+        assert summary["telegram_failed"] == 595
+        # The raw method->status breakdown is also exposed for any
+        # consumer that wants to render its own pivot.
+        assert result["method_status_breakdown"]["instagram_api"]["posted"] == 7
+        assert result["method_status_breakdown"]["telegram_manual"]["failed"] == 595
+
     def test_handles_empty_history(self):
         """get_analytics handles no posting history gracefully."""
         service = self._setup_analytics_service()
 
         service.history_repo.get_stats_by_status.return_value = {}
         service.history_repo.get_stats_by_method.return_value = {}
+        service.history_repo.get_stats_by_method_and_status.return_value = {}
         service.history_repo.get_daily_counts.return_value = []
         service.history_repo.get_hourly_distribution.return_value = []
         service.history_repo.get_stats_by_category.return_value = []
@@ -348,6 +398,9 @@ class TestGetAnalytics:
         assert result["summary"]["total_posts"] == 0
         assert result["summary"]["success_rate"] == 0
         assert result["summary"]["avg_per_day"] == 0
+        assert result["summary"]["ig_posted"] == 0
+        assert result["summary"]["ig_success_rate"] == 0
+        assert result["summary"]["telegram_failed"] == 0
         assert result["daily_counts"] == []
 
     def test_passes_days_and_tenant(self):
@@ -356,6 +409,7 @@ class TestGetAnalytics:
 
         service.history_repo.get_stats_by_status.return_value = {}
         service.history_repo.get_stats_by_method.return_value = {}
+        service.history_repo.get_stats_by_method_and_status.return_value = {}
         service.history_repo.get_daily_counts.return_value = []
         service.history_repo.get_hourly_distribution.return_value = []
         service.history_repo.get_stats_by_category.return_value = []
@@ -366,6 +420,9 @@ class TestGetAnalytics:
             days=7, chat_settings_id="tenant-uuid-1"
         )
         service.history_repo.get_stats_by_method.assert_called_once_with(
+            days=7, chat_settings_id="tenant-uuid-1"
+        )
+        service.history_repo.get_stats_by_method_and_status.assert_called_once_with(
             days=7, chat_settings_id="tenant-uuid-1"
         )
         service.history_repo.get_daily_counts.assert_called_once_with(
