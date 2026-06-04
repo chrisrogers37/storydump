@@ -18,6 +18,7 @@ from src.services.core.loops.lifecycle import (
 from src.services.core.loops.scheduler_loop import run_scheduler_loop
 from src.services.core.loops.lock_cleanup_loop import cleanup_locks_loop
 from src.services.core.loops.cloud_cleanup_loop import cleanup_cloud_storage_loop
+from src.services.core.loops.queue_cleanup_loop import cleanup_queue_loop
 from src.services.core.loops.transaction_cleanup_loop import transaction_cleanup_loop
 from src.services.core.loops.media_sync_loop import media_sync_loop
 from src.utils.logger import logger
@@ -107,12 +108,14 @@ async def main_async():
     from src.services.core.telegram_service import TelegramService
     from src.services.core.media_lock import MediaLockService
     from src.services.core.media_sync import MediaSyncService
+    from src.repositories.queue_repository import QueueRepository
 
     scheduler_service = SchedulerService()
     posting_service = PostingService()
     telegram_service = TelegramService()
     lock_service = MediaLockService()
     settings_service = SettingsService()
+    queue_repo = QueueRepository()
 
     # Media sync runs unconditionally — the loop iterates per-chat and skips
     # chats with media_sync_enabled=False. No env gate.
@@ -150,6 +153,9 @@ async def main_async():
         ),
         asyncio.create_task(
             guarded("lock_cleanup", lambda: cleanup_locks_loop(lock_service), bot=bot)
+        ),
+        asyncio.create_task(
+            guarded("queue_cleanup", lambda: cleanup_queue_loop(queue_repo), bot=bot)
         ),
         asyncio.create_task(telegram_service.start_polling()),
     ]
