@@ -376,9 +376,12 @@ class TelegramService(BaseService):
         1. Dictionary lookup for standard (data, user, query) handlers
         2. Special-case method for handlers with non-standard signatures or sub-routing
         """
+        from src.utils.resilience import log_pool_status
+
         query = update.callback_query
         try:
             logger.info(f"📞 Callback received: {query.data}")
+            log_pool_status()
 
             try:
                 await query.answer()
