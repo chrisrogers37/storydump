@@ -242,6 +242,43 @@ class HistoryRepository(BaseRepository):
         self.end_read_transaction()
         return {method or "unknown": count for method, count in rows}
 
+    def get_stats_by_method_and_status(
+        self, days: int = 30, chat_settings_id: Optional[str] = None
+    ) -> dict:
+        """Count posts grouped by (posting_method, status).
+
+        The summary KPIs need to distinguish Instagram publish attempts
+        from Telegram delivery attempts so that, for example, a burst
+        of Telegram delivery failures doesn't drag the apparent
+        Instagram success rate to 1%. `get_stats_by_method` only counts
+        successful rows; this counts every row and pivots so the caller
+        can read e.g. ``result["instagram_api"]["posted"]`` directly.
+
+        Returns: ``{"instagram_api": {"posted": N, "failed": M, ...},
+                   "telegram_manual": {...}}``
+        """
+        since = datetime.now(timezone.utc) - timedelta(days=days)
+        rows = (
+            self._tenant_query(PostingHistory, chat_settings_id)
+            .with_entities(
+                PostingHistory.posting_method,
+                PostingHistory.status,
+                func.count(PostingHistory.id),
+            )
+            .filter(PostingHistory.posted_at >= since)
+            .group_by(PostingHistory.posting_method, PostingHistory.status)
+            .all()
+        )
+        self.end_read_transaction()
+
+        result: dict = {}
+        for method, status, count in rows:
+            method_key = method or "unknown"
+            if method_key not in result:
+                result[method_key] = {}
+            result[method_key][status] = count
+        return result
+
     def get_daily_counts(
         self, days: int = 30, chat_settings_id: Optional[str] = None
     ) -> list:
