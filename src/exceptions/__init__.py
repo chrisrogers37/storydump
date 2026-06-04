@@ -14,6 +14,7 @@ from src.exceptions.instagram import (
     TokenCorruptError,
     TokenRevokedError,
     MediaUploadError,
+    MediaUnsupportedError,
 )
 from src.exceptions.backfill import (
     BackfillError,
@@ -33,6 +34,7 @@ __all__ = [
     "TokenCorruptError",
     "TokenRevokedError",
     "MediaUploadError",
+    "MediaUnsupportedError",
     "BackfillError",
     "BackfillMediaExpiredError",
     "BackfillMediaNotFoundError",
