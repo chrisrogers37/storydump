@@ -18,6 +18,7 @@ interface DailyCount {
   posted: number;
   skipped: number;
   rejected: number;
+  failed?: number;
 }
 
 export function PostingChart({ data }: { data: DailyCount[] }) {
@@ -72,6 +73,13 @@ export function PostingChart({ data }: { data: DailyCount[] }) {
                 stackId="a"
                 fill="hsl(0, 84%, 60%)"
                 name="Rejected"
+                radius={[0, 0, 0, 0]}
+              />
+              <Bar
+                dataKey="failed"
+                stackId="a"
+                fill="hsl(0, 70%, 35%)"
+                name="Failed"
                 radius={[4, 4, 0, 0]}
               />
             </BarChart>
