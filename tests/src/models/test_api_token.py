@@ -37,6 +37,33 @@ class TestApiTokenModel:
     def test_instagram_account_id_nullable(self):
         assert ApiToken.instagram_account_id.nullable is True
 
+    def test_auth_method_column_exists_and_nullable(self):
+        # Added in credential refactor phase 4 (#468). Nullable during
+        # the dual-write window; backfilled by migration 039.
+        assert ApiToken.auth_method.nullable is True
+        assert ApiToken.auth_method.type.length == 50
+
+    def test_issuing_app_id_column_exists_and_nullable(self):
+        assert ApiToken.issuing_app_id.nullable is True
+        assert ApiToken.issuing_app_id.type.length == 100
+
+    def test_unique_constraint_includes_auth_method(self):
+        # The UNIQUE tuple expanded to include auth_method so an
+        # account can hold both an instagram_login token and an
+        # fb_login token simultaneously (#380 acceptance criteria).
+        from sqlalchemy import UniqueConstraint
+
+        uniques = [
+            c for c in ApiToken.__table_args__ if isinstance(c, UniqueConstraint)
+        ]
+        assert len(uniques) == 1
+        cols = [c.name for c in uniques[0].columns]
+        assert "auth_method" in cols
+        assert "instagram_account_id" in cols
+        assert "service_name" in cols
+        assert "token_type" in cols
+        assert uniques[0].name == "unique_credential_per_account"
+
     def test_repr_with_expiry(self):
         token = ApiToken(
             service_name="instagram",

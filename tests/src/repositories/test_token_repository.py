@@ -144,6 +144,72 @@ class TestTokenRepository:
         assert existing_token.token_value == "new_encrypted"
         mock_db.commit.assert_called()
 
+    def test_create_or_update_persists_auth_method_and_issuing_app_id(
+        self, token_repo, mock_db
+    ):
+        """New tokens carry auth_method + issuing_app_id (#468)."""
+        mock_db.query.return_value.filter.return_value.filter.return_value.first.return_value = None
+
+        token_repo.create_or_update(
+            service_name="instagram",
+            token_type="access_token",
+            token_value="encrypted",
+            issued_at=datetime.utcnow(),
+            instagram_account_id="acct-uuid",
+            meta_account_id="26060527550287223",
+            auth_method="instagram_login",
+            issuing_app_id="ig_app_456",
+        )
+
+        added = mock_db.add.call_args[0][0]
+        assert added.auth_method == "instagram_login"
+        assert added.issuing_app_id == "ig_app_456"
+
+    def test_create_or_update_updates_auth_method_when_provided(
+        self, token_repo, mock_db
+    ):
+        """Existing tokens get auth_method/issuing_app_id updated on
+        re-issue but preserved when the caller omits them (matches the
+        meta_account_id pattern — refresh paths don't need to know)."""
+        existing = Mock(spec=ApiToken)
+        existing.token_value = "old"
+        existing.auth_method = "fb_login"
+        existing.issuing_app_id = "old_app"
+        mock_db.query.return_value.filter.return_value.filter.return_value.first.return_value = existing
+
+        token_repo.create_or_update(
+            service_name="instagram",
+            token_type="access_token",
+            token_value="new",
+            auth_method="instagram_login",
+            issuing_app_id="new_app",
+        )
+
+        assert existing.auth_method == "instagram_login"
+        assert existing.issuing_app_id == "new_app"
+
+    def test_create_or_update_preserves_auth_method_when_omitted(
+        self, token_repo, mock_db
+    ):
+        """Refresh path doesn't pass auth_method/issuing_app_id; the
+        existing row's values must be preserved rather than nulled."""
+        existing = Mock(spec=ApiToken)
+        existing.token_value = "old"
+        existing.auth_method = "instagram_login"
+        existing.issuing_app_id = "ig_app_456"
+        mock_db.query.return_value.filter.return_value.filter.return_value.first.return_value = existing
+
+        token_repo.create_or_update(
+            service_name="instagram",
+            token_type="access_token",
+            token_value="new",
+        )
+
+        # Existing fields untouched — only the auth-related fields
+        # need to be guarded against accidental nulling.
+        assert existing.auth_method == "instagram_login"
+        assert existing.issuing_app_id == "ig_app_456"
+
     def test_update_last_refreshed(self, token_repo, mock_db):
         """Test updating last_refreshed_at timestamp."""
         mock_token = Mock(spec=ApiToken)
