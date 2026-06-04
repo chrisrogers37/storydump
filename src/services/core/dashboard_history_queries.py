@@ -57,6 +57,9 @@ class HistoryDashboardQueries:
             method_counts = self.service.history_repo.get_stats_by_method(
                 days=days, chat_settings_id=chat_settings_id
             )
+            method_status = self.service.history_repo.get_stats_by_method_and_status(
+                days=days, chat_settings_id=chat_settings_id
+            )
             daily_counts = self.service.history_repo.get_daily_counts(
                 days=days, chat_settings_id=chat_settings_id
             )
@@ -70,6 +73,17 @@ class HistoryDashboardQueries:
             total = sum(status_counts.values())
             posted = status_counts.get("posted", 0)
 
+            # Method-split fields keep Instagram publish health distinct
+            # from Telegram delivery health. Lumping them together (e.g.
+            # the legacy "success_rate" field) made a 958-row Telegram
+            # delivery burst in 2026-05 look like a 1% IG success rate —
+            # see the 2026-05 burst postmortem (#467) for context.
+            ig = method_status.get("instagram_api", {})
+            tg = method_status.get("telegram_manual", {})
+            ig_posted = ig.get("posted", 0)
+            ig_failed = ig.get("failed", 0)
+            ig_attempts = ig_posted + ig_failed
+
             result = {
                 "summary": {
                     "total_posts": total,
@@ -79,8 +93,18 @@ class HistoryDashboardQueries:
                     "failed": status_counts.get("failed", 0),
                     "success_rate": round(posted / total, 2) if total else 0,
                     "avg_per_day": round(total / days, 1),
+                    # Method-split — preferred for new UI; legacy fields
+                    # above kept for backward compatibility.
+                    "ig_posted": ig_posted,
+                    "ig_failed": ig_failed,
+                    "ig_success_rate": (
+                        round(ig_posted / ig_attempts, 2) if ig_attempts else 0
+                    ),
+                    "telegram_skipped": tg.get("skipped", 0),
+                    "telegram_failed": tg.get("failed", 0),
                 },
                 "method_breakdown": method_counts,
+                "method_status_breakdown": method_status,
                 "daily_counts": daily_counts,
                 "hourly_distribution": hourly_dist,
                 "category_breakdown": category_stats,
