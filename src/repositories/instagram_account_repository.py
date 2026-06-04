@@ -116,9 +116,16 @@ class InstagramAccountRepository(BaseRepository):
         display_name: str,
         instagram_account_id: str,
         instagram_username: Optional[str] = None,
-        auth_method: Optional[str] = None,
+        auth_method: Optional[str] = None,  # noqa: ARG002 — kept for back-compat
     ) -> InstagramAccount:
-        """Create a new Instagram account record."""
+        """Create a new Instagram account record.
+
+        ``auth_method`` parameter is accepted for back-compat with
+        callers that haven't been updated to drop it but is ignored —
+        provenance now lives on ``api_tokens.auth_method`` and is
+        written via ``TokenRepository.create_or_update``. Migration
+        041 dropped the legacy column.
+        """
         # Strip @ if present in username
         if instagram_username:
             instagram_username = instagram_username.lstrip("@")
@@ -127,7 +134,6 @@ class InstagramAccountRepository(BaseRepository):
             display_name=display_name,
             instagram_account_id=instagram_account_id,
             instagram_username=instagram_username,
-            auth_method=auth_method,
         )
         self.db.add(account)
         self.db.commit()
