@@ -101,6 +101,17 @@ class TelegramAutopostHandler:
             await query.answer("⏳ Already processing...", show_alert=False)
             return
 
+        # Acknowledge the click IMMEDIATELY so the button stops spinning.
+        # Telegram requires answer_callback_query within ~30s of the click,
+        # but the Cloudinary upload + Meta publish below can take longer
+        # than that. Without this early answer the user sees a stale
+        # spinner and the bot logs "Could not answer callback query (may
+        # be stale)". The dupe-click branch above has its own answer.
+        try:
+            await query.answer("⏳ Posting…", show_alert=False)
+        except Exception as e:  # noqa: BLE001 — best-effort ack
+            logger.debug(f"Could not pre-answer autopost callback {queue_id}: {e}")
+
         cancel_flag = self.service.get_cancel_flag(queue_id)
         cancel_flag.clear()
 

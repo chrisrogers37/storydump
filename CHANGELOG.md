@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Telegram "Auto Post" button no longer spins after timeout** — `handle_autopost` did not call `query.answer()` until the full Cloudinary upload + Meta publish completed (often >30s), past Telegram's callback-answer deadline. Result: the button's loading spinner ran indefinitely, the bot logged `Could not answer callback query (may be stale)`, and the user couldn't tell if their click registered. Now answers immediately with `⏳ Posting…` after the cheap lock-held check (which keeps its specific `⏳ Already processing…` message for duplicate clicks).
+
 ### Removed
 
 - **`instagram_accounts.auth_method` legacy column dropped (#468 PR 5)** — Final sub-PR of the credential refactor. After PR 4 the application reads provenance off `api_tokens.auth_method` exclusively; PRs 2-4 made the account-side column write-only, and this PR removes both the writes (in `instagram_account_service.update_account_token` and `instagram_account_repository.create`) and the column itself (migration 041). `instagram_accounts` is one step closer to pure-identity. The `instagram_accounts.instagram_account_id` legacy column remains — its consumers (backfill, OAuth heal logic, credential lookup) need a separate refactor to read from `api_tokens.meta_account_id` instead, filed as a follow-up.

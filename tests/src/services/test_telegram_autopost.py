@@ -341,6 +341,37 @@ class TestAutopostEarlyFeedback:
         # Keyboard should be removed before claim_for_processing
         mock_query.edit_message_reply_markup.assert_called_once()
 
+    async def test_autopost_answers_callback_before_slow_work(
+        self, mock_autopost_handler
+    ):
+        """handle_autopost calls query.answer('Posting…') BEFORE any slow I/O.
+
+        Telegram requires answer_callback_query within ~30s of the click,
+        but Cloudinary upload + Meta publish can exceed that. Without an
+        early ack the spinner runs indefinitely and the bot logs
+        'Could not answer callback query (may be stale)'.
+        """
+        handler = mock_autopost_handler
+        service = handler.service
+        queue_id = str(uuid4())
+
+        # claim returns None so no background task is spawned (fast path)
+        service.queue_repo.claim_for_processing.return_value = None
+        service.queue_repo.get_by_id.return_value = None
+        service.history_repo.get_by_queue_item_id.return_value = None
+
+        mock_user = Mock()
+        mock_query = AsyncMock()
+
+        await handler.handle_autopost(queue_id, mock_user, mock_query)
+
+        # Early-answer must have fired with the "Posting…" text
+        mock_query.answer.assert_called_once()
+        answer_call = mock_query.answer.call_args
+        assert "Posting" in str(answer_call), (
+            f"Expected 'Posting' in answer call, got: {answer_call}"
+        )
+
 
 @pytest.mark.unit
 @pytest.mark.asyncio
