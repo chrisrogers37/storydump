@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Pool monitoring on callback path** — `log_pool_status()` now fires on every inline button callback in `_handle_callback`, surfacing connection pool utilization (checked-out, overflow, utilization %) in real-time logs. Aids diagnosis of callback latency spikes correlated with pool exhaustion or Neon cold starts.
 - **`api_tokens.auth_method` + `api_tokens.issuing_app_id` columns (#468)** — Credential refactor phase 4. The OAuth-flow discriminator (`instagram_login` / `fb_login` / `manual`) and the issuing Meta App ID move onto the credential row itself so the token becomes self-describing. Today posting code has to JOIN `instagram_accounts` to discover provenance; after the read-switch sub-PR that follows, it'll read directly off the token. Three migrations: 038 adds the columns + partial index, 039 backfills `auth_method` from `instagram_accounts.auth_method` (default `instagram_login` for any unset row), 040 expands the UNIQUE constraint to include `auth_method` so an account can hold both an `instagram_login` token AND an `fb_login` token simultaneously (#380 acceptance criteria). `TokenRepository.create_or_update()` accepts both new kwargs with sensible "preserve existing on omit" semantics so the refresh path doesn't accidentally null them.
 
 ### Fixed
