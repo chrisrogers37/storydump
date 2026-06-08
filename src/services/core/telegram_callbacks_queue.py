@@ -85,7 +85,21 @@ class TelegramCallbackQueueHandlers:
             media_item = self.core._execute_complete_db_ops(
                 queue_id, queue_item, user, status, success
             )
-        except OperationalError as e:
+        except Exception as exc:
+            from src.services.core.telegram_callbacks_core import DailyCapReachedError
+
+            if isinstance(exc, DailyCapReachedError):
+                # Restore queue item to pending so it can be retried tomorrow
+                self.service.queue_repo.update_status(queue_id, "pending")
+                await telegram_edit_with_retry(
+                    query.edit_message_caption,
+                    caption="⚠️ Daily posting limit reached. Try again tomorrow.",
+                )
+                return
+            if not isinstance(exc, OperationalError):
+                raise
+            e = exc
+
             logger.warning(
                 f"OperationalError during {callback_name} for queue {queue_id[:8]}, "
                 f"refreshing sessions and retrying: {e}"

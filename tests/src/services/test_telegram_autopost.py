@@ -108,6 +108,8 @@ class TestAutopostSafetyGates:
 
         mock_chat_settings = Mock()
         mock_chat_settings.dry_run_mode = False
+        mock_chat_settings.posts_per_day = 99
+        mock_chat_settings.posting_timezone = None
         service.settings_service.get_settings.return_value = mock_chat_settings
 
         with (
@@ -171,6 +173,8 @@ class TestAutopostDryRun:
 
         mock_chat_settings = Mock()
         mock_chat_settings.dry_run_mode = True
+        mock_chat_settings.posts_per_day = 99
+        mock_chat_settings.posting_timezone = None
         service.settings_service.get_settings.return_value = mock_chat_settings
 
         mock_user = Mock()
@@ -268,6 +272,8 @@ class TestAutopostErrorRecovery:
 
         mock_chat_settings = Mock()
         mock_chat_settings.dry_run_mode = False
+        mock_chat_settings.posts_per_day = 99
+        mock_chat_settings.posting_timezone = None
         service.settings_service.get_settings.return_value = mock_chat_settings
 
         mock_user = Mock()
@@ -544,7 +550,9 @@ def make_autopost_ctx():
             query = AsyncMock()
             query.message = Mock(chat_id=chat_id, message_id=1)
         if chat_settings is None:
-            chat_settings = Mock(dry_run_mode=False)
+            chat_settings = Mock(
+                dry_run_mode=False, posts_per_day=99, posting_timezone=None
+            )
         if cloud_service is None:
             cloud_service = Mock()
         if instagram_service is None:
@@ -1119,7 +1127,7 @@ class TestCloudinaryCleanupIntegration:
         """Test cleanup is called between record and success message."""
         handler = mock_autopost_handler
         handler.service.settings_service.get_settings.return_value = Mock(
-            dry_run_mode=False
+            dry_run_mode=False, posts_per_day=99, posting_timezone=None
         )
         handler.service._is_verbose = Mock(return_value=False)
         handler.service._get_display_name = Mock(return_value="@tester")
@@ -1248,7 +1256,7 @@ class TestCloudinaryCleanupIntegration:
         """Test that Cloudinary cleanup failure doesn't prevent success message."""
         handler = mock_autopost_handler
         handler.service.settings_service.get_settings.return_value = Mock(
-            dry_run_mode=False
+            dry_run_mode=False, posts_per_day=99, posting_timezone=None
         )
         handler.service._is_verbose = Mock(return_value=False)
         handler.service._get_display_name = Mock(return_value="@tester")

@@ -176,7 +176,9 @@ class TestResumeCallbacks:
         mock_user.telegram_username = "testuser"
 
         # Mock is_paused via settings_service — paused
-        mock_chat_settings = Mock(is_paused=True)
+        mock_chat_settings = Mock(
+            is_paused=True, posts_per_day=99, posting_timezone=None
+        )
         service.settings_service.get_settings.return_value = mock_chat_settings
         service.set_paused = Mock(
             side_effect=lambda paused, user=None: setattr(
@@ -217,7 +219,9 @@ class TestResumeCallbacks:
         mock_user.telegram_username = "testuser"
 
         # Mock is_paused via settings_service — paused
-        mock_chat_settings = Mock(is_paused=True)
+        mock_chat_settings = Mock(
+            is_paused=True, posts_per_day=99, posting_timezone=None
+        )
         service.settings_service.get_settings.return_value = mock_chat_settings
         service.set_paused = Mock(
             side_effect=lambda paused, user=None: setattr(
@@ -262,7 +266,9 @@ class TestResumeCallbacks:
         mock_user.telegram_username = "testuser"
 
         # Mock is_paused via settings_service — paused
-        mock_chat_settings = Mock(is_paused=True)
+        mock_chat_settings = Mock(
+            is_paused=True, posts_per_day=99, posting_timezone=None
+        )
         service.settings_service.get_settings.return_value = mock_chat_settings
         service.set_paused = Mock(
             side_effect=lambda paused, user=None: setattr(
@@ -373,6 +379,8 @@ class TestVerbosePostedSkipped:
         # Verbose ON
         mock_settings = Mock()
         mock_settings.show_verbose_notifications = True
+        mock_settings.posts_per_day = 99
+        mock_settings.posting_timezone = None
         service.settings_service.get_settings.return_value = mock_settings
 
         mock_user = Mock()
@@ -412,6 +420,8 @@ class TestVerbosePostedSkipped:
         # Verbose OFF
         mock_settings = Mock()
         mock_settings.show_verbose_notifications = False
+        mock_settings.posts_per_day = 99
+        mock_settings.posting_timezone = None
         service.settings_service.get_settings.return_value = mock_settings
 
         mock_user = Mock()
@@ -490,6 +500,8 @@ class TestVerboseRejected:
         # Verbose ON
         mock_settings = Mock()
         mock_settings.show_verbose_notifications = True
+        mock_settings.posts_per_day = 99
+        mock_settings.posting_timezone = None
         service.settings_service.get_settings.return_value = mock_settings
 
         mock_user = Mock()
@@ -530,6 +542,8 @@ class TestVerboseRejected:
         # Verbose OFF
         mock_settings = Mock()
         mock_settings.show_verbose_notifications = False
+        mock_settings.posts_per_day = 99
+        mock_settings.posting_timezone = None
         service.settings_service.get_settings.return_value = mock_settings
 
         mock_user = Mock()
@@ -779,6 +793,8 @@ class TestEarlyProcessingFeedback:
 
         mock_settings = Mock()
         mock_settings.show_verbose_notifications = False
+        mock_settings.posts_per_day = 99
+        mock_settings.posting_timezone = None
         service.settings_service.get_settings.return_value = mock_settings
 
         mock_user = Mock()
@@ -830,6 +846,8 @@ class TestRaceConditionHandling:
 
         mock_settings = Mock()
         mock_settings.show_verbose_notifications = True
+        mock_settings.posts_per_day = 99
+        mock_settings.posting_timezone = None
         service.settings_service.get_settings.return_value = mock_settings
 
         mock_user = Mock()
@@ -878,6 +896,8 @@ class TestRaceConditionHandling:
 
         mock_settings = Mock()
         mock_settings.show_verbose_notifications = True
+        mock_settings.posts_per_day = 99
+        mock_settings.posting_timezone = None
         service.settings_service.get_settings.return_value = mock_settings
 
         # Try to execute while lock is held
@@ -927,6 +947,8 @@ class TestRaceConditionHandling:
 
         mock_settings = Mock()
         mock_settings.show_verbose_notifications = True
+        mock_settings.posts_per_day = 99
+        mock_settings.posting_timezone = None
         service.settings_service.get_settings.return_value = mock_settings
 
         await handlers.handle_posted(queue_id, mock_user, mock_query)
@@ -953,6 +975,8 @@ class TestRaceConditionHandling:
 
         mock_settings = Mock()
         mock_settings.show_verbose_notifications = True
+        mock_settings.posts_per_day = 99
+        mock_settings.posting_timezone = None
         service.settings_service.get_settings.return_value = mock_settings
 
         mock_user = Mock()
@@ -1034,6 +1058,8 @@ class TestRaceConditionHandling:
 
         mock_settings = Mock()
         mock_settings.show_verbose_notifications = True
+        mock_settings.posts_per_day = 99
+        mock_settings.posting_timezone = None
         service.settings_service.get_settings.return_value = mock_settings
 
         mock_user = Mock()
@@ -1243,6 +1269,8 @@ class TestSSLRetry:
 
         mock_settings = Mock()
         mock_settings.show_verbose_notifications = False
+        mock_settings.posts_per_day = 99
+        mock_settings.posting_timezone = None
         service.settings_service.get_settings.return_value = mock_settings
 
         mock_user = Mock()
