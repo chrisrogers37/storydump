@@ -96,10 +96,17 @@ def mock_telegram_service():
         service.queue_repo = mock_queue_repo_class.return_value
         service.media_repo = mock_media_repo_class.return_value
         service.history_repo = mock_history_repo_class.return_value
+        service.history_repo.count_posts_today.return_value = 0
         service.lock_repo = mock_lock_repo_class.return_value
         service.lock_service = mock_lock_service_class.return_value
         service.interaction_service = mock_interaction_service_class.return_value
         service.settings_service = mock_settings_service_class.return_value
+        # Default chat_settings for daily cap guard — tests can override
+        _default_cs = Mock()
+        _default_cs.id = "default-cs-id"
+        _default_cs.posts_per_day = 99
+        _default_cs.posting_timezone = None
+        service.settings_service.get_settings.return_value = _default_cs
         service.ig_account_service = mock_ig_account_service_class.return_value
         service.ig_account_service.count_active_accounts.return_value = 1
         service.membership_repo = mock_membership_repo_class.return_value

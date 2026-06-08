@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Daily posting cap enforced across all 5 posting paths** — `posts_per_day` was only used for interval spacing, not as a hard daily limit. DB evidence showed accounts posting 2x their configured cap. Added a shared `can_post_today()` guard (backed by `HistoryRepository.count_posts_today()` with timezone-aware day boundaries) and wired it into the scheduler, autopost, manual posted callback, `/next` command, and auto-approve paths. Catchup bursts are also capped. On cap hit the queue item stays pending so it retries the next day.
+
 - **Telegram "Auto Post" button no longer spins after timeout** — `handle_autopost` did not call `query.answer()` until the full Cloudinary upload + Meta publish completed (often >30s), past Telegram's callback-answer deadline. Result: the button's loading spinner ran indefinitely, the bot logged `Could not answer callback query (may be stale)`, and the user couldn't tell if their click registered. Now answers immediately with `⏳ Posting…` after the cheap lock-held check (which keeps its specific `⏳ Already processing…` message for duplicate clicks).
 
 ### Removed
