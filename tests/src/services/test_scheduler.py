@@ -19,6 +19,7 @@ def scheduler_service_mocked():
         service.media_repo = Mock()
         service.queue_repo = Mock()
         service.history_repo = Mock()
+        service.history_repo.count_posts_today.return_value = 0
         service.lock_repo = Mock()
         service.category_mix_repo = Mock()
         service.settings_service = Mock()
@@ -937,6 +938,7 @@ class TestAutoApproval:
             service.media_repo = Mock()
             service.queue_repo = Mock()
             service.history_repo = Mock()
+            service.history_repo.count_posts_today.return_value = 0
             service.lock_repo = Mock()
             service.category_mix_repo = Mock()
             service.settings_service = Mock()
@@ -1051,6 +1053,7 @@ class TestAutoApproveInstagram:
             service.media_repo = Mock()
             service.queue_repo = Mock()
             service.history_repo = Mock()
+            service.history_repo.count_posts_today.return_value = 0
             service.lock_repo = Mock()
             service.category_mix_repo = Mock()
             service.settings_service = Mock()
@@ -1445,6 +1448,7 @@ class TestCatchupAfterRestart:
         """Auto-approved posts during catchup use the override timestamp."""
         service = scheduler_service_mocked
         service.history_repo = Mock()
+        service.history_repo.count_posts_today.return_value = 0
         override_time = datetime(2026, 3, 21, 13, 0, tzinfo=timezone.utc)
 
         media = Mock(

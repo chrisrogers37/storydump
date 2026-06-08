@@ -20,6 +20,7 @@ def mock_service():
     service.history_repo = Mock()
     service.history_repo.db = MagicMock()
     service.history_repo._db = MagicMock()
+    service.history_repo.count_posts_today.return_value = 0
     service.media_repo = Mock()
     service.media_repo._db = MagicMock()
     service.queue_repo = Mock()
@@ -29,6 +30,12 @@ def mock_service():
     service.lock_service = Mock()
     service.lock_service.lock_repo = Mock()
     service.lock_service.lock_repo._db = MagicMock()
+
+    # Settings service — default chat_settings for daily cap guard
+    _default_cs = Mock()
+    _default_cs.posts_per_day = 99
+    _default_cs.posting_timezone = None
+    service.settings_service.get_settings.return_value = _default_cs
 
     # Operation lock (real asyncio.Lock by default)
     service.get_operation_lock.return_value = asyncio.Lock()
