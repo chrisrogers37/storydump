@@ -1369,11 +1369,11 @@ class TestGetUserFriendlyError:
 class TestAutopostDailyCap:
     """Daily-cap handling on the autopost path must not orphan queue rows.
 
-    Every other posting path either gates the cap before claiming the row
-    (the scheduler gates before select/claim) or restores a claimed row to
-    'pending' on cap-hit (the manual Posted/Skip/Reject handler). The autopost
-    path must do the same, so a capped tap never leaves the row stranded in
-    'processing'.
+    The autopost path claims the card into 'processing' before running the cap
+    guard in _do_autopost (a spawned task). On a cap-hit it must release the
+    row back to 'pending' — mirroring the manual Posted/Skip/Reject handler
+    (telegram_callbacks_queue) — so a capped tap never leaves the row stranded
+    in 'processing'.
     """
 
     @staticmethod
@@ -1402,28 +1402,6 @@ class TestAutopostDailyCap:
         # Belt-and-suspenders restore — mirrors the manual queue-action handler.
         service.queue_repo.update_status.assert_called_once_with(queue_id, "pending")
         # Cap semantics intact: the user is still told the limit was reached.
-        query.edit_message_caption.assert_called_once()
-        assert "limit" in str(query.edit_message_caption.call_args).lower()
-
-    async def test_handle_autopost_cap_hit_does_not_claim_row(
-        self, mock_autopost_handler
-    ):
-        """When the cap is already reached, handle_autopost gates before the
-        atomic claim — the row is never moved into 'processing'."""
-        handler = mock_autopost_handler
-        service = handler.service
-        service.history_repo.count_posts_today.return_value = 99
-        # Guard: if the gate fails to fire, the post-claim media lookup returns
-        # None and bails out before spawning any background work.
-        service.media_repo.get_by_id.return_value = None
-        query = self._make_query()
-        queue_id = str(uuid4())
-
-        await handler.handle_autopost(queue_id, Mock(id="u-1"), query)
-        await _await_background_tasks(handler)
-
-        # Gate fired before the claim — nothing entered 'processing'.
-        service.queue_repo.claim_for_processing.assert_not_called()
         query.edit_message_caption.assert_called_once()
         assert "limit" in str(query.edit_message_caption.call_args).lower()
 
