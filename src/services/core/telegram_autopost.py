@@ -128,6 +128,22 @@ class TelegramAutopostHandler:
                     f"Could not remove keyboard for autopost item {queue_id}: {e}"
                 )
 
+            # Daily cap gate — check before the atomic claim so a capped tap
+            # never moves the row into 'processing' (the scheduler likewise
+            # gates the cap before selecting and claiming).
+            from src.services.core.daily_cap import can_post_today
+
+            chat_settings = self.service.settings_service.get_settings(
+                query.message.chat_id, create_if_missing=False
+            )
+            if chat_settings and not can_post_today(
+                chat_settings, self.service.history_repo
+            ):
+                await query.edit_message_caption(
+                    caption="⚠️ Daily posting limit reached. Try again tomorrow."
+                )
+                return
+
             # Atomic claim: prevents duplicate auto-posts from rapid double-taps
             queue_item = self.service.queue_repo.claim_for_processing(queue_id)
             if not queue_item:
@@ -226,6 +242,10 @@ class TelegramAutopostHandler:
         from src.services.core.daily_cap import can_post_today
 
         if not can_post_today(chat_settings, self.service.history_repo):
+            # The row was claimed into 'processing' upstream; release it back
+            # to 'pending' so it isn't left orphaned for the stale-processing
+            # sweeper (mirrors the manual queue-action cap-hit handling).
+            self.service.queue_repo.update_status(queue_id, "pending")
             await query.edit_message_caption(
                 caption="⚠️ Daily posting limit reached. Try again tomorrow.",
             )

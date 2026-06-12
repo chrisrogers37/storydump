@@ -1362,3 +1362,90 @@ class TestGetUserFriendlyError:
 
         assert "disconnected" in msg.lower()
         assert "reconnect" in msg.lower()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestAutopostDailyCap:
+    """Daily-cap handling on the autopost path must not orphan queue rows.
+
+    Every other posting path either gates the cap before claiming the row
+    (the scheduler gates before select/claim) or restores a claimed row to
+    'pending' on cap-hit (the manual Posted/Skip/Reject handler). The autopost
+    path must do the same, so a capped tap never leaves the row stranded in
+    'processing'.
+    """
+
+    @staticmethod
+    def _make_query(chat_id=-100123):
+        query = AsyncMock()
+        query.message = Mock()
+        query.message.chat_id = chat_id
+        return query
+
+    async def test_do_autopost_cap_hit_restores_row_to_pending(
+        self, mock_autopost_handler
+    ):
+        """On a daily-cap hit, _do_autopost releases the claimed row back to
+        'pending' instead of leaving it orphaned in 'processing'."""
+        handler = mock_autopost_handler
+        service = handler.service
+        # Default chat_settings allows 99/day; push today's count to the cap.
+        service.history_repo.count_posts_today.return_value = 99
+        query = self._make_query()
+        queue_id = str(uuid4())
+
+        await handler._do_autopost(
+            queue_id, Mock(), Mock(), Mock(), query, Mock(), Mock()
+        )
+
+        # Belt-and-suspenders restore — mirrors the manual queue-action handler.
+        service.queue_repo.update_status.assert_called_once_with(queue_id, "pending")
+        # Cap semantics intact: the user is still told the limit was reached.
+        query.edit_message_caption.assert_called_once()
+        assert "limit" in str(query.edit_message_caption.call_args).lower()
+
+    async def test_handle_autopost_cap_hit_does_not_claim_row(
+        self, mock_autopost_handler
+    ):
+        """When the cap is already reached, handle_autopost gates before the
+        atomic claim — the row is never moved into 'processing'."""
+        handler = mock_autopost_handler
+        service = handler.service
+        service.history_repo.count_posts_today.return_value = 99
+        # Guard: if the gate fails to fire, the post-claim media lookup returns
+        # None and bails out before spawning any background work.
+        service.media_repo.get_by_id.return_value = None
+        query = self._make_query()
+        queue_id = str(uuid4())
+
+        await handler.handle_autopost(queue_id, Mock(id="u-1"), query)
+        await _await_background_tasks(handler)
+
+        # Gate fired before the claim — nothing entered 'processing'.
+        service.queue_repo.claim_for_processing.assert_not_called()
+        query.edit_message_caption.assert_called_once()
+        assert "limit" in str(query.edit_message_caption.call_args).lower()
+
+    async def test_do_autopost_under_cap_does_not_restore(self, mock_autopost_handler):
+        """Under the cap, _do_autopost proceeds past the cap check and never
+        touches status — the restore path is strictly cap-gated."""
+        handler = mock_autopost_handler
+        service = handler.service
+        service.history_repo.count_posts_today.return_value = 0  # well under cap
+        # Fail the next safety gate so the method returns right after the cap
+        # check without reaching the real posting flow.
+        instagram_service = Mock()
+        instagram_service.safety_check_before_post.return_value = {
+            "safe_to_post": False,
+            "errors": ["blocked for test"],
+        }
+        query = self._make_query()
+        queue_id = str(uuid4())
+
+        await handler._do_autopost(
+            queue_id, Mock(), Mock(), Mock(), query, instagram_service, Mock()
+        )
+
+        # Not capped → no restore-to-pending churn.
+        service.queue_repo.update_status.assert_not_called()
