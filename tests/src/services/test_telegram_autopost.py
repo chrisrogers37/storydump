@@ -1023,6 +1023,59 @@ class TestHandleAutopostError:
         assert "Instagram rejected" in call_kwargs["caption"]
         assert "Media too large" in call_kwargs["caption"]
 
+    async def test_media_unsupported_creates_permanent_reject_lock(
+        self, mock_autopost_handler, make_autopost_ctx
+    ):
+        """MediaUnsupportedError (Meta 9004) creates a permanent_reject
+        lock on the underlying media_item so the same file doesn't keep
+        cycling through retries on every scheduler tick."""
+        from src.exceptions.instagram import MediaUnsupportedError
+
+        handler = mock_autopost_handler
+        ctx = make_autopost_ctx()
+
+        await handler._handle_autopost_error(
+            ctx,
+            MediaUnsupportedError(
+                "Only photo or video can be accepted as media type.",
+                error_code="9004",
+            ),
+        )
+
+        # Permanent_reject lock created on the media_item
+        handler.service.lock_service.create_lock.assert_called_once()
+        lock_kwargs = handler.service.lock_service.create_lock.call_args.kwargs
+        assert lock_kwargs["lock_reason"] == "permanent_reject"
+        assert lock_kwargs["ttl_days"] is None  # permanent
+        assert lock_kwargs["telegram_chat_id"] == ctx.chat_id
+        # First positional arg is the media_item.id
+        positional = handler.service.lock_service.create_lock.call_args.args
+        assert positional[0] == str(ctx.media_item.id)
+
+        # User-facing message mentions the permanent rejection
+        caption = ctx.query.edit_message_caption.call_args.kwargs["caption"]
+        assert "9004" in caption
+        assert "permanently rejected" in caption.lower()
+
+    async def test_media_unsupported_lock_failure_does_not_mask_error(
+        self, mock_autopost_handler, make_autopost_ctx
+    ):
+        """If the permanent_reject lock creation itself fails, the user
+        still gets the original 9004 error message (best-effort lock
+        must not swallow the underlying failure)."""
+        from src.exceptions.instagram import MediaUnsupportedError
+
+        handler = mock_autopost_handler
+        ctx = make_autopost_ctx()
+        handler.service.lock_service.create_lock.side_effect = RuntimeError("DB down")
+
+        await handler._handle_autopost_error(
+            ctx, MediaUnsupportedError("Only photo or video", error_code="9004")
+        )
+
+        caption = ctx.query.edit_message_caption.call_args.kwargs["caption"]
+        assert "9004" in caption
+
     async def test_logs_failure_interaction(
         self, mock_autopost_handler, make_autopost_ctx
     ):

@@ -18,6 +18,7 @@ from src.utils.encryption import TokenEncryption
 from src.config.settings import settings
 from src.exceptions import (
     InstagramAPIError,
+    MediaUnsupportedError,
     RateLimitError,
     TokenCorruptError,
     TokenExpiredError,
@@ -380,6 +381,19 @@ class InstagramAPIService(BaseService):
             raise TokenExpiredError(
                 f"OAuth error: {error_message}",
                 error_code=str(error_code),
+            )
+
+        # Media format errors — Meta couldn't parse the file we served
+        # from Cloudinary. Caused by HEIC-as-JPG, GIFs (not allowed for
+        # Stories), or a transformation failure that returned non-image
+        # bytes. Distinct from token errors: a retry won't help; the
+        # autopost handler creates a permanent_reject lock for the
+        # underlying media_item so we don't keep cycling on it.
+        if error_code == 9004:
+            raise MediaUnsupportedError(
+                error_message,
+                error_code=str(error_code),
+                error_subcode=error_subcode,
             )
 
         # General API error

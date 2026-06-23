@@ -11,6 +11,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from src.exceptions.instagram import (
     InstagramAPIError,
+    MediaUnsupportedError,
     MediaUploadError,
     RateLimitError,
     TokenCorruptError,
@@ -584,8 +585,35 @@ class TelegramAutopostHandler:
             )
 
     async def _handle_autopost_error(self, ctx: AutopostContext, e: Exception) -> None:
-        """Handle auto-post failure: show error message with recovery options."""
+        """Handle auto-post failure: show error message with recovery options.
+
+        For ``MediaUnsupportedError`` (Meta code 9004) we ALSO create a
+        permanent_reject lock on the underlying media_item. The error is
+        deterministic per-file (HEIC content, GIF, etc.), so without the
+        lock the scheduler would keep re-serving the same item and
+        burning through the same failure on every cycle.
+        """
         logger.error(f"Auto-post failed: {e}", exc_info=True)
+
+        if isinstance(e, MediaUnsupportedError):
+            try:
+                self.service.lock_service.create_lock(
+                    str(ctx.media_item.id),
+                    telegram_chat_id=ctx.chat_id,
+                    lock_reason="permanent_reject",
+                    ttl_days=None,  # NULL = permanent (per CLAUDE.md lock model)
+                )
+                logger.warning(
+                    f"Permanent-rejected media {ctx.media_item.file_name} "
+                    f"after Meta 9004: {e}"
+                )
+            except Exception as lock_err:  # noqa: BLE001
+                # Best-effort — don't let the lock failure mask the
+                # original error from the user.
+                logger.error(
+                    f"Failed to create permanent_reject lock for "
+                    f"media {ctx.media_item.id}: {lock_err}"
+                )
 
         user_msg = self._get_user_friendly_error(e)
         caption = (
@@ -624,6 +652,12 @@ class TelegramAutopostHandler:
         """Map internal exceptions to user-friendly error messages."""
         if isinstance(e, MediaUploadError):
             return "Failed to prepare media for Instagram. This is a server issue — please contact the admin."
+        if isinstance(e, MediaUnsupportedError):
+            return (
+                "Instagram couldn't process this file (Meta error 9004). "
+                "It may be a HEIC photo or an unsupported format. This media "
+                "has been permanently rejected and won't be scheduled again."
+            )
         if isinstance(e, RateLimitError):
             return "Instagram rate limit reached. Please try again later."
         if isinstance(e, TokenRevokedError):
