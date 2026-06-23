@@ -16,6 +16,10 @@ from src.utils.logger import logger
 
 CLOUD_UPLOAD_FOLDER = "instagram_stories"
 
+# Maximum number of resources Cloudinary returns per api.resources() page.
+# 500 is the API's hard ceiling; larger folders must be paginated via next_cursor.
+CLOUDINARY_RESOURCES_PAGE_SIZE = 500
+
 
 class CloudStorageService(BaseService):
     """
@@ -286,30 +290,41 @@ class CloudStorageService(BaseService):
             cutoff = datetime.now(timezone.utc) - timedelta(hours=retention_hours)
 
             try:
-                # List all resources in the folder
-                result = cloudinary.api.resources(
-                    type="upload",
-                    prefix=folder,
-                    max_results=500,
-                )
+                # List all resources in the folder, paginating through every
+                # page. Cloudinary caps a single response at 500 resources and
+                # returns a next_cursor when more exist; without consuming it,
+                # cleanup would silently stop after the first page and leave
+                # orphaned uploads accruing storage cost indefinitely.
+                next_cursor = None
+                while True:
+                    result = cloudinary.api.resources(
+                        type="upload",
+                        prefix=folder,
+                        max_results=CLOUDINARY_RESOURCES_PAGE_SIZE,
+                        next_cursor=next_cursor,
+                    )
 
-                for resource in result.get("resources", []):
-                    # Parse Cloudinary's created_at timestamp
-                    created_at_str = resource.get("created_at", "")
-                    if created_at_str:
-                        try:
-                            # Cloudinary format: "2024-01-11T12:00:00Z"
-                            created_at = datetime.fromisoformat(
-                                created_at_str.replace("Z", "+00:00")
-                            )
+                    for resource in result.get("resources", []):
+                        # Parse Cloudinary's created_at timestamp
+                        created_at_str = resource.get("created_at", "")
+                        if created_at_str:
+                            try:
+                                # Cloudinary format: "2024-01-11T12:00:00Z"
+                                created_at = datetime.fromisoformat(
+                                    created_at_str.replace("Z", "+00:00")
+                                )
 
-                            if created_at < cutoff:
-                                if self.delete_media(resource["public_id"]):
-                                    deleted_count += 1
-                        except ValueError:
-                            logger.warning(
-                                f"Could not parse date for {resource['public_id']}: {created_at_str}"
-                            )
+                                if created_at < cutoff:
+                                    if self.delete_media(resource["public_id"]):
+                                        deleted_count += 1
+                            except ValueError:
+                                logger.warning(
+                                    f"Could not parse date for {resource['public_id']}: {created_at_str}"
+                                )
+
+                    next_cursor = result.get("next_cursor")
+                    if not next_cursor:
+                        break
 
                 logger.info(
                     f"Cleaned up {deleted_count} expired uploads from Cloudinary"
