@@ -96,6 +96,31 @@ class TokenCorruptError(InstagramAPIError):
         super().__init__(message, **kwargs)
 
 
+class MediaUnsupportedError(InstagramAPIError):
+    """
+    Instagram could not parse the uploaded file (Meta error code 9004).
+
+    Raised when Meta returns "Only photo or video can be accepted as media
+    type." This happens when the Cloudinary URL we serve produces output
+    that Instagram doesn't recognize as a valid image or video — common
+    causes are HEIC files masquerading as JPG, GIFs (IG Stories don't
+    accept), or a Cloudinary transformation failure that served back an
+    error page.
+
+    Unlike TokenCorruptError (credential is broken) or RateLimitError
+    (transient), this means THIS specific media item will fail every time
+    it's posted until the file is fixed. The autopost handler creates a
+    permanent_reject lock so the scheduler doesn't keep cycling through it.
+    """
+
+    def __init__(
+        self,
+        message: str = "Instagram could not parse the uploaded file (Meta code 9004).",
+        **kwargs,
+    ):
+        super().__init__(message, **kwargs)
+
+
 class TokenRevokedError(InstagramAPIError):
     """
     Instagram refresh token has been revoked.

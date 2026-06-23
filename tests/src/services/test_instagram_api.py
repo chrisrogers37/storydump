@@ -8,6 +8,7 @@ import httpx
 
 from src.exceptions import (
     InstagramAPIError,
+    MediaUnsupportedError,
     RateLimitError,
     TokenCorruptError,
     TokenExpiredError,
@@ -313,6 +314,30 @@ class TestInstagramAPIService:
 
         with pytest.raises(InstagramAPIError, match="Internal server error"):
             instagram_service._check_response_errors(mock_response)
+
+    def test_check_response_errors_media_unsupported_code_9004(self, instagram_service):
+        """Meta code 9004 ("Only photo or video can be accepted as media
+        type.") classifies as MediaUnsupportedError so the autopost
+        handler can permanent-reject the failing media item instead of
+        letting it cycle through retries forever."""
+        mock_response = Mock()
+        mock_response.status_code = 400
+        mock_response.json.return_value = {
+            "error": {
+                "code": 9004,
+                "message": "Only photo or video can be accepted as media type.",
+            }
+        }
+
+        with pytest.raises(MediaUnsupportedError) as exc_info:
+            instagram_service._check_response_errors(mock_response)
+
+        assert exc_info.value.error_code == "9004"
+        # Must NOT be classified as a generic InstagramAPIError (it IS a
+        # subclass, but isinstance() check in autopost flow requires
+        # MediaUnsupportedError to come first in the chain to trigger
+        # the permanent_reject lock).
+        assert isinstance(exc_info.value, MediaUnsupportedError)
 
     def test_check_response_errors_invalid_json(self, instagram_service):
         """Test InstagramAPIError when response isn't JSON."""

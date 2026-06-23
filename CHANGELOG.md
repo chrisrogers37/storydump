@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **New `MediaUnsupportedError` exception classifies Meta error code 9004** — Previously a 9004 "Only photo or video can be accepted as media type" response (typically: HEIC file masquerading as JPG, or Cloudinary transformation produced output IG can't decode) was classified as a generic `InstagramAPIError`. Now `_check_response_errors` in `instagram_api.py` raises the new `MediaUnsupportedError`, and the autopost handler reacts by creating a **permanent_reject** lock on the underlying media_item so the failing file doesn't keep cycling through retries on every scheduler tick. User sees a clear "couldn't process this file (Meta error 9004) — permanently rejected, won't be scheduled again" message instead of the previous generic error.
+
 ### Fixed
 
 - **Daily posting cap enforced across all 5 posting paths** — `posts_per_day` was only used for interval spacing, not as a hard daily limit. DB evidence showed accounts posting 2x their configured cap. Added a shared `can_post_today()` guard (backed by `HistoryRepository.count_posts_today()` with timezone-aware day boundaries) and wired it into the scheduler, autopost, manual posted callback, `/next` command, and auto-approve paths. Catchup bursts are also capped. On cap hit the queue item stays pending so it retries the next day.
