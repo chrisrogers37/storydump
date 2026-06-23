@@ -49,8 +49,8 @@ class StartCommandRouter:
             # DM context
             payload = context.args[0] if context.args else None
 
-            if payload == "login":
-                await self._handle_login_redirect(update)
+            if payload == "login" and await self._handle_login_redirect(update, user):
+                pass  # Redirected to Mini App dashboard
             else:
                 with ConversationService() as conv_service:
                     active_session = conv_service.get_current_session(str(user.id))
@@ -191,22 +191,27 @@ class StartCommandRouter:
     # Branch 2b: DM + login payload → redirect to web dashboard
     # ------------------------------------------------------------------
 
-    async def _handle_login_redirect(self, update):
+    async def _handle_login_redirect(self, update, user):
         """Mobile Telegram OAuth lands here via t.me/bot?start=login.
 
-        Instead of showing the normal /start flow, send a single WebApp
-        button that opens the dashboard — completing the login redirect.
+        If the user has exactly one instance, open its Mini App dashboard
+        directly. Otherwise fall through to the normal DM flow (instance
+        list for returning users, onboarding for new users).
         """
         if not settings.OAUTH_REDIRECT_BASE_URL:
-            await update.message.reply_text(
-                "Welcome to *Storydump*!\n\n"
-                "Web dashboard is not configured. "
-                "Use /start to manage your instances here.",
-                parse_mode="Markdown",
-            )
-            return
+            return False
 
-        webapp_url = f"{settings.OAUTH_REDIRECT_BASE_URL}/dashboard"
+        with DashboardService() as dash:
+            data = dash.get_user_instances(update.effective_user.id)
+
+        instances = data["instances"]
+        if len(instances) != 1:
+            return False
+
+        chat_id = instances[0]["telegram_chat_id"]
+        webapp_url = (
+            f"{settings.OAUTH_REDIRECT_BASE_URL}/webapp/onboarding?chat_id={chat_id}"
+        )
         button = build_webapp_button(
             text="Open Dashboard",
             webapp_url=webapp_url,
@@ -219,6 +224,7 @@ class StartCommandRouter:
             "You're signed in! Tap below to open your dashboard.",
             reply_markup=keyboard,
         )
+        return True
 
     # ------------------------------------------------------------------
     # Branch 3: DM + active onboarding → resume

@@ -82,18 +82,59 @@ class TestHandleStartRouting:
 
         mock_group.assert_called_once()
 
-    async def test_dm_with_login_payload(self, router):
-        """DM + 'login' payload → _handle_login_redirect (mobile OAuth)."""
+    async def test_dm_with_login_payload_redirects(self, router):
+        """DM + 'login' payload + redirect succeeds → _handle_login_redirect."""
         update = _make_update(chat_type="private")
         context = _make_context(args=["login"])
-        router.service._get_or_create_user.return_value = Mock(id="user-1")
+        user = Mock(id="user-1")
+        router.service._get_or_create_user.return_value = user
 
         with patch.object(
-            router, "_handle_login_redirect", new_callable=AsyncMock
+            router, "_handle_login_redirect", new_callable=AsyncMock, return_value=True
         ) as mock_redirect:
             await router.handle_start(update, context)
 
-        mock_redirect.assert_called_once_with(update)
+        mock_redirect.assert_called_once_with(update, user)
+
+    async def test_dm_with_login_payload_falls_through(self, router):
+        """DM + 'login' payload but redirect returns False → normal DM flow."""
+        update = _make_update(chat_type="private")
+        context = _make_context(args=["login"])
+        user = Mock(id="user-1")
+        router.service._get_or_create_user.return_value = user
+
+        mock_conv = Mock()
+        mock_conv.get_current_session.return_value = None
+        mock_conv.__enter__ = Mock(return_value=mock_conv)
+        mock_conv.__exit__ = Mock(return_value=False)
+
+        mock_membership = Mock()
+        mock_membership.get_for_user.return_value = [Mock()]
+        mock_membership.__enter__ = Mock(return_value=mock_membership)
+        mock_membership.__exit__ = Mock(return_value=False)
+
+        with (
+            patch.object(
+                router,
+                "_handle_login_redirect",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "src.services.core.start_command_router.ConversationService",
+                return_value=mock_conv,
+            ),
+            patch(
+                "src.services.core.start_command_router.MembershipRepository",
+                return_value=mock_membership,
+            ),
+            patch.object(
+                router, "_handle_returning_user", new_callable=AsyncMock
+            ) as mock_returning,
+        ):
+            await router.handle_start(update, context)
+
+        mock_returning.assert_called_once()
 
     async def test_dm_with_active_session(self, router):
         """DM + active onboarding session → _handle_resume_onboarding."""
@@ -410,36 +451,93 @@ class TestHandleGroupStart:
 class TestHandleLoginRedirect:
     @patch("src.services.core.start_command_router.build_webapp_button")
     @patch("src.services.core.start_command_router.settings")
-    async def test_sends_dashboard_button(self, mock_settings, mock_button, router):
-        """With OAUTH_REDIRECT_BASE_URL set, sends a WebApp dashboard button."""
-        mock_settings.OAUTH_REDIRECT_BASE_URL = "https://app.example.com"
+    async def test_single_instance_opens_mini_app(
+        self, mock_settings, mock_button, router
+    ):
+        """Single instance → WebApp button with correct /webapp/onboarding URL."""
+        mock_settings.OAUTH_REDIRECT_BASE_URL = "https://api.example.com"
         mock_button.return_value = Mock()
         update = _make_update(chat_type="private")
+        user = Mock(id="user-1")
 
-        await router._handle_login_redirect(update)
+        mock_dash = Mock()
+        mock_dash.get_user_instances.return_value = {
+            "instances": [{"telegram_chat_id": -100999, "chat_settings_id": "cs-1"}]
+        }
+        mock_dash.__enter__ = Mock(return_value=mock_dash)
+        mock_dash.__exit__ = Mock(return_value=False)
 
+        with patch(
+            "src.services.core.start_command_router.DashboardService",
+            return_value=mock_dash,
+        ):
+            result = await router._handle_login_redirect(update, user)
+
+        assert result is True
         mock_button.assert_called_once_with(
             text="Open Dashboard",
-            webapp_url="https://app.example.com/dashboard",
+            webapp_url="https://api.example.com/webapp/onboarding?chat_id=-100999",
             chat_type="private",
             chat_id=update.effective_chat.id,
             user_id=update.effective_user.id,
         )
         update.message.reply_text.assert_called_once()
-        call_kwargs = update.message.reply_text.call_args[1]
-        assert call_kwargs.get("reply_markup") is not None
 
     @patch("src.services.core.start_command_router.settings")
-    async def test_fallback_without_oauth_url(self, mock_settings, router):
-        """Without OAUTH_REDIRECT_BASE_URL, shows fallback text."""
+    async def test_multiple_instances_returns_false(self, mock_settings, router):
+        """Multiple instances → returns False to fall through to instance list."""
+        mock_settings.OAUTH_REDIRECT_BASE_URL = "https://api.example.com"
+        update = _make_update(chat_type="private")
+        user = Mock(id="user-1")
+
+        mock_dash = Mock()
+        mock_dash.get_user_instances.return_value = {
+            "instances": [
+                {"telegram_chat_id": -100111, "chat_settings_id": "cs-1"},
+                {"telegram_chat_id": -100222, "chat_settings_id": "cs-2"},
+            ]
+        }
+        mock_dash.__enter__ = Mock(return_value=mock_dash)
+        mock_dash.__exit__ = Mock(return_value=False)
+
+        with patch(
+            "src.services.core.start_command_router.DashboardService",
+            return_value=mock_dash,
+        ):
+            result = await router._handle_login_redirect(update, user)
+
+        assert result is False
+
+    @patch("src.services.core.start_command_router.settings")
+    async def test_no_oauth_url_returns_false(self, mock_settings, router):
+        """Without OAUTH_REDIRECT_BASE_URL, returns False."""
         mock_settings.OAUTH_REDIRECT_BASE_URL = None
         update = _make_update(chat_type="private")
+        user = Mock(id="user-1")
 
-        await router._handle_login_redirect(update)
+        result = await router._handle_login_redirect(update, user)
 
-        update.message.reply_text.assert_called_once()
-        text = update.message.reply_text.call_args[0][0]
-        assert "not configured" in text
+        assert result is False
+
+    @patch("src.services.core.start_command_router.settings")
+    async def test_no_instances_returns_false(self, mock_settings, router):
+        """Zero instances → returns False to fall through to new user flow."""
+        mock_settings.OAUTH_REDIRECT_BASE_URL = "https://api.example.com"
+        update = _make_update(chat_type="private")
+        user = Mock(id="user-1")
+
+        mock_dash = Mock()
+        mock_dash.get_user_instances.return_value = {"instances": []}
+        mock_dash.__enter__ = Mock(return_value=mock_dash)
+        mock_dash.__exit__ = Mock(return_value=False)
+
+        with patch(
+            "src.services.core.start_command_router.DashboardService",
+            return_value=mock_dash,
+        ):
+            result = await router._handle_login_redirect(update, user)
+
+        assert result is False
 
 
 # ──────────────────────────────────────────────────────────────
