@@ -251,6 +251,49 @@ class QueueRepository(BaseRepository):
             return True
         return False
 
+    def delete_stale(self, hours: int = 24) -> int:
+        """Delete queue items whose scheduled_for is older than ``hours`` ago.
+
+        Broad sweeper for the long-tail case where queue items accumulate
+        during an upstream outage (Instagram API down, scheduler stuck,
+        etc.) and never get processed. Distinct from
+        ``delete_stale_pending(max_age_minutes=10)`` which is the JIT
+        scheduler's short-window hygiene; this catches the day-scale
+        accumulation that caused the 2026-05-17 → 19 burst (954 rows
+        had to be manually deleted on 2026-06-02).
+
+        Runs hourly via ``cleanup_queue_loop``. Deletes regardless of
+        status — by the time an item is >24h past its scheduled_for it
+        will never be relevant again, whether it's pending, processing,
+        or failed.
+
+        Args:
+            hours: Age threshold in hours (default: 24).
+
+        Returns:
+            Number of items deleted.
+        """
+        cutoff = datetime.utcnow() - timedelta(hours=hours)
+        stale = (
+            self.db.query(PostingQueue)
+            .filter(PostingQueue.scheduled_for < cutoff)
+            .all()
+        )
+
+        count = len(stale)
+        if not count:
+            return 0
+
+        oldest = min(i.scheduled_for for i in stale)
+        for item in stale:
+            self.db.delete(item)
+        self.db.commit()
+        logger.info(
+            f"Deleted {count} queue items older than {hours}h "
+            f"(oldest scheduled_for: {oldest})"
+        )
+        return count
+
     def delete_stale_pending(self, max_age_minutes: int = 10) -> int:
         """Delete pending items that were never sent to Telegram.
 

@@ -12,6 +12,7 @@ LOOP_EXPECTED_INTERVALS: dict[str, int] = {
     "scheduler": 60,
     "lock_cleanup": 3600,
     "cloud_cleanup": 3600,
+    "queue_cleanup": 3600,
     "media_sync": 300,
     "transaction_cleanup": 60,
 }
