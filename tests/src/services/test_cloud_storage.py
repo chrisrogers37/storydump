@@ -457,6 +457,44 @@ class TestCloudStorageService:
         call_kwargs = mock_cloudinary.api.resources.call_args[1]
         assert call_kwargs["prefix"] == "custom_folder"
 
+    @patch("src.services.integrations.cloud_storage.cloudinary")
+    def test_cleanup_expired_paginates_past_first_page(
+        self, mock_cloudinary, cloud_service
+    ):
+        """Cleanup follows next_cursor so expired uploads beyond the 500-item
+        page cap are not silently skipped (issue #499)."""
+        old_date = (datetime.utcnow() - timedelta(hours=48)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+
+        # Page 1 returns a next_cursor; page 2 (the final page) does not.
+        page_one = {
+            "resources": [
+                {"public_id": "storydump/old_page1", "created_at": old_date},
+            ],
+            "next_cursor": "cursor_page_2",
+        }
+        page_two = {
+            "resources": [
+                {"public_id": "storydump/old_page2", "created_at": old_date},
+            ],
+        }
+        mock_cloudinary.api.resources.side_effect = [page_one, page_two]
+        mock_cloudinary.uploader.destroy.return_value = {"result": "ok"}
+
+        deleted_count = cloud_service.cleanup_expired()
+
+        # Both pages' expired uploads are deleted, not just the first page.
+        assert deleted_count == 2
+        assert mock_cloudinary.api.resources.call_count == 2
+        # The second request must forward the cursor returned by the first.
+        second_call_kwargs = mock_cloudinary.api.resources.call_args_list[1][1]
+        assert second_call_kwargs["next_cursor"] == "cursor_page_2"
+        destroyed = {
+            call.args[0] for call in mock_cloudinary.uploader.destroy.call_args_list
+        }
+        assert destroyed == {"storydump/old_page1", "storydump/old_page2"}
+
     # ==================== _get_resource_type Tests ====================
 
     def test_get_resource_type_image_extensions(self, cloud_service):
