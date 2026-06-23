@@ -839,6 +839,7 @@ class TestLoopLiveness:
             "scheduler",
             "lock_cleanup",
             "cloud_cleanup",
+            "queue_cleanup",
             "media_sync",
             "transaction_cleanup",
         }

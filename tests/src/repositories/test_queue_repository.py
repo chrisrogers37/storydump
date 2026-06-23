@@ -95,6 +95,42 @@ class TestQueueRepository:
         # commit called once by get_by_id's end_read_transaction (no write commit)
         mock_db.commit.assert_called_once()
 
+    def test_delete_stale_removes_old_items_regardless_of_status(
+        self, queue_repo, mock_db
+    ):
+        """delete_stale(hours=24) wipes anything past the cutoff.
+
+        Regression context: 2026-05-17 → 19 outage left 954 stale rows
+        in posting_queue, eventually deleted manually on 2026-06-02.
+        This loop runs hourly to prevent the same buildup.
+        """
+        stale_item_a = MagicMock()
+        stale_item_a.scheduled_for = datetime.utcnow() - timedelta(days=10)
+        stale_item_b = MagicMock()
+        stale_item_b.scheduled_for = datetime.utcnow() - timedelta(days=2)
+        mock_db.query.return_value.filter.return_value.all.return_value = [
+            stale_item_a,
+            stale_item_b,
+        ]
+
+        count = queue_repo.delete_stale(hours=24)
+
+        assert count == 2
+        assert mock_db.delete.call_count == 2
+        mock_db.delete.assert_any_call(stale_item_a)
+        mock_db.delete.assert_any_call(stale_item_b)
+        mock_db.commit.assert_called_once()
+
+    def test_delete_stale_no_op_when_no_stale_items(self, queue_repo, mock_db):
+        """No commit fired when there's nothing to delete (cheap idle tick)."""
+        mock_db.query.return_value.filter.return_value.all.return_value = []
+
+        count = queue_repo.delete_stale(hours=24)
+
+        assert count == 0
+        mock_db.delete.assert_not_called()
+        mock_db.commit.assert_not_called()
+
     def test_delete_queue_item(self, queue_repo, mock_db):
         """Test deleting a queue item."""
         mock_item = MagicMock()
