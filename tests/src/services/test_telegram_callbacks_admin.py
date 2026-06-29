@@ -19,6 +19,10 @@ def mock_service():
     service.interaction_service = Mock()
     service._get_display_name.return_value = "AdminUser"
     service.set_paused = Mock()
+    # Default: the calling chat resolves to tenant "cs-1". Cross-tenant tests
+    # override get_settings_if_exists per-case.
+    service.settings_service = Mock()
+    service.settings_service.get_settings_if_exists.return_value = Mock(id="cs-1")
     return service
 
 
@@ -254,3 +258,98 @@ class TestHandleResetCallback:
 
         mock_retry.assert_called_once()
         assert "Error" in mock_retry.call_args[0][1]
+
+
+# ──────────────────────────────────────────────────────────────
+# Cross-tenant isolation (#512)
+# ──────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestCrossTenantIsolation:
+    """Queue mutations must never reach across tenants."""
+
+    @patch("src.services.core.telegram_callbacks_admin.telegram_edit_with_retry")
+    async def test_resume_clear_scopes_to_caller_tenant(self, mock_retry, handlers):
+        """resume:clear queries and deletes only the calling chat's rows."""
+        handlers.service.settings_service.get_settings_if_exists.return_value = Mock(
+            id="cs-A"
+        )
+        now = datetime.now(timezone.utc)
+        handlers.service.queue_repo.get_all.return_value = [
+            Mock(id="q-1", scheduled_for=now - timedelta(hours=2))
+        ]
+
+        await handlers.handle_resume_callback("clear", _make_user(), _make_query())
+
+        handlers.service.queue_repo.get_all.assert_called_once_with(
+            status="pending", chat_settings_id="cs-A"
+        )
+        handlers.service.queue_repo.delete.assert_called_once()
+
+    @patch("src.services.core.telegram_callbacks_admin.telegram_edit_with_retry")
+    async def test_resume_bails_when_chat_has_no_tenant(self, mock_retry, handlers):
+        """No chat_settings → never run an unscoped query or delete anything."""
+        handlers.service.settings_service.get_settings_if_exists.return_value = None
+
+        await handlers.handle_resume_callback("clear", _make_user(), _make_query())
+
+        handlers.service.queue_repo.get_all.assert_not_called()
+        handlers.service.queue_repo.delete.assert_not_called()
+
+    @patch("src.services.core.telegram_callbacks_admin.telegram_edit_with_retry")
+    async def test_reset_confirm_scopes_to_caller_tenant(self, mock_retry, handlers):
+        """reset:confirm queries and deletes only the calling chat's rows."""
+        handlers.service.settings_service.get_settings_if_exists.return_value = Mock(
+            id="cs-A"
+        )
+        handlers.service.queue_repo.get_all.return_value = [Mock(id="q-1")]
+
+        await handlers.handle_reset_callback("confirm", _make_user(), _make_query())
+
+        handlers.service.queue_repo.get_all.assert_called_once_with(
+            status="pending", chat_settings_id="cs-A"
+        )
+        handlers.service.queue_repo.delete.assert_called_once()
+
+    @patch("src.services.core.telegram_callbacks_admin.telegram_edit_with_retry")
+    async def test_reset_confirm_bails_when_chat_has_no_tenant(
+        self, mock_retry, handlers
+    ):
+        """No chat_settings → reset:confirm refuses rather than wipe everything."""
+        handlers.service.settings_service.get_settings_if_exists.return_value = None
+
+        await handlers.handle_reset_callback("confirm", _make_user(), _make_query())
+
+        handlers.service.queue_repo.get_all.assert_not_called()
+        handlers.service.queue_repo.delete.assert_not_called()
+
+    @patch("src.services.core.telegram_callbacks_admin.telegram_edit_with_retry")
+    async def test_batch_approve_rejects_foreign_chat_settings_id(
+        self, mock_retry, handlers
+    ):
+        """A button carrying another tenant's chat_settings_id is refused."""
+        handlers.service.settings_service.get_settings_if_exists.return_value = Mock(
+            id="cs-A"
+        )
+
+        await handlers.handle_batch_approve("cs-VICTIM", _make_user(), _make_query())
+
+        handlers.service.queue_repo.get_all_with_media.assert_not_called()
+        handlers.core._execute_complete_db_ops.assert_not_called()
+        assert "Not authorized" in mock_retry.call_args[0][1]
+
+    @patch("src.services.core.telegram_callbacks_admin.telegram_edit_with_retry")
+    async def test_batch_approve_allows_own_chat_settings_id(
+        self, mock_retry, handlers
+    ):
+        """A button carrying the caller's own chat_settings_id proceeds."""
+        handlers.service.settings_service.get_settings_if_exists.return_value = Mock(
+            id="cs-A"
+        )
+        handlers.service.queue_repo.get_all_with_media.return_value = []
+
+        await handlers.handle_batch_approve("cs-A", _make_user(), _make_query())
+
+        handlers.service.queue_repo.get_all_with_media.assert_called()
