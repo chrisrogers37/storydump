@@ -28,6 +28,34 @@ class TelegramCallbackAdminHandlers:
         self.service = service
         self.core = core
 
+    def _caller_chat_settings_id(self, query) -> str | None:
+        """Resolve the calling chat's tenant id (chat_settings UUID), or None.
+
+        Returns None when the chat has no settings row. Callers MUST treat
+        None as "no tenant scope" and refuse to operate — never fall back to
+        an unscoped query, which would reach across every tenant's rows.
+        """
+        chat_settings = self.service.settings_service.get_settings_if_exists(
+            query.message.chat_id
+        )
+        return str(chat_settings.id) if chat_settings else None
+
+    async def _require_caller_tenant(self, query) -> str | None:
+        """Resolve the caller's tenant id, or warn and return None.
+
+        Wraps :meth:`_caller_chat_settings_id` with the shared "no instance
+        configured" reply the destructive resume/reset handlers use, so that
+        bail message lives in one place.
+        """
+        cs_id = self._caller_chat_settings_id(query)
+        if cs_id is None:
+            await telegram_edit_with_retry(
+                query.edit_message_text,
+                "❌ No instance is configured for this chat.",
+                parse_mode="Markdown",
+            )
+        return cs_id
+
     async def handle_batch_approve(self, data, user, query):
         """Handle batch_approve:{chat_settings_id} callback — approve all pending items.
 
@@ -37,6 +65,24 @@ class TelegramCallbackAdminHandlers:
         """
         cs_id = data
         chat_id = query.message.chat_id
+
+        # The queue belongs to the chat this callback fired in — not whatever
+        # chat_settings_id the (forgeable) button data carries. Reject a foreign
+        # or unresolvable tenant before touching any rows.
+        caller_cs_id = self._caller_chat_settings_id(query)
+        if caller_cs_id is None or caller_cs_id != cs_id:
+            logger.warning(
+                "batch_approve rejected: chat %s (cs=%s) does not own cs=%s",
+                chat_id,
+                caller_cs_id,
+                cs_id,
+            )
+            await telegram_edit_with_retry(
+                query.edit_message_text,
+                "❌ Not authorized for this instance.",
+                parse_mode="Markdown",
+            )
+            return
 
         try:
             await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([]))
@@ -135,8 +181,14 @@ class TelegramCallbackAdminHandlers:
 
     async def _do_resume_callback(self, action: str, user, query):
         """Internal implementation of resume callback."""
+        cs_id = await self._require_caller_tenant(query)
+        if cs_id is None:
+            return
+
         now = datetime.now(timezone.utc)
-        all_pending = self.service.queue_repo.get_all(status="pending")
+        all_pending = self.service.queue_repo.get_all(
+            status="pending", chat_settings_id=cs_id
+        )
         overdue = [p for p in all_pending if p.scheduled_for < now]
 
         if action == "reschedule":
@@ -213,8 +265,13 @@ class TelegramCallbackAdminHandlers:
         """
         try:
             if action == "confirm":
-                # Reset queue - clear all pending posts
-                all_pending = self.service.queue_repo.get_all(status="pending")
+                # Reset queue — clear THIS chat's pending posts only.
+                cs_id = await self._require_caller_tenant(query)
+                if cs_id is None:
+                    return
+                all_pending = self.service.queue_repo.get_all(
+                    status="pending", chat_settings_id=cs_id
+                )
                 cleared = 0
                 for item in all_pending:
                     self.service.queue_repo.delete(str(item.id))

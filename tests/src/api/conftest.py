@@ -20,6 +20,21 @@ def _disable_rate_limits():
     limiter.enabled = True
 
 
+@pytest.fixture(autouse=True)
+def _authorize_membership_by_default():
+    """Default every API test to an authorized member.
+
+    ``_validate_request`` requires an active membership when the auth token
+    carries no bound ``chat_id`` — the DM Mini App case that ``mock_validate``
+    simulates by default. Tests that exercise the membership gate request this
+    fixture and tweak ``is_active_member``; all others assume a real member.
+    """
+    with patch("src.api.routes.onboarding.helpers.MembershipService") as mock_cls:
+        svc = service_ctx(mock_cls)
+        svc.is_active_member.return_value = True
+        yield mock_cls
+
+
 @pytest.fixture
 def client():
     return TestClient(app)
