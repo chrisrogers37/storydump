@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- **Full-system tech-debt triage (`documentation/TECH_DEBT_TRIAGE.md`)** — Added a structured backlog from a review of every subsystem (~27k LOC): scheduler/posting, Telegram, data layer, integrations, API/OAuth, config, CI. Captures 91 findings (26 High / 58 Med / 7 Low) across bugs, security, architecture, over-complication, and testing gaps, organized under five cross-cutting epics (multi-tenant isolation, non-atomic posting workflow, missing migration tooling, process-local state in a multi-worker deploy, and the `TelegramService` God-facade). Each item is written to be convertible into a standalone GitHub issue. No runtime behavior changed.
+
 ### Security
 
 - **Cross-tenant data isolation on the Mini App API and Telegram callbacks (#511, partial #512)** — Two cross-tenant holes found by the security audit, closed at the data layer.

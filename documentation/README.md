@@ -15,6 +15,7 @@ documentation/
 ├── README.md (this file)          # Documentation index
 ├── ROADMAP.md                     # Product roadmap and version history
 ├── SECURITY_REVIEW.md             # Security audit findings
+├── TECH_DEBT_TRIAGE.md            # Full-system tech-debt/bug/enhancement backlog
 ├── planning/                       # Planning and design documents
 │   ├── phases/                    # Phased implementation plans
 │   │   ├── 00_MASTER_ROADMAP.md   # Vision, architecture, phase overview
@@ -201,6 +202,11 @@ documentation/
 ---
 
 ## Security
+
+**[TECH_DEBT_TRIAGE.md](TECH_DEBT_TRIAGE.md)** - Full-system review triage (2026-07-02)
+- 91 triaged findings (bugs, security, architecture, over-complication, tests)
+- Organized under 5 cross-cutting epics; each item convertible to a GitHub issue
+- Prioritizes data-integrity, security, and multi-tenant isolation work first
 
 **[SECURITY_REVIEW.md](SECURITY_REVIEW.md)** - Reviewed 2026-01-11, Updated 2026-02-10
 - No hardcoded credentials found
