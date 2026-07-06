@@ -1,9 +1,11 @@
 # Instagram Story Camera Deep Link Redirect Service
 
-**Status**: Planning
+**Status**: 🔧 BUILT BUT NOT ACTIVATED — verified 2026-07-06 (see note below)
 **Priority**: High (Backlog item from Phase 1.5)
 **Estimated effort**: 1-2 hours
 **Date**: 2026-03-08
+
+> **Verification note (2026-07-06):** `docs/index.html` was built almost verbatim to this doc's recommended platform-aware design (commit `e3194ea`, 2026-03-28) and `docs/README.md` describes it as the live GitHub Pages deploy source. However, the application never links to it: `defaults.DEFAULT_INSTAGRAM_DEEPLINK_URL` (consumed by `telegram_utils.py`'s "Open Instagram" button) is hardcoded to the plain `https://www.instagram.com/` feed URL. The configurable `INSTAGRAM_DEEPLINK_URL` env var this plan calls for was added and then removed on 2026-05-12 (commit `41ce21a`, "same value for every deployment, no reason to env-ify") without ever pointing production at the redirect page. `.env.example` still carries a dead, commented-out `INSTAGRAM_DEEPLINK_URL=https://your-username.github.io/storydump/` line from the abandoned wiring. **Net effect: the story-camera deep link this plan describes is not live** — tapping "Open Instagram" opens the Instagram feed today, same as before this plan was written.
 
 ---
 

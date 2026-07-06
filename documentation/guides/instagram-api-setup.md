@@ -354,19 +354,21 @@ Expires in hours: 1440
 
 ## Step 12: Test Posting (Optional)
 
-Once verified, test with `DRY_RUN_MODE=true` first:
+Once verified, test with dry-run mode enabled first (toggle via `/settings`
+in Telegram, or `DRY_RUN_MODE=true` for the initial bootstrap default).
+
+There is no manual "process the queue now" command -- the running worker
+(`python -m src.main`) posts automatically via its just-in-time scheduler
+when a slot comes due. To preview what it would pick without waiting:
 
 ```bash
-# In .env
-DRY_RUN_MODE=true
+storydump-cli queue-preview
 ```
 
-Then:
-```bash
-storydump-cli process-queue --force
-```
+To force a real send immediately (useful for testing), use the `/next`
+command in Telegram rather than a CLI command.
 
-When ready for real posting, set `DRY_RUN_MODE=false`.
+When ready for real posting, turn dry-run mode off via `/settings`.
 
 ---
 

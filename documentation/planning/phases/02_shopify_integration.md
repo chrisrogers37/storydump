@@ -4,6 +4,8 @@
 **Dependencies**: Phase 2 (Instagram API)
 **Estimated Duration**: 2-3 weeks
 
+> Status verified 2026-07-06 (documentation staleness audit): still PENDING. `grep -ril "shopify" src/` matches only a code comment in `src/models/api_token.py` (`# 'instagram', 'shopify'` — an example value documenting the `service_name` field, not an integration) plus similar doc comments in migrations 004/008/038. No `ShopifyService`, no `shopify_products`/`shopify_orders` tables, no webhook routes, and no tests exist anywhere in the codebase.
+
 ---
 
 ## Overview

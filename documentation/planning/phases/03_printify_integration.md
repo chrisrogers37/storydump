@@ -4,6 +4,8 @@
 **Dependencies**: Phase 3 (Shopify Integration)
 **Estimated Duration**: 2 weeks
 
+> Status verified 2026-07-06 (documentation staleness audit): still PENDING. No Printify code, models, tables, or tests exist anywhere in `src/` or `scripts/migrations/`. Consistent with its stated dependency on Phase 3 (Shopify), which is also still unimplemented (see `02_shopify_integration.md`).
+
 ---
 
 ## Overview

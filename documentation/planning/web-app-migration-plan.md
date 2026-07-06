@@ -1,8 +1,10 @@
 # Web App Migration Plan: Landing Site to Full Application
 
-**Status:** Draft — Pending Review
+**Status:** ✅ COMPLETED (substantially) — verified 2026-07-06 (see note below)
 **Created:** 2026-04-15
 **Goal:** Evolve the existing Next.js landing/teaser site into a full web application with auth, dashboard, settings, and media management — replacing most Telegram Mini App functionality while keeping Telegram as the action layer (approvals, quick decisions).
+
+> **Verification note (2026-07-06):** All three phases shipped: Phase 1 in `ee048a6` ("Web Dashboard Phase 1 — Telegram Auth, BFF Proxy, Dashboard Shell", #196), Phase 2 in `75e8599` (#201), Phase 3 in `5b9ae38` (#202), plus extensive follow-on polish throughout `CHANGELOG.md`. The "Current State" section below, which describes `landing/` as just a teaser site, is now historical — `landing/` **is** the full web app. Where the build diverged from this plan: the route group is `(dashboard)`, not `(app)`; the chat/workspace concept shipped as **"instances"** (`/instances`, `/api/instances`, an `Instance` type) rather than "workspace"; OAuth uses a popup window + `visibilitychange` polling (`openOAuthWindow` in `dashboard-api.ts`) instead of the dedicated `redirect_uri` + Next.js callback route from AD-2 / PR 2.2-2.3; and AD-5's "future consideration, not needed for Phase 1-3" `chat_members` table was actually built right away as `user_chat_memberships` (#231, 2026-05-19) and became the backbone of a much larger multi-account/multi-tenant system (#231-#267) — including the recent cross-tenant security fix's `MembershipService` (#511) — well beyond this plan's modest scope. Settings pages also consolidated into tabs on fewer routes rather than the many per-category routes sketched in PR 2.1-2.3.
 
 **Guiding Principle:** Web-first for management, Telegram-first for actions.
 

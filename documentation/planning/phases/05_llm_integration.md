@@ -1,8 +1,12 @@
 # Phase 6: LLM Integration
 
-**Status**: 📋 PENDING
+**Status**: 📋 PENDING (see verification note — a narrow, unrelated Claude feature already ships in production)
 **Dependencies**: Phase 5 (Media-Product Linking)
 **Estimated Duration**: 3-4 weeks
+
+> Status verified 2026-07-06 (documentation staleness audit): the architecture specified in this doc — `LLMService` provider abstraction, `ClaudeProvider`/`OpenAIProvider`, `prompt_templates`/`llm_conversations`/`generated_content` tables, content-suggestion engine, hashtag suggestions, email draft generation — is 0% built. `src/services/domain/` (where `LLMService` would live) contains only an empty `__init__.py`.
+>
+> **Flagging for the lead**: a narrower, unrelated AI feature already exists in production — `src/services/core/caption_service.py` calls the Anthropic Claude API directly (module-level singleton client, no provider abstraction, no OpenAI support, no DB-backed prompt templates, no conversation logging) to auto-generate Instagram Story captions. It's gated by `ANTHROPIC_API_KEY` and a per-instance `enable_ai_captions` toggle (migration `026_add_ai_captions.sql`, CHANGELOG `#182`), and stores output on `media_items.generated_caption`. It does not implement any part of this doc's plan (wrong module, no abstraction layer, no prompt/conversation persistence, shipped without its stated dependency Phase 5 being done) and predates/bypasses this roadmap's sequencing. Left as PENDING rather than IN PROGRESS because it isn't a stepping-stone toward this specific architecture, but the lead should be aware it exists before scoping Phase 6 work.
 
 ---
 

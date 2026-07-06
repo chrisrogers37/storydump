@@ -62,8 +62,11 @@ Storydump is a self-hosted Instagram Story scheduling system with Telegram-based
 | `posting_queue` | Scheduled posts (ephemeral work items) |
 | `posting_history` | Permanent audit log of all posts |
 | `instagram_accounts` | Multi-account support (Phase 1.5) |
-| `chat_settings` | Per-Telegram-chat configuration |
+| `chat_settings` | Per-Telegram-chat configuration — **one row per tenant/instance** |
 | `api_tokens` | Encrypted OAuth tokens |
+| `user_chat_memberships` | User ↔ instance (chat_settings) membership — backs the multi-instance dashboard and `/start` instance picker. **Security-sensitive**: this is the table that scopes a user to their tenant(s); a 2026-07 audit found and fixed a cross-tenant IDOR where onboarding/dashboard endpoints didn't check it (see SECURITY_REVIEW.md §10 addendum) |
+| `onboarding_sessions` | Short-lived DM onboarding conversation state (naming → awaiting_group → complete) |
+| `category_mix` | Type 2 SCD history of per-category posting ratios |
 
 ---
 
@@ -107,14 +110,17 @@ Storydump is a self-hosted Instagram Story scheduling system with Telegram-based
 
 ---
 
-## Current Version: v1.6.0
+## Current Version: v1.6.0 (string is stale — see note)
 
 - ✅ Phase 1: Telegram manual posting
 - ✅ Phase 1.5: Multi-account support
 - ✅ Phase 1.6: Settings & Telegram UX
 - ✅ Phase 2: Instagram API automation
+- ✅ Multi-tenant / multi-instance rearchitecture (User → Instances, `user_chat_memberships`, `/start` instance picker, `landing/` Next.js web dashboard) — shipped after v1.6.0, not reflected in the version string. See `PROJECT_MISSION.md` for the current mental model.
 - 🔲 Phase 3: Shopify integration
-- 🔲 Phase 4+: Web UI, analytics
+- 🔲 Phase 4+: LLM integration, order/email automation
+
+**Note:** `src/__init__.py` still hardcodes `__version__ = "1.6.0"` despite 40+ migrations and dozens of unreleased PRs since (see `CHANGELOG.md` `[Unreleased]`). Don't treat the version string as a feature-completeness signal.
 
 ---
 

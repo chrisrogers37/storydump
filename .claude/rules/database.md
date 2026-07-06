@@ -16,6 +16,8 @@ paths:
 
 **Integration** (Phase 2+): `api_tokens` (encrypted OAuth tokens, FK to `instagram_accounts`)
 
+**Multi-instance** (post-v1.6.0, see `documentation/planning/multi-account-dashboard.md`): `user_chat_memberships` (user ↔ `chat_settings` membership — the tenant boundary check; a 2026-06 security fix (#511/#512) makes this the required gate for onboarding/dashboard endpoints when a token doesn't cryptographically bind a chat_id), `onboarding_sessions` (short-lived DM onboarding conversation state, one active per user)
+
 ## Settings Architecture
 
 - `chat_settings` table with `.env` as fallback
@@ -36,7 +38,7 @@ paths:
 2. **TTL Locks** (`media_posting_locks`): Lock types: `recent_post`, `manual_hold`, `seasonal`, `permanent_reject`, `skip`. Permanent locks: `locked_until = NULL`.
 3. **User Auto-Discovery**: Users created automatically from Telegram interactions. No separate registration.
 4. **Type 2 SCD**: Used for `category_post_case_mix` (ratio auditing) and future `shopify_products`.
-5. **Tenant Boundary**: `chat_settings` is the tenant boundary. All tenant FKs nullable (`NULL` = legacy single-tenant data).
+5. **Tenant Boundary**: `chat_settings` is the tenant boundary for data (all tenant FKs nullable, `NULL` = legacy single-tenant data). `user_chat_memberships` is the **access** boundary — it answers "can this user act on this tenant," which is a separate check from "is this user authenticated." Any new endpoint/handler that accepts a `chat_id`/`chat_settings_id` from the caller must verify active membership, not just authentication — this is the exact class of bug fixed in #511/#512.
 
 ## Creating Migrations
 

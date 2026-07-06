@@ -71,7 +71,7 @@ POSTING_HOURS_START=14  # 9 AM EST = 14 UTC
 POSTING_HOURS_END=2     # 9 PM EST = 2 UTC (next day)
 ```
 
-## Step 5: Index Media & Create Schedule (1 min)
+## Step 5: Index Media (1 min)
 
 ```bash
 # Create media directory if it doesn't exist
@@ -81,12 +81,15 @@ mkdir -p media/stories
 # Index media
 storydump-cli index-media media/stories
 
-# Create 7-day schedule
-storydump-cli create-schedule --days 7
-
-# View what was scheduled
-storydump-cli list-queue
+# Preview what the scheduler would pick next (doesn't post anything)
+storydump-cli queue-preview
 ```
+
+Scheduling is just-in-time: there's no separate "create schedule" step. Once
+the app is running (Step 6), the scheduler automatically selects and sends
+media at your configured posting cadence. `storydump-cli list-queue` shows
+in-flight items that have been sent to Telegram and are awaiting a
+Posted/Skip/Reject action.
 
 ## Step 6: Run the Application (1 min)
 

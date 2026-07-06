@@ -4,6 +4,8 @@ A self-hosted Instagram Story scheduling system with Telegram-based team collabo
 
 ## Features
 
+- 🏢 **Multi-Tenant / Multi-Instance**: One deployment serves many independent teams, each scoped to its own Telegram group, media, queue, and schedule
+- 🖥️ **Web Dashboard**: Next.js dashboard with an instance picker for managing multiple accounts
 - 📅 **Smart Scheduling**: Intelligent posting schedule based on your preferences
 - 📁 **Category-Based Scheduling**: Organize media by folder (memes/, merch/) with configurable ratios
 - 📱 **Telegram Integration**: Team collaboration via Telegram bot with lifecycle notifications
@@ -223,13 +225,25 @@ The bot responds to these commands in Telegram:
 - ✅ Message tracking (100-message cache) for efficient cleanup
 - ✅ TelegramService refactored from 3,500-line monolith into 5 handler modules
 - ✅ Verbose settings expansion (controls more message types)
-- ✅ 488 comprehensive tests
+- ✅ 2,038 tests across 103 files (grown well past the v1.6.0-era count below — see [TEST_COVERAGE.md](documentation/guides/TEST_COVERAGE.md))
+
+**Multi-Tenant / Multi-Instance Rearchitecture** - ✅ SHIPPED (post-v1.6.0, not yet version-tagged):
+
+Storydump moved from "one self-hosted deployment per team" to a multi-tenant model: a single deployment now serves many independent teams ("Instances"), each scoped to its own Telegram group, media, queue, and schedule. See `PROJECT_MISSION.md` for the current product mental model (User → Instances → accounts/media/queue).
+
+- ✅ `user_chat_memberships` table linking Telegram users to the instances (chat_settings rows) they belong to
+- ✅ 5-branch `/start` handler (`StartCommandRouter`) — DM onboarding for new users, returning-user instance list, group linking, and unchanged existing group setup
+- ✅ Web dashboard (`landing/`, Next.js on Vercel) with an instance picker and switcher — see [documentation/guides/landing-vercel-deployment.md](documentation/guides/landing-vercel-deployment.md)
+- ✅ Mini App instance picker for DM-launched sessions
+- ⚠️ **2026-07 security note:** a cross-tenant data-isolation gap in the onboarding/dashboard API and Telegram queue callbacks was found and fixed (see `documentation/SECURITY_REVIEW.md` §10 addendum). Role-based (member vs. admin) command authorization for multi-tenant is tracked as a follow-up, not yet implemented.
+
+**Phase 3+ (Shopify, Printify, LLM integration, order/email automation)** - 📋 PENDING — see [documentation/planning/phases/00_MASTER_ROADMAP.md](documentation/planning/phases/00_MASTER_ROADMAP.md) for the full phase breakdown and current status.
 
 ## Development
 
 ### Running Tests
 
-The project includes 488 comprehensive tests with automatic test database setup:
+The project includes 2,038 tests (103 files) with automatic test database setup:
 
 ```bash
 # Run all tests with coverage
@@ -249,17 +263,22 @@ storydump-cli process-queue --force
 
 ```
 storydump/
-├── src/                    # Main application code
+├── src/                    # Main application code (Python/FastAPI)
+│   ├── api/               # REST API + Mini App onboarding routes
 │   ├── config/            # Configuration management
 │   ├── models/            # Database models
 │   ├── repositories/      # Data access layer
 │   ├── services/          # Business logic
+│   │   ├── core/          # Telegram bot, posting, scheduling, dashboard, membership
+│   │   ├── integrations/  # Instagram Graph API, Google Drive, Cloudinary
+│   │   └── media_sources/ # Pluggable media source providers
 │   ├── utils/             # Utility functions
-│   └── main.py            # Application entry point
+│   └── main.py            # Application entry point (worker: bot + scheduler)
+├── landing/               # Next.js web dashboard + marketing site (Vercel)
 ├── cli/                   # CLI commands
-├── tests/                 # Test suite
-├── scripts/               # Database scripts
-└── media/                 # Media storage
+├── tests/                 # Test suite (100+ files)
+├── scripts/               # Database scripts + migrations
+└── media/                 # Local media storage (dev only — prod uses Google Drive)
     └── stories/           # Instagram stories
         ├── memes/         # Meme content
         └── merch/         # Merchandise content
@@ -273,7 +292,8 @@ Key resources:
 - **[Quick Start Guide](documentation/guides/quickstart.md)** - Get running in 10 minutes
 - **[Deployment Guide](documentation/guides/deployment.md)** - Production deployment checklist
 - **[Testing Guide](documentation/guides/testing-guide.md)** - How to run and write tests
-- **[Technical Specification](documentation/planning/instagram_automation_plan.md)** - Complete implementation plan
+- **[Master Roadmap](documentation/planning/phases/00_MASTER_ROADMAP.md)** - Architecture, phase status, and forward plan
+- **[Project Mission](PROJECT_MISSION.md)** - Product vision and multi-instance mental model
 - **[Developer Guide](CLAUDE.md)** - Development guidelines and architecture
 
 ## License

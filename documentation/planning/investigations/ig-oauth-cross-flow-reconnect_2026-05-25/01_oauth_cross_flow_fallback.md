@@ -8,7 +8,7 @@
 | Risk | Low |
 | Effort | Small (≈40 lines code, ≈60 lines test) |
 | Touches prod data? | No (self-healing happens via the live OAuth flow once a user reconnects) |
-| Status | **IN PROGRESS** (started 2026-05-25, branch `implement/oauth-cross-flow-fallback`) |
+| Status | ✅ **COMPLETED** — verified 2026-07-06. Shipped in `26f85fd` (2026-05-25) and `03d15cd` (2026-05-26, #441). `find_existing_account_for_oauth` is live in `src/services/core/instagram_account_service.py` — the same three-tier lookup designed here — and CHANGELOG.md documents the matching regression tests (`test_exchange_recovers_via_username_when_meta_id_mismatches`, `test_resolves_by_username_when_meta_id_misses`) and the `TestUsernameCallbackRemoved` → `TestCrossFlowUsernameRecovery` rename this plan called for. (Originally started 2026-05-25, branch `implement/oauth-cross-flow-fallback`.) |
 | Decisions confirmed during build | Keep `get_account_by_meta_id` as thin alias (no callsite churn); F5 logs interesting branches at INFO, skip the boring meta_id-direct hit |
 
 ---

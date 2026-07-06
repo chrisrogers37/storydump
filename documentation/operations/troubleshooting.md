@@ -40,8 +40,9 @@ railway logs --service worker | tail -50
 
 **Diagnosis**:
 ```sql
--- Check for stuck posts
-SELECT id, scheduled_for, status, error_message
+-- Check for stuck posts (posting_queue has no error_message column --
+-- error details for completed attempts live in posting_history instead)
+SELECT id, scheduled_for, status
 FROM posting_queue
 WHERE scheduled_for < NOW()
 ORDER BY scheduled_for DESC
@@ -124,9 +125,12 @@ JOIN instagram_accounts ia ON t.instagram_account_id::uuid = ia.id;
 ```bash
 # For Google Drive media source, check sync status
 railway shell --service worker -c "storydump-cli sync-status"
+```
 
-# Check media source configuration
-railway shell --service worker -c "echo \$MEDIA_SOURCE_TYPE"
+```sql
+-- Media source is a per-chat setting (not a global env var)
+SELECT media_source_type, media_source_root, media_sync_enabled
+FROM chat_settings WHERE telegram_chat_id = YOUR_CHAT_ID;
 ```
 
 **Common Causes**:
@@ -134,8 +138,8 @@ railway shell --service worker -c "echo \$MEDIA_SOURCE_TYPE"
 | Cause | Fix |
 |-------|-----|
 | Google Drive not connected | Complete OAuth via /start onboarding |
-| Wrong folder ID | Update `MEDIA_SOURCE_ROOT` env var |
-| Sync disabled | Set `MEDIA_SYNC_ENABLED=true` |
+| Wrong folder ID | Update `chat_settings.media_source_root` via /settings or the onboarding wizard |
+| Sync disabled | Enable `chat_settings.media_sync_enabled` via /settings |
 | Unsupported format | Only JPG, JPEG, PNG, GIF, MP4, MOV supported |
 | File too large | Max 100MB per file |
 
@@ -228,11 +232,19 @@ railway restart --service worker
 
 ### Clear Stuck Queue
 
+An hourly `cleanup_queue_loop` already deletes any queue item more than 24
+hours past its `scheduled_for` time automatically. To force this
+immediately instead of waiting for the next hourly pass:
+
 ```bash
-# Mark failed posts as cancelled
+# Delete stale queue items regardless of status (mirrors QueueRepository.delete_stale)
 psql "$DATABASE_URL" -c \
-    "UPDATE posting_queue SET status = 'cancelled' WHERE status = 'pending' AND scheduled_for < NOW();"
+    "DELETE FROM posting_queue WHERE scheduled_for < NOW() - INTERVAL '24 hours';"
 ```
+
+`posting_queue.status` only has three real values (`pending`, `processing`,
+`failed`) -- there is no `cancelled` status recognized anywhere in the
+codebase, so don't set it to that.
 
 ### Force Service Restart
 

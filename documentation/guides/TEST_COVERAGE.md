@@ -1,11 +1,13 @@
 # Test Coverage Report
 
-**Last Updated**: 2026-03-28
-**Total Tests**: 1,417
-**Test Files**: 77
+**Last Updated**: 2026-07-06 (top-line counts refreshed; see verification note)
+**Total Tests**: 2,038 (verified via `pytest --collect-only`, see `testing-guide.md`; superseded the 2,020 grep-proxy estimate this doc originally shipped with — see verification note)
+**Test Files**: 103
 **Test Framework**: pytest 7.4.3
 **Coverage Target**: Core business logic and critical paths
-**Status**: ✅ Current through v1.6.0 + race condition handling
+**Status**: ⚠️ Top-line counts current as of 2026-07-06. The per-layer breakdown, per-file counts, and Conclusion numbers further down this document were **not** re-verified in this pass and predate the multi-tenant/SaaS transition — treat them as historical.
+
+> **Verification note (2026-07-06)**: A working pytest environment (venv + installed dependencies) wasn't available in this pass, so these top-line numbers come from `find tests/ -name "test_*.py" | wc -l` (103 files) and a grep count of `def test_` under `tests/` (2,020) rather than `pytest --collect-only`. The grep count is a function-definition count — it won't reflect `@pytest.mark.parametrize` expansion in either direction, so it's a proxy, not an exact pytest-collected total. Corroborating data point: commit `7c99a34` (2026-06-28, the cross-tenant security fix) reports "full unit suite green (1896 passed)" for the non-skipped subset, which is consistent with ~2,020 total once skipped integration tests are counted in. Separately: the project version in `src/__init__.py` is still `1.6.0`, unchanged since 2026-02-09 — despite the large increase in test count and the substantial multi-tenant/SaaS work reflected in `CHANGELOG.md`'s `[Unreleased]` section, no version bump has been cut yet.
 
 ---
 

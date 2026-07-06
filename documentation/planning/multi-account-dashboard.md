@@ -1,7 +1,8 @@
 # Multi-Account Dashboard Migration
 
-**Status:** Planning (consolidated 2026-04-17)
+**Status:** Implemented. All 6 phases (1a-4) were built and merged the same day this plan was consolidated (2026-04-17), with follow-up hardening PRs through 2026-06-28. The feature has been live in production for roughly 2.5 months — a cross-tenant data isolation bug in the membership/auth gate was found and fixed on 2026-06-28 (PR #511/#512/#519), consistent with real membership data being in active use. Re-verified against code on 2026-07-06: 29 of 33 checklist items are confirmed fully implemented as specified (several exceed spec). 2 confirmed gaps and 1 item that cannot be verified from static code remain — see "Verification Notes" below and the inline notes on each phase's checklist.
 **Created:** 2026-04-17
+**Verified against code:** 2026-07-06
 **Reviewed by:** Rajan (architecture), Greg (implementation)
 
 ## Problem
@@ -269,58 +270,68 @@ Add `create_if_missing: bool = True` parameter to `get_settings()` for backward 
 
 After the `get_settings()` split ships, existing phantom DM `chat_settings` rows will still exist and appear in `get_all_active()` scheduler queries (no-op but wastes cycles). Add a cleanup migration to delete `chat_settings` rows where `telegram_chat_id > 0` AND no media/queue/history references exist.
 
+## Verification Notes (2026-07-06)
+
+A full code audit (reading actual implementation, not just checking file existence) against every checkbox below found the plan substantially implemented. Confirmed gaps, in order of importance:
+
+1. **Phase 2a's "audit and flip ~15 call sites" was not completed.** Of the plan's 4 explicitly named "MUST NOT create" DM call sites, only `handle_start` is actually safe (structurally — it never calls `get_settings()` on the DM chat at all). `SetupStateService.get_setup_state()`, `DashboardService.resolve_chat_settings_id()` (renamed from `_resolve_chat_settings_id`, used by 8+ dashboard query classes), and the `onboarding/init` → `_get_setup_state()` chain all still call `get_settings()` at its `create_if_missing=True` default, and will still silently create phantom DM `chat_settings` rows on every hit — including, per this doc's own text, "every BFF proxy page load." This directly contradicts migration `024_cleanup_phantom_dm_chat_settings.sql`'s header comment, which asserts "Phase 2a's get_settings() split prevents new phantoms." The actual call-site count is 34 (not ~15); only 10 explicitly pass `create_if_missing=False`, and all 10 are group-callback contexts, not the DM contexts this refactor targeted. Net effect: migration 024 cleaned up historical phantoms once, but the code paths that originally created them are still capable of creating new ones.
+2. **Phase 4's `/webapp/instances` Mini App picker is built but unreachable.** The page renders correctly and matches the spec's field list (name, media count, posts/day, last post, status), but nothing else in the repository links to it — no Telegram WebApp SDK / `initData` usage anywhere in the file or the `webapp/` folder, and zero repo-wide references to the route. The actual bot flow routes single-instance users to an unrelated FastAPI-served static page (`/webapp/onboarding`) and sends multi-instance DM users a plain-text message with inline-keyboard buttons — never a Mini App link to this page. Effectively dead code today.
+3. **Phase 1b's prod backfill verification cannot be confirmed from code alone.** `scripts/backfill_memberships.py` has a working `--verify` mode (auto-run after `--apply`) that implements the doc's exact gating query and exits non-zero on gaps, but whether it was actually run against production and returned 0 rows is a runtime fact outside what static code can prove. No run-log, ops runbook, or execution record was found in `documentation/`. Circumstantial evidence it passed is strong (Phases 2a-4, which depend on this gate, were built and merged the same day; the feature has been live in prod for ~2.5 months with real membership data), but this should be confirmed with a live DB check before treating it as closed.
+
+Minor, non-blocking deviations from spec (also noted inline on their checkboxes): `/link` intentionally does not take a `<session_id>` argument (always scoped to the caller's own pending session instead); `ConversationService` uses purpose-named methods (`set_instance_name()`, `link_group()`, `cleanup_expired()`, etc.) rather than the generic `advance_step()` / `get_current_step()` / `timeout_check()` named in the plan; `POST /api/instances/:id/select`'s `:id` is a `telegram_chat_id`, not the `chat_settings_id` UUID the schema names as PK; `StartCommandRouter` grew a 6th branch (mobile-login deep link) beyond the 5 originally planned.
+
 ## Implementation Plan
 
-### Phase 1a: Migration + Model + Repository (1 PR, ~400 LOC, low risk)
+### Phase 1a: Migration + Model + Repository (1 PR, ~400 LOC, low risk) — DONE (PR #231, 2026-04-17)
 
-- [ ] Migration 023: `user_chat_memberships` table, `onboarding_sessions` table, `display_name` on `chat_settings`
-- [ ] Migration 023: Index on `user_interactions(user_id, telegram_chat_id)` for backfill
-- [ ] `UserChatMembership` model + `UserChatMembershipRepository` (~120 LOC)
-- [ ] `OnboardingSession` model + `OnboardingSessionRepository`
-- [ ] Auto-create membership hook in `TelegramService._get_or_create_user()` for group interactions
-- [ ] `DashboardService.get_user_instances(telegram_user_id)` — JOIN memberships → chat_settings, aggregate stats (~40 LOC)
+- [x] Migration 023: `user_chat_memberships` table, `onboarding_sessions` table, `display_name` on `chat_settings` — `scripts/migrations/023_multi_account_data_layer.sql`, matches spec exactly
+- [x] Migration 023: Index on `user_interactions(user_id, telegram_chat_id)` for backfill — same migration, `idx_user_interactions_backfill`, created `CONCURRENTLY` outside the transaction block
+- [x] `UserChatMembership` model + repository (~120 LOC) — model fields match the migration exactly; repository is named `MembershipRepository` (`src/repositories/membership_repository.py`), not `UserChatMembershipRepository` as named in the plan, with `get_for_user`/`get_for_chat`/`get_membership`/`create_membership`/`deactivate_for_chat`/`deactivate`
+- [x] `OnboardingSession` model + repository — repository is named `OnboardingRepository` (`src/repositories/onboarding_repository.py`), not `OnboardingSessionRepository`
+- [x] Auto-create membership hook for group interactions — lives in `TelegramUserManager.get_or_create_user()` → `_ensure_membership()` (`src/services/core/telegram_user_manager.py`), called from `TelegramService._get_or_create_user()` which delegates to it; checks `telegram_chat_id < 0` before creating
+- [x] `DashboardService.get_user_instances(telegram_user_id)` — method exists on `DashboardService` (`src/services/core/dashboard_service.py`) and delegates to `InstanceDashboardQueries.get_user_instances()` (`src/services/core/dashboard_instance_queries.py`, ~38 LOC); joins memberships → chat_settings and aggregates media count, posts/day, last post
 
-### Phase 1b: Backfill + Verification (script, run on prod)
+### Phase 1b: Backfill + Verification (script, run on prod) — DONE (PR #232, 2026-04-17), prod execution unconfirmed
 
-- [ ] Backfill script with group-only filter (`telegram_chat_id < 0`)
-- [ ] Role promotion via `getChatAdministrators`
-- [ ] Run verification query — must return 0 rows
-- [ ] **GATE: Phase 2 cannot deploy until backfill verified**
+- [x] Backfill script with group-only filter (`telegram_chat_id < 0`) — `scripts/backfill_memberships.py`; matches the plan's SQL intent field-for-field (filters `telegram_chat_id < 0`, excludes `bot_response` interaction type, `ON CONFLICT DO NOTHING`)
+- [x] Role promotion via `getChatAdministrators` — same script, `--promote` flag; calls `getChatAdministrators` per active group, maps creator/administrator → owner/admin, 50ms delay between calls
+- [ ] Run verification query — must return 0 rows — **code capability confirmed** (script's `--verify` mode implements the doc's exact query and auto-runs after `--apply`, exiting non-zero on gaps), **but actual execution against production and its result cannot be confirmed from code alone.** No run-log or ops record found. Needs a live DB check to close out — see Verification Notes above.
+- [x] **GATE: Phase 2 cannot deploy until backfill verified** — gate mechanism is enforced in code (non-zero exit on verification failure); Phases 2a-4 shipped the same day, consistent with the gate having passed, though this is inferred rather than directly observed
 
-### Phase 2a: `get_settings()` Split + `/start` Refactor (1 PR, ~400 LOC, high risk)
+### Phase 2a: `get_settings()` Split + `/start` Refactor (1 PR, ~400 LOC, high risk) — DONE with a gap (PR #233, 2026-04-17)
 
-- [ ] Add `create_if_missing` parameter to `get_settings()`
-- [ ] Audit and flip ~15 call sites (DM paths → `create_if_missing=False`)
-- [ ] `StartCommandRouter` class with 5-branch `/start` handler
-- [ ] `ConversationService` wrapping `onboarding_sessions` (`advance_step()`, `get_current_step()`, `timeout_check()`)
-- [ ] DM onboarding flow (naming → awaiting_group → complete)
-- [ ] Returning user instance list in DM
+- [x] Add `create_if_missing` parameter to `get_settings()` — `src/services/core/settings_service.py:58`, `def get_settings(self, telegram_chat_id: int, create_if_missing: bool = True)`; defaults `True` for backward compat, `False` returns `get_by_chat_id()` (possibly `None`) instead of `get_or_create()`
+- [ ] Audit and flip ~15 call sites (DM paths → `create_if_missing=False`) — **incomplete.** 34 total call sites found (not ~15); only 10 pass `create_if_missing=False` explicitly, and all 10 are group-callback contexts, not the DM contexts this item targeted. Of the plan's 4 named "MUST NOT create" DM sites, only `handle_start` is actually safe; `SetupStateService.get_setup_state()`, `DashboardService.resolve_chat_settings_id()`, and the `onboarding/init` chain were never flipped and still auto-create phantom DM rows. See Verification Notes above.
+- [x] `StartCommandRouter` class with 5-branch `/start` handler — `src/services/core/start_command_router.py`; all 5 plan branches present (internally renumbered/relabeled), plus a 6th branch added later (`login` deep-link redirect for mobile sign-in, per #455/#457) not in the original plan
+- [x] `ConversationService` wrapping `onboarding_sessions` — functionality matches (advance state / query current session / expire stale sessions), but method names differ from the plan: actual public methods are `start_onboarding`, `get_current_session`, `get_session_by_id`, `set_instance_name`, `link_group`, `link_group_to_instance`, `cleanup_expired` — no `advance_step()`, `get_current_step()`, or `timeout_check()`
+- [x] DM onboarding flow (naming → awaiting_group → complete) — confirmed exact step values and transitions across `OnboardingSession`, `ConversationService`, and `StartCommandRouter`
+- [x] Returning user instance list in DM — `_handle_returning_user()` calls `DashboardService.get_user_instances()` and renders the list with "Manage"/"+ New Instance" buttons
 
-### Phase 2b: Group Linking + Event Handlers (1 PR, ~400 LOC, medium risk)
+### Phase 2b: Group Linking + Event Handlers (1 PR, ~400 LOC, medium risk) — DONE (PR #240, 2026-04-17)
 
-- [ ] `my_chat_member` handler: auto-link pending onboarding on bot-added, deactivate memberships on bot-kicked
-- [ ] `startgroup` deep link arg parsing in `/start` handler
-- [ ] `/link <session_id>` fallback command
-- [ ] `/name <name>` command for setting instance display_name
-- [ ] `/instances` command for DM instance management
-- [ ] Onboarding session timeout cleanup in scheduler loop
+- [x] `my_chat_member` handler: auto-link pending onboarding on bot-added, deactivate memberships on bot-kicked — `src/services/core/telegram_membership.py`, registered via `ChatMemberHandler` in `telegram_service.py`; matches spec exactly on both add and kick paths
+- [x] `startgroup` deep link arg parsing in `/start` handler — `start_command_router.py`, parses `context.args[0]` for a `setup_` prefixed payload
+- [x] `/link <session_id>` fallback command — implemented and registered, but **intentionally does not accept a `<session_id>` argument** (documented deviation in its own docstring); always resolves the caller's own pending `awaiting_group` session instead
+- [x] `/name <name>` command for setting instance display_name — `telegram_commands.py`, updates `chat_settings.display_name` for the invoking group
+- [x] `/instances` command for DM instance management — `telegram_commands.py`, lists instances via `DashboardService.get_user_instances()` with per-instance "Manage" buttons
+- [x] Onboarding session timeout cleanup in scheduler loop — `ConversationService.cleanup_expired()` (24h TTL), invoked hourly from `src/services/core/loops/scheduler_loop.py`, piggybacked on the existing retention tick counter exactly as the plan described; logs dropouts before deleting (#247)
 
-### Phase 3: API + Auth (1 PR, ~300 LOC, medium risk — can parallel with Phase 2b)
+### Phase 3: API + Auth (1 PR, ~300 LOC, medium risk — can parallel with Phase 2b) — DONE (PR #235/#236, #246, 2026-04-17)
 
-- [ ] `SessionPayload.chatId` → `SessionPayload.activeChatId: number | null`
-- [ ] Auth route: set `activeChatId = null` on login (not `chatId = body.id`)
-- [ ] `GET /api/instances` endpoint — calls `DashboardService.get_user_instances()`
-- [ ] `POST /api/instances/:id/select` — reissues JWT with `activeChatId` set
-- [ ] BFF proxy: use `activeChatId`, redirect to picker if null
-- [ ] BFF proxy: validate `activeChatId` against active memberships on each request
+- [x] `SessionPayload.chatId` → `SessionPayload.activeChatId: number | null` — `landing/src/lib/session.ts`, field renamed exactly as specified
+- [x] Auth route: set `activeChatId = null` on login (not `chatId = body.id`) — `landing/src/app/api/auth/telegram/route.ts`
+- [x] `GET /api/instances` endpoint — `landing/src/app/api/instances/route.ts` calls through to `DashboardService.get_user_instances()` via `src/api/routes/onboarding/dashboard.py`
+- [x] `POST /api/instances/:id/select` — reissues the JWT with `activeChatId` set, and genuinely authorizes against the caller's live active memberships before switching (403 if not a member — not a rubber stamp). Minor: `:id` is actually a `telegram_chat_id`, not the `chat_settings_id` UUID the schema names as PK — cosmetic naming mismatch, not a security issue.
+- [x] BFF proxy: use `activeChatId`, redirect to picker if null — implemented, split across `landing/src/middleware.ts` (page-level redirect to `/instances`) and the proxy route (422 JSON error for API calls, since a raw redirect wouldn't render a picker for client-side fetches)
+- [x] BFF proxy: validate `activeChatId` against active memberships on each request — implemented, not deferred despite being flagged "low severity" in this doc's own "URL Token Auth Gap" section; shipped same day in a follow-up (PR #246), re-checks live memberships on every proxied request and force-clears `activeChatId` if the membership has gone stale
 
-### Phase 4: Frontend (1 PR, ~500 LOC, low risk — depends on Phase 3)
+### Phase 4: Frontend (1 PR, ~500 LOC, low risk — depends on Phase 3) — DONE except entry point (PR #235/#236, 2026-04-17)
 
-- [ ] Instance picker page/component (name, media count, posts/day, last post, status badge)
-- [ ] Instance switcher dropdown in dashboard header
-- [ ] Update dashboard layout to show active instance name
-- [ ] 0-instance edge case → "Set up your first instance" CTA linking to DM bot
-- [ ] Mini App DM entry point: `/webapp/instances` picker view
+- [x] Instance picker page/component (name, media count, posts/day, last post, status badge) — `landing/src/app/instances/page.tsx`, all 5 fields present and correctly wired to the `Instance` type
+- [x] Instance switcher dropdown in dashboard header — `landing/src/components/dashboard/header.tsx`, calls `POST /api/instances/:id/select` and refreshes
+- [x] Update dashboard layout to show active instance name — shown in `header.tsx` (not the layout file itself); note `sidebar.tsx` still shows a static site name rather than the active instance name
+- [x] 0-instance edge case → "Set up your first instance" CTA linking to DM bot — bespoke branch in `instances/page.tsx` with a hardcoded `t.me/storydump_bot` link; does not reuse the generic `empty-state.tsx` component (that component has no zero-instance logic at all)
+- [ ] Mini App DM entry point: `/webapp/instances` picker view — **built but unreachable, effectively dead code.** The page exists and renders the correct fields, but nothing in the repo links to it, it has no Telegram WebApp SDK/`initData` integration, and the real bot flow routes single-instance users to an unrelated static page (`/webapp/onboarding`) and multi-instance DM users to a plain-text message with inline-keyboard buttons — never to this page. See Verification Notes above.
 
 ### Effort Summary
 

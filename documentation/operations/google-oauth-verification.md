@@ -24,7 +24,7 @@ Before opening the OAuth Brand / consent screen submission form:
 - [x] **Terms of Service URL** — `https://storydump.app/terms` (`landing/src/app/(marketing)/terms/page.tsx`)
 - [ ] **App icon** — 120×120 PNG, no transparency. Need to design.
 - [ ] **Authorized domain** — `storydump.app` verified via Google Search Console.
-- [ ] **OAuth Redirect URI registered** — `${OAUTH_REDIRECT_BASE_URL}/auth/google-drive/callback`. Currently `https://storyline-ai-production.up.railway.app/auth/google-drive/callback` on Railway. Add it under **APIs & Services → Credentials → [OAuth 2.0 Client] → Authorized redirect URIs**. (`OAUTH_REDIRECT_BASE_URL` is documented in [`documentation/guides/cloud-deployment.md`](../guides/cloud-deployment.md).)
+- [ ] **OAuth Redirect URI registered** — `${OAUTH_REDIRECT_BASE_URL}/auth/google-drive/callback`. Currently `https://storydump-production.up.railway.app/auth/google-drive/callback` on Railway. Add it under **APIs & Services → Credentials → [OAuth 2.0 Client] → Authorized redirect URIs**. (`OAUTH_REDIRECT_BASE_URL` is documented in [`documentation/guides/cloud-deployment.md`](../guides/cloud-deployment.md).)
 - [ ] **Scope justification copy** — short text explaining why we need `drive.readonly` (see template below).
 - [ ] **Demo video** — screencast (≤ 5 min) demonstrating each requested scope in use. YouTube unlisted is fine.
 

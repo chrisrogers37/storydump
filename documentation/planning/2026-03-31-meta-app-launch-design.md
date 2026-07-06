@@ -1,8 +1,10 @@
 # Design: Meta App + Instagram Login OAuth + Go-Live
 
 **Date:** 2026-03-31
-**Status:** APPROVED
+**Status:** ✅ COMPLETED — verified 2026-07-06
 **Goal:** Take Storydump from single-user dry-run to a system where testers can self-onboard and post to their own Instagram accounts via the Mini App.
+
+> **Verification note (2026-07-06):** All 4 milestones shipped. Graph API bumped to v21.0 (`settings.META_GRAPH_API_VERSION`); `InstagramLoginOAuthService` + `/auth/instagram-login/callback` landed in `fefd82f` ("feat: add Instagram Login OAuth + bump Graph API to v21.0"); the system has been live in production since, with real accounts (`@gatortails`, `@thursday.lines`) onboarded and posting via Instagram Login OAuth (see `CHANGELOG.md` and the `investigations/` docs). The architecture has since grown a second Graph host (`settings.meta_ig_graph_base`, added 2026-06-02) that this design didn't anticipate — see `2026-05-18-instagram-credential-refactor.md` and `investigations/ig-host-routing_2026-06-02/`.
 
 ## Context
 

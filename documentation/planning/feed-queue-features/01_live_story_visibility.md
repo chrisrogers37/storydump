@@ -2,9 +2,11 @@
 
 **Focus**: Fetch and display currently-live Instagram stories so users know what's on their feed without opening the app.
 
-**Status**: Ready for Implementation
+**Status**: 📋 PENDING — not started; verified 2026-07-06 (see note below)
 **Priority**: High — standalone value, no blockers
 **Estimated Effort**: Medium (service + Telegram UI + tests)
+
+> **Verification note (2026-07-06):** Confirmed not implemented — no `get_live_stories()` method exists in `src/services/integrations/instagram_api.py`, and `/status` (`telegram_commands.py`) has no "Live Stories" section. The documentation hub's "Ready" label is directionally fine (nothing blocks this), but **the endpoint sketched below is now stale and would reintroduce a known bug**: it hardcodes `graph.facebook.com/v22.0/...`, while production Instagram accounts authenticate via `instagram_login`, whose tokens are only valid against `graph.instagram.com` (`settings.meta_ig_graph_base`, added 2026-06-02). Calling `graph.facebook.com` with one of these tokens fails with Meta error 190 — the exact class of bug fixed for posting in `investigations/ig-host-routing_2026-06-02/`. Also note the current `META_GRAPH_API_VERSION` is `v21.0`, not the `v22.0` assumed below. An implementer should call through `settings.meta_ig_graph_base` rather than hardcoding host/version.
 
 ---
 

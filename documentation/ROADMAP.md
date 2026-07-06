@@ -238,6 +238,30 @@ Build a delightful Instagram Story automation system that:
 
 ---
 
+## Multi-Tenant / Multi-Instance Rearchitecture ✅ SHIPPED
+
+**Status**: ✅ Live in production (not version-tagged — `src/__init__.py` still reads `1.6.0`)
+**Design doc**: `planning/multi-account-dashboard.md` (moved here from the repo root 2026-07-06 docs audit — was misplaced)
+**Duration**: April 2026 (design consolidated 2026-04-17) through ~June 2026
+**Goal**: Move from one self-hosted deployment per team to a single multi-tenant deployment serving many independent "Instances" (Telegram groups), each with its own media, queue, schedule, and settings — with a user able to belong to and switch between multiple instances.
+
+### Delivered Features (verified against code 2026-07-06)
+- ✅ **Data layer** — `user_chat_memberships` (user ↔ instance membership, with `instance_role`: owner/admin/member) and `onboarding_sessions` tables (migration 023); `display_name` added to `chat_settings`
+- ✅ **Backfill** — historical group memberships backfilled from `user_interactions`; role promotion via `getChatAdministrators`
+- ✅ **`StartCommandRouter`** — grew to a 6-branch `/start` handler (the plan specified 5; a mobile-login redirect branch was added): DM new-user onboarding, DM returning-user instance list, DM active-onboarding resume, mobile-login redirect, group + `startgroup` linking, standard group setup
+- ✅ **New commands** — `/instances`, `/new`, `/name`, `/link` (see `.claude/rules/telegram.md` for the full command table)
+- ✅ **`my_chat_member` event handling** — auto-links pending onboarding on bot-added, deactivates memberships on bot-kicked
+- ✅ **Web dashboard** (`landing/`, Next.js/Vercel) — `GET /api/instances`, `POST /api/instances/:id/select`, instance picker + switcher, JWT `activeChatId` reissued on switch, BFF proxy validates active membership per request
+
+### Known Gaps (found during 2026-07-06 docs audit, not yet filed as tickets)
+- ⚠️ **`get_settings()` call-site audit incomplete**: the plan called for auditing ~15 call sites and flipping DM-context ones to `create_if_missing=False` so DM logins stop creating phantom `chat_settings` rows. Actual count is 34 call sites; only 10 were flipped. Three of the plan's four explicitly-named DM call sites — `SetupStateService.get_setup_state()`, `DashboardService._resolve_chat_settings_id()`, and the `onboarding/init` chain — were never flipped and still create phantoms, contradicting migration 024's own comment that phantoms are prevented going forward.
+- ⚠️ **Dead code**: the `/webapp/instances` Mini App instance picker page renders but is unreferenced anywhere else in the repo — no Telegram WebApp SDK integration wires up to it. The live bot flow uses a different mechanism for DM instance selection.
+- ⚠️ **Security**: a critical cross-tenant data-isolation gap in the onboarding/dashboard API and Telegram queue callbacks (the membership check this rearchitecture introduced wasn't consistently enforced) was found and fixed 2026-06-28 (#511/#512, PR #519). See `SECURITY_REVIEW.md` §11. Role-based command authorization (member vs. admin) is a tracked follow-up, not yet implemented.
+
+**Completed**: ~June 2026 (backfill + core phases); hardening ongoing
+
+---
+
 ## Phase 3: Advanced Features 🔮 FUTURE
 
 **Status**: 🔮 Exploratory
@@ -312,6 +336,7 @@ Build a delightful Instagram Story automation system that:
 
 | Version | Date | Phase | Description |
 |---------|------|-------|-------------|
+| *(unreleased — version string not bumped)* | 2026-04 to 2026-06 | Multi-Tenant Rearchitecture | `user_chat_memberships`, `StartCommandRouter`, `/instances` `/new` `/name` `/link`, web dashboard instance picker — see section above |
 | v1.6.0 | 2026-02-09 | Phase 1.5-1.8 | Instagram account management, inline account selector, TelegramService refactor, verbose expansion, /cleanup |
 | v1.5.0 | 2026-01-24 | Phase 2 | Instagram API automation + Multi-account support |
 | v1.4.0 | 2026-01-10 | Phase 1.6 | Category-based scheduling with configurable ratios |

@@ -4,6 +4,8 @@
 **Dependencies**: Phase 3 (Shopify), Phase 4 (Printify)
 **Estimated Duration**: 2-3 weeks
 
+> Status verified 2026-07-06 (documentation staleness audit): still PENDING. `src/services/domain/` — the module this doc's `MediaLinkingService`/`PerformanceAnalyticsService` would live in — contains only an empty `__init__.py`; no domain services of any kind exist yet. No `media_product_links` or `product_performance` tables in `scripts/migrations/`. Consistent with its stated dependencies (Phase 3 Shopify, Phase 4 Printify) both being unimplemented.
+
 ---
 
 ## Overview

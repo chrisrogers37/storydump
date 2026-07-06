@@ -2,9 +2,11 @@
 
 **Focus**: Allow users to clear/remove live Instagram stories to start a fresh posting cycle.
 
-**Status**: BLOCKED — Instagram Graph API does not support story deletion
+**Status**: BLOCKED — Instagram Graph API does not support story deletion (verified still true 2026-07-06)
 **Priority**: Medium — desired feature, but no API path currently exists
 **Estimated Effort**: TBD (dependent on API availability)
+
+> **Verification note (2026-07-06):** Re-checked — no DELETE endpoint for Instagram stories/media has appeared in the Graph API; current production Graph API version is v21.0. No code changes have been made toward this workstream since the doc was written (git history has no related commits). Status and recommendation below remain accurate as written; workstream is still correctly parked.
 
 ---
 

@@ -4,6 +4,8 @@
 **Reviewer**: AI Security Audit
 **Status**: ✅ Secure — Post-SaaS hardening complete
 
+> **⚠️ Post-review update (2026-06-28)**: A critical cross-tenant IDOR was found and fixed *after* this review was marked complete — see **[Section 11, Addendum](#11-addendum-cross-tenant-idor-finding-and-fix-2026-06-28)** below. The "Secure" / "Review Complete" status above reflects the 2026-02-15 point-in-time review only.
+
 ---
 
 ## Executive Summary
@@ -370,3 +372,36 @@ Post multi-tenant transition (Phases 01-07) security review. All findings fixed.
 ---
 
 **Review Complete** ✅
+
+---
+
+## 11. Addendum: Cross-Tenant IDOR Finding and Fix (2026-06-28)
+
+**This is a post-review addendum, added 2026-07-06.** It does not alter the findings above — it documents a critical vulnerability discovered and fixed *after* Section 10's review was marked complete on 2026-02-15, and closes the loop on two of that section's "Remaining Recommendations."
+
+### Finding 1: Mini App API IDOR — caller never bound to the tenant they acted on (#511)
+
+`_validate_request()` (`src/api/routes/onboarding/helpers.py`) is the shared authorization gate in front of ~35 onboarding/dashboard/settings API endpoints. It authenticated the caller (verified the Telegram `initData` HMAC signature or a signed URL token) but the chat-binding check only fired when the token itself carried a `chat_id`. A Telegram WebApp `initData` payload launched from a bot **DM** carries no `chat` field at all, so for DM-launched sessions the equality check was skipped entirely — the request's `chat_id` argument was trusted outright. Any authenticated bot user could pass an arbitrary `chat_id` and read or mutate **another tenant's** posting queue, history, Instagram accounts, media library, and settings. A previously fail-**open** inline membership check that guarded only the `/audit-log` endpoint had the same underlying gap.
+
+### Finding 2: Telegram callback queue operations — cross-tenant deletes (#512, data-layer subset)
+
+In `src/services/core/telegram_callbacks_admin.py`, the `resume:clear` / `clear:confirm` buttons and the resume `reschedule` path called the queue repository with no tenant filter, so a single button press could delete or reschedule **every tenant's** pending queue rows fleet-wide. `handle_batch_approve` also trusted a `chat_settings_id` value carried in the (forgeable) inline-button callback data without verifying it belonged to the calling chat.
+
+### Fix
+
+- **New `MembershipService`** (`src/services/core/membership_service.py`) — `is_active_member(telegram_user_id, telegram_chat_id)` resolves a Telegram identity to an active `UserChatMembership` row (user → `chat_settings` → membership) and is fail-closed by construction: a missing user, missing chat, missing membership, or inactive membership all return `False`; it never raises.
+- `_validate_request()` now branches on whether the token cryptographically binds a `chat_id`: bound tokens (signed URL tokens, group-launched initData) keep the original equality check; unbound tokens (DM-launched initData) now require `MembershipService().is_active_member(...)` to return `True`, or the request is rejected with `403 Not a member of this instance`. The old `/audit-log`-only fail-open check was removed in favor of this central, fail-closed path.
+- `telegram_callbacks_admin.py` gained a `_caller_chat_settings_id()` helper; `handle_batch_approve`, `handle_resume_callback`, and `_do_resume_callback` now scope all queue lookups to the calling chat's `chat_settings_id` and refuse to run (rather than silently falling back to an unscoped query) when the chat has no resolved tenant. `handle_batch_approve` also rejects a `batch_approve:{chat_settings_id}` callback whose id doesn't match the caller's own.
+- **Fixed in commit `7c99a34`** (PR #519), closing #511 and partially addressing #512. Regression tests added: `tests/src/services/test_membership_service.py`, `tests/src/api/test_helpers.py`, `tests/src/services/test_telegram_callbacks_admin.py`.
+
+### Status of Section 10's "Remaining Recommendations" (re-checked 2026-07-06)
+
+| Recommendation (Section 10) | Status |
+|---|---|
+| Add role-based access control on Telegram commands for multi-tenant | ❌ **Still open.** This fix closes cross-*tenant* leakage (which chat's data a request can touch) — it does not add member-vs-admin authorization *within* a chat. PR #519's own commit message explicitly tracks per-role command authorization as a separate follow-up. Do not treat this finding as covering the Section 10 recommendation. |
+| Add API rate limiting (e.g. `slowapi`) on `/api/onboarding/*` endpoints | ✅ **Done.** `SlowAPIMiddleware` is wired globally in `src/api/app.py` (30/min per IP default, applies to every route including all of `/api/onboarding/*`); several mutation endpoints in `src/api/routes/onboarding/settings.py` carry tighter `@limiter.limit("10/minute")` / `"5/minute"` decorators. |
+| Add `pip-audit` to CI for automated dependency vulnerability scanning | ✅ **Done, with a caveat.** `.github/workflows/ci.yml` runs `pip-audit -r requirements.txt`, but the step is `continue-on-error: true` with `|| true` on the command itself — a discovered vulnerability currently cannot fail the build. It's informational-only, not a gate. |
+
+### Takeaway
+
+The "✅ Secure" / "Review Complete" framing elsewhere in this document is a point-in-time snapshot from 2026-02-15. A real, critical cross-tenant vulnerability was present in production between that review and its fix on 2026-06-28. Treat each section of this document as dated evidence, not an evergreen guarantee of current security posture — cross-check `CHANGELOG.md`'s `### Security` entries under `[Unreleased]` for anything more recent than a section's own date.

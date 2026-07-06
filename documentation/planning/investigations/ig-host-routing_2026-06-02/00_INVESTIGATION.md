@@ -2,6 +2,7 @@
 
 | Field | Value |
 |---|---|
+| Status | ✅ **RESOLVED** — verified 2026-07-06. All 5 planned PRs merged: PR1 `ad6716b` (2026-06-02, host routing fix), PR2 `6f982a8` (2026-06-02, adds `api_tokens.auth_method`/`issuing_app_id`), PR3 `fe65678` (2026-06-02, dual-write at OAuth callbacks), PR4 (read-switch, documented in CHANGELOG.md under #468), PR5 `706fbc2` (2026-06-03, drops `instagram_accounts.auth_method`). No recurrence of "Cannot parse access token" / code 190 found in git history or CHANGELOG.md since. |
 | Date | 2026-06-02 |
 | Triggered by | User report: "We STILL have not figured out auth and getting stories to post through the Instagram login." |
 | Prior investigation | `documentation/planning/investigations/ig-oauth-cross-flow-reconnect_2026-05-25/00_INVESTIGATION.md` |

@@ -73,10 +73,12 @@ psql "$DATABASE_URL" -c "SELECT * FROM instagram_accounts WHERE is_active = true
 | File | Contains |
 |------|----------|
 | `src/services/core/telegram_service.py` | Telegram bot handlers |
-| `src/services/core/posting_service.py` | Posting orchestration |
+| `src/services/core/posting.py` | Posting orchestration (`PostingService`) |
 | `src/services/core/scheduler.py` | Schedule creation |
+| `src/services/core/start_command_router.py` | 5-branch `/start` handler (DM onboarding, instance list, group linking) |
 | `src/services/integrations/instagram_api.py` | Instagram Graph API |
-| `src/models/chat_settings.py` | Per-chat settings |
+| `src/models/chat_settings.py` | Per-chat settings (one per tenant/instance) |
+| `src/models/user_chat_membership.py` | User ↔ instance membership (multi-account dashboard) |
 
 ---
 

@@ -2,6 +2,7 @@
 
 | Field | Value |
 |---|---|
+| Status | ✅ **RESOLVED** — verified 2026-07-06. Bug B (reconnect loop) fixed by `find_existing_account_for_oauth`, per `01_oauth_cross_flow_fallback.md`, shipped `26f85fd` (2026-05-25) / `03d15cd` (2026-05-26, #441). Bug A ("Cannot parse access token") turned out to share a root cause with the *later* `ig-host-routing_2026-06-02` investigation — IG-Login tokens sent to the wrong Graph host, not a corrupt token — resolved by that investigation's PR1 (`ad6716b`, 2026-06-02). The F3 follow-up this doc anticipated ("if the fresh token also can't be parsed, Bug A is structural") was effectively answered by that sibling investigation rather than opened separately. |
 | Date | 2026-05-25 |
 | Triggered by | User report: "still getting served content, but still cannot post it to instagram. I have @gatortails attached to my account. I just tried re-connecting and got hit with Connection Failed." |
 | Deployed prod commit | `6ca43d3` (main, PR #435 — `fix: align dry_run_mode model default with code default (False)`) |

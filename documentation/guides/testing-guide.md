@@ -2,7 +2,7 @@
 
 This document explains how testing works in the Storydump project.
 
-**Current test count**: 1,417 tests across 77 test files as of v1.6.0
+**Current test count**: 2,038 tests across 103 test files (`pytest --collect-only -q`, v1.6.0)
 
 ## Quick Start
 
@@ -20,7 +20,7 @@ make test-quick
 pytest tests/src/services/test_telegram_callbacks.py
 
 # Run a specific test method
-pytest tests/src/services/test_scheduler.py::TestSchedulerService::test_create_schedule
+pytest tests/src/services/test_scheduler.py::TestForceSendNext::test_success
 ```
 
 ## Automatic Test Database Setup
@@ -117,47 +117,120 @@ Key design decisions:
 ```
 tests/
 ├── conftest.py              # Pytest configuration & fixtures
-├── cli/                     # CLI command tests (4 files)
+├── cli/                     # CLI command tests (8 files)
+│   ├── test_backfill_commands.py
+│   ├── test_google_drive_commands.py
+│   ├── test_health_commands.py
+│   ├── test_instagram_commands.py
 │   ├── test_media_commands.py
 │   ├── test_queue_commands.py
-│   ├── test_user_commands.py
-│   └── test_health_commands.py
-├── src/
-│   ├── repositories/        # Repository layer tests (8 files)
-│   │   ├── test_user_repository.py
-│   │   ├── test_media_repository.py
-│   │   ├── test_queue_repository.py
-│   │   ├── test_history_repository.py
-│   │   ├── test_lock_repository.py
-│   │   ├── test_service_run_repository.py
-│   │   ├── test_category_mix_repository.py
-│   │   └── test_interaction_repository.py
-│   ├── services/            # Service layer tests (17 files)
-│   │   ├── test_base_service.py
-│   │   ├── test_media_ingestion.py
-│   │   ├── test_scheduler.py
-│   │   ├── test_media_lock.py
-│   │   ├── test_posting.py
-│   │   ├── test_telegram_service.py       # Core service tests
-│   │   ├── test_telegram_commands.py      # Command handler tests
-│   │   ├── test_telegram_callbacks.py     # Callback handler tests
-│   │   ├── test_telegram_settings.py      # Settings UI tests
-│   │   ├── test_telegram_accounts.py      # Account handler tests
-│   │   ├── test_health_check.py
-│   │   ├── test_settings_service.py       # Per-chat settings
-│   │   ├── test_instagram_account_service.py  # Multi-account
-│   │   ├── test_interaction_service.py    # Bot interaction tracking
-│   │   ├── test_instagram_api.py          # Instagram Graph API
-│   │   ├── test_cloud_storage.py          # Cloudinary integration
-│   │   └── test_token_refresh.py          # Token lifecycle
-│   └── utils/               # Utility tests (5 files)
-│       ├── test_file_hash.py
-│       ├── test_logger.py
-│       ├── test_validators.py
-│       ├── test_image_processing.py
-│       └── test_encryption.py             # Fernet encryption
-└── integration/             # Integration tests
-    └── test_instagram_posting.py          # End-to-end posting
+│   ├── test_sync_commands.py
+│   └── test_user_commands.py
+├── integration/             # Integration tests (1 file)
+│   └── test_instagram_posting.py          # End-to-end posting
+└── src/
+    ├── test_health_endpoint.py
+    ├── test_main_scheduler_loop.py
+    ├── api/                 # API route tests (5 files)
+    │   ├── test_helpers.py
+    │   ├── test_oauth_routes.py
+    │   ├── test_onboarding_dashboard.py
+    │   ├── test_onboarding_routes.py
+    │   └── test_security_hardening.py
+    ├── config/              # Config tests (3 files)
+    │   ├── test_constants.py
+    │   ├── test_database.py
+    │   └── test_settings.py
+    ├── exceptions/          # Exception tests (4 files)
+    │   ├── test_backfill_exceptions.py
+    │   ├── test_base_exceptions.py
+    │   ├── test_google_drive_exceptions.py
+    │   └── test_instagram_exceptions.py
+    ├── models/              # Model tests (9 files)
+    │   ├── test_api_token.py
+    │   ├── test_category_mix.py
+    │   ├── test_chat_settings.py
+    │   ├── test_credential_refactor.py
+    │   ├── test_instagram_account.py
+    │   ├── test_media_item.py
+    │   ├── test_media_lock.py
+    │   ├── test_posting_history.py
+    │   └── test_posting_queue.py
+    ├── repositories/        # Repository layer tests (12 files)
+    │   ├── test_base_repository.py
+    │   ├── test_category_mix_repository.py
+    │   ├── test_chat_settings_repository.py
+    │   ├── test_history_repository.py
+    │   ├── test_instagram_account_repository.py
+    │   ├── test_interaction_repository.py
+    │   ├── test_lock_repository.py
+    │   ├── test_media_repository.py
+    │   ├── test_queue_repository.py
+    │   ├── test_service_run_repository.py
+    │   ├── test_token_repository.py
+    │   └── test_user_repository.py
+    ├── services/            # Service layer tests (51 files)
+    │   ├── media_sources/   # Media source provider tests (4 files)
+    │   │   ├── test_base_provider.py
+    │   │   ├── test_factory.py
+    │   │   ├── test_google_drive_provider.py
+    │   │   └── test_local_provider.py
+    │   ├── test_base_service.py
+    │   ├── test_media_ingestion.py
+    │   ├── test_scheduler.py                  # JIT scheduler tests
+    │   ├── test_scheduler_loop.py
+    │   ├── test_scheduler_queue_reliability.py
+    │   ├── test_media_lock.py
+    │   ├── test_media_lifecycle.py
+    │   ├── test_media_sync.py
+    │   ├── test_posting.py
+    │   ├── test_posting_delivery_reschedule.py
+    │   ├── test_daily_cap.py
+    │   ├── test_telegram_service.py           # Core service tests
+    │   ├── test_telegram_commands.py          # Command handler tests
+    │   ├── test_telegram_commands_status.py
+    │   ├── test_telegram_callbacks.py         # Callback handler tests
+    │   ├── test_telegram_callbacks_admin.py
+    │   ├── test_telegram_callbacks_core.py
+    │   ├── test_telegram_callbacks_queue.py
+    │   ├── test_telegram_settings.py          # Settings UI tests
+    │   ├── test_telegram_accounts.py          # Account handler tests
+    │   ├── test_telegram_autopost.py
+    │   ├── test_telegram_lifecycle.py
+    │   ├── test_telegram_notification.py
+    │   ├── test_telegram_utils.py
+    │   ├── test_health_check.py
+    │   ├── test_settings_service.py           # Per-chat settings
+    │   ├── test_setup_state_service.py
+    │   ├── test_start_command_router.py
+    │   ├── test_instagram_account_service.py  # Multi-account
+    │   ├── test_interaction_service.py        # Bot interaction tracking
+    │   ├── test_instagram_api.py              # Instagram Graph API
+    │   ├── test_instagram_backfill.py
+    │   ├── test_instagram_login_oauth.py
+    │   ├── test_backfill_downloader.py
+    │   ├── test_caption_service.py
+    │   ├── test_conversation_service.py
+    │   ├── test_credential_refactor_dual_write.py
+    │   ├── test_credential_refactor_phase_3.py
+    │   ├── test_cloud_storage.py               # Cloudinary integration
+    │   ├── test_dashboard_service.py
+    │   ├── test_google_drive_oauth.py
+    │   ├── test_google_drive_service.py
+    │   ├── test_membership_service.py
+    │   ├── test_oauth_service.py
+    │   ├── test_phase2b_handlers.py
+    │   ├── test_token_refresh.py               # Token lifecycle
+    │   └── test_user_service.py
+    └── utils/               # Utility tests (8 files)
+        ├── test_auth_monitor.py
+        ├── test_datetime_utils.py
+        ├── test_encryption.py             # Fernet encryption
+        ├── test_file_hash.py
+        ├── test_image_processing.py
+        ├── test_logger.py
+        ├── test_validators.py
+        └── test_webapp_auth.py
 ```
 
 ## Test Markers
@@ -322,18 +395,22 @@ open htmlcov/index.html
 In CI environments (GitHub Actions, etc.), tests run automatically. The test database is created automatically - no special setup needed.
 
 ```yaml
-# .github/workflows/test.yml
+# .github/workflows/ci.yml (the "test" job)
 services:
   postgres:
     image: postgres:15
     env:
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_USER: test_user
+      POSTGRES_PASSWORD: test_password
+      POSTGRES_DB: storyline_test
     options: >-
       --health-cmd pg_isready
       --health-interval 10s
+      --health-timeout 5s
+      --health-retries 5
 
-- name: Run tests
-  run: make test
+- name: Run tests with coverage
+  run: pytest tests/ -v --cov=src --cov-report=xml --cov-report=term-missing
 ```
 
 ## Troubleshooting

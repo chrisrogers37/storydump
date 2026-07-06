@@ -15,8 +15,14 @@ paths:
 | `/next` | Force-send next post now | `telegram_commands.py` |
 | `/cleanup` | Delete recent bot messages | `telegram_commands.py` |
 | `/setup` / `/settings` | Quick settings & toggles | `telegram_settings.py` |
+| `/instances` | List your instances (DM) | `telegram_commands.py` (`StartCommandRouter`) |
+| `/new` | Create a new instance (DM) | `telegram_commands.py` (`StartCommandRouter`) |
+| `/name` | Set instance display name (group) | `telegram_commands.py` (`StartCommandRouter`) |
+| `/link` | Link group to pending onboarding session | `telegram_commands.py` (`StartCommandRouter`) |
 
 **Retired commands**: `/queue`, `/pause`, `/resume`, `/history`, `/sync`, `/schedule`, `/stats`, `/locks`, `/reset`, `/dryrun`, `/backfill`, `/connect` — respond with redirect messages but are not listed in the bot menu.
+
+**Multi-instance note**: `/start` delegates to `StartCommandRouter` (`start_command_router.py`), a 6-branch handler covering DM onboarding (new user), DM returning-user instance list, DM active-onboarding resume, mobile-login redirect, group + `startgroup` payload linking, and standard group setup. See `documentation/planning/multi-account-dashboard.md` for the design — note `get_settings()`'s `create_if_missing` split (needed so DM flows don't create phantom `chat_settings` rows) is only partially applied: as of 2026-07-06, `SetupStateService.get_setup_state()`, `DashboardService._resolve_chat_settings_id()`, and the `onboarding/init` chain still default to creating phantoms in DM context.
 
 ## Callback Actions
 

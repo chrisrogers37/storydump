@@ -16,39 +16,57 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop, 'feature/*']
   pull_request:
-    branches: [main]
+    branches: [main, develop]
 
 jobs:
-  test:
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+      - run: pip install ruff
+      - run: ruff check src/ cli/ --output-format=github
+      - run: ruff format src/ cli/ --check
 
-      - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
-          pip install -e .
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        # ... health-checked Postgres service for the test suite
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - run: pip install -r requirements.txt && pip install -e .
+      - name: Run tests with coverage
+        run: pytest tests/ -v --cov=src --cov-report=xml --cov-report=term-missing
 
-      - name: Lint
-        run: |
-          ruff check src/ tests/ cli/
-          ruff format --check src/ tests/ cli/
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - run: pip install pip-audit bandit
+      - run: pip-audit -r requirements.txt --ignore-vuln GHSA-1234 || true
+      - run: bandit -r src/ -ll -ii --format json --output bandit-report.json || true
 
-      - name: Test
-        run: pytest
-
-      - name: Security scan
-        run: |
-          pip-audit
-          bandit -r src/ -c pyproject.toml
+  changelog-check:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Fails the check if CHANGELOG.md wasn't updated (docs-only PRs are exempt)
 ```
+
+These four jobs (`lint`, `test`, `security`, `changelog-check`) run in parallel, not as one combined job -- shown separately above to mirror the actual workflow file.
 
 ### What CI Checks
 

@@ -1,7 +1,9 @@
 # Instagram Credential Refactor — Implementation Plan
 
-**Status:** Draft. **Author:** chrisrogers37 (with Claude). **Date:** 2026-05-18.
+**Status:** ✅ COMPLETED — verified 2026-07-06 (see note below). **Author:** chrisrogers37 (with Claude). **Date:** 2026-05-18.
 **Related:** PR #378 (band-aid fix), follow-up to PR #341 (multi-account ingest).
+
+> **Verification note (2026-07-06):** All 5 PRs landed, tracked across issues #380 (phases 1-3) then #468 (phases 4-5): PR-1 `2bc6908` (2026-05-19, migration 035, additive `meta_account_id`), PR-2 `bb30228` (2026-05-19, dual-write), PR-3 `fb20683` (2026-05-19, #408, migration 036 backfill + credential-keyed reads), PR-4 `6f982a8` + `fe65678` (2026-06-02, migrations 038-040), PR-5 `706fbc2` (2026-06-03, migration 041). **Two deviations from this plan:** (1) PR-4 shipped as a real `api_tokens.auth_method` + `issuing_app_id` column pair (with its own migrations) rather than inferring auth method from `service_name` differentiation as sketched in "Open decisions" #1 below. (2) PR-5 only dropped `instagram_accounts.auth_method`; `instagram_accounts.instagram_account_id` was deliberately **kept** rather than dropped — per CHANGELOG.md: "its consumers (backfill, OAuth heal logic, credential lookup) need a separate refactor... filed as a follow-up." The migration plan's PR-5 SQL sketch (dropping both columns) did not ship as written.
 
 ## Problem statement
 

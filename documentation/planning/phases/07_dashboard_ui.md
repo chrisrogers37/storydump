@@ -1,8 +1,21 @@
 # Phase 8: Dashboard UI
 
-**Status**: 📋 PENDING
+**Status**: 🔧 IN PROGRESS (updated 2026-07-06 — was 📋 PENDING; see verification note)
 **Dependencies**: Phase 5 (Media-Product Linking), Phase 6 (LLM)
 **Estimated Duration**: 4-6 weeks
+
+> **Status updated 2026-07-06** (documentation staleness audit): changed from PENDING to IN PROGRESS. A real Next.js dashboard is live at `landing/src/app/(dashboard)/dashboard/` — Overview, Media Library (with Calendar and Reuse/Dead-Content sub-views), Analytics, Settings (General/Accounts/Integrations tabs), and a Setup Wizard — backed by `src/api/routes/onboarding/dashboard.py` and `DashboardService`. It genuinely covers parts of this doc's scope:
+> - **§8.1 Foundation & Auth**: Next.js + TypeScript + Tailwind + shadcn/ui (`landing/src/components/ui/`) all present. Telegram-based login is implemented and its flow is close to what this doc specifies almost verbatim — `landing/src/app/api/auth/telegram/route.ts` verifies the Telegram Login Widget signature and issues a signed session token, matching the doc's Authentication Flow section down to the endpoint name.
+> - **§8.2 Analytics Dashboard**: `dashboard/analytics` page exists; `recharts` is a real dependency.
+> - **§8.3 Media Library**: `dashboard/media` exists with filtering, pagination, and upload support via `POST /api/onboarding/upload-media`.
+>
+> However, this was **not built by executing this phase document** — it shipped as part of an undocumented multi-tenant / Telegram-Mini-App "onboarding" initiative (CHANGELOG entries `#231`, `#235`, `#236`, `#240`, `#244`, `#246`, `#253` — "Multi-account data layer", "instance picker", "dashboard switcher", etc.); nothing in that work references this doc. Notable divergences and gaps:
+> - **Architecture differs from spec**: auth/session is a Next.js BFF issuing its own JWT-style cookie (via `jose`), and most dashboard data fetching proxies server-side to the FastAPI "onboarding" API using signed Telegram `init_data` — not the generic bearer-JWT REST API (`/auth/telegram` + `/auth/refresh`, TanStack Query, Zustand) this doc specifies. TanStack Query and Zustand are not dependencies of `landing/`.
+> - **§8.4 Product & Performance does not exist at all** — no `/products`, `/orders`, or margin-analysis pages/routes anywhere, consistent with Shopify/Printify/Media-Linking (Phases 3-5) all still being unimplemented.
+> - **§8.5 Team & Settings is partial** — Settings exists, but there is no team activity feed/page, and the "integration status dashboard" only covers Google Drive + Instagram (`landing/src/components/dashboard/settings/integrations-tab.tsx`), not Shopify/Printify/Gmail, again because those don't exist. No prompt-template management UI (Phase 6 doesn't exist either).
+> - **Out-of-scope addition**: multi-instance/tenant switching (`landing/src/app/instances/`, `landing/src/app/webapp/instances/`, `landing/src/app/api/instances/`) sits alongside this dashboard and is entirely outside anything this doc anticipates.
+>
+> **Net**: treat this doc as superseded/partially-obsoleted by the actual onboarding-dashboard implementation for §8.1-8.3; §8.4 and the team portion of §8.5 remain accurate as a forward plan since nothing for them exists yet.
 
 ---
 

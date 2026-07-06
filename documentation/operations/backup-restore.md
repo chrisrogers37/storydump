@@ -19,7 +19,7 @@ Critical data to backup:
 pg_dump "$DATABASE_URL" -F c -f ~/backups/storydump_$(date +%Y%m%d_%H%M%S).dump
 
 # Or with explicit connection string
-pg_dump "postgresql://user:pass@ep-xxx.neon.tech/storydump_ai?sslmode=require" \
+pg_dump "postgresql://user:pass@ep-xxx.neon.tech/storydump?sslmode=require" \
     -F c -f ~/backups/storydump_$(date +%Y%m%d_%H%M%S).dump
 ```
 

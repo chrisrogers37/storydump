@@ -4,6 +4,8 @@
 **Dependencies**: Phase 3 (Shopify), Phase 6 (LLM Integration)
 **Estimated Duration**: 2-3 weeks
 
+> Status verified 2026-07-06 (documentation staleness audit): still PENDING. No `OrderNotificationService`, `GmailService`, or `EmailOrchestrationService` exist in `src/`, and no `email_threads`/`email_messages` tables exist in `scripts/migrations/`. The only "gmail" hits in the repo are a contact email address in `landing/src/config/site.ts` and `faqs.ts` marketing copy — not integration code. Consistent with its dependencies (Phase 3 Shopify, Phase 6 LLM) both still being unimplemented (see those docs).
+
 ---
 
 ## Overview

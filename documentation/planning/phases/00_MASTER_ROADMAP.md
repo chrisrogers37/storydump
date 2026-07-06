@@ -1,6 +1,6 @@
 # Storydump - Master Roadmap
 
-**Last Updated**: 2026-02-09
+**Last Updated**: 2026-02-09 (status column verified/annotated 2026-07-06 — see notes marked "Status verified/updated 2026-07-06")
 **Vision**: E-commerce Optimization Hub for Social Media Marketing
 
 ---
@@ -150,9 +150,13 @@ Entities (Tables):
 | **3** | **Shopify Integration** | 📋 PENDING | - | Phase 2 |
 | **4** | **Printify Integration** | 📋 PENDING | - | Phase 3 |
 | **5** | **Media-Product Linking** | 📋 PENDING | - | Phase 3, 4 |
-| **6** | **LLM Integration** | 📋 PENDING | - | Phase 5 |
+| **6** | **LLM Integration** | 📋 PENDING † | - | Phase 5 |
 | **7** | **Order & Email Automation** | 📋 PENDING | - | Phase 3, 6 |
-| **8** | **Dashboard UI** | 📋 PENDING | - | Phase 5, 6, 7 |
+| **8** | **Dashboard UI** | 🔧 IN PROGRESS †† | - | Phase 5, 6, 7 |
+
+> **Status verified 2026-07-06** (documentation staleness audit, cross-checked against `src/`, `landing/src/`, and `scripts/migrations/`): Phases 3, 4, 5, and 7 confirmed still PENDING with no corresponding code anywhere in the repo. Two corrections from this audit:
+> - **† Phase 6 (LLM)**: the abstraction/prompt-template/conversation architecture in [05_llm_integration.md](05_llm_integration.md) is still 0% built, but a narrow, unrelated Claude integration (`src/services/core/caption_service.py`, AI-generated Instagram captions) already ships in production. Left as PENDING rather than IN PROGRESS since it isn't a step toward this doc's specific architecture — see that doc for detail.
+> - **†† Phase 8 (Dashboard)**: changed from PENDING to IN PROGRESS. A substantial Next.js dashboard is live (`landing/src/app/(dashboard)/`) covering analytics, media library, and settings — but it was built via an undocumented multi-tenant/Telegram-Mini-App initiative rather than as an execution of [07_dashboard_ui.md](07_dashboard_ui.md), and it omits the e-commerce-dependent parts (Product & Performance, Team activity) since Phases 3-6 remain undone. See that doc for detail.
 
 ---
 
@@ -173,9 +177,11 @@ Enable automated Instagram Story posting via Meta Graph API. Hybrid mode: auto-p
 - Per-chat settings with `.env` fallback
 
 ### Phase 2.5: Settings & Multi-Tenancy ✅ COMPLETE (Phases 1-1.5)
-**Document**: [01_settings_and_multitenancy.md](01_settings_and_multitenancy.md)
+**Document**: [01_settings_and_multitenancy.md](01_settings_and_multitenancy.md) — ⚠️ *broken link as of 2026-07-06: this file does not exist in `documentation/planning/phases/`.*
 
 Runtime-configurable settings and Instagram account management. Phases 1 and 1.5 of this document are complete; Phases 2 (Cloud Media Storage) and 3 (Multi-Tenancy) remain future work.
+
+> **Status correction, 2026-07-06** (documentation staleness audit): the claim above that Phase 2 (Cloud Media Storage) and Phase 3 (Multi-Tenancy) "remain future work" is stale. Cloudinary cloud media storage shipped as part of Phase 2 (Instagram API Automation, above). Multi-tenancy has since been extensively implemented — a `chat_settings_id` tenant FK was added to core tables (migration `014_multi_tenant_chat_settings_fk.sql`) and threaded through dozens of repository methods, a `user_chat_memberships` join table plus `MembershipService` and `MembershipRepository` were added, multi-instance dashboard/account switching exists (`landing/src/app/instances/`, `landing/src/app/webapp/instances/`), and a cross-tenant isolation hardening pass shipped recently (CHANGELOG `#511`/`#512`). This work landed under CHANGELOG entries like "Multi-account data layer" (`#231`), "Multi-account Phase 2b/3/4" (`#235`, `#236`, `#240`), and "Multi-tenant data model foundation" — not under this (missing) document. This master roadmap significantly understates how far multi-tenancy has progressed; a full re-scoping of this section/document is left to the lead.
 
 **Key Deliverables** (delivered):
 - Database-backed settings (`chat_settings` table) with `.env` fallback
@@ -277,6 +283,8 @@ Web-based analytics dashboard and management interface.
 - JWT authentication for API
 - Team-based access control
 - OAuth2 for third-party integrations
+
+> **Status correction, 2026-07-06**: this section is stale — multi-tenancy is not gated behind a future "Phase 5" anymore, it is already implemented today (see the Phase 2.5 status correction above). Telegram-based JWT-style session auth for the API exists now (`landing/src/app/api/auth/telegram/`), and tenant-scoped access control is enforced via `chat_settings_id` + `MembershipService`, not deferred to later phases. OAuth2 for third-party integrations remains genuinely future work (no Shopify/Printify/Gmail OAuth exists).
 
 ### Configuration Management
 
@@ -403,6 +411,8 @@ LLM Service → Email Drafts → Gmail
 
 **Archived** (completed phases):
 | [archive/01_instagram_api.md](../archive/01_instagram_api.md) | Instagram Graph API (✅ COMPLETE) |
+
+> ⚠️ **Broken link, verified 2026-07-06**: no `documentation/planning/archive/` directory exists in the repo, so this row's link is dead. The feature it describes (Instagram Graph API automation) is genuinely complete — see `documentation/ROADMAP.md` Phase 2 — but its write-up isn't recoverable at this path.
 
 ---
 

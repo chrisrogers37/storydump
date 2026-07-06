@@ -11,13 +11,14 @@ Domain-specific rules are in `.claude/rules/` and load automatically when workin
 
 ### NEVER run these commands:
 ```bash
-storydump-cli process-queue          # Posts to Instagram/Telegram
-storydump-cli process-queue --force  # Posts to Instagram/Telegram
-python -m src.main                   # Starts posting scheduler
-storydump-cli create-schedule        # Modifies production schedule
+python -m src.main                   # Starts the JIT posting scheduler (worker) + Telegram bot
 storydump-cli reset-queue            # Modifies production queue
 storydump-cli instagram-auth         # Modifies authentication
+storydump-cli revoke-tokens          # Revokes live OAuth tokens for a service (breaks posting until re-auth)
+storydump-cli rotate-keys            # Re-encrypts all stored tokens with a new key; wrong ENCRYPTION_KEYS ordering can lose access to tokens. No dry-run.
 ```
+
+**Note (verified 2026-07-06):** `storydump-cli process-queue` and `storydump-cli create-schedule` no longer exist as CLI commands — the manual Phase-1-era "generate a schedule, then process it" workflow was replaced by the always-on JIT scheduler inside `python -m src.main` (see `.claude/rules/scheduler.md`). That command is still correctly listed above as the actual trigger for automatic posting.
 
 ### SAFE commands you CAN run:
 ```bash
@@ -27,6 +28,8 @@ storydump-cli list-categories
 storydump-cli list-users
 storydump-cli check-health
 storydump-cli instagram-status
+storydump-cli list-instagram-accounts
+storydump-cli google-drive-status
 storydump-cli validate-image <path>
 storydump-cli category-mix-history
 storydump-cli sync-media
@@ -55,17 +58,17 @@ pytest                               # Tests - always safe
 - **API**: `uvicorn src.api.app:app` (REST API + Mini App)
 - **Database**: Neon PostgreSQL — connect via `psql "$DATABASE_URL"`
 - Env vars are per-service — must set on both worker AND API
-- **NEVER run on production**: `process-queue`, `python -m src.main`, or mutating SQL on `posting_history`
+- **NEVER run on production**: `python -m src.main` (starts the JIT scheduler — see CRITICAL SAFETY RULES above), or mutating SQL on `posting_history`
 
 ---
 
 ## Project Overview
 
-**Storydump** is a self-hosted Instagram Story scheduling and automation system with Telegram-based team collaboration.
+**Storydump** is a multi-tenant Instagram Story scheduling and automation system with Telegram-based team collaboration. A single deployment serves many independent teams ("Instances"), each scoped to its own Telegram group, media, queue, and schedule — see `PROJECT_MISSION.md` for the current product mental model (User → Instances → accounts/media/queue).
 
-**Core Philosophy**: Phased deployment — 100% manual posting (Phase 1), optional Instagram API automation (Phase 2), web UI (Phase 3).
+**Core Philosophy**: Phased delivery — 100% manual posting (Phase 1), optional Instagram API automation (Phase 2), multi-tenant rearchitecture (shipped post-v1.6.0), web dashboard (in progress). See `documentation/planning/phases/00_MASTER_ROADMAP.md` for current per-phase status — don't treat "Phase 3" as "web UI"; the phase docs number Phase 3 as Shopify integration and the dashboard as Phase 7 (currently in progress).
 
-**Tech Stack**: Python 3.10+, FastAPI, Neon PostgreSQL, Telegram Bot, Railway deployment, Next.js landing site.
+**Tech Stack**: Python 3.10+, FastAPI, Neon PostgreSQL, Telegram Bot, Railway deployment, Next.js (`landing/` — both the marketing site and the multi-tenant web dashboard).
 
 ## Architecture: STRICT SEPARATION OF CONCERNS
 

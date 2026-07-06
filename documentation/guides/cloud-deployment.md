@@ -2,6 +2,8 @@
 
 Deploy Storydump to cloud infrastructure (Railway + Neon) for multi-tenant SaaS operation.
 
+> **Overlaps with [deployment.md](deployment.md)** — that doc is a step-by-step first-deploy checklist; this one is the technical reference (full env var list, architecture diagram, OAuth callback details). Audited together 2026-07-06, consistent with each other but redundant — see that doc's note for which to use when.
+
 **Estimated time:** 2-3 hours for complete setup
 **Prerequisites:** GitHub account, Railway account, Neon account
 
@@ -59,7 +61,7 @@ Run the base schema and all migrations in order:
 psql "$DATABASE_URL" -f scripts/setup_database.sql
 
 # All migrations (run in order)
-for f in scripts/migrations/0{01,02,03,04,05,06,07,08,09,10,11,12,13,14,15,16,17,18,19,20,21}_*.sql; do
+for f in scripts/migrations/*.sql; do
   echo "Running $f..."
   psql "$DATABASE_URL" -f "$f"
 done
@@ -71,7 +73,8 @@ done
 -- Check schema version
 SELECT * FROM schema_version ORDER BY version;
 
--- Should show version 21 as latest
+-- Should show the highest version in scripts/migrations/ as latest
+-- (41 as of this writing -- this number grows as new migrations land)
 
 -- Check uuid-ossp extension
 SELECT extname FROM pg_extension WHERE extname = 'uuid-ossp';
@@ -166,8 +169,10 @@ If not using `DATABASE_URL`, set individual components:
 | Variable | Description | Example |
 |---|---|---|
 | `OAUTH_REDIRECT_BASE_URL` | Railway web service URL | `https://your-app.up.railway.app` |
-| `FACEBOOK_APP_ID` | Meta Developer App ID | `1234567890123456` |
-| `FACEBOOK_APP_SECRET` | Meta Developer App Secret | `abc123...` |
+| `FACEBOOK_APP_ID` | Meta Developer App ID (Facebook Login flow, legacy) | `1234567890123456` |
+| `FACEBOOK_APP_SECRET` | Meta Developer App Secret (Facebook Login flow, legacy) | `abc123...` |
+| `INSTAGRAM_APP_ID` | Meta Developer App ID (Instagram Login flow, preferred) | `1234567890123456` |
+| `INSTAGRAM_APP_SECRET` | Meta Developer App Secret (Instagram Login flow, preferred) | `abc123...` |
 | `GOOGLE_CLIENT_ID` | Google OAuth Client ID | `xxx.apps.googleusercontent.com` |
 | `GOOGLE_CLIENT_SECRET` | Google OAuth Client Secret | `GOCSPX-...` |
 
@@ -208,15 +213,19 @@ If not using `DATABASE_URL`, set individual components:
 start - Open Storydump (setup & config)
 status - System health & media overview
 setup - Quick settings & toggles
-queue - View upcoming posts
 next - Send next post now
-pause - Pause delivery
-resume - Resume delivery
-history - Recent post history
-sync - Sync media from Drive
+approveall - Approve all pending auto-post items
 cleanup - Delete recent bot messages
+link - Link this group to a pending onboarding session
+name - Set this group's instance display name
+instances - List your instances (DM only)
+new - Start a new instance (DM only)
 help - Show available commands
 ```
+
+> **Note:** `queue`, `pause`, `resume`, `history`, and `sync` were retired —
+> the bot now shows a redirect message pointing users to the dashboard (or
+> `/settings`) if they're used. Don't register them with BotFather.
 
 4. Add the bot as admin to your Telegram channel/group
 5. Get the channel ID (send a message, check via `https://api.telegram.org/bot<TOKEN>/getUpdates`)
@@ -230,6 +239,8 @@ The app uses **polling mode** by default, which works well for cloud deployment 
 ## 5. Instagram OAuth Setup
 
 Instagram account connection uses browser-based OAuth, which requires the web service (FastAPI) to be running.
+
+> This section describes the legacy **Facebook Login** flow (`FACEBOOK_APP_ID`/`FACEBOOK_APP_SECRET`). There is also a newer, preferred **Instagram Login** flow (`INSTAGRAM_APP_ID`/`INSTAGRAM_APP_SECRET`) that doesn't require a Facebook Page — see [instagram-login-setup.md](instagram-login-setup.md) for that setup. Both can be configured; the app prefers Instagram Login when both are present.
 
 ### Meta Developer Setup
 
@@ -364,7 +375,7 @@ Use the Telegram bot itself as a health indicator:
 
 ## Quick Start Checklist
 
-1. [ ] Create Neon database and run schema + all 16 migrations
+1. [ ] Create Neon database and run schema + all migrations in `scripts/migrations/`
 2. [ ] Create Railway project with two services (worker + web)
 3. [ ] Set all required environment variables
 4. [ ] Create Telegram bot via BotFather, get token

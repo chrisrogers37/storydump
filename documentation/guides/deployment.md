@@ -2,6 +2,8 @@
 
 This checklist covers everything you need to do **outside of code** to get Storydump running in production on Railway + Neon.
 
+> **Overlaps with [cloud-deployment.md](cloud-deployment.md)** — this doc is a step-by-step first-deploy checklist; cloud-deployment.md is the multi-tenant technical reference (full env var list, architecture diagram, OAuth callback details). The two were audited together 2026-07-06 and are consistent with each other, but redundant — if you're setting up for the first time, follow this one; for a specific config/env-var lookup, check cloud-deployment.md.
+
 ## Prerequisites
 
 - [ ] GitHub account (public repository)
@@ -79,8 +81,8 @@ export DATABASE_URL="postgresql://user:pass@ep-xxx.neon.tech/storydump?sslmode=r
 # Run base schema
 psql "$DATABASE_URL" -f scripts/setup_database.sql
 
-# Run all migrations
-for f in scripts/migrations/0{01,02,03,04,05,06,07,08,09,10,11,12,13,14,15,16,17,18,19,20,21}_*.sql; do
+# Run all migrations (in order)
+for f in scripts/migrations/*.sql; do
   echo "Running $f..."
   psql "$DATABASE_URL" -f "$f"
 done
@@ -215,18 +217,21 @@ railway shell --service worker -c "storydump-cli sync-media"
 railway shell --service worker -c "storydump-cli list-media"
 ```
 
-### Create Initial Schedule
+### Preview the Schedule
 
 ```bash
-railway shell --service worker -c "storydump-cli create-schedule --days 7"
-# Creates 7 days of scheduled posts
+railway shell --service worker -c "storydump-cli queue-preview"
+# Shows what the JIT scheduler would pick next. Posting itself is automatic
+# once the worker is running, based on your configured posting cadence --
+# there is no separate "create schedule" step.
 ```
 
 ### Verify Queue
 
 ```bash
 railway shell --service worker -c "storydump-cli list-queue"
-# Should show scheduled items
+# Empty until the worker's next scheduled slot fires and sends an item to
+# Telegram -- that's when it becomes an in-flight item awaiting your action.
 ```
 
 ---
@@ -414,7 +419,7 @@ railway logs --service worker
 - [ ] Review team permissions
 
 ### As Needed
-- [ ] Create new schedule: `storydump-cli create-schedule --days 7`
+- [ ] Preview upcoming selections: `storydump-cli queue-preview` (posting is automatic via the JIT scheduler)
 - [ ] Promote team members: `storydump-cli promote-user <id> --role admin`
 - [ ] Clear old queue items if needed
 
