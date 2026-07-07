@@ -3,7 +3,14 @@
 **Created:** 2026-07-02
 **Reviewer:** Full-system architecture & code review
 **Scope:** `src/` (~27k LOC), `cli/`, `tests/`, config, CI, deployment
-**Status:** OPEN — triage backlog. Each item is written to be convertible into a standalone GitHub issue.
+**Status:** OPEN — triage backlog. Every item is filed (or clustered) into a GitHub issue; see [`issues/README.md`](issues/README.md).
+**Location:** `documentation/planning/2026-07-system-review/` (durable analysis artifact).
+
+### Companion documents
+
+- [`detailed-findings.md`](detailed-findings.md) — full per-subsystem raw analysis (richer than this tracker).
+- [`issues/README.md`](issues/README.md) — priority model, issue index, and how issues are filed.
+- [`issues/file-issues.sh`](issues/file-issues.sh) — one-command script that creates every GitHub issue below.
 
 > This is a living tracker. It captures bugs, tech debt, architectural smells,
 > over-complication, security gaps, and enhancement opportunities found during a
@@ -39,6 +46,21 @@
 | overcomplex | God-object `TelegramService`, 800-line repos/services, split callback routing |
 | debt | No migration tooling (Alembic declared but unused), schema drift, in-memory state |
 | test | No migration/schema-parity tests, mock-only repo tests, missing authz tests |
+
+### Priority model & issue mapping
+
+Severity (risk) is mapped to a **priority** (order of work). P0/P1 are filed as
+**individual** GitHub issues; P2–P4 and nice-to-haves are filed as **clustered**
+issues grouped by theme. See [`issues/README.md`](issues/README.md) for the full index.
+
+| Priority | Label | Definition | Filing | Items |
+|----------|-------|------------|--------|-------|
+| **P0** | `priority:critical` | Actively exploitable security / cross-tenant data exposure or mutation reachable by a normal user | individual (6) | TD-001, TD-002, TD-004, TD-005, TD-030, TD-056 |
+| **P1** | `priority:high` | Remaining High-severity integrity, atomicity, credential, and schema-foundation bugs | individual (20) | TD-010, TD-011, TD-012, TD-014, TD-020, TD-021, TD-025, TD-031, TD-040, TD-046, TD-049, TD-050, TD-052, TD-060, TD-061, TD-070, TD-071, TD-078, TD-100, TD-101 |
+| **P2** | `priority:medium` | Medium-severity correctness bugs + security hardening | clustered (4) | security-hardening, tenant/data-integrity, posting/scheduler/integration, db-session correctness |
+| **P3** | `priority:medium` | Medium architecture / tech-debt / over-complication | clustered (4) | architecture & layering, multi-worker state, telegram UX/debt, test coverage |
+| **P4** | `priority:low` | Low-severity issues | clustered (1) | low-severity cleanup |
+| **Nice-to-have** | `enhancement` | Enhancements / developer experience | clustered (1) | DX & enhancements |
 
 ---
 

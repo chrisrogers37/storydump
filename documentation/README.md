@@ -15,8 +15,8 @@ documentation/
 ├── README.md (this file)          # Documentation index
 ├── ROADMAP.md                     # Product roadmap and version history
 ├── SECURITY_REVIEW.md             # Security audit findings
-├── TECH_DEBT_TRIAGE.md            # Full-system tech-debt/bug/enhancement backlog
 ├── planning/                       # Planning and design documents
+│   └── 2026-07-system-review/     # Full-system review: triage + detailed findings + issue backlog
 │   ├── phases/                    # Phased implementation plans
 │   │   ├── 00_MASTER_ROADMAP.md   # Vision, architecture, phase overview
 │   │   ├── 02_shopify_integration.md        # PENDING
@@ -203,10 +203,11 @@ documentation/
 
 ## Security
 
-**[TECH_DEBT_TRIAGE.md](TECH_DEBT_TRIAGE.md)** - Full-system review triage (2026-07-02)
+**[planning/2026-07-system-review/](planning/2026-07-system-review/README.md)** - Full-system review (2026-07-02)
 - 91 triaged findings (bugs, security, architecture, over-complication, tests)
-- Organized under 5 cross-cutting epics; each item convertible to a GitHub issue
+- Organized under 5 cross-cutting epics; filed as 36 GitHub issues (26 individual P0/P1 + 10 clusters)
 - Prioritizes data-integrity, security, and multi-tenant isolation work first
+- Includes durable `triage-tracker.md`, `detailed-findings.md`, and a `file-issues.sh` filing script
 
 **[SECURITY_REVIEW.md](SECURITY_REVIEW.md)** - Reviewed 2026-01-11, Updated 2026-02-10
 - No hardcoded credentials found

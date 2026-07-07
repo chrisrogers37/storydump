@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
-- **Full-system tech-debt triage (`documentation/TECH_DEBT_TRIAGE.md`)** — Added a structured backlog from a review of every subsystem (~27k LOC): scheduler/posting, Telegram, data layer, integrations, API/OAuth, config, CI. Captures 91 findings (26 High / 58 Med / 7 Low) across bugs, security, architecture, over-complication, and testing gaps, organized under five cross-cutting epics (multi-tenant isolation, non-atomic posting workflow, missing migration tooling, process-local state in a multi-worker deploy, and the `TelegramService` God-facade). Each item is written to be convertible into a standalone GitHub issue. No runtime behavior changed.
+- **Full-system review artifacts (`documentation/planning/2026-07-system-review/`)** — Added durable analysis artifacts from a review of every subsystem (~27k LOC): scheduler/posting, Telegram, data layer, integrations, API/OAuth, config, CI. Captures 91 findings (26 High / 58 Med / 7 Low) across bugs, security, architecture, over-complication, and testing gaps, organized under five cross-cutting epics (multi-tenant isolation, non-atomic posting workflow, missing migration tooling, process-local state in a multi-worker deploy, and the `TelegramService` God-facade). Includes `triage-tracker.md` (consolidated backlog), `detailed-findings.md` (per-subsystem raw analysis), and an `issues/` backlog that maps the findings to 36 GitHub issues (6 × P0 + 20 × P1 individual, 10 × P2/P3/P4/nice-to-have clusters) with a `file-issues.sh` script to create them. No runtime behavior changed.
 
 ### Security
 
