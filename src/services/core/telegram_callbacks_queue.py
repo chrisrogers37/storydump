@@ -89,11 +89,15 @@ class TelegramCallbackQueueHandlers:
             from src.services.core.telegram_callbacks_core import DailyCapReachedError
 
             if isinstance(exc, DailyCapReachedError):
-                # Restore queue item to pending so it can be retried tomorrow
+                # Restore queue item to pending so it can be retried tomorrow.
+                # Strip the live buttons: a bounced-to-pending card that keeps
+                # its buttons is a button-bearing pending row a later delete
+                # path would orphan → the "Queue item not found" bug.
                 self.service.queue_repo.update_status(queue_id, "pending")
                 await telegram_edit_with_retry(
                     query.edit_message_caption,
                     caption="⚠️ Daily posting limit reached. Try again tomorrow.",
+                    reply_markup=InlineKeyboardMarkup([]),
                 )
                 return
             if not isinstance(exc, OperationalError):

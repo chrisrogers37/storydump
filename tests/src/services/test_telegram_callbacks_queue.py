@@ -5,8 +5,12 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from sqlalchemy.exc import OperationalError
+from telegram import InlineKeyboardMarkup
 
-from src.services.core.telegram_callbacks_core import TelegramCallbackCore
+from src.services.core.telegram_callbacks_core import (
+    DailyCapReachedError,
+    TelegramCallbackCore,
+)
 from src.services.core.telegram_callbacks_queue import TelegramCallbackQueueHandlers
 from tests.src.services.conftest import make_query as _make_query
 from tests.src.services.conftest import make_user as _make_user
@@ -247,6 +251,42 @@ class TestDoCompleteQueueAction:
 
         mock_retry.assert_called_once()
         assert "already processed" in mock_retry.call_args[1]["caption"]
+
+    @patch("src.services.core.telegram_callbacks_queue.telegram_edit_with_retry")
+    async def test_daily_cap_bounces_to_pending_and_strips_buttons(
+        self, mock_retry, handlers
+    ):
+        """DailyCap → restore to pending AND strip the stale live buttons.
+
+        Leaving the buttons live on a bounced-to-pending card is exactly what
+        lets a later delete-path orphan a button-bearing pending row (#561).
+        """
+        queue_item = Mock(media_item_id="m-1")
+        handlers.service.queue_repo.claim_for_processing.return_value = queue_item
+        handlers.core._execute_complete_db_ops.side_effect = DailyCapReachedError(
+            "Daily posting limit reached"
+        )
+
+        user = _make_user()
+        query = _make_query()
+
+        await handlers._do_complete_queue_action(
+            "q-1", user, query, "posted", True, "Done!", "posted"
+        )
+
+        # Row bounced back to pending so it can be retried tomorrow.
+        handlers.service.queue_repo.update_status.assert_called_once_with(
+            "q-1", "pending"
+        )
+
+        # The bounced card must shed its live buttons (empty markup), else a
+        # later tap hard-deletes an orphaned pending row → "Queue item not found".
+        mock_retry.assert_called_once()
+        kwargs = mock_retry.call_args.kwargs
+        assert "Daily posting limit" in kwargs["caption"]
+        markup = kwargs["reply_markup"]
+        assert isinstance(markup, InlineKeyboardMarkup)
+        assert markup.inline_keyboard == ()  # buttons stripped
 
 
 # ──────────────────────────────────────────────────────────────

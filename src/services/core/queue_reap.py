@@ -88,3 +88,25 @@ async def expire_sent_row(row, *, bot, history_repo, queue_repo) -> str:
     queue_repo.delete(row_id)
     logger.info(f"Expire reap: recorded expiry + removed queue item {row_id[:8]}")
     return "reaped"
+
+
+async def reap_pending_rows(rows, *, bot, history_repo, queue_repo) -> int:
+    """Delete a set of pending queue rows, routing any button-bearing row (one
+    with a live Telegram card / telegram_message_id) through expire_sent_row so
+    its buttons are stripped and a terminal history row is written instead of
+    orphaning the card. Non-button rows are plain-deleted. Returns the count of
+    rows actually removed (a transient-deferred reap is not counted)."""
+    removed = 0
+    for row in rows:
+        if row.telegram_message_id is not None:
+            if (
+                await expire_sent_row(
+                    row, bot=bot, history_repo=history_repo, queue_repo=queue_repo
+                )
+                == "reaped"
+            ):
+                removed += 1
+        else:
+            queue_repo.delete(str(row.id))
+            removed += 1
+    return removed

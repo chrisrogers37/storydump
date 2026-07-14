@@ -15,7 +15,11 @@ import pytest
 from telegram import InlineKeyboardMarkup
 from telegram.error import BadRequest
 
-from src.services.core.queue_reap import EXPIRED_CAPTION, expire_sent_row
+from src.services.core.queue_reap import (
+    EXPIRED_CAPTION,
+    expire_sent_row,
+    reap_pending_rows,
+)
 from src.services.core.telegram_utils import _build_already_handled_caption
 
 _MODULE = "src.services.core.queue_reap"
@@ -148,3 +152,64 @@ class TestExpiredTapFallback:
         caption = _build_already_handled_caption(history)
         assert caption == EXPIRED_CAPTION
         assert "not found" not in caption.lower()
+
+
+@pytest.mark.unit
+class TestReapPendingRows:
+    """Batch reaper the live delete paths share: button-bearing rows go through
+    expire_sent_row (strip card + write history), button-less rows plain-delete.
+    """
+
+    @pytest.mark.asyncio
+    async def test_routes_button_rows_and_plain_deletes_the_rest(self):
+        """Mixed set → each button-bearing row is expired, each None row deleted."""
+        btn1 = _make_row()  # telegram_message_id=555 (live card)
+        btn2 = _make_row()
+        plain1 = _make_row()
+        plain1.telegram_message_id = None  # never sent to Telegram
+        plain2 = _make_row()
+        plain2.telegram_message_id = None
+        bot = AsyncMock()
+        history_repo = Mock()
+        queue_repo = Mock()
+
+        with patch(f"{_MODULE}.expire_sent_row", new_callable=AsyncMock) as mock_expire:
+            mock_expire.return_value = "reaped"
+            removed = await reap_pending_rows(
+                [btn1, plain1, btn2, plain2],
+                bot=bot,
+                history_repo=history_repo,
+                queue_repo=queue_repo,
+            )
+
+        # Every button-bearing row is routed through expire_sent_row (one each).
+        assert mock_expire.await_count == 2
+        reaped_rows = [c.args[0] for c in mock_expire.await_args_list]
+        assert btn1 in reaped_rows
+        assert btn2 in reaped_rows
+
+        # Button-less rows are plain-deleted; the live ones are NOT delete()d.
+        deleted_ids = {c.args[0] for c in queue_repo.delete.call_args_list}
+        assert deleted_ids == {str(plain1.id), str(plain2.id)}
+
+        # All four rows removed.
+        assert removed == 4
+
+    @pytest.mark.asyncio
+    async def test_deferred_button_row_is_not_counted_or_double_deleted(self):
+        """A transient-deferred reap leaves the row intact — not counted, not deleted."""
+        btn = _make_row()  # telegram_message_id=555
+        bot = AsyncMock()
+        history_repo = Mock()
+        queue_repo = Mock()
+
+        with patch(f"{_MODULE}.expire_sent_row", new_callable=AsyncMock) as mock_expire:
+            mock_expire.return_value = "deferred"
+            removed = await reap_pending_rows(
+                [btn], bot=bot, history_repo=history_repo, queue_repo=queue_repo
+            )
+
+        mock_expire.assert_awaited_once()
+        # Deferred → row left tappable for the next sweep, never fallback-deleted.
+        assert removed == 0
+        queue_repo.delete.assert_not_called()
