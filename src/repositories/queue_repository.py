@@ -262,10 +262,12 @@ class QueueRepository(BaseRepository):
         accumulation that caused the 2026-05-17 → 19 burst (954 rows
         had to be manually deleted on 2026-06-02).
 
-        Runs hourly via ``cleanup_queue_loop``. Deletes regardless of
-        status — by the time an item is >24h past its scheduled_for it
-        will never be relevant again, whether it's pending, processing,
-        or failed.
+        Runs hourly via ``cleanup_queue_loop``. Targets only rows that were
+        NEVER sent to Telegram (``telegram_message_id IS NULL``) — the raw
+        accumulation from an upstream outage. Button-bearing rows (which
+        carry live inline buttons) are handled first by the shared reap
+        (``expire_sent_row``), which strips their buttons and writes a
+        terminal history row; deleting them here would orphan the buttons.
 
         Args:
             hours: Age threshold in hours (default: 24).
@@ -276,7 +278,10 @@ class QueueRepository(BaseRepository):
         cutoff = datetime.utcnow() - timedelta(hours=hours)
         stale = (
             self.db.query(PostingQueue)
-            .filter(PostingQueue.scheduled_for < cutoff)
+            .filter(
+                PostingQueue.scheduled_for < cutoff,
+                PostingQueue.telegram_message_id.is_(None),
+            )
             .all()
         )
 
@@ -371,11 +376,14 @@ class QueueRepository(BaseRepository):
         return len(stale)
 
     def discard_abandoned_processing(self, abandon_threshold_hours: int = 24) -> int:
-        """Delete queue items stuck in 'processing' for too long.
+        """Delete NEVER-SENT queue items stuck in 'processing' for too long.
 
-        Items in 'processing' have already been sent to Telegram and are
-        waiting for user action (Posted/Skip/Reject). If nobody acts within
-        the threshold, the notification is stale and the item is discarded.
+        Scoped to processing rows with ``telegram_message_id IS NULL`` — rows
+        that were claimed but crashed before the Telegram send completed.
+        Button-bearing processing rows (which carry live inline buttons) are
+        handled first by the shared reap (``expire_sent_row``), which strips
+        their buttons and writes a terminal history row; deleting them here
+        would orphan the buttons.
 
         This intentionally does NOT reset items back to 'pending' — doing so
         would re-send the Telegram notification, creating an infinite
@@ -394,6 +402,7 @@ class QueueRepository(BaseRepository):
             .filter(
                 PostingQueue.status == "processing",
                 PostingQueue.scheduled_for <= cutoff,
+                PostingQueue.telegram_message_id.is_(None),
             )
             .all()
         )
@@ -410,6 +419,37 @@ class QueueRepository(BaseRepository):
             self.db.commit()
 
         return len(abandoned)
+
+    def get_stale_sent(
+        self, hours: int = 24, status: Optional[str] = None
+    ) -> List[PostingQueue]:
+        """Get button-bearing queue rows past their reap age.
+
+        Returns rows that carry a ``telegram_message_id`` — a live Telegram
+        card with inline buttons — whose ``scheduled_for`` is more than
+        ``hours`` ago. These must be handled by the shared reap
+        (``expire_sent_row``), which strips the buttons and writes a terminal
+        history row, rather than being hard-deleted and orphaning the card.
+
+        Ordered by ``scheduled_for`` ascending (oldest first).
+
+        Args:
+            hours: Age threshold in hours (default: 24).
+            status: Optional status filter (e.g. 'processing').
+
+        Returns:
+            List of button-bearing PostingQueue items older than the cutoff.
+        """
+        cutoff = datetime.utcnow() - timedelta(hours=hours)
+        query = self.db.query(PostingQueue).filter(
+            PostingQueue.telegram_message_id.isnot(None),
+            PostingQueue.scheduled_for < cutoff,
+        )
+        if status:
+            query = query.filter(PostingQueue.status == status)
+        result = query.order_by(PostingQueue.scheduled_for.asc()).all()
+        self.end_read_transaction()
+        return result
 
     def get_pending_with_telegram_message(
         self, telegram_chat_id: int
