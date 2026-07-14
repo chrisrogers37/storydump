@@ -2,7 +2,7 @@
 
 Welcome to the Storydump documentation hub. All project documentation is organized here by purpose.
 
-**Last Updated**: 2026-03-28
+**Last Updated**: 2026-07-14
 **Current Version**: v1.6.0
 **Current Phase**: Phase 2 (Instagram API Automation) - COMPLETED | Phase 1.8 (Telegram UX) - COMPLETED
 **Next Phase**: Phase 3 (Shopify Integration) - PENDING
@@ -25,6 +25,7 @@ documentation/
 │   │   ├── 06_order_email_automation.md     # PENDING
 │   │   └── 07_dashboard_ui.md              # PENDING
 │   └── 01B_telegram_mini_app_secure_input.md  # PENDING (Future)
+├── cloudinary/                     # Cloudinary usage analyses and enhancement proposals
 ├── guides/                         # How-to guides and tutorials
 ├── operations/                     # Operational runbooks
 ├── updates/                        # Project updates, bugfixes, patches
@@ -82,6 +83,16 @@ documentation/
 - Phase 1.6 through Phase 2 test additions
 - Coverage gaps and future work
 - Test infrastructure documentation
+
+---
+
+## Cloudinary
+
+### Feature Gap Analysis & Enhancement Proposals
+**[cloudinary/2026-07-14-feature-gap-analysis.md](cloudinary/2026-07-14-feature-gap-analysis.md)** - PROPOSED
+- Current usage model (transient post-time hosting for the Instagram hop) mapped file:line, vs Cloudinary's July 2026 announcements (AI image generation add-on, self-service OAuth, VS Code extension GA)
+- Eight sized proposals (P0–P7): call timeout/offload substrate, persistent storage for web uploads (#317), tag-scoped lifecycle (#450/#550), q_auto delivery, generative 9:16 framing toggle, video normalization, pHash perceptual dedup, exploratory AI content generation (#152/#189)
+- Explicit non-proposals and unverified-claims sections; per-feature Cloudinary source citations
 
 ---
 
