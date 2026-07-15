@@ -121,6 +121,22 @@ class TestQueueDetail:
         assert data["items"] == []
         assert data["last_post_at"] is None
 
+    def test_queue_detail_bound_token_non_member_forbidden(
+        self, client, _authorize_membership_by_default
+    ):
+        """A bound-token caller who is not an active member is denied at the
+        route boundary — the crypto binding alone does not grant access."""
+        _authorize_membership_by_default.return_value.is_active_member.return_value = (
+            False
+        )
+        with mock_validate({"user_id": 1, "first_name": "X", "chat_id": CHAT_ID}):
+            response = client.get(
+                "/api/onboarding/queue-detail",
+                params={"init_data": "token", "chat_id": CHAT_ID},
+            )
+        assert response.status_code == 403
+        assert "member" in response.json()["detail"].lower()
+
     def test_queue_detail_unauthorized(self, client):
         """Queue detail rejects invalid auth."""
         with (

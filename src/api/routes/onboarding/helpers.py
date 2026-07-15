@@ -48,17 +48,22 @@ def _validate_request(
 ) -> dict:
     """Validate initData or URL token and authorize the caller for ``chat_id``.
 
-    Two authorization paths, by whether the token binds a chat:
+    Authorization is a server-side **active membership** for ``(user, chat_id)``
+    — the token alone never authorizes:
 
-    * **Bound token** — a signed URL token, or initData launched from a group,
-      carries a ``chat_id``. The cryptographic binding *is* the authorization
-      (the server only ever issues it to a legitimate user of that chat); we
-      reject only its reuse against a different ``chat_id``.
-    * **Unbound token** — initData launched from a DM has no ``chat`` field, so
-      the request-supplied ``chat_id`` is attacker-suppliable. We authorize via
-      a server-side active-membership lookup instead of trusting it. This closes
-      the cross-tenant IDOR where a DM-launched token is replayed against an
-      arbitrary ``chat_id``.
+    * A **bound token** (a signed URL token, or initData launched from a group)
+      carries a ``chat_id``. The cryptographic binding fixes *which* chat the
+      request targets — reuse against a different ``chat_id`` is rejected — but
+      it does not prove the user may still act on that chat: a revoked member,
+      or a group member who was never provisioned, keeps a usable token until
+      TTL expiry. The binding narrows; it does not authorize.
+    * An **unbound token** (initData launched from a DM) has no ``chat`` field,
+      so the request-supplied ``chat_id`` is attacker-suppliable.
+
+    Either way the caller must be an active member of ``chat_id``. This closes
+    both the cross-tenant IDOR (a DM-launched token replayed against an arbitrary
+    ``chat_id``) and the stale-access hole (a bound token outliving the user's
+    membership).
 
     Raises HTTPException(401) on auth failure, HTTPException(403) on a chat_id
     mismatch or a missing/inactive membership.
@@ -82,22 +87,23 @@ def _validate_request(
         )
         raise HTTPException(status_code=403, detail="Chat ID mismatch")
 
-    # Unbound token: the request-supplied chat_id is untrusted, so require a
-    # server-side active membership for the chat.
-    if signed_chat_id is None:
-        user_id = user_info.get("user_id")
-        with MembershipService() as membership_service:
-            authorized = membership_service.is_active_member(user_id, chat_id)
-        if not authorized:
-            ip = _client_ip(request)
-            logger.warning(
-                "Membership denied: user_id=%s is not an active member of chat %s (ip=%s)",
-                user_id,
-                chat_id,
-                ip,
-            )
-            auth_monitor.record_failure(ip, "membership denied")
-            raise HTTPException(status_code=403, detail="Not a member of this instance")
+    # Every path requires a server-side active membership for chat_id. A bound
+    # token proves the user once belonged to this chat, not that they still do;
+    # an unbound token's request chat_id is untrusted. The active
+    # UserChatMembership is the authorization.
+    user_id = user_info.get("user_id")
+    with MembershipService() as membership_service:
+        authorized = membership_service.is_active_member(user_id, chat_id)
+    if not authorized:
+        ip = _client_ip(request)
+        logger.warning(
+            "Membership denied: user_id=%s is not an active member of chat %s (ip=%s)",
+            user_id,
+            chat_id,
+            ip,
+        )
+        auth_monitor.record_failure(ip, "membership denied")
+        raise HTTPException(status_code=403, detail="Not a member of this instance")
 
     return user_info
 
