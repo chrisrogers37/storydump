@@ -13,6 +13,7 @@ from src.utils.resilience import telegram_edit_with_retry
 from datetime import datetime, timedelta, timezone
 
 if TYPE_CHECKING:
+    from src.models.chat_settings import ChatSettings
     from src.services.core.telegram_callbacks_core import TelegramCallbackCore
     from src.services.core.telegram_service import TelegramService
 
@@ -41,21 +42,23 @@ class TelegramCallbackAdminHandlers:
         )
         return str(chat_settings.id) if chat_settings else None
 
-    async def _require_caller_tenant(self, query) -> str | None:
-        """Resolve the caller's tenant id, or warn and return None.
+    async def _require_caller_tenant(self, query) -> ChatSettings | None:
+        """Resolve the caller's ChatSettings row, or warn and return None.
 
-        Wraps :meth:`_caller_chat_settings_id` with the shared "no instance
-        configured" reply the destructive resume/reset handlers use, so that
-        bail message lives in one place.
+        Adds the shared "no instance configured" reply the destructive
+        resume/reset handlers use, so that bail message lives in one place.
+        Returns the full row (not just the id) so callers don't re-fetch it.
         """
-        cs_id = self._caller_chat_settings_id(query)
-        if cs_id is None:
+        chat_settings = self.service.settings_service.get_settings_if_exists(
+            query.message.chat_id
+        )
+        if chat_settings is None:
             await telegram_edit_with_retry(
                 query.edit_message_text,
                 "❌ No instance is configured for this chat.",
                 parse_mode="Markdown",
             )
-        return cs_id
+        return chat_settings
 
     async def handle_batch_approve(self, data, user, query):
         """Handle batch_approve:{chat_settings_id} callback — approve all pending items.
@@ -181,10 +184,16 @@ class TelegramCallbackAdminHandlers:
             )
 
     async def _do_resume_callback(self, action: str, user, query):
-        """Internal implementation of resume callback."""
-        cs_id = await self._require_caller_tenant(query)
-        if cs_id is None:
+        """Internal implementation of resume callback.
+
+        Pause state is per-tenant (the scheduler skips paused chats), so the
+        unpause targets the caller's chat — never the deployment-wide
+        TELEGRAM_CHANNEL_ID chat.
+        """
+        chat_settings = await self._require_caller_tenant(query)
+        if chat_settings is None:
             return
+        cs_id = str(chat_settings.id)
 
         now = datetime.now(timezone.utc)
         all_pending = self.service.queue_repo.get_all(
@@ -202,7 +211,9 @@ class TelegramCallbackAdminHandlers:
                 self.service.queue_repo.update_scheduled_time(str(item.id), new_time)
                 rescheduled += 1
 
-            self.service.set_paused(False, user)
+            self.service.settings_service.set_paused(
+                chat_settings.telegram_chat_id, False, user
+            )
             await telegram_edit_with_retry(
                 query.edit_message_text,
                 f"📦 *Delivery ON*\n\n"
@@ -226,7 +237,9 @@ class TelegramCallbackAdminHandlers:
                 queue_repo=self.service.queue_repo,
             )
 
-            self.service.set_paused(False, user)
+            self.service.settings_service.set_paused(
+                chat_settings.telegram_chat_id, False, user
+            )
             remaining = len(all_pending) - cleared
             await telegram_edit_with_retry(
                 query.edit_message_text,
@@ -242,7 +255,9 @@ class TelegramCallbackAdminHandlers:
 
         elif action == "force":
             # Resume without handling overdue - they'll be processed immediately
-            self.service.set_paused(False, user)
+            self.service.settings_service.set_paused(
+                chat_settings.telegram_chat_id, False, user
+            )
             await telegram_edit_with_retry(
                 query.edit_message_text,
                 f"📦 *Delivery ON*\n\n"
@@ -271,9 +286,10 @@ class TelegramCallbackAdminHandlers:
         try:
             if action == "confirm":
                 # Reset queue — clear THIS chat's pending posts only.
-                cs_id = await self._require_caller_tenant(query)
-                if cs_id is None:
+                chat_settings = await self._require_caller_tenant(query)
+                if chat_settings is None:
                     return
+                cs_id = str(chat_settings.id)
                 all_pending = self.service.queue_repo.get_all(
                     status="pending", chat_settings_id=cs_id
                 )

@@ -1232,26 +1232,6 @@ class TestRemovedCommandRedirects:
         assert expected_text in call_text
 
 
-@pytest.mark.unit
-class TestPauseIntegration:
-    """Tests for pause integration with PostingService."""
-
-    def test_posting_service_respects_pause(self):
-        """Test that PostingService checks pause state via telegram_service."""
-        from src.services.core.posting import PostingService
-
-        with patch.object(PostingService, "__init__", lambda self: None):
-            posting_service = PostingService()
-            posting_service.telegram_service = Mock()
-            posting_service.telegram_service.is_paused = True
-
-            # Verify PostingService can read telegram_service.is_paused
-            assert posting_service.telegram_service.is_paused is True
-
-            posting_service.telegram_service.is_paused = False
-            assert posting_service.telegram_service.is_paused is False
-
-
 # ==================== /connect_drive Removal Tests ====================
 
 

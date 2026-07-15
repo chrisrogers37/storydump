@@ -37,6 +37,19 @@ class TestSettingsServiceUnit:
         with patch("src.services.core.settings_service.AuditRepository"):
             yield
 
+    def test_get_settings_by_id_delegates_to_repo(self):
+        """get_settings_by_id resolves a tenant by chat_settings UUID."""
+        service = SettingsService()
+        service.settings_repo = Mock(spec=ChatSettingsRepository)
+        cs_id = str(uuid4())
+        expected = Mock(spec=ChatSettings)
+        service.settings_repo.get_by_id.return_value = expected
+
+        result = service.get_settings_by_id(cs_id)
+
+        assert result is expected
+        service.settings_repo.get_by_id.assert_called_once_with(cs_id)
+
     def test_toggleable_settings_are_defined(self):
         """Verify TOGGLEABLE_SETTINGS contains expected settings."""
         assert "dry_run_mode" in TOGGLEABLE_SETTINGS
@@ -136,6 +149,48 @@ class TestSettingsServiceUnit:
         # Should have called set_paused, not update
         mock_repo.set_paused.assert_called_once()
         mock_repo.update.assert_not_called()
+
+    def test_set_paused_writes_when_state_differs(self):
+        """set_paused writes through the repo when the flag actually changes."""
+        service = SettingsService()
+
+        mock_settings = Mock(spec=ChatSettings)
+        mock_settings.is_paused = True
+
+        mock_repo = Mock()
+        mock_repo.get_or_create.return_value = mock_settings
+        service.settings_repo = mock_repo
+
+        service.service_run_repo = Mock()
+        service.service_run_repo.create_run.return_value = str(uuid4())
+
+        mock_user = Mock()
+        mock_user.id = uuid4()
+        mock_user.telegram_username = "testuser"
+
+        service.set_paused(-100, False, mock_user)
+
+        mock_repo.set_paused.assert_called_once_with(-100, False, str(mock_user.id))
+
+    def test_set_paused_noops_when_already_at_target(self):
+        """Idempotent: no write (and no audit churn) when already in the
+        requested state — concurrent resume taps converge instead of
+        flipping the flag back."""
+        service = SettingsService()
+
+        mock_settings = Mock(spec=ChatSettings)
+        mock_settings.is_paused = False
+
+        mock_repo = Mock()
+        mock_repo.get_or_create.return_value = mock_settings
+        service.settings_repo = mock_repo
+
+        service.service_run_repo = Mock()
+        service.service_run_repo.create_run.return_value = str(uuid4())
+
+        service.set_paused(-100, False, Mock(id=uuid4()))
+
+        mock_repo.set_paused.assert_not_called()
 
     def test_update_posts_per_day_validates_min(self):
         """posts_per_day below 1 should raise ValueError."""
@@ -653,20 +708,6 @@ class TestTelegramSettingsIntegration:
         source = inspect.getsource(TelegramService.__init__)
         assert "settings_service" in source or "SettingsService" in source
 
-    def test_is_paused_uses_database(self):
-        """TelegramService.is_paused should query database, not class variable."""
-        from src.services.core.telegram_service import TelegramService
-        import inspect
-
-        # Read the property source
-        source = inspect.getsource(TelegramService.is_paused.fget)
-
-        # Should reference settings_service, not _paused class variable
-        assert "settings_service" in source or "get_settings" in source
-        assert (
-            "_paused" not in source or "is_paused" in source
-        )  # is_paused from DB, not _paused
-
 
 # =============================================================================
 # POSTING/SCHEDULER SERVICE ARCHITECTURE TESTS
@@ -934,9 +975,7 @@ class TestSettingsServiceMediaSource:
         assert source_type == "google_drive"
         assert source_root == "folder_abc"
 
-    def test_get_media_source_config_falls_back_to_code_default(
-        self, settings_service
-    ):
+    def test_get_media_source_config_falls_back_to_code_default(self, settings_service):
         """NULL per-chat source_type falls back to defaults.DEFAULT_MEDIA_SOURCE_TYPE;
         NULL per-chat source_root surfaces as None (no env fallback).
         """
