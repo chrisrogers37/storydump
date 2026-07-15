@@ -136,6 +136,19 @@ class HistoryRepository(BaseRepository):
         self.db.refresh(history)
         return history
 
+    def create_idempotent(self, params: HistoryCreateParams) -> PostingHistory:
+        """Create a history record unless one already exists for the queue item.
+
+        A queue_item_id is unique per posting slot, so a replayed finalize
+        (e.g. a retried auto-post after a transient failure) would otherwise
+        double-insert. If a row already exists for this queue item we return it
+        untouched instead of writing a duplicate (#551).
+        """
+        existing = self.get_by_queue_item_id(params.queue_item_id)
+        if existing is not None:
+            return existing
+        return self.create(params)
+
     def get_recent_posts(
         self,
         hours: int = 24,

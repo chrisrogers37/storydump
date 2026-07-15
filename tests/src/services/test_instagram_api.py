@@ -945,3 +945,172 @@ class TestInstagramAPIService:
             instagram_service.token_repo.get_token_for_account.call_args.kwargs
         )
         assert call_kwargs.get("auth_method") == "instagram_login"
+
+
+@pytest.mark.unit
+class TestPostStoryContainerCallback:
+    """post_story exposes an on_container_created seam so the caller can persist
+    the container_id BEFORE the publish call (claim-before-publish, #549)."""
+
+    @pytest.fixture
+    def instagram_service(self):
+        with (
+            patch("src.services.integrations.instagram_api.TokenRefreshService"),
+            patch("src.services.integrations.instagram_api.CloudStorageService"),
+            patch("src.services.integrations.instagram_api.HistoryRepository"),
+            patch("src.services.integrations.instagram_api.InstagramAccountService"),
+            patch("src.services.integrations.instagram_api.TokenRepository"),
+            patch("src.services.integrations.instagram_api.TokenEncryption"),
+            patch("src.services.integrations.instagram_api.SettingsService"),
+            patch("src.services.base_service.ServiceRunRepository"),
+        ):
+            from src.services.integrations.instagram_api import InstagramAPIService
+
+            service = InstagramAPIService()
+            service.history_repo = Mock()
+            service.track_execution = mock_track_execution
+            service.set_result_summary = Mock()
+            return service
+
+    @pytest.mark.asyncio
+    @patch("src.services.integrations.instagram_api.settings")
+    async def test_callback_fires_after_container_before_publish(
+        self, mock_settings, instagram_service
+    ):
+        mock_settings.INSTAGRAM_POSTS_PER_HOUR = 25
+        mock_settings.ADMIN_TELEGRAM_CHAT_ID = -100123
+        instagram_service.history_repo.count_by_method.return_value = 0
+        instagram_service._get_active_account_credentials = Mock(
+            return_value=("tok", "acct-1", "user1")
+        )
+
+        order = []
+        instagram_service._create_media_container = AsyncMock(
+            return_value="container-xyz"
+        )
+
+        async def _wait(token, cid):
+            order.append(("wait", cid))
+
+        instagram_service._wait_for_container_ready = AsyncMock(side_effect=_wait)
+
+        async def _pub(token, account_id, container_id):
+            order.append(("publish", container_id))
+            return "story-1"
+
+        instagram_service._publish_container = AsyncMock(side_effect=_pub)
+
+        persisted = []
+
+        def _cb(cid):
+            persisted.append(cid)
+            order.append(("callback", cid))
+
+        result = await instagram_service.post_story(
+            "https://example.com/img.jpg",
+            media_type="IMAGE",
+            telegram_chat_id=-100123,
+            on_container_created=_cb,
+        )
+
+        assert result["story_id"] == "story-1"
+        assert result["container_id"] == "container-xyz"
+        # Container persisted exactly once, strictly before the publish step.
+        assert persisted == ["container-xyz"]
+        assert order == [
+            ("callback", "container-xyz"),
+            ("wait", "container-xyz"),
+            ("publish", "container-xyz"),
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status_code", ["ERROR", "EXPIRED"])
+    @patch("src.services.integrations.instagram_api.settings")
+    async def test_confirmed_dead_container_error_propagates_after_callback(
+        self, mock_settings, instagram_service, status_code
+    ):
+        """When IG marks the container ERROR/EXPIRED, _wait_for_container_ready
+        raises an InstagramAPIError carrying error_code=status_code. post_story
+        must let it propagate — AFTER the claim-before-publish callback fired
+        (anchor persisted) and WITHOUT ever publishing — so callers can classify
+        it as an IG-confirmed failure and release the row for retry."""
+        from src.exceptions import is_container_confirmed_failed
+
+        mock_settings.INSTAGRAM_POSTS_PER_HOUR = 25
+        mock_settings.ADMIN_TELEGRAM_CHAT_ID = -100123
+        instagram_service.history_repo.count_by_method.return_value = 0
+        instagram_service._get_active_account_credentials = Mock(
+            return_value=("tok", "acct-1", "user1")
+        )
+        instagram_service._create_media_container = AsyncMock(
+            return_value="container-xyz"
+        )
+        instagram_service._wait_for_container_ready = AsyncMock(
+            side_effect=InstagramAPIError(
+                "Media container failed", error_code=status_code
+            )
+        )
+        instagram_service._publish_container = AsyncMock()
+
+        persisted = []
+
+        with pytest.raises(InstagramAPIError) as excinfo:
+            await instagram_service.post_story(
+                "https://example.com/img.jpg",
+                media_type="IMAGE",
+                telegram_chat_id=-100123,
+                on_container_created=persisted.append,
+            )
+
+        # Anchor persisted before the failure; publish never attempted.
+        assert persisted == ["container-xyz"]
+        instagram_service._publish_container.assert_not_called()
+        # The raised error carries IG's status_code → classifies as confirmed-dead.
+        assert excinfo.value.error_code == status_code
+        assert is_container_confirmed_failed(excinfo.value) is True
+
+    @pytest.mark.asyncio
+    @patch("src.services.integrations.instagram_api.settings")
+    async def test_post_story_works_without_callback(
+        self, mock_settings, instagram_service
+    ):
+        """on_container_created is optional — the legacy call still works."""
+        mock_settings.INSTAGRAM_POSTS_PER_HOUR = 25
+        mock_settings.ADMIN_TELEGRAM_CHAT_ID = -100123
+        instagram_service.history_repo.count_by_method.return_value = 0
+        instagram_service._get_active_account_credentials = Mock(
+            return_value=("tok", "acct-1", "user1")
+        )
+        instagram_service._create_media_container = AsyncMock(return_value="c-1")
+        instagram_service._wait_for_container_ready = AsyncMock()
+        instagram_service._publish_container = AsyncMock(return_value="story-1")
+
+        result = await instagram_service.post_story("https://example.com/img.jpg")
+        assert result["story_id"] == "story-1"
+
+
+@pytest.mark.unit
+class TestContainerConfirmedFailedClassifier:
+    """is_container_confirmed_failed distinguishes an IG-*confirmed* container
+    failure (status_code ERROR/EXPIRED — IG says nothing published, safe to
+    release for retry) from an ambiguous crash/timeout (publish outcome
+    unknown, must stay stuck)."""
+
+    @pytest.mark.parametrize("status_code", ["ERROR", "EXPIRED"])
+    def test_true_for_ig_confirmed_status_codes(self, status_code):
+        from src.exceptions import is_container_confirmed_failed
+
+        exc = InstagramAPIError("container failed", error_code=status_code)
+        assert is_container_confirmed_failed(exc) is True
+
+    def test_false_for_ambiguous_instagram_error(self):
+        from src.exceptions import is_container_confirmed_failed
+
+        # A timeout/crash carries no ERROR/EXPIRED status_code → ambiguous.
+        assert is_container_confirmed_failed(InstagramAPIError("timed out")) is False
+
+    def test_false_for_non_instagram_exception(self):
+        from src.exceptions import is_container_confirmed_failed
+
+        assert is_container_confirmed_failed(RuntimeError("boom")) is False
+        assert is_container_confirmed_failed(TimeoutError()) is False

@@ -12,12 +12,14 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from src.exceptions.instagram import (
     InstagramAPIError,
     MediaUnsupportedError,
+    is_container_confirmed_failed,
     MediaUploadError,
     RateLimitError,
     TokenCorruptError,
     TokenExpiredError,
     TokenRevokedError,
 )
+from src.repositories.atomic_session import atomic_session
 from src.repositories.history_repository import HistoryCreateParams
 from src.services.core.telegram_service import _escape_markdown
 from src.services.core.telegram_utils import (
@@ -67,6 +69,9 @@ class AutopostContext:
     cancel_flag: object = None
     cloud_url: str | None = None
     cloud_public_id: str | None = None
+    # Set (with status='publishing') the instant the IG container is created,
+    # before publish. Presence => the publish outcome is unconfirmed on failure.
+    container_id: str | None = None
 
 
 class TelegramAutopostHandler:
@@ -226,7 +231,9 @@ class TelegramAutopostHandler:
         # Daily cap guard
         from src.services.core.daily_cap import can_post_today
 
-        if not can_post_today(chat_settings, self.service.history_repo):
+        if not can_post_today(
+            chat_settings, self.service.history_repo, self.service.queue_repo
+        ):
             # The row was claimed into 'processing' upstream; release it back
             # to 'pending' so it isn't left orphaned for the stale-processing
             # sweeper (mirrors the manual queue-action cap-hit handling).
@@ -466,43 +473,69 @@ class TelegramAutopostHandler:
             media_url=story_url,
             media_type=media_type,
             telegram_chat_id=ctx.chat_id,
+            # Claim-before-publish (#549): flip the row to 'publishing' and
+            # persist the container_id the instant the container exists, before
+            # the publish. A crash after publish then leaves a stuck row that
+            # can't be reaped or re-served instead of a duplicate story.
+            on_container_created=lambda cid: self._mark_container_created(ctx, cid),
         )
 
         story_id = post_result.get("story_id")
         logger.info(f"Posted to Instagram: story_id={story_id}")
         return story_id
 
+    def _mark_container_created(self, ctx: AutopostContext, container_id: str) -> None:
+        """Claim-before-publish: record the container on the context and flip
+        the queue row to 'publishing' with the persisted container_id (#549)."""
+        ctx.container_id = container_id
+        self.service.queue_repo.mark_publishing(ctx.queue_id, container_id)
+
     def _record_successful_post(self, ctx: AutopostContext, story_id: str) -> None:
-        """Record a successful Instagram post in all relevant tables."""
+        """Record a successful Instagram post in all relevant tables.
+
+        Runs as one atomic transaction so a crash can't leave the story
+        recorded-but-still-queued or the row deleted-without-history. The
+        history write is idempotent (#551) so a replayed finalize can't
+        double-insert.
+        """
         now = datetime.now(timezone.utc)
-        self.service.history_repo.create(
-            HistoryCreateParams(
-                media_item_id=str(ctx.queue_item.media_item_id),
-                queue_item_id=ctx.queue_id,
-                queue_created_at=ctx.queue_item.created_at,
-                queue_deleted_at=now,
-                scheduled_for=ctx.queue_item.scheduled_for,
-                posted_at=now,
-                status="posted",
-                success=True,
-                posted_by_user_id=str(ctx.user.id),
-                posted_by_telegram_username=ctx.user.telegram_username,
-                posting_method="instagram_api",
-                instagram_story_id=story_id,
-                chat_settings_id=str(ctx.queue_item.chat_settings_id)
-                if ctx.queue_item.chat_settings_id
-                else None,
+        with atomic_session(
+            [
+                self.service.history_repo,
+                self.service.media_repo,
+                self.service.queue_repo,
+                self.service.user_repo,
+                self.service.lock_service.lock_repo,
+            ]
+        ):
+            self.service.history_repo.create_idempotent(
+                HistoryCreateParams(
+                    media_item_id=str(ctx.queue_item.media_item_id),
+                    queue_item_id=ctx.queue_id,
+                    queue_created_at=ctx.queue_item.created_at,
+                    queue_deleted_at=now,
+                    scheduled_for=ctx.queue_item.scheduled_for,
+                    posted_at=now,
+                    status="posted",
+                    success=True,
+                    posted_by_user_id=str(ctx.user.id),
+                    posted_by_telegram_username=ctx.user.telegram_username,
+                    posting_method="instagram_api",
+                    instagram_story_id=story_id,
+                    chat_settings_id=str(ctx.queue_item.chat_settings_id)
+                    if ctx.queue_item.chat_settings_id
+                    else None,
+                )
             )
-        )
-        self.service.media_repo.increment_times_posted(
-            str(ctx.queue_item.media_item_id)
-        )
-        self.service.lock_service.create_lock(
-            str(ctx.queue_item.media_item_id),
-            telegram_chat_id=ctx.chat_id,
-        )
-        self.service.queue_repo.delete(ctx.queue_id)
-        self.service.user_repo.increment_posts(str(ctx.user.id))
+            self.service.media_repo.increment_times_posted(
+                str(ctx.queue_item.media_item_id)
+            )
+            self.service.lock_service.create_lock(
+                str(ctx.queue_item.media_item_id),
+                telegram_chat_id=ctx.chat_id,
+            )
+            self.service.queue_repo.delete(ctx.queue_id)
+            self.service.user_repo.increment_posts(str(ctx.user.id))
 
     async def _send_success_message(self, ctx: AutopostContext, story_id: str) -> None:
         """Send success message and log interaction after a successful post."""
@@ -598,6 +631,40 @@ class TelegramAutopostHandler:
         burning through the same failure on every cycle.
         """
         logger.error(f"Auto-post failed: {e}", exc_info=True)
+
+        # Claim-before-publish fail-safe (#549): once a container was created the
+        # row is in 'publishing'. Classify the failure:
+        #   - AMBIGUOUS (IG did NOT confirm failure): the publish outcome is
+        #     unknown — the story may be live. Hold the row stuck (excluded from
+        #     every sweep, blocks reselection) and do NOT retry; a retry can't
+        #     re-claim a 'publishing' row and could otherwise duplicate.
+        #   - IG-CONFIRMED-DEAD (ERROR/EXPIRED): IG affirmatively says nothing
+        #     published, so release the row for retry (below) — never stranded.
+        if ctx.container_id is not None:
+            if not is_container_confirmed_failed(e):
+                # AMBIGUOUS: hold the row stuck; do NOT retry.
+                logger.warning(
+                    f"Autopost unconfirmed for {ctx.media_item.file_name} "
+                    f"(container {ctx.container_id}) — holding row in 'publishing'; "
+                    f"not retrying to prevent a duplicate story"
+                )
+                await _update_autopost_caption(
+                    ctx.query,
+                    "⚠️ The post may have gone through but couldn't be confirmed. "
+                    "It's been held for review so it can't post twice.",
+                )
+                self._cleanup_cloudinary(ctx)
+                return
+
+            # IG-CONFIRMED-DEAD: release the claimed row — flip it out of
+            # 'publishing' back to 'processing' so the retry button can re-claim
+            # it (the same safe-retry outcome as if no container had been
+            # created) — then fall through to the normal error UI + retry button.
+            logger.warning(
+                f"Autopost container confirmed-failed for {ctx.media_item.file_name} "
+                f"(container {ctx.container_id}) — releasing row for retry"
+            )
+            self.service.queue_repo.update_status(ctx.queue_id, "processing")
 
         if isinstance(e, MediaUnsupportedError):
             try:

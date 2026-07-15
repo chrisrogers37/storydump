@@ -34,6 +34,30 @@ class InstagramAPIError(StorydumpError):
         return base
 
 
+# Instagram container ``status_code`` values that affirmatively confirm the
+# media will never publish. ``InstagramAPIService._wait_for_container_ready``
+# raises an ``InstagramAPIError`` carrying ``error_code=status_code`` for each
+# of these. Unlike an ambiguous crash/timeout (publish outcome unknown), one of
+# these means Instagram has told us nothing was posted — so a claimed
+# 'publishing' row can be safely released for retry instead of held forever.
+CONTAINER_CONFIRMED_FAILED_STATUS_CODES = frozenset({"ERROR", "EXPIRED"})
+
+
+def is_container_confirmed_failed(exc: BaseException) -> bool:
+    """Whether ``exc`` is Instagram affirmatively confirming the media container
+    failed (status_code ERROR/EXPIRED) — i.e. the publish provably never
+    happened, so the claimed row is safe to release for retry.
+
+    Returns False for an ambiguous crash/timeout where a container exists but
+    the publish outcome is unknown; only the confirmed-failed case is safe to
+    release (the ambiguous case must stay stuck to avoid a duplicate story).
+    """
+    return (
+        isinstance(exc, InstagramAPIError)
+        and exc.error_code in CONTAINER_CONFIRMED_FAILED_STATUS_CODES
+    )
+
+
 class RateLimitError(InstagramAPIError):
     """
     Instagram API rate limit exceeded.

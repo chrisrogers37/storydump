@@ -921,8 +921,8 @@ class TestRecordSuccessfulPost:
 
         handler._record_successful_post(ctx, story_id="story_abc")
 
-        # 1. Create history
-        handler.service.history_repo.create.assert_called_once()
+        # 1. Create history (idempotently — #551)
+        handler.service.history_repo.create_idempotent.assert_called_once()
         # 2. Increment times posted
         handler.service.media_repo.increment_times_posted.assert_called_once_with(
             str(ctx.queue_item.media_item_id)
@@ -1091,6 +1091,53 @@ class TestHandleAutopostError:
         ]
         assert log_ctx["success"] is False
         assert "API error" in log_ctx["error"]
+
+    @pytest.mark.parametrize("status_code", ["ERROR", "EXPIRED"])
+    async def test_confirmed_dead_container_released_for_retry(
+        self, mock_autopost_handler, make_autopost_ctx, status_code
+    ):
+        """IG affirmatively confirms the container failed (ERROR/EXPIRED) after
+        the claim → the row is RELEASED (flipped out of 'publishing' back to
+        'processing' so the retry button can re-claim it), NOT held forever
+        (rajan #564 finding 1)."""
+        from src.exceptions.instagram import InstagramAPIError
+
+        handler = mock_autopost_handler
+        ctx = make_autopost_ctx()
+        ctx.container_id = "container-xyz"  # container created + claimed
+
+        await handler._handle_autopost_error(
+            ctx,
+            InstagramAPIError("Media container failed", error_code=status_code),
+        )
+
+        # Released for retry — not stranded in 'publishing'.
+        handler.service.queue_repo.update_status.assert_called_once_with(
+            ctx.queue_id, "processing"
+        )
+        # Falls through to the normal error UI (retry keyboard), not the
+        # "held for review" hold message.
+        call_kwargs = ctx.query.edit_message_caption.call_args.kwargs
+        assert call_kwargs.get("reply_markup") is not None
+        assert "held for review" not in call_kwargs["caption"].lower()
+
+    async def test_ambiguous_container_still_held_for_review(
+        self, mock_autopost_handler, make_autopost_ctx
+    ):
+        """A container-present failure that is NOT IG-confirmed (ambiguous
+        crash/timeout) still HOLDS the row in 'publishing' — the existing
+        fail-closed behavior must not regress into a release."""
+        handler = mock_autopost_handler
+        ctx = make_autopost_ctx()
+        ctx.container_id = "container-xyz"
+
+        await handler._handle_autopost_error(ctx, Exception("Connection reset"))
+
+        # Held for review — the row is neither released nor deleted.
+        handler.service.queue_repo.update_status.assert_not_called()
+        handler.service.queue_repo.delete.assert_not_called()
+        caption = ctx.query.edit_message_caption.call_args.kwargs["caption"]
+        assert "held for review" in caption.lower()
 
 
 @pytest.mark.unit
@@ -1480,3 +1527,149 @@ class TestAutopostDailyCap:
 
         # Not capped → no restore-to-pending churn.
         service.queue_repo.update_status.assert_not_called()
+
+
+from datetime import datetime, timezone  # noqa: E402
+from tests.src.services.conftest import make_query, make_user  # noqa: E402
+
+
+def _autopost_ctx_bits():
+    """Build the queue_item / media_item / chat_settings mocks a finalize needs."""
+    now = datetime.now(timezone.utc)
+    queue_item = Mock(
+        id=uuid4(),
+        media_item_id=uuid4(),
+        chat_settings_id=uuid4(),
+        created_at=now,
+        scheduled_for=now,
+    )
+    media_item = Mock(id=uuid4(), file_name="x.jpg", file_path="x.jpg")
+    cs = Mock(
+        id=uuid4(),
+        dry_run_mode=False,
+        enable_instagram_api=True,
+        posts_per_day=99,
+        posting_timezone=None,
+        telegram_chat_id=-100123,
+    )
+    return queue_item, media_item, cs
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestAutopostClaimBeforePublish:
+    """The Telegram autopost button path must claim 'publishing' + persist the
+    container_id before publishing, and finalize idempotently (#549, #551)."""
+
+    async def test_crash_after_publish_leaves_row_publishing(
+        self, mock_autopost_handler
+    ):
+        """post_story creates the container (fires the callback) and returns a
+        story_id, then the finalize crashes. The 'publishing' row must NOT be
+        deleted — it stays stuck so the media can't be re-served."""
+        handler = mock_autopost_handler
+        service = handler.service
+        queue_item, media_item, cs = _autopost_ctx_bits()
+        service.settings_service.get_settings.return_value = cs
+        service.history_repo.count_posts_today.return_value = 0
+        service.queue_repo.count_by_status.return_value = 0
+        service.queue_repo.count_recent_by_status.return_value = 0
+        # Crash: the atomic finalize raises after publish.
+        service.history_repo.create_idempotent.side_effect = RuntimeError("crash")
+
+        ig = Mock()
+        ig.safety_check_before_post.return_value = {"safe_to_post": True, "errors": []}
+
+        async def _post(
+            media_url, media_type, telegram_chat_id, on_container_created=None
+        ):
+            if on_container_created is not None:
+                on_container_created("container-xyz")
+            return {"story_id": "story-1", "container_id": "container-xyz"}
+
+        ig.post_story = AsyncMock(side_effect=_post)
+        cloud = Mock()
+
+        with patch.object(
+            handler, "_upload_to_cloudinary", AsyncMock(return_value=True)
+        ):
+            await handler._do_autopost(
+                str(queue_item.id),
+                queue_item,
+                media_item,
+                make_user(),
+                make_query(),
+                ig,
+                cloud,
+            )
+
+        service.queue_repo.mark_publishing.assert_called_once_with(
+            str(queue_item.id), "container-xyz"
+        )
+        service.queue_repo.delete.assert_not_called()
+
+    async def test_execute_instagram_post_persists_container_before_publish(
+        self, mock_autopost_handler
+    ):
+        """_execute_instagram_post wires on_container_created so the container
+        id is marked 'publishing' the instant it exists."""
+        handler = mock_autopost_handler
+        service = handler.service
+        queue_item, media_item, cs = _autopost_ctx_bits()
+
+        published = {"container_marked": False}
+
+        async def _post(
+            media_url, media_type, telegram_chat_id, on_container_created=None
+        ):
+            assert on_container_created is not None, "must pass container callback"
+            on_container_created("container-xyz")
+            published["container_marked"] = True
+            return {"story_id": "story-1", "container_id": "container-xyz"}
+
+        ig = Mock()
+        ig.post_story = AsyncMock(side_effect=_post)
+        ctx = AutopostContext(
+            queue_id=str(queue_item.id),
+            queue_item=queue_item,
+            media_item=media_item,
+            user=make_user(),
+            query=make_query(),
+            chat_id=cs.telegram_chat_id,
+            chat_settings=cs,
+            cloud_service=Mock(),
+            instagram_service=ig,
+        )
+        ctx.cloud_url = "https://res.cloudinary.com/x.jpg"
+
+        story_id = await handler._execute_instagram_post(ctx)
+
+        assert story_id == "story-1"
+        assert published["container_marked"] is True
+        service.queue_repo.mark_publishing.assert_called_once_with(
+            str(queue_item.id), "container-xyz"
+        )
+
+    async def test_record_successful_post_is_idempotent(self, mock_autopost_handler):
+        """The finalize uses create_idempotent (not create) so a replay can't
+        double-insert posting_history (#551)."""
+        handler = mock_autopost_handler
+        service = handler.service
+        queue_item, media_item, cs = _autopost_ctx_bits()
+        ctx = AutopostContext(
+            queue_id=str(queue_item.id),
+            queue_item=queue_item,
+            media_item=media_item,
+            user=make_user(),
+            query=make_query(),
+            chat_id=cs.telegram_chat_id,
+            chat_settings=cs,
+            cloud_service=Mock(),
+            instagram_service=Mock(),
+        )
+
+        handler._record_successful_post(ctx, "story-1")
+
+        service.history_repo.create_idempotent.assert_called_once()
+        service.history_repo.create.assert_not_called()
+        service.queue_repo.delete.assert_called_once_with(str(queue_item.id))

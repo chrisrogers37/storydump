@@ -25,6 +25,8 @@ def mock_service():
     service.media_repo._db = MagicMock()
     service.queue_repo = Mock()
     service.queue_repo._db = MagicMock()
+    service.queue_repo.count_by_status.return_value = 0
+    service.queue_repo.count_recent_by_status.return_value = 0
     service.user_repo = Mock()
     service.user_repo._db = MagicMock()
     service.lock_service = Mock()
