@@ -84,17 +84,17 @@ class TelegramNotificationService:
             logger.error(f"Media item not found: {queue_item.media_item_id}")
             return False
 
-        # Get chat settings and verbose preference
-        chat_settings = self.service.settings_service.get_settings(
-            self.service.channel_id
-        )
-        verbose = self.service._is_verbose(
-            self.service.channel_id, chat_settings=chat_settings
-        )
+        # Resolve the tenant that owns this queue item. Every per-chat
+        # decision below (settings, account, source credentials, send
+        # destination, stored chat id) must use the tenant's own chat,
+        # never the deployment-wide TELEGRAM_CHANNEL_ID env chat.
+        chat_settings = self._resolve_tenant_settings(queue_item)
+        tenant_chat_id = chat_settings.telegram_chat_id
+        verbose = self.service._is_verbose(tenant_chat_id, chat_settings=chat_settings)
 
         # Get active Instagram account for display
         active_account = self.service.ig_account_service.get_active_account(
-            self.service.channel_id
+            tenant_chat_id
         )
 
         # Build caption (pass queue_item for enhanced mode)
@@ -131,7 +131,7 @@ class TelegramNotificationService:
             from src.services.media_sources.factory import MediaSourceFactory
 
             provider = MediaSourceFactory.get_provider_for_media_item(
-                media_item, telegram_chat_id=self.service.channel_id
+                media_item, telegram_chat_id=tenant_chat_id
             )
             # Offload the blocking media download so it can't freeze the shared
             # bot event loop (which would stall the update poller, callbacks, and
@@ -143,7 +143,7 @@ class TelegramNotificationService:
             photo_buffer = BytesIO(file_bytes)
             photo_buffer.name = media_item.file_name  # Telegram needs filename hint
             message = await self.service.bot.send_photo(
-                chat_id=self.service.channel_id,
+                chat_id=tenant_chat_id,
                 photo=photo_buffer,
                 caption=caption,
                 reply_markup=reply_markup,
@@ -152,7 +152,7 @@ class TelegramNotificationService:
 
             # Save telegram message ID
             self.service.queue_repo.set_telegram_message(
-                queue_item_id, message.message_id, self.service.channel_id
+                queue_item_id, message.message_id, tenant_chat_id
             )
 
             # Log outgoing bot response for visibility
@@ -165,7 +165,7 @@ class TelegramNotificationService:
                     "queue_item_id": queue_item_id,
                     "force_sent": force_sent,
                 },
-                telegram_chat_id=self.service.channel_id,
+                telegram_chat_id=tenant_chat_id,
                 telegram_message_id=message.message_id,
             )
 
@@ -181,6 +181,30 @@ class TelegramNotificationService:
                 ) from e
             logger.error(f"Failed to send Telegram notification: {e}")
             return False
+
+    def _resolve_tenant_settings(self, queue_item):
+        """Resolve the ChatSettings row of the tenant that owns a queue item.
+
+        Falls back to the deployment-wide TELEGRAM_CHANNEL_ID chat only for
+        legacy rows created before tenant stamping (chat_settings_id NULL)
+        or when the referenced tenant row no longer exists.
+        """
+        if queue_item.chat_settings_id:
+            chat_settings = self.service.settings_service.get_settings_by_id(
+                str(queue_item.chat_settings_id)
+            )
+            if chat_settings:
+                return chat_settings
+            logger.warning(
+                f"Queue item {queue_item.id} references missing chat_settings "
+                f"{queue_item.chat_settings_id}; falling back to the global channel"
+            )
+        else:
+            logger.warning(
+                f"Queue item {queue_item.id} has no chat_settings_id (legacy row); "
+                f"falling back to the global channel"
+            )
+        return self.service.settings_service.get_settings(self.service.channel_id)
 
     def _build_caption(
         self,

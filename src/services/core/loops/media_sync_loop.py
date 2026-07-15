@@ -147,19 +147,16 @@ async def media_sync_loop(
 
 
 async def _notify_sync_error(telegram_service, message: str):
-    """Send sync error notification to admin channel if verbose notifications enabled.
+    """Send sync error notification to the admin chat, suppressing errors.
 
-    Consolidated helper — checks verbose setting, sends message, suppresses errors.
+    Loop-level sync failures are deployment-level operational alerts, so
+    they go to ADMIN_TELEGRAM_CHAT_ID -- not to whichever tenant chat the
+    TELEGRAM_CHANNEL_ID env var happens to point at. Rate limiting is the
+    caller's job (it notifies on the first failure or a new error only).
     """
     try:
-        chat_settings = telegram_service.settings_service.get_settings(
-            telegram_service.channel_id
-        )
-        if not chat_settings.show_verbose_notifications:
-            return
-
         await telegram_service.bot.send_message(
-            chat_id=telegram_service.channel_id,
+            chat_id=telegram_service.admin_chat_id,
             text=message,
             parse_mode="Markdown",
         )

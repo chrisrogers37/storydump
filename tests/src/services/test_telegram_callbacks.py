@@ -175,15 +175,15 @@ class TestResumeCallbacks:
         mock_user.id = uuid4()
         mock_user.telegram_username = "testuser"
 
-        # Mock is_paused via settings_service — paused
+        # The calling chat resolves to this tenant row
         mock_chat_settings = Mock(
-            is_paused=True, posts_per_day=99, posting_timezone=None
+            id=uuid4(),
+            telegram_chat_id=-100123,
+            posts_per_day=99,
+            posting_timezone=None,
         )
-        service.settings_service.get_settings.return_value = mock_chat_settings
-        service.set_paused = Mock(
-            side_effect=lambda paused, user=None: setattr(
-                mock_chat_settings, "is_paused", paused
-            )
+        service.settings_service.get_settings_if_exists.return_value = (
+            mock_chat_settings
         )
 
         # Create overdue item
@@ -198,8 +198,10 @@ class TestResumeCallbacks:
 
         await handlers.handle_resume_callback("reschedule", mock_user, mock_query)
 
-        # Should be resumed
-        assert service.is_paused is False
+        # Should unpause the calling chat (tenant-scoped, not the env chat)
+        service.settings_service.set_paused.assert_called_once_with(
+            -100123, False, mock_user
+        )
 
         # Should reschedule the item
         service.queue_repo.update_scheduled_time.assert_called_once()
@@ -218,15 +220,15 @@ class TestResumeCallbacks:
         mock_user.id = uuid4()
         mock_user.telegram_username = "testuser"
 
-        # Mock is_paused via settings_service — paused
+        # The calling chat resolves to this tenant row
         mock_chat_settings = Mock(
-            is_paused=True, posts_per_day=99, posting_timezone=None
+            id=uuid4(),
+            telegram_chat_id=-100123,
+            posts_per_day=99,
+            posting_timezone=None,
         )
-        service.settings_service.get_settings.return_value = mock_chat_settings
-        service.set_paused = Mock(
-            side_effect=lambda paused, user=None: setattr(
-                mock_chat_settings, "is_paused", paused
-            )
+        service.settings_service.get_settings_if_exists.return_value = (
+            mock_chat_settings
         )
 
         # Create overdue and future items
@@ -245,8 +247,10 @@ class TestResumeCallbacks:
 
         await handlers.handle_resume_callback("clear", mock_user, mock_query)
 
-        # Should be resumed
-        assert service.is_paused is False
+        # Should unpause the calling chat (tenant-scoped, not the env chat)
+        service.settings_service.set_paused.assert_called_once_with(
+            -100123, False, mock_user
+        )
 
         # Should delete the overdue item
         service.queue_repo.delete.assert_called_once_with(str(overdue_item.id))
@@ -265,15 +269,15 @@ class TestResumeCallbacks:
         mock_user.id = uuid4()
         mock_user.telegram_username = "testuser"
 
-        # Mock is_paused via settings_service — paused
+        # The calling chat resolves to this tenant row
         mock_chat_settings = Mock(
-            is_paused=True, posts_per_day=99, posting_timezone=None
+            id=uuid4(),
+            telegram_chat_id=-100123,
+            posts_per_day=99,
+            posting_timezone=None,
         )
-        service.settings_service.get_settings.return_value = mock_chat_settings
-        service.set_paused = Mock(
-            side_effect=lambda paused, user=None: setattr(
-                mock_chat_settings, "is_paused", paused
-            )
+        service.settings_service.get_settings_if_exists.return_value = (
+            mock_chat_settings
         )
 
         overdue_item = Mock()
@@ -286,8 +290,10 @@ class TestResumeCallbacks:
 
         await handlers.handle_resume_callback("force", mock_user, mock_query)
 
-        # Should be resumed
-        assert service.is_paused is False
+        # Should unpause the calling chat (tenant-scoped, not the env chat)
+        service.settings_service.set_paused.assert_called_once_with(
+            -100123, False, mock_user
+        )
 
         # Should NOT delete or reschedule anything
         service.queue_repo.delete.assert_not_called()

@@ -5,7 +5,6 @@ from unittest.mock import Mock, AsyncMock, patch
 from uuid import uuid4
 
 from src.config import defaults
-from src.config.settings import settings
 from src.exceptions.google_drive import GoogleDriveAuthError
 from src.services.core.telegram_notification import (
     TelegramNotificationService,
@@ -830,6 +829,162 @@ class TestSendNotification:
             result = await notification_service.send_notification("some-id")
 
         assert result is False
+
+
+@pytest.mark.unit
+class TestTenantRouting:
+    """#541 — every per-tenant decision in send_notification must use the
+    queue item's own tenant chat, never the deployment-wide
+    TELEGRAM_CHANNEL_ID env chat."""
+
+    TENANT_CHAT_ID = -1009876543210
+    GLOBAL_CHAT_ID = -1001234567890
+
+    def _make_media_item(self):
+        return Mock(
+            file_name="tenant.jpg",
+            title="Tenant",
+            caption=None,
+            generated_caption=None,
+            link_url=None,
+            tags=[],
+            source_identifier="tenant.jpg",
+        )
+
+    def _make_chat_settings(self, telegram_chat_id):
+        return Mock(
+            telegram_chat_id=telegram_chat_id,
+            enable_instagram_api=False,
+            caption_style=None,
+        )
+
+    def _wire(self, mock_telegram_service, queue_item):
+        mock_telegram_service.queue_repo.get_by_id.return_value = queue_item
+        mock_telegram_service.media_repo.get_by_id.return_value = (
+            self._make_media_item()
+        )
+        mock_telegram_service._is_verbose.return_value = True
+        mock_telegram_service.ig_account_service.get_active_account.return_value = None
+        mock_telegram_service.bot.send_photo = AsyncMock(
+            return_value=Mock(message_id=12345)
+        )
+
+    async def _send(self, notification_service, queue_item_id, force_sent=False):
+        """Run send_notification with the media provider patched, returning
+        (result, mock_factory) for provider-call assertions."""
+        mock_provider = Mock()
+        mock_provider.download_file.return_value = b"fake-image-bytes"
+        with patch(
+            "src.services.media_sources.factory.MediaSourceFactory"
+        ) as mock_factory:
+            mock_factory.get_provider_for_media_item.return_value = mock_provider
+            result = await notification_service.send_notification(
+                queue_item_id, force_sent=force_sent
+            )
+        return result, mock_factory
+
+    async def test_routes_all_sends_to_tenant_chat(
+        self, notification_service, mock_telegram_service
+    ):
+        """A queue item owned by tenant B is sent to B's chat: photo
+        destination, settings, active account, media credentials, stored
+        message chat, and interaction log all use B's chat id."""
+        tenant_cs_id = uuid4()
+        queue_item_id = str(uuid4())
+        queue_item = Mock(
+            id=queue_item_id,
+            media_item_id=uuid4(),
+            chat_settings_id=tenant_cs_id,
+        )
+        tenant_settings = self._make_chat_settings(self.TENANT_CHAT_ID)
+        mock_telegram_service.settings_service.get_settings_by_id.return_value = (
+            tenant_settings
+        )
+        self._wire(mock_telegram_service, queue_item)
+
+        # force_sent=True also covers the /next → force_send_next path,
+        # which reaches the same send.
+        result, mock_factory = await self._send(
+            notification_service, queue_item_id, force_sent=True
+        )
+
+        assert result is True
+        # Tenant resolved by the queue item's chat_settings_id
+        mock_telegram_service.settings_service.get_settings_by_id.assert_called_once_with(
+            str(tenant_cs_id)
+        )
+        # The notification lands in the tenant's chat, not the env chat
+        send_kwargs = mock_telegram_service.bot.send_photo.call_args.kwargs
+        assert send_kwargs["chat_id"] == self.TENANT_CHAT_ID
+        # Active IG account looked up for the tenant
+        mock_telegram_service.ig_account_service.get_active_account.assert_called_once_with(
+            self.TENANT_CHAT_ID
+        )
+        # Media bytes fetched with the tenant's source credentials
+        factory_kwargs = mock_factory.get_provider_for_media_item.call_args.kwargs
+        assert factory_kwargs["telegram_chat_id"] == self.TENANT_CHAT_ID
+        # Queue row records the tenant chat id
+        mock_telegram_service.queue_repo.set_telegram_message.assert_called_once_with(
+            queue_item_id, 12345, self.TENANT_CHAT_ID
+        )
+        # Interaction log attributed to the tenant chat
+        log_kwargs = (
+            mock_telegram_service.interaction_service.log_bot_response.call_args.kwargs
+        )
+        assert log_kwargs["telegram_chat_id"] == self.TENANT_CHAT_ID
+        # Verbose preference read for the tenant
+        verbose_args = mock_telegram_service._is_verbose.call_args
+        assert verbose_args.args[0] == self.TENANT_CHAT_ID
+        # The env-chat settings lookup is never consulted
+        mock_telegram_service.settings_service.get_settings.assert_not_called()
+
+    async def test_null_chat_settings_id_falls_back_to_global_channel(
+        self, notification_service, mock_telegram_service
+    ):
+        """Legacy rows (chat_settings_id NULL) keep today's behavior: the
+        deployment-wide TELEGRAM_CHANNEL_ID chat."""
+        queue_item = Mock(
+            id=str(uuid4()),
+            media_item_id=uuid4(),
+            chat_settings_id=None,
+        )
+        mock_telegram_service.settings_service.get_settings.return_value = (
+            self._make_chat_settings(self.GLOBAL_CHAT_ID)
+        )
+        self._wire(mock_telegram_service, queue_item)
+
+        result, _ = await self._send(notification_service, str(queue_item.id))
+
+        assert result is True
+        mock_telegram_service.settings_service.get_settings.assert_called_once_with(
+            self.GLOBAL_CHAT_ID
+        )
+        mock_telegram_service.settings_service.get_settings_by_id.assert_not_called()
+        send_kwargs = mock_telegram_service.bot.send_photo.call_args.kwargs
+        assert send_kwargs["chat_id"] == self.GLOBAL_CHAT_ID
+
+    async def test_dangling_chat_settings_id_falls_back_to_global_channel(
+        self, notification_service, mock_telegram_service
+    ):
+        """A chat_settings_id pointing at a deleted row falls back to the
+        env chat instead of crashing or silently dropping the send."""
+        queue_item = Mock(
+            id=str(uuid4()),
+            media_item_id=uuid4(),
+            chat_settings_id=uuid4(),
+        )
+        mock_telegram_service.settings_service.get_settings_by_id.return_value = None
+        mock_telegram_service.settings_service.get_settings.return_value = (
+            self._make_chat_settings(self.GLOBAL_CHAT_ID)
+        )
+        self._wire(mock_telegram_service, queue_item)
+
+        result, _ = await self._send(notification_service, str(queue_item.id))
+
+        assert result is True
+        mock_telegram_service.settings_service.get_settings_by_id.assert_called_once()
+        send_kwargs = mock_telegram_service.bot.send_photo.call_args.kwargs
+        assert send_kwargs["chat_id"] == self.GLOBAL_CHAT_ID
 
 
 @pytest.mark.unit

@@ -133,17 +133,6 @@ class TelegramService(BaseService):
             return ()
         return (svc.interaction_repo,)
 
-    @property
-    def is_paused(self) -> bool:
-        """Check if bot posting is paused (from database)."""
-        chat_settings = self.settings_service.get_settings(self.channel_id)
-        return chat_settings.is_paused
-
-    def set_paused(self, paused: bool, user=None):
-        """Set pause state (persisted to database)."""
-        if self.is_paused != paused:
-            self.settings_service.toggle_setting(self.channel_id, "is_paused", user)
-
     # ------------------------------------------------------------------
     # Initialization
     # ------------------------------------------------------------------

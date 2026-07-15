@@ -84,6 +84,61 @@ class SettingsService(BaseService):
         """
         return self.settings_repo.get_by_chat_id(telegram_chat_id)
 
+    def get_settings_by_id(self, chat_settings_id: str) -> Optional[ChatSettings]:
+        """Look up settings by chat_settings UUID (the tenant primary key).
+
+        Use this to resolve the owning tenant of a row that carries a
+        chat_settings_id foreign key (queue items, locks, media).
+        Returns None if the referenced tenant no longer exists.
+        """
+        return self.settings_repo.get_by_id(chat_settings_id)
+
+    def set_paused(
+        self, telegram_chat_id: int, paused: bool, user: Optional[User] = None
+    ) -> None:
+        """Idempotently set a chat's pause flag.
+
+        Unlike toggle_setting, concurrent calls converge on the requested
+        state instead of flipping past it. No-ops (no write, no audit entry)
+        when the chat is already in the requested state.
+        """
+        with self.track_execution(
+            "set_paused",
+            user_id=user.id if user else None,
+            triggered_by="user",
+            input_params={"paused": paused},
+        ) as run_id:
+            settings = self.settings_repo.get_or_create(telegram_chat_id)
+            if settings.is_paused == paused:
+                self.set_result_summary(run_id, {"paused": paused, "changed": False})
+                return
+
+            self.settings_repo.set_paused(
+                telegram_chat_id, paused, str(user.id) if user else None
+            )
+            try:
+                self.audit_repo.log(
+                    entity_type="setting",
+                    entity_id=str(settings.id),
+                    action="update",
+                    field_changed="is_paused",
+                    old_value=not paused,
+                    new_value=paused,
+                    changed_by_user_id=str(user.id) if user else None,
+                    chat_settings_id=str(settings.id),
+                )
+            except SQLAlchemyError:
+                logger.warning("Audit log failed for setting change", exc_info=True)
+
+            self.set_result_summary(
+                run_id,
+                {
+                    "paused": paused,
+                    "changed": True,
+                    "changed_by": user.telegram_username if user else "system",
+                },
+            )
+
     def toggle_setting(
         self, telegram_chat_id: int, setting_name: str, user: Optional[User] = None
     ) -> bool:

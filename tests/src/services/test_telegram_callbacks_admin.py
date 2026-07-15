@@ -18,11 +18,12 @@ def mock_service():
     service.queue_repo = Mock()
     service.interaction_service = Mock()
     service._get_display_name.return_value = "AdminUser"
-    service.set_paused = Mock()
-    # Default: the calling chat resolves to tenant "cs-1". Cross-tenant tests
-    # override get_settings_if_exists per-case.
+    # Default: the calling chat resolves to tenant "cs-1" (make_query's
+    # default chat). Cross-tenant tests override get_settings_if_exists.
     service.settings_service = Mock()
-    service.settings_service.get_settings_if_exists.return_value = Mock(id="cs-1")
+    service.settings_service.get_settings_if_exists.return_value = Mock(
+        id="cs-1", telegram_chat_id=-100123
+    )
     return service
 
 
@@ -164,7 +165,9 @@ class TestHandleResumeCallback:
         await handlers.handle_resume_callback("reschedule", user, query)
 
         handlers.service.queue_repo.update_scheduled_time.assert_called_once()
-        handlers.service.set_paused.assert_called_once_with(False, user)
+        handlers.service.settings_service.set_paused.assert_called_once_with(
+            -100123, False, user
+        )
         handlers.service.interaction_service.log_callback.assert_called_once()
 
     @patch("src.services.core.telegram_callbacks_admin.telegram_edit_with_retry")
@@ -186,21 +189,30 @@ class TestHandleResumeCallback:
         await handlers.handle_resume_callback("clear", user, query)
 
         handlers.service.queue_repo.delete.assert_called_once()
-        handlers.service.set_paused.assert_called_once_with(False, user)
+        handlers.service.settings_service.set_paused.assert_called_once_with(
+            -100123, False, user
+        )
 
     @patch("src.services.core.telegram_callbacks_admin.telegram_edit_with_retry")
     async def test_force_action(self, mock_retry, handlers):
-        """Force resumes without handling overdue posts."""
+        """Force resumes without handling overdue posts, unpausing the chat
+        the button was pressed in — never the deployment-wide
+        TELEGRAM_CHANNEL_ID chat."""
         now = datetime.now(timezone.utc)
         overdue = [Mock(id="q-1", scheduled_for=now - timedelta(hours=2))]
         handlers.service.queue_repo.get_all.return_value = overdue
+        handlers.service.settings_service.get_settings_if_exists.return_value = Mock(
+            id="cs-9", telegram_chat_id=-100987
+        )
 
         user = _make_user()
-        query = _make_query()
+        query = _make_query(chat_id=-100987)
 
         await handlers.handle_resume_callback("force", user, query)
 
-        handlers.service.set_paused.assert_called_once_with(False, user)
+        handlers.service.settings_service.set_paused.assert_called_once_with(
+            -100987, False, user
+        )
         handlers.service.queue_repo.delete.assert_not_called()
         handlers.service.queue_repo.update_scheduled_time.assert_not_called()
 
