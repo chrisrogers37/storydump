@@ -59,6 +59,9 @@ class Settings(BaseSettings):
     CLOUDINARY_API_KEY: Optional[str] = None
     CLOUDINARY_API_SECRET: Optional[str] = None
     CLOUD_UPLOAD_RETENTION_HOURS: int = 24  # Delete cloud uploads after this time
+    # Bound the Cloudinary upload HTTP call so a stalled upload cannot hold the
+    # autopost background task (and its per-item operation lock) open forever.
+    CLOUD_UPLOAD_TIMEOUT_SECONDS: int = 120
 
     # Instagram API Rate Limiting (Phase 2)
     INSTAGRAM_POSTS_PER_HOUR: int = 25  # Meta's limit for Stories

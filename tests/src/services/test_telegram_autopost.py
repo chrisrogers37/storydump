@@ -1,6 +1,7 @@
 """Tests for TelegramAutopostHandler."""
 
 import asyncio
+import time
 
 import pytest
 from unittest.mock import Mock, patch, AsyncMock
@@ -1673,3 +1674,67 @@ class TestAutopostClaimBeforePublish:
         service.history_repo.create_idempotent.assert_called_once()
         service.history_repo.create.assert_not_called()
         service.queue_repo.delete.assert_called_once_with(str(queue_item.id))
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestAutopostMediaOffload:
+    """The autopost media transfer must not run ON the asyncio event loop.
+
+    The Drive download + Cloudinary upload are synchronous network I/O. Run on
+    the single bot event loop, a slow transfer FREEZES it — stalling not just
+    this task but everything else scheduled on that loop: the Telegram update
+    poller, the scheduler tick, and the cleanup loops. Offloading the transfer
+    to a worker thread keeps the loop live for that other work.
+
+    Scope note: this proves the loop is not PARKED. It does NOT prove a
+    competing button tap's ack fires sooner — under this repo's PTB config
+    (max_concurrent_updates=1, default-blocking handler) updates are still
+    dispatched one at a time, so cross-update ack latency needs
+    ``concurrent_updates`` + per-callback session isolation (tracked separately).
+    """
+
+    async def test_slow_transfer_does_not_park_the_event_loop(
+        self, mock_autopost_handler, make_autopost_ctx
+    ):
+        handler = mock_autopost_handler
+        loop = asyncio.get_running_loop()
+
+        # A blocking sleep stands in for slow synchronous network I/O: left on the
+        # loop it parks everything; offloaded to a thread it does not.
+        TRANSFER_SECONDS = 0.4
+
+        def slow_download(_identifier):
+            time.sleep(TRANSFER_SECONDS)
+            return b"fake-image-bytes"
+
+        def slow_upload(**_kwargs):
+            time.sleep(TRANSFER_SECONDS)
+            return {"url": "https://cloud.example/x.jpg", "public_id": "storydump/x"}
+
+        provider = Mock()
+        provider.download_file.side_effect = slow_download
+        cloud_service = Mock()
+        cloud_service.upload_media.side_effect = slow_upload
+        ctx = make_autopost_ctx(cloud_service=cloud_service)
+
+        with patch(
+            "src.services.media_sources.factory.MediaSourceFactory."
+            "get_provider_for_media_item",
+            return_value=provider,
+        ):
+            transfer = asyncio.create_task(handler._upload_to_cloudinary(ctx))
+
+            # Probe stands in for any OTHER work scheduled on the loop (the update
+            # poller, a scheduler tick, a heartbeat): while the transfer is in
+            # flight the loop must still service it. A transfer left on the loop
+            # would freeze this 0.1s timer until the whole transfer finishes.
+            probe_start = loop.time()
+            await asyncio.sleep(0.1)
+            probe_latency = loop.time() - probe_start
+
+            assert probe_latency < TRANSFER_SECONDS, (
+                f"event loop parked {probe_latency:.2f}s during the media transfer "
+                f"— concurrent acks would fire past Telegram's validity window"
+            )
+            assert await transfer is True

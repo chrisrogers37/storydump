@@ -208,6 +208,9 @@ class CloudStorageService(BaseService):
             "folder": folder,
             "resource_type": resource_type,
             "overwrite": True,
+            # Finite network timeout so a stalled upload fails fast instead of
+            # hanging the caller indefinitely.
+            "timeout": settings.CLOUD_UPLOAD_TIMEOUT_SECONDS,
         }
 
         if public_id:

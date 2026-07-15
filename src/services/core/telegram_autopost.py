@@ -319,7 +319,15 @@ class TelegramAutopostHandler:
         provider = MediaSourceFactory.get_provider_for_media_item(
             ctx.media_item, telegram_chat_id=ctx.chat_id
         )
-        file_bytes = provider.download_file(ctx.media_item.source_identifier)
+        # The download and Cloudinary upload are blocking synchronous network
+        # transfers; run them off the event loop so a slow transfer can't FREEZE
+        # it and stall everything else on the single bot loop (the update poller,
+        # scheduler tick, cleanup loops). Each touches only this task's own
+        # client/session, so the thread offload is safe. (Making a competing
+        # tap's ack fire concurrently additionally needs concurrent_updates.)
+        file_bytes = await asyncio.to_thread(
+            provider.download_file, ctx.media_item.source_identifier
+        )
 
         from src.services.integrations.cloud_storage import CLOUD_UPLOAD_FOLDER
 
@@ -328,7 +336,8 @@ class TelegramAutopostHandler:
             if ctx.queue_item.chat_settings_id
             else CLOUD_UPLOAD_FOLDER
         )
-        upload_result = ctx.cloud_service.upload_media(
+        upload_result = await asyncio.to_thread(
+            ctx.cloud_service.upload_media,
             file_bytes=file_bytes,
             filename=ctx.media_item.file_name,
             folder=folder,
