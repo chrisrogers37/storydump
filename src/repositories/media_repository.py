@@ -633,7 +633,13 @@ class MediaRepository(BaseRepository):
         query = query.filter(~locked_subquery)
 
         # Exclude items whose file_hash matches any currently-locked item's hash
-        # (prevents posting duplicate files stored under different filenames)
+        # (prevents posting duplicate files stored under different filenames).
+        # This subquery stays tenant-global while media_posting_locks ownership
+        # is not yet backfilled (most locks are NULL-owned): scoping it now
+        # would drop those legacy locks' enforcement. A global scope only ever
+        # over-excludes — a peer tenant's lock can shrink this tenant's eligible
+        # pool but can never surface another tenant's media — so it is safe for
+        # tenant isolation. Scope it to chat_settings_id once locks carry owners.
         locked_hashes_subquery = (
             select(MediaItem.file_hash)
             .join(MediaPostingLock, MediaPostingLock.media_item_id == MediaItem.id)
@@ -664,7 +670,11 @@ class MediaRepository(BaseRepository):
 
         Args:
             category: Filter by category, or None for all categories
-            chat_settings_id: Optional tenant filter (applied to main query and subqueries)
+            chat_settings_id: Optional tenant filter (applied to main query and
+                subqueries). A None id is a no-op filter that spans all tenants,
+                so callers requiring tenant isolation (e.g. posting selection)
+                must refuse to call with None rather than pass it through — see
+                SchedulerService._select_media_from_pool's fail-closed guard.
             exclude_ids: Optional list of media item IDs to exclude (for preview)
 
         Returns:
