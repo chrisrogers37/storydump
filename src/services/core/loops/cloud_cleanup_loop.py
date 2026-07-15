@@ -21,8 +21,6 @@ async def cleanup_cloud_storage_loop(cloud_service):
     while True:
         record_heartbeat("cloud_cleanup")
         try:
-            await asyncio.sleep(3600)
-
             cloud_count = cloud_service.cleanup_expired(folder=CLOUD_UPLOAD_FOLDER)
             db_count = media_repo.clear_stale_cloud_info(
                 retention_hours=settings.CLOUD_UPLOAD_RETENTION_HOURS
@@ -49,3 +47,7 @@ async def cleanup_cloud_storage_loop(cloud_service):
                 logger.warning(
                     f"cleanup_transactions failed for MediaRepository: {cleanup_err}"
                 )
+
+        # Sleep AFTER the cleanup so a redeploy that SIGKILLs the container
+        # during the sleep can never skip a cleanup cycle.
+        await asyncio.sleep(3600)

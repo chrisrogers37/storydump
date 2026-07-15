@@ -14,7 +14,6 @@ async def cleanup_locks_loop(lock_service: MediaLockService):
     while True:
         record_heartbeat("lock_cleanup")
         try:
-            await asyncio.sleep(3600)
             count = lock_service.cleanup_expired_locks()
 
             if count > 0:
@@ -29,3 +28,7 @@ async def cleanup_locks_loop(lock_service: MediaLockService):
                 logger.warning(
                     f"cleanup_transactions failed for MediaLockService: {cleanup_err}"
                 )
+
+        # Sleep AFTER the cleanup so a redeploy that SIGKILLs the container
+        # during the sleep can never skip a cleanup cycle.
+        await asyncio.sleep(3600)
