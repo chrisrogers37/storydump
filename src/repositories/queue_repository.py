@@ -170,6 +170,32 @@ class QueueRepository(BaseRepository):
         self.end_read_transaction()
         return result
 
+    def count_recent_by_status(
+        self,
+        statuses: list[str],
+        since: datetime,
+        chat_settings_id: Optional[str] = None,
+    ) -> int:
+        """Count items matching any status whose ``created_at`` is at or after
+        ``since``.
+
+        Time-bounded sibling of ``count_by_status`` for the daily-cap gate: a
+        'publishing' row only taxes the cap while it is plausibly a live,
+        in-flight publish. A publish resolves within the 180s container
+        wall-clock cap, so a row older than the caller's ``since`` threshold is
+        presumed stuck and excluded — a stranded row must not wedge the cap
+        forever. This only stops *counting* a stale claim; it never deletes or
+        rolls the row forward (no reconciliation).
+        """
+        result = (
+            self._tenant_query(PostingQueue, chat_settings_id)
+            .filter(PostingQueue.status.in_(statuses))
+            .filter(PostingQueue.created_at >= since)
+            .count()
+        )
+        self.end_read_transaction()
+        return result
+
     def count_pending(self, chat_settings_id: Optional[str] = None) -> int:
         """Count number of pending items."""
         result = (
@@ -215,6 +241,24 @@ class QueueRepository(BaseRepository):
         queue_item = self.get_by_id(queue_id)
         if queue_item:
             queue_item.status = status
+            self.db.commit()
+            self.db.refresh(queue_item)
+        return queue_item
+
+    def mark_publishing(self, queue_id: str, container_id: str) -> PostingQueue:
+        """Claim a queue row for an in-flight Instagram publish (#549).
+
+        Flips the row to ``status='publishing'`` and persists the IG media
+        ``container_id`` — done the instant the container is created and BEFORE
+        the publish call. A 'publishing' row is excluded from every stale-sweep
+        and blocks reselection (it is still "already queued"), so a crash after
+        the publish leaves a recoverable, non-duplicating row rather than
+        re-serving the media.
+        """
+        queue_item = self.get_by_id(queue_id)
+        if queue_item:
+            queue_item.status = "publishing"
+            queue_item.instagram_container_id = container_id
             self.db.commit()
             self.db.refresh(queue_item)
         return queue_item
@@ -281,6 +325,11 @@ class QueueRepository(BaseRepository):
             .filter(
                 PostingQueue.scheduled_for < cutoff,
                 PostingQueue.telegram_message_id.is_(None),
+                # Never reap a claimed-but-unconfirmed publish (#549): a stuck
+                # 'publishing' row (also msg_id IS NULL on the auto-approve
+                # path) must persist to block reselection of a maybe-posted
+                # story.
+                PostingQueue.status != "publishing",
             )
             .all()
         )
@@ -444,6 +493,11 @@ class QueueRepository(BaseRepository):
         query = self.db.query(PostingQueue).filter(
             PostingQueue.telegram_message_id.isnot(None),
             PostingQueue.scheduled_for < cutoff,
+            # A stuck 'publishing' autopost card (msg_id NOT NULL) must not be
+            # reaped by expire_sent_row either — it would record an 'expired'
+            # row for a maybe-posted story and reopen the media for a duplicate
+            # (#549).
+            PostingQueue.status != "publishing",
         )
         if status:
             query = query.filter(PostingQueue.status == status)

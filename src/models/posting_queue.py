@@ -36,7 +36,13 @@ class PostingQueue(Base):
     scheduled_for = Column(DateTime, nullable=False, index=True)
     status = Column(
         String(50), default="pending", nullable=False, index=True
-    )  # 'pending', 'processing', 'failed'
+    )  # 'pending', 'processing', 'failed', 'publishing'
+
+    # Instagram claim-before-publish anchor. Set (with status='publishing')
+    # the instant the IG media container is created and BEFORE the publish
+    # call, so a crash after publish leaves a recoverable, non-reapable row
+    # instead of re-serving the media and duplicating the story.
+    instagram_container_id = Column(String(255))
 
     # Telegram tracking (for manual posts)
     telegram_message_id = Column(BigInteger)
@@ -55,7 +61,8 @@ class PostingQueue(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "status IN ('pending', 'processing', 'failed')", name="check_status"
+            "status IN ('pending', 'processing', 'failed', 'publishing')",
+            name="check_status",
         ),
     )
 

@@ -8,6 +8,7 @@ from telegram import InlineKeyboardMarkup
 
 from contextlib import contextmanager
 
+from src.repositories.atomic_session import atomic_session
 from src.repositories.history_repository import HistoryCreateParams
 from src.utils.logger import logger
 from src.utils.resilience import telegram_edit_with_retry
@@ -93,40 +94,19 @@ class TelegramCallbackCore:
         Individual repo methods call commit(), but within this context
         manager we replace commit() with flush() so changes accumulate
         without being committed. A single commit at the end makes the
-        entire operation atomic.
+        entire operation atomic. Delegates to the shared ``atomic_session``
+        primitive.
         """
-        repos = [
-            self.service.history_repo,
-            self.service.media_repo,
-            self.service.queue_repo,
-            self.service.user_repo,
-            self.service.lock_service.lock_repo,
-        ]
-        primary_session = self.service.history_repo.db
-        originals = {}
-
-        # Swap sessions
-        for repo in repos:
-            originals[id(repo)] = repo._db
-            repo.use_session(primary_session)
-
-        # Monkey-patch commit to flush instead (defers actual commit)
-        original_commit = primary_session.commit
-        primary_session.commit = primary_session.flush
-
-        try:
+        with atomic_session(
+            [
+                self.service.history_repo,
+                self.service.media_repo,
+                self.service.queue_repo,
+                self.service.user_repo,
+                self.service.lock_service.lock_repo,
+            ]
+        ):
             yield
-            # All ops succeeded — do the real commit
-            original_commit()
-        except Exception:  # noqa: BLE001 — rollback on any failure, then re-raise
-            primary_session.rollback()
-            raise
-        finally:
-            # Restore commit and sessions
-            primary_session.commit = original_commit
-            for repo in repos:
-                if id(repo) in originals:
-                    repo.use_session(originals[id(repo)])
 
     def _create_history_params(self, queue_id, queue_item, user, status, success):
         """Build HistoryCreateParams for a queue action."""
@@ -165,7 +145,7 @@ class TelegramCallbackCore:
                 queue_item.telegram_chat_id, create_if_missing=False
             )
             if chat_settings and not can_post_today(
-                chat_settings, self.service.history_repo
+                chat_settings, self.service.history_repo, self.service.queue_repo
             ):
                 raise DailyCapReachedError("Daily posting limit reached")
 

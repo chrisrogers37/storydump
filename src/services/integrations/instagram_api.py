@@ -2,7 +2,7 @@
 
 import asyncio
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Callable, Optional
 
 import httpx
 
@@ -82,6 +82,7 @@ class InstagramAPIService(BaseService):
         media_url: str,
         media_type: str = "IMAGE",
         telegram_chat_id: Optional[int] = None,
+        on_container_created: Optional[Callable[[str], None]] = None,
     ) -> dict:
         """
         Post a Story to Instagram.
@@ -95,6 +96,13 @@ class InstagramAPIService(BaseService):
             media_url: Public URL to media (from CloudStorageService)
             media_type: IMAGE or VIDEO
             telegram_chat_id: Chat ID to get active account for (uses ADMIN chat if not specified)
+            on_container_created: Optional callback invoked with the container_id
+                the instant the media container is created and BEFORE the
+                publish call. Lets the caller persist the container_id as a
+                claim-before-publish anchor (#549) so a crash after publish
+                can't duplicate the story. Runs inside the 180s wall-clock cap;
+                if it raises, the publish is aborted (no anchor => nothing
+                published => safe to retry).
 
         Returns:
             dict with:
@@ -153,6 +161,7 @@ class InstagramAPIService(BaseService):
                         account_id=account_id,
                         media_url=media_url,
                         media_type=media_type,
+                        on_container_created=on_container_created,
                     ),
                     timeout=180.0,
                 )
@@ -196,8 +205,15 @@ class InstagramAPIService(BaseService):
         account_id: str,
         media_url: str,
         media_type: str,
+        on_container_created: Optional[Callable[[str], None]] = None,
     ) -> tuple[str, str]:
-        """Run the 3-step Instagram story flow. Returns (story_id, container_id)."""
+        """Run the 3-step Instagram story flow. Returns (story_id, container_id).
+
+        When ``on_container_created`` is provided it fires with the container_id
+        immediately after creation and before polling/publishing, so the caller
+        can persist the claim-before-publish anchor. A raise from the callback
+        propagates and aborts the flow before any publish attempt.
+        """
         container_id = await self._create_media_container(
             token=token,
             account_id=account_id,
@@ -205,6 +221,9 @@ class InstagramAPIService(BaseService):
             media_type=media_type,
         )
         logger.info(f"Created media container: {container_id}")
+
+        if on_container_created is not None:
+            on_container_created(container_id)
 
         await self._wait_for_container_ready(token, container_id)
 

@@ -653,3 +653,42 @@ class TestUserApprovalStats:
         result = history_repo.get_user_approval_stats(days=30)
 
         assert result == []
+
+
+@pytest.mark.unit
+class TestCreateIdempotent:
+    """HistoryRepository.create_idempotent — a replayed finalize must not
+    double-insert a posting_history row for the same queue item (#551)."""
+
+    def _params(self, queue_item_id="q-1", status="posted"):
+        now = datetime.utcnow()
+        return HistoryCreateParams(
+            media_item_id="m-1",
+            queue_item_id=queue_item_id,
+            queue_created_at=now,
+            queue_deleted_at=now,
+            scheduled_for=now,
+            posted_at=now,
+            status=status,
+            success=True,
+        )
+
+    def test_creates_when_no_existing_row(self, history_repo, mock_db):
+        """With no prior history for the queue item, it inserts normally."""
+        mock_db.query.return_value.filter.return_value.order_by.return_value.first.return_value = None
+
+        history_repo.create_idempotent(self._params())
+
+        mock_db.add.assert_called_once()
+        added = mock_db.add.call_args[0][0]
+        assert isinstance(added, PostingHistory)
+
+    def test_skips_insert_when_row_already_exists(self, history_repo, mock_db):
+        """A replay finds the existing row and does NOT insert a duplicate."""
+        existing = MagicMock(spec=PostingHistory)
+        mock_db.query.return_value.filter.return_value.order_by.return_value.first.return_value = existing
+
+        result = history_repo.create_idempotent(self._params())
+
+        assert result is existing
+        mock_db.add.assert_not_called()
