@@ -177,7 +177,9 @@ class TestMediaSyncServiceSync:
         result = sync_service.sync()
 
         assert result.deactivated == 1
-        sync_service.media_repo.deactivate.assert_called_once_with(str(db_item.id))
+        sync_service.media_repo.deactivate.assert_called_once_with(
+            str(db_item.id), chat_settings_id=None
+        )
 
     @patch("src.services.core.media_sync.settings")
     @patch("src.services.core.media_sync.MediaSourceFactory")
@@ -243,7 +245,9 @@ class TestMediaSyncServiceSync:
         result = sync_service.sync()
 
         assert result.reactivated == 1
-        sync_service.media_repo.reactivate.assert_called_once_with("inactive-1")
+        sync_service.media_repo.reactivate.assert_called_once_with(
+            "inactive-1", chat_settings_id=None
+        )
 
     @patch("src.services.core.media_sync.settings")
     @patch("src.services.core.media_sync.MediaSourceFactory")

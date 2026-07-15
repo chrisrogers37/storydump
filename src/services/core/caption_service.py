@@ -88,7 +88,11 @@ class CaptionService(BaseService):
 
             if caption:
                 self.media_repo.update_metadata(
-                    str(media_item.id), generated_caption=caption
+                    str(media_item.id),
+                    generated_caption=caption,
+                    chat_settings_id=str(media_item.chat_settings_id)
+                    if media_item.chat_settings_id
+                    else None,
                 )
 
             self.set_result_summary(

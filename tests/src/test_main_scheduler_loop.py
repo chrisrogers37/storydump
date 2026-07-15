@@ -630,8 +630,8 @@ class TestMediaSyncLoop:
         sync_service.sync.return_value = result
         sync_service.cleanup_transactions = Mock()
 
-        chat1 = Mock(telegram_chat_id=-100111)
-        chat2 = Mock(telegram_chat_id=-100222)
+        chat1 = Mock(telegram_chat_id=-100111, id="cs-111")
+        chat2 = Mock(telegram_chat_id=-100222, id="cs-222")
         settings_service = Mock()
         settings_service.get_all_sync_enabled_chats.return_value = [chat1, chat2]
         settings_service.cleanup_transactions = Mock()
@@ -644,11 +644,16 @@ class TestMediaSyncLoop:
                 pass
 
         assert sync_service.sync.call_count == 2
+        # Each per-tenant sync is scoped to that chat's tenant (#597).
         sync_service.sync.assert_any_call(
-            telegram_chat_id=-100111, triggered_by="scheduler"
+            telegram_chat_id=-100111,
+            chat_settings_id="cs-111",
+            triggered_by="scheduler",
         )
         sync_service.sync.assert_any_call(
-            telegram_chat_id=-100222, triggered_by="scheduler"
+            telegram_chat_id=-100222,
+            chat_settings_id="cs-222",
+            triggered_by="scheduler",
         )
 
     @pytest.mark.asyncio
