@@ -534,8 +534,10 @@ class TestNewCommand:
 class TestOnboardingCleanup:
     """Tests for onboarding session cleanup in scheduler loop."""
 
-    async def test_cleanup_called_when_retention_counter_resets(self):
-        """Verify the scheduler loop calls cleanup_expired on the retention tick."""
+    async def test_onboarding_cleanup_tick_purges_expired_sessions(self):
+        """The hourly onboarding-cleanup sub-task purges expired sessions."""
+        from src.services.core.loops.scheduler_loop import _onboarding_cleanup_tick
+
         mock_conv = Mock()
         mock_conv.__enter__ = Mock(return_value=mock_conv)
         mock_conv.__exit__ = Mock(return_value=False)
@@ -545,11 +547,6 @@ class TestOnboardingCleanup:
             "src.services.core.conversation_service.ConversationService",
             return_value=mock_conv,
         ):
-            # Simulate the scheduler loop branch: retention_tick_counter == 0
-            # fires right after counter is reset (hourly)
-            from src.services.core.conversation_service import ConversationService
-
-            with ConversationService() as conv_service:
-                conv_service.cleanup_expired()
+            await _onboarding_cleanup_tick()
 
         mock_conv.cleanup_expired.assert_called_once()

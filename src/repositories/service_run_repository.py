@@ -7,6 +7,12 @@ from sqlalchemy import case, func
 
 from src.repositories.base_repository import BaseRepository
 from src.models.service_run import ServiceRun
+from src.utils.datetime_utils import ensure_utc
+
+# Reserved service_name for the scheduler's durable periodic-task marker rows
+# (see PeriodicScheduler). Namespaced so it never collides with real service
+# audit rows and can be excluded from observability aggregates.
+PERIODIC_MARKER_SERVICE = "scheduler_periodic"
 
 
 class ServiceRunRepository(BaseRepository):
@@ -43,6 +49,38 @@ class ServiceRunRepository(BaseRepository):
         self.db.commit()
         self.db.refresh(run)
         return str(run.id)
+
+    def record_run(
+        self,
+        service_name: str,
+        method_name: str,
+        ran_at: Optional[datetime] = None,
+    ) -> None:
+        """Persist a lightweight completed marker row.
+
+        Used by the scheduler loop to stamp when a periodic sub-task last ran
+        (see get_last_run_at and PeriodicScheduler), so the interval survives a
+        process restart. started_at is stored naive-UTC to match the column
+        convention (see ensure_utc).
+        """
+        if ran_at is None:
+            ts = datetime.utcnow()
+        else:
+            # Store naive-UTC to match the column convention (ensure_utc treats
+            # a naive input as already-UTC; astimezone normalizes any offset).
+            ts = ensure_utc(ran_at).astimezone(timezone.utc).replace(tzinfo=None)
+        run = ServiceRun(
+            service_name=service_name,
+            method_name=method_name,
+            triggered_by="scheduler",
+            started_at=ts,
+            completed_at=ts,
+            status="completed",
+            success=True,
+            duration_ms=0,
+        )
+        self.db.add(run)
+        self.db.commit()
 
     def complete_run(
         self,
@@ -103,6 +141,26 @@ class ServiceRunRepository(BaseRepository):
         self.end_read_transaction()
         return result
 
+    def get_last_run_at(
+        self, service_name: str, method_name: Optional[str] = None
+    ) -> Optional[datetime]:
+        """Return the started_at of the most recent run for a service (+ method).
+
+        Powers the scheduler's durable periodic-task gating
+        (PeriodicScheduler): it reads when a task last ran so the interval
+        survives process restarts, unlike the in-memory tick counters this
+        replaced. Returns None when no matching run exists (or it aged out of
+        retention) — the caller treats that as "run promptly".
+        """
+        query = self.db.query(ServiceRun.started_at).filter(
+            ServiceRun.service_name == service_name
+        )
+        if method_name is not None:
+            query = query.filter(ServiceRun.method_name == method_name)
+        row = query.order_by(ServiceRun.started_at.desc()).first()
+        self.end_read_transaction()
+        return row[0] if row else None
+
     def delete_older_than(self, days: int) -> int:
         """Delete service runs older than the given number of days.
 
@@ -158,6 +216,7 @@ class ServiceRunRepository(BaseRepository):
                 func.avg(ServiceRun.duration_ms).label("avg_duration_ms"),
             )
             .filter(ServiceRun.started_at >= since)
+            .filter(ServiceRun.service_name != PERIODIC_MARKER_SERVICE)
             .group_by(ServiceRun.service_name)
             .order_by(func.count(ServiceRun.id).desc())
             .all()

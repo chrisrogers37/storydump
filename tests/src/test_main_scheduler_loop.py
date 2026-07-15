@@ -3,7 +3,7 @@
 import asyncio
 
 import pytest
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import ANY, AsyncMock, Mock, patch
 
 from src.services.core.loops.guarded import (
     guarded,
@@ -17,8 +17,9 @@ from src.services.core.loops.heartbeat import (
 )
 from src.services.core.loops.scheduler_loop import (
     run_scheduler_loop,
-    RETENTION_INTERVAL_TICKS,
     SERVICE_RUNS_RETENTION_DAYS,
+    TASK_RETENTION,
+    TASK_TOKEN_REFRESH,
 )
 from src.services.core.loops.media_sync_loop import media_sync_loop
 
@@ -41,6 +42,19 @@ class TestSchedulerLoop:
         session_state.initial_sync_complete = True
         yield
         session_state.initial_sync_complete = original
+
+    @pytest.fixture(autouse=True)
+    def _dormant_periodic(self):
+        """Patch PeriodicScheduler so periodic sub-tasks stay dormant by default.
+
+        Keeps token_refresh / health / retention (and their DB + network calls)
+        from firing in tests that only exercise per-tick chat logic. Tests that
+        need a sub-task to fire request this fixture and set ``.due``.
+        """
+        with patch(f"{_SCHEDULER}.PeriodicScheduler") as mock_cls:
+            gate = mock_cls.return_value
+            gate.due.return_value = False
+            yield gate
 
     @pytest.mark.asyncio
     async def test_scheduler_loop_iterates_over_active_chats(self):
@@ -290,8 +304,13 @@ class TestSchedulerLoop:
         session_state.posts_sent = original
 
     @pytest.mark.asyncio
-    async def test_scheduler_loop_runs_retention_at_interval(self):
-        """Service runs retention fires after RETENTION_INTERVAL_TICKS ticks."""
+    async def test_scheduler_loop_runs_retention_when_due(self, _dormant_periodic):
+        """Retention cleanup fires on a tick when the durable gate says it's
+        due, and records the run so the next interval is measured from now."""
+        _dormant_periodic.due.side_effect = lambda task, interval, *, now: (
+            task == TASK_RETENTION
+        )
+
         scheduler_service = Mock()
         scheduler_service.process_slot = AsyncMock(return_value={"posted": False})
         scheduler_service.cleanup_transactions = Mock()
@@ -301,14 +320,6 @@ class TestSchedulerLoop:
 
         settings_service = Mock()
         settings_service.get_all_active_chats.return_value = []
-
-        tick_count = 0
-
-        async def counting_sleep(seconds):
-            nonlocal tick_count
-            tick_count += 1
-            if tick_count >= RETENTION_INTERVAL_TICKS:
-                raise StopAsyncIteration
 
         with (
             patch(f"{_SCHEDULER}.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
@@ -320,7 +331,7 @@ class TestSchedulerLoop:
             mock_sr_repo = mock_sr_repo_cls.return_value
             mock_sr_repo.delete_older_than.return_value = 5
             mock_sr_repo.end_read_transaction = Mock()
-            mock_sleep.side_effect = counting_sleep
+            mock_sleep.side_effect = StopAsyncIteration  # one tick
 
             try:
                 await run_scheduler_loop(
@@ -332,6 +343,146 @@ class TestSchedulerLoop:
         mock_sr_repo.delete_older_than.assert_called_once_with(
             SERVICE_RUNS_RETENTION_DAYS
         )
+        _dormant_periodic.mark_ran.assert_any_call(TASK_RETENTION, now=ANY)
+
+    @pytest.mark.asyncio
+    async def test_token_refresh_fires_on_first_tick_when_due(self, _dormant_periodic):
+        """#547: when the durable gate reports token_refresh due, it runs on
+        the very first tick — even though a per-process counter would be 0 on a
+        fresh worker (the regression that let IG tokens silently expire under
+        sub-24h redeploys)."""
+        _dormant_periodic.due.side_effect = lambda task, interval, *, now: (
+            task == TASK_TOKEN_REFRESH
+        )
+
+        scheduler_service = Mock()
+        scheduler_service.process_slot = AsyncMock(return_value={"posted": False})
+        scheduler_service.cleanup_transactions = Mock()
+
+        posting_service = Mock()
+        posting_service.cleanup_transactions = Mock()
+
+        settings_service = Mock()
+        settings_service.get_all_active_chats.return_value = []
+
+        with (
+            patch(f"{_SCHEDULER}.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+            patch(f"{_SCHEDULER}.QueueRepository") as mock_queue_repo_cls,
+            patch(f"{_SCHEDULER}.ServiceRunRepository"),
+            patch(f"{_SCHEDULER}.TokenRefreshService"),
+            patch(
+                f"{_SCHEDULER}._token_refresh_tick", new_callable=AsyncMock
+            ) as mock_tr_tick,
+        ):
+            mock_queue_repo_cls.return_value.discard_abandoned_processing.return_value = 0
+            mock_queue_repo_cls.return_value.get_stale_sent.return_value = []
+            mock_sleep.side_effect = StopAsyncIteration  # one tick
+
+            try:
+                await run_scheduler_loop(
+                    scheduler_service, posting_service, settings_service
+                )
+            except StopAsyncIteration:
+                pass
+
+        mock_tr_tick.assert_awaited_once()
+        _dormant_periodic.mark_ran.assert_any_call(TASK_TOKEN_REFRESH, now=ANY)
+
+    @pytest.mark.asyncio
+    async def test_token_refresh_skipped_when_not_due(self, _dormant_periodic):
+        """#547 no-spam: a recent persisted run (gate reports not due) keeps
+        token_refresh from firing — the timestamp is honored across restarts,
+        so a redeploy cannot re-run it early."""
+        _dormant_periodic.due.return_value = False  # nothing due this tick
+
+        scheduler_service = Mock()
+        scheduler_service.process_slot = AsyncMock(return_value={"posted": False})
+        scheduler_service.cleanup_transactions = Mock()
+
+        posting_service = Mock()
+        posting_service.cleanup_transactions = Mock()
+
+        settings_service = Mock()
+        settings_service.get_all_active_chats.return_value = []
+
+        with (
+            patch(f"{_SCHEDULER}.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+            patch(f"{_SCHEDULER}.QueueRepository") as mock_queue_repo_cls,
+            patch(f"{_SCHEDULER}.ServiceRunRepository"),
+            patch(f"{_SCHEDULER}.TokenRefreshService"),
+            patch(
+                f"{_SCHEDULER}._token_refresh_tick", new_callable=AsyncMock
+            ) as mock_tr_tick,
+        ):
+            mock_queue_repo_cls.return_value.discard_abandoned_processing.return_value = 0
+            mock_queue_repo_cls.return_value.get_stale_sent.return_value = []
+            mock_sleep.side_effect = StopAsyncIteration
+
+            try:
+                await run_scheduler_loop(
+                    scheduler_service, posting_service, settings_service
+                )
+            except StopAsyncIteration:
+                pass
+
+        mock_tr_tick.assert_not_awaited()
+        _dormant_periodic.mark_ran.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_first_tick_survives_sync_wait(self, _dormant_periodic):
+        """#553: the redeploy catch-up first_tick must NOT be consumed by a
+        sync-wait no-op tick. The flag stays set until a tick actually passes
+        the sync gate, so process_slot(first_tick=True) runs on the first REAL
+        (post-sync) tick, not on the tick that early-returned while waiting."""
+        from src.services.core.loops.lifecycle import session_state
+
+        session_state.initial_sync_complete = False  # sync not done yet
+
+        scheduler_service = Mock()
+        scheduler_service.process_slot = AsyncMock(return_value={"posted": False})
+        scheduler_service.cleanup_transactions = Mock()
+
+        posting_service = Mock()
+        posting_service.cleanup_transactions = Mock()
+
+        chat1 = Mock(telegram_chat_id=-100111)
+        settings_service = Mock()
+        settings_service.get_all_active_chats.return_value = [chat1]
+        settings_service.cleanup_transactions = Mock()
+
+        tick = 0
+
+        async def sleep_flips_sync(seconds):
+            nonlocal tick
+            tick += 1
+            if tick == 1:
+                # First sync completes concurrently with the first tick.
+                session_state.initial_sync_complete = True
+            if tick >= 3:
+                raise StopAsyncIteration
+
+        with (
+            patch(f"{_SCHEDULER}.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+            patch(f"{_SCHEDULER}.QueueRepository") as mock_queue_repo_cls,
+            patch(f"{_SCHEDULER}.ServiceRunRepository"),
+        ):
+            mock_queue_repo_cls.return_value.discard_abandoned_processing.return_value = 0
+            mock_queue_repo_cls.return_value.get_stale_sent.return_value = []
+            mock_sleep.side_effect = sleep_flips_sync
+
+            try:
+                await run_scheduler_loop(
+                    scheduler_service, posting_service, settings_service
+                )
+            except StopAsyncIteration:
+                pass
+
+        # Tick 1 early-returned on the sync wait (no process_slot). Ticks 2 and
+        # 3 processed the chat; the first_tick catch-up survived to tick 2.
+        assert scheduler_service.process_slot.call_count == 2
+        calls = scheduler_service.process_slot.call_args_list
+        assert calls[0].kwargs["first_tick"] is True
+        assert calls[1].kwargs["first_tick"] is False
 
     @pytest.mark.asyncio
     async def test_scheduler_loop_rolls_back_queue_repo_on_discard_error(self):

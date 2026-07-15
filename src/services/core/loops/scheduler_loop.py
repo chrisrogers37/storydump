@@ -5,6 +5,7 @@ health checks as sub-tasks within the scheduler tick cycle.
 """
 
 import asyncio
+from datetime import datetime, timezone
 from time import time
 
 from src.exceptions.google_drive import GoogleDriveAuthError
@@ -13,6 +14,7 @@ from src.repositories.service_run_repository import ServiceRunRepository
 from src.services.core.health_check import HealthCheckService
 from src.services.core.loops.heartbeat import record_heartbeat
 from src.services.core.loops.lifecycle import session_state
+from src.services.core.loops.periodic import PeriodicScheduler
 from src.services.core.posting import PostingService
 from src.services.core.queue_reap import expire_sent_row
 from src.services.core.scheduler import SchedulerService
@@ -22,14 +24,19 @@ from src.utils.logger import logger
 
 # Retention policy: delete service_runs older than 7 days
 SERVICE_RUNS_RETENTION_DAYS = 7
-# Run retention once per hour (60 ticks at 1-minute intervals)
-RETENTION_INTERVAL_TICKS = 60
-# Pool depletion check interval (hourly, same cadence as retention)
-POOL_CHECK_INTERVAL_TICKS = 60
-# Token refresh interval: once per day (1440 ticks at 1-minute intervals)
-TOKEN_REFRESH_INTERVAL_TICKS = 1440
+# Periodic sub-task intervals, in seconds of wall-clock time. Each sub-task is
+# gated on a durable last-run timestamp (PeriodicScheduler), NOT an in-memory
+# tick counter, so the interval survives process restarts — the #547 fix.
+RETENTION_INTERVAL_SECONDS = 3600  # hourly
+POOL_CHECK_INTERVAL_SECONDS = 3600  # hourly (pool depletion + Drive-token health)
+TOKEN_REFRESH_INTERVAL_SECONDS = 86400  # daily
 # Throttle pool alerts to once per 24h per chat
 POOL_ALERT_COOLDOWN_SECONDS = 86400
+
+# Durable periodic sub-task keys (stored as the marker rows' method_name).
+TASK_RETENTION = "retention"
+TASK_HEALTH_CHECKS = "health_checks"
+TASK_TOKEN_REFRESH = "token_refresh"
 
 
 async def _scheduler_tick(
@@ -47,7 +54,11 @@ async def _scheduler_tick(
             Passed to process_slot so catch-up posts reset to now
             instead of advancing gradually.
 
-    Returns the list of active chats discovered this tick (used by health checks).
+    Returns the list of active chats discovered this tick (used by health
+    checks), or None when the tick short-circuited on the initial-sync wait
+    before reaching chat processing. The caller uses None to know the tick did
+    NOT process chats, so the first-tick catch-up flag is not consumed by a
+    sync-wait no-op tick (#553).
     """
     # Reap queue items abandoned in 'processing' for over 24h.
     # queue_repo is a standalone repository (not owned by a BaseService), so
@@ -84,7 +95,7 @@ async def _scheduler_tick(
     # "no eligible media" failures or wrong selections.
     if not session_state.initial_sync_complete:
         logger.debug("Scheduler tick: waiting for initial media sync")
-        return []
+        return None
 
     if settings_service:
         active_chats = settings_service.get_all_active_chats()
@@ -306,6 +317,49 @@ async def _token_refresh_tick(
             )
 
 
+async def _onboarding_cleanup_tick() -> None:
+    """Purge expired onboarding / conversation sessions (hourly sub-task)."""
+    try:
+        from src.services.core.conversation_service import ConversationService
+
+        with ConversationService() as conv_service:
+            conv_service.cleanup_expired()
+    except Exception as e:
+        logger.warning(f"Onboarding session cleanup failed: {e}")
+
+
+async def _health_checks_tick(
+    active_chats: list,
+    scheduler_service: SchedulerService,
+    health_check_service: HealthCheckService,
+    pool_alert_last_sent: dict[int, float],
+    token_alert_last_sent: dict[int, float],
+) -> None:
+    """Run the hourly pool-depletion and Drive-token health checks together."""
+    try:
+        await asyncio.gather(
+            _pool_health_tick(
+                active_chats,
+                scheduler_service,
+                health_check_service,
+                pool_alert_last_sent,
+            ),
+            _token_health_tick(
+                active_chats,
+                scheduler_service,
+                health_check_service,
+                token_alert_last_sent,
+            ),
+        )
+    finally:
+        try:
+            health_check_service.cleanup_transactions()
+        except Exception as cleanup_err:
+            logger.warning(
+                f"cleanup_transactions failed for HealthCheckService: {cleanup_err}"
+            )
+
+
 async def run_scheduler_loop(
     scheduler_service: SchedulerService,
     posting_service: PostingService,
@@ -317,8 +371,9 @@ async def run_scheduler_loop(
     checks is_slot_due() and, if a slot is due, selects media and sends
     to Telegram.  No service_run is created for no-op ticks.
 
-    Also runs hourly retention cleanup, pool health checks, and token
-    health checks.
+    Also runs periodic sub-tasks (retention cleanup, pool + Drive-token
+    health checks, and daily Instagram token refresh) gated on durable
+    last-run timestamps so their cadence survives process restarts (#547).
 
     Args:
         scheduler_service: SchedulerService instance (handles JIT logic)
@@ -332,9 +387,9 @@ async def run_scheduler_loop(
     service_run_repo = ServiceRunRepository()
     health_check_service = HealthCheckService()
     token_refresh_service = TokenRefreshService()
-    retention_tick_counter = 0
-    pool_check_tick_counter = 0
-    token_refresh_tick_counter = 0
+    # Periodic sub-tasks are gated on durable last-run timestamps rather than
+    # in-memory counters, so they survive process restarts (#547).
+    periodic = PeriodicScheduler(service_run_repo)
     pool_alert_last_sent: dict[int, float] = {}
     token_alert_last_sent: dict[int, float] = {}
     is_first_tick = True
@@ -343,16 +398,22 @@ async def run_scheduler_loop(
         record_heartbeat("scheduler")
 
         # --- Scheduler tick: process due slots ---
-        active_chats = []
+        active_chats: list = []
         try:
-            active_chats = await _scheduler_tick(
+            tick_result = await _scheduler_tick(
                 scheduler_service,
                 posting_service,
                 settings_service,
                 queue_repo,
                 first_tick=is_first_tick,
             )
-            is_first_tick = False
+            # Only consume the first-tick catch-up on a tick that actually
+            # passed the sync gate (returns a list). A sync-wait early return
+            # (None) must NOT burn the flag, or the redeploy catch-up never
+            # runs in the common sync-enabled deployment (#553).
+            if tick_result is not None:
+                is_first_tick = False
+                active_chats = tick_result
         except Exception as e:
             logger.error(f"Error in scheduler loop: {e}", exc_info=True)
         finally:
@@ -367,54 +428,36 @@ async def run_scheduler_loop(
                         f"{type(svc).__name__}: {cleanup_err}"
                     )
 
-        # --- Hourly retention: purge old service_runs ---
-        retention_tick_counter += 1
-        if retention_tick_counter >= RETENTION_INTERVAL_TICKS:
-            retention_tick_counter = 0
-            await _retention_cleanup_tick(service_run_repo)
+        # --- Periodic sub-tasks, gated on durable last-run timestamps ---
+        # These survive process restarts (unlike the old in-memory tick
+        # counters), so token refresh still fires ~daily even when Railway
+        # redeploys the worker more often than once per 24h — the acute #547
+        # failure where IG tokens silently expired because refresh never ran.
+        # A read/write failure here must not kill the loop; log and retry next
+        # minute (the per-sub-task functions already swallow their own errors).
+        now = datetime.now(timezone.utc)
+        try:
+            if periodic.due(TASK_RETENTION, RETENTION_INTERVAL_SECONDS, now=now):
+                await _retention_cleanup_tick(service_run_repo)
+                await _onboarding_cleanup_tick()
+                periodic.mark_ran(TASK_RETENTION, now=now)
 
-        # --- Hourly: clean up expired onboarding sessions ---
-        if retention_tick_counter == 0:
-            try:
-                from src.services.core.conversation_service import ConversationService
-
-                with ConversationService() as conv_service:
-                    conv_service.cleanup_expired()
-            except Exception as e:
-                logger.warning(f"Onboarding session cleanup failed: {e}")
-
-        # --- Hourly health checks: pool depletion + token health ---
-        pool_check_tick_counter += 1
-        if pool_check_tick_counter >= POOL_CHECK_INTERVAL_TICKS:
-            pool_check_tick_counter = 0
-            try:
-                await asyncio.gather(
-                    _pool_health_tick(
-                        active_chats,
-                        scheduler_service,
-                        health_check_service,
-                        pool_alert_last_sent,
-                    ),
-                    _token_health_tick(
-                        active_chats,
-                        scheduler_service,
-                        health_check_service,
-                        token_alert_last_sent,
-                    ),
+            if periodic.due(TASK_HEALTH_CHECKS, POOL_CHECK_INTERVAL_SECONDS, now=now):
+                await _health_checks_tick(
+                    active_chats,
+                    scheduler_service,
+                    health_check_service,
+                    pool_alert_last_sent,
+                    token_alert_last_sent,
                 )
-            finally:
-                try:
-                    health_check_service.cleanup_transactions()
-                except Exception as cleanup_err:
-                    logger.warning(
-                        f"cleanup_transactions failed for "
-                        f"HealthCheckService: {cleanup_err}"
-                    )
+                periodic.mark_ran(TASK_HEALTH_CHECKS, now=now)
 
-        # --- Daily: refresh Instagram tokens approaching expiry ---
-        token_refresh_tick_counter += 1
-        if token_refresh_tick_counter >= TOKEN_REFRESH_INTERVAL_TICKS:
-            token_refresh_tick_counter = 0
-            await _token_refresh_tick(token_refresh_service, scheduler_service)
+            if periodic.due(
+                TASK_TOKEN_REFRESH, TOKEN_REFRESH_INTERVAL_SECONDS, now=now
+            ):
+                await _token_refresh_tick(token_refresh_service, scheduler_service)
+                periodic.mark_ran(TASK_TOKEN_REFRESH, now=now)
+        except Exception as e:
+            logger.error(f"Periodic sub-task dispatch failed: {e}", exc_info=True)
 
         await asyncio.sleep(60)
