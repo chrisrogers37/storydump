@@ -320,7 +320,12 @@ class TestSyncReadinessGate:
 
     @pytest.mark.asyncio
     async def test_scheduler_tick_skips_when_sync_not_complete(self):
-        """Scheduler tick returns empty when initial_sync_complete is False."""
+        """Scheduler tick returns None (not []) on the sync-wait early return.
+
+        None is the distinct signal that the tick short-circuited before chat
+        processing, so the caller does not consume the first-tick catch-up flag
+        on a sync-wait no-op tick (#553). [] means "processed, no chats".
+        """
         from src.services.core.loops.scheduler_loop import _scheduler_tick
 
         scheduler_service = Mock()
@@ -342,7 +347,7 @@ class TestSyncReadinessGate:
                 queue_repo,
             )
 
-        assert result == []
+        assert result is None
         # Should not have fetched active chats
         settings_service.get_all_active_chats.assert_not_called()
 
