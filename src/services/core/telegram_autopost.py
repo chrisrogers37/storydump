@@ -171,6 +171,12 @@ class TelegramAutopostHandler:
         the callback pipeline. Owns the operation lock and releases it
         on completion.
         """
+        # This task copied the callback's context (incl. its per-repo Sessions).
+        # Detach to fresh, task-local sessions so our DB work does not share — and
+        # the callback's ``finally: cleanup_transactions()`` cannot commit/close —
+        # the very session we are mid-write on (use-after-free). See the ContextVar
+        # session isolation in BaseRepository.
+        self.service.begin_isolated_transactions()
         try:
             # ============================================
             # CRITICAL SAFETY GATES

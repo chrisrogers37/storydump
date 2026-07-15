@@ -31,6 +31,15 @@ class Settings(BaseSettings):
     TELEGRAM_CHANNEL_ID: int
     ADMIN_TELEGRAM_CHAT_ID: int
 
+    # Number of Telegram updates processed concurrently (PTB
+    # Application.concurrent_updates). Each concurrent callback runs in its own
+    # asyncio Task with its own per-task DB session (see BaseRepository), so this
+    # is the dominant multiplier on peak concurrent DB connections from button
+    # taps. Keep it comfortably within the connection pool
+    # (DB_POOL_SIZE + DB_MAX_OVERFLOW) alongside the background loops; unbounded
+    # concurrency would exhaust the pool.
+    TELEGRAM_MAX_CONCURRENT_UPDATES: int = 8
+
     # Media Configuration
     MEDIA_DIR: str = "/tmp/media"
 

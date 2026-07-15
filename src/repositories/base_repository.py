@@ -1,5 +1,6 @@
 """Base repository class with proper session management."""
 
+import contextvars
 from typing import Optional
 
 from sqlalchemy.exc import OperationalError
@@ -27,8 +28,51 @@ class BaseRepository:
     """
 
     def __init__(self):
-        self._db_generator = None
-        self._db: Optional[Session] = None
+        self._ensure_session_vars()
+
+    def _ensure_session_vars(self):
+        """Create the per-instance, task-local session ContextVars if absent.
+
+        Session state is held in ContextVars so it is task-local: each asyncio
+        Task (every PTB ``concurrent_updates`` callback) and each
+        ``asyncio.to_thread`` offload copies the current context, so each opens
+        and owns its OWN Session instead of sharing this singleton repo's one
+        Session — a SQLAlchemy Session is not safe for concurrent use.
+
+        Guarded (not created inline in ``__init__``) so the vars still exist for
+        code paths that bypass ``__init__`` — notably tests that patch
+        ``__init__`` to a no-op and then assign ``_db`` directly. Repos are
+        process-lifetime singletons, so in real use these are created once, in
+        the startup context, before any concurrency; ``id(self)`` only
+        disambiguates the debug name.
+        """
+        if getattr(self, "_db_var", None) is None:
+            self._db_var: contextvars.ContextVar = contextvars.ContextVar(
+                f"repo_db_{id(self)}", default=None
+            )
+            self._db_generator_var: contextvars.ContextVar = contextvars.ContextVar(
+                f"repo_db_generator_{id(self)}", default=None
+            )
+
+    @property
+    def _db(self) -> Optional[Session]:
+        self._ensure_session_vars()
+        return self._db_var.get()
+
+    @_db.setter
+    def _db(self, value: Optional[Session]) -> None:
+        self._ensure_session_vars()
+        self._db_var.set(value)
+
+    @property
+    def _db_generator(self):
+        self._ensure_session_vars()
+        return self._db_generator_var.get()
+
+    @_db_generator.setter
+    def _db_generator(self, value) -> None:
+        self._ensure_session_vars()
+        self._db_generator_var.set(value)
 
     def _open_session(self):
         """Open a new database session. Called lazily on first .db access."""
@@ -190,6 +234,20 @@ class BaseRepository:
             session: An existing SQLAlchemy Session to use instead of this repo's own.
         """
         self._db = session
+
+    def detach_session(self):
+        """Forget the current context's session WITHOUT closing it.
+
+        Used at task/thread boundaries. A coroutine spawned via
+        ``asyncio.create_task`` or run via ``asyncio.to_thread`` copies the
+        parent's context, inheriting the parent's Session reference. Calling this
+        at the top of the spawned unit makes its next ``.db`` access open a FRESH,
+        task-local session instead of sharing — and racing — the parent's. The
+        inherited Session object is left intact for its owner (the parent) to
+        commit and close.
+        """
+        self._db = None
+        self._db_generator = None
 
     def _apply_tenant_filter(
         self, query, model_class, chat_settings_id: Optional[str] = None

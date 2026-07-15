@@ -29,6 +29,50 @@ class BaseService(ABC):
         self.service_run_repo = ServiceRunRepository()
         self.service_name = self.__class__.__name__
 
+    def _for_each_repository(self, repo_action, service_method):
+        """Apply ``repo_action`` to every repository this service owns.
+
+        Shared traversal behind ``cleanup_transactions``,
+        ``begin_isolated_transactions``, and ``close``. Each attribute that is a
+        ``BaseRepository`` gets ``repo_action`` applied; each nested
+        ``BaseService`` has its own ``service_method`` invoked so it recurses
+        over its repositories (e.g. SettingsService inside PostingService).
+        Repositories the attribute walk can't see — held by a non-BaseService
+        collaborator — are included via ``_extra_repositories`` so every
+        lifecycle op covers them, not just one special-cased method. Each step is
+        guarded so one failure can't abort the traversal.
+        """
+        for attr_name in dir(self):
+            try:
+                attr = getattr(self, attr_name, None)
+                if isinstance(attr, BaseRepository):
+                    repo_action(attr)
+                elif isinstance(attr, BaseService) and attr is not self:
+                    getattr(attr, service_method)()
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    f"[{self.service_name}] {service_method} failed for "
+                    f"{attr_name}: {type(e).__name__}: {e}"
+                )
+        for repo in self._extra_repositories():
+            try:
+                repo_action(repo)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    f"[{self.service_name}] {service_method} failed for an "
+                    f"extra repository: {type(e).__name__}: {e}"
+                )
+
+    def _extra_repositories(self):
+        """Repositories this service owns that the attribute walk can't discover.
+
+        Override to include repositories held by a non-BaseService collaborator
+        (e.g. an InteractionService that intentionally does not extend
+        BaseService) so they participate in every session-lifecycle op —
+        cleanup, detach, and close alike — instead of one special-cased method.
+        """
+        return ()
+
     def cleanup_transactions(self):
         """
         Commit/rollback all open transactions on repository sessions.
@@ -40,18 +84,23 @@ class BaseService(ABC):
         Also traverses nested BaseService instances (e.g. SettingsService
         inside PostingService) so their sessions are cleaned up too.
         """
-        for attr_name in dir(self):
-            try:
-                attr = getattr(self, attr_name, None)
-                if isinstance(attr, BaseRepository):
-                    attr.end_read_transaction()
-                elif isinstance(attr, BaseService) and attr is not self:
-                    attr.cleanup_transactions()
-            except Exception as e:  # noqa: BLE001
-                logger.warning(
-                    f"[{self.service_name}] Transaction cleanup failed for "
-                    f"{attr_name}: {type(e).__name__}: {e}"
-                )
+        self._for_each_repository(
+            lambda repo: repo.end_read_transaction(), "cleanup_transactions"
+        )
+
+    def begin_isolated_transactions(self):
+        """Detach this service's repositories from any inherited task sessions.
+
+        A coroutine spawned as a new asyncio Task (``asyncio.create_task``) or run
+        via ``asyncio.to_thread`` copies the parent context — including each
+        repo's per-task Session reference. Call this at the top of such a spawned
+        unit, or before spawning a fan-out of tasks, so the DB work opens FRESH,
+        task-local sessions rather than sharing (and racing) the parent's.
+        Detaches without closing; the parent still owns the inherited sessions.
+        """
+        self._for_each_repository(
+            lambda repo: repo.detach_session(), "begin_isolated_transactions"
+        )
 
     def close(self):
         """
@@ -61,21 +110,9 @@ class BaseService(ABC):
         or can be called manually to release database connections.
 
         Recursively closes nested BaseService instances (which hold their
-        own repositories) to prevent connection pool exhaustion.  This
-        mirrors the recursive pattern used in cleanup_transactions().
+        own repositories) to prevent connection pool exhaustion.
         """
-        for attr_name in dir(self):
-            try:
-                attr = getattr(self, attr_name, None)
-                if isinstance(attr, BaseService) and attr is not self:
-                    attr.close()
-                elif isinstance(attr, BaseRepository):
-                    attr.close()
-            except Exception as e:  # noqa: BLE001
-                logger.warning(
-                    f"[{self.service_name}] Error closing {attr_name}: "
-                    f"{type(e).__name__}: {e}"
-                )
+        self._for_each_repository(lambda repo: repo.close(), "close")
 
     def __enter__(self):
         """Context manager entry."""
