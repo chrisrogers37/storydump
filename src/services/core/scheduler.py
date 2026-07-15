@@ -70,8 +70,8 @@ class SchedulerService(BaseService):
         if last_sent and (now - last_sent).total_seconds() < interval_seconds:
             return False  # Too soon
 
-        # Pick category for this slot
-        return self._pick_category_for_slot()
+        # Pick category for this slot (scoped to this tenant's configured mix)
+        return self._pick_category_for_slot(str(chat_settings.id))
 
     def _compute_catchup_sent_at(
         self, chat_settings, *, first_tick: bool = False
@@ -865,16 +865,23 @@ class SchedulerService(BaseService):
     # Internal: category selection
     # ------------------------------------------------------------------
 
-    def _pick_category_for_slot(self) -> Optional[str]:
-        """Pick a single category for this slot using configured ratios.
+    def _pick_category_for_slot(self, chat_settings_id: Optional[str]) -> Optional[str]:
+        """Pick a single category for this slot using the tenant's configured ratios.
 
         Uses weighted random selection so that over many slots the
         distribution matches the configured mix.
 
+        Fail-closed: a missing tenant means "no configured mix" (uncategorized),
+        never the global all-tenant mix. The category-mix tenant filter is a
+        no-op on a None id, so an unscoped read would let one tenant's ratios
+        shape another tenant's posting distribution (#542).
+
         Returns:
-            Category name, or None if no ratios configured.
+            Category name, or None if no ratios are configured for the tenant.
         """
-        current_mix = self.category_mix_repo.get_current_mix_as_dict()
+        if not chat_settings_id:
+            return None
+        current_mix = self.category_mix_repo.get_current_mix_as_dict(chat_settings_id)
         if not current_mix:
             return None
 

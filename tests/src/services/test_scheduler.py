@@ -697,11 +697,11 @@ class TestPickCategoryForSlot:
     """Tests for SchedulerService._pick_category_for_slot()."""
 
     def test_returns_none_when_no_ratios(self, scheduler_service_mocked):
-        """Returns None when no category mix is configured."""
+        """Returns None when the tenant has no category mix configured."""
         service = scheduler_service_mocked
         service.category_mix_repo.get_current_mix_as_dict.return_value = {}
 
-        assert service._pick_category_for_slot() is None
+        assert service._pick_category_for_slot("tenant-A") is None
 
     def test_returns_category_with_ratios(self, scheduler_service_mocked):
         """Returns a valid category when ratios are configured."""
@@ -711,7 +711,7 @@ class TestPickCategoryForSlot:
             "merch": Decimal("0.3"),
         }
 
-        result = service._pick_category_for_slot()
+        result = service._pick_category_for_slot("tenant-A")
 
         assert result in ("memes", "merch")
 
@@ -723,7 +723,29 @@ class TestPickCategoryForSlot:
         }
 
         for _ in range(10):
-            assert service._pick_category_for_slot() == "memes"
+            assert service._pick_category_for_slot("tenant-A") == "memes"
+
+    def test_scopes_mix_to_tenant(self, scheduler_service_mocked):
+        """The mix read is scoped to the caller's tenant (#542)."""
+        service = scheduler_service_mocked
+        service.category_mix_repo.get_current_mix_as_dict.return_value = {
+            "memes": Decimal("1.0"),
+        }
+
+        service._pick_category_for_slot("tenant-A")
+
+        service.category_mix_repo.get_current_mix_as_dict.assert_called_once_with(
+            "tenant-A"
+        )
+
+    def test_fail_closed_without_tenant(self, scheduler_service_mocked):
+        """Fail-closed: a missing tenant reads no mix, never the global merged mix."""
+        service = scheduler_service_mocked
+
+        result = service._pick_category_for_slot(None)
+
+        assert result is None
+        service.category_mix_repo.get_current_mix_as_dict.assert_not_called()
 
 
 # ------------------------------------------------------------------
