@@ -9,6 +9,7 @@ import random
 from src.exceptions.google_drive import GoogleDriveAuthError
 from src.services.base_service import BaseService
 from src.services.core.settings_service import SettingsService
+from src.repositories.atomic_session import atomic_session
 from src.repositories.media_repository import MediaRepository
 from src.repositories.queue_repository import QueueRepository
 from src.repositories.history_repository import HistoryRepository
@@ -153,7 +154,7 @@ class SchedulerService(BaseService):
         # Daily cap guard — applies before any slot/media evaluation
         from src.services.core.daily_cap import can_post_today
 
-        if not can_post_today(chat_settings, self.history_repo):
+        if not can_post_today(chat_settings, self.history_repo, self.queue_repo):
             return {"posted": False, "reason": "daily_cap_reached"}
 
         slot_result = self.is_slot_due(chat_settings)
@@ -199,7 +200,7 @@ class SchedulerService(BaseService):
         # Daily cap guard — even /next respects the daily limit
         from src.services.core.daily_cap import can_post_today
 
-        if not can_post_today(chat_settings, self.history_repo):
+        if not can_post_today(chat_settings, self.history_repo, self.queue_repo):
             return {
                 "posted": False,
                 "reason": "daily_cap_reached",
@@ -536,7 +537,7 @@ class SchedulerService(BaseService):
         # path if called from a future entry point
         from src.services.core.daily_cap import can_post_today
 
-        if not can_post_today(chat_settings, self.history_repo):
+        if not can_post_today(chat_settings, self.history_repo, self.queue_repo):
             logger.info(
                 f"Auto-approve skipped for {media_item.file_name}: daily cap reached"
             )
@@ -562,20 +563,49 @@ class SchedulerService(BaseService):
         instagram_story_id = None
 
         if chat_settings.enable_instagram_api and not chat_settings.dry_run_mode:
-            ig_result = await self._auto_approve_instagram(media_item, chat_settings)
-            if ig_result:
-                posting_method = "instagram_api"
-                instagram_story_id = ig_result
-            else:
-                # Instagram API failed — do NOT record as successful.
-                # Clean up the transient queue item and advance the clock
-                # so the scheduler doesn't re-fire this slot, but leave
-                # times_posted and locks untouched so the item remains
-                # eligible for future selection.
-                self.queue_repo.delete(queue_id)
+            # Claim-before-publish (#549): the container callback flips the row
+            # to 'publishing' and persists the container_id the instant the IG
+            # container exists — BEFORE the publish. A container_id having been
+            # persisted is our classification signal on failure.
+            container_created = {"id": None}
+
+            def _persist_container(container_id):
+                container_created["id"] = container_id
+                self.queue_repo.mark_publishing(queue_id, container_id)
+
+            instagram_story_id = await self._auto_approve_instagram(
+                media_item, chat_settings, on_container_created=_persist_container
+            )
+
+            if instagram_story_id is None:
+                # Advance the clock so the scheduler doesn't re-fire this slot.
                 self.settings_service.update_last_post_sent_at(
                     chat_settings.telegram_chat_id, sent_at_override or now
                 )
+                if container_created["id"] is not None:
+                    # AMBIGUOUS: a container was created, so the story may have
+                    # published. Leave the row in 'publishing' — excluded from
+                    # every sweep, it blocks reselection and is never
+                    # re-published. No history, no lock (finalize is skipped).
+                    logger.warning(
+                        f"Auto-approve Instagram unconfirmed for "
+                        f"{media_item.file_name} [{media_item.category}] "
+                        f"(container {container_created['id']}) — holding row "
+                        f"in 'publishing' to prevent a duplicate story"
+                    )
+                    return {
+                        "posted": False,
+                        "auto_approved": True,
+                        "queue_item_id": queue_id,
+                        "media_item": media_item,
+                        "media_file": media_item.file_name,
+                        "category": media_item.category,
+                        "error": "Instagram publish unconfirmed — held for review",
+                    }
+                # SAFE RETRY: no container was ever created, so nothing
+                # published. Release the transient row and leave the media
+                # eligible for a future selection.
+                self.queue_repo.delete(queue_id)
                 logger.warning(
                     f"Auto-approve Instagram failed for {media_item.file_name} "
                     f"[{media_item.category}] — not recording as posted"
@@ -590,32 +620,43 @@ class SchedulerService(BaseService):
                     "error": "Instagram API posting failed",
                 }
 
-        self.history_repo.create(
-            HistoryCreateParams(
-                media_item_id=media_id,
-                queue_item_id=queue_id,
-                queue_created_at=now,
-                queue_deleted_at=now,
-                scheduled_for=now,
-                posted_at=now,
-                status="posted",
-                success=True,
-                posting_method=posting_method,
-                instagram_story_id=instagram_story_id,
-                chat_settings_id=cs_id,
-            )
-        )
+            posting_method = "instagram_api"
 
-        self.media_repo.increment_times_posted(media_id)
-
+        # Finalize atomically: a crash between the publish and the bookkeeping
+        # must never leave a story recorded-but-still-queued (double count) or
+        # the queue row deleted-without-history (re-serve). One transaction
+        # writes history (idempotent, #551), increments, locks, and deletes.
         from src.services.core.media_lock import MediaLockService
 
         lock_service = MediaLockService()
-        lock_service.create_lock(
-            media_id, telegram_chat_id=chat_settings.telegram_chat_id
-        )
-
-        self.queue_repo.delete(queue_id)
+        with atomic_session(
+            [
+                self.history_repo,
+                self.media_repo,
+                self.queue_repo,
+                lock_service.lock_repo,
+            ]
+        ):
+            self.history_repo.create_idempotent(
+                HistoryCreateParams(
+                    media_item_id=media_id,
+                    queue_item_id=queue_id,
+                    queue_created_at=now,
+                    queue_deleted_at=now,
+                    scheduled_for=now,
+                    posted_at=now,
+                    status="posted",
+                    success=True,
+                    posting_method=posting_method,
+                    instagram_story_id=instagram_story_id,
+                    chat_settings_id=cs_id,
+                )
+            )
+            self.media_repo.increment_times_posted(media_id)
+            lock_service.create_lock(
+                media_id, telegram_chat_id=chat_settings.telegram_chat_id
+            )
+            self.queue_repo.delete(queue_id)
 
         self.settings_service.update_last_post_sent_at(
             chat_settings.telegram_chat_id, sent_at_override or now
@@ -642,11 +683,16 @@ class SchedulerService(BaseService):
         self,
         media_item,
         chat_settings,
+        on_container_created=None,
     ) -> Optional[str]:
         """Post auto-approved media to Instagram.
 
         Runs safety check, uploads to Cloudinary, posts via Graph API,
         cleans up Cloudinary. Returns story_id on success, None on failure.
+
+        ``on_container_created`` is forwarded to ``post_story`` so the caller
+        can persist the container_id (claim-before-publish) the moment the
+        container exists and before the publish call.
         """
         from src.services.integrations.cloud_storage import (
             CloudStorageService,
@@ -703,6 +749,7 @@ class SchedulerService(BaseService):
                 media_url=story_url,
                 media_type=media_type,
                 telegram_chat_id=chat_settings.telegram_chat_id,
+                on_container_created=on_container_created,
             )
 
             return post_result.get("story_id")

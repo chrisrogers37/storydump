@@ -485,3 +485,95 @@ class TestGetStaleSent:
         with patch.object(queue_repo, "end_read_transaction") as mock_end:
             queue_repo.get_stale_sent()
             mock_end.assert_called_once()
+
+
+def _literal(expr) -> str:
+    """Render a SQLAlchemy filter expression with its bound values inlined."""
+    return str(expr.compile(compile_kwargs={"literal_binds": True}))
+
+
+@pytest.mark.unit
+class TestMarkPublishing:
+    """QueueRepository.mark_publishing — the claim-before-publish signal (#549)."""
+
+    def test_sets_status_and_container_id(self, queue_repo, mock_db):
+        """mark_publishing flips status to 'publishing' and persists the container id."""
+        mock_item = MagicMock()
+        mock_item.status = "pending"
+        mock_item.instagram_container_id = None
+        mock_db.query.return_value.filter.return_value.first.return_value = mock_item
+
+        result = queue_repo.mark_publishing("q-1", "container-abc")
+
+        assert result is mock_item
+        assert mock_item.status == "publishing"
+        assert mock_item.instagram_container_id == "container-abc"
+        mock_db.refresh.assert_called_once_with(mock_item)
+
+    def test_no_op_when_missing(self, queue_repo, mock_db):
+        """mark_publishing returns None when the row is gone."""
+        mock_db.query.return_value.filter.return_value.first.return_value = None
+        assert queue_repo.mark_publishing("nope", "c") is None
+
+
+@pytest.mark.unit
+class TestSweepsExcludePublishing:
+    """Every stale-sweep/reaper must leave a 'publishing' row intact so a
+    claimed-but-unconfirmed publish is never reaped and re-served (#549)."""
+
+    def test_delete_stale_excludes_publishing(self, queue_repo, mock_db):
+        """delete_stale (targets msg_id IS NULL regardless of status after #561)
+        must additionally exclude status='publishing'."""
+        mock_db.query.return_value.filter.return_value.all.return_value = []
+
+        queue_repo.delete_stale(hours=24)
+
+        filter_args = mock_db.query.return_value.filter.call_args[0]
+        rendered = " ".join(_literal(a) for a in filter_args)
+        assert "status != 'publishing'" in rendered
+        assert "telegram_message_id IS NULL" in rendered
+
+    def test_get_stale_sent_excludes_publishing(self, queue_repo, mock_db):
+        """get_stale_sent feeds the button-bearing reaper (expire_sent_row);
+        a stuck 'publishing' autopost card (msg_id NOT NULL) must be excluded."""
+        mock_query = mock_db.query.return_value
+        mock_query.filter.return_value = mock_query
+        mock_query.order_by.return_value = mock_query
+        mock_query.all.return_value = []
+
+        queue_repo.get_stale_sent(hours=24)
+
+        filter_args = mock_query.filter.call_args[0]
+        rendered = " ".join(_literal(a) for a in filter_args)
+        assert "status != 'publishing'" in rendered
+        assert "telegram_message_id IS NOT NULL" in rendered
+
+    def test_delete_stale_pending_only_targets_pending(self, queue_repo, mock_db):
+        """delete_stale_pending is status-scoped to 'pending' — a 'publishing'
+        row can never match, so it needs no extra guard."""
+        mock_db.query.return_value.filter.return_value.all.return_value = []
+
+        queue_repo.delete_stale_pending(max_age_minutes=10)
+
+        filter_args = mock_db.query.return_value.filter.call_args[0]
+        rendered = " ".join(_literal(a) for a in filter_args)
+        assert "status = 'pending'" in rendered
+        assert "publishing" not in rendered
+
+    def test_processing_sweeps_only_target_processing(self, queue_repo, mock_db):
+        """requeue_stale_processing / discard_abandoned_processing are scoped to
+        'processing' — 'publishing' rows are excluded by construction."""
+        mock_db.query.return_value.filter.return_value.all.return_value = []
+        queue_repo.requeue_stale_processing(max_age_minutes=10)
+        rendered = " ".join(
+            _literal(a) for a in mock_db.query.return_value.filter.call_args[0]
+        )
+        assert "status = 'processing'" in rendered
+        assert "publishing" not in rendered
+
+        queue_repo.discard_abandoned_processing(abandon_threshold_hours=24)
+        rendered = " ".join(
+            _literal(a) for a in mock_db.query.return_value.filter.call_args[0]
+        )
+        assert "status = 'processing'" in rendered
+        assert "publishing" not in rendered

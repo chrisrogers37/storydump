@@ -945,3 +945,99 @@ class TestInstagramAPIService:
             instagram_service.token_repo.get_token_for_account.call_args.kwargs
         )
         assert call_kwargs.get("auth_method") == "instagram_login"
+
+
+@pytest.mark.unit
+class TestPostStoryContainerCallback:
+    """post_story exposes an on_container_created seam so the caller can persist
+    the container_id BEFORE the publish call (claim-before-publish, #549)."""
+
+    @pytest.fixture
+    def instagram_service(self):
+        with (
+            patch("src.services.integrations.instagram_api.TokenRefreshService"),
+            patch("src.services.integrations.instagram_api.CloudStorageService"),
+            patch("src.services.integrations.instagram_api.HistoryRepository"),
+            patch("src.services.integrations.instagram_api.InstagramAccountService"),
+            patch("src.services.integrations.instagram_api.TokenRepository"),
+            patch("src.services.integrations.instagram_api.TokenEncryption"),
+            patch("src.services.integrations.instagram_api.SettingsService"),
+            patch("src.services.base_service.ServiceRunRepository"),
+        ):
+            from src.services.integrations.instagram_api import InstagramAPIService
+
+            service = InstagramAPIService()
+            service.history_repo = Mock()
+            service.track_execution = mock_track_execution
+            service.set_result_summary = Mock()
+            return service
+
+    @pytest.mark.asyncio
+    @patch("src.services.integrations.instagram_api.settings")
+    async def test_callback_fires_after_container_before_publish(
+        self, mock_settings, instagram_service
+    ):
+        mock_settings.INSTAGRAM_POSTS_PER_HOUR = 25
+        mock_settings.ADMIN_TELEGRAM_CHAT_ID = -100123
+        instagram_service.history_repo.count_by_method.return_value = 0
+        instagram_service._get_active_account_credentials = Mock(
+            return_value=("tok", "acct-1", "user1")
+        )
+
+        order = []
+        instagram_service._create_media_container = AsyncMock(
+            return_value="container-xyz"
+        )
+
+        async def _wait(token, cid):
+            order.append(("wait", cid))
+
+        instagram_service._wait_for_container_ready = AsyncMock(side_effect=_wait)
+
+        async def _pub(token, account_id, container_id):
+            order.append(("publish", container_id))
+            return "story-1"
+
+        instagram_service._publish_container = AsyncMock(side_effect=_pub)
+
+        persisted = []
+
+        def _cb(cid):
+            persisted.append(cid)
+            order.append(("callback", cid))
+
+        result = await instagram_service.post_story(
+            "https://example.com/img.jpg",
+            media_type="IMAGE",
+            telegram_chat_id=-100123,
+            on_container_created=_cb,
+        )
+
+        assert result["story_id"] == "story-1"
+        assert result["container_id"] == "container-xyz"
+        # Container persisted exactly once, strictly before the publish step.
+        assert persisted == ["container-xyz"]
+        assert order == [
+            ("callback", "container-xyz"),
+            ("wait", "container-xyz"),
+            ("publish", "container-xyz"),
+        ]
+
+    @pytest.mark.asyncio
+    @patch("src.services.integrations.instagram_api.settings")
+    async def test_post_story_works_without_callback(
+        self, mock_settings, instagram_service
+    ):
+        """on_container_created is optional — the legacy call still works."""
+        mock_settings.INSTAGRAM_POSTS_PER_HOUR = 25
+        mock_settings.ADMIN_TELEGRAM_CHAT_ID = -100123
+        instagram_service.history_repo.count_by_method.return_value = 0
+        instagram_service._get_active_account_credentials = Mock(
+            return_value=("tok", "acct-1", "user1")
+        )
+        instagram_service._create_media_container = AsyncMock(return_value="c-1")
+        instagram_service._wait_for_container_ready = AsyncMock()
+        instagram_service._publish_container = AsyncMock(return_value="story-1")
+
+        result = await instagram_service.post_story("https://example.com/img.jpg")
+        assert result["story_id"] == "story-1"

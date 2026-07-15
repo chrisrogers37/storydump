@@ -94,6 +94,7 @@ def mock_telegram_service():
         # Make repos/services accessible for test assertions
         service.user_repo = mock_user_repo_class.return_value
         service.queue_repo = mock_queue_repo_class.return_value
+        service.queue_repo.count_by_status.return_value = 0
         service.media_repo = mock_media_repo_class.return_value
         service.history_repo = mock_history_repo_class.return_value
         service.history_repo.count_posts_today.return_value = 0
