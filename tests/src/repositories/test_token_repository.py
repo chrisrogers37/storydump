@@ -1,5 +1,7 @@
 """Tests for TokenRepository."""
 
+import uuid
+
 import pytest
 from unittest.mock import Mock, MagicMock, patch
 from datetime import datetime, timedelta
@@ -266,6 +268,19 @@ class TestTokenRepositoryTenantScoped:
         )
 
         assert result is mock_token
+
+    def test_get_owner_chat_ids_stringifies_stamped_owners(self, token_repo, mock_db):
+        """Distinct stamped owners come back as string UUIDs (#583
+        ownership derivation; unstamped rows are excluded in SQL)."""
+        cs_a, cs_b = uuid.uuid4(), uuid.uuid4()
+        mock_db.query.return_value.filter.return_value.distinct.return_value.all.return_value = [
+            (cs_a,),
+            (cs_b,),
+        ]
+
+        result = token_repo.get_owner_chat_ids("acct-uuid-1")
+
+        assert result == {str(cs_a), str(cs_b)}
 
     def test_get_token_for_chat_not_found(self, token_repo, mock_db):
         """Returns None when no token exists for chat."""

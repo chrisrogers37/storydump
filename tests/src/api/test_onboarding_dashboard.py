@@ -1209,6 +1209,7 @@ class TestRemoveAccount:
         assert data["removed"] is True
         mock_svc.deactivate_account.assert_called_once_with(
             account_id=str(acct.id),
+            telegram_chat_id=CHAT_ID,
         )
 
     def test_remove_account_not_found(self, client):

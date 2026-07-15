@@ -328,20 +328,136 @@ class TestUpdateAccountToken:
 
 
 class TestDeactivateAccount:
-    """Tests for deactivate_account method."""
+    """Tests for deactivate_account method.
 
-    def test_deactivate_active_account(
-        self, service, mock_account_repo, sample_account
-    ):
-        """Should soft-delete account by marking inactive."""
+    #583 — deactivation flips a deployment-wide flag, so only a chat that
+    OWNS the account (selected it, or holds a token for it) may remove it.
+    """
+
+    TENANT_CHAT_ID = -100123
+
+    def _chat(self, active_account_id=None, telegram_chat_id=TENANT_CHAT_ID):
+        chat = Mock()
+        chat.id = uuid.uuid4()
+        chat.telegram_chat_id = telegram_chat_id
+        chat.active_instagram_account_id = active_account_id
+        return chat
+
+    def _wire_success(self, mock_account_repo):
         deactivated = Mock()
         deactivated.is_active = False
         mock_account_repo.deactivate.return_value = deactivated
+        return deactivated
 
-        result = service.deactivate_account(str(sample_account.id))
+    def test_deactivate_by_token_owner(
+        self,
+        service,
+        mock_account_repo,
+        mock_settings_repo,
+        mock_token_repo,
+        sample_account,
+    ):
+        """A chat holding a token for the account may deactivate it."""
+        chat = self._chat()
+        mock_settings_repo.get_or_create.return_value = chat
+        mock_token_repo.get_owner_chat_ids.return_value = {str(chat.id)}
+        self._wire_success(mock_account_repo)
+
+        result = service.deactivate_account(
+            str(sample_account.id), telegram_chat_id=self.TENANT_CHAT_ID
+        )
+
+        assert result.is_active is False
+        mock_settings_repo.get_or_create.assert_called_once_with(self.TENANT_CHAT_ID)
+        mock_account_repo.deactivate.assert_called_once_with(str(sample_account.id))
+
+    def test_deactivate_by_active_pointer_owner(
+        self,
+        service,
+        mock_account_repo,
+        mock_settings_repo,
+        mock_token_repo,
+        sample_account,
+    ):
+        """A chat with the account selected as active may deactivate it,
+        even when the tokens are stamped to another chat."""
+        chat = self._chat(active_account_id=sample_account.id)
+        mock_settings_repo.get_or_create.return_value = chat
+        mock_token_repo.get_owner_chat_ids.return_value = {str(uuid.uuid4())}
+        self._wire_success(mock_account_repo)
+
+        result = service.deactivate_account(
+            str(sample_account.id), telegram_chat_id=self.TENANT_CHAT_ID
+        )
 
         assert result.is_active is False
         mock_account_repo.deactivate.assert_called_once_with(str(sample_account.id))
+
+    def test_deactivate_rejects_foreign_chat(
+        self,
+        service,
+        mock_account_repo,
+        mock_settings_repo,
+        mock_token_repo,
+        sample_account,
+    ):
+        """Tenant A cannot deactivate tenant B's account: the flag is
+        deployment-wide, so a foreign removal disables the account for B."""
+        chat = self._chat()  # no active pointer to this account
+        mock_settings_repo.get_or_create.return_value = chat
+        mock_token_repo.get_owner_chat_ids.return_value = {str(uuid.uuid4())}
+
+        with pytest.raises(ValueError, match="not found for this chat"):
+            service.deactivate_account(
+                str(sample_account.id), telegram_chat_id=self.TENANT_CHAT_ID
+            )
+
+        mock_account_repo.deactivate.assert_not_called()
+
+    def test_legacy_unstamped_account_removable_by_env_chat(
+        self,
+        service,
+        mock_account_repo,
+        mock_settings_repo,
+        mock_token_repo,
+        sample_account,
+    ):
+        """Accounts with no chat-stamped tokens are legacy single-tenant
+        data and belong to the deployment's env chat."""
+        from src.config.settings import settings as app_settings
+
+        chat = self._chat(telegram_chat_id=app_settings.TELEGRAM_CHANNEL_ID)
+        mock_settings_repo.get_or_create.return_value = chat
+        mock_token_repo.get_owner_chat_ids.return_value = set()
+        self._wire_success(mock_account_repo)
+
+        result = service.deactivate_account(
+            str(sample_account.id),
+            telegram_chat_id=app_settings.TELEGRAM_CHANNEL_ID,
+        )
+
+        assert result.is_active is False
+        mock_account_repo.deactivate.assert_called_once_with(str(sample_account.id))
+
+    def test_legacy_unstamped_account_rejected_for_non_env_chat(
+        self,
+        service,
+        mock_account_repo,
+        mock_settings_repo,
+        mock_token_repo,
+        sample_account,
+    ):
+        """A non-env chat cannot claim legacy unstamped accounts."""
+        chat = self._chat()
+        mock_settings_repo.get_or_create.return_value = chat
+        mock_token_repo.get_owner_chat_ids.return_value = set()
+
+        with pytest.raises(ValueError, match="not found for this chat"):
+            service.deactivate_account(
+                str(sample_account.id), telegram_chat_id=self.TENANT_CHAT_ID
+            )
+
+        mock_account_repo.deactivate.assert_not_called()
 
 
 class TestReactivateAccount:
