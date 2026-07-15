@@ -196,7 +196,7 @@ class TelegramAccountHandlers:
 
         try:
             account = self.service.ig_account_service.deactivate_account(
-                account_id, user
+                account_id, chat_id, user=user
             )
 
             # Log interaction

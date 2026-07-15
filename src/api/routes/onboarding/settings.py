@@ -154,12 +154,13 @@ async def onboarding_switch_account(request: SwitchAccountRequest) -> dict:
 
 @router.post("/remove-account")
 async def onboarding_remove_account(request: RemoveAccountRequest) -> dict:
-    """Deactivate (soft-delete) an Instagram account."""
+    """Deactivate (soft-delete) an Instagram account owned by this chat."""
     _validate_request(request.init_data, request.chat_id)
 
     with InstagramAccountService() as account_service, service_error_handler():
         account = account_service.deactivate_account(
             account_id=request.account_id,
+            telegram_chat_id=request.chat_id,
         )
         return {
             "account_id": str(account.id),
