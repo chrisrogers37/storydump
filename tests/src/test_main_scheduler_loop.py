@@ -63,6 +63,7 @@ class TestSchedulerLoop:
             patch(f"{_SCHEDULER}.ServiceRunRepository"),
         ):
             mock_queue_repo_cls.return_value.discard_abandoned_processing.return_value = 0
+            mock_queue_repo_cls.return_value.get_stale_sent.return_value = []
             mock_sleep.side_effect = StopAsyncIteration
             try:
                 await run_scheduler_loop(
@@ -99,6 +100,7 @@ class TestSchedulerLoop:
             patch(f"{_SCHEDULER}.ServiceRunRepository"),
         ):
             mock_queue_repo_cls.return_value.discard_abandoned_processing.return_value = 0
+            mock_queue_repo_cls.return_value.get_stale_sent.return_value = []
             mock_sleep.side_effect = StopAsyncIteration
             try:
                 await run_scheduler_loop(
@@ -126,6 +128,7 @@ class TestSchedulerLoop:
             patch(f"{_SCHEDULER}.ServiceRunRepository"),
         ):
             mock_queue_repo_cls.return_value.discard_abandoned_processing.return_value = 0
+            mock_queue_repo_cls.return_value.get_stale_sent.return_value = []
             mock_sleep.side_effect = StopAsyncIteration
             try:
                 await run_scheduler_loop(scheduler_service, posting_service, None)
@@ -161,6 +164,7 @@ class TestSchedulerLoop:
             patch(f"{_SCHEDULER}.ServiceRunRepository"),
         ):
             mock_queue_repo_cls.return_value.discard_abandoned_processing.return_value = 0
+            mock_queue_repo_cls.return_value.get_stale_sent.return_value = []
             mock_sleep.side_effect = StopAsyncIteration
             try:
                 await run_scheduler_loop(
@@ -201,6 +205,7 @@ class TestSchedulerLoop:
             patch(f"{_SCHEDULER}.ServiceRunRepository"),
         ):
             mock_queue_repo_cls.return_value.discard_abandoned_processing.return_value = 0
+            mock_queue_repo_cls.return_value.get_stale_sent.return_value = []
             mock_sleep.side_effect = StopAsyncIteration
             try:
                 await run_scheduler_loop(
@@ -233,6 +238,7 @@ class TestSchedulerLoop:
             patch(f"{_SCHEDULER}.ServiceRunRepository"),
         ):
             mock_queue_repo_cls.return_value.discard_abandoned_processing.return_value = 0
+            mock_queue_repo_cls.return_value.get_stale_sent.return_value = []
             mock_sleep.side_effect = StopAsyncIteration
             try:
                 await run_scheduler_loop(
@@ -271,6 +277,7 @@ class TestSchedulerLoop:
             patch(f"{_SCHEDULER}.ServiceRunRepository"),
         ):
             mock_queue_repo_cls.return_value.discard_abandoned_processing.return_value = 0
+            mock_queue_repo_cls.return_value.get_stale_sent.return_value = []
             mock_sleep.side_effect = StopAsyncIteration
             try:
                 await run_scheduler_loop(
@@ -309,6 +316,7 @@ class TestSchedulerLoop:
             patch(f"{_SCHEDULER}.ServiceRunRepository") as mock_sr_repo_cls,
         ):
             mock_queue_repo_cls.return_value.discard_abandoned_processing.return_value = 0
+            mock_queue_repo_cls.return_value.get_stale_sent.return_value = []
             mock_sr_repo = mock_sr_repo_cls.return_value
             mock_sr_repo.delete_older_than.return_value = 5
             mock_sr_repo.end_read_transaction = Mock()
@@ -352,6 +360,7 @@ class TestSchedulerLoop:
             queue_repo.discard_abandoned_processing.side_effect = RuntimeError(
                 "simulated DB error"
             )
+            queue_repo.get_stale_sent.return_value = []
             queue_repo.rollback = Mock()
             mock_sleep.side_effect = StopAsyncIteration
 
@@ -364,6 +373,54 @@ class TestSchedulerLoop:
 
         # Session was rolled back so the next tick starts clean.
         queue_repo.rollback.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_scheduler_loop_reaps_button_bearing_processing_rows(self):
+        """Button-bearing 'processing' rows are gracefully expired (buttons
+        stripped, terminal history written) via the shared reap BEFORE the raw
+        discard sweeps the never-sent remainder. This is the #560 fix: without
+        it, a late tap on a hard-deleted card shows 'Queue item not found'.
+        """
+        scheduler_service = Mock()
+        scheduler_service.process_slot = AsyncMock(return_value={"posted": False})
+        scheduler_service.cleanup_transactions = Mock()
+        scheduler_service.telegram_service.application.bot = Mock()
+        scheduler_service.history_repo = Mock()
+
+        posting_service = Mock()
+        posting_service.cleanup_transactions = Mock()
+
+        settings_service = Mock()
+        settings_service.get_all_active_chats.return_value = []
+
+        stale_row = Mock()
+
+        with (
+            patch(f"{_SCHEDULER}.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+            patch(f"{_SCHEDULER}.QueueRepository") as mock_queue_repo_cls,
+            patch(f"{_SCHEDULER}.ServiceRunRepository"),
+            patch(
+                f"{_SCHEDULER}.expire_sent_row", new_callable=AsyncMock
+            ) as mock_expire,
+        ):
+            queue_repo = mock_queue_repo_cls.return_value
+            queue_repo.discard_abandoned_processing.return_value = 0
+            queue_repo.get_stale_sent.return_value = [stale_row]
+            mock_sleep.side_effect = StopAsyncIteration
+            try:
+                await run_scheduler_loop(
+                    scheduler_service, posting_service, settings_service
+                )
+            except StopAsyncIteration:
+                pass
+
+        queue_repo.get_stale_sent.assert_called_once_with(hours=24, status="processing")
+        mock_expire.assert_awaited_once_with(
+            stale_row,
+            bot=scheduler_service.telegram_service.application.bot,
+            history_repo=scheduler_service.history_repo,
+            queue_repo=queue_repo,
+        )
 
     @pytest.mark.asyncio
     async def test_first_tick_flag_is_true_then_false(self):
@@ -394,6 +451,7 @@ class TestSchedulerLoop:
             patch(f"{_SCHEDULER}.ServiceRunRepository"),
         ):
             mock_queue_repo_cls.return_value.discard_abandoned_processing.return_value = 0
+            mock_queue_repo_cls.return_value.get_stale_sent.return_value = []
             mock_sleep.side_effect = counting_sleep
             try:
                 await run_scheduler_loop(

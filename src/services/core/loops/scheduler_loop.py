@@ -14,6 +14,7 @@ from src.services.core.health_check import HealthCheckService
 from src.services.core.loops.heartbeat import record_heartbeat
 from src.services.core.loops.lifecycle import session_state
 from src.services.core.posting import PostingService
+from src.services.core.queue_reap import expire_sent_row
 from src.services.core.scheduler import SchedulerService
 from src.exceptions.instagram import TokenCorruptError, TokenRevokedError
 from src.services.integrations.token_refresh import TokenRefreshService
@@ -48,13 +49,28 @@ async def _scheduler_tick(
 
     Returns the list of active chats discovered this tick (used by health checks).
     """
-    # Discard queue items abandoned in 'processing' for over 24h.
+    # Reap queue items abandoned in 'processing' for over 24h.
     # queue_repo is a standalone repository (not owned by a BaseService), so
     # the outer loop's cleanup_transactions() doesn't roll it back on error.
     # Without this guard a single failed query would leave the session in a
     # broken transaction and every subsequent tick would PendingRollbackError
     # for the lifetime of the worker — observed in production.
+    #
+    # Button-bearing rows (already sent to Telegram) are gracefully expired
+    # FIRST via the shared reap: their inline buttons are stripped and a
+    # terminal 'expired' history row is written, so a late tap shows
+    # "Expired" instead of the scary "Queue item not found". The narrowed
+    # discard_abandoned_processing (telegram_message_id IS NULL) then only
+    # sweeps rows that were never sent — no buttons to orphan.
     try:
+        telegram_service = scheduler_service.telegram_service
+        if telegram_service is not None:
+            bot = telegram_service.application.bot
+            history_repo = scheduler_service.history_repo
+            for row in queue_repo.get_stale_sent(hours=24, status="processing"):
+                await expire_sent_row(
+                    row, bot=bot, history_repo=history_repo, queue_repo=queue_repo
+                )
         discarded = queue_repo.discard_abandoned_processing()
     except Exception:
         queue_repo.rollback()

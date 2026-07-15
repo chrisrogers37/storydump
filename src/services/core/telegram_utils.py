@@ -67,6 +67,12 @@ _TERMINAL_CAPTION_PREFIXES = (
     "🚫 *Permanently ",  # rejected verbose
 )
 
+# Caption shown on a queue card that aged out unactioned (reaped). Single
+# source of truth for the expired-card text: queue_reap.expire_sent_row edits
+# the live card to this, and _build_already_handled_caption renders the same
+# for a late tap on a reaped card.
+EXPIRED_CAPTION = "⌛ Expired — no action needed"
+
 
 def _has_terminal_caption(query) -> bool:
     """Check whether the message already shows a terminal action caption.
@@ -95,6 +101,8 @@ def _build_already_handled_caption(history) -> str:
         return "🚫 Already rejected"
     elif status == "failed":
         return "❌ Previous attempt failed — item removed from queue"
+    elif status == "expired":
+        return EXPIRED_CAPTION
     else:
         return f"ℹ️ Already processed (status: {status})"
 

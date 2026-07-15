@@ -44,6 +44,15 @@ class TestPostingHistoryModel:
         ]
         assert "check_history_status" in constraint_names
 
+    def test_check_constraint_includes_expired(self):
+        """The status CHECK permits the terminal 'expired' status (#560 reap lifecycle)."""
+        constraint = next(
+            c
+            for c in PostingHistory.__table_args__
+            if getattr(c, "name", None) == "check_history_status"
+        )
+        assert "expired" in str(constraint.sqltext)
+
     def test_repr_format(self):
         item = PostingHistory(
             id=uuid.uuid4(),

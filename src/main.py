@@ -109,6 +109,7 @@ async def main_async():
     from src.services.core.media_lock import MediaLockService
     from src.services.core.media_sync import MediaSyncService
     from src.repositories.queue_repository import QueueRepository
+    from src.repositories.history_repository import HistoryRepository
 
     scheduler_service = SchedulerService()
     posting_service = PostingService()
@@ -116,6 +117,7 @@ async def main_async():
     lock_service = MediaLockService()
     settings_service = SettingsService()
     queue_repo = QueueRepository()
+    history_repo = HistoryRepository()
 
     # Media sync runs unconditionally — the loop iterates per-chat and skips
     # chats with media_sync_enabled=False. No env gate.
@@ -155,7 +157,13 @@ async def main_async():
             guarded("lock_cleanup", lambda: cleanup_locks_loop(lock_service), bot=bot)
         ),
         asyncio.create_task(
-            guarded("queue_cleanup", lambda: cleanup_queue_loop(queue_repo), bot=bot)
+            guarded(
+                "queue_cleanup",
+                lambda: cleanup_queue_loop(
+                    queue_repo, bot=bot, history_repo=history_repo
+                ),
+                bot=bot,
+            )
         ),
         asyncio.create_task(telegram_service.start_polling()),
     ]

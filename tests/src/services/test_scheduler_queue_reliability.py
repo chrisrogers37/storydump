@@ -328,6 +328,7 @@ class TestSyncReadinessGate:
         settings_service = Mock()
         queue_repo = Mock()
         queue_repo.discard_abandoned_processing.return_value = 0
+        queue_repo.get_stale_sent.return_value = []
 
         with patch(
             "src.services.core.loops.scheduler_loop.session_state"
@@ -360,6 +361,7 @@ class TestSyncReadinessGate:
 
         queue_repo = Mock()
         queue_repo.discard_abandoned_processing.return_value = 0
+        queue_repo.get_stale_sent.return_value = []
 
         with patch(
             "src.services.core.loops.scheduler_loop.session_state"

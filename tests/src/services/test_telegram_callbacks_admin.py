@@ -1,7 +1,7 @@
 """Tests for TelegramCallbackAdminHandlers — batch approve, resume, reset."""
 
 from datetime import datetime, timedelta, timezone
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -171,7 +171,13 @@ class TestHandleResumeCallback:
     async def test_clear_action(self, mock_retry, handlers):
         """Clears overdue posts and resumes delivery."""
         now = datetime.now(timezone.utc)
-        overdue = [Mock(id="q-1", scheduled_for=now - timedelta(hours=2))]
+        overdue = [
+            Mock(
+                id="q-1",
+                scheduled_for=now - timedelta(hours=2),
+                telegram_message_id=None,  # button-less → plain delete
+            )
+        ]
         handlers.service.queue_repo.get_all.return_value = overdue
 
         user = _make_user()
@@ -223,7 +229,10 @@ class TestHandleResetCallback:
     @patch("src.services.core.telegram_callbacks_admin.telegram_edit_with_retry")
     async def test_confirm_clears_queue(self, mock_retry, handlers):
         """Confirm action deletes all pending posts."""
-        pending = [Mock(id="q-1"), Mock(id="q-2")]
+        pending = [
+            Mock(id="q-1", telegram_message_id=None),
+            Mock(id="q-2", telegram_message_id=None),
+        ]
         handlers.service.queue_repo.get_all.return_value = pending
 
         user = _make_user()
@@ -259,6 +268,30 @@ class TestHandleResetCallback:
         mock_retry.assert_called_once()
         assert "Error" in mock_retry.call_args[0][1]
 
+    @patch("src.services.core.queue_reap.expire_sent_row", new_callable=AsyncMock)
+    @patch("src.services.core.telegram_callbacks_admin.telegram_edit_with_retry")
+    async def test_confirm_reaps_button_rows_and_plain_deletes_the_rest(
+        self, mock_retry, mock_expire, handlers
+    ):
+        """Live-card rows are expired gracefully, not blind-deleted.
+
+        A button-bearing pending row routes through expire_sent_row (strip card
+        + terminal history); a button-less row is plain-deleted. This is the fix
+        for the remaining orphaned-button delete path (#561).
+        """
+        mock_expire.return_value = "reaped"
+        button_row = Mock(id="q-live", telegram_message_id=555)
+        plain_row = Mock(id="q-dead", telegram_message_id=None)
+        handlers.service.queue_repo.get_all.return_value = [button_row, plain_row]
+
+        await handlers.handle_reset_callback("confirm", _make_user(), _make_query())
+
+        # Live card routed through expire_sent_row (strips buttons + writes history).
+        mock_expire.assert_awaited_once()
+        assert mock_expire.await_args.args[0] is button_row
+        # Only the button-less row is hard-deleted; the live one is never delete()d.
+        handlers.service.queue_repo.delete.assert_called_once_with("q-dead")
+
 
 # ──────────────────────────────────────────────────────────────
 # Cross-tenant isolation (#512)
@@ -278,7 +311,11 @@ class TestCrossTenantIsolation:
         )
         now = datetime.now(timezone.utc)
         handlers.service.queue_repo.get_all.return_value = [
-            Mock(id="q-1", scheduled_for=now - timedelta(hours=2))
+            Mock(
+                id="q-1",
+                scheduled_for=now - timedelta(hours=2),
+                telegram_message_id=None,
+            )
         ]
 
         await handlers.handle_resume_callback("clear", _make_user(), _make_query())
@@ -304,7 +341,9 @@ class TestCrossTenantIsolation:
         handlers.service.settings_service.get_settings_if_exists.return_value = Mock(
             id="cs-A"
         )
-        handlers.service.queue_repo.get_all.return_value = [Mock(id="q-1")]
+        handlers.service.queue_repo.get_all.return_value = [
+            Mock(id="q-1", telegram_message_id=None)
+        ]
 
         await handlers.handle_reset_callback("confirm", _make_user(), _make_query())
 

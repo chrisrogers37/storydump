@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from telegram import InlineKeyboardMarkup
 from telegram.error import TelegramError
 
+from src.services.core.queue_reap import reap_pending_rows
 from src.utils.logger import logger
 from src.utils.resilience import telegram_edit_with_retry
 from datetime import datetime, timedelta, timezone
@@ -215,11 +216,15 @@ class TelegramCallbackAdminHandlers:
             )
 
         elif action == "clear":
-            # Clear all overdue posts
-            cleared = 0
-            for item in overdue:
-                self.service.queue_repo.delete(str(item.id))
-                cleared += 1
+            # Clear all overdue posts. Route button-bearing rows through the
+            # shared reap so live cards are expired (buttons stripped + terminal
+            # history) rather than orphaned; button-less rows are plain-deleted.
+            cleared = await reap_pending_rows(
+                overdue,
+                bot=self.service.bot,
+                history_repo=self.service.history_repo,
+                queue_repo=self.service.queue_repo,
+            )
 
             self.service.set_paused(False, user)
             remaining = len(all_pending) - cleared
@@ -272,10 +277,14 @@ class TelegramCallbackAdminHandlers:
                 all_pending = self.service.queue_repo.get_all(
                     status="pending", chat_settings_id=cs_id
                 )
-                cleared = 0
-                for item in all_pending:
-                    self.service.queue_repo.delete(str(item.id))
-                    cleared += 1
+                # Route button-bearing rows through the shared reap so live
+                # cards are expired rather than orphaned; plain-delete the rest.
+                cleared = await reap_pending_rows(
+                    all_pending,
+                    bot=self.service.bot,
+                    history_repo=self.service.history_repo,
+                    queue_repo=self.service.queue_repo,
+                )
 
                 await telegram_edit_with_retry(
                     query.edit_message_text,

@@ -14,6 +14,7 @@ from src.config.constants import (
     MIN_POSTS_PER_DAY,
 )
 from src.config.settings import settings as app_settings
+from src.services.core.queue_reap import reap_pending_rows
 from src.services.core.telegram_utils import (
     CANCEL_KEYBOARD,
     build_webapp_button,
@@ -494,8 +495,17 @@ class TelegramSettingsHandlers:
                 chat_id, create_if_missing=False
             )
             chat_settings_id = str(chat_settings.id) if chat_settings else None
-            cleared = self.service.queue_repo.delete_all_pending(
-                chat_settings_id=chat_settings_id
+            # Route button-bearing rows through the shared reap so live cards are
+            # expired (buttons stripped + terminal history) rather than orphaned;
+            # button-less rows are plain-deleted.
+            pending = self.service.queue_repo.get_all(
+                status="pending", chat_settings_id=chat_settings_id
+            )
+            cleared = await reap_pending_rows(
+                pending,
+                bot=self.service.bot,
+                history_repo=self.service.history_repo,
+                queue_repo=self.service.queue_repo,
             )
 
             self.service.interaction_service.log_callback(

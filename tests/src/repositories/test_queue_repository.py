@@ -95,14 +95,14 @@ class TestQueueRepository:
         # commit called once by get_by_id's end_read_transaction (no write commit)
         mock_db.commit.assert_called_once()
 
-    def test_delete_stale_removes_old_items_regardless_of_status(
-        self, queue_repo, mock_db
-    ):
-        """delete_stale(hours=24) wipes anything past the cutoff.
+    def test_delete_stale_only_targets_never_sent_rows(self, queue_repo, mock_db):
+        """delete_stale(hours=24) wipes only rows never sent to Telegram.
 
         Regression context: 2026-05-17 → 19 outage left 954 stale rows
         in posting_queue, eventually deleted manually on 2026-06-02.
-        This loop runs hourly to prevent the same buildup.
+        Button-bearing rows (with a telegram_message_id) are handled first by
+        the shared reap so their inline buttons are stripped instead of
+        orphaned; delete_stale scopes to telegram_message_id IS NULL.
         """
         stale_item_a = MagicMock()
         stale_item_a.scheduled_for = datetime.utcnow() - timedelta(days=10)
@@ -120,6 +120,9 @@ class TestQueueRepository:
         mock_db.delete.assert_any_call(stale_item_a)
         mock_db.delete.assert_any_call(stale_item_b)
         mock_db.commit.assert_called_once()
+        # Scoped to never-sent rows so button-bearing cards aren't orphaned.
+        filter_args = mock_db.query.return_value.filter.call_args[0]
+        assert any("telegram_message_id IS NULL" in str(a) for a in filter_args)
 
     def test_delete_stale_no_op_when_no_stale_items(self, queue_repo, mock_db):
         """No commit fired when there's nothing to delete (cheap idle tick)."""
@@ -423,6 +426,9 @@ class TestDiscardAbandonedProcessing:
         assert result == 2
         assert mock_db.delete.call_count == 2
         mock_db.commit.assert_called_once()
+        # Only never-sent processing rows; button-bearing ones go through the reap.
+        filter_args = mock_db.query.return_value.filter.call_args[0]
+        assert any("telegram_message_id IS NULL" in str(a) for a in filter_args)
 
     def test_no_abandoned_items(self, queue_repo, mock_db):
         """No abandoned items → returns 0, no commit."""
@@ -434,3 +440,48 @@ class TestDiscardAbandonedProcessing:
 
         assert result == 0
         mock_db.commit.assert_not_called()
+
+
+@pytest.mark.unit
+class TestGetStaleSent:
+    """Tests for get_stale_sent (button-bearing rows past reap age, #560)."""
+
+    def test_returns_rows_with_status_filter(self, queue_repo, mock_db):
+        """With a status filter, applies base + status filter and returns rows."""
+        rows = [MagicMock(), MagicMock()]
+        mock_query = mock_db.query.return_value
+        mock_query.filter.return_value = mock_query
+        mock_query.order_by.return_value = mock_query
+        mock_query.all.return_value = rows
+
+        result = queue_repo.get_stale_sent(hours=24, status="processing")
+
+        assert result == rows
+        mock_db.query.assert_called_with(PostingQueue)
+        # base filter (msg_id NOT NULL + age) then the optional status filter
+        assert mock_query.filter.call_count == 2
+        mock_query.order_by.assert_called_once()
+
+    def test_scopes_to_sent_rows_without_status(self, queue_repo, mock_db):
+        """Without a status filter, a single filter scopes to sent rows only."""
+        mock_query = mock_db.query.return_value
+        mock_query.filter.return_value = mock_query
+        mock_query.order_by.return_value = mock_query
+        mock_query.all.return_value = []
+
+        queue_repo.get_stale_sent(hours=12)
+
+        assert mock_query.filter.call_count == 1
+        filter_args = mock_query.filter.call_args[0]
+        assert any("telegram_message_id IS NOT NULL" in str(a) for a in filter_args)
+
+    def test_calls_end_read_transaction(self, queue_repo, mock_db):
+        """get_stale_sent ends the read transaction after fetching."""
+        mock_query = mock_db.query.return_value
+        mock_query.filter.return_value = mock_query
+        mock_query.order_by.return_value = mock_query
+        mock_query.all.return_value = []
+
+        with patch.object(queue_repo, "end_read_transaction") as mock_end:
+            queue_repo.get_stale_sent()
+            mock_end.assert_called_once()
