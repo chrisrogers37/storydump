@@ -250,6 +250,13 @@ class TestBuildAlreadyHandledCaption:
         history = Mock(status="failed", posting_method="telegram_manual")
         assert "Previous attempt failed" in _build_already_handled_caption(history)
 
+    def test_expired(self):
+        """A reaped card's late tap shows 'Expired', not 'Queue item not found' (#560)."""
+        history = Mock(status="expired", posting_method="system_expiry")
+        result = _build_already_handled_caption(history)
+        assert "Expired" in result
+        assert "not found" not in result.lower()
+
     def test_unknown_status(self):
         history = Mock(status="custom_status", posting_method=None)
         result = _build_already_handled_caption(history)
