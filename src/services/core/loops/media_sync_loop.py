@@ -9,6 +9,25 @@ from src.services.core.media_sync import MediaSyncService
 from src.utils.logger import logger
 
 
+def _sync_isolated(sync_service: MediaSyncService, **sync_kwargs):
+    """Run ``sync_service.sync`` in a worker thread with isolated, self-cleaned sessions.
+
+    Called via ``asyncio.to_thread`` (which copies the loop task's context). We
+    detach first so this thread opens FRESH sessions rather than sharing the
+    loop's, then end them in-thread. Because those sessions live only in this
+    thread's context, the ``transaction_cleanup_loop``'s periodic
+    ``cleanup_transactions`` running in the main-loop context cannot see — and so
+    cannot race — the session ``sync`` is using. (That race is why a naive offload
+    was unsafe: sync_service is a singleton whose session that loop commits or
+    replaces every 30s.)
+    """
+    sync_service.begin_isolated_transactions()
+    try:
+        return sync_service.sync(**sync_kwargs)
+    finally:
+        sync_service.cleanup_transactions()
+
+
 async def media_sync_loop(
     sync_service: MediaSyncService,
     settings_service=None,
@@ -45,7 +64,9 @@ async def media_sync_loop(
             if sync_enabled_chats:
                 for chat in sync_enabled_chats:
                     try:
-                        result = sync_service.sync(
+                        result = await asyncio.to_thread(
+                            _sync_isolated,
+                            sync_service,
                             telegram_chat_id=chat.telegram_chat_id,
                             triggered_by="scheduler",
                         )
@@ -66,7 +87,9 @@ async def media_sync_loop(
                         )
             else:
                 # Legacy fallback: single-tenant using global env vars
-                result = sync_service.sync(triggered_by="scheduler")
+                result = await asyncio.to_thread(
+                    _sync_isolated, sync_service, triggered_by="scheduler"
+                )
 
                 if result.total_processed > 0 or result.errors > 0:
                     logger.info(
