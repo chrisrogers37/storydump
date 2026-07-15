@@ -118,38 +118,20 @@ class TelegramService(BaseService):
     # Lifecycle overrides (BaseService)
     # ------------------------------------------------------------------
 
-    def cleanup_transactions(self):
-        """Override to also clean up InteractionService's repository session.
+    def _extra_repositories(self):
+        """Include InteractionService's repo in every session-lifecycle op.
 
         InteractionService does not extend BaseService (by design — it's
-        fire-and-forget logging that doesn't need execution tracking).
-        The base cleanup_transactions() traversal skips it because it only
-        looks for BaseRepository and BaseService attributes. We explicitly
-        clean up its repo here to prevent "idle in transaction" leaks.
+        fire-and-forget logging that doesn't need execution tracking), so the
+        base attribute walk skips it. Surfacing it here means cleanup, detach,
+        and close all cover it — instead of a special-cased override per op —
+        preventing "idle in transaction" leaks and keeping its session isolated
+        per task under concurrent dispatch.
         """
-        super().cleanup_transactions()
-        try:
-            self.interaction_service.interaction_repo.end_read_transaction()
-        except Exception as e:  # noqa: BLE001
-            logger.warning(
-                f"[TelegramService] Interaction repo cleanup failed: "
-                f"{type(e).__name__}: {e}"
-            )
-
-    def close(self):
-        """Override to also close InteractionService's repository session.
-
-        InteractionService is not a BaseService, so the base close()
-        traversal won't find it. We explicitly close its repo here.
-        """
-        super().close()
-        try:
-            self.interaction_service.interaction_repo.close()
-        except Exception as e:  # noqa: BLE001
-            logger.warning(
-                f"[TelegramService] Interaction repo close failed: "
-                f"{type(e).__name__}: {e}"
-            )
+        svc = getattr(self, "interaction_service", None)
+        if svc is None:
+            return ()
+        return (svc.interaction_repo,)
 
     @property
     def is_paused(self) -> bool:
@@ -169,7 +151,17 @@ class TelegramService(BaseService):
     async def initialize(self):
         """Initialize Telegram bot and register all handlers."""
         self.bot = Bot(token=self.bot_token)
-        self.application = Application.builder().token(self.bot_token).build()
+        # concurrent_updates: process button taps concurrently (each in its own
+        # asyncio Task) so a slow in-flight callback no longer serializes every
+        # other user's tap behind it. Bounded — each concurrent callback holds its
+        # own per-task DB session, so the bound keeps peak DB connections within
+        # the pool (see settings.TELEGRAM_MAX_CONCURRENT_UPDATES).
+        self.application = (
+            Application.builder()
+            .token(self.bot_token)
+            .concurrent_updates(settings.TELEGRAM_MAX_CONCURRENT_UPDATES)
+            .build()
+        )
 
         # Initialize sub-handlers (after bot/application are created)
         from src.services.core.telegram_commands import TelegramCommandHandlers

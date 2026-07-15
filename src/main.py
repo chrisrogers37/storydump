@@ -130,6 +130,25 @@ async def main_async():
     # here no longer fails Railway's healthcheck).
     await telegram_service.send_startup_notification()
 
+    # Startup work above (e.g. send_startup_notification's settings read) opened
+    # sessions in THIS (main) context. asyncio.create_task copies the current
+    # context, so without this every task spawned below — the concurrent-updates
+    # callbacks AND the background loops — would inherit and share those
+    # singleton Sessions (a SQLAlchemy Session is not safe for concurrent use).
+    # Detach here so the fan-out copies a clean context and each task opens its
+    # own per-task session on first use (see BaseRepository ContextVar isolation).
+    for _service in (
+        scheduler_service,
+        posting_service,
+        telegram_service,
+        lock_service,
+        settings_service,
+        sync_service,
+    ):
+        _service.begin_isolated_transactions()
+    for _repo in (queue_repo, history_repo):
+        _repo.detach_session()
+
     # Create tasks
     all_services = [
         scheduler_service,
