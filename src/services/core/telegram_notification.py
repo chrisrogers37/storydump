@@ -133,8 +133,9 @@ class TelegramNotificationService:
             provider = MediaSourceFactory.get_provider_for_media_item(
                 media_item, telegram_chat_id=self.service.channel_id
             )
-            # Offload the blocking media download so the shared bot event loop
-            # stays free to service Telegram callbacks while this runs.
+            # Offload the blocking media download so it can't freeze the shared
+            # bot event loop (which would stall the update poller, callbacks, and
+            # the other loops) while this runs.
             file_bytes = await asyncio.to_thread(
                 provider.download_file, media_item.source_identifier
             )

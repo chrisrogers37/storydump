@@ -749,8 +749,9 @@ class SchedulerService(BaseService):
             provider = MediaSourceFactory.get_provider_for_media_item(
                 media_item, telegram_chat_id=chat_settings.telegram_chat_id
             )
-            # Offload the blocking media transfer so the shared bot event loop
-            # stays free to service Telegram callbacks while this runs.
+            # Offload the blocking media transfer so it can't freeze the shared
+            # bot event loop (which would stall the update poller, callbacks, and
+            # the other loops) while this runs.
             file_bytes = await asyncio.to_thread(
                 provider.download_file, media_item.source_identifier
             )

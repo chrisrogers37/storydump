@@ -1678,19 +1678,23 @@ class TestAutopostClaimBeforePublish:
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-class TestAutopostEventLoopReactivity:
-    """#557: a slow media transfer must not park the asyncio event loop.
+class TestAutopostMediaOffload:
+    """The autopost media transfer must not run ON the asyncio event loop.
 
-    The autopost upload (Drive download + Cloudinary upload) is synchronous
-    network I/O. If it runs on the event loop, every other pending callback —
-    another user's button tap, whose ``answerCallbackQuery`` the dispatcher
-    issues before dispatch — is delayed for the whole transfer. The ack then
-    fires past Telegram's callback-validity window ('Query is too old') and the
-    spinner never clears. Offloading the transfer to a worker thread keeps the
-    loop responsive so concurrent acks fire immediately.
+    The Drive download + Cloudinary upload are synchronous network I/O. Run on
+    the single bot event loop, a slow transfer FREEZES it — stalling not just
+    this task but everything else scheduled on that loop: the Telegram update
+    poller, the scheduler tick, and the cleanup loops. Offloading the transfer
+    to a worker thread keeps the loop live for that other work.
+
+    Scope note: this proves the loop is not PARKED. It does NOT prove a
+    competing button tap's ack fires sooner — under this repo's PTB config
+    (max_concurrent_updates=1, default-blocking handler) updates are still
+    dispatched one at a time, so cross-update ack latency needs
+    ``concurrent_updates`` + per-callback session isolation (tracked separately).
     """
 
-    async def test_slow_transfer_does_not_block_event_loop(
+    async def test_slow_transfer_does_not_park_the_event_loop(
         self, mock_autopost_handler, make_autopost_ctx
     ):
         handler = mock_autopost_handler
@@ -1721,9 +1725,10 @@ class TestAutopostEventLoopReactivity:
         ):
             transfer = asyncio.create_task(handler._upload_to_cloudinary(ctx))
 
-            # Probe stands in for a concurrent callback's ack: while the transfer
-            # is in flight it must still be serviced promptly. A transfer left on
-            # the loop would delay this 0.1s timer until it finishes.
+            # Probe stands in for any OTHER work scheduled on the loop (the update
+            # poller, a scheduler tick, a heartbeat): while the transfer is in
+            # flight the loop must still service it. A transfer left on the loop
+            # would freeze this 0.1s timer until the whole transfer finishes.
             probe_start = loop.time()
             await asyncio.sleep(0.1)
             probe_latency = loop.time() - probe_start

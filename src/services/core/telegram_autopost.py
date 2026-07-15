@@ -320,10 +320,11 @@ class TelegramAutopostHandler:
             ctx.media_item, telegram_chat_id=ctx.chat_id
         )
         # The download and Cloudinary upload are blocking synchronous network
-        # transfers; run them off the event loop so it stays free to service
-        # callback acks (an on-loop transfer parks pending acks past Telegram's
-        # validity window -> 'Query is too old'). Each touches only this task's
-        # own client/session, so the thread offload is safe.
+        # transfers; run them off the event loop so a slow transfer can't FREEZE
+        # it and stall everything else on the single bot loop (the update poller,
+        # scheduler tick, cleanup loops). Each touches only this task's own
+        # client/session, so the thread offload is safe. (Making a competing
+        # tap's ack fire concurrently additionally needs concurrent_updates.)
         file_bytes = await asyncio.to_thread(
             provider.download_file, ctx.media_item.source_identifier
         )
