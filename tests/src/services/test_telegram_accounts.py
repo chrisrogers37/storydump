@@ -390,8 +390,9 @@ class TestAccountSelectionMenu:
             "acc1", mock_user, mock_query
         )
 
+        # The calling chat is passed so the service can enforce ownership
         mock_account_handlers.service.ig_account_service.deactivate_account.assert_called_once_with(
-            "acc1", mock_user
+            "acc1", -100123, user=mock_user
         )
 
 

@@ -1,6 +1,6 @@
 """Token repository - CRUD operations for API tokens."""
 
-from typing import Optional, List
+from typing import Optional, List, Set
 from datetime import datetime, timedelta, timezone
 
 from src.repositories.base_repository import BaseRepository
@@ -118,6 +118,32 @@ class TokenRepository(BaseRepository):
         result = query.first()
         self.end_read_transaction()
         return result
+
+    def get_owner_chat_ids(self, instagram_account_id: str) -> Set[str]:
+        """Distinct chat_settings_id values across an account's tokens.
+
+        Unstamped (legacy single-tenant) tokens are excluded, so an empty
+        set means the account has no chat-stamped tokens — either no
+        tokens at all, or only legacy ones. Revoked tokens still count:
+        revocation changes credentials, not which chat owns the account.
+
+        Args:
+            instagram_account_id: UUID of Instagram account
+
+        Returns:
+            Set of chat_settings_id strings
+        """
+        rows = (
+            self.db.query(ApiToken.chat_settings_id)
+            .filter(
+                ApiToken.instagram_account_id == instagram_account_id,
+                ApiToken.chat_settings_id.isnot(None),
+            )
+            .distinct()
+            .all()
+        )
+        self.end_read_transaction()
+        return {str(row[0]) for row in rows}
 
     def get_all_instagram_tokens(
         self, token_type: str = "access_token"

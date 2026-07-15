@@ -3,6 +3,7 @@
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 
+from src.config.settings import settings
 from src.services.base_service import BaseService
 from src.repositories.instagram_account_repository import InstagramAccountRepository
 from src.repositories.chat_settings_repository import ChatSettingsRepository
@@ -498,27 +499,66 @@ class InstagramAccountService(BaseService):
         """
         return self.account_repo.get_by_instagram_id(instagram_account_id)
 
+    def _account_owned_by_chat(self, account_id: str, chat_settings) -> bool:
+        """Whether a chat owns an account.
+
+        Ownership is derived (accounts carry no tenant column): a chat owns
+        an account when it has the account selected as active, or holds a
+        token stamped with its chat_settings_id. Accounts with no
+        chat-stamped tokens are legacy single-tenant data and belong to the
+        deployment's env chat only.
+        """
+        active_id = chat_settings.active_instagram_account_id
+        if active_id is not None and str(active_id) == str(account_id):
+            return True
+
+        stamped = self.token_repo.get_owner_chat_ids(account_id)
+        if str(chat_settings.id) in stamped:
+            return True
+        return (
+            not stamped
+            and chat_settings.telegram_chat_id == settings.TELEGRAM_CHANNEL_ID
+        )
+
     def deactivate_account(
-        self, account_id: str, user: Optional[User] = None
+        self, account_id: str, telegram_chat_id: int, user: Optional[User] = None
     ) -> InstagramAccount:
         """
-        Soft-delete an account by marking it inactive.
+        Soft-delete an account for the chat that owns it.
 
         The account and its tokens are preserved for audit purposes.
+        ``is_active`` is a deployment-wide flag, so the requesting chat
+        must own the account (have it selected, or hold a token for it) —
+        otherwise one tenant could disable another tenant's account.
 
         Args:
             account_id: UUID of account to deactivate
+            telegram_chat_id: Chat requesting the removal
             user: User performing the action
 
         Returns:
             Deactivated InstagramAccount
+
+        Raises:
+            ValueError: If the account is not owned by the requesting chat
         """
         with self.track_execution(
             "deactivate_account",
             user_id=user.id if user else None,
             triggered_by="user",
-            input_params={"account_id": account_id},
+            input_params={
+                "account_id": account_id,
+                "telegram_chat_id": telegram_chat_id,
+            },
         ) as run_id:
+            chat_settings = self.settings_repo.get_or_create(telegram_chat_id)
+            if not self._account_owned_by_chat(account_id, chat_settings):
+                logger.warning(
+                    f"Chat {telegram_chat_id} attempted to deactivate account "
+                    f"{account_id} it does not own"
+                )
+                raise ValueError(f"Account {account_id} not found for this chat")
+
             account = self.account_repo.deactivate(account_id)
 
             self.set_result_summary(
