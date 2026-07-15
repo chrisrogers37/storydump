@@ -39,6 +39,7 @@ is recorded per ``callback_query_id`` inside the ``answer_callback_query`` patch
 """
 
 import asyncio
+import os
 import time
 import unittest.mock as mock
 from unittest.mock import AsyncMock
@@ -46,6 +47,7 @@ from unittest.mock import AsyncMock
 import pytest
 import telegram
 from sqlalchemy import text
+from sqlalchemy.orm import sessionmaker
 from telegram import Update, User
 from telegram.ext import ApplicationBuilder, CallbackQueryHandler
 
@@ -183,6 +185,45 @@ async def _drive_real_application(n_concurrent: int) -> dict:
         "distinct_session_ids": len(set(session_ids.values())),
         "errors": errors,
     }
+
+
+@pytest.fixture(autouse=True)
+def _behavioral_db_gate(setup_test_database, monkeypatch):
+    """Gate: this is a real-Postgres behavioral timing proof, not a CI unit test.
+
+    Skips in CI — storydump CI is mock-based with no real database, and the
+    ack-latency assertions below need controlled timing that a shared CI runner
+    can't guarantee. The proof runs locally and in review (rajan reproduces it
+    under real conditions). The mechanism it proves (per-task ContextVar session
+    isolation) is covered hermetically, without a DB, in
+    tests/src/repositories/test_base_repository_isolation.py — which DOES run in
+    CI.
+
+    When it does run, it routes the production session factory at the conftest
+    test DB (current schema, isolated from the real ``storyline_ai``) so
+    ``_ProbeRepo().db`` exercises real per-task sessions.
+    """
+    if os.environ.get("CI"):
+        pytest.skip(
+            "real-PTB behavioral timing proof — verified locally / in review, "
+            "not in CI (mock-based, no real DB); mechanism covered hermetically "
+            "in test_base_repository_isolation.py"
+        )
+    if setup_test_database is None:
+        pytest.skip("real Postgres not available — behavioral proof requires it")
+
+    import src.config.database as db_module
+
+    monkeypatch.setattr(
+        db_module,
+        "SessionLocal",
+        sessionmaker(
+            autocommit=False,
+            autoflush=False,
+            bind=setup_test_database,
+            expire_on_commit=False,
+        ),
+    )
 
 
 @pytest.mark.integration
