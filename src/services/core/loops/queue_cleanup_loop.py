@@ -38,8 +38,6 @@ async def cleanup_queue_loop(
     while True:
         record_heartbeat("queue_cleanup")
         try:
-            await asyncio.sleep(3600)
-
             # Gracefully expire button-bearing rows first so their inline
             # buttons are stripped instead of orphaned by delete_stale.
             for row in queue_repo.get_stale_sent(hours=24):
@@ -53,3 +51,7 @@ async def cleanup_queue_loop(
 
         except Exception as e:
             logger.error(f"Error in queue cleanup loop: {e}", exc_info=True)
+
+        # Sleep AFTER the cleanup so a redeploy that SIGKILLs the container
+        # during the sleep can never skip a cleanup cycle.
+        await asyncio.sleep(3600)
