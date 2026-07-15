@@ -12,6 +12,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from src.exceptions.instagram import (
     InstagramAPIError,
     MediaUnsupportedError,
+    is_container_confirmed_failed,
     MediaUploadError,
     RateLimitError,
     TokenCorruptError,
@@ -631,24 +632,39 @@ class TelegramAutopostHandler:
         """
         logger.error(f"Auto-post failed: {e}", exc_info=True)
 
-        # Claim-before-publish fail-safe (#549): if a container was created
-        # before this failure, the publish outcome is unknown — the story may
-        # be live. The row is now in 'publishing' (excluded from every sweep,
-        # blocks reselection). Leave it stuck and do NOT offer a retry; a retry
-        # can't re-claim a 'publishing' row and could otherwise duplicate.
+        # Claim-before-publish fail-safe (#549): once a container was created the
+        # row is in 'publishing'. Classify the failure:
+        #   - AMBIGUOUS (IG did NOT confirm failure): the publish outcome is
+        #     unknown — the story may be live. Hold the row stuck (excluded from
+        #     every sweep, blocks reselection) and do NOT retry; a retry can't
+        #     re-claim a 'publishing' row and could otherwise duplicate.
+        #   - IG-CONFIRMED-DEAD (ERROR/EXPIRED): IG affirmatively says nothing
+        #     published, so release the row for retry (below) — never stranded.
         if ctx.container_id is not None:
+            if not is_container_confirmed_failed(e):
+                # AMBIGUOUS: hold the row stuck; do NOT retry.
+                logger.warning(
+                    f"Autopost unconfirmed for {ctx.media_item.file_name} "
+                    f"(container {ctx.container_id}) — holding row in 'publishing'; "
+                    f"not retrying to prevent a duplicate story"
+                )
+                await _update_autopost_caption(
+                    ctx.query,
+                    "⚠️ The post may have gone through but couldn't be confirmed. "
+                    "It's been held for review so it can't post twice.",
+                )
+                self._cleanup_cloudinary(ctx)
+                return
+
+            # IG-CONFIRMED-DEAD: release the claimed row — flip it out of
+            # 'publishing' back to 'processing' so the retry button can re-claim
+            # it (the same safe-retry outcome as if no container had been
+            # created) — then fall through to the normal error UI + retry button.
             logger.warning(
-                f"Autopost unconfirmed for {ctx.media_item.file_name} "
-                f"(container {ctx.container_id}) — holding row in 'publishing'; "
-                f"not retrying to prevent a duplicate story"
+                f"Autopost container confirmed-failed for {ctx.media_item.file_name} "
+                f"(container {ctx.container_id}) — releasing row for retry"
             )
-            await _update_autopost_caption(
-                ctx.query,
-                "⚠️ The post may have gone through but couldn't be confirmed. "
-                "It's been held for review so it can't post twice.",
-            )
-            self._cleanup_cloudinary(ctx)
-            return
+            self.service.queue_repo.update_status(ctx.queue_id, "processing")
 
         if isinstance(e, MediaUnsupportedError):
             try:

@@ -7,6 +7,7 @@ import random
 
 
 from src.exceptions.google_drive import GoogleDriveAuthError
+from src.exceptions.instagram import is_container_confirmed_failed
 from src.services.base_service import BaseService
 from src.services.core.settings_service import SettingsService
 from src.repositories.atomic_session import atomic_session
@@ -565,28 +566,40 @@ class SchedulerService(BaseService):
         if chat_settings.enable_instagram_api and not chat_settings.dry_run_mode:
             # Claim-before-publish (#549): the container callback flips the row
             # to 'publishing' and persists the container_id the instant the IG
-            # container exists — BEFORE the publish. A container_id having been
-            # persisted is our classification signal on failure.
+            # container exists — BEFORE the publish. On failure we classify from
+            # two signals: whether a container_id was persisted, and whether the
+            # error is an IG-confirmed dead container (ERROR/EXPIRED).
             container_created = {"id": None}
 
             def _persist_container(container_id):
                 container_created["id"] = container_id
                 self.queue_repo.mark_publishing(queue_id, container_id)
 
-            instagram_story_id = await self._auto_approve_instagram(
-                media_item, chat_settings, on_container_created=_persist_container
-            )
+            confirmed_failed = False
+            try:
+                instagram_story_id = await self._auto_approve_instagram(
+                    media_item,
+                    chat_settings,
+                    on_container_created=_persist_container,
+                )
+            except Exception as e:  # noqa: BLE001
+                instagram_story_id = None
+                confirmed_failed = is_container_confirmed_failed(e)
+                logger.warning(
+                    f"Auto-approve Instagram posting failed for "
+                    f"{media_item.file_name} [{media_item.category}]: {e}"
+                )
 
             if instagram_story_id is None:
                 # Advance the clock so the scheduler doesn't re-fire this slot.
                 self.settings_service.update_last_post_sent_at(
                     chat_settings.telegram_chat_id, sent_at_override or now
                 )
-                if container_created["id"] is not None:
-                    # AMBIGUOUS: a container was created, so the story may have
-                    # published. Leave the row in 'publishing' — excluded from
-                    # every sweep, it blocks reselection and is never
-                    # re-published. No history, no lock (finalize is skipped).
+                if container_created["id"] is not None and not confirmed_failed:
+                    # AMBIGUOUS: a container was created and IG did NOT confirm
+                    # failure, so the story may have published. Leave the row in
+                    # 'publishing' — excluded from every sweep, it blocks
+                    # reselection and is never re-published. No history, no lock.
                     logger.warning(
                         f"Auto-approve Instagram unconfirmed for "
                         f"{media_item.file_name} [{media_item.category}] "
@@ -602,9 +615,17 @@ class SchedulerService(BaseService):
                         "category": media_item.category,
                         "error": "Instagram publish unconfirmed — held for review",
                     }
-                # SAFE RETRY: no container was ever created, so nothing
-                # published. Release the transient row and leave the media
-                # eligible for a future selection.
+                # SAFE RETRY: nothing published — either no container was ever
+                # created, or IG affirmatively confirmed the container is dead
+                # (ERROR/EXPIRED). Release the transient row (deleting a claimed
+                # 'publishing' row too) and leave the media eligible.
+                if container_created["id"] is not None:
+                    logger.warning(
+                        f"Auto-approve Instagram container confirmed-failed for "
+                        f"{media_item.file_name} [{media_item.category}] "
+                        f"(container {container_created['id']}) — releasing row "
+                        f"for retry"
+                    )
                 self.queue_repo.delete(queue_id)
                 logger.warning(
                     f"Auto-approve Instagram failed for {media_item.file_name} "
@@ -688,7 +709,14 @@ class SchedulerService(BaseService):
         """Post auto-approved media to Instagram.
 
         Runs safety check, uploads to Cloudinary, posts via Graph API,
-        cleans up Cloudinary. Returns story_id on success, None on failure.
+        cleans up Cloudinary. Returns the story_id on success, or None when it
+        bails out BEFORE any container is created (safety check / upload
+        failure — nothing published, safe to retry).
+
+        A failure AFTER the Graph API call begins PROPAGATES as an exception so
+        the caller can classify the outcome from the error (an IG-confirmed dead
+        container is safe to release; an ambiguous crash/timeout must stay
+        stuck). The Cloudinary/service cleanup in ``finally`` still runs first.
 
         ``on_container_created`` is forwarded to ``post_story`` so the caller
         can persist the container_id (claim-before-publish) the moment the
@@ -754,14 +782,10 @@ class SchedulerService(BaseService):
 
             return post_result.get("story_id")
 
-        except Exception as e:
-            logger.warning(
-                f"Auto-approve Instagram posting failed for "
-                f"{media_item.file_name}, falling back to reapproval: {e}"
-            )
-            return None
-
         finally:
+            # A post-Graph-API failure propagates to the caller (which classifies
+            # IG-confirmed-dead vs ambiguous) — but the Cloudinary/service cleanup
+            # must run either way.
             if cloud_public_id:
                 try:
                     cloud_service.delete_media(cloud_public_id)

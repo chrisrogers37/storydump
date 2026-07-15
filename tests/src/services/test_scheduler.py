@@ -19,6 +19,7 @@ def scheduler_service_mocked():
         service.media_repo = Mock()
         service.queue_repo = Mock()
         service.queue_repo.count_by_status.return_value = 0
+        service.queue_repo.count_recent_by_status.return_value = 0
         service.history_repo = Mock()
         service.history_repo.count_posts_today.return_value = 0
         service.lock_repo = Mock()
@@ -742,6 +743,7 @@ class TestSchedulerCategoryAllocation:
             service.media_repo = Mock()
             service.queue_repo = Mock()
             service.queue_repo.count_by_status.return_value = 0
+            service.queue_repo.count_recent_by_status.return_value = 0
             service.lock_repo = Mock()
             service.category_mix_repo = Mock()
             service.settings_service = Mock()
@@ -890,6 +892,7 @@ class TestSchedulerMediaPool:
             service.media_repo = Mock()
             service.queue_repo = Mock()
             service.queue_repo.count_by_status.return_value = 0
+            service.queue_repo.count_recent_by_status.return_value = 0
             service.lock_repo = Mock()
             service.category_mix_repo = Mock()
             service.settings_service = Mock()
@@ -941,6 +944,7 @@ class TestAutoApproval:
             service.media_repo = Mock()
             service.queue_repo = Mock()
             service.queue_repo.count_by_status.return_value = 0
+            service.queue_repo.count_recent_by_status.return_value = 0
             service.history_repo = Mock()
             service.history_repo.count_posts_today.return_value = 0
             service.lock_repo = Mock()
@@ -1057,6 +1061,7 @@ class TestAutoApproveInstagram:
             service.media_repo = Mock()
             service.queue_repo = Mock()
             service.queue_repo.count_by_status.return_value = 0
+            service.queue_repo.count_recent_by_status.return_value = 0
             service.history_repo = Mock()
             service.history_repo.count_posts_today.return_value = 0
             service.lock_repo = Mock()
@@ -1613,6 +1618,7 @@ class TestAutoApproveClaimBeforePublish:
             service.media_repo = Mock()
             service.queue_repo = Mock()
             service.queue_repo.count_by_status.return_value = 0
+            service.queue_repo.count_recent_by_status.return_value = 0
             service.history_repo = Mock()
             service.history_repo.count_posts_today.return_value = 0
             service.lock_repo = Mock()
@@ -1708,4 +1714,75 @@ class TestAutoApproveClaimBeforePublish:
         assert result["posted"] is False
         service.queue_repo.mark_publishing.assert_not_called()
         service.queue_repo.delete.assert_called_once_with(str(queue_item.id))
+        service.history_repo.create_idempotent.assert_not_called()
+
+    @staticmethod
+    def _ig_container_then_raises(exc):
+        """Fake _auto_approve_instagram that creates a container (fires the
+        callback, persisting the anchor) and THEN raises `exc` — mirrors
+        post_story propagating an IG failure after the claim-before-publish
+        write."""
+
+        async def _fake(media, cs, on_container_created=None):
+            if on_container_created is not None:
+                on_container_created("container-xyz")
+            raise exc
+
+        return AsyncMock(side_effect=_fake)
+
+    @pytest.mark.parametrize("status_code", ["ERROR", "EXPIRED"])
+    async def test_confirmed_dead_container_released_for_retry(
+        self, scheduler_service, status_code
+    ):
+        """IG affirmatively confirms the container failed (status_code
+        ERROR/EXPIRED) → nothing published → the claimed 'publishing' row is
+        RELEASED (deleted, same path as 'no container'), NOT stranded forever
+        (rajan #564 finding 1)."""
+        from src.exceptions.instagram import InstagramAPIError
+
+        service = scheduler_service
+        queue_item = Mock(id=uuid4())
+        service.queue_repo.create.return_value = queue_item
+        service._auto_approve_instagram = self._ig_container_then_raises(
+            InstagramAPIError("Media container failed", error_code=status_code)
+        )
+
+        cs = _make_chat_settings(enable_instagram_api=True)
+
+        with patch("src.services.core.media_lock.MediaLockService"):
+            result = await service._auto_approve(self._media(), cs)
+
+        assert result["posted"] is False
+        # The row was claimed the instant the container existed…
+        service.queue_repo.mark_publishing.assert_called_once_with(
+            str(queue_item.id), "container-xyz"
+        )
+        # …but IG confirmed it's dead, so it is released — not left stuck.
+        service.queue_repo.delete.assert_called_once_with(str(queue_item.id))
+        service.history_repo.create_idempotent.assert_not_called()
+
+    async def test_ambiguous_raise_after_container_stays_stuck(self, scheduler_service):
+        """A post-container failure that is NOT IG-confirmed (a crash/timeout
+        whose publish outcome is unknown) STILL holds the row in 'publishing' —
+        the ambiguous-stays-stuck behavior must not regress."""
+        from src.exceptions.instagram import InstagramAPIError
+
+        service = scheduler_service
+        queue_item = Mock(id=uuid4())
+        service.queue_repo.create.return_value = queue_item
+        # No error_code → ambiguous (e.g. the 180s wall-clock timeout wrapper).
+        service._auto_approve_instagram = self._ig_container_then_raises(
+            InstagramAPIError("Instagram post timed out after 180 seconds")
+        )
+
+        cs = _make_chat_settings(enable_instagram_api=True)
+
+        with patch("src.services.core.media_lock.MediaLockService"):
+            result = await service._auto_approve(self._media(), cs)
+
+        assert result["posted"] is False
+        service.queue_repo.mark_publishing.assert_called_once_with(
+            str(queue_item.id), "container-xyz"
+        )
+        service.queue_repo.delete.assert_not_called()  # stuck, not released
         service.history_repo.create_idempotent.assert_not_called()

@@ -1,5 +1,7 @@
 """Tests for daily posting cap guard — can_post_today()."""
 
+from datetime import datetime, timedelta
+
 import pytest
 from unittest.mock import Mock, MagicMock, patch
 
@@ -58,9 +60,10 @@ def _make_chat_settings(posts_per_day=3, posting_timezone=None):
 
 
 def _make_queue_repo(publishing=0):
-    """Mock queue repo whose count_by_status(['publishing']) returns `publishing`."""
+    """Mock queue repo whose count_recent_by_status(['publishing'], since=...)
+    returns `publishing` — the time-bounded in-flight count the cap uses."""
     queue_repo = Mock()
-    queue_repo.count_by_status.return_value = publishing
+    queue_repo.count_recent_by_status.return_value = publishing
     return queue_repo
 
 
@@ -166,9 +169,13 @@ class TestCanPostTodayCountsPublishing:
         result = can_post_today(chat_settings, history_repo, queue_repo)
 
         assert result is False  # 0 history + 1 publishing >= cap of 1
-        queue_repo.count_by_status.assert_called_once_with(
-            ["publishing"], chat_settings_id="cs-abc-123"
-        )
+        # Only *recent* publishing rows tax the cap — a time bound so a stuck
+        # row can't wedge the cap forever (rajan #564).
+        assert queue_repo.count_recent_by_status.call_count == 1
+        call = queue_repo.count_recent_by_status.call_args
+        assert call.args[0] == ["publishing"]
+        assert call.kwargs["chat_settings_id"] == "cs-abc-123"
+        assert "since" in call.kwargs
 
     def test_no_double_count_after_finalize(self):
         """After the atomic finalize (history written, publishing row deleted)
@@ -194,6 +201,62 @@ class TestCanPostTodayCountsPublishing:
 
         # 2 + 1 = 3 >= 3 → blocked
         assert can_post_today(chat_settings, history_repo, queue_repo) is False
+
+
+class _FakeQueueRepoWithRows:
+    """Queue-repo stand-in that applies count_recent_by_status's created_at
+    bound against in-memory rows, so the time bound is exercised for real
+    (no DB, no sleep — created_at is set relative to now)."""
+
+    def __init__(self, rows):
+        self._rows = rows  # Mock(status=..., created_at=datetime)
+
+    def count_recent_by_status(self, statuses, since, chat_settings_id=None):
+        return sum(
+            1 for r in self._rows if r.status in statuses and r.created_at >= since
+        )
+
+
+@pytest.mark.unit
+class TestCanPostTodayTimeBoundsPublishing:
+    """The 'publishing' cap count is time-bounded: a fresh in-flight publish
+    still consumes a slot, but a stale (presumed-stuck) publishing row must NOT
+    tax the cap forever — otherwise a handful of stuck rows silently wedge a
+    chat's auto-posting with no recovery (rajan #564 finding 2)."""
+
+    def test_fresh_publishing_row_counts_toward_cap(self):
+        """A publishing row younger than the bound is a live publish → counted,
+        so an over-cap post can't slip through while it's genuinely in flight."""
+        from src.services.core.daily_cap import can_post_today
+
+        chat_settings = _make_chat_settings(posts_per_day=1)
+        history_repo = Mock()
+        history_repo.count_posts_today.return_value = 0
+        fresh = Mock(status="publishing", created_at=datetime.utcnow())
+        queue_repo = _FakeQueueRepoWithRows([fresh])
+
+        # 0 history + 1 fresh publishing >= cap of 1 → blocked.
+        assert can_post_today(chat_settings, history_repo, queue_repo) is False
+
+    def test_stale_publishing_rows_do_not_wedge_cap(self):
+        """N stale publishing rows (older than the bound) must NOT consume the
+        cap — a posts_per_day=3 chat with 3 stuck rows can still post."""
+        from src.services.core.daily_cap import can_post_today
+
+        chat_settings = _make_chat_settings(posts_per_day=3)
+        history_repo = Mock()
+        history_repo.count_posts_today.return_value = 0
+        stale = [
+            Mock(
+                status="publishing",
+                created_at=datetime.utcnow() - timedelta(minutes=30),
+            )
+            for _ in range(3)
+        ]
+        queue_repo = _FakeQueueRepoWithRows(stale)
+
+        # All 3 are stale → excluded → 0 used < cap of 3 → still allowed.
+        assert can_post_today(chat_settings, history_repo, queue_repo) is True
 
 
 @pytest.mark.unit

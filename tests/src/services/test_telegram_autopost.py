@@ -1092,6 +1092,53 @@ class TestHandleAutopostError:
         assert log_ctx["success"] is False
         assert "API error" in log_ctx["error"]
 
+    @pytest.mark.parametrize("status_code", ["ERROR", "EXPIRED"])
+    async def test_confirmed_dead_container_released_for_retry(
+        self, mock_autopost_handler, make_autopost_ctx, status_code
+    ):
+        """IG affirmatively confirms the container failed (ERROR/EXPIRED) after
+        the claim → the row is RELEASED (flipped out of 'publishing' back to
+        'processing' so the retry button can re-claim it), NOT held forever
+        (rajan #564 finding 1)."""
+        from src.exceptions.instagram import InstagramAPIError
+
+        handler = mock_autopost_handler
+        ctx = make_autopost_ctx()
+        ctx.container_id = "container-xyz"  # container created + claimed
+
+        await handler._handle_autopost_error(
+            ctx,
+            InstagramAPIError("Media container failed", error_code=status_code),
+        )
+
+        # Released for retry — not stranded in 'publishing'.
+        handler.service.queue_repo.update_status.assert_called_once_with(
+            ctx.queue_id, "processing"
+        )
+        # Falls through to the normal error UI (retry keyboard), not the
+        # "held for review" hold message.
+        call_kwargs = ctx.query.edit_message_caption.call_args.kwargs
+        assert call_kwargs.get("reply_markup") is not None
+        assert "held for review" not in call_kwargs["caption"].lower()
+
+    async def test_ambiguous_container_still_held_for_review(
+        self, mock_autopost_handler, make_autopost_ctx
+    ):
+        """A container-present failure that is NOT IG-confirmed (ambiguous
+        crash/timeout) still HOLDS the row in 'publishing' — the existing
+        fail-closed behavior must not regress into a release."""
+        handler = mock_autopost_handler
+        ctx = make_autopost_ctx()
+        ctx.container_id = "container-xyz"
+
+        await handler._handle_autopost_error(ctx, Exception("Connection reset"))
+
+        # Held for review — the row is neither released nor deleted.
+        handler.service.queue_repo.update_status.assert_not_called()
+        handler.service.queue_repo.delete.assert_not_called()
+        caption = ctx.query.edit_message_caption.call_args.kwargs["caption"]
+        assert "held for review" in caption.lower()
+
 
 @pytest.mark.unit
 class TestCloudinaryCleanup:
@@ -1526,6 +1573,7 @@ class TestAutopostClaimBeforePublish:
         service.settings_service.get_settings.return_value = cs
         service.history_repo.count_posts_today.return_value = 0
         service.queue_repo.count_by_status.return_value = 0
+        service.queue_repo.count_recent_by_status.return_value = 0
         # Crash: the atomic finalize raises after publish.
         service.history_repo.create_idempotent.side_effect = RuntimeError("crash")
 
