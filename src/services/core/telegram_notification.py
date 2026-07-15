@@ -125,6 +125,7 @@ class TelegramNotificationService:
 
         try:
             # Get file bytes via provider (supports local and future cloud sources)
+            import asyncio
             from io import BytesIO
 
             from src.services.media_sources.factory import MediaSourceFactory
@@ -132,7 +133,11 @@ class TelegramNotificationService:
             provider = MediaSourceFactory.get_provider_for_media_item(
                 media_item, telegram_chat_id=self.service.channel_id
             )
-            file_bytes = provider.download_file(media_item.source_identifier)
+            # Offload the blocking media download so the shared bot event loop
+            # stays free to service Telegram callbacks while this runs.
+            file_bytes = await asyncio.to_thread(
+                provider.download_file, media_item.source_identifier
+            )
 
             photo_buffer = BytesIO(file_bytes)
             photo_buffer.name = media_item.file_name  # Telegram needs filename hint

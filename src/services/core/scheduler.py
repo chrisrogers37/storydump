@@ -722,6 +722,9 @@ class SchedulerService(BaseService):
         can persist the container_id (claim-before-publish) the moment the
         container exists and before the publish call.
         """
+
+        import asyncio
+
         from src.services.integrations.cloud_storage import (
             CloudStorageService,
             CLOUD_UPLOAD_FOLDER,
@@ -746,10 +749,15 @@ class SchedulerService(BaseService):
             provider = MediaSourceFactory.get_provider_for_media_item(
                 media_item, telegram_chat_id=chat_settings.telegram_chat_id
             )
-            file_bytes = provider.download_file(media_item.source_identifier)
+            # Offload the blocking media transfer so the shared bot event loop
+            # stays free to service Telegram callbacks while this runs.
+            file_bytes = await asyncio.to_thread(
+                provider.download_file, media_item.source_identifier
+            )
 
             folder = f"{CLOUD_UPLOAD_FOLDER}/{chat_settings.id}"
-            upload_result = cloud_service.upload_media(
+            upload_result = await asyncio.to_thread(
+                cloud_service.upload_media,
                 file_bytes=file_bytes,
                 filename=media_item.file_name,
                 folder=folder,
