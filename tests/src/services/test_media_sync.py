@@ -869,3 +869,77 @@ class TestMediaSyncServiceSettingsResolution:
         )
 
         mock_factory.create.assert_called_once_with("local", base_path="/explicit/path")
+
+
+# ==================== Tenant Ownership Stamping (#412) ====================
+
+
+@pytest.mark.unit
+class TestMediaSyncTenantStamping:
+    """Sync stamps media_items.chat_settings_id with the owning tenant (#412)."""
+
+    def _one_new_file(self, mock_factory):
+        """Configure a provider that reports a single new file with a hash."""
+        provider = Mock()
+        mock_factory.create.return_value = provider
+        provider.is_configured.return_value = True
+        provider.list_files.return_value = [
+            _make_file_info(name="new.jpg", identifier="/media/new.jpg"),
+        ]
+        provider.calculate_file_hash.return_value = "hash_new"
+        return provider
+
+    @patch("src.services.core.media_sync.settings")
+    @patch("src.services.core.media_sync.MediaSourceFactory")
+    def test_sync_scopes_to_resolved_owner(
+        self, mock_factory, mock_settings, sync_service
+    ):
+        """A per-tenant sync stamps new media AND scopes its reads to the owner.
+
+        create() gets the resolved chat_settings_id; the reconciliation set
+        (get_active_by_source_type) and the cross-source hash-dup check
+        (get_active_by_hash) are both scoped to the syncing tenant. Otherwise
+        two tenants holding the same file collide — the global hash-dup skip
+        would let only the first tenant get a row.
+        """
+        mock_settings.MEDIA_DIR = "/media"
+        self._one_new_file(mock_factory)
+        sync_service.media_repo.get_active_by_source_type.return_value = []
+        sync_service.media_repo.get_inactive_by_source_identifier.return_value = None
+
+        with patch(
+            "src.services.core.settings_service.SettingsService"
+        ) as MockSettingsSvc:
+            svc = MockSettingsSvc.return_value
+            svc.get_media_source_config.return_value = ("local", "/media")
+            svc.get_settings_if_exists.return_value = Mock(id="tenant-A")
+
+            sync_service.sync(triggered_by="scheduler", telegram_chat_id=-100)
+
+        assert (
+            sync_service.media_repo.create.call_args[1]["chat_settings_id"]
+            == "tenant-A"
+        )
+        assert (
+            sync_service.media_repo.get_active_by_source_type.call_args[0][1]
+            == "tenant-A"
+        )
+        assert sync_service.media_repo.get_active_by_hash.call_args[0][1] == "tenant-A"
+
+    @patch("src.services.core.media_sync.settings")
+    @patch("src.services.core.media_sync.MediaSourceFactory")
+    def test_sync_leaves_owner_null_without_tenant(
+        self, mock_factory, mock_settings, sync_service
+    ):
+        """A tenant-less sync (CLI / legacy global) leaves chat_settings_id NULL."""
+        mock_settings.MEDIA_SOURCE_TYPE = "local"
+        mock_settings.MEDIA_SOURCE_ROOT = "/media"
+        mock_settings.MEDIA_DIR = "/media"
+        self._one_new_file(mock_factory)
+        sync_service.media_repo.get_active_by_source_type.return_value = []
+        sync_service.media_repo.get_inactive_by_source_identifier.return_value = None
+
+        sync_service.sync(source_type="local", source_root="/media", triggered_by="cli")
+
+        kwargs = sync_service.media_repo.create.call_args[1]
+        assert kwargs["chat_settings_id"] is None

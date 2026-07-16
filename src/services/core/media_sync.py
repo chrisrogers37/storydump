@@ -74,6 +74,7 @@ class SyncContext:
     db_by_hash: dict[str, list]
     seen_identifiers: set[str]
     result: SyncResult
+    chat_settings_id: Optional[str] = None
 
 
 class MediaSyncService(BaseService):
@@ -100,11 +101,18 @@ class MediaSyncService(BaseService):
         source_type: Optional[str],
         source_root: Optional[str],
         telegram_chat_id: Optional[int],
-    ) -> tuple[str, str]:
-        """Resolve source type and root with fallback chain.
+    ) -> tuple[str, str, Optional[str]]:
+        """Resolve source type, root, and owning tenant with a fallback chain.
 
         Resolution order: explicit params > per-chat DB config > global env vars.
+
+        The owning chat_settings_id is resolved (non-bootstrapping) alongside
+        the per-chat config load so sync can stamp media with its tenant. A
+        None owner — CLI, legacy global sync, or an explicit source override —
+        leaves media_items.chat_settings_id NULL, the legacy single-tenant
+        marker, rather than fabricating an owner.
         """
+        chat_settings_id = None
         if not source_type and not source_root and telegram_chat_id:
             from src.services.core.settings_service import SettingsService
 
@@ -113,6 +121,8 @@ class MediaSyncService(BaseService):
                 source_type, source_root = settings_service.get_media_source_config(
                     telegram_chat_id
                 )
+                owner = settings_service.get_settings_if_exists(telegram_chat_id)
+                chat_settings_id = str(owner.id) if owner else None
             finally:
                 settings_service.close()
 
@@ -121,14 +131,20 @@ class MediaSyncService(BaseService):
         if resolved_type == "local" and not resolved_root:
             resolved_root = settings.MEDIA_DIR
 
-        return resolved_type, resolved_root
+        return resolved_type, resolved_root, chat_settings_id
 
-    def _build_db_lookups(self, source_type: str) -> tuple[list, dict, dict]:
+    def _build_db_lookups(
+        self, source_type: str, chat_settings_id: Optional[str]
+    ) -> tuple[list, dict, dict]:
         """Fetch DB records and build O(1) lookup dicts.
 
-        Returns (db_items, db_by_identifier, db_by_hash).
+        Returns (db_items, db_by_identifier, db_by_hash). Scoped to
+        chat_settings_id when known so a per-tenant sync reconciles only its
+        own media; a None owner spans all tenants (the legacy global path).
         """
-        db_items = self.media_repo.get_active_by_source_type(source_type)
+        db_items = self.media_repo.get_active_by_source_type(
+            source_type, chat_settings_id
+        )
         db_by_identifier = {
             item.source_identifier: item for item in db_items if item.source_identifier
         }
@@ -175,7 +191,7 @@ class MediaSyncService(BaseService):
         Raises:
             ValueError: If provider is not configured or source_type is invalid
         """
-        resolved_type, resolved_root = self._resolve_source_config(
+        resolved_type, resolved_root, chat_settings_id = self._resolve_source_config(
             source_type, source_root, telegram_chat_id
         )
 
@@ -206,7 +222,7 @@ class MediaSyncService(BaseService):
             )
 
             db_items, db_by_identifier, db_by_hash = self._build_db_lookups(
-                resolved_type
+                resolved_type, chat_settings_id
             )
             logger.info(f"[MediaSyncService] Database has {len(db_items)} active items")
 
@@ -217,6 +233,7 @@ class MediaSyncService(BaseService):
                 db_by_hash=db_by_hash,
                 seen_identifiers=set(),
                 result=SyncResult(),
+                chat_settings_id=chat_settings_id,
             )
 
             for file_info in provider_files:
@@ -327,7 +344,7 @@ class MediaSyncService(BaseService):
 
         # Skip if another item already holds this file_path to avoid
         # unique constraint violation.
-        if self.media_repo.get_by_path(file_path):
+        if self.media_repo.get_by_path(file_path, ctx.chat_settings_id):
             ctx.result.unchanged += 1
             return True
 
@@ -349,7 +366,7 @@ class MediaSyncService(BaseService):
     def _handle_reactivation(self, file_info: MediaFileInfo, ctx: SyncContext) -> bool:
         """Case 3: Inactive record with same identifier — reactivate."""
         inactive = self.media_repo.get_inactive_by_source_identifier(
-            ctx.source_type, file_info.identifier
+            ctx.source_type, file_info.identifier, ctx.chat_settings_id
         )
         if not inactive:
             return False
@@ -366,7 +383,8 @@ class MediaSyncService(BaseService):
         # Use in-memory lookup first; this covers same-source-type duplicates.
         # The DB query catches cross-source-type duplicates not in ctx.db_by_hash.
         if file_hash and (
-            file_hash in ctx.db_by_hash or self.media_repo.get_active_by_hash(file_hash)
+            file_hash in ctx.db_by_hash
+            or self.media_repo.get_active_by_hash(file_hash, ctx.chat_settings_id)
         ):
             ctx.result.unchanged += 1
             logger.info(
@@ -386,6 +404,7 @@ class MediaSyncService(BaseService):
             source_type=ctx.source_type,
             source_identifier=file_info.identifier,
             thumbnail_url=file_info.thumbnail_url,
+            chat_settings_id=ctx.chat_settings_id,
         )
         ctx.result.new += 1
         logger.info(

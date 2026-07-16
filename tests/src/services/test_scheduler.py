@@ -697,11 +697,11 @@ class TestPickCategoryForSlot:
     """Tests for SchedulerService._pick_category_for_slot()."""
 
     def test_returns_none_when_no_ratios(self, scheduler_service_mocked):
-        """Returns None when no category mix is configured."""
+        """Returns None when the tenant has no category mix configured."""
         service = scheduler_service_mocked
         service.category_mix_repo.get_current_mix_as_dict.return_value = {}
 
-        assert service._pick_category_for_slot() is None
+        assert service._pick_category_for_slot("tenant-A") is None
 
     def test_returns_category_with_ratios(self, scheduler_service_mocked):
         """Returns a valid category when ratios are configured."""
@@ -711,7 +711,7 @@ class TestPickCategoryForSlot:
             "merch": Decimal("0.3"),
         }
 
-        result = service._pick_category_for_slot()
+        result = service._pick_category_for_slot("tenant-A")
 
         assert result in ("memes", "merch")
 
@@ -723,7 +723,29 @@ class TestPickCategoryForSlot:
         }
 
         for _ in range(10):
-            assert service._pick_category_for_slot() == "memes"
+            assert service._pick_category_for_slot("tenant-A") == "memes"
+
+    def test_scopes_mix_to_tenant(self, scheduler_service_mocked):
+        """The mix read is scoped to the caller's tenant (#542)."""
+        service = scheduler_service_mocked
+        service.category_mix_repo.get_current_mix_as_dict.return_value = {
+            "memes": Decimal("1.0"),
+        }
+
+        service._pick_category_for_slot("tenant-A")
+
+        service.category_mix_repo.get_current_mix_as_dict.assert_called_once_with(
+            "tenant-A"
+        )
+
+    def test_fail_closed_without_tenant(self, scheduler_service_mocked):
+        """Fail-closed: a missing tenant reads no mix, never the global merged mix."""
+        service = scheduler_service_mocked
+
+        result = service._pick_category_for_slot(None)
+
+        assert result is None
+        service.category_mix_repo.get_current_mix_as_dict.assert_not_called()
 
 
 # ------------------------------------------------------------------
@@ -842,10 +864,10 @@ class TestSchedulerCategoryAllocation:
         mock_media = Mock(category="memes", file_name="test.jpg")
         scheduler_service._select_media_from_pool = Mock(return_value=mock_media)
 
-        result = scheduler_service._select_media(category="memes")
+        result = scheduler_service._select_media("tenant-A", category="memes")
 
         scheduler_service._select_media_from_pool.assert_called_with(
-            category="memes", exclude_ids=None
+            "tenant-A", category="memes", exclude_ids=None
         )
         assert result == mock_media
 
@@ -855,22 +877,25 @@ class TestSchedulerCategoryAllocation:
 
         scheduler_service._select_media_from_pool = Mock(side_effect=[None, mock_media])
 
-        result = scheduler_service._select_media(category="memes")
+        result = scheduler_service._select_media("tenant-A", category="memes")
 
         assert scheduler_service._select_media_from_pool.call_count == 2
         calls = scheduler_service._select_media_from_pool.call_args_list
         assert calls[0][1]["category"] == "memes"
         assert calls[1][1]["category"] is None
+        # Both the category pool and the any-category fallback stay tenant-scoped
+        assert calls[0][0][0] == "tenant-A"
+        assert calls[1][0][0] == "tenant-A"
         assert result == mock_media
 
     def test_select_media_no_fallback_when_no_category(self, scheduler_service):
         """Test that no fallback occurs when no category specified."""
         scheduler_service._select_media_from_pool = Mock(return_value=None)
 
-        result = scheduler_service._select_media(category=None)
+        result = scheduler_service._select_media("tenant-A", category=None)
 
         scheduler_service._select_media_from_pool.assert_called_once_with(
-            category=None, exclude_ids=None
+            "tenant-A", category=None, exclude_ids=None
         )
         assert result is None
 
@@ -901,30 +926,42 @@ class TestSchedulerMediaPool:
             service.SCHEDULE_JITTER_MINUTES = 30
             return service
 
-    def test_select_media_from_pool_delegates_to_repository(self, scheduler_service):
-        """Test that _select_media_from_pool delegates to media_repo."""
+    def test_select_media_from_pool_scopes_to_tenant(self, scheduler_service):
+        """_select_media_from_pool scopes the repo query to chat_settings_id (#542)."""
         mock_media = Mock(category="memes", file_name="test.jpg")
         scheduler_service.media_repo.get_next_eligible_for_posting.return_value = (
             mock_media
         )
 
-        result = scheduler_service._select_media_from_pool(category="memes")
+        result = scheduler_service._select_media_from_pool("tenant-A", category="memes")
 
         scheduler_service.media_repo.get_next_eligible_for_posting.assert_called_once_with(
-            category="memes", exclude_ids=None
+            category="memes", chat_settings_id="tenant-A", exclude_ids=None
         )
         assert result == mock_media
 
     def test_select_media_from_pool_passes_none_category(self, scheduler_service):
-        """Test that _select_media_from_pool passes None category correctly."""
+        """_select_media_from_pool threads None category with the tenant scope."""
         scheduler_service.media_repo.get_next_eligible_for_posting.return_value = None
 
-        result = scheduler_service._select_media_from_pool(category=None)
+        result = scheduler_service._select_media_from_pool("tenant-A", category=None)
 
         scheduler_service.media_repo.get_next_eligible_for_posting.assert_called_once_with(
-            category=None, exclude_ids=None
+            category=None, chat_settings_id="tenant-A", exclude_ids=None
         )
         assert result is None
+
+    def test_select_media_from_pool_fail_closed_without_tenant(self, scheduler_service):
+        """Fail-closed: a missing tenant selects nothing, never the global pool.
+
+        The repository tenant filter is a no-op on a None id, so an unscoped
+        call would span every tenant. The guard must short-circuit before the
+        query — this is the #542 cross-tenant leak.
+        """
+        result = scheduler_service._select_media_from_pool(None, category="memes")
+
+        assert result is None
+        scheduler_service.media_repo.get_next_eligible_for_posting.assert_not_called()
 
 
 # ------------------------------------------------------------------
