@@ -6,6 +6,7 @@ from telegram.error import TimedOut
 
 from src.config import defaults
 from src.exceptions.google_drive import GoogleDriveAuthError
+from src.exceptions.telegram import AmbiguousDeliveryError
 from src.services.core.telegram_utils import escape_markdown as _escape_md
 from src.utils.logger import logger
 
@@ -165,12 +166,13 @@ class TelegramNotificationService:
 
         except GoogleDriveAuthError:
             raise
-        except TimedOut:
+        except TimedOut as e:
             # Ambiguous delivery: Telegram may have posted the card even
             # though the response never arrived, so this must not read as a
             # clean retryable failure — a resend posts a duplicate card.
-            # Callers decide the no-retry policy.
-            raise
+            raise AmbiguousDeliveryError(
+                f"Telegram send timed out; the card may be delivered: {e}"
+            ) from e
         except Exception as e:  # noqa: BLE001
             if _is_google_auth_error(e):
                 raise GoogleDriveAuthError(

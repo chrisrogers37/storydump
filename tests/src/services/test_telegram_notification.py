@@ -868,13 +868,16 @@ class TestSendNotification:
         mock_telegram_service.bot.send_photo.assert_not_called()
         mock_telegram_service.queue_repo.set_telegram_message.assert_not_called()
 
-    async def test_timed_out_send_propagates(
+    async def test_timed_out_send_raises_ambiguous_delivery(
         self, notification_service, mock_telegram_service
     ):
         """TimedOut from send_photo is ambiguous — the card may have been
-        delivered. It must propagate so the caller can decide not to resend,
-        instead of being swallowed into a retryable False."""
+        delivered. It must surface as AmbiguousDeliveryError so the caller
+        can decide not to resend, instead of being swallowed into a
+        retryable False."""
         from telegram.error import TimedOut
+
+        from src.exceptions.telegram import AmbiguousDeliveryError
 
         queue_item = Mock(media_item_id=uuid4(), telegram_message_id=None)
         media_item = Mock(
@@ -903,7 +906,7 @@ class TestSendNotification:
         ) as mock_factory:
             mock_factory.get_provider_for_media_item.return_value = mock_provider
 
-            with pytest.raises(TimedOut):
+            with pytest.raises(AmbiguousDeliveryError):
                 await notification_service.send_notification("some-id")
 
     async def test_bookkeeping_failure_after_delivery_returns_true(

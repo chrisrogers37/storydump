@@ -436,15 +436,15 @@ class TestSendToTelegram:
         service.history_repo.create.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_timed_out_send_not_retried_stays_processing(
+    async def test_ambiguous_delivery_not_retried_stays_processing(
         self, scheduler_service_mocked
     ):
-        """A TimedOut send is ambiguous — the card may already be in the chat.
-        Resending would post a duplicate approval card, so the item is left in
-        'processing' (the stale-processing sweep requeues it if it never
-        arrived; a button click reconciles it if it did). No retry, no
+        """An ambiguous send (timed out; the card may already be in the chat)
+        must not be resent — that posts a duplicate approval card. The item is
+        left in 'processing' (the stale-processing sweep requeues it if it
+        never arrived; a button click reconciles it if it did). No retry, no
         'failed' status, no failure history row."""
-        from telegram.error import TimedOut
+        from src.exceptions.telegram import AmbiguousDeliveryError
 
         service = scheduler_service_mocked
         queue_item = Mock(
@@ -455,7 +455,7 @@ class TestSendToTelegram:
             scheduled_for=datetime(2026, 1, 1, tzinfo=timezone.utc),
         )
         service.telegram_service.send_notification = AsyncMock(
-            side_effect=TimedOut("Pool timeout")
+            side_effect=AmbiguousDeliveryError("Telegram send timed out")
         )
 
         with patch("asyncio.sleep", new_callable=AsyncMock):

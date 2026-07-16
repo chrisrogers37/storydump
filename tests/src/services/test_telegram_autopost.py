@@ -348,29 +348,29 @@ class TestAutopostEarlyFeedback:
         # Keyboard should be removed before claim_for_processing
         mock_query.edit_message_reply_markup.assert_called_once()
 
-    async def test_autopost_keyboard_strip_retries_transient_timeout(
-        self, mock_autopost_handler
+    @patch("src.services.core.telegram_autopost.reconcile_card_messages")
+    async def test_autopost_reconciles_card_after_claim(
+        self, mock_reconcile, mock_autopost_handler
     ):
-        """A transient TimedOut on the autopost keyboard strip is retried
-        instead of being swallowed on the first attempt."""
-        from telegram.error import TimedOut
-
+        """A successful autopost claim from a clicked card must reconcile the
+        row's telegram_message_id with that card (duplicate-card guard)."""
         handler = mock_autopost_handler
         service = handler.service
         queue_id = str(uuid4())
 
-        # claim returns None so no background task is spawned
-        service.queue_repo.claim_for_processing.return_value = None
-        service.queue_repo.get_by_id.return_value = None
-        service.history_repo.get_by_queue_item_id.return_value = None
+        queue_item = Mock(media_item_id=uuid4())
+        service.queue_repo.claim_for_processing.return_value = queue_item
+        # Media lookup fails right after the claim so the flow exits early —
+        # the reconcile call is the behavior under test.
+        service.media_repo.get_by_id.return_value = None
 
         mock_query = AsyncMock()
-        mock_query.edit_message_reply_markup.side_effect = [TimedOut("t"), None]
 
-        with patch("src.utils.resilience.asyncio.sleep", new_callable=AsyncMock):
-            await handler.handle_autopost(queue_id, Mock(), mock_query)
+        await handler.handle_autopost(queue_id, Mock(), mock_query)
 
-        assert mock_query.edit_message_reply_markup.call_count == 2
+        mock_reconcile.assert_awaited_once_with(
+            service, queue_id, queue_item, mock_query
+        )
 
     async def test_autopost_answers_callback_before_slow_work(
         self, mock_autopost_handler

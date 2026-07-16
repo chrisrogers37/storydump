@@ -11,6 +11,7 @@ from sqlalchemy.exc import OperationalError
 from src.services.core.telegram_utils import (
     escape_markdown as _escape_markdown,
     build_queue_action_keyboard,
+    reconcile_card_messages,
     validate_queue_and_media,
     validate_queue_item,
 )
@@ -33,46 +34,6 @@ class TelegramCallbackQueueHandlers:
     def __init__(self, service: TelegramService, core: TelegramCallbackCore):
         self.service = service
         self.core = core
-
-    async def _reconcile_card_messages(self, queue_id: str, queue_item, query):
-        """Reconcile the row's telegram_message_id with the clicked card.
-
-        - Missing id (the send delivered but the response was lost before the
-          stamp): backfill from the clicked message, so the stale-processing
-          sweep can't requeue an already-delivered card into a duplicate.
-        - Mismatched id (a duplicate card exists): strip the sibling card's
-          keyboard so it can't linger with dead buttons, and re-point the row
-          at the card the user actually acted on.
-
-        The common case — row already points at the clicked card — makes no
-        DB or Telegram calls.
-        """
-        message = getattr(query, "message", None)
-        if message is None:
-            return
-        clicked_id = message.message_id
-        stored_id = queue_item.telegram_message_id
-
-        if stored_id == clicked_id:
-            return
-
-        if stored_id:
-            chat_id = queue_item.telegram_chat_id or message.chat_id
-            try:
-                await telegram_edit_with_retry(
-                    self.service.bot.edit_message_reply_markup,
-                    chat_id=chat_id,
-                    message_id=stored_id,
-                    reply_markup=InlineKeyboardMarkup([]),
-                )
-            except Exception:  # noqa: BLE001 — sibling may already be gone
-                logger.debug(
-                    f"Could not strip sibling card {stored_id} for queue {queue_id[:8]}"
-                )
-
-        self.service.queue_repo.set_telegram_message(
-            queue_id, clicked_id, message.chat_id
-        )
 
     async def complete_queue_action(
         self,
@@ -120,7 +81,7 @@ class TelegramCallbackQueueHandlers:
             await validate_queue_item(self.service, queue_id, query)
             return
 
-        await self._reconcile_card_messages(queue_id, queue_item, query)
+        await reconcile_card_messages(self.service, queue_id, queue_item, query)
 
         # Execute DB operations with retry-once on SSL/connection errors
         try:
@@ -489,7 +450,7 @@ class TelegramCallbackQueueHandlers:
             await validate_queue_item(self.service, queue_id, query)
             return
 
-        await self._reconcile_card_messages(queue_id, queue_item, query)
+        await reconcile_card_messages(self.service, queue_id, queue_item, query)
 
         # Execute DB operations with retry-once on SSL/connection errors
         try:

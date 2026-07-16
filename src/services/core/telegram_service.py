@@ -380,7 +380,6 @@ class TelegramService(BaseService):
             handler = self._callback_dispatch.get(action)
             if handler:
                 await handler(data, user, query)
-                await self._fallback_answer(query)
                 return
 
             # Tier 2: Special cases (non-standard signatures, sub-routing)
@@ -388,11 +387,9 @@ class TelegramService(BaseService):
                 action, data, user, query, context
             )
             if handled:
-                await self._fallback_answer(query)
                 return
 
             logger.warning(f"Unknown callback action: {action}")
-            await self._fallback_answer(query)
 
         except Exception as e:  # noqa: BLE001
             logger.error(
@@ -408,6 +405,10 @@ class TelegramService(BaseService):
                 pass
 
         finally:
+            # Every callback ends answered: stops the spinner for handlers
+            # that didn't answer; rejected + swallowed for those that did
+            # (including the error alert above).
+            await self._fallback_answer(query)
             self.cleanup_transactions()
 
     @staticmethod

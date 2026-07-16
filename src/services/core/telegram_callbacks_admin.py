@@ -88,11 +88,10 @@ class TelegramCallbackAdminHandlers:
             )
             return
 
+        # Single attempt on purpose: cosmetic strip; the batch-result edit
+        # below strips the keyboard implicitly (with retry).
         try:
-            await telegram_edit_with_retry(
-                query.edit_message_reply_markup,
-                reply_markup=InlineKeyboardMarkup([]),
-            )
+            await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([]))
         except TelegramError:
             pass
 

@@ -636,19 +636,16 @@ class TestHandleRejected:
 @pytest.mark.unit
 @pytest.mark.asyncio
 class TestCardMessageReconciliation:
-    """A claimed queue item's telegram_message_id must be reconciled with the
-    card the user actually clicked.
+    """Every claim from a clicked item card must reconcile the row's
+    telegram_message_id with that card (backfill a lost stamp / strip a
+    duplicate sibling). Behavior of the reconcile itself is covered in
+    test_telegram_utils.py; these tests pin the call-after-claim seam."""
 
-    - Missing id (send delivered but the response was lost): backfill from
-      the clicked message so the stale-processing sweep can't requeue an
-      already-delivered card into a duplicate.
-    - Mismatched id (a duplicate card exists): strip the sibling card's
-      keyboard so it can't linger as dead buttons, and re-point the row at
-      the card that was acted on.
-    """
-
+    @patch("src.services.core.telegram_callbacks_queue.reconcile_card_messages")
     @patch("src.services.core.telegram_callbacks_queue.telegram_edit_with_retry")
-    async def test_backfills_missing_message_id(self, mock_retry, handlers):
+    async def test_complete_flow_reconciles_after_claim(
+        self, mock_retry, mock_reconcile, handlers
+    ):
         queue_item = Mock(
             media_item_id="m-1", telegram_message_id=None, telegram_chat_id=None
         )
@@ -656,67 +653,21 @@ class TestCardMessageReconciliation:
         handlers.core._execute_complete_db_ops.return_value = Mock(
             file_name="photo.jpg"
         )
+        query = _make_query()
 
         await handlers._do_complete_queue_action(
-            "q-1", _make_user(), _make_query(), "posted", True, "Done!", "posted"
+            "q-1", _make_user(), query, "posted", True, "Done!", "posted"
         )
 
-        handlers.service.queue_repo.set_telegram_message.assert_called_once_with(
-            "q-1", 42, -100123
+        mock_reconcile.assert_awaited_once_with(
+            handlers.service, "q-1", queue_item, query
         )
 
+    @patch("src.services.core.telegram_callbacks_queue.reconcile_card_messages")
     @patch("src.services.core.telegram_callbacks_queue.telegram_edit_with_retry")
-    async def test_strips_sibling_card_and_repoints_on_mismatch(
-        self, mock_retry, handlers
+    async def test_rejected_flow_reconciles_after_claim(
+        self, mock_retry, mock_reconcile, handlers
     ):
-        queue_item = Mock(
-            media_item_id="m-1", telegram_message_id=555, telegram_chat_id=-100123
-        )
-        handlers.service.queue_repo.claim_for_processing.return_value = queue_item
-        handlers.core._execute_complete_db_ops.return_value = Mock(
-            file_name="photo.jpg"
-        )
-
-        await handlers._do_complete_queue_action(
-            "q-1", _make_user(), _make_query(), "posted", True, "Done!", "posted"
-        )
-
-        sibling_strips = [
-            c
-            for c in mock_retry.call_args_list
-            if c.kwargs.get("message_id") == 555
-        ]
-        assert len(sibling_strips) == 1, (
-            "expected exactly one keyboard strip aimed at the sibling card"
-        )
-        strip = sibling_strips[0]
-        assert strip.args[0] is handlers.service.bot.edit_message_reply_markup
-        assert strip.kwargs["chat_id"] == -100123
-        handlers.service.queue_repo.set_telegram_message.assert_called_once_with(
-            "q-1", 42, -100123
-        )
-
-    @patch("src.services.core.telegram_callbacks_queue.telegram_edit_with_retry")
-    async def test_matching_card_costs_nothing(self, mock_retry, handlers):
-        """The common case — row already points at the clicked card — must
-        add zero extra DB or Telegram calls."""
-        queue_item = Mock(
-            media_item_id="m-1", telegram_message_id=42, telegram_chat_id=-100123
-        )
-        handlers.service.queue_repo.claim_for_processing.return_value = queue_item
-        handlers.core._execute_complete_db_ops.return_value = Mock(
-            file_name="photo.jpg"
-        )
-
-        await handlers._do_complete_queue_action(
-            "q-1", _make_user(), _make_query(), "posted", True, "Done!", "posted"
-        )
-
-        handlers.service.queue_repo.set_telegram_message.assert_not_called()
-        assert mock_retry.call_count == 1  # only the caption update
-
-    @patch("src.services.core.telegram_callbacks_queue.telegram_edit_with_retry")
-    async def test_rejected_flow_also_backfills(self, mock_retry, handlers):
         queue_item = Mock(
             media_item_id="m-1", telegram_message_id=None, telegram_chat_id=None
         )
@@ -724,9 +675,23 @@ class TestCardMessageReconciliation:
         handlers.core._execute_reject_db_ops.return_value = Mock(
             file_name="photo.jpg"
         )
+        query = _make_query()
 
-        await handlers._do_handle_rejected("q-1", _make_user(), _make_query())
+        await handlers._do_handle_rejected("q-1", _make_user(), query)
 
-        handlers.service.queue_repo.set_telegram_message.assert_called_once_with(
-            "q-1", 42, -100123
+        mock_reconcile.assert_awaited_once_with(
+            handlers.service, "q-1", queue_item, query
         )
+
+    @patch("src.services.core.telegram_callbacks_queue.reconcile_card_messages")
+    @patch("src.services.core.telegram_callbacks_queue.validate_queue_item")
+    async def test_failed_claim_does_not_reconcile(
+        self, mock_validate, mock_reconcile, handlers
+    ):
+        handlers.service.queue_repo.claim_for_processing.return_value = None
+
+        await handlers._do_complete_queue_action(
+            "q-1", _make_user(), _make_query(), "posted", True, "Done!", "posted"
+        )
+
+        mock_reconcile.assert_not_awaited()

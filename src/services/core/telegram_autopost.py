@@ -24,6 +24,7 @@ from src.repositories.history_repository import HistoryCreateParams
 from src.services.core.telegram_service import _escape_markdown
 from src.services.core.telegram_utils import (
     build_queue_action_keyboard,
+    reconcile_card_messages,
     validate_queue_item,
 )
 from src.utils.logger import logger
@@ -125,10 +126,12 @@ class TelegramAutopostHandler:
         task_spawned = False
         try:
             # Immediate visual feedback: remove buttons to signal action received
+            # Single attempt on purpose: cosmetic strip; the caption updates
+            # later in the flow strip the keyboard implicitly (with retry),
+            # and retry backoff here would stall the flow under the lock.
             try:
-                await telegram_edit_with_retry(
-                    query.edit_message_reply_markup,
-                    reply_markup=InlineKeyboardMarkup([]),
+                await query.edit_message_reply_markup(
+                    reply_markup=InlineKeyboardMarkup([])
                 )
             except Exception as e:  # noqa: BLE001
                 logger.debug(
@@ -140,6 +143,8 @@ class TelegramAutopostHandler:
             if not queue_item:
                 await validate_queue_item(self.service, queue_id, query)
                 return
+
+            await reconcile_card_messages(self.service, queue_id, queue_item, query)
 
             # Get media item
             media_item = self.service.media_repo.get_by_id(

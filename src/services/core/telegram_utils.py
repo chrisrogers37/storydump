@@ -16,6 +16,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
 from src.config import defaults
 from src.utils.logger import logger
+from src.utils.resilience import telegram_edit_with_retry
 from src.utils.webapp_auth import generate_url_token
 
 if TYPE_CHECKING:
@@ -175,6 +176,51 @@ async def validate_queue_and_media(service: TelegramService, queue_id: str, quer
         return None, None
 
     return queue_item, media_item
+
+
+async def reconcile_card_messages(
+    service: TelegramService, queue_id: str, queue_item, query
+):
+    """Reconcile the row's telegram_message_id with the clicked card.
+
+    Call after claiming a queue item from a button click on the item's own
+    card (posted/skip/reject/autopost). Not for batch approve, where the
+    clicked message is the batch card, not the item card.
+
+    - Missing id (the send delivered but the response was lost before the
+      stamp): backfill from the clicked message, so the stale-processing
+      sweep can't requeue an already-delivered card into a duplicate.
+    - Mismatched id (a duplicate card exists): strip the sibling card's
+      keyboard so it can't linger with dead buttons, and re-point the row
+      at the card the user actually acted on.
+
+    The common case — row already points at the clicked card — makes no
+    DB or Telegram calls.
+    """
+    message = query.message
+    if message is None:
+        return
+    clicked_id = message.message_id
+    stored_id = queue_item.telegram_message_id
+
+    if stored_id == clicked_id:
+        return
+
+    if stored_id:
+        chat_id = queue_item.telegram_chat_id or message.chat_id
+        try:
+            await telegram_edit_with_retry(
+                service.bot.edit_message_reply_markup,
+                chat_id=chat_id,
+                message_id=stored_id,
+                reply_markup=InlineKeyboardMarkup([]),
+            )
+        except Exception:  # noqa: BLE001 — sibling may already be gone
+            logger.debug(
+                f"Could not strip sibling card {stored_id} for queue {queue_id[:8]}"
+            )
+
+    service.queue_repo.set_telegram_message(queue_id, clicked_id, message.chat_id)
 
 
 # =========================================================================

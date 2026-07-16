@@ -86,21 +86,6 @@ class TestHandleBatchApprove:
         ]
         assert any("No pending items" in t for t in edit_texts)
 
-    @patch("src.services.core.telegram_callbacks_admin.telegram_edit_with_retry")
-    async def test_keyboard_strip_goes_through_retry_helper(self, mock_retry, handlers):
-        """The batch-approve keyboard strip is hardened against transient
-        timeouts by routing through telegram_edit_with_retry."""
-        handlers.service.queue_repo.get_all_with_media.return_value = []
-        query = _make_query()
-
-        await handlers.handle_batch_approve("cs-1", _make_user(), query)
-
-        strips = [
-            c
-            for c in mock_retry.call_args_list
-            if c.args and c.args[0] is query.edit_message_reply_markup
-        ]
-        assert len(strips) == 1
 
     @patch("src.services.core.telegram_callbacks_admin.telegram_edit_with_retry")
     async def test_mixed_success_and_failure(self, mock_retry, handlers):

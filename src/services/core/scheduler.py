@@ -5,11 +5,9 @@ from typing import Optional, List, Union
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import random
 
-from telegram.error import TimedOut
-
-
 from src.exceptions.google_drive import GoogleDriveAuthError
 from src.exceptions.instagram import is_container_confirmed_failed
+from src.exceptions.telegram import AmbiguousDeliveryError
 from src.services.base_service import BaseService
 from src.services.core.settings_service import SettingsService
 from src.repositories.atomic_session import atomic_session
@@ -449,15 +447,15 @@ class SchedulerService(BaseService):
                 )
                 raise
 
-            except TimedOut as e:
-                # Ambiguous delivery: the card may already be in the chat, so
-                # a resend would post a duplicate approval card. Leave the
-                # item in 'processing' — requeue_stale_processing restores it
-                # if the card never arrived, and a button click reconciles
-                # its telegram_message_id if it did.
+            except AmbiguousDeliveryError as e:
+                # The card may already be in the chat, so a resend would post
+                # a duplicate approval card. Leave the item in 'processing' —
+                # requeue_stale_processing restores it if the card never
+                # arrived, and a button click reconciles its
+                # telegram_message_id if it did.
                 logger.warning(
-                    f"Telegram send timed out for {queue_item_id} — delivery "
-                    f"ambiguous, leaving in processing without retry: {e}"
+                    f"Telegram send delivery ambiguous for {queue_item_id} — "
+                    f"leaving in processing without retry: {e}"
                 )
                 return False
 
