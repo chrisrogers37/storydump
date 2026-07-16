@@ -70,8 +70,8 @@ class SchedulerService(BaseService):
         if last_sent and (now - last_sent).total_seconds() < interval_seconds:
             return False  # Too soon
 
-        # Pick category for this slot
-        return self._pick_category_for_slot()
+        # Pick category for this slot (scoped to this tenant's configured mix)
+        return self._pick_category_for_slot(str(chat_settings.id))
 
     def _compute_catchup_sent_at(
         self, chat_settings, *, first_tick: bool = False
@@ -229,11 +229,16 @@ class SchedulerService(BaseService):
         Returns:
             List of dicts with media_id, file_name, category.
         """
+        owner = self.settings_service.get_settings_if_exists(telegram_chat_id)
+        chat_settings_id = str(owner.id) if owner else None
+
         previews = []
         seen_ids: list[str] = []
 
         for _ in range(count):
-            media_item = self._select_media(category=None, exclude_ids=seen_ids or None)
+            media_item = self._select_media(
+                chat_settings_id, category=None, exclude_ids=seen_ids or None
+            )
             if not media_item:
                 break
             seen_ids.append(str(media_item.id))
@@ -311,7 +316,7 @@ class SchedulerService(BaseService):
             user_id=user_id,
             triggered_by=triggered_by,
         ) as run_id:
-            media_item = self._select_media(category=category)
+            media_item = self._select_media(str(chat_settings.id), category=category)
             if not media_item:
                 result = {
                     "posted": False,
@@ -860,16 +865,23 @@ class SchedulerService(BaseService):
     # Internal: category selection
     # ------------------------------------------------------------------
 
-    def _pick_category_for_slot(self) -> Optional[str]:
-        """Pick a single category for this slot using configured ratios.
+    def _pick_category_for_slot(self, chat_settings_id: Optional[str]) -> Optional[str]:
+        """Pick a single category for this slot using the tenant's configured ratios.
 
         Uses weighted random selection so that over many slots the
         distribution matches the configured mix.
 
+        Fail-closed: a missing tenant means "no configured mix" (uncategorized),
+        never the global all-tenant mix. The category-mix tenant filter is a
+        no-op on a None id, so an unscoped read would let one tenant's ratios
+        shape another tenant's posting distribution (#542).
+
         Returns:
-            Category name, or None if no ratios configured.
+            Category name, or None if no ratios are configured for the tenant.
         """
-        current_mix = self.category_mix_repo.get_current_mix_as_dict()
+        if not chat_settings_id:
+            return None
+        current_mix = self.category_mix_repo.get_current_mix_as_dict(chat_settings_id)
         if not current_mix:
             return None
 
@@ -919,10 +931,11 @@ class SchedulerService(BaseService):
 
     def _select_media(
         self,
+        chat_settings_id: Optional[str],
         category: Optional[str] = None,
         exclude_ids: Optional[list] = None,
     ):
-        """Select next media item to post.
+        """Select next media item to post, scoped to a tenant.
 
         Selection priority:
         1. Filter by category (if specified)
@@ -933,7 +946,7 @@ class SchedulerService(BaseService):
         Falls back to any category if target category is exhausted.
         """
         media_item = self._select_media_from_pool(
-            category=category, exclude_ids=exclude_ids
+            chat_settings_id, category=category, exclude_ids=exclude_ids
         )
 
         if not media_item and category:
@@ -941,20 +954,30 @@ class SchedulerService(BaseService):
                 f"Category '{category}' exhausted, falling back to any available media"
             )
             media_item = self._select_media_from_pool(
-                category=None, exclude_ids=exclude_ids
+                chat_settings_id, category=None, exclude_ids=exclude_ids
             )
 
         return media_item
 
     def _select_media_from_pool(
         self,
+        chat_settings_id: Optional[str],
         category: Optional[str] = None,
         exclude_ids: Optional[list] = None,
     ):
-        """Select media from a specific pool (category or all).
+        """Select media from a specific pool (category or all), scoped to a tenant.
 
         Delegates to MediaRepository.get_next_eligible_for_posting().
+
+        Fail-closed: a missing tenant means "no eligible media", never the
+        global all-tenant pool. The repository tenant filter is a no-op on a
+        None id, so an unscoped call would silently span every tenant — the
+        exact cross-tenant selection leak #542 closes. Guard before the query.
         """
+        if not chat_settings_id:
+            return None
         return self.media_repo.get_next_eligible_for_posting(
-            category=category, exclude_ids=exclude_ids
+            category=category,
+            chat_settings_id=chat_settings_id,
+            exclude_ids=exclude_ids,
         )
