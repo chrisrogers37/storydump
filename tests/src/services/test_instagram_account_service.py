@@ -146,19 +146,30 @@ class TestGetActiveAccount:
 
 
 class TestSwitchAccount:
-    """Tests for switch_account method."""
+    """Tests for switch_account method.
+
+    #671 — switching sets which credentials a chat posts with, so a chat
+    may only switch to an account it owns (same derived-ownership rule as
+    deactivation, #583).
+    """
+
+    def _own(self, mock_settings_repo, mock_token_repo, sample_settings):
+        """Wire the caller as a token-owner of whatever account is probed."""
+        mock_settings_repo.get_or_create.return_value = sample_settings
+        mock_token_repo.get_owner_chat_ids.return_value = {str(sample_settings.id)}
 
     def test_switch_to_valid_account(
         self,
         service,
         mock_account_repo,
         mock_settings_repo,
+        mock_token_repo,
         sample_account,
         sample_settings,
     ):
-        """Should switch to a valid active account."""
+        """Should switch to a valid active account the chat owns."""
+        self._own(mock_settings_repo, mock_token_repo, sample_settings)
         mock_account_repo.get_by_id.return_value = sample_account
-        mock_settings_repo.get_or_create.return_value = sample_settings
         mock_settings_repo.update.return_value = sample_settings
 
         result = service.switch_account(-1001234567890, str(sample_account.id))
@@ -166,19 +177,68 @@ class TestSwitchAccount:
         assert result == sample_account
         mock_settings_repo.update.assert_called_once()
 
-    def test_switch_to_nonexistent_account_raises_error(
-        self, service, mock_account_repo
+    def test_switch_rejects_foreign_chat(
+        self,
+        service,
+        mock_settings_repo,
+        mock_token_repo,
+        sample_account,
+        sample_settings,
     ):
-        """Should raise ValueError when account doesn't exist."""
+        """Tenant A cannot adopt tenant B's account: switching would let A
+        post with B's credentials."""
+        mock_settings_repo.get_or_create.return_value = sample_settings
+        mock_token_repo.get_owner_chat_ids.return_value = {str(uuid.uuid4())}
+
+        with pytest.raises(ValueError, match="not found for this chat"):
+            service.switch_account(-1001234567890, str(sample_account.id))
+
+        mock_settings_repo.update.assert_not_called()
+
+    def test_switch_legacy_unstamped_rejected_for_non_env_chat(
+        self,
+        service,
+        mock_settings_repo,
+        mock_token_repo,
+        sample_settings,
+    ):
+        """A non-env chat cannot adopt legacy unstamped accounts."""
+        sample_settings.telegram_chat_id = -100999
+        mock_settings_repo.get_or_create.return_value = sample_settings
+        mock_token_repo.get_owner_chat_ids.return_value = set()
+
+        with pytest.raises(ValueError, match="not found for this chat"):
+            service.switch_account(-100999, str(uuid.uuid4()))
+
+        mock_settings_repo.update.assert_not_called()
+
+    def test_switch_to_nonexistent_account_raises_error(
+        self,
+        service,
+        mock_account_repo,
+        mock_settings_repo,
+        mock_token_repo,
+        sample_settings,
+    ):
+        """Should raise ValueError when an owned account id doesn't resolve
+        (e.g. a stamped token whose account row is gone)."""
+        self._own(mock_settings_repo, mock_token_repo, sample_settings)
         mock_account_repo.get_by_id.return_value = None
 
         with pytest.raises(ValueError, match="not found"):
             service.switch_account(-1001234567890, "nonexistent-id")
 
     def test_switch_to_inactive_account_raises_error(
-        self, service, mock_account_repo, sample_account
+        self,
+        service,
+        mock_account_repo,
+        mock_settings_repo,
+        mock_token_repo,
+        sample_account,
+        sample_settings,
     ):
         """Should raise ValueError when trying to switch to inactive account."""
+        self._own(mock_settings_repo, mock_token_repo, sample_settings)
         sample_account.is_active = False
         mock_account_repo.get_by_id.return_value = sample_account
 
