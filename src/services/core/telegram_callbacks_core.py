@@ -160,7 +160,10 @@ class TelegramCallbackCore:
 
             if status == "posted":
                 self.service.media_repo.increment_times_posted(
-                    str(queue_item.media_item_id)
+                    str(queue_item.media_item_id),
+                    chat_settings_id=str(queue_item.chat_settings_id)
+                    if queue_item.chat_settings_id
+                    else None,
                 )
                 self.service.lock_service.create_lock(
                     str(queue_item.media_item_id),

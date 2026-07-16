@@ -372,6 +372,9 @@ class TelegramAutopostHandler:
             cloud_url=ctx.cloud_url,
             cloud_public_id=ctx.cloud_public_id,
             cloud_uploaded_at=datetime.now(timezone.utc),
+            chat_settings_id=str(ctx.queue_item.chat_settings_id)
+            if ctx.queue_item.chat_settings_id
+            else None,
         )
 
         return True
@@ -543,7 +546,10 @@ class TelegramAutopostHandler:
                 )
             )
             self.service.media_repo.increment_times_posted(
-                str(ctx.queue_item.media_item_id)
+                str(ctx.queue_item.media_item_id),
+                chat_settings_id=str(ctx.queue_item.chat_settings_id)
+                if ctx.queue_item.chat_settings_id
+                else None,
             )
             self.service.lock_service.create_lock(
                 str(ctx.queue_item.media_item_id),
@@ -625,6 +631,9 @@ class TelegramAutopostHandler:
                     cloud_public_id=None,
                     cloud_uploaded_at=None,
                     cloud_expires_at=None,
+                    chat_settings_id=str(ctx.queue_item.chat_settings_id)
+                    if ctx.queue_item.chat_settings_id
+                    else None,
                 )
                 logger.info(f"Cleaned up Cloudinary upload: {ctx.cloud_public_id}")
             else:

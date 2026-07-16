@@ -8,6 +8,7 @@ from src.repositories.base_repository import BaseRepository
 from src.models.media_item import MediaItem
 from src.models.posting_queue import PostingQueue
 from src.models.media_lock import MediaPostingLock
+from src.utils.logger import logger
 
 
 class MediaRepository(BaseRepository):
@@ -15,6 +16,61 @@ class MediaRepository(BaseRepository):
 
     def __init__(self):
         super().__init__()
+
+    @staticmethod
+    def _write_allowed(owner_chat_settings_id, chat_settings_id) -> bool:
+        """Whether a caller acting as ``chat_settings_id`` may mutate a media row
+        owned by ``owner_chat_settings_id`` (#597 cross-tenant write guard).
+
+        The tenant boundary is ``chat_settings``; media belongs to a tenant via
+        ``MediaItem.chat_settings_id``. Rules:
+
+        - No caller tenant (internal/worker path, e.g. the dedup CLI): permitted —
+          behavior is unchanged from before scoping existed.
+        - Row owned by a DIFFERENT tenant: refused. This is the hole #597 closes —
+          a caller cannot mutate another tenant's media by knowing its UUID.
+        - Legacy row with a NULL ``chat_settings_id`` (pre-#412 ownership
+          backfill): permitted. A strict ``== tenant`` filter would exclude these
+          rows and silently no-op every write on not-yet-backfilled media —
+          halting reactivate / mark-posted / metadata / deactivate. Mirrors the
+          NULL-owned fallback #541 established for the worker notification layer.
+        """
+        if not chat_settings_id:
+            return True
+        if owner_chat_settings_id is None:
+            return True
+        return str(owner_chat_settings_id) == str(chat_settings_id)
+
+    def _get_for_write(
+        self, media_id: str, chat_settings_id: Optional[str]
+    ) -> Optional[MediaItem]:
+        """Resolve a media item for a tenant-scoped mutation, or None if the
+        caller may not write it.
+
+        Fetches by identity, then applies :meth:`_write_allowed`. A row owned by
+        another tenant returns None (the mutator then no-ops) and is logged; the
+        legacy NULL-owned fallback is logged so the pre-#412 path is observable.
+        """
+        media_item = self.get_by_id(media_id)
+        if media_item is None:
+            return None
+        if not self._write_allowed(media_item.chat_settings_id, chat_settings_id):
+            logger.warning(
+                "MediaRepository: refused cross-tenant write to media %s "
+                "(owner=%s, caller tenant=%s)",
+                media_id,
+                media_item.chat_settings_id,
+                chat_settings_id,
+            )
+            return None
+        if chat_settings_id and media_item.chat_settings_id is None:
+            logger.warning(
+                "MediaRepository: mutating legacy NULL-owned media %s under tenant "
+                "%s (pre-#412 ownership backfill fallback)",
+                media_id,
+                chat_settings_id,
+            )
+        return media_item
 
     def get_by_id(
         self, media_id: str, chat_settings_id: Optional[str] = None
@@ -169,18 +225,22 @@ class MediaRepository(BaseRepository):
         self.end_read_transaction()
         return result
 
-    def reactivate(self, media_id: str) -> MediaItem:
+    def reactivate(
+        self, media_id: str, chat_settings_id: Optional[str] = None
+    ) -> MediaItem:
         """Reactivate a previously deactivated media item.
 
         Used when a file reappears in the provider after being removed.
 
         Args:
             media_id: UUID of the media item to reactivate
+            chat_settings_id: Tenant acting on the item; scopes the write so a
+                caller cannot reactivate another tenant's media (#597).
 
         Returns:
             Reactivated MediaItem
         """
-        media_item = self.get_by_id(media_id)
+        media_item = self._get_for_write(media_id, chat_settings_id)
         if media_item:
             media_item.is_active = True
             media_item.updated_at = datetime.utcnow()
@@ -195,6 +255,7 @@ class MediaRepository(BaseRepository):
         file_name: Optional[str] = None,
         source_identifier: Optional[str] = None,
         thumbnail_url: Optional[str] = None,
+        chat_settings_id: Optional[str] = None,
     ) -> MediaItem:
         """Update source-related fields for a media item (rename/move tracking).
 
@@ -207,11 +268,12 @@ class MediaRepository(BaseRepository):
             file_name: New display filename
             source_identifier: New provider-specific identifier
             thumbnail_url: New CDN thumbnail URL (Drive thumbnailLink rotates)
+            chat_settings_id: Tenant acting on the item; scopes the write (#597).
 
         Returns:
             Updated MediaItem
         """
-        media_item = self.get_by_id(media_id)
+        media_item = self._get_for_write(media_id, chat_settings_id)
         if media_item:
             if file_path is not None:
                 media_item.file_path = file_path
@@ -365,9 +427,10 @@ class MediaRepository(BaseRepository):
         generated_caption: Optional[str] = None,
         tags: Optional[List[str]] = None,
         custom_metadata: Optional[dict] = None,
+        chat_settings_id: Optional[str] = None,
     ) -> MediaItem:
-        """Update media item metadata."""
-        media_item = self.get_by_id(media_id)
+        """Update media item metadata (tenant-scoped write, #597)."""
+        media_item = self._get_for_write(media_id, chat_settings_id)
         if media_item:
             if title is not None:
                 media_item.title = title
@@ -387,9 +450,15 @@ class MediaRepository(BaseRepository):
             self.db.refresh(media_item)
         return media_item
 
-    def increment_times_posted(self, media_id: str) -> MediaItem:
-        """Increment times posted counter and update last_posted_at."""
-        media_item = self.get_by_id(media_id)
+    def increment_times_posted(
+        self, media_id: str, chat_settings_id: Optional[str] = None
+    ) -> MediaItem:
+        """Increment times posted counter and update last_posted_at.
+
+        Tenant-scoped so a posting callback cannot mark another tenant's media
+        as posted (#597).
+        """
+        media_item = self._get_for_write(media_id, chat_settings_id)
         if media_item:
             media_item.times_posted += 1
             media_item.last_posted_at = datetime.utcnow()
@@ -404,6 +473,7 @@ class MediaRepository(BaseRepository):
         cloud_public_id: Optional[str] = None,
         cloud_uploaded_at: Optional[datetime] = None,
         cloud_expires_at: Optional[datetime] = None,
+        chat_settings_id: Optional[str] = None,
     ) -> MediaItem:
         """
         Update cloud storage information for a media item.
@@ -417,11 +487,12 @@ class MediaRepository(BaseRepository):
             cloud_public_id: Cloudinary public_id (or None to clear)
             cloud_uploaded_at: Upload timestamp (or None to clear)
             cloud_expires_at: URL expiry timestamp (or None to clear)
+            chat_settings_id: Tenant acting on the item; scopes the write (#597).
 
         Returns:
             Updated MediaItem
         """
-        media_item = self.get_by_id(media_id)
+        media_item = self._get_for_write(media_id, chat_settings_id)
         if media_item:
             media_item.cloud_url = cloud_url
             media_item.cloud_public_id = cloud_public_id
@@ -465,9 +536,11 @@ class MediaRepository(BaseRepository):
         self.db.commit()
         return count
 
-    def deactivate(self, media_id: str) -> MediaItem:
-        """Deactivate a media item."""
-        media_item = self.get_by_id(media_id)
+    def deactivate(
+        self, media_id: str, chat_settings_id: Optional[str] = None
+    ) -> MediaItem:
+        """Deactivate a media item (tenant-scoped write, #597)."""
+        media_item = self._get_for_write(media_id, chat_settings_id)
         if media_item:
             media_item.is_active = False
             media_item.updated_at = datetime.utcnow()
@@ -475,13 +548,13 @@ class MediaRepository(BaseRepository):
             self.db.refresh(media_item)
         return media_item
 
-    def delete(self, media_id: str) -> bool:
-        """Permanently delete a media item.
+    def delete(self, media_id: str, chat_settings_id: Optional[str] = None) -> bool:
+        """Permanently delete a media item (tenant-scoped write, #597).
 
         WARNING: Does not clean up Cloudinary resources. Use
         MediaLifecycleService.delete_media_item() for full cleanup.
         """
-        media_item = self.get_by_id(media_id)
+        media_item = self._get_for_write(media_id, chat_settings_id)
         if media_item:
             self.db.delete(media_item)
             self.db.commit()
@@ -807,14 +880,34 @@ class MediaRepository(BaseRepository):
             )
         return list(groups.values())
 
-    def deactivate_by_ids(self, media_ids: List[str]) -> int:
-        """Bulk deactivate media items by ID list. Returns count deactivated."""
+    def deactivate_by_ids(
+        self, media_ids: List[str], chat_settings_id: Optional[str] = None
+    ) -> int:
+        """Bulk deactivate media items by ID list. Returns count deactivated.
+
+        Tenant-scoped (#597): rows owned by another tenant are skipped; legacy
+        NULL-owned rows (pre-#412 backfill) are included. Applies the same
+        ownership rule as the single-row mutators via :meth:`_write_allowed`,
+        so the two paths cannot drift.
+        """
         if not media_ids:
             return 0
-        count = (
-            self.db.query(MediaItem)
-            .filter(MediaItem.id.in_(media_ids))
-            .update({MediaItem.is_active: False}, synchronize_session="fetch")
-        )
+        rows = self.db.query(MediaItem).filter(MediaItem.id.in_(media_ids)).all()
+        count = 0
+        null_owned = 0
+        for row in rows:
+            if not self._write_allowed(row.chat_settings_id, chat_settings_id):
+                continue
+            if chat_settings_id and row.chat_settings_id is None:
+                null_owned += 1
+            row.is_active = False
+            count += 1
+        if null_owned:
+            logger.warning(
+                "MediaRepository.deactivate_by_ids: deactivated %d legacy "
+                "NULL-owned media under tenant %s (pre-#412 fallback)",
+                null_owned,
+                chat_settings_id,
+            )
         self.db.commit()
         return count

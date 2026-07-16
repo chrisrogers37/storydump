@@ -149,6 +149,8 @@ async def onboarding_start_indexing(request: StartIndexingRequest) -> dict:
         source_type, source_root = settings_service.get_media_source_config(
             request.chat_id
         )
+        chat_settings = settings_service.get_settings_if_exists(request.chat_id)
+        chat_settings_id = str(chat_settings.id) if chat_settings else None
 
     if not source_root:
         raise HTTPException(
@@ -163,6 +165,7 @@ async def onboarding_start_indexing(request: StartIndexingRequest) -> dict:
                 source_root=source_root,
                 triggered_by="onboarding",
                 telegram_chat_id=request.chat_id,
+                chat_settings_id=chat_settings_id,
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))

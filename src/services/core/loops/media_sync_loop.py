@@ -68,6 +68,7 @@ async def media_sync_loop(
                             _sync_isolated,
                             sync_service,
                             telegram_chat_id=chat.telegram_chat_id,
+                            chat_settings_id=str(chat.id),
                             triggered_by="scheduler",
                         )
 
