@@ -198,7 +198,7 @@ class OAuthService(BaseService):
                         instagram_username=ig_username,
                         token_expires_at=expires_at,
                         set_as_active=set_active,
-                        telegram_chat_id=telegram_chat_id if set_active else None,
+                        telegram_chat_id=telegram_chat_id,
                         auth_method=AUTH_METHOD_OAUTH,
                         issuing_app_id=settings.FACEBOOK_APP_ID,
                     )
@@ -215,7 +215,7 @@ class OAuthService(BaseService):
                         access_token=long_token,
                         token_expires_at=expires_at,
                         set_as_active=set_active,
-                        telegram_chat_id=telegram_chat_id if set_active else None,
+                        telegram_chat_id=telegram_chat_id,
                         auth_method=AUTH_METHOD_OAUTH,
                         issuing_app_id=settings.FACEBOOK_APP_ID,
                     )

@@ -209,6 +209,7 @@ class InstagramAccountService(BaseService):
                 token_expires_at=token_expires_at,
                 auth_method=auth_method,
                 issuing_app_id=issuing_app_id,
+                chat_settings_id=self._chat_settings_id_for(telegram_chat_id),
             )
 
             # Optionally set as active
@@ -268,6 +269,7 @@ class InstagramAccountService(BaseService):
         token_expires_at: Optional[datetime] = None,
         auth_method: Optional[str] = None,
         issuing_app_id: Optional[str] = None,
+        chat_settings_id: Optional[str] = None,
     ) -> InstagramAccount:
         """Create account record and store its encrypted token.
 
@@ -294,6 +296,7 @@ class InstagramAccountService(BaseService):
             meta_account_id=instagram_account_id,
             auth_method=auth_method,
             issuing_app_id=issuing_app_id,
+            chat_settings_id=chat_settings_id,
             metadata={
                 "account_id": instagram_account_id,
                 "username": instagram_username,
@@ -419,6 +422,7 @@ class InstagramAccountService(BaseService):
                 meta_account_id=instagram_account_id,
                 auth_method=auth_method,
                 issuing_app_id=issuing_app_id,
+                chat_settings_id=self._chat_settings_id_for(telegram_chat_id),
                 metadata={
                     "account_id": instagram_account_id,
                     "username": account.instagram_username,
@@ -507,6 +511,13 @@ class InstagramAccountService(BaseService):
         OAuth flows via api_tokens.meta_account_id.
         """
         return self.account_repo.get_by_instagram_id(instagram_account_id)
+
+    def _chat_settings_id_for(self, telegram_chat_id: Optional[int]) -> Optional[str]:
+        """Resolve the tenant stamp for a token write, or None when no chat
+        is in scope (CLI/operator paths; see the column doc on ApiToken)."""
+        if telegram_chat_id is None:
+            return None
+        return str(self.settings_repo.get_or_create(telegram_chat_id).id)
 
     def _account_owned_by_chat(self, account_id: str, chat_settings) -> bool:
         """Whether a chat owns an account.

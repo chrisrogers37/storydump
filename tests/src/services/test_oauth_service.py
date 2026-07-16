@@ -294,7 +294,9 @@ class TestExchangeAndStore:
         assert calls[0][1]["telegram_chat_id"] == -100123
         for call in calls[1:]:
             assert call[1]["set_as_active"] is False
-            assert call[1]["telegram_chat_id"] is None
+            # #675: secondary accounts belong to the connecting chat too --
+            # the chat is passed for token stamping; only activation is gated.
+            assert call[1]["telegram_chat_id"] == -100123
 
     @pytest.mark.asyncio
     async def test_exchange_multiple_accounts_mixed_existing_and_new(self, service):
