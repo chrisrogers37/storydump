@@ -8,6 +8,7 @@ from src.services.base_service import BaseService
 from src.repositories.instagram_account_repository import InstagramAccountRepository
 from src.repositories.chat_settings_repository import ChatSettingsRepository
 from src.repositories.token_repository import TokenRepository
+from src.models.chat_settings import ChatSettings
 from src.models.instagram_account import InstagramAccount
 from src.models.user import User
 from src.utils.logger import logger
@@ -105,7 +106,8 @@ class InstagramAccountService(BaseService):
             The newly active InstagramAccount
 
         Raises:
-            ValueError: If account not found or disabled
+            ValueError: If the account is not owned by the requesting chat,
+                not found, or disabled
         """
         with self.track_execution(
             "switch_account",
@@ -113,6 +115,12 @@ class InstagramAccountService(BaseService):
             triggered_by="user",
             input_params={"account_id": account_id},
         ) as run_id:
+            # Switching decides which credentials this chat posts with, so
+            # the chat must own the account.
+            chat_settings = self._require_account_ownership(
+                account_id, telegram_chat_id, "switch to"
+            )
+
             account = self.account_repo.get_by_id(account_id)
             if not account:
                 raise ValueError(f"Account {account_id} not found")
@@ -120,8 +128,9 @@ class InstagramAccountService(BaseService):
             if not account.is_active:
                 raise ValueError(f"Account '{account.display_name}' is disabled")
 
-            # Get old account for logging
-            old_account = self.get_active_account(telegram_chat_id)
+            # Get old account for logging (pointer already in hand)
+            old_id = chat_settings.active_instagram_account_id
+            old_account = self.account_repo.get_by_id(str(old_id)) if old_id else None
 
             # Update settings
             self.settings_repo.update(
@@ -520,6 +529,27 @@ class InstagramAccountService(BaseService):
             and chat_settings.telegram_chat_id == settings.TELEGRAM_CHANNEL_ID
         )
 
+    def _require_account_ownership(
+        self, account_id: str, telegram_chat_id: int, action: str
+    ) -> ChatSettings:
+        """Resolve the caller's settings and reject non-owners.
+
+        Runs before any existence lookup and raises the same "not found"
+        shape whether the account exists or not — a foreign probe must not
+        be able to distinguish real account ids from invented ones. Every
+        tenant-gated account mutation goes through here so the message and
+        ordering can't drift apart. Returns the caller's ChatSettings so
+        gated methods don't re-fetch it.
+        """
+        chat_settings = self.settings_repo.get_or_create(telegram_chat_id)
+        if not self._account_owned_by_chat(account_id, chat_settings):
+            logger.warning(
+                f"Chat {telegram_chat_id} attempted to {action} account "
+                f"{account_id} it does not own"
+            )
+            raise ValueError(f"Account {account_id} not found for this chat")
+        return chat_settings
+
     def deactivate_account(
         self, account_id: str, telegram_chat_id: int, user: Optional[User] = None
     ) -> InstagramAccount:
@@ -551,13 +581,7 @@ class InstagramAccountService(BaseService):
                 "telegram_chat_id": telegram_chat_id,
             },
         ) as run_id:
-            chat_settings = self.settings_repo.get_or_create(telegram_chat_id)
-            if not self._account_owned_by_chat(account_id, chat_settings):
-                logger.warning(
-                    f"Chat {telegram_chat_id} attempted to deactivate account "
-                    f"{account_id} it does not own"
-                )
-                raise ValueError(f"Account {account_id} not found for this chat")
+            self._require_account_ownership(account_id, telegram_chat_id, "deactivate")
 
             account = self.account_repo.deactivate(account_id)
 
