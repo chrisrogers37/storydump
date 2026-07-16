@@ -75,6 +75,23 @@ class TestSafeLockedCallback:
         query.edit_message_reply_markup.assert_called_once()
         core.service.cleanup_operation_state.assert_called_once_with("q-1")
 
+    async def test_keyboard_strip_retries_transient_timeout(self, core):
+        """A transient TimedOut on the immediate keyboard strip is retried
+        instead of being swallowed on the first attempt — an unstripped
+        keyboard is how a stale card lingers with dead buttons."""
+        from telegram.error import TimedOut
+
+        query = AsyncMock()
+        query.edit_message_reply_markup.side_effect = [TimedOut("t"), None]
+
+        async def work():
+            pass
+
+        with patch("src.utils.resilience.asyncio.sleep", new_callable=AsyncMock):
+            await core._safe_locked_callback("q-1", query, "test_cb", "err", work())
+
+        assert query.edit_message_reply_markup.call_count == 2
+
     async def test_already_locked_answers_and_skips(self, core):
         """If the lock is already held, answer with a warning and skip."""
         lock = asyncio.Lock()

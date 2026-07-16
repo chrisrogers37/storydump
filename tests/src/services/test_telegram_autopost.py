@@ -348,6 +348,30 @@ class TestAutopostEarlyFeedback:
         # Keyboard should be removed before claim_for_processing
         mock_query.edit_message_reply_markup.assert_called_once()
 
+    async def test_autopost_keyboard_strip_retries_transient_timeout(
+        self, mock_autopost_handler
+    ):
+        """A transient TimedOut on the autopost keyboard strip is retried
+        instead of being swallowed on the first attempt."""
+        from telegram.error import TimedOut
+
+        handler = mock_autopost_handler
+        service = handler.service
+        queue_id = str(uuid4())
+
+        # claim returns None so no background task is spawned
+        service.queue_repo.claim_for_processing.return_value = None
+        service.queue_repo.get_by_id.return_value = None
+        service.history_repo.get_by_queue_item_id.return_value = None
+
+        mock_query = AsyncMock()
+        mock_query.edit_message_reply_markup.side_effect = [TimedOut("t"), None]
+
+        with patch("src.utils.resilience.asyncio.sleep", new_callable=AsyncMock):
+            await handler.handle_autopost(queue_id, Mock(), mock_query)
+
+        assert mock_query.edit_message_reply_markup.call_count == 2
+
     async def test_autopost_answers_callback_before_slow_work(
         self, mock_autopost_handler
     ):

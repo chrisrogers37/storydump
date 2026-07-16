@@ -926,3 +926,97 @@ class TestInstanceNewSpecialCase:
             "Use this in a DM with me.", show_alert=True
         )
         query.edit_message_text.assert_not_called()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestCallbackAnswerDiscipline:
+    """The dispatcher must not answer the callback query before the handler.
+
+    Telegram accepts one answer per callback query. An unconditional blank
+    answer ahead of dispatch consumes that budget, so handler feedback
+    (toasts, show_alert error popups) is silently rejected. The dispatcher
+    answers only as a post-dispatch fallback for handlers that didn't.
+    """
+
+    def _make_update(self, mock_telegram_service, action="fake_action"):
+        mock_telegram_service.user_repo.get_by_telegram_id.return_value = Mock(
+            id=uuid4(), telegram_username="tester", telegram_chat_id=-100123
+        )
+        update = Mock()
+        query = AsyncMock()
+        query.data = f"{action}:q-1"
+        query.from_user = Mock(
+            id=123456, username="tester", first_name="T", last_name=None
+        )
+        query.message = Mock(chat_id=-100123, message_id=42)
+        update.callback_query = query
+        return update, query
+
+    async def test_handler_answer_is_the_first_answer(self, mock_telegram_service):
+        """A handler's rich answer must be the first (and thus visible) one."""
+        update, query = self._make_update(mock_telegram_service)
+        calls = []
+
+        async def handler(data, user, q):
+            calls.append("handler")
+            await q.answer("Done!", show_alert=True)
+
+        query.answer = AsyncMock(
+            side_effect=lambda *a, **k: calls.append(("answer", a, k))
+        )
+        mock_telegram_service._callback_dispatch["fake_action"] = handler
+
+        await mock_telegram_service._handle_callback(update, Mock())
+
+        answer_calls = [c for c in calls if c != "handler"]
+        assert calls[0] == "handler", (
+            "dispatcher answered the query before the handler ran"
+        )
+        assert answer_calls[0] == ("answer", ("Done!",), {"show_alert": True})
+
+    async def test_fallback_answers_when_handler_does_not(
+        self, mock_telegram_service
+    ):
+        """A handler that never answers still gets the spinner stopped —
+        exactly one blank answer, after the handler has run."""
+        update, query = self._make_update(mock_telegram_service)
+        order = []
+
+        async def handler(data, user, q):
+            order.append("handler")
+
+        query.answer = AsyncMock(side_effect=lambda *a, **k: order.append("answer"))
+        mock_telegram_service._callback_dispatch["fake_action"] = handler
+
+        await mock_telegram_service._handle_callback(update, Mock())
+
+        assert order == ["handler", "answer"]
+        query.answer.assert_called_once_with()
+
+    async def test_fallback_answer_rejection_is_swallowed(
+        self, mock_telegram_service
+    ):
+        """If the handler already answered, the fallback's second answer is
+        rejected by Telegram — that rejection must not propagate."""
+        from telegram.error import BadRequest
+
+        update, query = self._make_update(mock_telegram_service)
+
+        async def handler(data, user, q):
+            await q.answer("Handled")
+
+        query.answer = AsyncMock(side_effect=[None, BadRequest("already answered")])
+        mock_telegram_service._callback_dispatch["fake_action"] = handler
+
+        await mock_telegram_service._handle_callback(update, Mock())
+
+        assert query.answer.call_count == 2
+
+    async def test_unknown_action_still_answers(self, mock_telegram_service):
+        """Unknown actions must still stop the button spinner."""
+        update, query = self._make_update(mock_telegram_service, action="no_such")
+
+        await mock_telegram_service._handle_callback(update, Mock())
+
+        query.answer.assert_called_once_with()
