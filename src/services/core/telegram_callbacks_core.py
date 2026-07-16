@@ -63,6 +63,10 @@ class TelegramCallbackCore:
             try:
                 # Immediate visual feedback: remove buttons to signal action received.
                 # Best-effort — message may already be updated by a concurrent handler.
+                # Single attempt on purpose: this strip is cosmetic — the
+                # terminal caption edits below strip the keyboard implicitly
+                # (with retry), and blocking on retry backoff here would
+                # serialize seconds of wait ahead of the real work.
                 try:
                     await query.edit_message_reply_markup(
                         reply_markup=InlineKeyboardMarkup([])

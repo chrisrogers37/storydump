@@ -11,6 +11,7 @@ from sqlalchemy.exc import OperationalError
 from src.services.core.telegram_utils import (
     escape_markdown as _escape_markdown,
     build_queue_action_keyboard,
+    reconcile_card_messages,
     validate_queue_and_media,
     validate_queue_item,
 )
@@ -79,6 +80,8 @@ class TelegramCallbackQueueHandlers:
             # Already claimed by another handler — show contextual message
             await validate_queue_item(self.service, queue_id, query)
             return
+
+        await reconcile_card_messages(self.service, queue_id, queue_item, query)
 
         # Execute DB operations with retry-once on SSL/connection errors
         try:
@@ -464,6 +467,8 @@ class TelegramCallbackQueueHandlers:
         if not queue_item:
             await validate_queue_item(self.service, queue_id, query)
             return
+
+        await reconcile_card_messages(self.service, queue_id, queue_item, query)
 
         # Execute DB operations with retry-once on SSL/connection errors
         try:

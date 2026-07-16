@@ -9,6 +9,7 @@ from src.services.core.telegram_utils import (
     build_account_management_keyboard,
     build_webapp_button,
     cleanup_conversation_messages,
+    reconcile_card_messages,
     validate_queue_item,
 )
 
@@ -455,3 +456,93 @@ class TestHasTerminalCaption:
         query = AsyncMock()
         # AsyncMock auto-creates message.caption as a Mock, not a str
         assert _has_terminal_caption(query) is False
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestReconcileCardMessages:
+    """Reconcile a claimed row's telegram_message_id with the clicked card.
+
+    Duplicate-card guard: backfill a stamp the send lost (so the
+    stale-processing sweep can't requeue an already-delivered card) and
+    strip a mismatched sibling card's keyboard (no lingering dead buttons).
+    """
+
+    def _service(self):
+        service = Mock()
+        service.bot = AsyncMock()
+        service.queue_repo = Mock()
+        return service
+
+    def _query(self, message_id=42, chat_id=-100123):
+        query = AsyncMock()
+        query.message = Mock(message_id=message_id, chat_id=chat_id)
+        return query
+
+    async def test_backfills_missing_message_id(self):
+        service = self._service()
+        queue_item = Mock(telegram_message_id=None, telegram_chat_id=None)
+
+        await reconcile_card_messages(service, "q-1", queue_item, self._query())
+
+        service.queue_repo.set_telegram_message.assert_called_once_with(
+            "q-1", 42, -100123
+        )
+        service.bot.edit_message_reply_markup.assert_not_called()
+
+    async def test_strips_sibling_card_and_repoints_on_mismatch(self):
+        service = self._service()
+        queue_item = Mock(telegram_message_id=555, telegram_chat_id=-100123)
+
+        with patch(
+            "src.services.core.telegram_utils.telegram_edit_with_retry",
+            new_callable=AsyncMock,
+        ) as mock_retry:
+            await reconcile_card_messages(service, "q-1", queue_item, self._query())
+
+        mock_retry.assert_awaited_once()
+        strip = mock_retry.await_args
+        assert strip.args[0] is service.bot.edit_message_reply_markup
+        assert strip.kwargs["message_id"] == 555
+        assert strip.kwargs["chat_id"] == -100123
+        service.queue_repo.set_telegram_message.assert_called_once_with(
+            "q-1", 42, -100123
+        )
+
+    async def test_sibling_strip_failure_still_repoints(self):
+        """A vanished sibling (BadRequest on strip) must not abort the
+        re-point — the row must end up tracking the acted-on card."""
+        service = self._service()
+        queue_item = Mock(telegram_message_id=555, telegram_chat_id=-100123)
+
+        with patch(
+            "src.services.core.telegram_utils.telegram_edit_with_retry",
+            new_callable=AsyncMock,
+            side_effect=Exception("message to edit not found"),
+        ):
+            await reconcile_card_messages(service, "q-1", queue_item, self._query())
+
+        service.queue_repo.set_telegram_message.assert_called_once_with(
+            "q-1", 42, -100123
+        )
+
+    async def test_matching_card_costs_nothing(self):
+        """The common case — row already points at the clicked card — must
+        make zero DB or Telegram calls."""
+        service = self._service()
+        queue_item = Mock(telegram_message_id=42, telegram_chat_id=-100123)
+
+        await reconcile_card_messages(service, "q-1", queue_item, self._query())
+
+        service.queue_repo.set_telegram_message.assert_not_called()
+        service.bot.edit_message_reply_markup.assert_not_called()
+
+    async def test_no_message_on_query_is_a_no_op(self):
+        service = self._service()
+        queue_item = Mock(telegram_message_id=None, telegram_chat_id=None)
+        query = AsyncMock()
+        query.message = None
+
+        await reconcile_card_messages(service, "q-1", queue_item, query)
+
+        service.queue_repo.set_telegram_message.assert_not_called()

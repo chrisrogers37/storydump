@@ -364,13 +364,6 @@ class TelegramService(BaseService):
             logger.info(f"📞 Callback received: {query.data}")
             log_pool_status()
 
-            try:
-                await query.answer()
-            except Exception:  # noqa: BLE001
-                logger.debug(
-                    f"Could not answer callback query (may be stale): {query.data}"
-                )
-
             parts = query.data.split(":", 1)
             action = parts[0]
             data = parts[1] if len(parts) > 1 else None
@@ -412,7 +405,26 @@ class TelegramService(BaseService):
                 pass
 
         finally:
+            # Every callback ends answered: stops the spinner for handlers
+            # that didn't answer; rejected + swallowed for those that did
+            # (including the error alert above).
+            await self._fallback_answer(query)
             self.cleanup_transactions()
+
+    @staticmethod
+    async def _fallback_answer(query) -> None:
+        """Stop the button spinner if the handler didn't answer the query.
+
+        Telegram accepts one answer per callback query, so answering is left
+        to handlers (their toasts and show_alert popups must be the first —
+        and thus visible — answer). For handlers that don't answer, this
+        blank answer stops the spinner; if the handler already answered,
+        Telegram rejects this one and the rejection is swallowed.
+        """
+        try:
+            await query.answer()
+        except Exception:  # noqa: BLE001
+            logger.debug("Callback already answered or stale — fallback skipped")
 
     # ------------------------------------------------------------------
     # Conversation routing
