@@ -269,6 +269,54 @@ class TestAddAccount:
         mock_account_repo.create.assert_called_once()
         mock_token_repo.create_or_update.assert_called_once()
 
+    def test_add_account_stamps_token_with_owning_chat(
+        self,
+        service,
+        mock_account_repo,
+        mock_settings_repo,
+        mock_token_repo,
+        sample_account,
+        sample_settings,
+    ):
+        """#675 — a token written for a chat carries its chat_settings_id,
+        so the ownership predicate (#583/#671) has a producer."""
+        mock_account_repo.get_by_meta_account_id.return_value = None
+        mock_account_repo.get_by_instagram_id.return_value = None
+        mock_account_repo.get_by_username.return_value = None
+        mock_account_repo.create.return_value = sample_account
+        mock_settings_repo.get_or_create.return_value = sample_settings
+
+        service.add_account(
+            display_name="Main Brand",
+            instagram_account_id="17841234567890",
+            instagram_username="brand_main",
+            access_token="tok",
+            telegram_chat_id=-100123,
+        )
+
+        kwargs = mock_token_repo.create_or_update.call_args.kwargs
+        assert kwargs["chat_settings_id"] == str(sample_settings.id)
+
+    def test_add_account_without_chat_leaves_token_unstamped(
+        self, service, mock_account_repo, mock_token_repo, sample_account
+    ):
+        """No chat in scope (e.g. CLI) → no stamp; unstamped stays the
+        documented legacy/env-chat case."""
+        mock_account_repo.get_by_meta_account_id.return_value = None
+        mock_account_repo.get_by_instagram_id.return_value = None
+        mock_account_repo.get_by_username.return_value = None
+        mock_account_repo.create.return_value = sample_account
+
+        service.add_account(
+            display_name="Main Brand",
+            instagram_account_id="17841234567890",
+            instagram_username="brand_main",
+            access_token="tok",
+        )
+
+        kwargs = mock_token_repo.create_or_update.call_args.kwargs
+        assert kwargs["chat_settings_id"] is None
+
     def test_add_duplicate_account_by_id_raises_error(
         self, service, mock_account_repo, sample_account
     ):
@@ -329,6 +377,28 @@ class TestAddAccount:
 
 class TestUpdateAccountToken:
     """Tests for update_account_token's cross-flow lookup behavior."""
+
+    def test_update_stamps_token_with_owning_chat(
+        self,
+        service,
+        mock_account_repo,
+        mock_settings_repo,
+        mock_token_repo,
+        sample_account,
+        sample_settings,
+    ):
+        """#675 — re-issued tokens carry the connecting chat's stamp."""
+        mock_account_repo.get_by_meta_account_id.return_value = sample_account
+        mock_settings_repo.get_or_create.return_value = sample_settings
+
+        service.update_account_token(
+            instagram_account_id="17841234567890",
+            access_token="new_tok",
+            telegram_chat_id=-100123,
+        )
+
+        kwargs = mock_token_repo.create_or_update.call_args.kwargs
+        assert kwargs["chat_settings_id"] == str(sample_settings.id)
 
     def test_resolves_by_username_when_meta_id_misses(
         self,

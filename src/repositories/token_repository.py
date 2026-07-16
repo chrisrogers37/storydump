@@ -182,6 +182,7 @@ class TokenRepository(BaseRepository):
         meta_account_id: Optional[str] = None,
         auth_method: Optional[str] = None,
         issuing_app_id: Optional[str] = None,
+        chat_settings_id: Optional[str] = None,
     ) -> ApiToken:
         """
         Create or update a token (UPSERT pattern).
@@ -208,6 +209,11 @@ class TokenRepository(BaseRepository):
                 self-describing (#468).
             issuing_app_id: Meta App ID that issued this token; stored
                 explicitly to eliminate env-var drift as a failure mode.
+            chat_settings_id: Owning tenant of this credential — the chat
+                that connected the account. Only set when provided, so a
+                chat-less write (e.g. token refresh) never clears an
+                existing stamp. Unstamped rows are the documented legacy
+                single-tenant case (owned by the env chat).
 
         Returns:
             Created or updated ApiToken
@@ -244,6 +250,8 @@ class TokenRepository(BaseRepository):
                 existing.auth_method = auth_method
             if issuing_app_id is not None:
                 existing.issuing_app_id = issuing_app_id
+            if chat_settings_id is not None:
+                existing.chat_settings_id = chat_settings_id
             self.db.commit()
             self.db.refresh(existing)
             return existing
@@ -261,6 +269,7 @@ class TokenRepository(BaseRepository):
                 meta_account_id=meta_account_id,
                 auth_method=auth_method,
                 issuing_app_id=issuing_app_id,
+                chat_settings_id=chat_settings_id,
             )
             self.db.add(token)
             self.db.commit()
