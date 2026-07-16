@@ -580,6 +580,159 @@ class TestMediaRepositoryTenantFiltering:
 
 
 @pytest.mark.unit
+class TestMediaRepositoryWriteTenantScoping:
+    """Cross-tenant write isolation for media mutators (#597, TD-030).
+
+    Media mutators resolve a row by a bare UUID. Without a tenant guard, a
+    caller acting as tenant A could reactivate / mark-posted / edit / deactivate
+    tenant B's media just by knowing its UUID. These tests pin the guard:
+
+    - a mutator refuses (no write, returns None) when the row is OWNED by a
+      different tenant;
+    - it still mutates the caller's OWN rows;
+    - it falls back (mutates, with a warning) for legacy rows whose
+      chat_settings_id is NULL (pre-#412 ownership backfill) so scoping does
+      not silently no-op every write on not-yet-backfilled media and halt
+      posting;
+    - with no caller tenant (internal/worker path) behavior is unchanged.
+    """
+
+    def _seed_row(self, mock_db, **attrs):
+        row = MagicMock(**attrs)
+        mock_db.query.return_value.filter.return_value.first.return_value = row
+        return row
+
+    # ── the ownership predicate ─────────────────────────────────────────
+    def test_write_allowed_same_tenant(self):
+        assert MediaRepository._write_allowed("tenant-A", "tenant-A") is True
+
+    def test_write_allowed_different_tenant_refused(self):
+        assert MediaRepository._write_allowed("tenant-B", "tenant-A") is False
+
+    def test_write_allowed_null_owned_falls_back(self):
+        assert MediaRepository._write_allowed(None, "tenant-A") is True
+
+    def test_write_allowed_no_actor_tenant_unchanged(self):
+        assert MediaRepository._write_allowed("tenant-B", None) is True
+
+    # ── reactivate ──────────────────────────────────────────────────────
+    def test_reactivate_blocks_cross_tenant(self, media_repo, mock_db):
+        row = self._seed_row(mock_db, chat_settings_id="tenant-B", is_active=False)
+
+        result = media_repo.reactivate("media-id", chat_settings_id="tenant-A")
+
+        assert result is None
+        assert row.is_active is False  # never mutated
+        mock_db.refresh.assert_not_called()
+
+    def test_reactivate_allows_own_tenant(self, media_repo, mock_db):
+        row = self._seed_row(mock_db, chat_settings_id="tenant-A", is_active=False)
+
+        result = media_repo.reactivate("media-id", chat_settings_id="tenant-A")
+
+        assert result is row
+        assert row.is_active is True
+        mock_db.refresh.assert_called_once_with(row)
+
+    def test_reactivate_allows_null_owned_with_warning(self, media_repo, mock_db):
+        row = self._seed_row(mock_db, chat_settings_id=None, is_active=False)
+
+        with patch("src.repositories.media_repository.logger") as mock_logger:
+            result = media_repo.reactivate("media-id", chat_settings_id="tenant-A")
+
+        assert result is row
+        assert row.is_active is True
+        mock_logger.warning.assert_called()  # legacy NULL-owned fallback is observable
+
+    def test_reactivate_without_tenant_unchanged(self, media_repo, mock_db):
+        row = self._seed_row(mock_db, is_active=False)
+
+        result = media_repo.reactivate("media-id")
+
+        assert result is row
+        assert row.is_active is True
+
+    # ── increment_times_posted ──────────────────────────────────────────
+    def test_increment_times_posted_blocks_cross_tenant(self, media_repo, mock_db):
+        row = self._seed_row(mock_db, chat_settings_id="tenant-B", times_posted=5)
+
+        result = media_repo.increment_times_posted(
+            "media-id", chat_settings_id="tenant-A"
+        )
+
+        assert result is None
+        assert row.times_posted == 5  # counter untouched
+        mock_db.refresh.assert_not_called()
+
+    def test_increment_times_posted_allows_own_tenant(self, media_repo, mock_db):
+        row = self._seed_row(mock_db, chat_settings_id="tenant-A", times_posted=5)
+        row.last_posted_at = None
+
+        result = media_repo.increment_times_posted(
+            "media-id", chat_settings_id="tenant-A"
+        )
+
+        assert result is row
+        assert row.times_posted == 6
+
+    # ── update_metadata ─────────────────────────────────────────────────
+    def test_update_metadata_blocks_cross_tenant(self, media_repo, mock_db):
+        self._seed_row(mock_db, chat_settings_id="tenant-B")
+
+        result = media_repo.update_metadata(
+            "media-id", title="hijacked", chat_settings_id="tenant-A"
+        )
+
+        assert result is None
+        mock_db.refresh.assert_not_called()
+
+    # ── deactivate (single) ─────────────────────────────────────────────
+    def test_deactivate_blocks_cross_tenant(self, media_repo, mock_db):
+        row = self._seed_row(mock_db, chat_settings_id="tenant-B", is_active=True)
+
+        result = media_repo.deactivate("media-id", chat_settings_id="tenant-A")
+
+        assert result is None
+        assert row.is_active is True
+
+    # ── deactivate_by_ids (bulk) ────────────────────────────────────────
+    def test_deactivate_by_ids_scopes_to_tenant(self, media_repo, mock_db):
+        row_a = MagicMock(chat_settings_id="tenant-A", is_active=True)
+        row_b = MagicMock(chat_settings_id="tenant-B", is_active=True)
+        row_null = MagicMock(chat_settings_id=None, is_active=True)
+        mock_db.query.return_value.filter.return_value.all.return_value = [
+            row_a,
+            row_b,
+            row_null,
+        ]
+
+        count = media_repo.deactivate_by_ids(
+            ["a", "b", "n"], chat_settings_id="tenant-A"
+        )
+
+        assert count == 2  # own + legacy NULL-owned
+        assert row_a.is_active is False
+        assert row_null.is_active is False
+        assert row_b.is_active is True  # cross-tenant row untouched
+
+    def test_deactivate_by_ids_without_tenant_deactivates_all(
+        self, media_repo, mock_db
+    ):
+        row_a = MagicMock(chat_settings_id="tenant-A", is_active=True)
+        row_b = MagicMock(chat_settings_id="tenant-B", is_active=True)
+        mock_db.query.return_value.filter.return_value.all.return_value = [row_a, row_b]
+
+        count = media_repo.deactivate_by_ids(["a", "b"])
+
+        assert count == 2
+        assert row_a.is_active is False
+        assert row_b.is_active is False
+
+    def test_deactivate_by_ids_empty_returns_zero(self, media_repo, mock_db):
+        assert media_repo.deactivate_by_ids([], chat_settings_id="tenant-A") == 0
+
+
+@pytest.mark.unit
 class TestClearStaleCloudInfo:
     """Tests for clear_stale_cloud_info method."""
 

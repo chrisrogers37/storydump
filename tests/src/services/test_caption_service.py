@@ -36,6 +36,7 @@ def _make_media_item(**overrides):
         "generated_caption": None,
         "tags": ["funny", "relatable"],
         "custom_metadata": None,
+        "chat_settings_id": None,
     }
     defaults.update(overrides)
     return Mock(**defaults)
@@ -72,7 +73,9 @@ class TestCaptionService:
 
         assert result == "Check this out!"
         caption_service.media_repo.update_metadata.assert_called_once_with(
-            str(media_item.id), generated_caption="Check this out!"
+            str(media_item.id),
+            generated_caption="Check this out!",
+            chat_settings_id=None,
         )
 
     @pytest.mark.asyncio

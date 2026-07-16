@@ -271,7 +271,7 @@ class TestExecuteCompleteDbOps:
         assert result is media_item
         core.service.history_repo.create.assert_called_once()
         core.service.media_repo.increment_times_posted.assert_called_once_with(
-            "media-1"
+            "media-1", chat_settings_id="cs-1"
         )
         # Lock now passes chat_id so MediaLockService can look up the per-chat TTL
         core.service.lock_service.create_lock.assert_called_once_with(
