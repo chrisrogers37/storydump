@@ -348,6 +348,30 @@ class TestAutopostEarlyFeedback:
         # Keyboard should be removed before claim_for_processing
         mock_query.edit_message_reply_markup.assert_called_once()
 
+    @patch("src.services.core.telegram_autopost.reconcile_card_messages")
+    async def test_autopost_reconciles_card_after_claim(
+        self, mock_reconcile, mock_autopost_handler
+    ):
+        """A successful autopost claim from a clicked card must reconcile the
+        row's telegram_message_id with that card (duplicate-card guard)."""
+        handler = mock_autopost_handler
+        service = handler.service
+        queue_id = str(uuid4())
+
+        queue_item = Mock(media_item_id=uuid4())
+        service.queue_repo.claim_for_processing.return_value = queue_item
+        # Media lookup fails right after the claim so the flow exits early —
+        # the reconcile call is the behavior under test.
+        service.media_repo.get_by_id.return_value = None
+
+        mock_query = AsyncMock()
+
+        await handler.handle_autopost(queue_id, Mock(), mock_query)
+
+        mock_reconcile.assert_awaited_once_with(
+            service, queue_id, queue_item, mock_query
+        )
+
     async def test_autopost_answers_callback_before_slow_work(
         self, mock_autopost_handler
     ):

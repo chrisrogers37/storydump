@@ -107,8 +107,10 @@ class TestSafeLockedCallback:
             "q-1", query, "test_cb", "something went wrong", failing()
         )
 
-        mock_retry.assert_called_once()
-        assert mock_retry.call_args[1]["caption"] == "something went wrong"
+        # First helper call is the keyboard strip; the error caption follows.
+        error_edits = [c for c in mock_retry.call_args_list if c.kwargs.get("caption")]
+        assert len(error_edits) == 1
+        assert error_edits[0].kwargs["caption"] == "something went wrong"
         core.service.cleanup_operation_state.assert_called_once_with("q-1")
 
     async def test_keyboard_removal_failure_does_not_block(self, core):

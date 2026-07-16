@@ -143,7 +143,9 @@ class TestDoCompleteQueueAction:
     @patch("src.services.core.telegram_callbacks_queue.telegram_edit_with_retry")
     async def test_happy_path(self, mock_retry, handlers):
         """Claim, execute DB ops, update caption, log interaction."""
-        queue_item = Mock(media_item_id="m-1")
+        queue_item = Mock(
+            media_item_id="m-1", telegram_message_id=42, telegram_chat_id=-100123
+        )
         handlers.service.queue_repo.claim_for_processing.return_value = queue_item
         media_item = Mock(file_name="photo.jpg")
         handlers.core._execute_complete_db_ops.return_value = media_item
@@ -182,7 +184,9 @@ class TestDoCompleteQueueAction:
     @patch("src.services.core.telegram_callbacks_queue.telegram_edit_with_retry")
     async def test_operational_error_retries(self, mock_retry, handlers):
         """On OperationalError, refresh sessions and retry once."""
-        queue_item = Mock(media_item_id="m-1")
+        queue_item = Mock(
+            media_item_id="m-1", telegram_message_id=42, telegram_chat_id=-100123
+        )
         handlers.service.queue_repo.claim_for_processing.return_value = queue_item
         handlers.service.history_repo.get_by_queue_item_id.return_value = None
         handlers.service.queue_repo.get_by_id.return_value = queue_item
@@ -206,7 +210,9 @@ class TestDoCompleteQueueAction:
     @patch("src.services.core.telegram_callbacks_queue.telegram_edit_with_retry")
     async def test_operational_error_with_existing_history(self, mock_retry, handlers):
         """If history already exists after OperationalError, just clean up."""
-        queue_item = Mock(media_item_id="m-1")
+        queue_item = Mock(
+            media_item_id="m-1", telegram_message_id=42, telegram_chat_id=-100123
+        )
         handlers.service.queue_repo.claim_for_processing.return_value = queue_item
         media_item = Mock(file_name="photo.jpg")
         handlers.service.media_repo.get_by_id.return_value = media_item
@@ -233,7 +239,9 @@ class TestDoCompleteQueueAction:
     @patch("src.services.core.telegram_callbacks_queue.telegram_edit_with_retry")
     async def test_operational_error_queue_item_gone(self, mock_retry, handlers):
         """If queue item gone after session refresh, show 'already processed'."""
-        queue_item = Mock(media_item_id="m-1")
+        queue_item = Mock(
+            media_item_id="m-1", telegram_message_id=42, telegram_chat_id=-100123
+        )
         handlers.service.queue_repo.claim_for_processing.return_value = queue_item
         handlers.service.history_repo.get_by_queue_item_id.return_value = None
         handlers.service.queue_repo.get_by_id.return_value = None
@@ -261,7 +269,9 @@ class TestDoCompleteQueueAction:
         Leaving the buttons live on a bounced-to-pending card is exactly what
         lets a later delete-path orphan a button-bearing pending row (#561).
         """
-        queue_item = Mock(media_item_id="m-1")
+        queue_item = Mock(
+            media_item_id="m-1", telegram_message_id=42, telegram_chat_id=-100123
+        )
         handlers.service.queue_repo.claim_for_processing.return_value = queue_item
         handlers.core._execute_complete_db_ops.side_effect = DailyCapReachedError(
             "Daily posting limit reached"
@@ -370,7 +380,12 @@ class TestHandleRegenerateCaption:
         )
         handlers.service.settings_service.get_settings.return_value = chat_settings
 
-        queue_item = Mock(media_item_id="m-1", chat_settings_id="cs-A")
+        queue_item = Mock(
+            media_item_id="m-1",
+            chat_settings_id="cs-A",
+            telegram_message_id=42,
+            telegram_chat_id=-100123,
+        )
         media_item = Mock(generated_caption="new caption", caption=None)
         mock_validate.return_value = (queue_item, media_item)
         handlers.service.media_repo.get_by_id.return_value = media_item
@@ -494,7 +509,9 @@ class TestHandleRejectConfirmation:
     @patch("src.services.core.telegram_callbacks_queue.telegram_edit_with_retry")
     async def test_shows_confirmation_dialog(self, mock_retry, mock_validate, handlers):
         """Shows Yes/No keyboard with file name and warning."""
-        queue_item = Mock(media_item_id="m-1")
+        queue_item = Mock(
+            media_item_id="m-1", telegram_message_id=42, telegram_chat_id=-100123
+        )
         mock_validate.return_value = queue_item
         media_item = Mock(file_name="photo.jpg")
         handlers.service.media_repo.get_by_id.return_value = media_item
@@ -579,7 +596,9 @@ class TestHandleRejected:
     @patch("src.services.core.telegram_callbacks_queue.telegram_edit_with_retry")
     async def test_do_handle_rejected_happy_path(self, mock_retry, handlers):
         """Successful rejection: claim, DB ops, update caption, log."""
-        queue_item = Mock(media_item_id="m-1")
+        queue_item = Mock(
+            media_item_id="m-1", telegram_message_id=42, telegram_chat_id=-100123
+        )
         handlers.service.queue_repo.claim_for_processing.return_value = queue_item
         media_item = Mock(file_name="photo.jpg")
         handlers.core._execute_reject_db_ops.return_value = media_item
@@ -614,7 +633,9 @@ class TestHandleRejected:
     async def test_do_handle_rejected_verbose_caption(self, mock_retry, handlers):
         """Verbose mode includes file name and permanent rejection notice."""
         handlers.service._is_verbose.return_value = True
-        queue_item = Mock(media_item_id="m-1")
+        queue_item = Mock(
+            media_item_id="m-1", telegram_message_id=42, telegram_chat_id=-100123
+        )
         handlers.service.queue_repo.claim_for_processing.return_value = queue_item
         media_item = Mock(file_name="photo.jpg")
         handlers.core._execute_reject_db_ops.return_value = media_item
@@ -632,7 +653,9 @@ class TestHandleRejected:
         self, mock_retry, handlers
     ):
         """On OperationalError, refresh and retry once."""
-        queue_item = Mock(media_item_id="m-1")
+        queue_item = Mock(
+            media_item_id="m-1", telegram_message_id=42, telegram_chat_id=-100123
+        )
         handlers.service.queue_repo.claim_for_processing.return_value = queue_item
         handlers.service.history_repo.get_by_queue_item_id.return_value = None
         handlers.service.queue_repo.get_by_id.return_value = queue_item
@@ -650,3 +673,70 @@ class TestHandleRejected:
 
         assert handlers.core._execute_reject_db_ops.call_count == 2
         handlers.core._refresh_repo_sessions.assert_called_once()
+
+
+# ──────────────────────────────────────────────────────────────
+# card message reconciliation (duplicate-card guard)
+# ──────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestCardMessageReconciliation:
+    """Every claim from a clicked item card must reconcile the row's
+    telegram_message_id with that card (backfill a lost stamp / strip a
+    duplicate sibling). Behavior of the reconcile itself is covered in
+    test_telegram_utils.py; these tests pin the call-after-claim seam."""
+
+    @patch("src.services.core.telegram_callbacks_queue.reconcile_card_messages")
+    @patch("src.services.core.telegram_callbacks_queue.telegram_edit_with_retry")
+    async def test_complete_flow_reconciles_after_claim(
+        self, mock_retry, mock_reconcile, handlers
+    ):
+        queue_item = Mock(
+            media_item_id="m-1", telegram_message_id=None, telegram_chat_id=None
+        )
+        handlers.service.queue_repo.claim_for_processing.return_value = queue_item
+        handlers.core._execute_complete_db_ops.return_value = Mock(
+            file_name="photo.jpg"
+        )
+        query = _make_query()
+
+        await handlers._do_complete_queue_action(
+            "q-1", _make_user(), query, "posted", True, "Done!", "posted"
+        )
+
+        mock_reconcile.assert_awaited_once_with(
+            handlers.service, "q-1", queue_item, query
+        )
+
+    @patch("src.services.core.telegram_callbacks_queue.reconcile_card_messages")
+    @patch("src.services.core.telegram_callbacks_queue.telegram_edit_with_retry")
+    async def test_rejected_flow_reconciles_after_claim(
+        self, mock_retry, mock_reconcile, handlers
+    ):
+        queue_item = Mock(
+            media_item_id="m-1", telegram_message_id=None, telegram_chat_id=None
+        )
+        handlers.service.queue_repo.claim_for_processing.return_value = queue_item
+        handlers.core._execute_reject_db_ops.return_value = Mock(file_name="photo.jpg")
+        query = _make_query()
+
+        await handlers._do_handle_rejected("q-1", _make_user(), query)
+
+        mock_reconcile.assert_awaited_once_with(
+            handlers.service, "q-1", queue_item, query
+        )
+
+    @patch("src.services.core.telegram_callbacks_queue.reconcile_card_messages")
+    @patch("src.services.core.telegram_callbacks_queue.validate_queue_item")
+    async def test_failed_claim_does_not_reconcile(
+        self, mock_validate, mock_reconcile, handlers
+    ):
+        handlers.service.queue_repo.claim_for_processing.return_value = None
+
+        await handlers._do_complete_queue_action(
+            "q-1", _make_user(), _make_query(), "posted", True, "Done!", "posted"
+        )
+
+        mock_reconcile.assert_not_awaited()
