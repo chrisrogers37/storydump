@@ -2,6 +2,8 @@
 
 from typing import Optional
 
+from telegram.error import TimedOut
+
 from src.config import defaults
 from src.exceptions.google_drive import GoogleDriveAuthError
 from src.services.core.telegram_utils import escape_markdown as _escape_md
@@ -79,6 +81,17 @@ class TelegramNotificationService:
             logger.error(f"Queue item not found: {queue_item_id}")
             return False
 
+        # Idempotency guard (claim-before-publish, mirrors #564): a stamped
+        # telegram_message_id means the approval card is already in the chat.
+        # Re-entry here (send retry, crash replay, /next re-fire) must not
+        # post a duplicate card.
+        if queue_item.telegram_message_id:
+            logger.info(
+                f"Queue item {queue_item_id} already has Telegram card "
+                f"{queue_item.telegram_message_id} — skipping duplicate send"
+            )
+            return True
+
         media_item = self.service.media_repo.get_by_id(str(queue_item.media_item_id))
         if not media_item:
             logger.error(f"Media item not found: {queue_item.media_item_id}")
@@ -150,6 +163,26 @@ class TelegramNotificationService:
                 parse_mode="Markdown",
             )
 
+        except GoogleDriveAuthError:
+            raise
+        except TimedOut:
+            # Ambiguous delivery: Telegram may have posted the card even
+            # though the response never arrived, so this must not read as a
+            # clean retryable failure — a resend posts a duplicate card.
+            # Callers decide the no-retry policy.
+            raise
+        except Exception as e:  # noqa: BLE001
+            if _is_google_auth_error(e):
+                raise GoogleDriveAuthError(
+                    f"Google Drive token expired or revoked: {e}"
+                ) from e
+            logger.error(f"Failed to send Telegram notification: {e}")
+            return False
+
+        # The card is delivered from here on. Bookkeeping failures must not
+        # turn into a send failure — a retry would post a duplicate card.
+        # A lost stamp is healed at callback time (card reconciliation).
+        try:
             # Save telegram message ID
             self.service.queue_repo.set_telegram_message(
                 queue_item_id, message.message_id, tenant_chat_id
@@ -168,19 +201,15 @@ class TelegramNotificationService:
                 telegram_chat_id=tenant_chat_id,
                 telegram_message_id=message.message_id,
             )
-
-            logger.info(f"Sent Telegram notification for {media_item.file_name}")
-            return True
-
-        except GoogleDriveAuthError:
-            raise
         except Exception as e:  # noqa: BLE001
-            if _is_google_auth_error(e):
-                raise GoogleDriveAuthError(
-                    f"Google Drive token expired or revoked: {e}"
-                ) from e
-            logger.error(f"Failed to send Telegram notification: {e}")
-            return False
+            logger.error(
+                f"Bookkeeping failed after delivered send for {queue_item_id} "
+                f"(message {message.message_id}): {e}",
+                exc_info=True,
+            )
+
+        logger.info(f"Sent Telegram notification for {media_item.file_name}")
+        return True
 
     def _resolve_tenant_settings(self, queue_item):
         """Resolve the ChatSettings row of the tenant that owns a queue item.

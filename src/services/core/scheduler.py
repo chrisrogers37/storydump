@@ -5,6 +5,8 @@ from typing import Optional, List, Union
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import random
 
+from telegram.error import TimedOut
+
 
 from src.exceptions.google_drive import GoogleDriveAuthError
 from src.exceptions.instagram import is_container_confirmed_failed
@@ -446,6 +448,18 @@ class SchedulerService(BaseService):
                     queue_item, "GoogleDriveAuthError: credentials invalid"
                 )
                 raise
+
+            except TimedOut as e:
+                # Ambiguous delivery: the card may already be in the chat, so
+                # a resend would post a duplicate approval card. Leave the
+                # item in 'processing' — requeue_stale_processing restores it
+                # if the card never arrived, and a button click reconciles
+                # its telegram_message_id if it did.
+                logger.warning(
+                    f"Telegram send timed out for {queue_item_id} — delivery "
+                    f"ambiguous, leaving in processing without retry: {e}"
+                )
+                return False
 
             except Exception as e:  # noqa: BLE001
                 last_error = str(e)

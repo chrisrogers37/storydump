@@ -64,8 +64,9 @@ class TelegramCallbackCore:
                 # Immediate visual feedback: remove buttons to signal action received.
                 # Best-effort — message may already be updated by a concurrent handler.
                 try:
-                    await query.edit_message_reply_markup(
-                        reply_markup=InlineKeyboardMarkup([])
+                    await telegram_edit_with_retry(
+                        query.edit_message_reply_markup,
+                        reply_markup=InlineKeyboardMarkup([]),
                     )
                 except Exception:  # noqa: BLE001
                     logger.debug(

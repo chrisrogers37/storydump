@@ -126,8 +126,9 @@ class TelegramAutopostHandler:
         try:
             # Immediate visual feedback: remove buttons to signal action received
             try:
-                await query.edit_message_reply_markup(
-                    reply_markup=InlineKeyboardMarkup([])
+                await telegram_edit_with_retry(
+                    query.edit_message_reply_markup,
+                    reply_markup=InlineKeyboardMarkup([]),
                 )
             except Exception as e:  # noqa: BLE001
                 logger.debug(

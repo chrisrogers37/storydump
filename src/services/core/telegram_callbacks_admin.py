@@ -89,7 +89,10 @@ class TelegramCallbackAdminHandlers:
             return
 
         try:
-            await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([]))
+            await telegram_edit_with_retry(
+                query.edit_message_reply_markup,
+                reply_markup=InlineKeyboardMarkup([]),
+            )
         except TelegramError:
             pass
 

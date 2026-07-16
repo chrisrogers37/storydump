@@ -364,13 +364,6 @@ class TelegramService(BaseService):
             logger.info(f"📞 Callback received: {query.data}")
             log_pool_status()
 
-            try:
-                await query.answer()
-            except Exception:  # noqa: BLE001
-                logger.debug(
-                    f"Could not answer callback query (may be stale): {query.data}"
-                )
-
             parts = query.data.split(":", 1)
             action = parts[0]
             data = parts[1] if len(parts) > 1 else None
@@ -387,6 +380,7 @@ class TelegramService(BaseService):
             handler = self._callback_dispatch.get(action)
             if handler:
                 await handler(data, user, query)
+                await self._fallback_answer(query)
                 return
 
             # Tier 2: Special cases (non-standard signatures, sub-routing)
@@ -394,9 +388,11 @@ class TelegramService(BaseService):
                 action, data, user, query, context
             )
             if handled:
+                await self._fallback_answer(query)
                 return
 
             logger.warning(f"Unknown callback action: {action}")
+            await self._fallback_answer(query)
 
         except Exception as e:  # noqa: BLE001
             logger.error(
@@ -413,6 +409,21 @@ class TelegramService(BaseService):
 
         finally:
             self.cleanup_transactions()
+
+    @staticmethod
+    async def _fallback_answer(query) -> None:
+        """Stop the button spinner if the handler didn't answer the query.
+
+        Telegram accepts one answer per callback query, so answering is left
+        to handlers (their toasts and show_alert popups must be the first —
+        and thus visible — answer). For handlers that don't answer, this
+        blank answer stops the spinner; if the handler already answered,
+        Telegram rejects this one and the rejection is swallowed.
+        """
+        try:
+            await query.answer()
+        except Exception:  # noqa: BLE001
+            logger.debug("Callback already answered or stale — fallback skipped")
 
     # ------------------------------------------------------------------
     # Conversation routing
