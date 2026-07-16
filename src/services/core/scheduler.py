@@ -690,7 +690,7 @@ class SchedulerService(BaseService):
                     chat_settings_id=cs_id,
                 )
             )
-            self.media_repo.increment_times_posted(media_id)
+            self.media_repo.increment_times_posted(media_id, chat_settings_id=cs_id)
             lock_service.create_lock(
                 media_id, telegram_chat_id=chat_settings.telegram_chat_id
             )

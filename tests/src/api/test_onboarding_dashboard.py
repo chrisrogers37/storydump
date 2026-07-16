@@ -892,6 +892,7 @@ class TestSyncMedia:
                 "google_drive",
                 "folder123",
             )
+            mock_settings_svc.get_settings_if_exists.return_value = Mock(id="cs-abc")
             mock_sync_svc = service_ctx(MockSyncService)
             mock_sync_svc.sync.return_value = mock_result
 
@@ -913,6 +914,7 @@ class TestSyncMedia:
             source_root="folder123",
             triggered_by="dashboard",
             telegram_chat_id=CHAT_ID,
+            chat_settings_id="cs-abc",
         )
 
     def test_sync_media_no_folder_configured(self, client):

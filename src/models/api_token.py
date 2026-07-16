@@ -63,7 +63,10 @@ class ApiToken(Base):
     # gives an audit trail of which app produced which credential.
     issuing_app_id = Column(String(100), nullable=True)
 
-    # Per-tenant scoping (used by Google Drive OAuth tokens)
+    # Owning tenant — the chat that connected this credential. NULL =
+    # legacy single-tenant rows, owned by the deployment's env chat.
+    # Feeds the account-ownership predicate; Drive tokens also use it
+    # as part of their upsert identity.
     chat_settings_id = Column(
         UUID(as_uuid=True),
         ForeignKey("chat_settings.id"),

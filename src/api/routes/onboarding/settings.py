@@ -197,6 +197,8 @@ async def onboarding_sync_media(request: Request, body: InitRequest) -> dict:
         source_type, source_root = settings_service.get_media_source_config(
             body.chat_id
         )
+        chat_settings = settings_service.get_settings_if_exists(body.chat_id)
+        chat_settings_id = str(chat_settings.id) if chat_settings else None
 
     if not source_root:
         raise HTTPException(
@@ -211,6 +213,7 @@ async def onboarding_sync_media(request: Request, body: InitRequest) -> dict:
                 source_root=source_root,
                 triggered_by="dashboard",
                 telegram_chat_id=body.chat_id,
+                chat_settings_id=chat_settings_id,
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))

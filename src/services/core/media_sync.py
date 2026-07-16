@@ -74,6 +74,9 @@ class SyncContext:
     db_by_hash: dict[str, list]
     seen_identifiers: set[str]
     result: SyncResult
+    # Tenant this sync run acts on (None for the legacy/global path). Scopes
+    # every media mutation so a per-tenant sync cannot deactivate or rename
+    # another tenant's rows (#597).
     chat_settings_id: Optional[str] = None
 
 
@@ -158,12 +161,15 @@ class MediaSyncService(BaseService):
         for identifier, item in ctx.db_by_identifier.items():
             if identifier not in ctx.seen_identifiers:
                 try:
-                    self.media_repo.deactivate(str(item.id))
-                    ctx.result.deactivated += 1
-                    logger.info(
-                        f"[MediaSyncService] Deactivated: {item.file_name} "
-                        f"(no longer in provider)"
+                    deactivated = self.media_repo.deactivate(
+                        str(item.id), chat_settings_id=ctx.chat_settings_id
                     )
+                    if deactivated:
+                        ctx.result.deactivated += 1
+                        logger.info(
+                            f"[MediaSyncService] Deactivated: {item.file_name} "
+                            f"(no longer in provider)"
+                        )
                 except SQLAlchemyError as e:
                     ctx.result.errors += 1
                     error_msg = f"Error deactivating {item.file_name}: {e}"
@@ -176,6 +182,7 @@ class MediaSyncService(BaseService):
         source_root: Optional[str] = None,
         triggered_by: str = "system",
         telegram_chat_id: Optional[int] = None,
+        chat_settings_id: Optional[str] = None,
     ) -> SyncResult:
         """Run a full media sync against the configured provider.
 
@@ -184,6 +191,10 @@ class MediaSyncService(BaseService):
             source_root: Override chat_settings.media_source_root
             triggered_by: Who triggered ('system', 'cli', 'scheduler')
             telegram_chat_id: If provided, look up per-chat media source config
+            chat_settings_id: Tenant this run acts on. When set, every media
+                mutation is scoped to it, so a per-tenant sync cannot deactivate
+                or rename another tenant's rows (#597). None (CLI/legacy path)
+                leaves writes unscoped, as before.
 
         Returns:
             SyncResult with counts for each action taken
@@ -316,6 +327,7 @@ class MediaSyncService(BaseService):
                 file_name=file_info.name,
                 file_path=file_path,
                 thumbnail_url=file_info.thumbnail_url,
+                chat_settings_id=ctx.chat_settings_id,
             )
             ctx.result.updated += 1
             logger.info(
@@ -326,6 +338,7 @@ class MediaSyncService(BaseService):
             self.media_repo.update_source_info(
                 media_id=str(existing.id),
                 thumbnail_url=file_info.thumbnail_url,
+                chat_settings_id=ctx.chat_settings_id,
             )
             ctx.result.unchanged += 1
         else:
@@ -354,6 +367,7 @@ class MediaSyncService(BaseService):
             file_path=file_path,
             source_identifier=file_info.identifier,
             thumbnail_url=file_info.thumbnail_url,
+            chat_settings_id=ctx.chat_settings_id,
         )
         ctx.result.updated += 1
         logger.info(
@@ -371,7 +385,9 @@ class MediaSyncService(BaseService):
         if not inactive:
             return False
 
-        self.media_repo.reactivate(str(inactive.id))
+        self.media_repo.reactivate(
+            str(inactive.id), chat_settings_id=ctx.chat_settings_id
+        )
         ctx.result.reactivated += 1
         logger.info(f"[MediaSyncService] Reactivated: {inactive.file_name}")
         return True

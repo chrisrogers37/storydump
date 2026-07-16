@@ -258,6 +258,56 @@ class TestTokenRepositoryTenantScoped:
             repo._db = mock_db
             return repo
 
+    def test_create_or_update_stamps_new_token_with_chat(self, token_repo, mock_db):
+        """#675 — the create arm stamps chat_settings_id so ownership is
+        derivable for accounts added by a chat."""
+        mock_db.query.return_value.filter.return_value.filter.return_value.first.return_value = None
+
+        token_repo.create_or_update(
+            service_name="instagram",
+            token_type="access_token",
+            token_value="enc",
+            instagram_account_id="acct-1",
+            chat_settings_id="cs-uuid-1",
+        )
+
+        added = mock_db.add.call_args[0][0]
+        assert added.chat_settings_id == "cs-uuid-1"
+
+    def test_create_or_update_stamps_existing_token_when_chat_provided(
+        self, token_repo, mock_db
+    ):
+        """Re-issue by a chat stamps (or re-stamps) the credential."""
+        existing = Mock(spec=ApiToken)
+        mock_db.query.return_value.filter.return_value.filter.return_value.first.return_value = existing
+
+        token_repo.create_or_update(
+            service_name="instagram",
+            token_type="access_token",
+            token_value="enc",
+            instagram_account_id="acct-1",
+            chat_settings_id="cs-uuid-2",
+        )
+
+        assert existing.chat_settings_id == "cs-uuid-2"
+
+    def test_create_or_update_preserves_stamp_when_chat_absent(
+        self, token_repo, mock_db
+    ):
+        """Chat-less writes (token refresh) must not clear ownership."""
+        existing = Mock(spec=ApiToken)
+        existing.chat_settings_id = "cs-uuid-1"
+        mock_db.query.return_value.filter.return_value.filter.return_value.first.return_value = existing
+
+        token_repo.create_or_update(
+            service_name="instagram",
+            token_type="access_token",
+            token_value="enc",
+            instagram_account_id="acct-1",
+        )
+
+        assert existing.chat_settings_id == "cs-uuid-1"
+
     def test_get_token_for_chat_found(self, token_repo, mock_db):
         """Get token scoped to a specific chat."""
         mock_token = Mock(spec=ApiToken)

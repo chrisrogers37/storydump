@@ -273,6 +273,24 @@ class TelegramCallbackQueueHandlers:
         if not queue_item:
             return
 
+        # The queue item belongs to the chat this callback fired in — not
+        # whatever queue_id the (forgeable) button data carries. Verify the
+        # caller (resolved above from query.message.chat_id) owns it before
+        # regenerating, which overwrites the media item's caption. Fail closed
+        # on an untenanted row: ownership cannot be proven, so refuse.
+        owner_id = queue_item.chat_settings_id
+        if owner_id is None or str(owner_id) != str(chat_settings.id):
+            logger.warning(
+                "regenerate_caption rejected: chat %s (cs=%s) does not own "
+                "queue item %s (cs=%s)",
+                chat_id,
+                chat_settings.id,
+                queue_id[:8],
+                owner_id,
+            )
+            await query.answer("❌ Not authorized for this instance", show_alert=True)
+            return
+
         from src.services.core.caption_service import CaptionService
 
         try:

@@ -555,6 +555,7 @@ def make_autopost_ctx():
                 media_item_id=uuid4(),
                 created_at="2026-01-01T00:00:00",
                 scheduled_for="2026-01-01T12:00:00",
+                chat_settings_id=None,
             )
         if media_item is None:
             media_item = Mock(
@@ -950,7 +951,7 @@ class TestRecordSuccessfulPost:
         handler.service.history_repo.create_idempotent.assert_called_once()
         # 2. Increment times posted
         handler.service.media_repo.increment_times_posted.assert_called_once_with(
-            str(ctx.queue_item.media_item_id)
+            str(ctx.queue_item.media_item_id), chat_settings_id=None
         )
         # 3. Create lock — chat_id passed so per-chat TTL can be applied
         handler.service.lock_service.create_lock.assert_called_once_with(
@@ -1192,6 +1193,7 @@ class TestCloudinaryCleanup:
             cloud_public_id=None,
             cloud_uploaded_at=None,
             cloud_expires_at=None,
+            chat_settings_id=None,
         )
 
     def test_cleanup_skipped_when_no_public_id(

@@ -375,11 +375,16 @@ class TestHandleRegenerateCaption:
         self, mock_retry, mock_validate, mock_keyboard, handlers
     ):
         """Generates new caption, rebuilds message, updates UI."""
-        chat_settings = Mock(enable_ai_captions=True, enable_instagram_api=False)
+        chat_settings = Mock(
+            enable_ai_captions=True, enable_instagram_api=False, id="cs-A"
+        )
         handlers.service.settings_service.get_settings.return_value = chat_settings
 
         queue_item = Mock(
-            media_item_id="m-1", telegram_message_id=42, telegram_chat_id=-100123
+            media_item_id="m-1",
+            chat_settings_id="cs-A",
+            telegram_message_id=42,
+            telegram_chat_id=-100123,
         )
         media_item = Mock(generated_caption="new caption", caption=None)
         mock_validate.return_value = (queue_item, media_item)
@@ -417,9 +422,12 @@ class TestHandleRegenerateCaption:
     @patch("src.services.core.telegram_callbacks_queue.validate_queue_and_media")
     async def test_generation_failure_answers_alert(self, mock_validate, handlers):
         """If caption generation returns None, show alert."""
-        chat_settings = Mock(enable_ai_captions=True)
+        chat_settings = Mock(enable_ai_captions=True, id="cs-A")
         handlers.service.settings_service.get_settings.return_value = chat_settings
-        mock_validate.return_value = (Mock(media_item_id="m-1"), Mock())
+        mock_validate.return_value = (
+            Mock(media_item_id="m-1", chat_settings_id="cs-A"),
+            Mock(),
+        )
 
         mock_caption_svc = Mock()
         mock_caption_svc.generate_caption = AsyncMock(return_value=None)
@@ -448,6 +456,45 @@ class TestHandleRegenerateCaption:
         await handlers.handle_regenerate_caption("q-1", user, query)
 
         query.answer.assert_called_once()
+
+    @pytest.mark.parametrize(
+        "item_tenant", ["cs-A", None], ids=["foreign-tenant", "untenanted"]
+    )
+    @patch("src.services.core.telegram_callbacks_queue.validate_queue_and_media")
+    async def test_rejects_unowned_queue_item(
+        self, mock_validate, handlers, item_tenant
+    ):
+        """A forged queue_id whose item is owned by another tenant (cs-A) — or
+        by no tenant at all (NULL, fail-closed) — is refused before the caption
+        is regenerated (which would overwrite it).
+
+        The caller's tenant is resolved independently from the chat the button
+        fired in (query.message.chat_id → cs-B), so it cannot be spoofed by the
+        (forgeable) queue_id in the callback data.
+        """
+        # Caller's own instance: captions on, tenant cs-B.
+        chat_settings = Mock(
+            enable_ai_captions=True, enable_instagram_api=False, id="cs-B"
+        )
+        handlers.service.settings_service.get_settings.return_value = chat_settings
+        # The forged queue_id resolves to an item the caller does NOT own.
+        mock_validate.return_value = (
+            Mock(media_item_id="m-x", chat_settings_id=item_tenant),
+            Mock(),
+        )
+
+        user = _make_user()
+        query = _make_query()  # query.message.chat_id is the caller's chat
+
+        with patch(
+            "src.services.core.caption_service.CaptionService"
+        ) as mock_caption_cls:
+            await handlers.handle_regenerate_caption("q-forged", user, query)
+
+        # The mutation (caption generation) must never run.
+        mock_caption_cls.assert_not_called()
+        query.answer.assert_called_once()
+        assert "Not authorized" in query.answer.call_args[0][0]
 
 
 # ──────────────────────────────────────────────────────────────
@@ -672,9 +719,7 @@ class TestCardMessageReconciliation:
             media_item_id="m-1", telegram_message_id=None, telegram_chat_id=None
         )
         handlers.service.queue_repo.claim_for_processing.return_value = queue_item
-        handlers.core._execute_reject_db_ops.return_value = Mock(
-            file_name="photo.jpg"
-        )
+        handlers.core._execute_reject_db_ops.return_value = Mock(file_name="photo.jpg")
         query = _make_query()
 
         await handlers._do_handle_rejected("q-1", _make_user(), query)
