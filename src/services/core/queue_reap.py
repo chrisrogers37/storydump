@@ -18,11 +18,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from telegram import InlineKeyboardMarkup
+from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
 
 from src.repositories.history_repository import HistoryCreateParams
 from src.services.core.telegram_utils import EXPIRED_CAPTION
 from src.utils.logger import logger
-from src.utils.resilience import telegram_edit_with_retry
 
 
 async def expire_sent_row(row, *, bot, history_repo, queue_repo) -> str:
@@ -38,31 +38,39 @@ async def expire_sent_row(row, *, bot, history_repo, queue_repo) -> str:
     row_id = str(row.id)
 
     # One best-effort edit that BOTH sets the caption AND strips the buttons.
+    # Single attempt, classified at this seam: the sweep cadence is the retry
+    # loop, and backoff sleeps here feed the very flood window they wait out.
     try:
-        edited = await telegram_edit_with_retry(
-            bot.edit_message_caption,
+        await bot.edit_message_caption(
             chat_id=row.telegram_chat_id,
             message_id=row.telegram_message_id,
             caption=EXPIRED_CAPTION,
             reply_markup=InlineKeyboardMarkup([]),
         )
-    except Exception as edit_error:  # noqa: BLE001 — classify via the wrapper's contract
-        # Non-retryable (message not found / too old / forbidden): there is
-        # nothing editable left to orphan, so proceed to record + delete.
+    except BadRequest as edit_error:
+        # Permanent rejection — most commonly "Message is not modified": the
+        # card already shows Expired with its buttons stripped, so there is
+        # nothing left to orphan. Proceed to record + delete. BadRequest
+        # subclasses NetworkError, so it must be classified before the
+        # transient branch.
+        logger.info(
+            f"Expire reap: card for {row_id[:8]} already terminal or not "
+            f"editable ({edit_error}); recording expiry and deleting"
+        )
+    except (RetryAfter, TimedOut, NetworkError) as edit_error:
+        # Genuinely transient: the card may still be live — defer so its
+        # buttons stay tappable and the next sweep can try again.
+        logger.warning(
+            f"Expire reap: deferring {row_id[:8]} "
+            f"({type(edit_error).__name__}); row left tappable for next sweep"
+        )
+        return "deferred"
+    except Exception as edit_error:  # noqa: BLE001 — e.g. Forbidden: bot removed
+        # Nothing editable left to orphan — proceed to record + delete.
         logger.info(
             f"Expire reap: card for {row_id[:8]} not editable "
             f"({type(edit_error).__name__}); recording expiry and deleting"
         )
-    else:
-        if edited is None:
-            # Transient failure exhausted retries (RetryAfter / TimedOut /
-            # NetworkError). The card may still be live — defer so its
-            # buttons stay tappable and the next sweep can try again.
-            logger.warning(
-                f"Expire reap: deferring {row_id[:8]} (transient edit failure); "
-                f"row left tappable for next sweep"
-            )
-            return "deferred"
 
     # PROCEED: idempotent terminal history write, then delete the queue row.
     now = datetime.now(timezone.utc)

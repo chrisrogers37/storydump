@@ -5,7 +5,7 @@ import time
 from enum import Enum
 from typing import Optional
 
-from telegram.error import RetryAfter, TimedOut, NetworkError
+from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
 
 from src.utils.logger import logger
 
@@ -151,8 +151,9 @@ async def telegram_edit_with_retry(
     rate limits (RetryAfter), or connection drops. This wrapper
     retries with exponential backoff for those cases only.
 
-    Non-retryable errors (BadRequest, message not found, etc.)
-    are raised immediately.
+    Permanent rejections (``BadRequest`` — e.g. "message is not modified",
+    "message to edit not found") are not retried: they return ``None``
+    immediately. Unexpected exceptions are raised.
 
     Args:
         edit_func: The async Telegram method to call (e.g., query.edit_message_caption)
@@ -181,6 +182,13 @@ async def telegram_edit_with_retry(
                 await asyncio.sleep(wait)
             else:
                 logger.warning(f"Telegram RetryAfter exhausted retries: {e}")
+        except BadRequest as e:
+            # Permanent API rejection ("message is not modified", "message to
+            # edit not found", …): a retry can never succeed, so don't burn
+            # attempts or backoff sleeps. BadRequest subclasses NetworkError —
+            # this branch must stay ahead of the transient one.
+            logger.info(f"Telegram edit rejected, not retrying: {e}")
+            return None
         except (TimedOut, NetworkError) as e:
             # Transient network issue
             last_error = e
@@ -196,7 +204,7 @@ async def telegram_edit_with_retry(
                     f"Telegram edit failed after {max_retries + 1} attempts: {e}"
                 )
         except Exception:
-            # Non-retryable (BadRequest, Forbidden, etc.) — raise immediately
+            # Unexpected (Forbidden, etc.) — raise immediately
             raise
 
     # All retries exhausted — log and return None
