@@ -740,3 +740,82 @@ class TestCardMessageReconciliation:
         )
 
         mock_reconcile.assert_not_awaited()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestAnswerCallbackFirst:
+    """#686a: once a click's queue item is claimed, the spinner-stopping
+    ``query.answer()`` must land BEFORE the slow chat ops (reconcile + the
+    terminal caption edit that waits out per-chat ``RetryAfter`` walls), so a
+    burst of clicks can't push the ack past Telegram's validity window and
+    leave a stuck spinner. The claim is the cheap, chat-op-free gate; answering
+    after it — not before — keeps a failed claim's ``validate_queue_item`` toast
+    as the first, visible answer (#679)."""
+
+    @staticmethod
+    def _record_order(order, query, mock_reconcile, mock_retry):
+        query.answer.side_effect = lambda *a, **k: order.append("answer")
+        mock_reconcile.side_effect = lambda *a, **k: order.append("reconcile")
+        mock_retry.side_effect = lambda *a, **k: order.append("caption_edit")
+
+    @patch("src.services.core.telegram_callbacks_queue.reconcile_card_messages")
+    @patch("src.services.core.telegram_callbacks_queue.telegram_edit_with_retry")
+    async def test_posted_answers_before_slow_work(
+        self, mock_retry, mock_reconcile, handlers
+    ):
+        queue_item = Mock(
+            media_item_id="m-1", telegram_message_id=None, telegram_chat_id=None
+        )
+        handlers.service.queue_repo.claim_for_processing.return_value = queue_item
+        handlers.core._execute_complete_db_ops.return_value = Mock(
+            file_name="photo.jpg"
+        )
+        query = _make_query()
+        order = []
+        self._record_order(order, query, mock_reconcile, mock_retry)
+
+        await handlers._do_complete_queue_action(
+            "q-1", _make_user(), query, "posted", True, "Done!", "posted"
+        )
+
+        query.answer.assert_awaited_once()
+        assert order == ["answer", "reconcile", "caption_edit"]
+
+    @patch("src.services.core.telegram_callbacks_queue.reconcile_card_messages")
+    @patch("src.services.core.telegram_callbacks_queue.telegram_edit_with_retry")
+    async def test_rejected_answers_before_slow_work(
+        self, mock_retry, mock_reconcile, handlers
+    ):
+        queue_item = Mock(
+            media_item_id="m-1", telegram_message_id=None, telegram_chat_id=None
+        )
+        handlers.service.queue_repo.claim_for_processing.return_value = queue_item
+        handlers.core._execute_reject_db_ops.return_value = Mock(file_name="photo.jpg")
+        query = _make_query()
+        order = []
+        self._record_order(order, query, mock_reconcile, mock_retry)
+
+        await handlers._do_handle_rejected("q-1", _make_user(), query)
+
+        query.answer.assert_awaited_once()
+        assert order == ["answer", "reconcile", "caption_edit"]
+
+    @patch("src.services.core.telegram_callbacks_queue.reconcile_card_messages")
+    @patch("src.services.core.telegram_callbacks_queue.validate_queue_item")
+    async def test_failed_claim_does_not_pre_answer(
+        self, mock_validate, mock_reconcile, handlers
+    ):
+        # Claim fails → validate_queue_item owns the first/only answer (its
+        # "already handled" toast, #679). The handler must NOT fire its own
+        # bare answer here, which would spend the one-answer budget and
+        # suppress that toast.
+        handlers.service.queue_repo.claim_for_processing.return_value = None
+        query = _make_query()
+
+        await handlers._do_complete_queue_action(
+            "q-1", _make_user(), query, "posted", True, "Done!", "posted"
+        )
+
+        query.answer.assert_not_called()
+        mock_reconcile.assert_not_awaited()
