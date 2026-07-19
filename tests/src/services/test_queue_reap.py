@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from telegram import InlineKeyboardMarkup
-from telegram.error import BadRequest
+from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TimedOut
 
 from src.services.core.queue_reap import (
     EXPIRED_CAPTION,
@@ -81,42 +81,81 @@ class TestExpireSentRow:
         queue_repo.delete.assert_called_once_with(str(row.id))
 
     @pytest.mark.asyncio
-    async def test_transient_failure_defers_without_side_effects(self):
-        """Wrapper returns None (transient exhausted) → no history, no delete, deferred."""
+    async def test_not_modified_is_already_expired_so_records_and_deletes(self):
+        """'Message is not modified' = card already Expired + stripped → record + delete.
+
+        The #682 regression: this permanent rejection was classified as
+        transient, deferring the same rows every sweep forever and flooding
+        the chat with no-op edits until Telegram rate-limited the bot.
+        """
         row = _make_row()
         bot = AsyncMock()
+        bot.edit_message_caption.side_effect = BadRequest(
+            "Message is not modified: specified new message content and reply "
+            "markup are exactly the same as a current content and reply markup "
+            "of the message"
+        )
+        history_repo = Mock()
+        history_repo.get_by_queue_item_id.return_value = None
+        queue_repo = Mock()
+
+        result = await expire_sent_row(
+            row, bot=bot, history_repo=history_repo, queue_repo=queue_repo
+        )
+
+        assert result == "reaped"
+        history_repo.create.assert_called_once()
+        queue_repo.delete.assert_called_once_with(str(row.id))
+        # One attempt only — in-reap retries would feed an active flood window.
+        assert bot.edit_message_caption.await_count == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "transient",
+        [RetryAfter(0), TimedOut(), NetworkError("connection dropped")],
+        ids=["retry_after", "timed_out", "network_error"],
+    )
+    async def test_transient_failure_defers_without_side_effects(self, transient):
+        """Transient edit failure (flood wait / timeout / network) → defer, untouched.
+
+        Deferral is immediate and single-attempt: the sweep cadence is the
+        retry loop, so backoff-sleeping here only stalls the reaper (and a
+        RetryAfter sleep would wait out a flood window just to re-enter it).
+        """
+        row = _make_row()
+        bot = AsyncMock()
+        bot.edit_message_caption.side_effect = transient
         history_repo = Mock()
         queue_repo = Mock()
 
-        with patch(
-            f"{_MODULE}.telegram_edit_with_retry", new_callable=AsyncMock
-        ) as mock_edit:
-            mock_edit.return_value = None
-            result = await expire_sent_row(
-                row, bot=bot, history_repo=history_repo, queue_repo=queue_repo
-            )
+        result = await expire_sent_row(
+            row, bot=bot, history_repo=history_repo, queue_repo=queue_repo
+        )
 
         # Row is left intact & tappable for the next sweep — never orphaned.
         assert result == "deferred"
         history_repo.create.assert_not_called()
         queue_repo.delete.assert_not_called()
+        assert bot.edit_message_caption.await_count == 1
 
     @pytest.mark.asyncio
-    async def test_terminal_edit_error_still_records_and_deletes(self):
-        """Non-retryable edit error (message not found) → still records + deletes, reaped."""
+    @pytest.mark.parametrize(
+        "terminal",
+        [BadRequest("Message to edit not found"), Forbidden("bot was kicked")],
+        ids=["message_gone", "forbidden"],
+    )
+    async def test_terminal_edit_error_still_records_and_deletes(self, terminal):
+        """Non-retryable edit error → nothing editable left, record + delete."""
         row = _make_row()
         bot = AsyncMock()
+        bot.edit_message_caption.side_effect = terminal
         history_repo = Mock()
         history_repo.get_by_queue_item_id.return_value = None
         queue_repo = Mock()
 
-        with patch(
-            f"{_MODULE}.telegram_edit_with_retry", new_callable=AsyncMock
-        ) as mock_edit:
-            mock_edit.side_effect = BadRequest("Message to edit not found")
-            result = await expire_sent_row(
-                row, bot=bot, history_repo=history_repo, queue_repo=queue_repo
-            )
+        result = await expire_sent_row(
+            row, bot=bot, history_repo=history_repo, queue_repo=queue_repo
+        )
 
         # Nothing editable left to orphan → proceed to record + delete.
         assert result == "reaped"
