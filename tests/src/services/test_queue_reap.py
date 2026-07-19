@@ -20,6 +20,7 @@ from src.services.core.queue_reap import (
     EXPIRED_CAPTION,
     expire_sent_row,
     reap_pending_rows,
+    record_expiry_and_delete,
 )
 from src.services.core.telegram_utils import _build_already_handled_caption
 
@@ -38,6 +39,19 @@ def _make_row():
         scheduled_for=ts,
         created_at=ts,
     )
+
+
+def _make_unsent_row():
+    """A queue row with no stamped telegram_message_id.
+
+    Either genuinely never sent, or — the #679/#680 class — delivered to
+    Telegram but never stamped because the send raised after delivery.
+    The two are indistinguishable from the row alone.
+    """
+    row = _make_row()
+    row.telegram_message_id = None
+    row.telegram_chat_id = None
+    return row
 
 
 @pytest.mark.unit
@@ -250,6 +264,123 @@ class TestExpireSentRow:
 
 
 @pytest.mark.unit
+class TestRecordExpiryAndDelete:
+    """Contract for the shared terminal-history-then-delete step (#687).
+
+    Every age-based deletion of an unstamped (telegram_message_id IS NULL)
+    row must write the terminal 'expired' history row BEFORE deleting: an
+    unstamped row may still have delivered a live card (#679/#680), and
+    without history a tap on that card surfaces the raw "Queue item not
+    found" error instead of the graceful "Expired" caption.
+    """
+
+    def test_writes_terminal_history_then_deletes(self):
+        """History row (expired/system_expiry) written, then the row deleted."""
+        row = _make_unsent_row()
+        history_repo = Mock()
+        history_repo.get_by_queue_item_id.return_value = None
+        queue_repo = Mock()
+
+        result = record_expiry_and_delete(
+            row, history_repo=history_repo, queue_repo=queue_repo
+        )
+
+        assert result is True
+        history_repo.create.assert_called_once()
+        params = history_repo.create.call_args[0][0]
+        assert params.status == "expired"
+        assert params.success is False
+        assert params.posting_method == "system_expiry"
+        assert params.queue_item_id == str(row.id)
+        assert params.media_item_id == str(row.media_item_id)
+        assert params.chat_settings_id == str(row.chat_settings_id)
+        queue_repo.delete.assert_called_once_with(str(row.id))
+
+    def test_idempotent_history_skips_create_but_still_deletes(self):
+        """Existing history row → create skipped, delete still runs."""
+        row = _make_unsent_row()
+        history_repo = Mock()
+        history_repo.get_by_queue_item_id.return_value = Mock()  # already recorded
+        queue_repo = Mock()
+
+        result = record_expiry_and_delete(
+            row, history_repo=history_repo, queue_repo=queue_repo
+        )
+
+        assert result is True
+        history_repo.create.assert_not_called()
+        queue_repo.delete.assert_called_once_with(str(row.id))
+
+    def test_history_write_failure_keeps_row_and_rolls_back(self):
+        """History write rejected → row NOT deleted (never delete without the
+        terminal record — that is the orphaning bug), both sessions rolled
+        back, False returned so callers can skip the row without aborting."""
+        row = _make_unsent_row()
+        history_repo = Mock()
+        history_repo.get_by_queue_item_id.return_value = None
+        history_repo.create.side_effect = IntegrityError(
+            "INSERT INTO posting_history", {}, Exception("check_posting_method")
+        )
+        queue_repo = Mock()
+
+        result = record_expiry_and_delete(
+            row, history_repo=history_repo, queue_repo=queue_repo
+        )
+
+        assert result is False
+        queue_repo.delete.assert_not_called()
+        history_repo.rollback.assert_called_once()
+        queue_repo.rollback.assert_called_once()
+
+    def test_delete_failure_rolls_back_and_returns_false(self):
+        """A DB failure on the delete is contained the same way."""
+        row = _make_unsent_row()
+        history_repo = Mock()
+        history_repo.get_by_queue_item_id.return_value = None
+        queue_repo = Mock()
+        queue_repo.delete.side_effect = SQLAlchemyError("connection lost")
+
+        result = record_expiry_and_delete(
+            row, history_repo=history_repo, queue_repo=queue_repo
+        )
+
+        assert result is False
+        history_repo.rollback.assert_called_once()
+        queue_repo.rollback.assert_called_once()
+
+    def test_non_db_error_still_raises(self):
+        """Programming errors surface loudly instead of per-row containment."""
+        row = _make_unsent_row()
+        history_repo = Mock()
+        history_repo.get_by_queue_item_id.side_effect = AttributeError("malformed row")
+        queue_repo = Mock()
+
+        with pytest.raises(AttributeError):
+            record_expiry_and_delete(
+                row, history_repo=history_repo, queue_repo=queue_repo
+            )
+
+    def test_687_regression_tap_after_sweep_shows_expired_not_qinf(self):
+        """The #687 orphan, end to end: a delivered-but-unstamped row swept by
+        an age-based reaper leaves history behind, so the tap-time fallback
+        renders the graceful "Expired" caption — never the raw
+        "Queue item not found" error."""
+        row = _make_unsent_row()  # delivered card, stamp never landed (#679)
+        history_repo = Mock()
+        history_repo.get_by_queue_item_id.return_value = None
+        queue_repo = Mock()
+
+        record_expiry_and_delete(row, history_repo=history_repo, queue_repo=queue_repo)
+
+        # The tap-time fallback (validate_queue_item) finds the history row
+        # this sweep just wrote and builds the friendly caption from it.
+        written = history_repo.create.call_args[0][0]
+        caption = _build_already_handled_caption(written)
+        assert caption == EXPIRED_CAPTION
+        assert "not found" not in caption.lower()
+
+
+@pytest.mark.unit
 class TestExpiredTapFallback:
     """The terminal 'expired' history row rescues a late tap on a reaped card."""
 
@@ -264,24 +395,28 @@ class TestExpiredTapFallback:
 @pytest.mark.unit
 class TestReapPendingRows:
     """Batch reaper the live delete paths share: button-bearing rows go through
-    expire_sent_row (strip card + write history), button-less rows plain-delete.
+    expire_sent_row (strip card + write history), unstamped rows through
+    record_expiry_and_delete (write history, then delete — #687).
     """
 
     @pytest.mark.asyncio
-    async def test_routes_button_rows_and_plain_deletes_the_rest(self):
-        """Mixed set → each button-bearing row is expired, each None row deleted."""
+    async def test_routes_button_rows_and_records_expiry_for_the_rest(self):
+        """Mixed set → button-bearing rows expired, unstamped rows recorded +
+        deleted through the shared helper — never raw-deleted (#687)."""
         btn1 = _make_row()  # telegram_message_id=555 (live card)
         btn2 = _make_row()
-        plain1 = _make_row()
-        plain1.telegram_message_id = None  # never sent to Telegram
-        plain2 = _make_row()
-        plain2.telegram_message_id = None
+        plain1 = _make_unsent_row()  # unstamped — may still carry a card
+        plain2 = _make_unsent_row()
         bot = AsyncMock()
         history_repo = Mock()
         queue_repo = Mock()
 
-        with patch(f"{_MODULE}.expire_sent_row", new_callable=AsyncMock) as mock_expire:
+        with (
+            patch(f"{_MODULE}.expire_sent_row", new_callable=AsyncMock) as mock_expire,
+            patch(f"{_MODULE}.record_expiry_and_delete") as mock_record,
+        ):
             mock_expire.return_value = "reaped"
+            mock_record.return_value = True
             removed = await reap_pending_rows(
                 [btn1, plain1, btn2, plain2],
                 bot=bot,
@@ -295,12 +430,31 @@ class TestReapPendingRows:
         assert btn1 in reaped_rows
         assert btn2 in reaped_rows
 
-        # Button-less rows are plain-deleted; the live ones are NOT delete()d.
-        deleted_ids = {c.args[0] for c in queue_repo.delete.call_args_list}
-        assert deleted_ids == {str(plain1.id), str(plain2.id)}
+        # Unstamped rows go through the history-then-delete helper.
+        assert mock_record.call_count == 2
+        recorded_rows = [c.args[0] for c in mock_record.call_args_list]
+        assert plain1 in recorded_rows
+        assert plain2 in recorded_rows
+        queue_repo.delete.assert_not_called()
 
         # All four rows removed.
         assert removed == 4
+
+    @pytest.mark.asyncio
+    async def test_failed_record_of_unstamped_row_is_not_counted(self):
+        """A contained record+delete failure leaves the row for the next pass."""
+        plain = _make_unsent_row()
+        bot = AsyncMock()
+        history_repo = Mock()
+        queue_repo = Mock()
+
+        with patch(f"{_MODULE}.record_expiry_and_delete") as mock_record:
+            mock_record.return_value = False
+            removed = await reap_pending_rows(
+                [plain], bot=bot, history_repo=history_repo, queue_repo=queue_repo
+            )
+
+        assert removed == 0
 
     @pytest.mark.asyncio
     async def test_deferred_button_row_is_not_counted_or_double_deleted(self):

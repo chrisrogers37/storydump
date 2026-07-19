@@ -20,6 +20,7 @@ def scheduler_service_mocked():
         service.queue_repo = Mock()
         service.queue_repo.count_by_status.return_value = 0
         service.queue_repo.count_recent_by_status.return_value = 0
+        service.queue_repo.get_stale_unsent_pending.return_value = []
         service.history_repo = Mock()
         service.history_repo.count_posts_today.return_value = 0
         service.lock_repo = Mock()
@@ -799,6 +800,7 @@ class TestSchedulerCategoryAllocation:
             service.queue_repo = Mock()
             service.queue_repo.count_by_status.return_value = 0
             service.queue_repo.count_recent_by_status.return_value = 0
+            service.queue_repo.get_stale_unsent_pending.return_value = []
             service.lock_repo = Mock()
             service.category_mix_repo = Mock()
             service.settings_service = Mock()
@@ -951,6 +953,7 @@ class TestSchedulerMediaPool:
             service.queue_repo = Mock()
             service.queue_repo.count_by_status.return_value = 0
             service.queue_repo.count_recent_by_status.return_value = 0
+            service.queue_repo.get_stale_unsent_pending.return_value = []
             service.lock_repo = Mock()
             service.category_mix_repo = Mock()
             service.settings_service = Mock()
@@ -1015,6 +1018,7 @@ class TestAutoApproval:
             service.queue_repo = Mock()
             service.queue_repo.count_by_status.return_value = 0
             service.queue_repo.count_recent_by_status.return_value = 0
+            service.queue_repo.get_stale_unsent_pending.return_value = []
             service.history_repo = Mock()
             service.history_repo.count_posts_today.return_value = 0
             service.lock_repo = Mock()
@@ -1132,6 +1136,7 @@ class TestAutoApproveInstagram:
             service.queue_repo = Mock()
             service.queue_repo.count_by_status.return_value = 0
             service.queue_repo.count_recent_by_status.return_value = 0
+            service.queue_repo.get_stale_unsent_pending.return_value = []
             service.history_repo = Mock()
             service.history_repo.count_posts_today.return_value = 0
             service.lock_repo = Mock()
@@ -1689,6 +1694,7 @@ class TestAutoApproveClaimBeforePublish:
             service.queue_repo = Mock()
             service.queue_repo.count_by_status.return_value = 0
             service.queue_repo.count_recent_by_status.return_value = 0
+            service.queue_repo.get_stale_unsent_pending.return_value = []
             service.history_repo = Mock()
             service.history_repo.count_posts_today.return_value = 0
             service.lock_repo = Mock()

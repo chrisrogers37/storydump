@@ -21,6 +21,7 @@ def scheduler_service_mocked():
         service = SchedulerService()
         service.media_repo = Mock()
         service.queue_repo = Mock()
+        service.queue_repo.get_stale_unsent_pending.return_value = []
         service.history_repo = Mock()
         service.lock_repo = Mock()
         service.category_mix_repo = Mock()
@@ -249,15 +250,43 @@ class TestStaleProcessingRecovery:
     async def test_process_slot_calls_both_cleanup_methods(
         self, scheduler_service_mocked
     ):
-        """Both delete_stale_pending and requeue_stale_processing run."""
+        """Both the stale-pending sweep and requeue_stale_processing run."""
         service = scheduler_service_mocked
         cs = _make_chat_settings(is_paused=True)
         service.settings_service.get_settings.return_value = cs
 
         await service.process_slot(telegram_chat_id=-100123)
 
-        service.queue_repo.delete_stale_pending.assert_called_once()
+        service.queue_repo.get_stale_unsent_pending.assert_called_once_with(
+            max_age_minutes=10
+        )
         service.queue_repo.requeue_stale_processing.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_process_slot_records_expiry_for_stale_pending_rows(
+        self, scheduler_service_mocked
+    ):
+        """#687: stale pending rows are deleted through record_expiry_and_delete
+        — terminal history first — never raw-deleted. A requeued (#679/#680)
+        delivered-but-unstamped card then shows "Expired" on tap instead of
+        the raw "Queue item not found"."""
+        service = scheduler_service_mocked
+        cs = _make_chat_settings(is_paused=True)
+        service.settings_service.get_settings.return_value = cs
+        stale_row = Mock()
+        service.queue_repo.get_stale_unsent_pending.return_value = [stale_row]
+
+        with patch(
+            "src.services.core.scheduler.record_expiry_and_delete"
+        ) as mock_record:
+            mock_record.return_value = True
+            await service.process_slot(telegram_chat_id=-100123)
+
+        mock_record.assert_called_once_with(
+            stale_row,
+            history_repo=service.history_repo,
+            queue_repo=service.queue_repo,
+        )
 
 
 # ==================== #363: shutdown guard ====================
