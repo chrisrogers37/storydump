@@ -9,6 +9,7 @@ from src.exceptions.google_drive import GoogleDriveAuthError
 from src.exceptions.instagram import is_container_confirmed_failed
 from src.exceptions.telegram import AmbiguousDeliveryError
 from src.services.base_service import BaseService
+from src.services.core.queue_reap import record_expiry_and_delete
 from src.services.core.settings_service import SettingsService
 from src.repositories.atomic_session import atomic_session
 from src.repositories.media_repository import MediaRepository
@@ -143,8 +144,14 @@ class SchedulerService(BaseService):
             Dict with keys: posted (bool), reason (str), and optionally
             queue_item_id, media_file, category.
         """
-        # Defense-in-depth: clean up failed/stale queue items from prior ticks
-        self.queue_repo.delete_stale_pending(max_age_minutes=10)
+        # Defense-in-depth: clean up failed/stale queue items from prior ticks.
+        # A stale pending row may carry a delivered-but-unstamped card — a
+        # requeued ambiguous send (#679/#680) — so each delete goes through
+        # the history-first reap helper (#687), never a raw delete.
+        for stale_row in self.queue_repo.get_stale_unsent_pending(max_age_minutes=10):
+            record_expiry_and_delete(
+                stale_row, history_repo=self.history_repo, queue_repo=self.queue_repo
+            )
         self.queue_repo.requeue_stale_processing(max_age_minutes=10)
 
         chat_settings = self.settings_service.get_settings(telegram_chat_id)

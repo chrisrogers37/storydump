@@ -95,44 +95,43 @@ class TestQueueRepository:
         # commit called once by get_by_id's end_read_transaction (no write commit)
         mock_db.commit.assert_called_once()
 
-    def test_delete_stale_only_targets_never_sent_rows(self, queue_repo, mock_db):
-        """delete_stale(hours=24) wipes only rows never sent to Telegram.
+    def test_get_stale_unsent_only_targets_unstamped_rows(self, queue_repo, mock_db):
+        """get_stale_unsent(hours=24) is a read — it returns the unstamped
+        (telegram_message_id IS NULL) accumulation and deletes NOTHING.
 
-        Regression context: 2026-05-17 → 19 outage left 954 stale rows
-        in posting_queue, eventually deleted manually on 2026-06-02.
-        Button-bearing rows (with a telegram_message_id) are handled first by
-        the shared reap so their inline buttons are stripped instead of
-        orphaned; delete_stale scopes to telegram_message_id IS NULL.
+        Deletion moved to the service layer (#687): each returned row gets a
+        terminal 'expired' history row via record_expiry_and_delete before it
+        is deleted, so a delivered-but-unstamped card (#679/#680) degrades to
+        "Expired" on tap instead of the raw "Queue item not found".
         """
         stale_item_a = MagicMock()
         stale_item_a.scheduled_for = datetime.utcnow() - timedelta(days=10)
         stale_item_b = MagicMock()
         stale_item_b.scheduled_for = datetime.utcnow() - timedelta(days=2)
-        mock_db.query.return_value.filter.return_value.all.return_value = [
-            stale_item_a,
-            stale_item_b,
-        ]
+        mock_query = mock_db.query.return_value
+        mock_query.filter.return_value = mock_query
+        mock_query.order_by.return_value = mock_query
+        mock_query.all.return_value = [stale_item_a, stale_item_b]
 
-        count = queue_repo.delete_stale(hours=24)
+        result = queue_repo.get_stale_unsent(hours=24)
 
-        assert count == 2
-        assert mock_db.delete.call_count == 2
-        mock_db.delete.assert_any_call(stale_item_a)
-        mock_db.delete.assert_any_call(stale_item_b)
-        mock_db.commit.assert_called_once()
-        # Scoped to never-sent rows so button-bearing cards aren't orphaned.
-        filter_args = mock_db.query.return_value.filter.call_args[0]
+        assert result == [stale_item_a, stale_item_b]
+        mock_db.delete.assert_not_called()
+        # Scoped to unstamped rows; stamped cards go through expire_sent_row.
+        filter_args = mock_query.filter.call_args[0]
         assert any("telegram_message_id IS NULL" in str(a) for a in filter_args)
 
-    def test_delete_stale_no_op_when_no_stale_items(self, queue_repo, mock_db):
-        """No commit fired when there's nothing to delete (cheap idle tick)."""
-        mock_db.query.return_value.filter.return_value.all.return_value = []
+    def test_get_stale_unsent_empty_when_no_stale_items(self, queue_repo, mock_db):
+        """Nothing past the cutoff → empty list, nothing deleted."""
+        mock_query = mock_db.query.return_value
+        mock_query.filter.return_value = mock_query
+        mock_query.order_by.return_value = mock_query
+        mock_query.all.return_value = []
 
-        count = queue_repo.delete_stale(hours=24)
+        result = queue_repo.get_stale_unsent(hours=24)
 
-        assert count == 0
+        assert result == []
         mock_db.delete.assert_not_called()
-        mock_db.commit.assert_not_called()
 
     def test_delete_queue_item(self, queue_repo, mock_db):
         """Test deleting a queue item."""
@@ -536,14 +535,17 @@ class TestSweepsExcludePublishing:
     """Every stale-sweep/reaper must leave a 'publishing' row intact so a
     claimed-but-unconfirmed publish is never reaped and re-served (#549)."""
 
-    def test_delete_stale_excludes_publishing(self, queue_repo, mock_db):
-        """delete_stale (targets msg_id IS NULL regardless of status after #561)
-        must additionally exclude status='publishing'."""
-        mock_db.query.return_value.filter.return_value.all.return_value = []
+    def test_get_stale_unsent_excludes_publishing(self, queue_repo, mock_db):
+        """get_stale_unsent (targets msg_id IS NULL regardless of status after
+        #561) must additionally exclude status='publishing'."""
+        mock_query = mock_db.query.return_value
+        mock_query.filter.return_value = mock_query
+        mock_query.order_by.return_value = mock_query
+        mock_query.all.return_value = []
 
-        queue_repo.delete_stale(hours=24)
+        queue_repo.get_stale_unsent(hours=24)
 
-        filter_args = mock_db.query.return_value.filter.call_args[0]
+        filter_args = mock_query.filter.call_args[0]
         rendered = " ".join(_literal(a) for a in filter_args)
         assert "status != 'publishing'" in rendered
         assert "telegram_message_id IS NULL" in rendered
@@ -563,16 +565,22 @@ class TestSweepsExcludePublishing:
         assert "status != 'publishing'" in rendered
         assert "telegram_message_id IS NOT NULL" in rendered
 
-    def test_delete_stale_pending_only_targets_pending(self, queue_repo, mock_db):
-        """delete_stale_pending is status-scoped to 'pending' — a 'publishing'
-        row can never match, so it needs no extra guard."""
-        mock_db.query.return_value.filter.return_value.all.return_value = []
+    def test_get_stale_unsent_pending_only_targets_pending(self, queue_repo, mock_db):
+        """get_stale_unsent_pending is status-scoped to unstamped 'pending'
+        rows — a 'publishing' row can never match, so it needs no extra
+        guard. A read: deletion (with its history write) is the caller's."""
+        mock_query = mock_db.query.return_value
+        mock_query.filter.return_value = mock_query
+        mock_query.order_by.return_value = mock_query
+        mock_query.all.return_value = []
 
-        queue_repo.delete_stale_pending(max_age_minutes=10)
+        queue_repo.get_stale_unsent_pending(max_age_minutes=10)
 
-        filter_args = mock_db.query.return_value.filter.call_args[0]
+        mock_db.delete.assert_not_called()
+        filter_args = mock_query.filter.call_args[0]
         rendered = " ".join(_literal(a) for a in filter_args)
         assert "status = 'pending'" in rendered
+        assert "telegram_message_id IS NULL" in rendered
         assert "publishing" not in rendered
 
     def test_processing_sweeps_only_target_processing(self, queue_repo, mock_db):

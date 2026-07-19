@@ -11,6 +11,14 @@ and writes a terminal ``expired`` posting_history row (audit trail + tap-time
 fallback). Both age-based reap paths — the scheduler's processing sweep and
 the hourly queue-cleanup loop — call this one helper so their behavior can
 never drift, and a future claim-lease reaper can reuse it too.
+
+Rows WITHOUT a ``telegram_message_id`` are not safe to hard-delete either: a
+timed-out send can deliver a card without the stamp ever landing (#679/#680),
+and the two cases are indistinguishable from the row alone. So every age-based
+deletion of an unstamped row goes through ``record_expiry_and_delete`` (#687),
+which writes the same terminal history row first — a spare row for a
+genuinely-never-sent item is harmless (no card exists to tap), while an
+orphaned-but-delivered card degrades to the graceful "Expired" caption.
 """
 
 from __future__ import annotations
@@ -76,10 +84,31 @@ async def expire_sent_row(row, *, bot, history_repo, queue_repo) -> str:
         )
 
     # PROCEED: idempotent terminal history write, then delete the queue row.
-    # Contained: callers run this mid-sweep over many rows, so a DB failure
-    # here (e.g. a constraint rejecting the write) must not raise and abort
-    # the rest of the pass — and the failed flush leaves the session dirty,
-    # poisoning the pass's remaining DB work unless rolled back.
+    if not record_expiry_and_delete(
+        row, history_repo=history_repo, queue_repo=queue_repo
+    ):
+        return "failed"
+    return "reaped"
+
+
+def record_expiry_and_delete(row, *, history_repo, queue_repo) -> bool:
+    """Write the terminal ``expired`` history row (idempotent), then delete
+    the queue row.
+
+    The shared final step of every reap deletion: sent rows reach it via
+    ``expire_sent_row`` after their card edit, unstamped rows directly
+    (#687 — see the module docstring for why they are not safe to
+    hard-delete). The delete only ever runs after the history write
+    succeeds — never the other way around.
+
+    Contained: callers run this mid-sweep over many rows, so a DB failure
+    here (e.g. a constraint rejecting the write) must not raise and abort
+    the rest of the pass — and the failed flush leaves the session dirty,
+    poisoning the pass's remaining DB work unless rolled back. Returns True
+    when the row was recorded + deleted, False on a contained DB failure
+    (row left for the next sweep).
+    """
+    row_id = str(row.id)
     try:
         now = datetime.now(timezone.utc)
         if not history_repo.get_by_queue_item_id(row_id):
@@ -111,17 +140,18 @@ async def expire_sent_row(row, *, bot, history_repo, queue_repo) -> str:
         )
         history_repo.rollback()
         queue_repo.rollback()
-        return "failed"
+        return False
 
     logger.info(f"Expire reap: recorded expiry + removed queue item {row_id[:8]}")
-    return "reaped"
+    return True
 
 
 async def reap_pending_rows(rows, *, bot, history_repo, queue_repo) -> int:
     """Delete a set of pending queue rows, routing any button-bearing row (one
     with a live Telegram card / telegram_message_id) through expire_sent_row so
     its buttons are stripped and a terminal history row is written instead of
-    orphaning the card. Non-button rows are plain-deleted. Returns the count of
+    orphaning the card. Unstamped rows go through record_expiry_and_delete —
+    they may equally carry a delivered card (#679/#680). Returns the count of
     rows actually removed (deferred or failed reaps are not counted)."""
     removed = 0
     for row in rows:
@@ -133,7 +163,8 @@ async def reap_pending_rows(rows, *, bot, history_repo, queue_repo) -> int:
                 == "reaped"
             ):
                 removed += 1
-        else:
-            queue_repo.delete(str(row.id))
+        elif record_expiry_and_delete(
+            row, history_repo=history_repo, queue_repo=queue_repo
+        ):
             removed += 1
     return removed
