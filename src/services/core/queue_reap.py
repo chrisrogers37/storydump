@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from sqlalchemy.exc import SQLAlchemyError
 from telegram import InlineKeyboardMarkup
 from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
 
@@ -31,9 +32,11 @@ async def expire_sent_row(row, *, bot, history_repo, queue_repo) -> str:
     C-edit the card to Expired + strip buttons, write a terminal ``expired``
     history row (idempotent), then delete the queue row.
 
-    Returns ``"reaped"`` (handled + deleted) or ``"deferred"`` (a transient
+    Returns ``"reaped"`` (handled + deleted), ``"deferred"`` (a transient
     edit failure left the card possibly still live and tappable, so the row
-    is left intact for the next sweep — never orphaned).
+    is left intact for the next sweep — never orphaned), or ``"failed"``
+    (recording/deleting hit a DB error; logged, session rolled back, row
+    left for the next sweep).
     """
     row_id = str(row.id)
 
@@ -73,27 +76,43 @@ async def expire_sent_row(row, *, bot, history_repo, queue_repo) -> str:
         )
 
     # PROCEED: idempotent terminal history write, then delete the queue row.
-    now = datetime.now(timezone.utc)
-    if not history_repo.get_by_queue_item_id(row_id):
-        history_repo.create(
-            HistoryCreateParams(
-                media_item_id=str(row.media_item_id),
-                queue_item_id=row_id,
-                queue_created_at=row.created_at,
-                queue_deleted_at=now,
-                scheduled_for=row.scheduled_for,
-                posted_at=now,
-                status="expired",
-                success=False,
-                posting_method="system_expiry",
-                posted_by_user_id=None,
-                chat_settings_id=str(row.chat_settings_id)
-                if row.chat_settings_id
-                else None,
+    # Contained: callers run this mid-sweep over many rows, so a DB failure
+    # here (e.g. a constraint rejecting the write) must not raise and abort
+    # the rest of the pass — and the failed flush leaves the session dirty,
+    # poisoning the pass's remaining DB work unless rolled back.
+    try:
+        now = datetime.now(timezone.utc)
+        if not history_repo.get_by_queue_item_id(row_id):
+            history_repo.create(
+                HistoryCreateParams(
+                    media_item_id=str(row.media_item_id),
+                    queue_item_id=row_id,
+                    queue_created_at=row.created_at,
+                    queue_deleted_at=now,
+                    scheduled_for=row.scheduled_for,
+                    posted_at=now,
+                    status="expired",
+                    success=False,
+                    posting_method="system_expiry",
+                    posted_by_user_id=None,
+                    chat_settings_id=str(row.chat_settings_id)
+                    if row.chat_settings_id
+                    else None,
+                )
             )
+        queue_repo.delete(row_id)
+    except SQLAlchemyError:
+        # DB failures only — a programming error (malformed row, bad params)
+        # must propagate loudly instead of masquerading as a per-row retry.
+        logger.error(
+            f"Expire reap: failed to record + delete {row_id[:8]}; "
+            f"row left for next sweep",
+            exc_info=True,
         )
+        history_repo.rollback()
+        queue_repo.rollback()
+        return "failed"
 
-    queue_repo.delete(row_id)
     logger.info(f"Expire reap: recorded expiry + removed queue item {row_id[:8]}")
     return "reaped"
 
@@ -103,7 +122,7 @@ async def reap_pending_rows(rows, *, bot, history_repo, queue_repo) -> int:
     with a live Telegram card / telegram_message_id) through expire_sent_row so
     its buttons are stripped and a terminal history row is written instead of
     orphaning the card. Non-button rows are plain-deleted. Returns the count of
-    rows actually removed (a transient-deferred reap is not counted)."""
+    rows actually removed (deferred or failed reaps are not counted)."""
     removed = 0
     for row in rows:
         if row.telegram_message_id is not None:

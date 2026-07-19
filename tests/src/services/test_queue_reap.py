@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from telegram import InlineKeyboardMarkup
 from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TimedOut
 
@@ -163,6 +164,73 @@ class TestExpireSentRow:
         queue_repo.delete.assert_called_once_with(str(row.id))
 
     @pytest.mark.asyncio
+    async def test_record_failure_returns_failed_rolls_back_keeps_row(self):
+        """A DB rejection recording the expiry must not raise out of the reap.
+
+        Callers are mid-sweep over many rows — raising aborts the whole pass
+        (and a dirty session poisons its remaining DB work). Log, roll back,
+        leave the row for the next sweep. Surfaced by prod's
+        check_posting_method constraint rejecting the 'system_expiry' write.
+        """
+        row = _make_row()
+        bot = AsyncMock()
+        bot.edit_message_caption.return_value = Mock()
+        history_repo = Mock()
+        history_repo.get_by_queue_item_id.return_value = None
+        history_repo.create.side_effect = IntegrityError(
+            "INSERT INTO posting_history", {}, Exception("check_posting_method")
+        )
+        queue_repo = Mock()
+
+        result = await expire_sent_row(
+            row, bot=bot, history_repo=history_repo, queue_repo=queue_repo
+        )
+
+        assert result == "failed"
+        queue_repo.delete.assert_not_called()
+        history_repo.rollback.assert_called_once()
+        queue_repo.rollback.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_delete_failure_returns_failed_and_rolls_back(self):
+        """A failure deleting the queue row is contained the same way."""
+        row = _make_row()
+        bot = AsyncMock()
+        bot.edit_message_caption.return_value = Mock()
+        history_repo = Mock()
+        history_repo.get_by_queue_item_id.return_value = None
+        queue_repo = Mock()
+        queue_repo.delete.side_effect = SQLAlchemyError("connection lost")
+
+        result = await expire_sent_row(
+            row, bot=bot, history_repo=history_repo, queue_repo=queue_repo
+        )
+
+        assert result == "failed"
+        history_repo.rollback.assert_called_once()
+        queue_repo.rollback.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_non_db_error_still_raises(self):
+        """Only DB failures are contained — programming errors surface loudly.
+
+        A malformed row or bad params is a code defect: containing it would
+        retry the same row every sweep forever, indistinguishable from a
+        transient DB blip. Let it propagate to the loop-level handler.
+        """
+        row = _make_row()
+        bot = AsyncMock()
+        bot.edit_message_caption.return_value = Mock()
+        history_repo = Mock()
+        history_repo.get_by_queue_item_id.side_effect = AttributeError("malformed row")
+        queue_repo = Mock()
+
+        with pytest.raises(AttributeError):
+            await expire_sent_row(
+                row, bot=bot, history_repo=history_repo, queue_repo=queue_repo
+            )
+
+    @pytest.mark.asyncio
     async def test_idempotent_history_skips_create_but_still_deletes(self):
         """Existing history row → create skipped, delete still runs, reaped."""
         row = _make_row()
@@ -252,3 +320,21 @@ class TestReapPendingRows:
         # Deferred → row left tappable for the next sweep, never fallback-deleted.
         assert removed == 0
         queue_repo.delete.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_failed_row_does_not_abort_batch_or_count(self):
+        """A row whose record+delete failed is skipped, the batch continues."""
+        bad = _make_row()
+        good = _make_row()
+        bot = AsyncMock()
+        history_repo = Mock()
+        queue_repo = Mock()
+
+        with patch(f"{_MODULE}.expire_sent_row", new_callable=AsyncMock) as mock_expire:
+            mock_expire.side_effect = ["failed", "reaped"]
+            removed = await reap_pending_rows(
+                [bad, good], bot=bot, history_repo=history_repo, queue_repo=queue_repo
+            )
+
+        assert mock_expire.await_count == 2
+        assert removed == 1
