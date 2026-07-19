@@ -295,72 +295,66 @@ class QueueRepository(BaseRepository):
             return True
         return False
 
-    def delete_stale(self, hours: int = 24) -> int:
-        """Delete queue items whose scheduled_for is older than ``hours`` ago.
+    def _get_stale_scheduled(
+        self, *, stamped: bool, hours: int, status: Optional[str] = None
+    ) -> List[PostingQueue]:
+        """Age-based fetch of rows past their reap age, split by stamp polarity.
 
-        Broad sweeper for the long-tail case where queue items accumulate
-        during an upstream outage (Instagram API down, scheduler stuck,
-        etc.) and never get processed. Distinct from
-        ``delete_stale_pending(max_age_minutes=10)`` which is the JIT
-        scheduler's short-window hygiene; this catches the day-scale
-        accumulation that caused the 2026-05-17 → 19 burst (954 rows
-        had to be manually deleted on 2026-06-02).
+        Backs ``get_stale_sent`` / ``get_stale_unsent`` so the reap-age query
+        — and its 'publishing' guard — cannot drift between the two.
+        Ordered by ``scheduled_for`` ascending (oldest first).
+        """
+        cutoff = datetime.utcnow() - timedelta(hours=hours)
+        msg_id = PostingQueue.telegram_message_id
+        query = self.db.query(PostingQueue).filter(
+            msg_id.isnot(None) if stamped else msg_id.is_(None),
+            PostingQueue.scheduled_for < cutoff,
+            # Never reap a claimed-but-unconfirmed publish (#549): whether
+            # stamped (stuck autopost card) or not (auto-approve path), a
+            # 'publishing' row must persist to block reselection of a
+            # maybe-posted story.
+            PostingQueue.status != "publishing",
+        )
+        if status:
+            query = query.filter(PostingQueue.status == status)
+        result = query.order_by(PostingQueue.scheduled_for.asc()).all()
+        self.end_read_transaction()
+        return result
 
-        Runs hourly via ``cleanup_queue_loop``. Targets only rows that were
-        NEVER sent to Telegram (``telegram_message_id IS NULL``) — the raw
-        accumulation from an upstream outage. Button-bearing rows (which
-        carry live inline buttons) are handled first by the shared reap
-        (``expire_sent_row``), which strips their buttons and writes a
-        terminal history row; deleting them here would orphan the buttons.
+    def get_stale_unsent(self, hours: int = 24) -> List[PostingQueue]:
+        """Get unstamped queue rows whose scheduled_for is older than ``hours``.
+
+        Feeds the hourly ``cleanup_queue_loop`` sweep of the long-tail
+        accumulation from an upstream outage (the 2026-05-17 → 19 burst left
+        954 such rows). An unstamped row may still have delivered a card, so
+        the caller must delete through ``record_expiry_and_delete`` (#687),
+        never a raw hard-delete.
 
         Args:
             hours: Age threshold in hours (default: 24).
 
         Returns:
-            Number of items deleted.
+            List of unstamped PostingQueue items older than the cutoff.
         """
-        cutoff = datetime.utcnow() - timedelta(hours=hours)
-        stale = (
-            self.db.query(PostingQueue)
-            .filter(
-                PostingQueue.scheduled_for < cutoff,
-                PostingQueue.telegram_message_id.is_(None),
-                # Never reap a claimed-but-unconfirmed publish (#549): a stuck
-                # 'publishing' row (also msg_id IS NULL on the auto-approve
-                # path) must persist to block reselection of a maybe-posted
-                # story.
-                PostingQueue.status != "publishing",
-            )
-            .all()
-        )
+        return self._get_stale_scheduled(stamped=False, hours=hours)
 
-        count = len(stale)
-        if not count:
-            return 0
+    def get_stale_unsent_pending(self, max_age_minutes: int = 10) -> List[PostingQueue]:
+        """Get unstamped pending items older than ``max_age_minutes``.
 
-        oldest = min(i.scheduled_for for i in stale)
-        for item in stale:
-            self.db.delete(item)
-        self.db.commit()
-        logger.info(
-            f"Deleted {count} queue items older than {hours}h "
-            f"(oldest scheduled_for: {oldest})"
-        )
-        return count
+        Feeds the scheduler's defense-in-depth sweep of items orphaned by
+        crashes or restarts. Normal failures delete the queue item
+        immediately in _send_to_telegram(); this catches anything that
+        slipped through. The caller must delete through
+        ``record_expiry_and_delete`` (#687), never a raw hard-delete.
 
-    def delete_stale_pending(self, max_age_minutes: int = 10) -> int:
-        """Delete pending items that were never sent to Telegram.
-
-        Defense-in-depth for items orphaned by crashes or restarts.
-        Normal failures delete the queue item immediately in
-        _send_to_telegram(); this catches anything that slipped through.
+        Ordered by ``created_at`` ascending (oldest first).
 
         Args:
             max_age_minutes: Minutes after which an unsent pending item
-                is considered stale and deleted (default: 10).
+                is considered stale (default: 10).
 
         Returns:
-            Number of items deleted.
+            List of unstamped pending PostingQueue items older than the cutoff.
         """
         cutoff = datetime.utcnow() - timedelta(minutes=max_age_minutes)
         stale = (
@@ -370,22 +364,11 @@ class QueueRepository(BaseRepository):
                 PostingQueue.telegram_message_id.is_(None),
                 PostingQueue.created_at <= cutoff,
             )
+            .order_by(PostingQueue.created_at.asc())
             .all()
         )
-
-        count = len(stale)
-        for item in stale:
-            logger.info(
-                f"Deleting stale queue item {item.id} "
-                f"(status={item.status}, age={datetime.utcnow() - item.created_at})"
-            )
-            self.db.delete(item)
-
-        if count:
-            self.db.commit()
-            logger.info(f"Cleaned up {count} stale pending/failed queue items")
-
-        return count
+        self.end_read_transaction()
+        return stale
 
     def requeue_stale_processing(self, max_age_minutes: int = 10) -> int:
         """Reset processing items that were never sent to Telegram back to pending.
@@ -489,21 +472,7 @@ class QueueRepository(BaseRepository):
         Returns:
             List of button-bearing PostingQueue items older than the cutoff.
         """
-        cutoff = datetime.utcnow() - timedelta(hours=hours)
-        query = self.db.query(PostingQueue).filter(
-            PostingQueue.telegram_message_id.isnot(None),
-            PostingQueue.scheduled_for < cutoff,
-            # A stuck 'publishing' autopost card (msg_id NOT NULL) must not be
-            # reaped by expire_sent_row either — it would record an 'expired'
-            # row for a maybe-posted story and reopen the media for a duplicate
-            # (#549).
-            PostingQueue.status != "publishing",
-        )
-        if status:
-            query = query.filter(PostingQueue.status == status)
-        result = query.order_by(PostingQueue.scheduled_for.asc()).all()
-        self.end_read_transaction()
-        return result
+        return self._get_stale_scheduled(stamped=True, hours=hours, status=status)
 
     def get_pending_with_telegram_message(
         self, telegram_chat_id: int
