@@ -81,6 +81,12 @@ class TelegramCallbackQueueHandlers:
             await validate_queue_item(self.service, queue_id, query)
             return
 
+        # Answer after the claim (the cheap, chat-op-free gate) but before the
+        # slow chat ops below: a failed claim keeps validate_queue_item's toast
+        # as the one allowed answer, and a click burst can't defer this ack past
+        # Telegram's ~30s validity window and leave the spinner stuck.
+        await query.answer()
+
         await reconcile_card_messages(self.service, queue_id, queue_item, query)
 
         # Execute DB operations with retry-once on SSL/connection errors
@@ -467,6 +473,11 @@ class TelegramCallbackQueueHandlers:
         if not queue_item:
             await validate_queue_item(self.service, queue_id, query)
             return
+
+        # Stop the spinner before the slow chat ops below, mirroring
+        # _do_complete_queue_action: answer after the cheap claim so a failed
+        # claim's validation toast stays the first answer.
+        await query.answer()
 
         await reconcile_card_messages(self.service, queue_id, queue_item, query)
 
