@@ -76,6 +76,10 @@ class PostingHistory(Base):
             "status IN ('posted', 'failed', 'skipped', 'rejected', 'expired')",
             name="check_history_status",
         ),
+        CheckConstraint(
+            "posting_method IN ('instagram_api', 'telegram_manual', 'system_expiry')",
+            name="check_posting_method",
+        ),
     )
 
     def __repr__(self):
