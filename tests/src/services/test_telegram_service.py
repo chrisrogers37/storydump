@@ -71,6 +71,11 @@ def mock_telegram_service():
         # Build callback dispatch table (mirrors initialize() setup)
         service._callback_dispatch = service._build_callback_dispatch_table()
 
+        # Routing tests verify dispatch wiring; the callback authorization gate
+        # is exercised by tests/integration/test_callback_authorization_gate.py.
+        # Authorize by default here so routing is tested independent of authz.
+        service._authorize_callback = AsyncMock(return_value=True)
+
         yield service
 
 
@@ -975,9 +980,7 @@ class TestCallbackAnswerDiscipline:
         )
         assert answer_calls[0] == ("answer", ("Done!",), {"show_alert": True})
 
-    async def test_fallback_answers_when_handler_does_not(
-        self, mock_telegram_service
-    ):
+    async def test_fallback_answers_when_handler_does_not(self, mock_telegram_service):
         """A handler that never answers still gets the spinner stopped —
         exactly one blank answer, after the handler has run."""
         update, query = self._make_update(mock_telegram_service)
@@ -994,9 +997,7 @@ class TestCallbackAnswerDiscipline:
         assert order == ["handler", "answer"]
         query.answer.assert_called_once_with()
 
-    async def test_fallback_answer_rejection_is_swallowed(
-        self, mock_telegram_service
-    ):
+    async def test_fallback_answer_rejection_is_swallowed(self, mock_telegram_service):
         """If the handler already answered, the fallback's second answer is
         rejected by Telegram — that rejection must not propagate."""
         from telegram.error import BadRequest
