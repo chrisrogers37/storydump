@@ -437,14 +437,15 @@ class TestSendToTelegram:
         service.history_repo.create.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_ambiguous_delivery_not_retried_stays_processing(
+    async def test_ambiguous_delivery_marks_sent_unconfirmed(
         self, scheduler_service_mocked
     ):
         """An ambiguous send (timed out; the card may already be in the chat)
-        must not be resent — that posts a duplicate approval card. The item is
-        left in 'processing' (the stale-processing sweep requeues it if it
-        never arrived; a button click reconciles it if it did). No retry, no
-        'failed' status, no failure history row."""
+        must not be resent — that posts a duplicate approval card. Instead of
+        being left in the ambiguous (processing, msg_id NULL) limbo, the row is
+        recorded as 'sent_unconfirmed' so the processing-requeue sweep no longer
+        resets and re-sends a maybe-delivered card. No retry, no 'failed'
+        status, no failure history row."""
         from src.exceptions.telegram import AmbiguousDeliveryError
 
         service = scheduler_service_mocked
@@ -464,8 +465,12 @@ class TestSendToTelegram:
 
         assert result is False
         assert service.telegram_service.send_notification.call_count == 1
+        # Claimed to processing, then moved out of the limbo to sent_unconfirmed.
         service.queue_repo.update_status.assert_called_once_with(
             str(queue_item.id), "processing"
+        )
+        service.queue_repo.transition.assert_called_once_with(
+            str(queue_item.id), "sent_unconfirmed", allowed_from={"processing"}
         )
         service.history_repo.create.assert_not_called()
 

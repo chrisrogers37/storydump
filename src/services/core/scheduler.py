@@ -455,14 +455,22 @@ class SchedulerService(BaseService):
                 raise
 
             except AmbiguousDeliveryError as e:
-                # The card may already be in the chat, so a resend would post
-                # a duplicate approval card. Leave the item in 'processing' —
-                # requeue_stale_processing restores it if the card never
-                # arrived, and a button click reconciles its
-                # telegram_message_id if it did.
+                # The card may already be in the chat, so a resend would post a
+                # duplicate approval card. Record the unconfirmed delivery
+                # instead of retrying: moving the row out of the ambiguous
+                # (processing, msg_id NULL) limbo to 'sent_unconfirmed' takes it
+                # out of requeue_stale_processing's scope, so a maybe-delivered
+                # card is never reset and re-sent. A recovered message-id stamp
+                # or a button click promotes it to 'delivered'; otherwise it
+                # ages out to expired.
                 logger.warning(
                     f"Telegram send delivery ambiguous for {queue_item_id} — "
-                    f"leaving in processing without retry: {e}"
+                    f"marking sent_unconfirmed without retry: {e}"
+                )
+                self.queue_repo.transition(
+                    queue_item_id,
+                    "sent_unconfirmed",
+                    allowed_from={"processing"},
                 )
                 return False
 

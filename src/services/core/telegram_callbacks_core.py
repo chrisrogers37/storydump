@@ -158,7 +158,10 @@ class TelegramCallbackCore:
                 str(queue_item.media_item_id)
             )
 
-            self.service.history_repo.create(
+            # Idempotent on queue_item_id: a lingering 'processing' row can be
+            # re-claimed (claim_for_processing re-accepts it), so a replayed
+            # completion must not write a second, undeduped history row (#680).
+            self.service.history_repo.create_idempotent(
                 self._create_history_params(queue_id, queue_item, user, status, success)
             )
 
@@ -198,7 +201,7 @@ class TelegramCallbackCore:
                 str(queue_item.media_item_id)
             )
 
-            self.service.history_repo.create(
+            self.service.history_repo.create_idempotent(
                 self._create_history_params(
                     queue_id, queue_item, user, "rejected", False
                 )
