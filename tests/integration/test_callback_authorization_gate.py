@@ -1,0 +1,391 @@
+"""Integration test: the central callback authorization gate.
+
+The Telegram callback dispatcher (``TelegramService._handle_callback``) is the
+one chokepoint every inline-button tap flows through. ``callback_data`` is
+client-supplied, so authorization cannot rely on it — it is resolved instead
+from the one field the client cannot choose, ``query.message.chat_id`` (the chat
+the tapped message actually lives in). This is the callback-layer mirror of the
+web ``_validate_request`` gate.
+
+The gate fails closed when:
+
+* the caller is not an active member of the chat the callback fired in, or
+* a queue id carried in ``callback_data`` resolves to a row owned by a
+  *different* instance than the caller's.
+
+Ownership is owned-OR-NULL: a legacy row with no instance stamp is allowed
+through (so the gate does not depend on the ownership backfill); only a
+populated, foreign instance id is refused.
+
+Real DB. Rows are created through the production repositories against the
+``.env.test`` database (routed via ``_route_repos_to_test_db``) — a separate
+connection from the conftest ``test_db`` rollback fixture, so the ``seed``
+factory deletes every row it creates (children first) and leaves zero residue
+for later tests in the session.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock, Mock
+from uuid import uuid4
+
+import pytest
+from sqlalchemy import text
+from sqlalchemy.orm import sessionmaker
+
+from src.repositories.chat_settings_repository import ChatSettingsRepository
+from src.repositories.media_repository import MediaRepository
+from src.repositories.membership_repository import MembershipRepository
+from src.repositories.queue_repository import QueueRepository
+from src.repositories.user_repository import UserRepository
+from src.services.core.telegram_service import TelegramService
+
+
+@pytest.fixture(autouse=True)
+def _route_repos_to_test_db(setup_test_database, monkeypatch):
+    """Route the production repo session factory at the current-schema test DB.
+
+    Repositories open sessions through ``get_db()`` → the module-global
+    ``SessionLocal``; rebinding that sessionmaker to the conftest test engine
+    sends every repo session to the current-schema ``.env.test`` DB without
+    modifying ``src``. Mirrors the queue-claim concurrency integration test.
+    """
+    if setup_test_database is None:
+        pytest.skip("Database not available - skipping integration test")
+
+    import src.config.database as db_module
+
+    monkeypatch.setattr(
+        db_module,
+        "SessionLocal",
+        sessionmaker(
+            autocommit=False,
+            autoflush=False,
+            bind=setup_test_database,
+            expire_on_commit=False,
+        ),
+    )
+    yield
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _dispose_pool_after_module(setup_test_database):
+    """Return every pooled connection this module opened before later files run.
+
+    These tests commit through the shared session-scoped engine; disposing its
+    idle connections afterward hands a clean pool to the timing-sensitive
+    concurrency tests that run later in the session.
+    """
+    yield
+    if setup_test_database is not None:
+        setup_test_database.dispose()
+
+
+def _unique_chat_id() -> int:
+    """A unique group chat id (Telegram groups are large negatives)."""
+    return -(uuid4().int % (10**12)) - 1
+
+
+def _unique_user_id() -> int:
+    return uuid4().int % (10**11)
+
+
+class _Seed:
+    """Create instance/user/membership/queue rows and remember them for purge."""
+
+    def __init__(self) -> None:
+        self.users: list[str] = []
+        self.instances: list[str] = []
+        self.memberships: list[tuple[str, str]] = []
+        self.media: list[str] = []
+        self.queue: list[str] = []
+
+    def instance(self, telegram_chat_id: int | None = None) -> str:
+        if telegram_chat_id is None:
+            telegram_chat_id = _unique_chat_id()
+        repo = ChatSettingsRepository()
+        try:
+            cs_id = str(repo.get_or_create(telegram_chat_id).id)
+        finally:
+            repo.close()
+        self.instances.append(cs_id)
+        return cs_id
+
+    def user(self, telegram_user_id: int | None = None) -> tuple[int, str]:
+        tid = telegram_user_id if telegram_user_id is not None else _unique_user_id()
+        repo = UserRepository()
+        try:
+            uid = str(
+                repo.create(
+                    telegram_user_id=tid,
+                    telegram_username=f"user{tid}",
+                    telegram_first_name="Test",
+                    telegram_last_name="User",
+                ).id
+            )
+        finally:
+            repo.close()
+        self.users.append(uid)
+        return tid, uid
+
+    def membership(self, user_id: str, cs_id: str) -> None:
+        repo = MembershipRepository()
+        try:
+            repo.create_membership(user_id=user_id, chat_settings_id=cs_id)
+        finally:
+            repo.close()
+        self.memberships.append((user_id, cs_id))
+
+    def queue_item(self, cs_id: str | None) -> tuple[str, str]:
+        media_repo = MediaRepository()
+        try:
+            media_id = str(
+                media_repo.create(
+                    file_path=f"/test/callback-gate/{uuid4()}.jpg",
+                    file_name="gate.jpg",
+                    file_hash=uuid4().hex,
+                    file_size_bytes=2048,
+                    mime_type="image/jpeg",
+                ).id
+            )
+        finally:
+            media_repo.close()
+
+        queue_repo = QueueRepository()
+        try:
+            queue_id = str(
+                queue_repo.create(
+                    media_item_id=media_id,
+                    scheduled_for=datetime.now(timezone.utc) - timedelta(minutes=1),
+                    chat_settings_id=cs_id,
+                ).id
+            )
+        finally:
+            queue_repo.close()
+        self.media.append(media_id)
+        self.queue.append(queue_id)
+        return media_id, queue_id
+
+    def purge(self) -> None:
+        """Delete every created row (children first) via one routed session.
+
+        ``user_id``-keyed rather than membership-pair so an auto-provisioned
+        membership (created by ``_get_or_create_user`` on the dispatch path) is
+        swept too.
+        """
+        import src.config.database as db_module
+
+        session = db_module.SessionLocal()
+        try:
+            # audit_log FK-references both users and chat_settings (membership
+            # creation writes audit rows) — clear it before its parents.
+            for uid in self.users:
+                session.execute(
+                    text("DELETE FROM audit_log WHERE changed_by_user_id = :u"),
+                    {"u": uid},
+                )
+            for cs_id in self.instances:
+                session.execute(
+                    text("DELETE FROM audit_log WHERE chat_settings_id = :i"),
+                    {"i": cs_id},
+                )
+            for uid in self.users:
+                session.execute(
+                    text("DELETE FROM user_chat_memberships WHERE user_id = :u"),
+                    {"u": uid},
+                )
+            for queue_id in self.queue:
+                session.execute(
+                    text("DELETE FROM posting_queue WHERE id = :i"), {"i": queue_id}
+                )
+            for media_id in self.media:
+                session.execute(
+                    text("DELETE FROM media_items WHERE id = :i"), {"i": media_id}
+                )
+            for uid in self.users:
+                session.execute(text("DELETE FROM users WHERE id = :i"), {"i": uid})
+            for cs_id in self.instances:
+                session.execute(
+                    text("DELETE FROM chat_settings WHERE id = :i"), {"i": cs_id}
+                )
+            session.commit()
+        finally:
+            session.close()
+
+
+@pytest.fixture
+def seed():
+    """A row factory that purges everything it created after the test."""
+    s = _Seed()
+    try:
+        yield s
+    finally:
+        s.purge()
+
+
+@pytest.fixture
+def service():
+    """A real TelegramService (no bot/network; __init__ wires repos only).
+
+    Closed after each test so its repo sessions are returned to the pool.
+    """
+    svc = TelegramService()
+    try:
+        yield svc
+    finally:
+        svc.close()
+
+
+def _make_query(from_user_id: int, chat_id: int, data: str) -> AsyncMock:
+    """A stand-in Telegram callback query.
+
+    Async methods (answer, edit_message_*) are AsyncMocks; ``from_user`` and
+    ``message`` are plain Mocks so attribute reads are values, not coroutines.
+    """
+    query = AsyncMock()
+    query.data = data
+    query.from_user = Mock()
+    query.from_user.id = from_user_id
+    query.from_user.username = f"user{from_user_id}"
+    query.from_user.first_name = "Test"
+    query.from_user.last_name = "User"
+    query.message = Mock()
+    query.message.chat_id = chat_id
+    query.message.message_id = 1
+    query.message.chat = Mock()
+    query.message.chat.type = "supergroup"
+    return query
+
+
+def _queue_status(queue_id: str) -> str | None:
+    repo = QueueRepository()
+    try:
+        row = repo.get_by_id(queue_id)
+        return row.status if row else None
+    finally:
+        repo.close()
+
+
+# ---------------------------------------------------------------------------
+# Gate decision — _authorize_callback
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+class TestCallbackAuthorizationDecision:
+    """The gate's allow/deny decision against real instance + queue rows."""
+
+    async def test_member_acting_on_own_instance_item_is_authorized(
+        self, service, seed
+    ):
+        """A member acting on a queue item owned by their own instance passes."""
+        chat_id = _unique_chat_id()
+        cs_id = seed.instance(chat_id)
+        caller_tid, caller_uid = seed.user()
+        seed.membership(caller_uid, cs_id)
+        _, queue_id = seed.queue_item(cs_id)
+        query = _make_query(caller_tid, chat_id, f"posted:{queue_id}")
+
+        allowed = await service._authorize_callback("posted", queue_id, query)
+        assert allowed is True
+
+    async def test_callback_for_item_in_another_instance_is_refused(
+        self, service, seed
+    ):
+        """A queue id owned by a different instance is refused (owned check)."""
+        caller_chat = _unique_chat_id()
+        caller_cs = seed.instance(caller_chat)
+        other_cs = seed.instance()
+        caller_tid, caller_uid = seed.user()
+        seed.membership(caller_uid, caller_cs)
+        _, other_queue_id = seed.queue_item(other_cs)
+        query = _make_query(caller_tid, caller_chat, f"posted:{other_queue_id}")
+
+        allowed = await service._authorize_callback("posted", other_queue_id, query)
+        assert allowed is False
+        query.answer.assert_awaited()  # caller answered, no handler ran
+
+    async def test_caller_without_membership_is_refused(self, service, seed):
+        """A caller with no active membership in the chat is refused.
+
+        The queue item is owned by the caller's own chat, so ownership would
+        pass — the refusal can only come from the membership check.
+        """
+        chat_id = _unique_chat_id()
+        cs_id = seed.instance(chat_id)
+        caller_tid, _ = seed.user()  # user exists, but no membership row
+        _, queue_id = seed.queue_item(cs_id)
+        query = _make_query(caller_tid, chat_id, f"posted:{queue_id}")
+
+        allowed = await service._authorize_callback("posted", queue_id, query)
+        assert allowed is False
+
+    async def test_owned_or_null_allows_legacy_unstamped_item(self, service, seed):
+        """A queue row with no instance stamp is allowed (no backfill dependency)."""
+        chat_id = _unique_chat_id()
+        cs_id = seed.instance(chat_id)
+        caller_tid, caller_uid = seed.user()
+        seed.membership(caller_uid, cs_id)
+        _, legacy_queue_id = seed.queue_item(None)  # NULL instance stamp
+        query = _make_query(caller_tid, chat_id, f"posted:{legacy_queue_id}")
+
+        allowed = await service._authorize_callback("posted", legacy_queue_id, query)
+        assert allowed is True
+
+
+# ---------------------------------------------------------------------------
+# End-to-end dispatch — _handle_callback must not reach the handler on refusal
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+class TestCallbackDispatchGating:
+    """The dispatcher must not invoke a handler for a refused callback."""
+
+    async def test_foreign_instance_callback_does_not_reach_handler(
+        self, service, seed
+    ):
+        """A queue id from another instance never reaches the autopost handler.
+
+        Proves zero state mutation and zero media action: the handler — the only
+        code that mutates the row or posts media — is never called, and the
+        queue row is left untouched.
+        """
+        caller_chat = _unique_chat_id()
+        caller_cs = seed.instance(caller_chat)
+        other_cs = seed.instance()
+        caller_tid, caller_uid = seed.user()
+        seed.membership(caller_uid, caller_cs)
+        _, other_queue_id = seed.queue_item(other_cs)
+
+        spy = AsyncMock()
+        service._callback_dispatch = {"autopost": spy}
+        query = _make_query(caller_tid, caller_chat, f"autopost:{other_queue_id}")
+        update = Mock()
+        update.callback_query = query
+
+        await service._handle_callback(update, Mock())
+
+        spy.assert_not_called()
+        assert _queue_status(other_queue_id) == "pending"
+
+    async def test_own_instance_callback_reaches_handler(self, service, seed):
+        """A member's callback on their own instance item still dispatches."""
+        chat_id = _unique_chat_id()
+        cs_id = seed.instance(chat_id)
+        caller_tid, caller_uid = seed.user()
+        seed.membership(caller_uid, cs_id)
+        _, queue_id = seed.queue_item(cs_id)
+
+        spy = AsyncMock()
+        service._callback_dispatch = {"posted": spy}
+        query = _make_query(caller_tid, chat_id, f"posted:{queue_id}")
+        update = Mock()
+        update.callback_query = query
+
+        await service._handle_callback(update, Mock())
+
+        spy.assert_awaited_once()
