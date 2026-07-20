@@ -72,29 +72,6 @@ class TestQueueRepository:
         assert len(result) == 2
         mock_db.query.assert_called_with(PostingQueue)
 
-    def test_update_status(self, queue_repo, mock_db):
-        """Test updating queue item status."""
-        mock_item = MagicMock()
-        mock_item.status = "pending"
-        mock_db.query.return_value.filter.return_value.first.return_value = mock_item
-
-        queue_repo.update_status("some-id", "posted")
-
-        assert mock_item.status == "posted"
-        # commit called twice: once by get_by_id's end_read_transaction, once by the write
-        assert mock_db.commit.call_count == 2
-        mock_db.refresh.assert_called_once_with(mock_item)
-
-    def test_update_status_not_found(self, queue_repo, mock_db):
-        """Test updating status of non-existent queue item."""
-        mock_db.query.return_value.filter.return_value.first.return_value = None
-
-        result = queue_repo.update_status("nonexistent-id", "posted")
-
-        assert result is None
-        # commit called once by get_by_id's end_read_transaction (no write commit)
-        mock_db.commit.assert_called_once()
-
     def test_get_stale_unsent_only_targets_unstamped_rows(self, queue_repo, mock_db):
         """get_stale_unsent(hours=24) is a read — it returns the unstamped
         (telegram_message_id IS NULL) accumulation and deletes NOTHING.

@@ -271,7 +271,10 @@ class TestExecuteCompleteDbOps:
         result = core._execute_complete_db_ops("q-1", queue_item, user, "posted", True)
 
         assert result is media_item
-        core.service.history_repo.create.assert_called_once()
+        # Idempotent write: a replayed completion (re-claimed lingering row)
+        # must not double-insert the terminal history row.
+        core.service.history_repo.create_idempotent.assert_called_once()
+        core.service.history_repo.create.assert_not_called()
         core.service.media_repo.increment_times_posted.assert_called_once_with(
             "media-1", chat_settings_id="cs-1"
         )
@@ -336,7 +339,8 @@ class TestExecuteRejectDbOps:
         result = core._execute_reject_db_ops("q-1", queue_item, user)
 
         assert result is media_item
-        core.service.history_repo.create.assert_called_once()
+        core.service.history_repo.create_idempotent.assert_called_once()
+        core.service.history_repo.create.assert_not_called()
         core.service.lock_service.create_permanent_lock.assert_called_once_with(
             "media-1", created_by_user_id="user-1"
         )

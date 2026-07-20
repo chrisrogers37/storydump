@@ -30,8 +30,9 @@ import re
 
 import pytest
 
-from src.models.enums import HistoryStatus, PostingMethod
+from src.models.enums import HistoryStatus, PostingMethod, QueueStatus
 from src.models.posting_history import PostingHistory
+from src.models.posting_queue import PostingQueue
 from src.utils.validators import MIGRATIONS_DIR
 
 
@@ -85,4 +86,14 @@ class TestEnumSSOTParity:
     def test_latest_migration_history_status_matches_enum(self):
         assert _latest_migration_in_list("check_history_status") == {
             m.value for m in HistoryStatus
+        }
+
+    def test_model_queue_status_matches_enum(self):
+        assert _model_constraint_values(PostingQueue, "check_status") == {
+            m.value for m in QueueStatus
+        }
+
+    def test_latest_migration_queue_status_matches_enum(self):
+        assert _latest_migration_in_list("check_status") == {
+            m.value for m in QueueStatus
         }

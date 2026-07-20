@@ -1,6 +1,6 @@
 """Posting queue repository - CRUD operations for posting queue."""
 
-from typing import Optional, List
+from typing import Optional, List, Iterable
 from datetime import datetime, timedelta
 from sqlalchemy import and_
 
@@ -34,9 +34,13 @@ class QueueRepository(BaseRepository):
         the same item concurrently, the second gets None instead of a
         duplicate.
 
-        Items arrive in 'processing' from the scheduler. Callbacks may also
-        arrive when items are still 'pending' (e.g. /next force-post).
-        We accept both states.
+        Items arrive in 'processing' from the scheduler, or 'pending' when a
+        callback races the send (e.g. /next force-post). They also arrive in a
+        delivery state — 'delivered' (card confirmed in the chat) or
+        'sent_unconfirmed' (send dispatched, delivery unconfirmed) — when a human
+        taps a card whose row has moved past 'processing'. All are claimable;
+        excluding the delivery states would resolve a legitimate tap to None
+        ("Queue item not found").
 
         Returns:
             The claimed PostingQueue item (now in 'processing'), or None if
@@ -46,7 +50,9 @@ class QueueRepository(BaseRepository):
             self.db.query(PostingQueue)
             .filter(
                 PostingQueue.id == queue_id,
-                PostingQueue.status.in_(["pending", "processing"]),
+                PostingQueue.status.in_(
+                    ["pending", "processing", "sent_unconfirmed", "delivered"]
+                ),
             )
             .with_for_update(skip_locked=True)
             .first()
@@ -236,14 +242,46 @@ class QueueRepository(BaseRepository):
         self.db.refresh(queue_item)
         return queue_item
 
-    def update_status(self, queue_id: str, status: str) -> PostingQueue:
-        """Update queue item status."""
-        queue_item = self.get_by_id(queue_id)
-        if queue_item:
-            queue_item.status = status
-            self.db.commit()
-            self.db.refresh(queue_item)
-        return queue_item
+    def transition(
+        self,
+        queue_id: str,
+        to_status: str,
+        allowed_from: Optional[Iterable[str]] = None,
+    ) -> Optional[PostingQueue]:
+        """Move a queue row to ``to_status`` through one atomic guarded seam.
+
+        The single place delivery-state writes flow through. The ``allowed_from``
+        guard is enforced in the UPDATE's own WHERE clause — a single conditional
+        statement, not a read-then-write — so two concurrent transitions out of
+        the same state can never both succeed: the first flips the row out of
+        ``allowed_from`` and the rest match zero rows and return ``None`` (the
+        row moved under them — a concurrent claim or reap). This mirrors
+        ``claim_for_processing``'s concurrency-safe conditional claim. With
+        ``allowed_from=None`` the status is set unconditionally.
+
+        Returns the updated row, or ``None`` if the row is gone or its current
+        status is outside ``allowed_from``.
+        """
+        query = self.db.query(PostingQueue).filter(PostingQueue.id == queue_id)
+        if allowed_from is not None:
+            query = query.filter(PostingQueue.status.in_(list(allowed_from)))
+        updated = query.update(
+            {PostingQueue.status: to_status}, synchronize_session="fetch"
+        )
+        self.db.commit()
+        if updated == 0:
+            allowed = set(allowed_from) if allowed_from is not None else "any"
+            logger.info(
+                f"Queue item {queue_id} not transitioned to {to_status} "
+                f"(missing, or current status not in {allowed})"
+            )
+            return None
+        return self.get_by_id(queue_id)
+
+    def update_status(self, queue_id: str, status: str) -> Optional[PostingQueue]:
+        """Update queue item status unconditionally (see :meth:`transition` for
+        a from-state-guarded write)."""
+        return self.transition(queue_id, status)
 
     def mark_publishing(self, queue_id: str, container_id: str) -> PostingQueue:
         """Claim a queue row for an in-flight Instagram publish (#549).

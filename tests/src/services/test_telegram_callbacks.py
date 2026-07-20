@@ -113,8 +113,8 @@ class TestRejectConfirmation:
         service.queue_repo.delete.assert_called_once_with(queue_id)
 
         # Should create history record with status='rejected'
-        service.history_repo.create.assert_called_once()
-        history_call = service.history_repo.create.call_args
+        service.history_repo.create_idempotent.assert_called_once()
+        history_call = service.history_repo.create_idempotent.call_args
         params = history_call.args[0]
         assert params.status == "rejected"
 
@@ -717,8 +717,8 @@ class TestEarlyProcessingFeedback:
         mock_query.edit_message_reply_markup.side_effect = lambda **kw: (
             call_order.append("remove_keyboard")
         )
-        service.history_repo.create.side_effect = lambda *a, **kw: call_order.append(
-            "history_create"
+        service.history_repo.create_idempotent.side_effect = lambda *a, **kw: (
+            call_order.append("history_create")
         )
 
         await handlers.complete_queue_action(
@@ -773,7 +773,7 @@ class TestEarlyProcessingFeedback:
             callback_name="skip",
         )
 
-        service.history_repo.create.assert_called_once()
+        service.history_repo.create_idempotent.assert_called_once()
         service.queue_repo.delete.assert_called_once()
         mock_query.edit_message_caption.assert_called_once()
 
@@ -815,8 +815,8 @@ class TestEarlyProcessingFeedback:
         mock_query.edit_message_reply_markup.side_effect = lambda **kw: (
             call_order.append("remove_keyboard")
         )
-        service.history_repo.create.side_effect = lambda *a, **kw: call_order.append(
-            "history_create"
+        service.history_repo.create_idempotent.side_effect = lambda *a, **kw: (
+            call_order.append("history_create")
         )
 
         await handlers.handle_rejected(queue_id, mock_user, mock_query)
@@ -868,7 +868,7 @@ class TestRaceConditionHandling:
         await handlers.handle_posted(queue_id, mock_user, mock_query)
 
         # History created exactly once
-        assert service.history_repo.create.call_count == 1
+        assert service.history_repo.create_idempotent.call_count == 1
 
         # Second click on the same item - lock is cleaned up so a new one is created,
         # but claim_for_processing returns None (item was already claimed/deleted)
@@ -880,7 +880,7 @@ class TestRaceConditionHandling:
         await handlers.handle_posted(queue_id, mock_user, mock_query_2)
 
         # History still only created once (second call found no queue item)
-        assert service.history_repo.create.call_count == 1
+        assert service.history_repo.create_idempotent.call_count == 1
 
     async def test_lock_prevents_concurrent_execution(self, mock_callback_handlers):
         """Test that the lock prevents concurrent execution on the same item."""
@@ -923,7 +923,7 @@ class TestRaceConditionHandling:
         )
 
         # Should NOT create history (action was blocked)
-        service.history_repo.create.assert_not_called()
+        service.history_repo.create_idempotent.assert_not_called()
 
         # Clean up
         lock.release()
@@ -1001,7 +1001,7 @@ class TestRaceConditionHandling:
 
         # The cancel flag should have been set (even though cleanup_operation_state
         # removes it, we verify it was set by checking the call succeeded)
-        service.history_repo.create.assert_called_once()
+        service.history_repo.create_idempotent.assert_called_once()
 
     async def test_skipped_sets_cancel_flag(self, mock_callback_handlers):
         """Test that clicking 'Skip' sets the cancel flag."""
@@ -1117,7 +1117,7 @@ class TestSSLRetry:
 
         # First history_repo.create raises OperationalError, second succeeds
         op_error = OperationalError("SSL closed", {}, Exception("SSL"))
-        service.history_repo.create.side_effect = [op_error, Mock()]
+        service.history_repo.create_idempotent.side_effect = [op_error, Mock()]
         # No existing history → retry should proceed
         service.history_repo.get_by_queue_item_id.return_value = None
 
@@ -1131,7 +1131,7 @@ class TestSSLRetry:
             callback_name="skip",
         )
 
-        assert service.history_repo.create.call_count == 2
+        assert service.history_repo.create_idempotent.call_count == 2
         mock_query.edit_message_caption.assert_called()
 
     async def test_non_operational_error_not_retried(self, mock_callback_handlers):
@@ -1157,7 +1157,7 @@ class TestSSLRetry:
         mock_query = AsyncMock()
         mock_query.message = Mock(chat_id=-100123, message_id=1)
 
-        service.history_repo.create.side_effect = ValueError("bad data")
+        service.history_repo.create_idempotent.side_effect = ValueError("bad data")
 
         with pytest.raises(ValueError):
             await handlers._do_complete_queue_action(
@@ -1170,7 +1170,7 @@ class TestSSLRetry:
                 callback_name="skip",
             )
 
-        assert service.history_repo.create.call_count == 1
+        assert service.history_repo.create_idempotent.call_count == 1
 
     async def test_second_failure_propagates(self, mock_callback_handlers):
         """Both attempts fail -> exception propagates."""
@@ -1197,7 +1197,7 @@ class TestSSLRetry:
         mock_query.message = Mock(chat_id=-100123, message_id=1)
 
         op_error = OperationalError("SSL closed", {}, Exception("SSL"))
-        service.history_repo.create.side_effect = [op_error, op_error]
+        service.history_repo.create_idempotent.side_effect = [op_error, op_error]
         # No existing history → retry should proceed (and fail again)
         service.history_repo.get_by_queue_item_id.return_value = None
 
@@ -1238,7 +1238,7 @@ class TestSSLRetry:
         mock_query.message = Mock(chat_id=-100123, message_id=1)
 
         op_error = OperationalError("SSL closed", {}, Exception("SSL"))
-        service.history_repo.create.side_effect = op_error
+        service.history_repo.create_idempotent.side_effect = op_error
         # No existing history → retry path checks get_by_id
         service.history_repo.get_by_queue_item_id.return_value = None
 
@@ -1288,13 +1288,13 @@ class TestSSLRetry:
         mock_query.message = Mock(chat_id=-100123, message_id=1)
 
         op_error = OperationalError("SSL closed", {}, Exception("SSL"))
-        service.history_repo.create.side_effect = [op_error, Mock()]
+        service.history_repo.create_idempotent.side_effect = [op_error, Mock()]
         # No existing history → retry should proceed
         service.history_repo.get_by_queue_item_id.return_value = None
 
         await handlers.handle_rejected(queue_id, mock_user, mock_query)
 
-        assert service.history_repo.create.call_count == 2
+        assert service.history_repo.create_idempotent.call_count == 2
 
 
 @pytest.mark.unit
@@ -1329,7 +1329,7 @@ class TestAtomicClaim:
         )
 
         # No history created (claim failed, fallback showed message)
-        service.history_repo.create.assert_not_called()
+        service.history_repo.create_idempotent.assert_not_called()
         service.queue_repo.delete.assert_not_called()
 
     async def test_claim_success_proceeds_normally(self, mock_callback_handlers):
@@ -1364,7 +1364,7 @@ class TestAtomicClaim:
             callback_name="posted",
         )
 
-        service.history_repo.create.assert_called_once()
+        service.history_repo.create_idempotent.assert_called_once()
         service.queue_repo.delete.assert_called_once_with(queue_id)
 
     async def test_rejected_uses_operation_lock(self, mock_callback_handlers):
@@ -1393,7 +1393,7 @@ class TestAtomicClaim:
         )
 
         # Should NOT create history or lock (action was blocked)
-        service.history_repo.create.assert_not_called()
+        service.history_repo.create_idempotent.assert_not_called()
         service.lock_service.create_permanent_lock.assert_not_called()
 
         lock.release()
@@ -1423,7 +1423,7 @@ class TestAtomicClaim:
 
         # First create raises OperationalError
         op_error = OperationalError("SSL closed", {}, Exception("SSL"))
-        service.history_repo.create.side_effect = op_error
+        service.history_repo.create_idempotent.side_effect = op_error
         # History already exists (written before the error)
         service.history_repo.get_by_queue_item_id.return_value = Mock(status="skipped")
 
@@ -1439,7 +1439,7 @@ class TestAtomicClaim:
 
         # history_repo.create called only once (the failing attempt);
         # retry was skipped because history already existed
-        assert service.history_repo.create.call_count == 1
+        assert service.history_repo.create_idempotent.call_count == 1
         # Queue item still cleaned up
         service.queue_repo.delete.assert_called_once_with(queue_id)
 
