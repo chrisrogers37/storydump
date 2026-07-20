@@ -6,7 +6,6 @@ from sqlalchemy import and_
 
 from src.repositories.base_repository import BaseRepository
 from src.models.posting_queue import PostingQueue
-from src.models.enums import QueueStatus
 from src.utils.logger import logger
 
 
@@ -52,12 +51,7 @@ class QueueRepository(BaseRepository):
             .filter(
                 PostingQueue.id == queue_id,
                 PostingQueue.status.in_(
-                    [
-                        QueueStatus.PENDING.value,
-                        QueueStatus.PROCESSING.value,
-                        QueueStatus.SENT_UNCONFIRMED.value,
-                        QueueStatus.DELIVERED.value,
-                    ]
+                    ["pending", "processing", "sent_unconfirmed", "delivered"]
                 ),
             )
             .with_for_update(skip_locked=True)
@@ -281,7 +275,7 @@ class QueueRepository(BaseRepository):
         self.db.refresh(queue_item)
         return queue_item
 
-    def update_status(self, queue_id: str, status: str) -> PostingQueue:
+    def update_status(self, queue_id: str, status: str) -> Optional[PostingQueue]:
         """Update queue item status unconditionally (see :meth:`transition` for
         a from-state-guarded write)."""
         return self.transition(queue_id, status)

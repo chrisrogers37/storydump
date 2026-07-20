@@ -60,9 +60,7 @@ class PostingQueue(Base):
     # Timestamps (preserved in history)
     created_at = Column(DateTime, default=datetime.utcnow)
 
-    # CHECK constraint is DERIVED from the code-owned QueueStatus enum (no
-    # hand-typed value list) — the enum is the single source of truth; the CI
-    # parity gate (tests/src/models/test_enum_ssot_parity.py) fails on any drift.
+    # check_status is derived from the QueueStatus enum SSOT (parity-gated).
     __table_args__ = (
         CheckConstraint(
             f"status IN ({sql_in_list(QueueStatus)})",
