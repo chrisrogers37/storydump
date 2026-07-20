@@ -152,7 +152,10 @@ class SchedulerService(BaseService):
             record_expiry_and_delete(
                 stale_row, history_repo=self.history_repo, queue_repo=self.queue_repo
             )
-        self.queue_repo.requeue_stale_processing(max_age_minutes=10)
+        # Stale 'processing' rows resolve to their delivery state (INV-1/
+        # INV-2): stamped → delivered, unknown → sent_unconfirmed. Never
+        # requeued — a maybe-delivered card must not be re-sent (#680).
+        self.queue_repo.resolve_stale_processing(max_age_minutes=10)
 
         chat_settings = self.settings_service.get_settings(telegram_chat_id)
 
@@ -457,12 +460,12 @@ class SchedulerService(BaseService):
             except AmbiguousDeliveryError as e:
                 # The card may already be in the chat, so a resend would post a
                 # duplicate approval card. Record the unconfirmed delivery
-                # instead of retrying: moving the row out of the ambiguous
-                # (processing, msg_id NULL) limbo to 'sent_unconfirmed' takes it
-                # out of requeue_stale_processing's scope, so a maybe-delivered
-                # card is never reset and re-sent. A recovered message-id stamp
-                # or a button click promotes it to 'delivered'; otherwise it
-                # ages out to expired.
+                # instead of retrying: 'sent_unconfirmed' carries the unknown
+                # as first-class state, outside every requeue/reap path (the
+                # stale-processing resolver parks, never requeues), so a
+                # maybe-delivered card is never reset and re-sent. A recovered
+                # message-id stamp or a button click promotes it to
+                # 'delivered'; otherwise it ages out to expired.
                 logger.warning(
                     f"Telegram send delivery ambiguous for {queue_item_id} — "
                     f"marking sent_unconfirmed without retry: {e}"

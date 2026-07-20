@@ -61,10 +61,18 @@ class PostingQueue(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # check_status is derived from the QueueStatus enum SSOT (parity-gated).
+    # check_delivered_stamped is INV-1: 'delivered' means the card is
+    # confirmed in the chat, so a delivered row MUST carry its
+    # telegram_message_id — the "delivered-but-unstamped" orphan shape
+    # (#687) is unrepresentable.
     __table_args__ = (
         CheckConstraint(
             f"status IN ({sql_in_list(QueueStatus)})",
             name="check_status",
+        ),
+        CheckConstraint(
+            "status <> 'delivered' OR telegram_message_id IS NOT NULL",
+            name="check_delivered_stamped",
         ),
     )
 

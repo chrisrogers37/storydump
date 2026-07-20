@@ -76,7 +76,6 @@ class TestSchedulerLoop:
             patch(f"{_SCHEDULER}.QueueRepository") as mock_queue_repo_cls,
             patch(f"{_SCHEDULER}.ServiceRunRepository"),
         ):
-            mock_queue_repo_cls.return_value.discard_abandoned_processing.return_value = 0
             mock_queue_repo_cls.return_value.get_stale_sent.return_value = []
             mock_sleep.side_effect = StopAsyncIteration
             try:
@@ -113,7 +112,6 @@ class TestSchedulerLoop:
             patch(f"{_SCHEDULER}.QueueRepository") as mock_queue_repo_cls,
             patch(f"{_SCHEDULER}.ServiceRunRepository"),
         ):
-            mock_queue_repo_cls.return_value.discard_abandoned_processing.return_value = 0
             mock_queue_repo_cls.return_value.get_stale_sent.return_value = []
             mock_sleep.side_effect = StopAsyncIteration
             try:
@@ -141,7 +139,6 @@ class TestSchedulerLoop:
             patch(f"{_SCHEDULER}.QueueRepository") as mock_queue_repo_cls,
             patch(f"{_SCHEDULER}.ServiceRunRepository"),
         ):
-            mock_queue_repo_cls.return_value.discard_abandoned_processing.return_value = 0
             mock_queue_repo_cls.return_value.get_stale_sent.return_value = []
             mock_sleep.side_effect = StopAsyncIteration
             try:
@@ -177,7 +174,6 @@ class TestSchedulerLoop:
             patch(f"{_SCHEDULER}.QueueRepository") as mock_queue_repo_cls,
             patch(f"{_SCHEDULER}.ServiceRunRepository"),
         ):
-            mock_queue_repo_cls.return_value.discard_abandoned_processing.return_value = 0
             mock_queue_repo_cls.return_value.get_stale_sent.return_value = []
             mock_sleep.side_effect = StopAsyncIteration
             try:
@@ -218,7 +214,6 @@ class TestSchedulerLoop:
             patch(f"{_SCHEDULER}.QueueRepository") as mock_queue_repo_cls,
             patch(f"{_SCHEDULER}.ServiceRunRepository"),
         ):
-            mock_queue_repo_cls.return_value.discard_abandoned_processing.return_value = 0
             mock_queue_repo_cls.return_value.get_stale_sent.return_value = []
             mock_sleep.side_effect = StopAsyncIteration
             try:
@@ -251,7 +246,6 @@ class TestSchedulerLoop:
             patch(f"{_SCHEDULER}.QueueRepository") as mock_queue_repo_cls,
             patch(f"{_SCHEDULER}.ServiceRunRepository"),
         ):
-            mock_queue_repo_cls.return_value.discard_abandoned_processing.return_value = 0
             mock_queue_repo_cls.return_value.get_stale_sent.return_value = []
             mock_sleep.side_effect = StopAsyncIteration
             try:
@@ -290,7 +284,6 @@ class TestSchedulerLoop:
             patch(f"{_SCHEDULER}.QueueRepository") as mock_queue_repo_cls,
             patch(f"{_SCHEDULER}.ServiceRunRepository"),
         ):
-            mock_queue_repo_cls.return_value.discard_abandoned_processing.return_value = 0
             mock_queue_repo_cls.return_value.get_stale_sent.return_value = []
             mock_sleep.side_effect = StopAsyncIteration
             try:
@@ -326,7 +319,6 @@ class TestSchedulerLoop:
             patch(f"{_SCHEDULER}.QueueRepository") as mock_queue_repo_cls,
             patch(f"{_SCHEDULER}.ServiceRunRepository") as mock_sr_repo_cls,
         ):
-            mock_queue_repo_cls.return_value.discard_abandoned_processing.return_value = 0
             mock_queue_repo_cls.return_value.get_stale_sent.return_value = []
             mock_sr_repo = mock_sr_repo_cls.return_value
             mock_sr_repo.delete_older_than.return_value = 5
@@ -374,7 +366,6 @@ class TestSchedulerLoop:
                 f"{_SCHEDULER}._token_refresh_tick", new_callable=AsyncMock
             ) as mock_tr_tick,
         ):
-            mock_queue_repo_cls.return_value.discard_abandoned_processing.return_value = 0
             mock_queue_repo_cls.return_value.get_stale_sent.return_value = []
             mock_sleep.side_effect = StopAsyncIteration  # one tick
 
@@ -414,7 +405,6 @@ class TestSchedulerLoop:
                 f"{_SCHEDULER}._token_refresh_tick", new_callable=AsyncMock
             ) as mock_tr_tick,
         ):
-            mock_queue_repo_cls.return_value.discard_abandoned_processing.return_value = 0
             mock_queue_repo_cls.return_value.get_stale_sent.return_value = []
             mock_sleep.side_effect = StopAsyncIteration
 
@@ -466,7 +456,6 @@ class TestSchedulerLoop:
             patch(f"{_SCHEDULER}.QueueRepository") as mock_queue_repo_cls,
             patch(f"{_SCHEDULER}.ServiceRunRepository"),
         ):
-            mock_queue_repo_cls.return_value.discard_abandoned_processing.return_value = 0
             mock_queue_repo_cls.return_value.get_stale_sent.return_value = []
             mock_sleep.side_effect = sleep_flips_sync
 
@@ -485,8 +474,8 @@ class TestSchedulerLoop:
         assert calls[1].kwargs["first_tick"] is False
 
     @pytest.mark.asyncio
-    async def test_scheduler_loop_rolls_back_queue_repo_on_discard_error(self):
-        """If queue_repo.discard_abandoned_processing raises, the session is
+    async def test_scheduler_loop_rolls_back_queue_repo_on_reap_error(self):
+        """If the stale-row reap raises, the session is
         rolled back so the next tick doesn't PendingRollbackError. This was a
         real production incident: one bad query left the standalone queue_repo
         in a broken transaction and every subsequent tick errored for hours.
@@ -508,10 +497,7 @@ class TestSchedulerLoop:
             patch(f"{_SCHEDULER}.ServiceRunRepository"),
         ):
             queue_repo = mock_queue_repo_cls.return_value
-            queue_repo.discard_abandoned_processing.side_effect = RuntimeError(
-                "simulated DB error"
-            )
-            queue_repo.get_stale_sent.return_value = []
+            queue_repo.get_stale_sent.side_effect = RuntimeError("simulated DB error")
             queue_repo.rollback = Mock()
             mock_sleep.side_effect = StopAsyncIteration
 
@@ -555,7 +541,6 @@ class TestSchedulerLoop:
             ) as mock_expire,
         ):
             queue_repo = mock_queue_repo_cls.return_value
-            queue_repo.discard_abandoned_processing.return_value = 0
             queue_repo.get_stale_sent.return_value = [stale_row]
             mock_sleep.side_effect = StopAsyncIteration
             try:
@@ -601,7 +586,6 @@ class TestSchedulerLoop:
             patch(f"{_SCHEDULER}.QueueRepository") as mock_queue_repo_cls,
             patch(f"{_SCHEDULER}.ServiceRunRepository"),
         ):
-            mock_queue_repo_cls.return_value.discard_abandoned_processing.return_value = 0
             mock_queue_repo_cls.return_value.get_stale_sent.return_value = []
             mock_sleep.side_effect = counting_sleep
             try:

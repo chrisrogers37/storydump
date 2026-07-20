@@ -400,40 +400,6 @@ class TestClaimForProcessing:
 
 
 @pytest.mark.unit
-class TestDiscardAbandonedProcessing:
-    """Tests for discard_abandoned_processing method."""
-
-    def test_discards_old_processing_items(self, queue_repo, mock_db):
-        """Items in processing older than threshold are deleted."""
-        old_time = datetime.utcnow() - timedelta(hours=48)
-        mock_item1 = MagicMock(status="processing", scheduled_for=old_time)
-        mock_item2 = MagicMock(status="processing", scheduled_for=old_time)
-        mock_query = mock_db.query.return_value
-        mock_query.filter.return_value = mock_query
-        mock_query.all.return_value = [mock_item1, mock_item2]
-
-        result = queue_repo.discard_abandoned_processing()
-
-        assert result == 2
-        assert mock_db.delete.call_count == 2
-        mock_db.commit.assert_called_once()
-        # Only never-sent processing rows; button-bearing ones go through the reap.
-        filter_args = mock_db.query.return_value.filter.call_args[0]
-        assert any("telegram_message_id IS NULL" in str(a) for a in filter_args)
-
-    def test_no_abandoned_items(self, queue_repo, mock_db):
-        """No abandoned items → returns 0, no commit."""
-        mock_query = mock_db.query.return_value
-        mock_query.filter.return_value = mock_query
-        mock_query.all.return_value = []
-
-        result = queue_repo.discard_abandoned_processing()
-
-        assert result == 0
-        mock_db.commit.assert_not_called()
-
-
-@pytest.mark.unit
 class TestGetStaleSent:
     """Tests for get_stale_sent (button-bearing rows past reap age, #560)."""
 
@@ -560,20 +526,15 @@ class TestSweepsExcludePublishing:
         assert "telegram_message_id IS NULL" in rendered
         assert "publishing" not in rendered
 
-    def test_processing_sweeps_only_target_processing(self, queue_repo, mock_db):
-        """requeue_stale_processing / discard_abandoned_processing are scoped to
-        'processing' — 'publishing' rows are excluded by construction."""
+    def test_processing_sweep_only_targets_processing(self, queue_repo, mock_db):
+        """resolve_stale_processing selects on status + age ONLY (INV-2):
+        'publishing' rows are excluded by construction, and the stamp carries
+        no selection meaning — disposition reads it, the WHERE never does."""
         mock_db.query.return_value.filter.return_value.all.return_value = []
-        queue_repo.requeue_stale_processing(max_age_minutes=10)
+        queue_repo.resolve_stale_processing(max_age_minutes=10)
         rendered = " ".join(
             _literal(a) for a in mock_db.query.return_value.filter.call_args[0]
         )
         assert "status = 'processing'" in rendered
         assert "publishing" not in rendered
-
-        queue_repo.discard_abandoned_processing(abandon_threshold_hours=24)
-        rendered = " ".join(
-            _literal(a) for a in mock_db.query.return_value.filter.call_args[0]
-        )
-        assert "status = 'processing'" in rendered
-        assert "publishing" not in rendered
+        assert "telegram_message_id" not in rendered

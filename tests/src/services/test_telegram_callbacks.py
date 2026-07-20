@@ -1650,6 +1650,8 @@ class TestBatchApprove:
         service.queue_repo.get_all_with_media.side_effect = [
             [(item1, "meme.jpg", "memes")],
             [(item2, "merch.jpg", "merch")],
+            [],  # sent_unconfirmed
+            [],  # delivered
         ]
         service.queue_repo.claim_for_processing.side_effect = [item1, item2]
         service.media_repo.get_by_id.return_value = Mock()
@@ -1711,6 +1713,8 @@ class TestBatchApprove:
 
         service.queue_repo.get_all_with_media.side_effect = [
             [(item1, "file.jpg", "cat")],
+            [],
+            [],
             [],
         ]
         service.queue_repo.claim_for_processing.return_value = None

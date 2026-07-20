@@ -60,19 +60,19 @@ async def _scheduler_tick(
     NOT process chats, so the first-tick catch-up flag is not consumed by a
     sync-wait no-op tick (#553).
     """
-    # Reap queue items abandoned in 'processing' for over 24h.
+    # Gracefully expire button-bearing rows stuck in 'processing' past reap
+    # age: their inline buttons are stripped and a terminal 'expired' history
+    # row is written, so a late tap shows "Expired" instead of the scary
+    # "Queue item not found". There is no raw-delete sweep any more: an
+    # unstamped stale row is parked by resolve_stale_processing (10 min) and
+    # the hourly cleanup loop deletes aged rows through the history-first
+    # reap (#687) — a raw delete here could orphan a maybe-delivered card.
+    #
     # queue_repo is a standalone repository (not owned by a BaseService), so
     # the outer loop's cleanup_transactions() doesn't roll it back on error.
     # Without this guard a single failed query would leave the session in a
     # broken transaction and every subsequent tick would PendingRollbackError
     # for the lifetime of the worker — observed in production.
-    #
-    # Button-bearing rows (already sent to Telegram) are gracefully expired
-    # FIRST via the shared reap: their inline buttons are stripped and a
-    # terminal 'expired' history row is written, so a late tap shows
-    # "Expired" instead of the scary "Queue item not found". The narrowed
-    # discard_abandoned_processing (telegram_message_id IS NULL) then only
-    # sweeps rows that were never sent — no buttons to orphan.
     try:
         telegram_service = scheduler_service.telegram_service
         if telegram_service is not None:
@@ -82,13 +82,9 @@ async def _scheduler_tick(
                 await expire_sent_row(
                     row, bot=bot, history_repo=history_repo, queue_repo=queue_repo
                 )
-        discarded = queue_repo.discard_abandoned_processing()
     except Exception:
         queue_repo.rollback()
         raise
-
-    if discarded > 0:
-        logger.warning(f"Discarded {discarded} abandoned processing item(s) (>24h old)")
 
     # Wait for at least one media sync to complete before posting.
     # Posting against a stale or empty media_items table leads to

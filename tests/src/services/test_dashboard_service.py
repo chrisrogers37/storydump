@@ -56,6 +56,8 @@ class TestGetQueueDetail:
         dashboard_service.queue_repo.get_all_with_media.side_effect = [
             [(pending_item, "meme_01.jpg", "memes")],
             [(processing_item, "merch_01.jpg", "merch")],
+            [],  # sent_unconfirmed
+            [],  # delivered
         ]
         dashboard_service.history_repo.get_recent_posts.return_value = []
 
@@ -83,6 +85,8 @@ class TestGetQueueDetail:
         dashboard_service.queue_repo.get_all_with_media.side_effect = [
             [(item, None, None)],  # pending
             [],  # processing
+            [],  # sent_unconfirmed
+            [],  # delivered
         ]
         dashboard_service.history_repo.get_recent_posts.return_value = []
 
@@ -94,7 +98,7 @@ class TestGetQueueDetail:
     def test_includes_posts_today_and_last_post(self, dashboard_service):
         """get_queue_detail includes posts_today and last_post_at."""
         dashboard_service.queue_repo.count_by_status.return_value = 0
-        dashboard_service.queue_repo.get_all_with_media.side_effect = [[], []]
+        dashboard_service.queue_repo.get_all_with_media.side_effect = [[], [], [], []]
 
         post = Mock(posted_at=datetime(2026, 3, 1, 14, 0))
         dashboard_service.history_repo.get_recent_posts.return_value = [post]
@@ -133,7 +137,7 @@ class TestGetQueueDetail:
     def test_empty_queue(self, dashboard_service):
         """get_queue_detail handles empty queue."""
         dashboard_service.queue_repo.count_by_status.return_value = 0
-        dashboard_service.queue_repo.get_all_with_media.side_effect = [[], []]
+        dashboard_service.queue_repo.get_all_with_media.side_effect = [[], [], [], []]
         dashboard_service.history_repo.get_recent_posts.return_value = []
 
         result = dashboard_service.get_queue_detail(telegram_chat_id=123)

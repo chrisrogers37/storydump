@@ -229,20 +229,20 @@ class TestSeenIdentifiersOrdering:
 
 @pytest.mark.unit
 class TestStaleProcessingRecovery:
-    """process_slot should requeue stale processing items alongside stale pending."""
+    """process_slot resolves stale processing rows (INV-1 disposition) alongside stale pending."""
 
     @pytest.mark.asyncio
-    async def test_process_slot_calls_requeue_stale_processing(
+    async def test_process_slot_calls_resolve_stale_processing(
         self, scheduler_service_mocked
     ):
-        """process_slot should call requeue_stale_processing on each tick."""
+        """process_slot should call resolve_stale_processing on each tick."""
         service = scheduler_service_mocked
         cs = _make_chat_settings(is_paused=True)
         service.settings_service.get_settings.return_value = cs
 
         await service.process_slot(telegram_chat_id=-100123)
 
-        service.queue_repo.requeue_stale_processing.assert_called_once_with(
+        service.queue_repo.resolve_stale_processing.assert_called_once_with(
             max_age_minutes=10
         )
 
@@ -250,7 +250,7 @@ class TestStaleProcessingRecovery:
     async def test_process_slot_calls_both_cleanup_methods(
         self, scheduler_service_mocked
     ):
-        """Both the stale-pending sweep and requeue_stale_processing run."""
+        """Both the stale-pending sweep and resolve_stale_processing run."""
         service = scheduler_service_mocked
         cs = _make_chat_settings(is_paused=True)
         service.settings_service.get_settings.return_value = cs
@@ -260,7 +260,7 @@ class TestStaleProcessingRecovery:
         service.queue_repo.get_stale_unsent_pending.assert_called_once_with(
             max_age_minutes=10
         )
-        service.queue_repo.requeue_stale_processing.assert_called_once()
+        service.queue_repo.resolve_stale_processing.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_process_slot_records_expiry_for_stale_pending_rows(
@@ -361,7 +361,6 @@ class TestSyncReadinessGate:
         posting_service = Mock()
         settings_service = Mock()
         queue_repo = Mock()
-        queue_repo.discard_abandoned_processing.return_value = 0
         queue_repo.get_stale_sent.return_value = []
 
         with patch(
@@ -394,7 +393,6 @@ class TestSyncReadinessGate:
         settings_service.get_all_active_chats.return_value = [chat]
 
         queue_repo = Mock()
-        queue_repo.discard_abandoned_processing.return_value = 0
         queue_repo.get_stale_sent.return_value = []
 
         with patch(
