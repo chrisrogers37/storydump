@@ -42,6 +42,7 @@ from src.services.core.telegram_notification import TelegramNotificationService
 from src.services.core.telegram_operation_state import OperationStateManager
 from src.services.core.telegram_user_manager import TelegramUserManager
 from src.repositories.membership_repository import MembershipRepository
+from src.services.core.membership_service import MembershipService
 from src.config.settings import settings
 from src.utils.logger import logger
 
@@ -350,6 +351,102 @@ class TelegramService(BaseService):
 
         return False
 
+    # Callback actions whose callback_data is a bare queue_id acting on the
+    # instance that owns the tapped card. These are gated by _authorize_callback;
+    # other callback families self-authorize (batch_approve checks its own
+    # instance id, account switches are ownership-checked in the account service).
+    _QUEUE_ID_ACTIONS = frozenset(
+        {
+            "posted",
+            "skip",
+            "back",
+            "reject",
+            "confirm_reject",
+            "cancel_reject",
+            "regenerate_caption",
+            "autopost",
+            "select_account",
+            "cycle_account",
+        }
+    )
+
+    async def _authorize_callback(self, action, data, query) -> bool:
+        """Authorize a queue-item callback before dispatch.
+
+        The callback-layer mirror of the web ``_validate_request`` gate. Only
+        queue-item actions are gated here: their ``callback_data`` is a bare,
+        client-supplied ``queue_id`` acting on the instance that owns the chat
+        the card was posted to. Every other callback family (settings, account,
+        instance, schedule) self-authorizes or is authorized in its handler, so
+        passing them through keeps DM-launched settings/onboarding flows working.
+
+        Authorization resolves from ``query.message.chat_id`` — the one field a
+        client cannot choose — and fails closed when:
+
+        * the caller is not an active member of that chat, or
+        * the ``queue_id`` in ``callback_data`` resolves to a row owned by a
+          *different* instance.
+
+        Ownership is owned-OR-NULL: a row with no instance stamp is allowed
+        through, so the gate does not depend on the instance-ownership backfill;
+        only a populated, foreign instance id is refused. Tenanting the queue
+        resolvers themselves is a separate, deeper change, left out here.
+
+        Returns True to allow dispatch; False after answering the caller with a
+        neutral reply (the handler is never reached).
+        """
+        if action not in self._QUEUE_ID_ACTIONS:
+            return True
+
+        try:
+            chat_id = int(query.message.chat_id) if query.message else None
+        except (TypeError, ValueError):
+            chat_id = None
+
+        # Membership: the caller must be an active member of the chat the card
+        # lives in — the same server-side authorization the web layer requires.
+        with MembershipService() as membership:
+            if not membership.is_active_member(query.from_user.id, chat_id):
+                logger.warning(
+                    "Callback '%s' refused: user %s is not a member of chat %s",
+                    action,
+                    getattr(query.from_user, "id", None),
+                    chat_id,
+                )
+                await self._reject_callback(query)
+                return False
+
+        # Ownership: the queue id must belong to the caller's own instance.
+        if data:
+            caller_settings = self.settings_service.get_settings_if_exists(chat_id)
+            caller_cs_id = str(caller_settings.id) if caller_settings else None
+            row = self.queue_repo.get_by_id(data)
+            if (
+                row is not None
+                and row.chat_settings_id is not None
+                and str(row.chat_settings_id) != caller_cs_id
+            ):
+                logger.warning(
+                    "Callback '%s' refused: chat %s (instance %s) does not own "
+                    "queue item %s (instance %s)",
+                    action,
+                    chat_id,
+                    caller_cs_id,
+                    str(data)[:8],
+                    row.chat_settings_id,
+                )
+                await self._reject_callback(query)
+                return False
+
+        return True
+
+    async def _reject_callback(self, query) -> None:
+        """Answer a refused callback with a neutral, non-revealing reply."""
+        try:
+            await query.answer("⚠️ Queue item not found.", show_alert=True)
+        except Exception:  # noqa: BLE001
+            logger.debug("Refused callback already answered or stale")
+
     async def _handle_callback(self, update, context):
         """Handle inline button callbacks.
 
@@ -375,6 +472,15 @@ class TelegramService(BaseService):
             except (TypeError, ValueError):
                 chat_id = None
             user = self._get_or_create_user(query.from_user, telegram_chat_id=chat_id)
+
+            # Central authorization gate — the callback-layer mirror of the web
+            # _validate_request membership gate. callback_data is client-supplied,
+            # so a queue-item action is authorized against the one un-forgeable
+            # field (query.message.chat_id, the chat the tapped card lives in):
+            # active membership there, and a queue id that belongs to that same
+            # instance — verified before any handler resolves the row.
+            if not await self._authorize_callback(action, data, query):
+                return
 
             # Tier 1: Standard dispatch (data, user, query) handlers
             handler = self._callback_dispatch.get(action)
