@@ -322,3 +322,24 @@ async def test_detach_session_isolates_session_per_offload():
         sess_a.close()
         sess_b.close()
         repo.close()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("delivery_status", ["sent_unconfirmed", "delivered"])
+def test_claim_admits_delivery_states(delivery_status):
+    """A human tap on a 'delivered' or 'sent_unconfirmed' card must still claim
+    the row. Before the delivery-state split these rows sat in 'processing';
+    now claim_for_processing must admit the new states or the tap resolves to
+    None ("Queue item not found")."""
+    media_id, queue_id = _create_pending_queue_row()
+    try:
+        repo = QueueRepository()
+        try:
+            repo.update_status(str(queue_id), delivery_status)
+            claimed = repo.claim_for_processing(str(queue_id))
+        finally:
+            repo.close()
+        assert claimed is not None, f"a {delivery_status} row must be claimable"
+        assert claimed.status == "processing"
+    finally:
+        _delete_rows(media_id, queue_id)

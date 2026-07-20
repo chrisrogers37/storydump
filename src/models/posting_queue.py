@@ -13,6 +13,7 @@ from datetime import datetime
 import uuid
 
 from src.config.database import Base
+from src.models.enums import QueueStatus, sql_in_list
 
 
 class PostingQueue(Base):
@@ -36,7 +37,7 @@ class PostingQueue(Base):
     scheduled_for = Column(DateTime, nullable=False, index=True)
     status = Column(
         String(50), default="pending", nullable=False, index=True
-    )  # 'pending', 'processing', 'failed', 'publishing'
+    )  # allowed values: QueueStatus enum (src/models/enums.py)
 
     # Instagram claim-before-publish anchor. Set (with status='publishing')
     # the instant the IG media container is created and BEFORE the publish
@@ -59,9 +60,12 @@ class PostingQueue(Base):
     # Timestamps (preserved in history)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+    # CHECK constraint is DERIVED from the code-owned QueueStatus enum (no
+    # hand-typed value list) — the enum is the single source of truth; the CI
+    # parity gate (tests/src/models/test_enum_ssot_parity.py) fails on any drift.
     __table_args__ = (
         CheckConstraint(
-            "status IN ('pending', 'processing', 'failed', 'publishing')",
+            f"status IN ({sql_in_list(QueueStatus)})",
             name="check_status",
         ),
     )

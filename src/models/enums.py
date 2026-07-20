@@ -9,11 +9,8 @@ constraint and the latest migration DDL both match the Enum — drift fails a
 test instead of aborting a production scheduler sweep with a ``CheckViolation``
 (the #684 / #685 class).
 
-Scope note: this increment wires ``PostingMethod`` and ``HistoryStatus`` to
-``posting_history``'s CHECK constraints. ``QueueStatus`` is the *target* queue
-vocabulary; it is wired to ``posting_queue.check_status`` in the follow-up
-status-model migration (M-B), not here — ``posting_queue.check_status`` stays
-hand-declared until then.
+All three vocabularies (``PostingMethod``, ``HistoryStatus``, ``QueueStatus``)
+are wired to their model CHECK constraints and guarded by the parity gate.
 """
 
 from enum import Enum
@@ -39,21 +36,35 @@ class HistoryStatus(str, Enum):
 
 
 class QueueStatus(str, Enum):
-    """Target vocabulary for ``posting_queue.status`` (check_status).
+    """Allowed values for ``posting_queue.status`` (check_status).
 
-    Wired to the model constraint + migrated in the status-model follow-up
-    (M-B), reconciling #510's ``ready``/``claimed`` with the delivery states
-    (``sent_unconfirmed``/``delivered``/``expired``). NOT applied in this
-    increment.
+    The lifecycle state of a row while it is active work in the queue:
+
+    - ``pending`` — scheduled, not yet claimed for a send attempt.
+    - ``processing`` — claimed; a send attempt is in flight.
+    - ``publishing`` — Instagram media container created, publish call in
+      flight (the #549 claim-before-publish anchor).
+    - ``sent_unconfirmed`` — the Telegram send was dispatched but delivery could
+      not be confirmed (an ``AmbiguousDeliveryError``); the card may or may not
+      be in the chat. Resolves one-way — a recovered ``telegram_message_id``
+      stamp or a button click promotes it to ``delivered``, otherwise an aged
+      reconcile records it as expired.
+    - ``delivered`` — a ``telegram_message_id`` is stamped; the approval card is
+      confirmed in the chat, awaiting a human decision.
+    - ``failed`` — the attempt failed terminally.
+
+    Terminal outcomes (posted/skipped/rejected/expired) are written to
+    ``posting_history`` and the queue row is deleted, so they are not queue
+    states. The #510 ``ready``/``claimed`` lease rename lands with its lease
+    columns in the lease increment (PR-L).
     """
 
-    READY = "ready"
-    CLAIMED = "claimed"
+    PENDING = "pending"
+    PROCESSING = "processing"
+    FAILED = "failed"
+    PUBLISHING = "publishing"
     SENT_UNCONFIRMED = "sent_unconfirmed"
     DELIVERED = "delivered"
-    POSTED = "posted"
-    EXPIRED = "expired"
-    FAILED = "failed"
 
 
 def sql_in_list(enum_cls) -> str:
