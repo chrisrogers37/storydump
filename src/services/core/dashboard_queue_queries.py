@@ -22,27 +22,27 @@ class QueueDashboardQueries:
         """
         chat_settings_id = self.service.resolve_chat_settings_id(telegram_chat_id)
 
+        # "Awaiting team action" spans the pre-delivery shapes AND the
+        # delivery states: 'delivered' cards sit in the chat awaiting a
+        # decision, 'sent_unconfirmed' cards may. Pending leads the list
+        # (scheduled order), then the in-flight states.
+        in_flight_statuses = ["pending", "processing", "sent_unconfirmed", "delivered"]
         total_in_flight = self.service.queue_repo.count_by_status(
-            statuses=["pending", "processing"],
+            statuses=in_flight_statuses,
             chat_settings_id=chat_settings_id,
         )
 
-        pending_rows = self.service.queue_repo.get_all_with_media(
-            status="pending", chat_settings_id=chat_settings_id, limit=limit
-        )
-        remaining = limit - len(pending_rows)
-        processing_rows = (
-            self.service.queue_repo.get_all_with_media(
-                status="processing",
-                chat_settings_id=chat_settings_id,
-                limit=remaining,
+        listed_rows = []
+        for status in in_flight_statuses:
+            remaining = limit - len(listed_rows)
+            if remaining <= 0:
+                break
+            listed_rows += self.service.queue_repo.get_all_with_media(
+                status=status, chat_settings_id=chat_settings_id, limit=remaining
             )
-            if remaining > 0
-            else []
-        )
 
         items = []
-        for item, file_name, category in pending_rows + processing_rows:
+        for item, file_name, category in listed_rows:
             items.append(
                 {
                     "scheduled_for": item.scheduled_for.isoformat(),

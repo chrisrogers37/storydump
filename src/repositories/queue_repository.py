@@ -265,8 +265,16 @@ class QueueRepository(BaseRepository):
         query = self.db.query(PostingQueue).filter(PostingQueue.id == queue_id)
         if allowed_from is not None:
             query = query.filter(PostingQueue.status.in_(list(allowed_from)))
+        # synchronize_session=False keeps this ONE statement. "fetch" may
+        # split it into a pre-SELECT + primary-key UPDATE, and that second
+        # statement carries no allowed_from guard — a transition blocked on a
+        # concurrent lock then re-applies to a row that already left the
+        # allowed set (the read-check-write TOCTOU this method exists to
+        # close; surfaced as a check_delivered_stamped violation under the
+        # concurrency suite). Session state is refreshed by the get_by_id
+        # re-read below, so no sync strategy is needed.
         updated = query.update(
-            {PostingQueue.status: to_status}, synchronize_session="fetch"
+            {PostingQueue.status: to_status}, synchronize_session=False
         )
         self.db.commit()
         if updated == 0:
@@ -315,11 +323,21 @@ class QueueRepository(BaseRepository):
     def set_telegram_message(
         self, queue_id: str, message_id: int, chat_id: int
     ) -> PostingQueue:
-        """Set Telegram message ID for tracking."""
+        """Stamp the row with its Telegram card and promote it to 'delivered'.
+
+        INV-1: ``delivered`` ⟺ stamped — a landed stamp IS delivery
+        confirmation, whether it arrives from the send path or from the
+        callback-time stamp heal (a recovered stamp resolves
+        ``sent_unconfirmed`` one-way to ``delivered``). Guarded: a
+        ``publishing`` row keeps its status (the IG claim anchor stays
+        authoritative, #549), as does terminal ``failed``.
+        """
         queue_item = self.get_by_id(queue_id)
         if queue_item:
             queue_item.telegram_message_id = message_id
             queue_item.telegram_chat_id = chat_id
+            if queue_item.status in ("pending", "processing", "sent_unconfirmed"):
+                queue_item.status = "delivered"
             self.db.commit()
             self.db.refresh(queue_item)
         return queue_item
@@ -352,6 +370,12 @@ class QueueRepository(BaseRepository):
             # 'publishing' row must persist to block reselection of a
             # maybe-posted story.
             PostingQueue.status != "publishing",
+            # 'sent_unconfirmed' is owned by the aged-reconcile lifecycle
+            # (promote on click / expire when aged), not this generic sweep:
+            # reaping it here would race that purpose-built resolution.
+            # 'delivered' stays sweepable on the stamped side — an unacted
+            # card must still age out (the stranding safety net).
+            PostingQueue.status != "sent_unconfirmed",
         )
         if status:
             query = query.filter(PostingQueue.status == status)
@@ -408,87 +432,59 @@ class QueueRepository(BaseRepository):
         self.end_read_transaction()
         return stale
 
-    def requeue_stale_processing(self, max_age_minutes: int = 10) -> int:
-        """Reset processing items that were never sent to Telegram back to pending.
+    def resolve_stale_processing(self, max_age_minutes: int = 10) -> int:
+        """Resolve rows stuck in 'processing' to their delivery state.
 
-        Catches items that got stuck in 'processing' due to a crash or SIGTERM
-        before the Telegram send completed. These have no telegram_message_id,
-        so resetting to 'pending' is safe — no duplicate notification risk.
+        Selection keys on status + age ONLY (INV-2): a NULL
+        ``telegram_message_id`` is not proof the send never happened
+        (#679/#680), so NULL-ness never decides whether a row is swept.
+        Disposition applies INV-1's definition:
+
+        - stamped → ``delivered`` — the card is confirmed in the chat; the
+          row just missed its promote (e.g. a crash between stamp and
+          transition).
+        - unstamped → ``sent_unconfirmed`` — outcome unknown; parking is
+          fail-safe because nothing is ever re-sent.
+
+        Nothing is ever reset to 'pending': requeueing re-arms the send path,
+        which is exactly the #680 double-card mechanism. Parked rows remain
+        claimable on tap (``claim_for_processing`` accepts the delivery
+        states); their aged expiry belongs to the reconcile sweep, not this
+        resolver.
 
         Args:
-            max_age_minutes: Minutes after which a processing item without a
-                telegram_message_id is considered stale (default: 10).
+            max_age_minutes: Minutes after which a processing item is
+                considered stuck (default: 10).
 
         Returns:
-            Number of items requeued.
+            Number of items resolved.
         """
         cutoff = datetime.utcnow() - timedelta(minutes=max_age_minutes)
         stale = (
             self.db.query(PostingQueue)
             .filter(
                 PostingQueue.status == "processing",
-                PostingQueue.telegram_message_id.is_(None),
                 PostingQueue.created_at <= cutoff,
             )
             .all()
         )
 
         for item in stale:
-            logger.info(
-                f"Requeuing stale processing item {item.id} "
-                f"(no telegram_message_id, age={datetime.utcnow() - item.created_at})"
+            resolved_to = (
+                "delivered"
+                if item.telegram_message_id is not None
+                else "sent_unconfirmed"
             )
-            item.status = "pending"
+            logger.info(
+                f"Resolving stale processing item {item.id} -> {resolved_to} "
+                f"(age={datetime.utcnow() - item.created_at})"
+            )
+            item.status = resolved_to
 
         if stale:
             self.db.commit()
 
         return len(stale)
-
-    def discard_abandoned_processing(self, abandon_threshold_hours: int = 24) -> int:
-        """Delete NEVER-SENT queue items stuck in 'processing' for too long.
-
-        Scoped to processing rows with ``telegram_message_id IS NULL`` — rows
-        that were claimed but crashed before the Telegram send completed.
-        Button-bearing processing rows (which carry live inline buttons) are
-        handled first by the shared reap (``expire_sent_row``), which strips
-        their buttons and writes a terminal history row; deleting them here
-        would orphan the buttons.
-
-        This intentionally does NOT reset items back to 'pending' — doing so
-        would re-send the Telegram notification, creating an infinite
-        notify-reset-notify loop.
-
-        Args:
-            abandon_threshold_hours: Hours after which a processing item is
-                considered abandoned and deleted (default: 24).
-
-        Returns:
-            Number of items discarded.
-        """
-        cutoff = datetime.utcnow() - timedelta(hours=abandon_threshold_hours)
-        abandoned = (
-            self.db.query(PostingQueue)
-            .filter(
-                PostingQueue.status == "processing",
-                PostingQueue.scheduled_for <= cutoff,
-                PostingQueue.telegram_message_id.is_(None),
-            )
-            .all()
-        )
-
-        for item in abandoned:
-            logger.warning(
-                f"Discarding abandoned queue item {item.id} "
-                f"(scheduled_for={item.scheduled_for}, "
-                f"over {abandon_threshold_hours}h old)"
-            )
-            self.db.delete(item)
-
-        if abandoned:
-            self.db.commit()
-
-        return len(abandoned)
 
     def get_stale_sent(
         self, hours: int = 24, status: Optional[str] = None
@@ -515,10 +511,12 @@ class QueueRepository(BaseRepository):
     def get_pending_with_telegram_message(
         self, telegram_chat_id: int
     ) -> List[PostingQueue]:
-        """Get pending/processing queue items that have been sent to Telegram.
+        """Get active queue items whose card is live in a Telegram chat.
 
         Used to find all active notifications for a chat so their captions
         and keyboards can be batch-updated (e.g., after an account switch).
+        Covers 'delivered' (the stamped resting state under INV-1) alongside
+        the transient pending/processing shapes.
 
         Args:
             telegram_chat_id: The Telegram chat ID to filter by
@@ -531,7 +529,7 @@ class QueueRepository(BaseRepository):
             .filter(
                 PostingQueue.telegram_chat_id == telegram_chat_id,
                 PostingQueue.telegram_message_id.isnot(None),
-                PostingQueue.status.in_(["pending", "processing"]),
+                PostingQueue.status.in_(["pending", "processing", "delivered"]),
             )
             .order_by(PostingQueue.scheduled_for.asc())
             .all()

@@ -95,13 +95,17 @@ class TelegramCallbackAdminHandlers:
         except TelegramError:
             pass
 
-        pending = self.service.queue_repo.get_all_with_media(
-            status="pending", chat_settings_id=cs_id
-        )
-        processing = self.service.queue_repo.get_all_with_media(
-            status="processing", chat_settings_id=cs_id
-        )
-        all_items = pending + processing
+        # Every state a live approval card can rest in: 'delivered' is the
+        # stamped resting state (INV-1) and 'sent_unconfirmed' may still have
+        # a card in the chat — batch-approve must sweep them all, not just
+        # the pre-delivery shapes.
+        all_items = [
+            row
+            for status in ("pending", "processing", "sent_unconfirmed", "delivered")
+            for row in self.service.queue_repo.get_all_with_media(
+                status=status, chat_settings_id=cs_id
+            )
+        ]
 
         if not all_items:
             await telegram_edit_with_retry(
