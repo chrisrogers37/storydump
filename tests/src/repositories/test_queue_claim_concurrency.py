@@ -335,7 +335,13 @@ def test_claim_admits_delivery_states(delivery_status):
     try:
         repo = QueueRepository()
         try:
-            repo.update_status(str(queue_id), delivery_status)
+            if delivery_status == "delivered":
+                # A row only reaches 'delivered' stamped (INV-1,
+                # check_delivered_stamped) — go through the real seam,
+                # which stamps and promotes in one step.
+                repo.set_telegram_message(str(queue_id), 990001, 110011)
+            else:
+                repo.update_status(str(queue_id), delivery_status)
             claimed = repo.claim_for_processing(str(queue_id))
         finally:
             repo.close()
@@ -405,7 +411,12 @@ async def test_transition_concurrent_loser_fails():
         queue_repo.detach_session()
         try:
             loser_attempting.set()
-            row = queue_repo.transition(qid, "delivered", allowed_from={"processing"})
+            # Target 'failed', not 'delivered': the loser can legitimately win
+            # this race under thread scheduling, and an unstamped row may not
+            # become 'delivered' (INV-1, check_delivered_stamped) — the target
+            # state is incidental to what this test proves (exactly one of two
+            # concurrent guarded transitions succeeds).
+            row = queue_repo.transition(qid, "failed", allowed_from={"processing"})
             return row is not None
         except Exception as exc:  # noqa: BLE001
             errors.append(("loser", repr(exc)))
@@ -431,13 +442,18 @@ async def test_transition_concurrent_loser_fails():
             f"expected exactly 1 winner, got {len(winners)}; the loser must fail "
             f"(None), not silently commit a second success (TOCTOU)"
         )
-        assert winner_result is True and loser_result is False
+        # Which side wins is thread scheduling's call (the gate makes the
+        # gated side the overwhelmingly likely winner, not a guaranteed one);
+        # the invariant is that the row settles in exactly the single
+        # winner's target state.
+        expected_status = "sent_unconfirmed" if winner_result else "failed"
 
         verify_repo = QueueRepository()
         try:
             row = verify_repo.get_by_id(qid)
-            assert row is not None and row.status == "sent_unconfirmed", (
-                f"row must settle in the winner's target, got {row.status!r}"
+            assert row is not None and row.status == expected_status, (
+                f"row must settle in the winner's target {expected_status!r}, "
+                f"got {row.status!r}"
             )
         finally:
             verify_repo.close()

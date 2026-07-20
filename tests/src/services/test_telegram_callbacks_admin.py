@@ -57,6 +57,8 @@ class TestHandleBatchApprove:
         handlers.service.queue_repo.get_all_with_media.side_effect = [
             [(qi1, "f1.jpg", "memes")],  # pending
             [(qi2, "f2.jpg", "memes")],  # processing
+            [],  # sent_unconfirmed
+            [],  # delivered
         ]
         handlers.service.queue_repo.claim_for_processing.return_value = Mock()
 
@@ -86,13 +88,14 @@ class TestHandleBatchApprove:
         ]
         assert any("No pending items" in t for t in edit_texts)
 
-
     @patch("src.services.core.telegram_callbacks_admin.telegram_edit_with_retry")
     async def test_mixed_success_and_failure(self, mock_retry, handlers):
         """Reports both approved and failed counts."""
         qi1, qi2 = Mock(id="q-1"), Mock(id="q-2")
         handlers.service.queue_repo.get_all_with_media.side_effect = [
             [(qi1, "f1.jpg", "m"), (qi2, "f2.jpg", "m")],
+            [],
+            [],
             [],
         ]
         handlers.service.queue_repo.claim_for_processing.side_effect = [Mock(), Mock()]
@@ -116,6 +119,8 @@ class TestHandleBatchApprove:
         qi1 = Mock(id="q-1")
         handlers.service.queue_repo.get_all_with_media.side_effect = [
             [(qi1, "f1.jpg", "m")],
+            [],
+            [],
             [],
         ]
         handlers.service.queue_repo.claim_for_processing.return_value = None
