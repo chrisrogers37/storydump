@@ -248,32 +248,35 @@ class QueueRepository(BaseRepository):
         to_status: str,
         allowed_from: Optional[Iterable[str]] = None,
     ) -> Optional[PostingQueue]:
-        """Move a queue row to ``to_status`` through one guarded seam.
+        """Move a queue row to ``to_status`` through one atomic guarded seam.
 
-        The single place delivery-state writes flow through, so the legal
-        transitions live in one spot rather than scattered ``status = ...``
-        assignments. When ``allowed_from`` is given and the row's current
-        status is not in it, the write is skipped and ``None`` is returned — the
-        row moved under us (a concurrent claim, a reap), which callers treat
-        like a lost claim. With ``allowed_from=None`` the status is set
-        unconditionally.
+        The single place delivery-state writes flow through. The ``allowed_from``
+        guard is enforced in the UPDATE's own WHERE clause — a single conditional
+        statement, not a read-then-write — so two concurrent transitions out of
+        the same state can never both succeed: the first flips the row out of
+        ``allowed_from`` and the rest match zero rows and return ``None`` (the
+        row moved under them — a concurrent claim or reap). This mirrors
+        ``claim_for_processing``'s concurrency-safe conditional claim. With
+        ``allowed_from=None`` the status is set unconditionally.
 
         Returns the updated row, or ``None`` if the row is gone or its current
         status is outside ``allowed_from``.
         """
-        queue_item = self.get_by_id(queue_id)
-        if queue_item is None:
-            return None
-        if allowed_from is not None and queue_item.status not in allowed_from:
+        query = self.db.query(PostingQueue).filter(PostingQueue.id == queue_id)
+        if allowed_from is not None:
+            query = query.filter(PostingQueue.status.in_(list(allowed_from)))
+        updated = query.update(
+            {PostingQueue.status: to_status}, synchronize_session="fetch"
+        )
+        self.db.commit()
+        if updated == 0:
+            allowed = set(allowed_from) if allowed_from is not None else "any"
             logger.info(
-                f"Queue item {queue_id} not transitioned to {to_status}: "
-                f"current status '{queue_item.status}' not in {set(allowed_from)}"
+                f"Queue item {queue_id} not transitioned to {to_status} "
+                f"(missing, or current status not in {allowed})"
             )
             return None
-        queue_item.status = to_status
-        self.db.commit()
-        self.db.refresh(queue_item)
-        return queue_item
+        return self.get_by_id(queue_id)
 
     def update_status(self, queue_id: str, status: str) -> Optional[PostingQueue]:
         """Update queue item status unconditionally (see :meth:`transition` for

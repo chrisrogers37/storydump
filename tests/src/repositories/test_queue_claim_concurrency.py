@@ -343,3 +343,151 @@ def test_claim_admits_delivery_states(delivery_status):
         assert claimed.status == "processing"
     finally:
         _delete_rows(media_id, queue_id)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_transition_concurrent_loser_fails():
+    """Two concurrent transitions out of one 'processing' row → exactly one
+    wins; the loser must return None, not silently commit a second success.
+
+    The old read-check-write transition() let both callers read 'processing',
+    both pass the allowed_from guard, and both commit — a TOCTOU double-success
+    (rajan, #694). The atomic conditional UPDATE closes it: the winner's UPDATE
+    takes the row lock and holds it (its commit is gated), so the loser's
+    ``UPDATE ... WHERE status='processing'`` blocks on that lock; when the
+    winner commits the row out of 'processing', the loser's WHERE re-evaluates
+    to 0 rows and it returns None. Gating the winner's commit is a test-side
+    interception; the production transition() path runs unmodified. Not live
+    today (one caller), but PR3/4/5 add concurrent callers onto this seam.
+    """
+    media_id, queue_id = _create_pending_queue_row()
+    qid = str(queue_id)
+    seed = QueueRepository()
+    try:
+        seed.update_status(qid, "processing")
+    finally:
+        seed.close()
+
+    queue_repo = QueueRepository()  # ONE shared singleton, per-task sessions
+    winner_holds = threading.Event()  # winner ran its UPDATE, gated before commit
+    release_winner = threading.Event()
+    loser_attempting = threading.Event()
+    errors: list = []
+
+    def winner_transition():
+        queue_repo.detach_session()
+        try:
+            sess = queue_repo.db
+            original_commit = sess.commit
+
+            def gated_commit():
+                # transition() has issued its UPDATE (row locked); hold the lock
+                # open until the loser has begun its own concurrent transition.
+                winner_holds.set()
+                if not release_winner.wait(timeout=30):
+                    raise TimeoutError("winner commit was never released")
+                return original_commit()
+
+            sess.commit = gated_commit  # instance-level gate, winner's session only
+            row = queue_repo.transition(
+                qid, "sent_unconfirmed", allowed_from={"processing"}
+            )
+            return row is not None
+        except Exception as exc:  # noqa: BLE001 — collect, never escape the thread
+            errors.append(("winner", repr(exc)))
+            winner_holds.set()
+            return False
+        finally:
+            queue_repo.close()
+
+    def loser_transition():
+        queue_repo.detach_session()
+        try:
+            loser_attempting.set()
+            row = queue_repo.transition(qid, "delivered", allowed_from={"processing"})
+            return row is not None
+        except Exception as exc:  # noqa: BLE001
+            errors.append(("loser", repr(exc)))
+            return False
+        finally:
+            queue_repo.close()
+
+    try:
+        winner_task = asyncio.create_task(asyncio.to_thread(winner_transition))
+        assert await asyncio.to_thread(winner_holds.wait, 30), (
+            "winner never reached its gated commit"
+        )
+        loser_task = asyncio.create_task(asyncio.to_thread(loser_transition))
+        await asyncio.to_thread(loser_attempting.wait, 30)
+        # Release the winner: it commits the row out of 'processing', the loser's
+        # blocked UPDATE unblocks, re-evaluates its WHERE, and matches 0 rows.
+        release_winner.set()
+        winner_result, loser_result = await asyncio.gather(winner_task, loser_task)
+
+        assert not errors, f"transitions raised under concurrent sessions: {errors}"
+        winners = [r for r in (winner_result, loser_result) if r]
+        assert len(winners) == 1, (
+            f"expected exactly 1 winner, got {len(winners)}; the loser must fail "
+            f"(None), not silently commit a second success (TOCTOU)"
+        )
+        assert winner_result is True and loser_result is False
+
+        verify_repo = QueueRepository()
+        try:
+            row = verify_repo.get_by_id(qid)
+            assert row is not None and row.status == "sent_unconfirmed", (
+                f"row must settle in the winner's target, got {row.status!r}"
+            )
+        finally:
+            verify_repo.close()
+    finally:
+        release_winner.set()  # never let the winner hang on teardown
+        _delete_rows(media_id, queue_id)
+
+
+@pytest.mark.integration
+def test_transition_unconditional_sets_status():
+    """allowed_from=None writes the status unconditionally and returns the row."""
+    media_id, queue_id = _create_pending_queue_row()
+    try:
+        repo = QueueRepository()
+        try:
+            repo.update_status(qid := str(queue_id), "processing")
+            row = repo.transition(qid, "failed")
+            assert row is not None and row.status == "failed"
+        finally:
+            repo.close()
+    finally:
+        _delete_rows(media_id, queue_id)
+
+
+@pytest.mark.integration
+def test_transition_allowed_from_mismatch_is_noop():
+    """A guarded transition from a disallowed state is a no-op → None, unchanged."""
+    media_id, queue_id = _create_pending_queue_row()
+    try:
+        repo = QueueRepository()
+        try:
+            repo.update_status(qid := str(queue_id), "failed")
+            assert (
+                repo.transition(qid, "delivered", allowed_from={"processing"}) is None
+            )
+            assert repo.get_by_id(qid).status == "failed"
+        finally:
+            repo.close()
+    finally:
+        _delete_rows(media_id, queue_id)
+
+
+@pytest.mark.integration
+def test_transition_missing_row_returns_none():
+    """A transition on a nonexistent row returns None (0 rows affected)."""
+    repo = QueueRepository()
+    try:
+        assert (
+            repo.transition(str(uuid4()), "delivered", allowed_from={"processing"})
+            is None
+        )
+    finally:
+        repo.close()

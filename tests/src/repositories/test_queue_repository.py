@@ -72,29 +72,6 @@ class TestQueueRepository:
         assert len(result) == 2
         mock_db.query.assert_called_with(PostingQueue)
 
-    def test_update_status(self, queue_repo, mock_db):
-        """Test updating queue item status."""
-        mock_item = MagicMock()
-        mock_item.status = "pending"
-        mock_db.query.return_value.filter.return_value.first.return_value = mock_item
-
-        queue_repo.update_status("some-id", "posted")
-
-        assert mock_item.status == "posted"
-        # commit called twice: once by get_by_id's end_read_transaction, once by the write
-        assert mock_db.commit.call_count == 2
-        mock_db.refresh.assert_called_once_with(mock_item)
-
-    def test_update_status_not_found(self, queue_repo, mock_db):
-        """Test updating status of non-existent queue item."""
-        mock_db.query.return_value.filter.return_value.first.return_value = None
-
-        result = queue_repo.update_status("nonexistent-id", "posted")
-
-        assert result is None
-        # commit called once by get_by_id's end_read_transaction (no write commit)
-        mock_db.commit.assert_called_once()
-
     def test_get_stale_unsent_only_targets_unstamped_rows(self, queue_repo, mock_db):
         """get_stale_unsent(hours=24) is a read — it returns the unstamped
         (telegram_message_id IS NULL) accumulation and deletes NOTHING.
@@ -420,65 +397,6 @@ class TestClaimForProcessing:
 
         assert result is None
         mock_db.commit.assert_not_called()
-
-
-@pytest.mark.unit
-class TestTransition:
-    """Tests for the transition() guarded state-write seam."""
-
-    def test_unconditional_sets_status(self, queue_repo, mock_db):
-        """With no allowed_from, transition sets the status and commits."""
-        mock_item = MagicMock()
-        mock_item.status = "processing"
-        mock_db.query.return_value.filter.return_value.first.return_value = mock_item
-
-        result = queue_repo.transition("some-id", "delivered")
-
-        assert result is mock_item
-        assert mock_item.status == "delivered"
-        # get_by_id's end_read_transaction commit + the write commit
-        assert mock_db.commit.call_count == 2
-        mock_db.refresh.assert_called_once_with(mock_item)
-
-    def test_allowed_from_match_sets_status(self, queue_repo, mock_db):
-        """When the current status is in allowed_from, transition applies."""
-        mock_item = MagicMock()
-        mock_item.status = "processing"
-        mock_db.query.return_value.filter.return_value.first.return_value = mock_item
-
-        result = queue_repo.transition(
-            "some-id", "sent_unconfirmed", allowed_from={"processing"}
-        )
-
-        assert result is mock_item
-        assert mock_item.status == "sent_unconfirmed"
-        assert mock_db.commit.call_count == 2
-
-    def test_allowed_from_mismatch_is_noop(self, queue_repo, mock_db):
-        """When the current status is outside allowed_from the write is skipped:
-        the row moved under us (a concurrent claim or reap)."""
-        mock_item = MagicMock()
-        mock_item.status = "failed"
-        mock_db.query.return_value.filter.return_value.first.return_value = mock_item
-
-        result = queue_repo.transition(
-            "some-id", "delivered", allowed_from={"processing", "sent_unconfirmed"}
-        )
-
-        assert result is None
-        assert mock_item.status == "failed"  # unchanged
-        # only get_by_id's end_read_transaction commit; no write commit
-        mock_db.commit.assert_called_once()
-        mock_db.refresh.assert_not_called()
-
-    def test_missing_row_returns_none(self, queue_repo, mock_db):
-        """A missing row yields None."""
-        mock_db.query.return_value.filter.return_value.first.return_value = None
-
-        result = queue_repo.transition("nonexistent", "delivered")
-
-        assert result is None
-        mock_db.commit.assert_called_once()  # get_by_id's end_read_transaction
 
 
 @pytest.mark.unit
