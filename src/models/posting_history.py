@@ -7,6 +7,7 @@ from datetime import datetime
 import uuid
 
 from src.config.database import Base
+from src.models.enums import HistoryStatus, PostingMethod, sql_in_list
 
 
 class PostingHistory(Base):
@@ -40,7 +41,7 @@ class PostingHistory(Base):
     posted_at = Column(DateTime, nullable=False, index=True)
     status = Column(
         String(50), nullable=False
-    )  # 'posted', 'failed', 'skipped', 'rejected', 'expired'
+    )  # allowed values: HistoryStatus enum (src/models/enums.py)
     success = Column(Boolean, nullable=False)
 
     # Instagram result (if successful)
@@ -50,8 +51,8 @@ class PostingHistory(Base):
 
     # Posting method tracking (Phase 2)
     posting_method = Column(
-        String(20), default="telegram_manual"
-    )  # 'instagram_api' or 'telegram_manual'
+        String(20), default=PostingMethod.TELEGRAM_MANUAL.value
+    )  # allowed values: PostingMethod enum (src/models/enums.py)
 
     # User tracking
     posted_by_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
@@ -71,13 +72,16 @@ class PostingHistory(Base):
     # Metadata
     created_at = Column(DateTime, default=datetime.utcnow)
 
+    # CHECK constraints are DERIVED from the code-owned enums (no hand-typed
+    # value lists) — the enum is the single source of truth; a CI parity gate
+    # (tests/src/models/test_enum_ssot_parity.py) fails on any drift.
     __table_args__ = (
         CheckConstraint(
-            "status IN ('posted', 'failed', 'skipped', 'rejected', 'expired')",
+            f"status IN ({sql_in_list(HistoryStatus)})",
             name="check_history_status",
         ),
         CheckConstraint(
-            "posting_method IN ('instagram_api', 'telegram_manual', 'system_expiry')",
+            f"posting_method IN ({sql_in_list(PostingMethod)})",
             name="check_posting_method",
         ),
     )
