@@ -1,10 +1,16 @@
 """Tests for TelegramService."""
 
+import asyncio
+
 import pytest
 from unittest.mock import Mock, patch, AsyncMock
 from datetime import datetime
 from uuid import uuid4
 
+from telegram import Bot
+from telegram.ext import AIORateLimiter
+
+import src.services.core.telegram_service as telegram_service_module
 from src.config import defaults
 from src.services.core.telegram_service import TelegramService
 from src.services.core.telegram_callbacks import TelegramCallbackHandlers
@@ -1021,3 +1027,104 @@ class TestCallbackAnswerDiscipline:
         await mock_telegram_service._handle_callback(update, Mock())
 
         query.answer.assert_called_once_with()
+
+
+def _configure_rate_limiter_settings(enabled=True, max_retries=3):
+    """Give the fixture's mocked settings real values for the builder reads."""
+    mocked = telegram_service_module.settings
+    mocked.TELEGRAM_MAX_CONCURRENT_UPDATES = 8
+    mocked.TELEGRAM_RATE_LIMITER_ENABLED = enabled
+    mocked.TELEGRAM_RATE_LIMITER_MAX_RETRIES = max_retries
+
+
+@pytest.mark.unit
+class TestRateLimiterWiring:
+    """#686b: one rate-limited outbound bot, kill-switch honored."""
+
+    def test_application_built_with_rate_limiter(self, mock_telegram_service):
+        _configure_rate_limiter_settings()
+
+        application = mock_telegram_service._build_application()
+
+        limiter = application.bot.rate_limiter
+        assert isinstance(limiter, AIORateLimiter)
+        assert limiter._max_retries == 3
+
+    def test_kill_switch_builds_without_limiter(self, mock_telegram_service):
+        _configure_rate_limiter_settings(enabled=False)
+
+        application = mock_telegram_service._build_application()
+
+        assert application.bot.rate_limiter is None
+
+    @pytest.mark.asyncio
+    async def test_initialize_routes_service_bot_through_application(
+        self, mock_telegram_service
+    ):
+        """service.bot must BE the application's rate-limited ExtBot. A
+        separate raw Bot() lets card sends and keyboard edits bypass
+        pacing entirely (the pre-#686b fork)."""
+        _configure_rate_limiter_settings()
+
+        # Patch the base Bot method: it terminates the call chain for both
+        # ExtBot (expected) and a raw Bot (the regression this test catches),
+        # so neither shape can reach the live API from a test.
+        with patch.object(Bot, "set_my_commands", new_callable=AsyncMock):
+            await mock_telegram_service.initialize()
+
+        service = mock_telegram_service
+        assert service.bot is service.application.bot
+        assert isinstance(service.bot.rate_limiter, AIORateLimiter)
+
+
+@pytest.mark.unit
+class TestRateLimiterAnswerBypassContract:
+    """PTB contract tripwire (#686b): calls without a chat_id (callback
+    answers) skip AIORateLimiter's buckets entirely, so acks stay instant
+    while a chat's edit queue is saturated — the mechanism behind #689's
+    instant-ack guarantee surviving heavy bursts. Passes against today's
+    PTB; its job is to fail loudly on a future PTB bump that changes
+    bucketing."""
+
+    @pytest.mark.asyncio
+    async def test_answer_not_queued_behind_saturated_group_bucket(self):
+        limiter = AIORateLimiter(
+            overall_max_rate=100,
+            overall_time_period=1,
+            group_max_rate=1,
+            group_time_period=5,  # 1 op/5s: sends 2-3 queue for seconds
+            max_retries=0,
+        )
+        calls: list[str] = []
+
+        async def fake_request(tag):
+            calls.append(tag)
+            return True
+
+        def request(tag, data):
+            return limiter.process_request(
+                callback=fake_request,
+                args=(tag,),
+                kwargs={},
+                endpoint="x",
+                data=data,
+                rate_limit_args=None,
+            )
+
+        send_tasks = [
+            asyncio.create_task(request(f"send{i}", {"chat_id": -100123}))
+            for i in range(3)
+        ]
+        await asyncio.sleep(0)  # let the sends claim the group bucket
+
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        await request("answer", {"callback_query_id": "abc"})
+        answer_latency = loop.time() - start
+
+        assert "answer" in calls
+        assert answer_latency < 0.5  # generous; the group queue is seconds deep
+
+        for task in send_tasks:
+            task.cancel()
+        await asyncio.gather(*send_tasks, return_exceptions=True)

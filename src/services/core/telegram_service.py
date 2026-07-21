@@ -18,8 +18,9 @@ the extracted handler modules:
 
 import asyncio
 
-from telegram import Bot, BotCommand
+from telegram import BotCommand
 from telegram.ext import (
+    AIORateLimiter,
     Application,
     CallbackQueryHandler,
     ChatMemberHandler,
@@ -138,20 +139,42 @@ class TelegramService(BaseService):
     # Initialization
     # ------------------------------------------------------------------
 
-    async def initialize(self):
-        """Initialize Telegram bot and register all handlers."""
-        self.bot = Bot(token=self.bot_token)
-        # concurrent_updates: process button taps concurrently (each in its own
-        # asyncio Task) so a slow in-flight callback no longer serializes every
-        # other user's tap behind it. Bounded — each concurrent callback holds its
-        # own per-task DB session, so the bound keeps peak DB connections within
-        # the pool (see settings.TELEGRAM_MAX_CONCURRENT_UPDATES).
-        self.application = (
+    def _build_application(self) -> Application:
+        """Build the PTB Application: bounded concurrency + outbound pacing.
+
+        concurrent_updates: process button taps concurrently (each in its own
+        asyncio Task) so a slow in-flight callback no longer serializes every
+        other user's tap behind it. Bounded — each concurrent callback holds its
+        own per-task DB session, so the bound keeps peak DB connections within
+        the pool (see settings.TELEGRAM_MAX_CONCURRENT_UPDATES).
+
+        rate_limiter: paces every outbound API call through Telegram's
+        published budgets (PTB defaults: 30/s overall, 20/min per group) so
+        per-chat bursts queue smoothly instead of hitting RetryAfter walls.
+        Calls without a chat_id (callback answers) skip the buckets entirely,
+        keeping acks instant under saturation. The limiter is the single
+        owner of RetryAfter retries — see telegram_edit_with_retry. The
+        kill-switch setting is a no-redeploy rollback lever.
+        """
+        builder = (
             Application.builder()
             .token(self.bot_token)
             .concurrent_updates(settings.TELEGRAM_MAX_CONCURRENT_UPDATES)
-            .build()
         )
+        if settings.TELEGRAM_RATE_LIMITER_ENABLED:
+            builder = builder.rate_limiter(
+                AIORateLimiter(max_retries=settings.TELEGRAM_RATE_LIMITER_MAX_RETRIES)
+            )
+        return builder.build()
+
+    async def initialize(self):
+        """Initialize Telegram bot and register all handlers."""
+        self.application = self._build_application()
+        # One outbound bot: the Application's ExtBot carries the rate limiter,
+        # so every send path that reaches Telegram through this service —
+        # approval cards (send_photo), caption/keyboard edits, loop alerts —
+        # is paced. A separate raw Bot(token=...) here would bypass pacing.
+        self.bot = self.application.bot
 
         # Initialize sub-handlers (after bot/application are created)
         from src.services.core.telegram_commands import TelegramCommandHandlers
