@@ -67,9 +67,11 @@ async def _scheduler_tick(
     # 'delivered' (the stamp promotes processing -> delivered; a never-stamped
     # row is parked at 'sent_unconfirmed' by resolve_stale_processing at 10
     # min) — so 'delivered' is the button-bearing state that ages out here.
-    # There is no raw-delete sweep: the reap is history-first (#687), and the
-    # hourly cleanup loop owns the unstamped remainder plus the
-    # 'sent_unconfirmed' reconcile — a raw delete here could orphan a card.
+    # There is no raw-delete sweep: the reap is history-first (#687). Scoping
+    # to 'delivered' is safe because the hourly cleanup loop is the full net —
+    # its status-agnostic-for-stamped sweep catches any stamped straggler, and
+    # it owns the unstamped remainder plus the 'sent_unconfirmed' reconcile;
+    # a raw delete here could orphan a card.
     #
     # queue_repo is a standalone repository (not owned by a BaseService), so
     # the outer loop's cleanup_transactions() doesn't roll it back on error.
