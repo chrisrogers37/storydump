@@ -223,8 +223,12 @@ class TestSchedulerLoop:
             except StopAsyncIteration:
                 pass
 
-        # Alert should be sent for chat1's GDrive auth failure
-        posting_service.send_gdrive_auth_alert.assert_called_once_with(-100111)
+        # Alert should be sent for chat1's GDrive auth failure, via the
+        # scheduler's rate-limited application bot
+        posting_service.send_gdrive_auth_alert.assert_called_once_with(
+            -100111,
+            bot=scheduler_service.telegram_service.application.bot,
+        )
         # Chat2 should still have been processed
         assert scheduler_service.process_slot.call_count == 2
 

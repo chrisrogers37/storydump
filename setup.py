@@ -24,7 +24,7 @@ setup(
         "pydantic-settings>=2.1.0",
         "python-dateutil>=2.8.2",
         "python-dotenv>=1.0.0",
-        "python-telegram-bot>=20.7",
+        "python-telegram-bot[rate-limiter]>=20.7",
         "rich>=13.7.0",
         "sqlalchemy>=2.0.23",
         "uvicorn>=0.27.0",

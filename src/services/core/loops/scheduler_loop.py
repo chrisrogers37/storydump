@@ -156,7 +156,10 @@ async def _scheduler_tick(
                     f"Google Drive auth error for chat {chat_id}",
                     exc_info=True,
                 )
-                await posting_service.send_gdrive_auth_alert(chat_id)
+                await posting_service.send_gdrive_auth_alert(
+                    chat_id,
+                    bot=scheduler_service.telegram_service.application.bot,
+                )
 
             except Exception as e:
                 logger.error(
