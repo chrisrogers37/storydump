@@ -9,11 +9,13 @@ import asyncio
 
 
 class OperationStateManager:
-    """Manages per-queue-item operation locks and cancellation flags."""
+    """Manages per-queue-item operation locks, cancellation flags, and
+    in-flight-autopost markers."""
 
     def __init__(self):
         self._operation_locks: dict[str, asyncio.Lock] = {}
         self._cancel_flags: dict[str, asyncio.Event] = {}
+        self._autopost_inflight: set[str] = set()
 
     def get_lock(self, queue_id: str) -> asyncio.Lock:
         """Get or create an asyncio lock for a queue item."""
@@ -27,7 +29,22 @@ class OperationStateManager:
             self._cancel_flags[queue_id] = asyncio.Event()
         return self._cancel_flags[queue_id]
 
+    def mark_autopost_inflight(self, queue_id: str) -> None:
+        """Mark that an autopost background task is running for a queue item.
+
+        Held from the moment the row is claimed until the task finishes — the
+        span the operation lock no longer covers now that it releases before the
+        slow edits. A re-tap that sees the marker is rejected, so this is the
+        durable guard against a second autopost (and the #549 double-publish).
+        """
+        self._autopost_inflight.add(queue_id)
+
+    def is_autopost_inflight(self, queue_id: str) -> bool:
+        """Whether an autopost background task is currently running for a queue item."""
+        return queue_id in self._autopost_inflight
+
     def cleanup(self, queue_id: str):
-        """Remove lock and cancel flag after operation completes."""
+        """Remove lock, cancel flag, and in-flight marker after an operation completes."""
         self._operation_locks.pop(queue_id, None)
         self._cancel_flags.pop(queue_id, None)
+        self._autopost_inflight.discard(queue_id)
