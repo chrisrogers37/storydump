@@ -17,7 +17,11 @@ import asyncio
 from src.repositories.history_repository import HistoryRepository
 from src.repositories.queue_repository import QueueRepository
 from src.services.core.loops.heartbeat import record_heartbeat
-from src.services.core.queue_reap import expire_sent_row, record_expiry_and_delete
+from src.services.core.queue_reap import (
+    expire_sent_row,
+    reconcile_aged_unconfirmed,
+    record_expiry_and_delete,
+)
 from src.utils.logger import logger
 
 
@@ -51,6 +55,13 @@ async def cleanup_queue_loop(
                     count += 1
             if count > 0:
                 logger.info(f"Cleaned up {count} stale queue items (>24h old)")
+
+            # Aged-reconcile: expire never-tapped 'sent_unconfirmed' rows —
+            # the one delivery state no other sweep owns. Bounded + offloaded
+            # to a worker thread so its synchronous DB pass can never block the
+            # shared event loop (the #682/#573 loop-starvation class). The
+            # helper logs its own count.
+            await asyncio.to_thread(reconcile_aged_unconfirmed)
 
         except Exception as e:
             logger.error(f"Error in queue cleanup loop: {e}", exc_info=True)

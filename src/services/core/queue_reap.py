@@ -29,7 +29,11 @@ from sqlalchemy.exc import SQLAlchemyError
 from telegram import InlineKeyboardMarkup
 from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
 
-from src.repositories.history_repository import HistoryCreateParams
+from src.repositories.history_repository import (
+    HistoryCreateParams,
+    HistoryRepository,
+)
+from src.repositories.queue_repository import QueueRepository
 from src.services.core.telegram_utils import EXPIRED_CAPTION
 from src.utils.logger import logger
 
@@ -168,3 +172,38 @@ async def reap_pending_rows(rows, *, bot, history_repo, queue_repo) -> int:
         ):
             removed += 1
     return removed
+
+
+def reconcile_aged_unconfirmed(hours: int = 24, limit: int = 100) -> int:
+    """Expire 'sent_unconfirmed' rows that aged out without ever being tapped.
+
+    A ``sent_unconfirmed`` row is a send whose delivery could not be confirmed
+    (``AmbiguousDeliveryError``). A tap resolves it one-way to ``delivered``
+    (``set_telegram_message``); this is the other half of that lifecycle — the
+    never-tapped rows age out to terminal ``expired`` through the shared
+    history-first reap (#687), which NEVER re-sends. (The #680 double-post
+    class is a re-arm of the send path; expiry has no send path at all — that
+    is the invariant this function preserves.)
+
+    Bounded by ``limit`` and built to run OFF the event loop (the caller wraps
+    it in ``asyncio.to_thread``): its DB work is synchronous psycopg2, so
+    running it inline would block every tenant's callbacks (the #682/#573
+    loop-starvation class). It constructs its OWN repositories so their Session
+    is opened and closed inside the worker thread and never crosses the thread
+    boundary.
+
+    Returns the number of rows expired.
+    """
+    with QueueRepository() as queue_repo, HistoryRepository() as history_repo:
+        expired = 0
+        for row in queue_repo.get_aged_sent_unconfirmed(hours=hours, limit=limit):
+            if record_expiry_and_delete(
+                row, history_repo=history_repo, queue_repo=queue_repo
+            ):
+                expired += 1
+        if expired:
+            logger.info(
+                f"Aged reconcile: expired {expired} sent_unconfirmed queue "
+                f"item(s) older than {hours}h (batch limit {limit})"
+            )
+        return expired
