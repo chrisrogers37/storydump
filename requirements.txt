@@ -9,7 +9,7 @@ psycopg2-binary==2.9.12
 alembic==1.18.4
 
 # Telegram
-python-telegram-bot==22.7
+python-telegram-bot[rate-limiter]==22.7
 httpx==0.28.1
 httpx2==2.2.0
 

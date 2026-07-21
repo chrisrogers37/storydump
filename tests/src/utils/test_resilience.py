@@ -1,9 +1,12 @@
 """Tests for ``src.utils.resilience.telegram_edit_with_retry``.
 
 Pins the retry classifier's contract: permanent Telegram rejections
-(``BadRequest`` — e.g. "Message is not modified") are not retried, while
-genuinely transient failures (``RetryAfter`` / ``TimedOut`` / ``NetworkError``)
-keep their bounded-retry behavior. ``BadRequest`` subclasses ``NetworkError``
+(``BadRequest`` — e.g. "Message is not modified") are not retried, transient
+network failures (``TimedOut`` / ``NetworkError``) keep their bounded-retry
+behavior, and ``RetryAfter`` gets a single attempt with no sleeps — the
+Application's AIORateLimiter is the single owner of rate pacing and
+RetryAfter retries (#686b), so one surfacing here is already past the
+limiter's retries. ``BadRequest`` subclasses ``NetworkError``
 in python-telegram-bot, so the permanent branch must be classified first —
 misordering it is the regression behind the #682 flood-control storm.
 """
@@ -19,8 +22,8 @@ from src.utils.resilience import telegram_edit_with_retry
 @pytest.fixture(autouse=True)
 def _no_sleep():
     """Backoff sleeps are real time — no-op them to keep tests fast."""
-    with patch("src.utils.resilience.asyncio.sleep", new_callable=AsyncMock):
-        yield
+    with patch("src.utils.resilience.asyncio.sleep", new_callable=AsyncMock) as mock:
+        yield mock
 
 
 @pytest.mark.unit
@@ -53,8 +56,8 @@ class TestTelegramEditWithRetry:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "transient",
-        [RetryAfter(0), TimedOut(), NetworkError("connection dropped")],
-        ids=["retry_after", "timed_out", "network_error"],
+        [TimedOut(), NetworkError("connection dropped")],
+        ids=["timed_out", "network_error"],
     )
     async def test_transient_retries_then_none(self, transient):
         edit = AsyncMock(side_effect=transient)
@@ -63,6 +66,21 @@ class TestTelegramEditWithRetry:
 
         assert result is None
         assert edit.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_retry_after_single_attempt_no_sleep(self, _no_sleep):
+        """RetryAfter is not retried (or slept on) at this layer. The
+        AIORateLimiter below owns rate pacing and RetryAfter retries; one
+        surfacing here means the limiter's retries are exhausted (or the
+        limiter is disabled), and a second retry ladder here would stack
+        its blocking waits under the caller's operation lock (#686b)."""
+        edit = AsyncMock(side_effect=RetryAfter(7))
+
+        result = await telegram_edit_with_retry(edit)
+
+        assert result is None
+        assert edit.await_count == 1
+        _no_sleep.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_transient_then_success_returns_result(self):

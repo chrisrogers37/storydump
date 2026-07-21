@@ -1,11 +1,18 @@
 """Tests for TelegramService."""
 
+import asyncio
+
 import pytest
 from unittest.mock import Mock, patch, AsyncMock
 from datetime import datetime
 from uuid import uuid4
 
+from telegram import Bot
+from telegram.ext import AIORateLimiter
+
+import src.services.core.telegram_service as telegram_service_module
 from src.config import defaults
+from src.config.settings import Settings
 from src.services.core.telegram_service import TelegramService
 from src.services.core.telegram_callbacks import TelegramCallbackHandlers
 from src.services.core.telegram_autopost import TelegramAutopostHandler
@@ -1021,3 +1028,201 @@ class TestCallbackAnswerDiscipline:
         await mock_telegram_service._handle_callback(update, Mock())
 
         query.answer.assert_called_once_with()
+
+
+def _configure_rate_limiter_settings(enabled=True, max_retries=5):
+    """Stamp real values on the fixture's mocked settings for builder reads.
+
+    max_retries defaults to a sentinel (not the shipped default) so the
+    wiring tests prove the settings value flows into the limiter rather
+    than two hardcoded copies of a default agreeing; the shipped defaults
+    themselves are pinned by test_shipped_rate_limiter_defaults.
+    """
+    mocked = telegram_service_module.settings
+    mocked.TELEGRAM_MAX_CONCURRENT_UPDATES = 2  # any real int; not under test
+    mocked.TELEGRAM_RATE_LIMITER_ENABLED = enabled
+    mocked.TELEGRAM_RATE_LIMITER_MAX_RETRIES = max_retries
+
+
+@pytest.mark.unit
+class TestRateLimiterWiring:
+    """#686b: one rate-limited outbound bot, kill-switch honored."""
+
+    def test_shipped_rate_limiter_defaults(self):
+        """Config contract: limiter on by default, three RetryAfter
+        absorptions for residual budget consumed by out-of-process
+        senders on the same token."""
+        fields = Settings.model_fields
+        assert fields["TELEGRAM_RATE_LIMITER_ENABLED"].default is True
+        assert fields["TELEGRAM_RATE_LIMITER_MAX_RETRIES"].default == 3
+
+    def test_application_built_with_rate_limiter(self, mock_telegram_service):
+        _configure_rate_limiter_settings(max_retries=5)
+
+        application = mock_telegram_service._build_application()
+
+        limiter = application.bot.rate_limiter
+        assert isinstance(limiter, AIORateLimiter)
+        assert limiter._max_retries == 5
+
+    def test_kill_switch_builds_without_limiter(self, mock_telegram_service):
+        _configure_rate_limiter_settings(enabled=False)
+
+        application = mock_telegram_service._build_application()
+
+        assert application.bot.rate_limiter is None
+
+    @pytest.mark.asyncio
+    async def test_initialize_routes_service_bot_through_application(
+        self, mock_telegram_service
+    ):
+        """service.bot must BE the application's rate-limited ExtBot. A
+        separate raw Bot() lets card sends and keyboard edits bypass
+        pacing entirely (the pre-#686b fork)."""
+        _configure_rate_limiter_settings()
+
+        # Patch the base Bot method: it terminates the call chain for both
+        # ExtBot (expected) and a raw Bot (the regression this test catches),
+        # so neither shape can reach the live API from a test.
+        with patch.object(Bot, "set_my_commands", new_callable=AsyncMock):
+            await mock_telegram_service.initialize()
+
+        service = mock_telegram_service
+        assert service.bot is service.application.bot
+
+
+@pytest.mark.unit
+class TestRateLimiterAnswerBypassContract:
+    """PTB contract tripwire (#686b): calls without a chat_id (callback
+    answers) skip AIORateLimiter's buckets entirely, so acks stay instant
+    while a chat's edit queue is saturated — the mechanism behind #689's
+    instant-ack guarantee surviving heavy bursts. Passes against today's
+    PTB; its job is to fail loudly on a future PTB bump that changes
+    bucketing."""
+
+    @pytest.mark.asyncio
+    async def test_answer_not_queued_behind_saturated_group_bucket(self):
+        limiter = AIORateLimiter(
+            overall_max_rate=100,
+            overall_time_period=1,
+            group_max_rate=1,
+            group_time_period=5,  # 1 op/5s: sends 2-3 queue for seconds
+            max_retries=0,
+        )
+        calls: list[str] = []
+
+        async def fake_request(tag):
+            calls.append(tag)
+            return True
+
+        def request(tag, data):
+            return limiter.process_request(
+                callback=fake_request,
+                args=(tag,),
+                kwargs={},
+                endpoint="x",
+                data=data,
+                rate_limit_args=None,
+            )
+
+        send_tasks = [
+            asyncio.create_task(request(f"send{i}", {"chat_id": -100123}))
+            for i in range(3)
+        ]
+        await asyncio.sleep(0)  # let the sends claim the group bucket
+
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        await request("answer", {"callback_query_id": "abc"})
+        answer_latency = loop.time() - start
+
+        assert "answer" in calls
+        assert answer_latency < 0.5  # generous; the group queue is seconds deep
+
+        for task in send_tasks:
+            task.cancel()
+        await asyncio.gather(*send_tasks, return_exceptions=True)
+
+
+@pytest.mark.unit
+class TestSaturationSignal:
+    """#686b: the limiter logs WHICH bucket a call is about to wait on.
+    A group-bucket wait is normal per-chat pacing (debug); an
+    overall-bucket wait means the deployment-wide ceiling is binding —
+    the multi-user smoke alarm (warning)."""
+
+    def _make_limiter(self, **overrides):
+        limiter_cls = telegram_service_module._ObservedAIORateLimiter
+        params = dict(
+            overall_max_rate=1,
+            overall_time_period=600,
+            group_max_rate=1,
+            group_time_period=600,
+            max_retries=0,
+        )
+        params.update(overrides)
+        return limiter_cls(**params)
+
+    @pytest.mark.asyncio
+    async def test_overall_saturation_warns(self):
+        limiter = self._make_limiter()
+        await limiter._base_limiter.acquire()  # drain the overall bucket
+
+        with patch.object(telegram_service_module, "logger") as mock_logger:
+            limiter._note_bucket_wait(
+                chat=True, group=False, allow_paid_broadcast=False
+            )
+
+        mock_logger.warning.assert_called_once()
+        mock_logger.debug.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_group_saturation_logs_debug_only(self):
+        limiter = self._make_limiter()
+        await limiter._get_group_limiter(-100123).acquire()  # drain group bucket
+
+        with patch.object(telegram_service_module, "logger") as mock_logger:
+            limiter._note_bucket_wait(
+                chat=True, group=-100123, allow_paid_broadcast=False
+            )
+
+        mock_logger.debug.assert_called_once()
+        mock_logger.warning.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_free_buckets_log_nothing(self):
+        # async: aiolimiter's has_capacity() requires a running event loop
+        limiter = self._make_limiter()
+
+        with patch.object(telegram_service_module, "logger") as mock_logger:
+            limiter._note_bucket_wait(
+                chat=True, group=-100123, allow_paid_broadcast=False
+            )
+
+        mock_logger.warning.assert_not_called()
+        mock_logger.debug.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_run_request_passes_through(self):
+        """The override must match PTB's keyword call convention for
+        _run_request — this catches a signature drift on a PTB bump."""
+        limiter = self._make_limiter(
+            overall_max_rate=100,
+            overall_time_period=1,
+            group_max_rate=100,
+            group_time_period=1,
+        )
+
+        async def callback(value):
+            return value
+
+        result = await limiter._run_request(
+            chat=True,
+            group=-100123,
+            allow_paid_broadcast=False,
+            callback=callback,
+            args=("ok",),
+            kwargs={},
+        )
+
+        assert result == "ok"

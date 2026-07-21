@@ -40,6 +40,16 @@ class Settings(BaseSettings):
     # concurrency would exhaust the pool.
     TELEGRAM_MAX_CONCURRENT_UPDATES: int = 8
 
+    # Outbound Telegram API pacing (PTB AIORateLimiter, wired in
+    # TelegramService). The limiter's default buckets mirror Telegram's
+    # published budgets (30 msgs/s overall, 20 msgs/min per group); disabling
+    # it is the no-redeploy rollback lever — bursts then hit raw RetryAfter
+    # walls again. MAX_RETRIES bounds how many residual RetryAfter errors
+    # (budget consumed by senders the limiter cannot see, e.g. one-shot OAuth
+    # bots on the same token) the limiter absorbs before surfacing the error.
+    TELEGRAM_RATE_LIMITER_ENABLED: bool = True
+    TELEGRAM_RATE_LIMITER_MAX_RETRIES: int = 3
+
     # Media Configuration
     MEDIA_DIR: str = "/tmp/media"
 

@@ -3,8 +3,9 @@
 from datetime import datetime, timezone
 from typing import Optional
 
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
+
 from src.services.base_service import BaseService
-from src.services.core.telegram_service import TelegramService
 from src.services.core.settings_service import SettingsService
 from src.config.settings import settings
 from src.utils.logger import logger
@@ -21,11 +22,10 @@ class PostingService(BaseService):
 
     def __init__(self):
         super().__init__()
-        self.telegram_service = TelegramService()
         self.settings_service = SettingsService()
 
     async def send_gdrive_auth_alert(
-        self, telegram_chat_id: Optional[int] = None
+        self, telegram_chat_id: Optional[int] = None, *, bot: Bot
     ) -> None:
         """Send a Google Drive reconnect alert to Telegram.
 
@@ -33,6 +33,11 @@ class PostingService(BaseService):
         event and stays silent until the OAuth reconnect callback clears
         the flag. State lives in Postgres so it survives worker restarts
         and is correctly scoped per chat.
+
+        The caller supplies the bot — in the worker that is the
+        Application's rate-limited ExtBot, so the alert shares the same
+        outbound pacing as every other send instead of bypassing it via a
+        raw Bot.
         """
         chat_id = telegram_chat_id or settings.ADMIN_TELEGRAM_CHAT_ID
         if not chat_id:
@@ -52,10 +57,6 @@ class PostingService(BaseService):
             return
 
         try:
-            from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
-
-            bot = Bot(token=self.telegram_service.bot_token)
-
             reconnect_url = None
             if settings.OAUTH_REDIRECT_BASE_URL:
                 reconnect_url = (

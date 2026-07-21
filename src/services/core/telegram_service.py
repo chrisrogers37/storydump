@@ -17,9 +17,11 @@ the extracted handler modules:
 """
 
 import asyncio
+import logging
 
-from telegram import Bot, BotCommand
+from telegram import BotCommand
 from telegram.ext import (
+    AIORateLimiter,
     Application,
     CallbackQueryHandler,
     ChatMemberHandler,
@@ -50,6 +52,47 @@ from src.utils.logger import logger
 from src.services.core.telegram_utils import escape_markdown as _escape_markdown  # noqa: F401
 
 # Handler classes are imported inside initialize() to avoid circular imports.
+
+
+class _ObservedAIORateLimiter(AIORateLimiter):
+    """AIORateLimiter that logs which bucket an outbound call waits on.
+
+    Per-group waits are normal per-chat pacing (debug); an overall-bucket
+    wait means the deployment-wide budget is binding, all tenants sharing
+    one token — the capacity signal that gates future rate tuning
+    (warning). Peeks are advisory trend signals, not per-call ground
+    truth. Relies on PTB-private internals; the pass-through test pins
+    that contract against a version bump.
+    """
+
+    def _note_bucket_wait(self, chat, group, allow_paid_broadcast):
+        if allow_paid_broadcast:
+            return
+        if chat and self._base_limiter and not self._base_limiter.has_capacity():
+            logger.warning(
+                "Telegram overall send budget saturated — call queued behind "
+                "the deployment-wide ceiling (multi-user capacity signal)"
+            )
+        elif (
+            logger.isEnabledFor(logging.DEBUG)
+            and group
+            and self._group_max_rate
+            and not self._get_group_limiter(group).has_capacity()
+        ):
+            logger.debug(f"Telegram per-group budget pacing send to chat {group}")
+
+    async def _run_request(
+        self, chat, group, allow_paid_broadcast, callback, args, kwargs
+    ):
+        self._note_bucket_wait(chat, group, allow_paid_broadcast)
+        return await super()._run_request(
+            chat=chat,
+            group=group,
+            allow_paid_broadcast=allow_paid_broadcast,
+            callback=callback,
+            args=args,
+            kwargs=kwargs,
+        )
 
 
 class TelegramService(BaseService):
@@ -138,20 +181,40 @@ class TelegramService(BaseService):
     # Initialization
     # ------------------------------------------------------------------
 
-    async def initialize(self):
-        """Initialize Telegram bot and register all handlers."""
-        self.bot = Bot(token=self.bot_token)
-        # concurrent_updates: process button taps concurrently (each in its own
-        # asyncio Task) so a slow in-flight callback no longer serializes every
-        # other user's tap behind it. Bounded — each concurrent callback holds its
-        # own per-task DB session, so the bound keeps peak DB connections within
-        # the pool (see settings.TELEGRAM_MAX_CONCURRENT_UPDATES).
-        self.application = (
+    def _build_application(self) -> Application:
+        """Build the PTB Application: bounded concurrency + outbound pacing.
+
+        concurrent_updates: process button taps concurrently (each in its own
+        asyncio Task) so a slow in-flight callback no longer serializes every
+        other user's tap behind it. Bounded — each concurrent callback holds its
+        own per-task DB session, so the bound keeps peak DB connections within
+        the pool (see settings.TELEGRAM_MAX_CONCURRENT_UPDATES).
+
+        rate_limiter: paces outbound API calls so per-chat bursts queue
+        smoothly instead of hitting RetryAfter walls — semantics on
+        _ObservedAIORateLimiter; kill-switch and retry bound in settings.
+        """
+        builder = (
             Application.builder()
             .token(self.bot_token)
             .concurrent_updates(settings.TELEGRAM_MAX_CONCURRENT_UPDATES)
-            .build()
         )
+        if settings.TELEGRAM_RATE_LIMITER_ENABLED:
+            builder = builder.rate_limiter(
+                _ObservedAIORateLimiter(
+                    max_retries=settings.TELEGRAM_RATE_LIMITER_MAX_RETRIES
+                )
+            )
+        return builder.build()
+
+    async def initialize(self):
+        """Initialize Telegram bot and register all handlers."""
+        self.application = self._build_application()
+        # One outbound bot per worker: the Application's ExtBot carries the
+        # rate limiter, so every worker send path — approval cards, caption
+        # and keyboard edits, loop alerts — is paced. (API/CLI processes
+        # have no Application; their one-shot sends stay unpaced by design.)
+        self.bot = self.application.bot
 
         # Initialize sub-handlers (after bot/application are created)
         from src.services.core.telegram_commands import TelegramCommandHandlers
