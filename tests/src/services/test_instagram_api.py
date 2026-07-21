@@ -53,30 +53,30 @@ class TestInstagramAPIService:
         self, mock_settings, instagram_service
     ):
         """Test rate limit shows full capacity when no recent posts."""
-        mock_settings.INSTAGRAM_POSTS_PER_HOUR = 25
+        mock_settings.INSTAGRAM_PUBLISH_LIMIT_FALLBACK = 100
         instagram_service.history_repo.count_by_method.return_value = 0
 
         result = instagram_service.get_rate_limit_remaining()
 
-        assert result == 25
+        assert result == 100
 
     @patch("src.services.integrations.instagram_api.settings")
     def test_get_rate_limit_remaining_some_posts(
         self, mock_settings, instagram_service
     ):
         """Test rate limit calculation with recent posts."""
-        mock_settings.INSTAGRAM_POSTS_PER_HOUR = 25
+        mock_settings.INSTAGRAM_PUBLISH_LIMIT_FALLBACK = 100
         instagram_service.history_repo.count_by_method.return_value = 10
 
         result = instagram_service.get_rate_limit_remaining()
 
-        assert result == 15
+        assert result == 90
 
     @patch("src.services.integrations.instagram_api.settings")
     def test_get_rate_limit_remaining_exhausted(self, mock_settings, instagram_service):
         """Test rate limit shows 0 when exhausted."""
-        mock_settings.INSTAGRAM_POSTS_PER_HOUR = 25
-        instagram_service.history_repo.count_by_method.return_value = 25
+        mock_settings.INSTAGRAM_PUBLISH_LIMIT_FALLBACK = 100
+        instagram_service.history_repo.count_by_method.return_value = 100
 
         result = instagram_service.get_rate_limit_remaining()
 
@@ -87,43 +87,151 @@ class TestInstagramAPIService:
         self, mock_settings, instagram_service
     ):
         """Test rate limit doesn't go negative."""
-        mock_settings.INSTAGRAM_POSTS_PER_HOUR = 25
-        instagram_service.history_repo.count_by_method.return_value = 30
+        mock_settings.INSTAGRAM_PUBLISH_LIMIT_FALLBACK = 100
+        instagram_service.history_repo.count_by_method.return_value = 130
 
         result = instagram_service.get_rate_limit_remaining()
 
         assert result == 0
 
     def test_get_rate_limit_remaining_correct_time_window(self, instagram_service):
-        """Test rate limit uses correct 1-hour time window."""
+        """Test rate limit uses a 24-hour trailing window (not 1 hour)."""
         instagram_service.history_repo.count_by_method.return_value = 0
 
         with patch("src.services.integrations.instagram_api.settings") as mock_settings:
-            mock_settings.INSTAGRAM_POSTS_PER_HOUR = 25
+            mock_settings.INSTAGRAM_PUBLISH_LIMIT_FALLBACK = 100
             instagram_service.get_rate_limit_remaining()
 
         # Verify correct method and time window
         call_args = instagram_service.history_repo.count_by_method.call_args
         assert call_args[1]["method"] == "instagram_api"
         since = call_args[1]["since"]
-        # Should be approximately 1 hour ago
+        # Should be approximately 24 hours ago.
         now = datetime.now(timezone.utc)
-        assert (now - since).total_seconds() < 3610  # Within ~1 hour
+        elapsed = (now - since).total_seconds()
+        assert 23 * 3600 < elapsed < 24 * 3600 + 10
 
-    # ==================== get_rate_limit_status Tests ====================
+    # ============= get_content_publishing_limit Tests (Meta endpoint) =============
 
+    @pytest.mark.asyncio
     @patch("src.services.integrations.instagram_api.settings")
-    def test_get_rate_limit_status(self, mock_settings, instagram_service):
-        """Test rate limit status returns complete info."""
-        mock_settings.INSTAGRAM_POSTS_PER_HOUR = 25
-        instagram_service.history_repo.count_by_method.return_value = 10
+    async def test_get_content_publishing_limit_parses_meta_response(
+        self, mock_settings, instagram_service
+    ):
+        """Live Meta quota → remaining = quota_total - quota_usage, source=meta."""
+        mock_settings.INSTAGRAM_PUBLISH_LIMIT_FALLBACK = 100
+        mock_settings.meta_ig_graph_base = "https://graph.facebook.com/v21.0"
+        mock_settings.ADMIN_TELEGRAM_CHAT_ID = -100123
+        instagram_service._get_active_account_credentials = Mock(
+            return_value=("tok", "acct-1", "user1")
+        )
 
-        result = instagram_service.get_rate_limit_status()
+        response = Mock()
+        response.status_code = 200
+        response.json.return_value = {
+            "data": [
+                {
+                    "config": {"quota_total": 100, "quota_duration": 86400},
+                    "quota_usage": 3,
+                }
+            ]
+        }
 
-        assert result["remaining"] == 15
-        assert result["limit"] == 25
-        assert result["used"] == 10
-        assert result["window"] == "1 hour"
+        with patch(
+            "src.services.integrations.instagram_api.httpx.AsyncClient"
+        ) as mock_client:
+            mock_instance = mock_client.return_value
+            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_instance.__aexit__ = AsyncMock(return_value=False)
+            mock_instance.get = AsyncMock(return_value=response)
+
+            result = await instagram_service.get_content_publishing_limit(-100123)
+
+        assert result["quota_total"] == 100
+        assert result["quota_usage"] == 3
+        assert result["remaining"] == 97
+        assert result["source"] == "meta"
+
+    @pytest.mark.asyncio
+    @patch("src.services.integrations.instagram_api.settings")
+    async def test_get_content_publishing_limit_fails_open_on_http_error(
+        self, mock_settings, instagram_service
+    ):
+        """A monitoring-endpoint blip must never block posting: fail open."""
+        mock_settings.INSTAGRAM_PUBLISH_LIMIT_FALLBACK = 100
+        mock_settings.meta_ig_graph_base = "https://graph.facebook.com/v21.0"
+        mock_settings.ADMIN_TELEGRAM_CHAT_ID = -100123
+        instagram_service._get_active_account_credentials = Mock(
+            return_value=("tok", "acct-1", "user1")
+        )
+
+        with patch(
+            "src.services.integrations.instagram_api.httpx.AsyncClient"
+        ) as mock_client:
+            mock_instance = mock_client.return_value
+            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_instance.__aexit__ = AsyncMock(return_value=False)
+            mock_instance.get = AsyncMock(
+                side_effect=httpx.RequestError("connection reset")
+            )
+
+            result = await instagram_service.get_content_publishing_limit(-100123)
+
+        assert result["source"] == "fallback"
+        assert result["remaining"] == 100
+        assert result["quota_total"] == 100
+        assert result["quota_usage"] == 0
+
+    @pytest.mark.asyncio
+    @patch("src.services.integrations.instagram_api.settings")
+    async def test_get_content_publishing_limit_no_creds_returns_fallback(
+        self, mock_settings, instagram_service
+    ):
+        """No token/account → permissive fallback (never blocks the publish)."""
+        mock_settings.INSTAGRAM_PUBLISH_LIMIT_FALLBACK = 100
+        mock_settings.ADMIN_TELEGRAM_CHAT_ID = -100123
+        instagram_service._get_active_account_credentials = Mock(
+            return_value=(None, None, None)
+        )
+
+        result = await instagram_service.get_content_publishing_limit(-100123)
+
+        assert result["source"] == "fallback"
+        assert result["remaining"] == 100
+
+    @pytest.mark.asyncio
+    @patch("src.services.integrations.instagram_api.settings")
+    async def test_get_content_publishing_limit_meta_ratelimit_returns_zero(
+        self, mock_settings, instagram_service
+    ):
+        """If the endpoint itself returns Meta's rate-limit error, treat the
+        account as fully consumed (remaining=0) — Meta itself says limited."""
+        mock_settings.INSTAGRAM_PUBLISH_LIMIT_FALLBACK = 100
+        mock_settings.meta_ig_graph_base = "https://graph.facebook.com/v21.0"
+        mock_settings.ADMIN_TELEGRAM_CHAT_ID = -100123
+        instagram_service._get_active_account_credentials = Mock(
+            return_value=("tok", "acct-1", "user1")
+        )
+
+        err_response = Mock()
+        err_response.status_code = 400
+        err_response.json.return_value = {
+            "error": {"code": 4, "message": "Application request limit reached"}
+        }
+
+        with patch(
+            "src.services.integrations.instagram_api.httpx.AsyncClient"
+        ) as mock_client:
+            mock_instance = mock_client.return_value
+            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_instance.__aexit__ = AsyncMock(return_value=False)
+            mock_instance.get = AsyncMock(return_value=err_response)
+
+            result = await instagram_service.get_content_publishing_limit(-100123)
+
+        assert result["remaining"] == 0
+        assert result["quota_usage"] == 100
+        assert result["source"] == "meta"
 
     # ==================== is_configured Tests ====================
 
@@ -356,19 +464,36 @@ class TestInstagramAPIService:
     async def test_post_story_rate_limit_exhausted(
         self, mock_settings, instagram_service
     ):
-        """Test post_story raises RateLimitError when exhausted."""
-        mock_settings.INSTAGRAM_POSTS_PER_HOUR = 25
-        instagram_service.history_repo.count_by_method.return_value = 25
+        """post_story raises RateLimitError when Meta's live quota is exhausted."""
+        mock_settings.ADMIN_TELEGRAM_CHAT_ID = -100123
+        instagram_service._get_active_account_credentials = Mock(
+            return_value=("tok", "acct-1", "user1")
+        )
+        instagram_service.get_content_publishing_limit = AsyncMock(
+            return_value={
+                "quota_total": 100,
+                "quota_usage": 100,
+                "remaining": 0,
+                "source": "meta",
+            }
+        )
 
-        with pytest.raises(RateLimitError, match="Rate limit exhausted"):
+        with pytest.raises(RateLimitError, match="daily publishing limit reached"):
             await instagram_service.post_story("https://example.com/image.jpg")
 
     @pytest.mark.asyncio
     @patch("src.services.integrations.instagram_api.settings")
     async def test_post_story_no_token(self, mock_settings, instagram_service):
         """Test post_story raises TokenExpiredError when no token."""
-        mock_settings.INSTAGRAM_POSTS_PER_HOUR = 25
-        instagram_service.history_repo.count_by_method.return_value = 0
+        mock_settings.ADMIN_TELEGRAM_CHAT_ID = -100123
+        instagram_service.get_content_publishing_limit = AsyncMock(
+            return_value={
+                "quota_total": 100,
+                "quota_usage": 0,
+                "remaining": 100,
+                "source": "fallback",
+            }
+        )
         instagram_service.token_service.get_token.return_value = None
 
         with pytest.raises(TokenExpiredError, match="No valid Instagram token"):
@@ -381,8 +506,15 @@ class TestInstagramAPIService:
         self, mock_api_settings, mock_cred_settings, instagram_service
     ):
         """Test post_story raises error when no account configured."""
-        mock_api_settings.INSTAGRAM_POSTS_PER_HOUR = 25
         mock_api_settings.ADMIN_TELEGRAM_CHAT_ID = -100123
+        instagram_service.get_content_publishing_limit = AsyncMock(
+            return_value={
+                "quota_total": 100,
+                "quota_usage": 0,
+                "remaining": 100,
+                "source": "fallback",
+            }
+        )
         mock_cred_settings.INSTAGRAM_ACCOUNT_ID = None
         instagram_service.history_repo.count_by_method.return_value = 0
         instagram_service.token_service.get_token.return_value = "valid_token"
@@ -397,8 +529,15 @@ class TestInstagramAPIService:
     @patch("src.services.integrations.instagram_api.settings")
     async def test_post_story_success(self, mock_api_settings, instagram_service):
         """Test successful story posting."""
-        mock_api_settings.INSTAGRAM_POSTS_PER_HOUR = 25
-        instagram_service.history_repo.count_by_method.return_value = 0
+        mock_api_settings.ADMIN_TELEGRAM_CHAT_ID = -100123
+        instagram_service.get_content_publishing_limit = AsyncMock(
+            return_value={
+                "quota_total": 100,
+                "quota_usage": 0,
+                "remaining": 100,
+                "source": "fallback",
+            }
+        )
         # Multi-account: active account row + token record in DB
         active_account = Mock(
             id="acct-uuid",
@@ -450,8 +589,15 @@ class TestInstagramAPIService:
     @patch("src.services.integrations.instagram_api.settings")
     async def test_post_story_network_error(self, mock_api_settings, instagram_service):
         """Test post_story handles network errors."""
-        mock_api_settings.INSTAGRAM_POSTS_PER_HOUR = 25
-        instagram_service.history_repo.count_by_method.return_value = 0
+        mock_api_settings.ADMIN_TELEGRAM_CHAT_ID = -100123
+        instagram_service.get_content_publishing_limit = AsyncMock(
+            return_value={
+                "quota_total": 100,
+                "quota_usage": 0,
+                "remaining": 100,
+                "source": "fallback",
+            }
+        )
         active_account = Mock(
             id="acct-uuid",
             instagram_account_id="12345678",
@@ -977,9 +1123,15 @@ class TestPostStoryContainerCallback:
     async def test_callback_fires_after_container_before_publish(
         self, mock_settings, instagram_service
     ):
-        mock_settings.INSTAGRAM_POSTS_PER_HOUR = 25
         mock_settings.ADMIN_TELEGRAM_CHAT_ID = -100123
-        instagram_service.history_repo.count_by_method.return_value = 0
+        instagram_service.get_content_publishing_limit = AsyncMock(
+            return_value={
+                "quota_total": 100,
+                "quota_usage": 0,
+                "remaining": 100,
+                "source": "fallback",
+            }
+        )
         instagram_service._get_active_account_credentials = Mock(
             return_value=("tok", "acct-1", "user1")
         )
@@ -1036,9 +1188,15 @@ class TestPostStoryContainerCallback:
         it as an IG-confirmed failure and release the row for retry."""
         from src.exceptions import is_container_confirmed_failed
 
-        mock_settings.INSTAGRAM_POSTS_PER_HOUR = 25
         mock_settings.ADMIN_TELEGRAM_CHAT_ID = -100123
-        instagram_service.history_repo.count_by_method.return_value = 0
+        instagram_service.get_content_publishing_limit = AsyncMock(
+            return_value={
+                "quota_total": 100,
+                "quota_usage": 0,
+                "remaining": 100,
+                "source": "fallback",
+            }
+        )
         instagram_service._get_active_account_credentials = Mock(
             return_value=("tok", "acct-1", "user1")
         )
@@ -1075,9 +1233,15 @@ class TestPostStoryContainerCallback:
         self, mock_settings, instagram_service
     ):
         """on_container_created is optional — the legacy call still works."""
-        mock_settings.INSTAGRAM_POSTS_PER_HOUR = 25
         mock_settings.ADMIN_TELEGRAM_CHAT_ID = -100123
-        instagram_service.history_repo.count_by_method.return_value = 0
+        instagram_service.get_content_publishing_limit = AsyncMock(
+            return_value={
+                "quota_total": 100,
+                "quota_usage": 0,
+                "remaining": 100,
+                "source": "fallback",
+            }
+        )
         instagram_service._get_active_account_credentials = Mock(
             return_value=("tok", "acct-1", "user1")
         )

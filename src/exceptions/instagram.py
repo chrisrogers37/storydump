@@ -62,8 +62,11 @@ class RateLimitError(InstagramAPIError):
     """
     Instagram API rate limit exceeded.
 
-    Raised when we've hit Meta's rate limits (typically 25 posts/hour for Stories).
-    The caller should back off and retry later, or route to Telegram fallback.
+    Raised when Meta reports the account's content-publishing quota is
+    exhausted — the rolling-24h publish limit, shared across Stories, Reels,
+    and feed posts — or when the pre-publish quota check reports no remaining.
+    The caller surfaces the daily-limit state so the operator can post manually
+    now or retry once the 24h window rolls.
 
     Attributes:
         retry_after_seconds: Suggested wait time before retrying (if provided by API)

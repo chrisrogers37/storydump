@@ -21,8 +21,8 @@ class TestSettingsDefaults:
     def test_log_level_defaults_to_info(self):
         assert Settings.model_fields["LOG_LEVEL"].default == "INFO"
 
-    def test_instagram_posts_per_hour_defaults_to_25(self):
-        assert Settings.model_fields["INSTAGRAM_POSTS_PER_HOUR"].default == 25
+    def test_instagram_publish_limit_fallback_defaults_to_100(self):
+        assert Settings.model_fields["INSTAGRAM_PUBLISH_LIMIT_FALLBACK"].default == 100
 
     def test_cloud_upload_retention_hours_defaults_to_24(self):
         assert Settings.model_fields["CLOUD_UPLOAD_RETENTION_HOURS"].default == 24

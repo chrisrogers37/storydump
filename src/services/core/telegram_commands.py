@@ -243,7 +243,10 @@ class TelegramCommandHandlers:
                 rate_remaining = ig_service.get_rate_limit_remaining(
                     chat_settings_id=chat_settings_id,
                 )
-            return f"✅ Enabled ({rate_remaining}/25 remaining)"
+            return (
+                f"✅ Enabled ({rate_remaining}/"
+                f"{settings.INSTAGRAM_PUBLISH_LIMIT_FALLBACK} remaining)"
+            )
         except Exception:  # noqa: BLE001
             return "✅ Enabled (rate limit unknown)"
 

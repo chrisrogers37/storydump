@@ -662,6 +662,35 @@ class TelegramAutopostHandler:
         """
         logger.error(f"Auto-post failed: {e}", exc_info=True)
 
+        # A rate-limit rejection is definitive, not ambiguous: Instagram enforces
+        # the publishing quota at the media_publish call, so a RateLimitError
+        # means the story was never created — whether or not a container already
+        # exists. (Fail-open on the pre-publish gate makes a 429 after the
+        # container was created a designed path, not a fluke.) So this is NOT the
+        # #549 unconfirmed-publish case: if a container was claimed, release the
+        # row for retry (the same safe outcome as an IG-confirmed-dead container —
+        # nothing published, no duplicate risk), then show the graceful
+        # daily-limit card with the manual buttons — never the ambiguous
+        # "held for review" dead-end that would strand the row in 'publishing'.
+        if isinstance(e, RateLimitError):
+            if ctx.container_id is not None:
+                self.service.queue_repo.update_status(ctx.queue_id, "processing")
+            caption = (
+                "⚠️ *Instagram daily limit reached*\n\n"
+                "You've hit Instagram's daily posting limit. Post manually "
+                "below, or try auto-post again tomorrow."
+            )
+            reply_markup = build_queue_action_keyboard(
+                ctx.queue_id,
+                enable_instagram_api=bool(ctx.chat_settings.enable_instagram_api),
+                error_recovery=True,
+            )
+            await _update_autopost_caption(
+                ctx.query, caption, reply_markup=reply_markup
+            )
+            self._cleanup_cloudinary(ctx)
+            return
+
         # Claim-before-publish fail-safe (#549): once a container was created the
         # row is in 'publishing'. Classify the failure:
         #   - AMBIGUOUS (IG did NOT confirm failure): the publish outcome is
@@ -759,8 +788,6 @@ class TelegramAutopostHandler:
                 "It may be a HEIC photo or an unsupported format. This media "
                 "has been permanently rejected and won't be scheduled again."
             )
-        if isinstance(e, RateLimitError):
-            return "Instagram rate limit reached. Please try again later."
         if isinstance(e, TokenRevokedError):
             return "Instagram account has been disconnected (password change or app removed). Please reconnect in Settings."
         if isinstance(e, TokenCorruptError):
