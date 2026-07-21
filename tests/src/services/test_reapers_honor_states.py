@@ -130,18 +130,23 @@ async def _run_scheduler_reap(queue_repo) -> None:
     through a real HistoryRepository while the Telegram bot is a no-op (the
     reap edits the card, then writes history + deletes via the real repos).
     get_all_active_chats returns [] so the tick no-ops after the reap block."""
-    scheduler_service = Mock()
-    scheduler_service.telegram_service.application.bot = AsyncMock()
-    scheduler_service.history_repo = HistoryRepository()
-    settings_service = Mock()
-    settings_service.get_all_active_chats.return_value = []
-    await _scheduler_tick(
-        scheduler_service,
-        Mock(),  # posting_service — unused once active_chats is empty
-        settings_service,
-        queue_repo,
-        first_tick=False,
-    )
+    # Close the reap's HistoryRepository deterministically (context manager)
+    # rather than leaving it to __del__/GC: a session generator finalized at GC
+    # time can segfault in the psycopg2/greenlet C layer under coverage tracing
+    # (the fragile base_repository __del__ finalizer).
+    with HistoryRepository() as history_repo:
+        scheduler_service = Mock()
+        scheduler_service.telegram_service.application.bot = AsyncMock()
+        scheduler_service.history_repo = history_repo
+        settings_service = Mock()
+        settings_service.get_all_active_chats.return_value = []
+        await _scheduler_tick(
+            scheduler_service,
+            Mock(),  # posting_service — unused once active_chats is empty
+            settings_service,
+            queue_repo,
+            first_tick=False,
+        )
 
 
 @pytest.mark.integration
