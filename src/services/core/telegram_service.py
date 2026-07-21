@@ -142,6 +142,14 @@ class TelegramService(BaseService):
         """Delegate to OperationStateManager."""
         self.operation_state.cleanup(queue_id)
 
+    def mark_autopost_inflight(self, queue_id: str):
+        """Delegate to OperationStateManager."""
+        self.operation_state.mark_autopost_inflight(queue_id)
+
+    def is_autopost_inflight(self, queue_id: str) -> bool:
+        """Delegate to OperationStateManager."""
+        return self.operation_state.is_autopost_inflight(queue_id)
+
     def _get_or_create_user(self, telegram_user, telegram_chat_id=None):
         """Delegate to TelegramUserManager."""
         return self.user_manager.get_or_create_user(telegram_user, telegram_chat_id)

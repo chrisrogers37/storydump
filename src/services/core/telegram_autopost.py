@@ -96,24 +96,23 @@ class TelegramAutopostHandler:
         This uploads the media to Cloudinary and posts to Instagram via API.
         Includes CRITICAL safety gates to prevent accidental Facebook posting.
 
-        Uses operation locks to prevent duplicate auto-posts from rapid clicks.
-        Checks cancellation flags so terminal actions (Posted/Skip/Reject) can abort.
-
-        The fast path (claim item, remove buttons) runs synchronously.
-        The heavy work (upload, post, record) is spawned as a background task
-        so the callback pipeline is unblocked for other messages.
+        Duplicate rapid taps are rejected by the in-flight marker (held for the
+        whole background task); terminal actions (Posted/Skip/Reject) can still
+        abort via the cancel flag. The operation lock only guards the brief
+        claim + spawn critical section — it is released before the slow, rate-
+        limited edits, which run in the background task.
         """
-        lock = self.service.get_operation_lock(queue_id)
-        if lock.locked():
-            await query.answer("⏳ Already processing...", show_alert=False)
+        # Durable dupe guard: an in-flight autopost holds the marker until its
+        # background task finishes, so a re-tap is rejected even after the lock is
+        # released (below) ahead of the slow edits.
+        if self.service.is_autopost_inflight(queue_id):
+            await query.answer("⏳ Already posting this item...", show_alert=False)
             return
 
         # Acknowledge the click IMMEDIATELY so the button stops spinning.
         # Telegram requires answer_callback_query within ~30s of the click,
         # but the Cloudinary upload + Meta publish below can take longer
-        # than that. Without this early answer the user sees a stale
-        # spinner and the bot logs "Could not answer callback query (may
-        # be stale)". The dupe-click branch above has its own answer.
+        # than that. Without this early answer the user sees a stale spinner.
         try:
             await query.answer("⏳ Posting…", show_alert=False)
         except Exception as e:  # noqa: BLE001 — best-effort ack
@@ -122,13 +121,26 @@ class TelegramAutopostHandler:
         cancel_flag = self.service.get_cancel_flag(queue_id)
         cancel_flag.clear()
 
-        await lock.acquire()  # Manual acquire — background task will release
-        task_spawned = False
+        # The operation lock guards only the claim → mark-in-flight → spawn
+        # critical section (plus the cheap keyboard strip and card reconcile). It
+        # is released the instant the task is spawned — BEFORE the slow, rate-
+        # limited edits (Cloudinary upload, Meta publish, caption updates) that
+        # run in the background task — so it no longer blocks a concurrent action
+        # for the whole task. The in-flight marker, set before the spawn and
+        # cleared when the task finishes, is the durable guard that a second tap
+        # can never start a second autopost while the lock is down.
+        lock = self.service.get_operation_lock(queue_id)
+        spawned = False
+        await lock.acquire()
         try:
-            # Immediate visual feedback: remove buttons to signal action received
-            # Single attempt on purpose: cosmetic strip; the caption updates
-            # later in the flow strip the keyboard implicitly (with retry),
-            # and retry backoff here would stall the flow under the lock.
+            # Re-check under the lock: a tap that raced us may have claimed first.
+            if self.service.is_autopost_inflight(queue_id):
+                await query.answer("⏳ Already posting this item...", show_alert=False)
+                return
+
+            # Immediate visual feedback: remove buttons to signal action received.
+            # Single attempt on purpose — cosmetic; the caption edits later strip
+            # the keyboard implicitly, and retrying here would stall under the lock.
             try:
                 await query.edit_message_reply_markup(
                     reply_markup=InlineKeyboardMarkup([])
@@ -138,7 +150,7 @@ class TelegramAutopostHandler:
                     f"Could not remove keyboard for autopost item {queue_id}: {e}"
                 )
 
-            # Atomic claim: prevents duplicate auto-posts from rapid double-taps
+            # Atomic claim: prevents duplicate auto-posts from rapid double-taps.
             queue_item = self.service.queue_repo.claim_for_processing(queue_id)
             if not queue_item:
                 await validate_queue_item(self.service, queue_id, query)
@@ -146,7 +158,6 @@ class TelegramAutopostHandler:
 
             await reconcile_card_messages(self.service, queue_id, queue_item, query)
 
-            # Get media item
             media_item = self.service.media_repo.get_by_id(
                 str(queue_item.media_item_id)
             )
@@ -154,28 +165,35 @@ class TelegramAutopostHandler:
                 await query.edit_message_caption(caption="⚠️ Media item not found")
                 return
 
-            # Spawn background task — lock is transferred to the task
+            # Mark in-flight and spawn — no await between them, and the whole
+            # block runs under the lock, so a concurrent tap can't slip a second
+            # claim through. The background task clears the marker when done.
+            self.service.mark_autopost_inflight(queue_id)
             task = asyncio.create_task(
                 self._autopost_background(
-                    queue_id, queue_item, media_item, user, query, cancel_flag, lock
+                    queue_id, queue_item, media_item, user, query, cancel_flag
                 )
             )
             self._background_tasks.add(task)
             task.add_done_callback(self._background_tasks.discard)
-            task_spawned = True
+            spawned = True
         finally:
-            if not task_spawned:
-                lock.release()
+            lock.release()
+            # On a non-spawn path, free this item's state — unless a concurrent
+            # autopost owns the marker (never clear a live in-flight marker).
+            if not spawned and not self.service.is_autopost_inflight(queue_id):
                 self.service.cleanup_operation_state(queue_id)
 
     async def _autopost_background(
-        self, queue_id, queue_item, media_item, user, query, cancel_flag, lock
+        self, queue_id, queue_item, media_item, user, query, cancel_flag
     ):
         """Background task that performs the heavy auto-post work.
 
-        Runs Cloudinary upload + Instagram API call without blocking
-        the callback pipeline. Owns the operation lock and releases it
-        on completion.
+        Runs the slow, rate-limited work (Cloudinary upload, Instagram publish,
+        caption edits) WITHOUT holding the operation lock — it was released the
+        instant this task was spawned. The in-flight marker keeps a concurrent tap
+        from starting a second autopost; it is cleared (with the lock and cancel
+        flag) when this task finishes.
         """
         # This task copied the callback's context (incl. its per-repo Sessions).
         # Detach to fresh, task-local sessions so our DB work does not share — and
@@ -211,7 +229,6 @@ class TelegramAutopostHandler:
                 f"Background autopost failed for {queue_id[:8]}: {e}", exc_info=True
             )
         finally:
-            lock.release()
             self.service.cleanup_operation_state(queue_id)
             self.service.cleanup_transactions()
 
