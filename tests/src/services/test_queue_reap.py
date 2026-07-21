@@ -9,7 +9,7 @@ caption fallback that shows "Expired" instead of "Queue item not found".
 
 import uuid
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -495,6 +495,16 @@ class TestReapPendingRows:
         assert removed == 1
 
 
+def _cm_repo(**attrs):
+    """A repository mock usable as a context manager that yields itself and
+    does not suppress exceptions — mirrors BaseRepository.__enter__/__exit__
+    (``with Repo() as r`` gives ``r``; exit closes the session)."""
+    m = MagicMock(**attrs)
+    m.__enter__.return_value = m
+    m.__exit__.return_value = False
+    return m
+
+
 @pytest.mark.unit
 class TestReconcileAgedUnconfirmed:
     """The bounded aged-reconcile for never-tapped 'sent_unconfirmed' rows.
@@ -506,9 +516,9 @@ class TestReconcileAgedUnconfirmed:
 
     def test_expires_each_aged_row_and_returns_count(self):
         rows = [_make_unsent_row(), _make_unsent_row()]
-        queue_repo = Mock()
+        queue_repo = _cm_repo()
         queue_repo.get_aged_sent_unconfirmed.return_value = rows
-        history_repo = Mock()
+        history_repo = _cm_repo()
 
         with (
             patch(f"{_MODULE}.QueueRepository", return_value=queue_repo),
@@ -524,17 +534,17 @@ class TestReconcileAgedUnconfirmed:
         assert rec.call_count == 2
         for row in rows:
             rec.assert_any_call(row, history_repo=history_repo, queue_repo=queue_repo)
-        # It owns its repos and closes them.
-        queue_repo.close.assert_called_once()
-        history_repo.close.assert_called_once()
+        # It owns its repos and releases them via the context manager (close).
+        queue_repo.__exit__.assert_called_once()
+        history_repo.__exit__.assert_called_once()
 
     def test_counts_only_successful_reaps(self):
         """A contained per-row DB failure (record_expiry_and_delete -> False)
         is not counted — that row simply waits for the next pass."""
         rows = [_make_unsent_row(), _make_unsent_row()]
-        queue_repo = Mock()
+        queue_repo = _cm_repo()
         queue_repo.get_aged_sent_unconfirmed.return_value = rows
-        history_repo = Mock()
+        history_repo = _cm_repo()
 
         with (
             patch(f"{_MODULE}.QueueRepository", return_value=queue_repo),
@@ -545,11 +555,12 @@ class TestReconcileAgedUnconfirmed:
 
         assert expired == 1
 
-    def test_closes_repos_even_when_the_pass_raises(self):
-        """A raise mid-pass must still close both repos — no session leak."""
-        queue_repo = Mock()
+    def test_releases_repos_even_when_the_pass_raises(self):
+        """A raise mid-pass must still release both repos — the context
+        manager guarantees no session leak."""
+        queue_repo = _cm_repo()
         queue_repo.get_aged_sent_unconfirmed.side_effect = RuntimeError("boom")
-        history_repo = Mock()
+        history_repo = _cm_repo()
 
         with (
             patch(f"{_MODULE}.QueueRepository", return_value=queue_repo),
@@ -558,5 +569,5 @@ class TestReconcileAgedUnconfirmed:
             with pytest.raises(RuntimeError):
                 reconcile_aged_unconfirmed()
 
-        queue_repo.close.assert_called_once()
-        history_repo.close.assert_called_once()
+        queue_repo.__exit__.assert_called_once()
+        history_repo.__exit__.assert_called_once()

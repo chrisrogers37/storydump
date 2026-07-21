@@ -194,9 +194,7 @@ def reconcile_aged_unconfirmed(hours: int = 24, limit: int = 100) -> int:
 
     Returns the number of rows expired.
     """
-    queue_repo = QueueRepository()
-    history_repo = HistoryRepository()
-    try:
+    with QueueRepository() as queue_repo, HistoryRepository() as history_repo:
         expired = 0
         for row in queue_repo.get_aged_sent_unconfirmed(hours=hours, limit=limit):
             if record_expiry_and_delete(
@@ -209,6 +207,3 @@ def reconcile_aged_unconfirmed(hours: int = 24, limit: int = 100) -> int:
                 f"item(s) older than {hours}h (batch limit {limit})"
             )
         return expired
-    finally:
-        queue_repo.close()
-        history_repo.close()
