@@ -21,6 +21,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 
 from src.services.core.loops.queue_cleanup_loop import cleanup_queue_loop
+from src.services.core.queue_reap import reconcile_aged_unconfirmed
 
 _MODULE = "src.services.core.loops.queue_cleanup_loop"
 
@@ -42,6 +43,7 @@ class TestCleanupQueueLoop:
 
         with (
             patch(f"{_MODULE}.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+            patch(f"{_MODULE}.asyncio.to_thread", new_callable=AsyncMock),
             patch(f"{_MODULE}.expire_sent_row", new_callable=AsyncMock) as mock_expire,
         ):
             mock_sleep.side_effect = asyncio.CancelledError()
@@ -69,6 +71,7 @@ class TestCleanupQueueLoop:
 
         with (
             patch(f"{_MODULE}.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+            patch(f"{_MODULE}.asyncio.to_thread", new_callable=AsyncMock),
             patch(f"{_MODULE}.record_expiry_and_delete") as mock_record,
         ):
             mock_record.return_value = True
@@ -95,6 +98,7 @@ class TestCleanupQueueLoop:
 
         with (
             patch(f"{_MODULE}.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+            patch(f"{_MODULE}.asyncio.to_thread", new_callable=AsyncMock),
             patch(f"{_MODULE}.expire_sent_row", new_callable=AsyncMock) as mock_expire,
         ):
             mock_sleep.side_effect = asyncio.CancelledError()
@@ -115,6 +119,7 @@ class TestCleanupQueueLoop:
 
         with (
             patch(f"{_MODULE}.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+            patch(f"{_MODULE}.asyncio.to_thread", new_callable=AsyncMock),
             patch(f"{_MODULE}.expire_sent_row", new_callable=AsyncMock),
         ):
             mock_sleep.side_effect = asyncio.CancelledError()
@@ -125,3 +130,27 @@ class TestCleanupQueueLoop:
         queue_repo.get_stale_sent.assert_called_once_with(hours=24)
         queue_repo.get_stale_unsent.assert_called_once_with(hours=24)
         mock_sleep.assert_awaited_once_with(3600)
+
+    @pytest.mark.asyncio
+    async def test_aged_reconcile_runs_offloaded(self):
+        """PR4: the aged sent_unconfirmed reconcile is dispatched via
+        asyncio.to_thread — its synchronous DB pass runs OFF the shared event
+        loop so it can never block other tenants' callbacks (#682/#573)."""
+        queue_repo = Mock()
+        queue_repo.get_stale_sent.return_value = []
+        queue_repo.get_stale_unsent.return_value = []
+        bot = AsyncMock()
+        history_repo = Mock()
+
+        with (
+            patch(f"{_MODULE}.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+            patch(
+                f"{_MODULE}.asyncio.to_thread", new_callable=AsyncMock
+            ) as mock_to_thread,
+        ):
+            mock_sleep.side_effect = asyncio.CancelledError()
+            with pytest.raises(asyncio.CancelledError):
+                await cleanup_queue_loop(queue_repo, bot=bot, history_repo=history_repo)
+
+        # Offloaded (not called inline) and pointed at the bounded reconcile.
+        mock_to_thread.assert_awaited_once_with(reconcile_aged_unconfirmed)

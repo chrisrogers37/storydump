@@ -508,6 +508,46 @@ class QueueRepository(BaseRepository):
         """
         return self._get_stale_scheduled(stamped=True, hours=hours, status=status)
 
+    def get_aged_sent_unconfirmed(
+        self, hours: int = 24, limit: int = 100
+    ) -> List[PostingQueue]:
+        """Get 'sent_unconfirmed' rows past their reconcile age, oldest first.
+
+        The aged-reconcile lifecycle owns 'sent_unconfirmed': a tap promotes
+        the row to 'delivered' (``set_telegram_message``); this feed ages out
+        the never-tapped ones to terminal 'expired' via
+        ``record_expiry_and_delete`` (#687 — history-first, never a re-send).
+        These rows are deliberately excluded from ``_get_stale_scheduled`` so
+        the generic hourly sweep can't race this purpose-built resolution —
+        this method is their only reaper.
+
+        Selection keys on status + ``scheduled_for`` age only (INV-2), the same
+        age predicate as the sibling reap sweeps. Bounded by ``limit`` so one
+        pass can never block the event loop on a large backlog (the #682
+        loop-starvation class) — the hourly cadence drains the remainder.
+
+        Args:
+            hours: Age threshold in hours (default: 24).
+            limit: Maximum rows returned per pass (default: 100).
+
+        Returns:
+            Up to ``limit`` sent_unconfirmed PostingQueue rows older than the
+            cutoff, ordered by ``scheduled_for`` ascending (oldest first).
+        """
+        cutoff = datetime.utcnow() - timedelta(hours=hours)
+        rows = (
+            self.db.query(PostingQueue)
+            .filter(
+                PostingQueue.status == "sent_unconfirmed",
+                PostingQueue.scheduled_for < cutoff,
+            )
+            .order_by(PostingQueue.scheduled_for.asc())
+            .limit(limit)
+            .all()
+        )
+        self.end_read_transaction()
+        return rows
+
     def get_pending_with_telegram_message(
         self, telegram_chat_id: int
     ) -> List[PostingQueue]:

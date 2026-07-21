@@ -28,8 +28,10 @@ from uuid import uuid4
 import pytest
 from sqlalchemy.orm import sessionmaker
 
+from src.repositories.history_repository import HistoryRepository
 from src.repositories.media_repository import MediaRepository
 from src.repositories.queue_repository import QueueRepository
+from src.services.core.queue_reap import reconcile_aged_unconfirmed
 
 STALE_MINUTES = 10
 
@@ -121,6 +123,37 @@ def _status_of(queue_id) -> str:
     repo = QueueRepository()
     try:
         return repo.get_by_id(str(queue_id)).status
+    finally:
+        repo.close()
+
+
+def _get_row(queue_id):
+    """Return the queue row, or None if it has been reaped."""
+    repo = QueueRepository()
+    try:
+        return repo.get_by_id(str(queue_id))
+    finally:
+        repo.close()
+
+
+def _history_for(queue_id):
+    """Return the posting_history row a reap wrote for this queue item, if any."""
+    repo = HistoryRepository()
+    try:
+        return repo.get_by_queue_item_id(str(queue_id))
+    finally:
+        repo.close()
+
+
+def _delete_history_for(queue_id) -> None:
+    """Remove any posting_history row a reap wrote (call before _delete_rows,
+    so the media FK is free to drop)."""
+    repo = HistoryRepository()
+    try:
+        row = repo.get_by_queue_item_id(str(queue_id))
+        if row:
+            repo.db.delete(row)
+            repo.db.commit()
     finally:
         repo.close()
 
@@ -372,5 +405,170 @@ class TestStaleScheduledStatusAware:
             finally:
                 repo.close()
             assert str(pair[1]) in {str(r.id) for r in stale}
+        finally:
+            _delete_rows(pair)
+
+
+@pytest.mark.integration
+class TestGetAgedSentUnconfirmed:
+    """PR4: the aged-reconcile feed — the ONE set no other sweep owns.
+
+    ``sent_unconfirmed`` is excluded from ``_get_stale_scheduled`` (M3) and
+    never selected by ``resolve_stale_processing``, so without this feed those
+    rows persist forever. It keys on ``scheduled_for`` + status only (INV-2,
+    same age predicate as the sibling reap sweeps), is bounded by ``limit`` so
+    one pass can't block the loop on a backlog (#682), and returns oldest
+    first so the drain is fair.
+    """
+
+    def test_returns_aged_sent_unconfirmed(self):
+        pair = _create_queue_row(status="sent_unconfirmed", scheduled_age_hours=48)
+        try:
+            repo = QueueRepository()
+            try:
+                aged = repo.get_aged_sent_unconfirmed(hours=24)
+            finally:
+                repo.close()
+            assert str(pair[1]) in {str(r.id) for r in aged}
+        finally:
+            _delete_rows(pair)
+
+    def test_excludes_fresh_sent_unconfirmed(self):
+        """A recently-scheduled sent_unconfirmed row is still within its action
+        window — a tap can still promote it to delivered, so don't expire it."""
+        pair = _create_queue_row(status="sent_unconfirmed", scheduled_age_hours=1)
+        try:
+            repo = QueueRepository()
+            try:
+                aged = repo.get_aged_sent_unconfirmed(hours=24)
+            finally:
+                repo.close()
+            assert str(pair[1]) not in {str(r.id) for r in aged}
+        finally:
+            _delete_rows(pair)
+
+    def test_excludes_other_statuses(self):
+        """Only sent_unconfirmed is owned by this feed. delivered ages out via
+        the stamped reap; processing via resolve_stale_processing; pending is
+        live work."""
+        su = _create_queue_row(status="sent_unconfirmed", scheduled_age_hours=48)
+        delivered = _create_queue_row(
+            status="delivered", stamped=True, scheduled_age_hours=48
+        )
+        processing = _create_queue_row(status="processing", scheduled_age_hours=48)
+        pending = _create_queue_row(status="pending", scheduled_age_hours=48)
+        try:
+            repo = QueueRepository()
+            try:
+                aged_ids = {str(r.id) for r in repo.get_aged_sent_unconfirmed(hours=24)}
+            finally:
+                repo.close()
+            assert str(su[1]) in aged_ids
+            assert str(delivered[1]) not in aged_ids
+            assert str(processing[1]) not in aged_ids
+            assert str(pending[1]) not in aged_ids
+        finally:
+            _delete_rows(su, delivered, processing, pending)
+
+    def test_bounded_by_limit_oldest_first(self):
+        """The #682 loop-starvation guard: with more aged rows than the limit,
+        only the oldest ``limit`` come back, oldest first — the rest drain on
+        the next cycle."""
+        older = _create_queue_row(status="sent_unconfirmed", scheduled_age_hours=96)
+        middle = _create_queue_row(status="sent_unconfirmed", scheduled_age_hours=72)
+        newer = _create_queue_row(status="sent_unconfirmed", scheduled_age_hours=48)
+        try:
+            repo = QueueRepository()
+            try:
+                aged = repo.get_aged_sent_unconfirmed(hours=24, limit=2)
+            finally:
+                repo.close()
+            returned = [str(r.id) for r in aged]
+            assert returned == [str(older[1]), str(middle[1])]
+            assert str(newer[1]) not in returned
+        finally:
+            _delete_rows(older, middle, newer)
+
+
+@pytest.mark.integration
+class TestReconcileAgedUnconfirmed:
+    """PR4: never-tapped 'sent_unconfirmed' rows age out to terminal 'expired'
+    through the shared history-first reap (#687) — INV-3 (a terminal
+    transition writes posting_history) and NEVER a re-send
+    (``record_expiry_and_delete`` carries no send path)."""
+
+    def test_expires_aged_row_with_terminal_history(self):
+        pair = _create_queue_row(status="sent_unconfirmed", scheduled_age_hours=48)
+        _, queue_id = pair
+        try:
+            expired = reconcile_aged_unconfirmed(hours=24, limit=100)
+            assert expired >= 1
+            # The queue row is gone...
+            assert _get_row(queue_id) is None
+            # ...and INV-3 held: a terminal 'expired' history row exists,
+            # written the system-expiry way (no send, success=False).
+            hist = _history_for(queue_id)
+            assert hist is not None
+            assert hist.status == "expired"
+            assert hist.posting_method == "system_expiry"
+            assert hist.success is False
+        finally:
+            _delete_history_for(queue_id)
+            _delete_rows(pair)
+
+    def test_leaves_fresh_row_untouched(self):
+        """A within-window sent_unconfirmed row is neither expired nor
+        history-written — a tap can still resolve it to delivered."""
+        pair = _create_queue_row(status="sent_unconfirmed", scheduled_age_hours=1)
+        _, queue_id = pair
+        try:
+            reconcile_aged_unconfirmed(hours=24, limit=100)
+            assert _status_of(queue_id) == "sent_unconfirmed"
+            assert _history_for(queue_id) is None
+        finally:
+            _delete_history_for(queue_id)
+            _delete_rows(pair)
+
+    def test_bounded_by_limit(self):
+        """Only ``limit`` rows expire per pass — the rest wait for the next
+        cycle, so one pass can't block the loop on a backlog (#682)."""
+        a = _create_queue_row(status="sent_unconfirmed", scheduled_age_hours=96)
+        b = _create_queue_row(status="sent_unconfirmed", scheduled_age_hours=72)
+        c = _create_queue_row(status="sent_unconfirmed", scheduled_age_hours=48)
+        try:
+            expired = reconcile_aged_unconfirmed(hours=24, limit=2)
+            assert expired == 2
+            # The two oldest expired; the newest survives to the next cycle.
+            remaining = [p for p in (a, b, c) if _get_row(p[1]) is not None]
+            assert remaining == [c]
+        finally:
+            for p in (a, b, c):
+                _delete_history_for(p[1])
+                _delete_rows(p)
+
+
+@pytest.mark.integration
+class TestOnClickResolvesSentUnconfirmed:
+    """PR4 (on-click half): a tap resolves the delivery ambiguity. The click
+    path claims the row (``claim_for_processing`` admits sent_unconfirmed) then
+    stamps it, promoting to 'delivered' (INV-1). This is what keeps a tapped
+    card out of the aged reconcile's expiry set. Regression lock on the seam
+    that PR2 already wired — proven end-to-end against a real DB."""
+
+    def test_claim_then_stamp_promotes_to_delivered(self):
+        pair = _create_queue_row(status="sent_unconfirmed")
+        _, queue_id = pair
+        try:
+            repo = QueueRepository()
+            try:
+                claimed = repo.claim_for_processing(str(queue_id))
+                assert claimed is not None
+                assert claimed.status == "processing"
+                repo.set_telegram_message(str(queue_id), 556677, 222333)
+            finally:
+                repo.close()
+            row = _get_row(queue_id)
+            assert row.status == "delivered"
+            assert row.telegram_message_id == 556677
         finally:
             _delete_rows(pair)
