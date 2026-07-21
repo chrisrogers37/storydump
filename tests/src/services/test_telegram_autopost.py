@@ -1241,6 +1241,44 @@ class TestHandleAutopostError:
         caption = ctx.query.edit_message_caption.call_args.kwargs["caption"]
         assert "held for review" in caption.lower()
 
+    async def test_rate_limit_after_container_shows_graceful_card_not_held(
+        self, mock_autopost_handler, make_autopost_ctx
+    ):
+        """A Meta rate-limit rejection that fires AFTER a container was created
+        (the fail-open pathway: the pre-publish gate let it through, then
+        media_publish 429s) must NOT land in the ambiguous 'held for review'
+        dead-end. A rate-reject is definitive — nothing published — so the row
+        is released for retry and the operator gets the graceful daily-limit
+        card WITH the manual buttons, never a zero-button stranded 'publishing'
+        orphan (navi #707)."""
+        from src.exceptions.instagram import RateLimitError
+
+        handler = mock_autopost_handler
+        ctx = make_autopost_ctx()
+        ctx.container_id = "container-xyz"  # container created before the 429
+
+        await handler._handle_autopost_error(ctx, RateLimitError())
+
+        # Row released for retry — never stranded in 'publishing'.
+        handler.service.queue_repo.update_status.assert_called_once_with(
+            ctx.queue_id, "processing"
+        )
+
+        call_kwargs = ctx.query.edit_message_caption.call_args.kwargs
+        caption = call_kwargs["caption"]
+        # Graceful daily-limit card, NOT the ambiguous held-for-review hold.
+        assert "daily limit reached" in caption.lower()
+        assert "held for review" not in caption.lower()
+
+        # Manual action buttons restored (back-to-buttons affordance).
+        reply_markup = call_kwargs["reply_markup"]
+        assert reply_markup is not None
+        callbacks = [
+            btn.callback_data for row in reply_markup.inline_keyboard for btn in row
+        ]
+        assert any(c.startswith("posted:") for c in callbacks)
+        assert any(c.startswith("skip:") for c in callbacks)
+
 
 @pytest.mark.unit
 class TestCloudinaryCleanup:
