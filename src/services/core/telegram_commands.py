@@ -326,12 +326,7 @@ class TelegramCommandHandlers:
 
         if not result.get("posted"):
             error = result.get("error", "")
-            if result.get("reason") == "daily_cap_reached":
-                await update.message.reply_text(
-                    "⚠️ *Daily Limit Reached*\n\nPosting cap for today has been hit.",
-                    parse_mode="Markdown",
-                )
-            elif result.get("reason") == "no_eligible_media":
+            if result.get("reason") == "no_eligible_media":
                 await update.message.reply_text(
                     "📭 *No Eligible Media*\n\nNo media available to send.",
                     parse_mode="Markdown",

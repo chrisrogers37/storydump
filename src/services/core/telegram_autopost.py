@@ -240,21 +240,6 @@ class TelegramAutopostHandler:
             )
             return
 
-        # Daily cap guard
-        from src.services.core.daily_cap import can_post_today
-
-        if not can_post_today(
-            chat_settings, self.service.history_repo, self.service.queue_repo
-        ):
-            # The row was claimed into 'processing' upstream; release it back
-            # to 'pending' so it isn't left orphaned for the stale-processing
-            # sweeper (mirrors the manual queue-action cap-hit handling).
-            self.service.queue_repo.update_status(queue_id, "pending")
-            await query.edit_message_caption(
-                caption="⚠️ Daily posting limit reached. Try again tomorrow.",
-            )
-            return
-
         # Run comprehensive safety check
         safety_result = instagram_service.safety_check_before_post(
             telegram_chat_id=chat_id

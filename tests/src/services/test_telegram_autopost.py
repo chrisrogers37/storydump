@@ -557,7 +557,6 @@ class TestAutopostBackgroundTask:
             patch(
                 "src.services.integrations.cloud_storage.CloudStorageService"
             ) as mock_cloud,
-            patch("src.services.core.daily_cap.can_post_today", return_value=True),
         ):
             ig = mock_ig.return_value
             ig.close = Mock()
@@ -1605,71 +1604,6 @@ class TestGetUserFriendlyError:
         assert "reconnect" in msg.lower()
 
 
-@pytest.mark.unit
-@pytest.mark.asyncio
-class TestAutopostDailyCap:
-    """Daily-cap handling on the autopost path must not orphan queue rows.
-
-    The autopost path claims the card into 'processing' before running the cap
-    guard in _do_autopost (a spawned task). On a cap-hit it must release the
-    row back to 'pending' — mirroring the manual Posted/Skip/Reject handler
-    (telegram_callbacks_queue) — so a capped tap never leaves the row stranded
-    in 'processing'.
-    """
-
-    @staticmethod
-    def _make_query(chat_id=-100123):
-        query = AsyncMock()
-        query.message = Mock()
-        query.message.chat_id = chat_id
-        return query
-
-    async def test_do_autopost_cap_hit_restores_row_to_pending(
-        self, mock_autopost_handler
-    ):
-        """On a daily-cap hit, _do_autopost releases the claimed row back to
-        'pending' instead of leaving it orphaned in 'processing'."""
-        handler = mock_autopost_handler
-        service = handler.service
-        # Default chat_settings allows 99/day; push today's count to the cap.
-        service.history_repo.count_posts_today.return_value = 99
-        query = self._make_query()
-        queue_id = str(uuid4())
-
-        await handler._do_autopost(
-            queue_id, Mock(), Mock(), Mock(), query, Mock(), Mock()
-        )
-
-        # Belt-and-suspenders restore — mirrors the manual queue-action handler.
-        service.queue_repo.update_status.assert_called_once_with(queue_id, "pending")
-        # Cap semantics intact: the user is still told the limit was reached.
-        query.edit_message_caption.assert_called_once()
-        assert "limit" in str(query.edit_message_caption.call_args).lower()
-
-    async def test_do_autopost_under_cap_does_not_restore(self, mock_autopost_handler):
-        """Under the cap, _do_autopost proceeds past the cap check and never
-        touches status — the restore path is strictly cap-gated."""
-        handler = mock_autopost_handler
-        service = handler.service
-        service.history_repo.count_posts_today.return_value = 0  # well under cap
-        # Fail the next safety gate so the method returns right after the cap
-        # check without reaching the real posting flow.
-        instagram_service = Mock()
-        instagram_service.safety_check_before_post.return_value = {
-            "safe_to_post": False,
-            "errors": ["blocked for test"],
-        }
-        query = self._make_query()
-        queue_id = str(uuid4())
-
-        await handler._do_autopost(
-            queue_id, Mock(), Mock(), Mock(), query, instagram_service, Mock()
-        )
-
-        # Not capped → no restore-to-pending churn.
-        service.queue_repo.update_status.assert_not_called()
-
-
 from datetime import datetime, timezone  # noqa: E402
 from tests.src.services.conftest import make_query, make_user  # noqa: E402
 
@@ -1712,9 +1646,7 @@ class TestAutopostClaimBeforePublish:
         service = handler.service
         queue_item, media_item, cs = _autopost_ctx_bits()
         service.settings_service.get_settings.return_value = cs
-        service.history_repo.count_posts_today.return_value = 0
         service.queue_repo.count_by_status.return_value = 0
-        service.queue_repo.count_recent_by_status.return_value = 0
         # Crash: the atomic finalize raises after publish.
         service.history_repo.create_idempotent.side_effect = RuntimeError("crash")
 

@@ -176,32 +176,6 @@ class QueueRepository(BaseRepository):
         self.end_read_transaction()
         return result
 
-    def count_recent_by_status(
-        self,
-        statuses: list[str],
-        since: datetime,
-        chat_settings_id: Optional[str] = None,
-    ) -> int:
-        """Count items matching any status whose ``created_at`` is at or after
-        ``since``.
-
-        Time-bounded sibling of ``count_by_status`` for the daily-cap gate: a
-        'publishing' row only taxes the cap while it is plausibly a live,
-        in-flight publish. A publish resolves within the 180s container
-        wall-clock cap, so a row older than the caller's ``since`` threshold is
-        presumed stuck and excluded — a stranded row must not wedge the cap
-        forever. This only stops *counting* a stale claim; it never deletes or
-        rolls the row forward (no reconciliation).
-        """
-        result = (
-            self._tenant_query(PostingQueue, chat_settings_id)
-            .filter(PostingQueue.status.in_(statuses))
-            .filter(PostingQueue.created_at >= since)
-            .count()
-        )
-        self.end_read_transaction()
-        return result
-
     def count_pending(self, chat_settings_id: Optional[str] = None) -> int:
         """Count number of pending items."""
         result = (

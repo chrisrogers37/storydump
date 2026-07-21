@@ -200,52 +200,6 @@ class HistoryRepository(BaseRepository):
         self.end_read_transaction()
         return result
 
-    def count_posts_today(
-        self,
-        chat_settings_id: Optional[str] = None,
-        posting_timezone: Optional[str] = None,
-    ) -> int:
-        """Count successful posts in the current calendar day.
-
-        Uses the chat's posting_timezone to determine day boundaries.
-        Falls back to UTC if timezone is None or invalid.
-
-        Args:
-            chat_settings_id: Tenant to filter by
-            posting_timezone: IANA timezone for day boundary calculation
-
-        Returns:
-            Count of posts with status='posted' and success=True today
-        """
-        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-
-        tz = timezone.utc
-        if posting_timezone:
-            try:
-                tz = ZoneInfo(posting_timezone)
-            except (ZoneInfoNotFoundError, KeyError):
-                tz = timezone.utc
-
-        now = datetime.now(tz)
-        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        today_start_utc = today_start.astimezone(timezone.utc)
-
-        result = (
-            self._tenant_query(PostingHistory, chat_settings_id)
-            .with_entities(func.count(PostingHistory.id))
-            .filter(
-                and_(
-                    PostingHistory.posted_at >= today_start_utc,
-                    PostingHistory.status == "posted",
-                    PostingHistory.success,
-                )
-            )
-            .scalar()
-            or 0
-        )
-        self.end_read_transaction()
-        return result
-
     def get_by_queue_item_id(self, queue_item_id: str) -> Optional[PostingHistory]:
         """Get the most recent history record for a specific queue item.
 
