@@ -696,6 +696,33 @@ class TelegramAutopostHandler:
             )
             self.service.queue_repo.update_status(ctx.queue_id, "processing")
 
+        # Graceful daily-cap card: a rate-limit rejection means nothing posted,
+        # so this is not a "failure" — reframe as an expected daily-limit hit and
+        # restore the manual action buttons (the same recovery keyboard the
+        # generic path builds below) so the operator can post manually now or
+        # retry tomorrow. NOT a dead-end. The claim-before-publish container
+        # handling above still runs first, so an unconfirmed publish is never
+        # bypassed by this early return.
+        if isinstance(e, RateLimitError):
+            caption = (
+                "⚠️ *Instagram daily limit reached*\n\n"
+                "You've hit Instagram's daily posting limit. Post manually "
+                "below, or try auto-post again tomorrow."
+            )
+            reply_markup = build_queue_action_keyboard(
+                ctx.queue_id,
+                enable_instagram_api=bool(ctx.chat_settings.enable_instagram_api),
+                error_recovery=True,
+            )
+            await _update_autopost_caption(
+                ctx.query, caption, reply_markup=reply_markup
+            )
+            # The upload ran before the publish gate rejected us — clean it up
+            # so we don't orphan the Cloudinary asset (parity with the generic
+            # error path below).
+            self._cleanup_cloudinary(ctx)
+            return
+
         if isinstance(e, MediaUnsupportedError):
             try:
                 self.service.lock_service.create_lock(
@@ -759,8 +786,6 @@ class TelegramAutopostHandler:
                 "It may be a HEIC photo or an unsupported format. This media "
                 "has been permanently rejected and won't be scheduled again."
             )
-        if isinstance(e, RateLimitError):
-            return "Instagram rate limit reached. Please try again later."
         if isinstance(e, TokenRevokedError):
             return "Instagram account has been disconnected (password change or app removed). Please reconnect in Settings."
         if isinstance(e, TokenCorruptError):

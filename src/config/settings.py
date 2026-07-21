@@ -83,7 +83,12 @@ class Settings(BaseSettings):
     CLOUD_UPLOAD_TIMEOUT_SECONDS: int = 120
 
     # Instagram API Rate Limiting (Phase 2)
-    INSTAGRAM_POSTS_PER_HOUR: int = 25  # Meta's limit for Stories
+    # Fallback daily publishing limit, used ONLY when Meta's
+    # content_publishing_limit endpoint is unreachable. The authoritative
+    # limit is fetched live per-account (Meta has changed it 25→50→100 and it
+    # varies per account); Meta's current documented default is 100 API-published
+    # posts per rolling 24h.
+    INSTAGRAM_PUBLISH_LIMIT_FALLBACK: int = 100
 
     # Security (Phase 2 - required for token encryption)
     ENCRYPTION_KEY: Optional[str] = None  # Fernet key for encrypting tokens in DB

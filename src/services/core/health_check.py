@@ -155,7 +155,7 @@ class HealthCheckService(BaseService):
                 "healthy": True,
                 "enabled": True,
                 "rate_limit_remaining": remaining,
-                "rate_limit_total": settings.INSTAGRAM_POSTS_PER_HOUR,
+                "rate_limit_total": settings.INSTAGRAM_PUBLISH_LIMIT_FALLBACK,
             }
 
             # Add token info
@@ -164,14 +164,14 @@ class HealthCheckService(BaseService):
 
             if token_health.get("needs_refresh"):
                 response["message"] = (
-                    f"OK ({remaining}/{settings.INSTAGRAM_POSTS_PER_HOUR} posts), token refresh recommended"
+                    f"OK ({remaining}/{settings.INSTAGRAM_PUBLISH_LIMIT_FALLBACK} posts), token refresh recommended"
                 )
             elif remaining == 0:
                 response["healthy"] = False
                 response["message"] = "Rate limit exhausted (0 posts remaining)"
             else:
                 response["message"] = (
-                    f"OK ({remaining}/{settings.INSTAGRAM_POSTS_PER_HOUR} posts remaining)"
+                    f"OK ({remaining}/{settings.INSTAGRAM_PUBLISH_LIMIT_FALLBACK} posts remaining)"
                 )
 
             return response

@@ -376,7 +376,7 @@ class TestGetInstagramApiStatus:
             )
 
         assert "Enabled" in result
-        assert "20/25" in result
+        assert "20/100" in result
 
     def test_disabled(self):
         """Test shows disabled status when chat_settings has IG API off."""
@@ -642,13 +642,14 @@ class TestStatusCommand:
             ),
         ):
             mock_settings.OAUTH_REDIRECT_BASE_URL = None
+            mock_settings.INSTAGRAM_PUBLISH_LIMIT_FALLBACK = 100
             # Env says disabled, but DB says enabled — DB should win
             mock_settings.ENABLE_INSTAGRAM_API = False
             await handlers.handle_status(mock_update, Mock())
 
         msg = mock_update.message.reply_text.call_args.args[0]
         assert "Enabled" in msg
-        assert "20/25" in msg
+        assert "20/100" in msg
 
 
 # ==================== Setup Status Tests ====================

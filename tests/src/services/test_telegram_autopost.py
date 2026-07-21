@@ -526,6 +526,67 @@ class TestAutopostBackgroundTask:
 
         service.cleanup_transactions.assert_called()
 
+    async def test_rate_limit_answers_callback_and_shows_graceful_card(
+        self, background_test_setup
+    ):
+        """End-to-end: when the IG publish hits the daily limit, the callback is
+        answered up-front (spinner stops) AND the final card is the graceful
+        daily-limit card — not the scary generic 'Auto Post Failed' dead-end."""
+        from src.exceptions.instagram import RateLimitError
+
+        handler, service, queue_id, mock_user, mock_query = background_test_setup
+
+        # API enabled, not dry-run, so the flow reaches the real publish path.
+        chat_settings = Mock(
+            id="cs-id",
+            dry_run_mode=False,
+            enable_instagram_api=True,
+            posts_per_day=99,
+            posting_timezone=None,
+        )
+        service.settings_service.get_settings.return_value = chat_settings
+        service.media_repo.get_by_id.return_value.file_path = "/x/test.jpg"
+
+        # Skip the real Cloudinary upload — the publish gate is what we exercise.
+        handler._upload_to_cloudinary = AsyncMock(return_value=True)
+
+        with (
+            patch(
+                "src.services.integrations.instagram_api.InstagramAPIService"
+            ) as mock_ig,
+            patch(
+                "src.services.integrations.cloud_storage.CloudStorageService"
+            ) as mock_cloud,
+            patch("src.services.core.daily_cap.can_post_today", return_value=True),
+        ):
+            ig = mock_ig.return_value
+            ig.close = Mock()
+            ig.safety_check_before_post.return_value = {
+                "safe_to_post": True,
+                "errors": [],
+            }
+            ig.post_story = AsyncMock(
+                side_effect=RateLimitError(
+                    "Instagram daily publishing limit reached "
+                    "(100/100 in the last 24h)."
+                )
+            )
+            mock_cloud.return_value.close = Mock()
+
+            await handler.handle_autopost(queue_id, mock_user, mock_query)
+            await _await_background_tasks(handler)
+
+        # Callback answered up-front (spinner stopped) regardless of outcome.
+        mock_query.answer.assert_called()
+
+        captions = [
+            c.kwargs.get("caption", "")
+            for c in mock_query.edit_message_caption.call_args_list
+        ]
+        # Final framing is the graceful daily-limit card, never the failure card.
+        assert any("daily limit reached" in cap.lower() for cap in captions)
+        assert all("Auto Post Failed" not in cap for cap in captions)
+
 
 # ==================== Extracted Helper Tests ====================
 
@@ -1003,10 +1064,12 @@ class TestHandleAutopostError:
         assert "Cloudinary" not in call_kwargs["caption"]
         assert "server issue" in call_kwargs["caption"]
 
-    async def test_rate_limit_error_message(
+    async def test_rate_limit_error_shows_graceful_daily_limit_card(
         self, mock_autopost_handler, make_autopost_ctx
     ):
-        """Test RateLimitError shows rate limit message."""
+        """A RateLimitError renders a DISTINCT graceful daily-limit card (not the
+        scary generic 'Auto Post Failed'), and restores the manual action
+        buttons so the operator can post manually or retry — never a dead-end."""
         from src.exceptions.instagram import RateLimitError
 
         handler = mock_autopost_handler
@@ -1015,7 +1078,20 @@ class TestHandleAutopostError:
         await handler._handle_autopost_error(ctx, RateLimitError())
 
         call_kwargs = ctx.query.edit_message_caption.call_args.kwargs
-        assert "rate limit" in call_kwargs["caption"].lower()
+        caption = call_kwargs["caption"]
+        # Graceful framing, not the generic failure card.
+        assert "daily limit reached" in caption.lower()
+        assert "Auto Post Failed" not in caption
+
+        # Manual action buttons restored (back-to-buttons affordance).
+        reply_markup = call_kwargs["reply_markup"]
+        assert reply_markup is not None
+        callbacks = [
+            btn.callback_data for row in reply_markup.inline_keyboard for btn in row
+        ]
+        assert any(c.startswith("posted:") for c in callbacks)
+        assert any(c.startswith("skip:") for c in callbacks)
+        assert any(c.startswith("reject:") for c in callbacks)
 
     async def test_token_expired_error_message(
         self, mock_autopost_handler, make_autopost_ctx
