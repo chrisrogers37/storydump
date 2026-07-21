@@ -60,13 +60,16 @@ async def _scheduler_tick(
     NOT process chats, so the first-tick catch-up flag is not consumed by a
     sync-wait no-op tick (#553).
     """
-    # Gracefully expire button-bearing rows stuck in 'processing' past reap
-    # age: their inline buttons are stripped and a terminal 'expired' history
-    # row is written, so a late tap shows "Expired" instead of the scary
-    # "Queue item not found". There is no raw-delete sweep any more: an
-    # unstamped stale row is parked by resolve_stale_processing (10 min) and
-    # the hourly cleanup loop deletes aged rows through the history-first
-    # reap (#687) — a raw delete here could orphan a maybe-delivered card.
+    # Gracefully expire button-bearing 'delivered' rows nobody acted on past
+    # reap age: their inline buttons are stripped and a terminal 'expired'
+    # history row is written, so a late tap shows "Expired" instead of the
+    # scary "Queue item not found". A stamped card awaiting a decision is
+    # 'delivered' (the stamp promotes processing -> delivered; a never-stamped
+    # row is parked at 'sent_unconfirmed' by resolve_stale_processing at 10
+    # min) — so 'delivered' is the button-bearing state that ages out here.
+    # There is no raw-delete sweep: the reap is history-first (#687), and the
+    # hourly cleanup loop owns the unstamped remainder plus the
+    # 'sent_unconfirmed' reconcile — a raw delete here could orphan a card.
     #
     # queue_repo is a standalone repository (not owned by a BaseService), so
     # the outer loop's cleanup_transactions() doesn't roll it back on error.
@@ -78,7 +81,7 @@ async def _scheduler_tick(
         if telegram_service is not None:
             bot = telegram_service.application.bot
             history_repo = scheduler_service.history_repo
-            for row in queue_repo.get_stale_sent(hours=24, status="processing"):
+            for row in queue_repo.get_stale_sent(hours=24, status="delivered"):
                 await expire_sent_row(
                     row, bot=bot, history_repo=history_repo, queue_repo=queue_repo
                 )
