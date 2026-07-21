@@ -145,15 +145,20 @@ async def telegram_edit_with_retry(
     base_delay: float = 1.0,
     **kwargs,
 ) -> Optional[object]:
-    """Retry a Telegram message edit on transient failures.
+    """Retry a Telegram message edit on transient network failures.
 
-    Telegram's API can transiently fail with network timeouts,
-    rate limits (RetryAfter), or connection drops. This wrapper
-    retries with exponential backoff for those cases only.
+    Telegram's API can transiently fail with network timeouts or
+    connection drops. This wrapper retries with exponential backoff for
+    those cases only.
 
     Permanent rejections (``BadRequest`` — e.g. "message is not modified",
     "message to edit not found") are not retried: they return ``None``
-    immediately. Unexpected exceptions are raised.
+    immediately. Rate limits (``RetryAfter``) are also not retried here:
+    the Application's ``AIORateLimiter`` is the single owner of rate
+    pacing and RetryAfter retries, so one surfacing at this layer is
+    already past the limiter's retries (or the limiter is disabled) and
+    retrying again would stack a second ladder of blocking waits under
+    the caller's operation lock. Unexpected exceptions are raised.
 
     Args:
         edit_func: The async Telegram method to call (e.g., query.edit_message_caption)
@@ -171,17 +176,11 @@ async def telegram_edit_with_retry(
         try:
             return await edit_func(*args, **kwargs)
         except RetryAfter as e:
-            # Telegram explicitly told us to wait
-            last_error = e
-            if attempt < max_retries:
-                wait = e.retry_after + 0.5
-                logger.warning(
-                    f"Telegram RetryAfter: waiting {wait}s "
-                    f"(attempt {attempt + 1}/{max_retries + 1})"
-                )
-                await asyncio.sleep(wait)
-            else:
-                logger.warning(f"Telegram RetryAfter exhausted retries: {e}")
+            # Rate limited despite the AIORateLimiter's pacing and retries —
+            # give this edit up rather than sleep out another flood window
+            # under the caller's operation lock.
+            logger.warning(f"Telegram RetryAfter past the rate limiter, giving up: {e}")
+            return None
         except BadRequest as e:
             # Permanent API rejection ("message is not modified", "message to
             # edit not found", …): a retry can never succeed, so don't burn
