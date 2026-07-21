@@ -17,6 +17,7 @@ the extracted handler modules:
 """
 
 import asyncio
+import logging
 
 from telegram import BotCommand
 from telegram.ext import (
@@ -56,14 +57,12 @@ from src.services.core.telegram_utils import escape_markdown as _escape_markdown
 class _ObservedAIORateLimiter(AIORateLimiter):
     """AIORateLimiter that logs which bucket an outbound call waits on.
 
-    A wait on a per-group bucket is normal pacing — a burst in one chat
-    queues at that chat's budget. A wait on the overall bucket means the
-    deployment-wide send budget is binding (all tenants share one token):
-    that is the capacity signal that gates any future rate tuning. The
-    peeks are advisory — capacity can change between peek and acquire —
-    so they classify the imminent wait, they never gate it. Relies on
-    PTB-private internals; the pass-through test pins the contract
-    against a version bump.
+    Per-group waits are normal per-chat pacing (debug); an overall-bucket
+    wait means the deployment-wide budget is binding, all tenants sharing
+    one token — the capacity signal that gates future rate tuning
+    (warning). Peeks are advisory trend signals, not per-call ground
+    truth. Relies on PTB-private internals; the pass-through test pins
+    that contract against a version bump.
     """
 
     def _note_bucket_wait(self, chat, group, allow_paid_broadcast):
@@ -75,7 +74,8 @@ class _ObservedAIORateLimiter(AIORateLimiter):
                 "the deployment-wide ceiling (multi-user capacity signal)"
             )
         elif (
-            group
+            logger.isEnabledFor(logging.DEBUG)
+            and group
             and self._group_max_rate
             and not self._get_group_limiter(group).has_capacity()
         ):
@@ -190,13 +190,9 @@ class TelegramService(BaseService):
         own per-task DB session, so the bound keeps peak DB connections within
         the pool (see settings.TELEGRAM_MAX_CONCURRENT_UPDATES).
 
-        rate_limiter: paces every outbound API call through Telegram's
-        published budgets (PTB defaults: 30/s overall, 20/min per group) so
-        per-chat bursts queue smoothly instead of hitting RetryAfter walls.
-        Calls without a chat_id (callback answers) skip the buckets entirely,
-        keeping acks instant under saturation. The limiter is the single
-        owner of RetryAfter retries — see telegram_edit_with_retry. The
-        kill-switch setting is a no-redeploy rollback lever.
+        rate_limiter: paces outbound API calls so per-chat bursts queue
+        smoothly instead of hitting RetryAfter walls — semantics on
+        _ObservedAIORateLimiter; kill-switch and retry bound in settings.
         """
         builder = (
             Application.builder()
@@ -214,10 +210,10 @@ class TelegramService(BaseService):
     async def initialize(self):
         """Initialize Telegram bot and register all handlers."""
         self.application = self._build_application()
-        # One outbound bot: the Application's ExtBot carries the rate limiter,
-        # so every send path that reaches Telegram through this service —
-        # approval cards (send_photo), caption/keyboard edits, loop alerts —
-        # is paced. A separate raw Bot(token=...) here would bypass pacing.
+        # One outbound bot per worker: the Application's ExtBot carries the
+        # rate limiter, so every worker send path — approval cards, caption
+        # and keyboard edits, loop alerts — is paced. (API/CLI processes
+        # have no Application; their one-shot sends stay unpaced by design.)
         self.bot = self.application.bot
 
         # Initialize sub-handlers (after bot/application are created)

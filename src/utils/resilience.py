@@ -153,12 +153,10 @@ async def telegram_edit_with_retry(
 
     Permanent rejections (``BadRequest`` — e.g. "message is not modified",
     "message to edit not found") are not retried: they return ``None``
-    immediately. Rate limits (``RetryAfter``) are also not retried here:
+    immediately. Rate limits (``RetryAfter``) are also not retried here —
     the Application's ``AIORateLimiter`` is the single owner of rate
-    pacing and RetryAfter retries, so one surfacing at this layer is
-    already past the limiter's retries (or the limiter is disabled) and
-    retrying again would stack a second ladder of blocking waits under
-    the caller's operation lock. Unexpected exceptions are raised.
+    pacing and RetryAfter retries (see the inline note). Unexpected
+    exceptions are raised.
 
     Args:
         edit_func: The async Telegram method to call (e.g., query.edit_message_caption)

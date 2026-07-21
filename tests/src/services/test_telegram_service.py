@@ -12,6 +12,7 @@ from telegram.ext import AIORateLimiter
 
 import src.services.core.telegram_service as telegram_service_module
 from src.config import defaults
+from src.config.settings import Settings
 from src.services.core.telegram_service import TelegramService
 from src.services.core.telegram_callbacks import TelegramCallbackHandlers
 from src.services.core.telegram_autopost import TelegramAutopostHandler
@@ -1029,10 +1030,16 @@ class TestCallbackAnswerDiscipline:
         query.answer.assert_called_once_with()
 
 
-def _configure_rate_limiter_settings(enabled=True, max_retries=3):
-    """Give the fixture's mocked settings real values for the builder reads."""
+def _configure_rate_limiter_settings(enabled=True, max_retries=5):
+    """Stamp real values on the fixture's mocked settings for builder reads.
+
+    max_retries defaults to a sentinel (not the shipped default) so the
+    wiring tests prove the settings value flows into the limiter rather
+    than two hardcoded copies of a default agreeing; the shipped defaults
+    themselves are pinned by test_shipped_rate_limiter_defaults.
+    """
     mocked = telegram_service_module.settings
-    mocked.TELEGRAM_MAX_CONCURRENT_UPDATES = 8
+    mocked.TELEGRAM_MAX_CONCURRENT_UPDATES = 2  # any real int; not under test
     mocked.TELEGRAM_RATE_LIMITER_ENABLED = enabled
     mocked.TELEGRAM_RATE_LIMITER_MAX_RETRIES = max_retries
 
@@ -1041,14 +1048,22 @@ def _configure_rate_limiter_settings(enabled=True, max_retries=3):
 class TestRateLimiterWiring:
     """#686b: one rate-limited outbound bot, kill-switch honored."""
 
+    def test_shipped_rate_limiter_defaults(self):
+        """Config contract: limiter on by default, three RetryAfter
+        absorptions for residual budget consumed by out-of-process
+        senders on the same token."""
+        fields = Settings.model_fields
+        assert fields["TELEGRAM_RATE_LIMITER_ENABLED"].default is True
+        assert fields["TELEGRAM_RATE_LIMITER_MAX_RETRIES"].default == 3
+
     def test_application_built_with_rate_limiter(self, mock_telegram_service):
-        _configure_rate_limiter_settings()
+        _configure_rate_limiter_settings(max_retries=5)
 
         application = mock_telegram_service._build_application()
 
         limiter = application.bot.rate_limiter
         assert isinstance(limiter, AIORateLimiter)
-        assert limiter._max_retries == 3
+        assert limiter._max_retries == 5
 
     def test_kill_switch_builds_without_limiter(self, mock_telegram_service):
         _configure_rate_limiter_settings(enabled=False)
@@ -1074,7 +1089,6 @@ class TestRateLimiterWiring:
 
         service = mock_telegram_service
         assert service.bot is service.application.bot
-        assert isinstance(service.bot.rate_limiter, AIORateLimiter)
 
 
 @pytest.mark.unit
