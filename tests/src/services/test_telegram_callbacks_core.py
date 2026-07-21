@@ -20,20 +20,18 @@ def mock_service():
     service.history_repo = Mock()
     service.history_repo.db = MagicMock()
     service.history_repo._db = MagicMock()
-    service.history_repo.count_posts_today.return_value = 0
     service.media_repo = Mock()
     service.media_repo._db = MagicMock()
     service.queue_repo = Mock()
     service.queue_repo._db = MagicMock()
     service.queue_repo.count_by_status.return_value = 0
-    service.queue_repo.count_recent_by_status.return_value = 0
     service.user_repo = Mock()
     service.user_repo._db = MagicMock()
     service.lock_service = Mock()
     service.lock_service.lock_repo = Mock()
     service.lock_service.lock_repo._db = MagicMock()
 
-    # Settings service — default chat_settings for daily cap guard
+    # Settings service — default chat_settings
     _default_cs = Mock()
     _default_cs.posts_per_day = 99
     _default_cs.posting_timezone = None

@@ -162,12 +162,6 @@ class SchedulerService(BaseService):
         if chat_settings.is_paused:
             return {"posted": False, "reason": "paused"}
 
-        # Daily cap guard — applies before any slot/media evaluation
-        from src.services.core.daily_cap import can_post_today
-
-        if not can_post_today(chat_settings, self.history_repo, self.queue_repo):
-            return {"posted": False, "reason": "daily_cap_reached"}
-
         slot_result = self.is_slot_due(chat_settings)
         if slot_result is False:
             return {"posted": False, "reason": "not_due"}
@@ -207,16 +201,6 @@ class SchedulerService(BaseService):
             Dict with posted, queue_item_id, media_item, error keys
         """
         chat_settings = self.settings_service.get_settings(telegram_chat_id)
-
-        # Daily cap guard — even /next respects the daily limit
-        from src.services.core.daily_cap import can_post_today
-
-        if not can_post_today(chat_settings, self.history_repo, self.queue_repo):
-            return {
-                "posted": False,
-                "reason": "daily_cap_reached",
-                "error": "Daily posting limit reached",
-            }
 
         return await self._select_and_send(
             chat_settings,
@@ -568,24 +552,6 @@ class SchedulerService(BaseService):
         now = datetime.now(timezone.utc)
         media_id = str(media_item.id)
         cs_id = str(chat_settings.id)
-
-        # Daily cap guard — redundant with process_slot but defends this
-        # path if called from a future entry point
-        from src.services.core.daily_cap import can_post_today
-
-        if not can_post_today(chat_settings, self.history_repo, self.queue_repo):
-            logger.info(
-                f"Auto-approve skipped for {media_item.file_name}: daily cap reached"
-            )
-            return {
-                "posted": False,
-                "auto_approved": True,
-                "queue_item_id": None,
-                "media_item": media_item,
-                "media_file": media_item.file_name,
-                "category": media_item.category,
-                "error": "Daily posting limit reached",
-            }
 
         # Create + immediately delete queue item (needed for history record)
         queue_item = self.queue_repo.create(

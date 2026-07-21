@@ -18,10 +18,6 @@ if TYPE_CHECKING:
     from src.services.core.telegram_service import TelegramService
 
 
-class DailyCapReachedError(Exception):
-    """Raised when the daily posting cap has been reached."""
-
-
 class TelegramCallbackCore:
     """Shared utilities for Telegram callback handlers.
 
@@ -139,20 +135,7 @@ class TelegramCallbackCore:
 
         Separated to enable retry on OperationalError.
         Returns the media_item.
-        Raises DailyCapReachedError if the daily limit is reached for 'posted' actions.
         """
-        # Daily cap guard — only for "posted" actions (skip/reject are always allowed)
-        if status == "posted" and queue_item.telegram_chat_id:
-            from src.services.core.daily_cap import can_post_today
-
-            chat_settings = self.service.settings_service.get_settings(
-                queue_item.telegram_chat_id, create_if_missing=False
-            )
-            if chat_settings and not can_post_today(
-                chat_settings, self.service.history_repo, self.service.queue_repo
-            ):
-                raise DailyCapReachedError("Daily posting limit reached")
-
         with self._shared_session():
             media_item = self.service.media_repo.get_by_id(
                 str(queue_item.media_item_id)

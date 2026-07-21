@@ -161,21 +161,6 @@ class TestQueueRepository:
 
         assert result == 5
 
-    def test_count_recent_by_status_bounds_on_created_at(self, queue_repo, mock_db):
-        """count_recent_by_status adds a created_at >= since bound on top of the
-        status filter — the time bound that stops a stale 'publishing' row from
-        taxing the daily cap forever (#549, rajan #564)."""
-        chain = mock_db.query.return_value
-        chain.count.return_value = 2
-
-        since = datetime.utcnow() - timedelta(minutes=15)
-        result = queue_repo.count_recent_by_status(["publishing"], since=since)
-
-        assert result == 2
-        # Two filters: the status IN (...) and the created_at >= since bound.
-        # (No tenant filter is added when chat_settings_id is None.)
-        assert chain.filter.call_count == 2
-
 
 @pytest.mark.unit
 class TestQueueRepositoryTenantFiltering:
