@@ -1128,3 +1128,87 @@ class TestRateLimiterAnswerBypassContract:
         for task in send_tasks:
             task.cancel()
         await asyncio.gather(*send_tasks, return_exceptions=True)
+
+
+@pytest.mark.unit
+class TestSaturationSignal:
+    """#686b: the limiter logs WHICH bucket a call is about to wait on.
+    A group-bucket wait is normal per-chat pacing (debug); an
+    overall-bucket wait means the deployment-wide ceiling is binding —
+    the multi-user smoke alarm (warning)."""
+
+    def _make_limiter(self, **overrides):
+        limiter_cls = telegram_service_module._ObservedAIORateLimiter
+        params = dict(
+            overall_max_rate=1,
+            overall_time_period=600,
+            group_max_rate=1,
+            group_time_period=600,
+            max_retries=0,
+        )
+        params.update(overrides)
+        return limiter_cls(**params)
+
+    @pytest.mark.asyncio
+    async def test_overall_saturation_warns(self):
+        limiter = self._make_limiter()
+        await limiter._base_limiter.acquire()  # drain the overall bucket
+
+        with patch.object(telegram_service_module, "logger") as mock_logger:
+            limiter._note_bucket_wait(
+                chat=True, group=False, allow_paid_broadcast=False
+            )
+
+        mock_logger.warning.assert_called_once()
+        mock_logger.debug.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_group_saturation_logs_debug_only(self):
+        limiter = self._make_limiter()
+        await limiter._get_group_limiter(-100123).acquire()  # drain group bucket
+
+        with patch.object(telegram_service_module, "logger") as mock_logger:
+            limiter._note_bucket_wait(
+                chat=True, group=-100123, allow_paid_broadcast=False
+            )
+
+        mock_logger.debug.assert_called_once()
+        mock_logger.warning.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_free_buckets_log_nothing(self):
+        # async: aiolimiter's has_capacity() requires a running event loop
+        limiter = self._make_limiter()
+
+        with patch.object(telegram_service_module, "logger") as mock_logger:
+            limiter._note_bucket_wait(
+                chat=True, group=-100123, allow_paid_broadcast=False
+            )
+
+        mock_logger.warning.assert_not_called()
+        mock_logger.debug.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_run_request_passes_through(self):
+        """The override must match PTB's keyword call convention for
+        _run_request — this catches a signature drift on a PTB bump."""
+        limiter = self._make_limiter(
+            overall_max_rate=100,
+            overall_time_period=1,
+            group_max_rate=100,
+            group_time_period=1,
+        )
+
+        async def callback(value):
+            return value
+
+        result = await limiter._run_request(
+            chat=True,
+            group=-100123,
+            allow_paid_broadcast=False,
+            callback=callback,
+            args=("ok",),
+            kwargs={},
+        )
+
+        assert result == "ok"

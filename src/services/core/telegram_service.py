@@ -53,6 +53,48 @@ from src.services.core.telegram_utils import escape_markdown as _escape_markdown
 # Handler classes are imported inside initialize() to avoid circular imports.
 
 
+class _ObservedAIORateLimiter(AIORateLimiter):
+    """AIORateLimiter that logs which bucket an outbound call waits on.
+
+    A wait on a per-group bucket is normal pacing — a burst in one chat
+    queues at that chat's budget. A wait on the overall bucket means the
+    deployment-wide send budget is binding (all tenants share one token):
+    that is the capacity signal that gates any future rate tuning. The
+    peeks are advisory — capacity can change between peek and acquire —
+    so they classify the imminent wait, they never gate it. Relies on
+    PTB-private internals; the pass-through test pins the contract
+    against a version bump.
+    """
+
+    def _note_bucket_wait(self, chat, group, allow_paid_broadcast):
+        if allow_paid_broadcast:
+            return
+        if chat and self._base_limiter and not self._base_limiter.has_capacity():
+            logger.warning(
+                "Telegram overall send budget saturated — call queued behind "
+                "the deployment-wide ceiling (multi-user capacity signal)"
+            )
+        elif (
+            group
+            and self._group_max_rate
+            and not self._get_group_limiter(group).has_capacity()
+        ):
+            logger.debug(f"Telegram per-group budget pacing send to chat {group}")
+
+    async def _run_request(
+        self, chat, group, allow_paid_broadcast, callback, args, kwargs
+    ):
+        self._note_bucket_wait(chat, group, allow_paid_broadcast)
+        return await super()._run_request(
+            chat=chat,
+            group=group,
+            allow_paid_broadcast=allow_paid_broadcast,
+            callback=callback,
+            args=args,
+            kwargs=kwargs,
+        )
+
+
 class TelegramService(BaseService):
     """Thin orchestrator for Telegram bot operations.
 
@@ -163,7 +205,9 @@ class TelegramService(BaseService):
         )
         if settings.TELEGRAM_RATE_LIMITER_ENABLED:
             builder = builder.rate_limiter(
-                AIORateLimiter(max_retries=settings.TELEGRAM_RATE_LIMITER_MAX_RETRIES)
+                _ObservedAIORateLimiter(
+                    max_retries=settings.TELEGRAM_RATE_LIMITER_MAX_RETRIES
+                )
             )
         return builder.build()
 
