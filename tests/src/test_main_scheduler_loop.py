@@ -512,11 +512,14 @@ class TestSchedulerLoop:
         queue_repo.rollback.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_scheduler_loop_reaps_button_bearing_processing_rows(self):
-        """Button-bearing 'processing' rows are gracefully expired (buttons
-        stripped, terminal history written) via the shared reap BEFORE the raw
-        discard sweeps the never-sent remainder. This is the #560 fix: without
-        it, a late tap on a hard-deleted card shows 'Queue item not found'.
+    async def test_scheduler_loop_reaps_aged_delivered_rows(self):
+        """A button-bearing 'delivered' card nobody acted on is gracefully
+        expired (buttons stripped, terminal history written) via the shared
+        history-first reap (#687), so a late tap shows 'Expired' instead of the
+        scary 'Queue item not found'. Under the delivery-state machine a stamped
+        card awaiting a decision is 'delivered' — that is the state the
+        scheduler reap targets ('processing' is emptied at 10 min by
+        resolve_stale_processing, so it no longer reaches reap age here).
         """
         scheduler_service = Mock()
         scheduler_service.process_slot = AsyncMock(return_value={"posted": False})
@@ -550,7 +553,7 @@ class TestSchedulerLoop:
             except StopAsyncIteration:
                 pass
 
-        queue_repo.get_stale_sent.assert_called_once_with(hours=24, status="processing")
+        queue_repo.get_stale_sent.assert_called_once_with(hours=24, status="delivered")
         mock_expire.assert_awaited_once_with(
             stale_row,
             bot=scheduler_service.telegram_service.application.bot,
