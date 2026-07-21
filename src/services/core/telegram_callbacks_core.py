@@ -50,7 +50,12 @@ class TelegramCallbackCore:
             coro: Awaitable that does the actual work.
         """
         lock = self.service.get_operation_lock(queue_id)
-        if lock.locked():
+        # Defer to an in-flight autopost as well as a held lock: the autopost lock
+        # now releases before its slow edits, so the in-flight marker — not the
+        # lock — is what a terminal action must yield to. The terminal handler has
+        # already set the cancel flag, so the autopost aborts; deferring here
+        # keeps a manual claim/delete from racing the autopost's publish.
+        if lock.locked() or self.service.is_autopost_inflight(queue_id):
             coro.close()  # Prevent "coroutine was never awaited" warning
             await query.answer("⏳ Already processing this item...", show_alert=False)
             return

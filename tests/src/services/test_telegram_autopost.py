@@ -410,14 +410,19 @@ class TestAutopostOperationLock:
     """Tests for the operation lock that prevents duplicate auto-posts."""
 
     async def test_double_click_returns_already_processing(self, mock_autopost_handler):
-        """Test that clicking autopost while already processing shows feedback."""
+        """Tapping autopost while one is already in flight shows feedback and
+        does NOT re-claim the row.
+
+        The in-flight marker (not the operation lock) is the durable dupe guard:
+        it is held for the whole background task, so a re-tap is rejected even
+        though the lock has already been released before the slow edits.
+        """
         handler = mock_autopost_handler
         service = handler.service
         queue_id = str(uuid4())
 
-        # Pre-acquire the lock to simulate an in-progress operation
-        lock = service.get_operation_lock(queue_id)
-        await lock.acquire()
+        # Simulate an autopost already in flight for this item.
+        service.mark_autopost_inflight(queue_id)
 
         mock_user = Mock()
         mock_user.id = uuid4()
@@ -425,13 +430,13 @@ class TestAutopostOperationLock:
 
         await handler.handle_autopost(queue_id, mock_user, mock_query)
 
-        # Should show "Already processing" feedback
+        # Should show "already posting/processing" feedback and NOT re-claim.
         mock_query.answer.assert_called_once()
-        answer_call = mock_query.answer.call_args
-        assert "Already processing" in str(answer_call)
+        assert "already" in str(mock_query.answer.call_args).lower()
+        service.queue_repo.claim_for_processing.assert_not_called()
 
         # Clean up
-        lock.release()
+        service.cleanup_operation_state(queue_id)
 
 
 @pytest.mark.unit
@@ -497,21 +502,78 @@ class TestAutopostBackgroundTask:
 
         assert len(handler._background_tasks) == 0
 
-    async def test_background_task_releases_lock_on_success(
+    async def test_lock_released_before_slow_edits_marker_holds(
         self, background_test_setup
     ):
-        """Background task releases the operation lock after success."""
+        """The operation lock is released as soon as the item is claimed and the
+        background task is spawned — BEFORE the slow edits — so it never blocks a
+        concurrent action across the whole task. The in-flight marker carries the
+        dedup for the background task's duration and is cleared when it finishes.
+        """
         handler, service, queue_id, mock_user, mock_query = background_test_setup
 
         with self._patch_services():
             await handler.handle_autopost(queue_id, mock_user, mock_query)
 
+            # Narrowed span: lock already released once handle_autopost returns,
+            # but the durable in-flight marker is still set (task not done yet).
             lock = service.get_operation_lock(queue_id)
-            assert lock.locked()
+            assert not lock.locked()
+            assert service.is_autopost_inflight(queue_id)
 
             await _await_background_tasks(handler)
 
+        # Task done → marker cleared.
         assert not lock.locked()
+        assert not service.is_autopost_inflight(queue_id)
+
+    async def test_second_concurrent_tap_does_not_double_spawn(
+        self, background_test_setup
+    ):
+        """CRITICAL (#703): a second tap arriving WHILE an autopost is in flight
+        — the row is still 'processing' and therefore re-claimable — must NOT
+        re-claim the row or spawn a second background task. That double-spawn is
+        the #549 double-publish the operation lock used to prevent by being held
+        for the whole task; the in-flight marker now provides that guarantee once
+        the lock is released before the slow edits.
+        """
+        handler, service, queue_id, mock_user, mock_query = background_test_setup
+
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def blocking_background(*args, **kwargs):
+            # Stay 'in flight' (marker held, lock already released) until released.
+            started.set()
+            await release.wait()
+            service.cleanup_operation_state(queue_id)
+
+        handler._autopost_background = blocking_background
+
+        # Tap 1 — claims the row and spawns the (blocked) background task.
+        await handler.handle_autopost(queue_id, mock_user, mock_query)
+        await asyncio.wait_for(started.wait(), timeout=1)
+        assert service.queue_repo.claim_for_processing.call_count == 1
+        assert service.is_autopost_inflight(queue_id)
+        assert len(handler._background_tasks) == 1
+
+        # Tap 2 — same item, while the first autopost is still in flight. The mock
+        # claim returns the item every time (a real 'processing' row IS
+        # re-claimable), so ONLY the marker stands between this and a double-spawn.
+        query2 = AsyncMock()
+        query2.message = Mock(chat_id=-100, message_id=1)
+        await handler.handle_autopost(queue_id, mock_user, query2)
+
+        # Rejected by the marker: no second claim, no second background task.
+        assert service.queue_repo.claim_for_processing.call_count == 1
+        assert len(handler._background_tasks) == 1
+        query2.answer.assert_called()
+        assert "already" in str(query2.answer.call_args).lower()
+
+        # Release the first task; the marker clears when it finishes.
+        release.set()
+        await _await_background_tasks(handler)
+        assert not service.is_autopost_inflight(queue_id)
 
     async def test_background_task_calls_cleanup_transactions(
         self, background_test_setup

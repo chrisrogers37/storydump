@@ -39,6 +39,7 @@ def mock_service():
 
     # Operation lock (real asyncio.Lock by default)
     service.get_operation_lock.return_value = asyncio.Lock()
+    service.is_autopost_inflight.return_value = False
     service.cleanup_operation_state = Mock()
 
     return service
@@ -92,6 +93,29 @@ class TestSafeLockedCallback:
         query.answer.assert_called_once()
         assert "Already processing" in query.answer.call_args[0][0]
         lock.release()
+
+    async def test_defers_to_inflight_autopost(self, core):
+        """A terminal action defers while an autopost is in flight for the same
+        item. The autopost lock now releases before its slow edits, so the
+        in-flight marker — not the lock — is what a manual action must yield to;
+        the cancel flag it already set makes the autopost abort. This keeps a
+        manual claim/delete from racing the autopost's publish.
+        """
+        core.service.get_operation_lock.return_value = asyncio.Lock()  # not held
+        core.service.is_autopost_inflight.return_value = True
+
+        ran = False
+
+        async def work():
+            nonlocal ran
+            ran = True
+
+        query = AsyncMock()
+        await core._safe_locked_callback("q-1", query, "posted", "err msg", work())
+
+        assert not ran  # deferred — the terminal work never ran
+        query.answer.assert_called_once()
+        assert "Already processing" in query.answer.call_args[0][0]
 
     @patch("src.services.core.telegram_callbacks_core.telegram_edit_with_retry")
     async def test_callback_error_shows_error_message(self, mock_retry, core):
