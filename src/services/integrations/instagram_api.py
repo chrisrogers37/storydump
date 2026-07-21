@@ -128,14 +128,9 @@ class InstagramAPIService(BaseService):
                 "media_type": media_type,
             },
         ) as run_id:
-            # Check rate limit first
-            remaining = self.get_rate_limit_remaining()
-            if remaining <= 0:
-                raise RateLimitError(
-                    f"Rate limit exhausted. 0/{settings.INSTAGRAM_POSTS_PER_HOUR} remaining."
-                )
-
-            # Get active account and its token
+            # Resolve the active account first — the publishing-quota gate below
+            # reuses these creds (no duplicate lookup) and a missing token fails
+            # fast before we ever call Meta.
             token, account_id, account_username = self._get_active_account_credentials(
                 telegram_chat_id
             )
@@ -148,6 +143,20 @@ class InstagramAPIService(BaseService):
             if not account_id:
                 raise InstagramAPIError(
                     "No Instagram account selected. Use /settings to select one."
+                )
+
+            # Gate on Meta's authoritative rolling-24h publishing quota (fetched
+            # live per-account, reusing the creds above); fail-open so a
+            # monitoring blip can't block a legitimate post — the real backstop
+            # is Meta's server-side 429 on the publish call itself.
+            publish_limit = await self.get_content_publishing_limit(
+                telegram_chat_id, token=token, account_id=account_id
+            )
+            if publish_limit["remaining"] <= 0:
+                raise RateLimitError(
+                    f"Instagram daily publishing limit reached "
+                    f"({publish_limit['quota_usage']}/{publish_limit['quota_total']} "
+                    f"in the last 24h)."
                 )
 
             try:
@@ -424,41 +433,115 @@ class InstagramAPIService(BaseService):
 
     def get_rate_limit_remaining(self, chat_settings_id: Optional[str] = None) -> int:
         """
-        Calculate remaining posts based on trailing 60 min history.
+        Best-effort LOCAL estimate of remaining posts over a trailing 24h window.
 
-        Meta allows approximately 25 content publishing API calls per hour.
-        We derive this from our posting history rather than tracking API headers.
+        Derived from our own posting history and used for STATUS DISPLAYS ONLY
+        (health check, settings screen) — it is NOT authoritative. The real
+        publishing gate is the async ``get_content_publishing_limit``, which
+        reads the account's live quota from Meta's content_publishing_limit
+        endpoint.
 
         Args:
             chat_settings_id: Optional tenant filter for multi-tenant scoping
 
         Returns:
-            Number of posts remaining in the current hour window
+            Estimated number of posts remaining in the trailing 24h window
         """
-        since = datetime.now(timezone.utc) - timedelta(hours=1)
+        since = datetime.now(timezone.utc) - timedelta(hours=24)
         recent_api_posts = self.history_repo.count_by_method(
             method="instagram_api",
             since=since,
             chat_settings_id=chat_settings_id,
         )
-        return max(0, settings.INSTAGRAM_POSTS_PER_HOUR - recent_api_posts)
+        return max(0, settings.INSTAGRAM_PUBLISH_LIMIT_FALLBACK - recent_api_posts)
 
-    def get_rate_limit_status(self) -> dict:
+    async def get_content_publishing_limit(
+        self,
+        telegram_chat_id: Optional[int] = None,
+        token: Optional[str] = None,
+        account_id: Optional[str] = None,
+    ) -> dict:
         """
-        Get detailed rate limit status.
+        Fetch the account's live content-publishing quota from Meta.
+
+        Reads ``GET {graph}/{ig_user_id}/content_publishing_limit``, which
+        returns the account's rolling-24h publishing quota and current usage.
+        This is the AUTHORITATIVE gate for ``post_story`` (the local
+        ``get_rate_limit_remaining`` is only a best-effort display estimate).
+        ``post_story`` passes the creds it already resolved; standalone callers
+        may omit ``token``/``account_id`` and they are fetched from the active
+        account.
+
+        FAIL-OPEN by design: Meta's server-side 429 (error 4/17 → RateLimitError
+        on the actual publish) is the true backstop, so a blip on this monitoring
+        endpoint must never block a legitimate post. On any error other than a
+        RateLimitError — missing creds, empty data, network/parse failure — we
+        return a permissive fallback. A RateLimitError from the endpoint itself
+        means Meta says the account is limited, so we report remaining=0.
 
         Returns:
-            dict with remaining, limit, and oldest_post_in_window
+            dict with ``quota_total``, ``quota_usage``, ``remaining``, and
+            ``source`` ("meta" when the value came from Meta, else "fallback").
         """
-        remaining = self.get_rate_limit_remaining()
-        used = settings.INSTAGRAM_POSTS_PER_HOUR - remaining
+        fallback = settings.INSTAGRAM_PUBLISH_LIMIT_FALLBACK
 
-        return {
-            "remaining": remaining,
-            "limit": settings.INSTAGRAM_POSTS_PER_HOUR,
-            "used": used,
-            "window": "1 hour",
-        }
+        def _limit(quota_total: int, quota_usage: int, source: str) -> dict:
+            return {
+                "quota_total": quota_total,
+                "quota_usage": quota_usage,
+                "remaining": max(0, quota_total - quota_usage),
+                "source": source,
+            }
+
+        if token is None or account_id is None:
+            chat_id = telegram_chat_id or settings.ADMIN_TELEGRAM_CHAT_ID
+            token, account_id, _ = self._get_active_account_credentials(chat_id)
+        if not token or not account_id:
+            logger.warning(
+                "content_publishing_limit: no active Instagram credentials; "
+                "using permissive fallback"
+            )
+            return _limit(fallback, 0, "fallback")
+
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{settings.meta_ig_graph_base}/{account_id}"
+                    "/content_publishing_limit",
+                    params={
+                        "fields": "config,quota_usage",
+                        "access_token": token,
+                    },
+                    timeout=10.0,
+                )
+
+                self._check_response_errors(response)
+
+                rows = response.json().get("data", [])
+                if not rows:
+                    logger.warning(
+                        "content_publishing_limit: empty data from Meta; "
+                        "using permissive fallback"
+                    )
+                    return _limit(fallback, 0, "fallback")
+
+                row = rows[0]
+                config = row.get("config", {})
+                quota_total = int(config.get("quota_total", fallback))
+                quota_usage = int(row.get("quota_usage", 0))
+                return _limit(quota_total, quota_usage, "meta")
+        except RateLimitError:
+            # Meta itself says the account is limited — report fully consumed.
+            logger.warning(
+                "content_publishing_limit: Meta reports rate limited; remaining=0"
+            )
+            return _limit(fallback, fallback, "meta")
+        except Exception as e:  # noqa: BLE001 — monitoring blip must not block posting
+            logger.warning(
+                f"content_publishing_limit: fetch failed ({e}); "
+                "using permissive fallback"
+            )
+            return _limit(fallback, 0, "fallback")
 
     async def validate_media_url(self, url: str) -> dict:
         """Validate that a media URL is accessible. Delegates to credentials."""
