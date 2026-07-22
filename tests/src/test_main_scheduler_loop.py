@@ -22,6 +22,7 @@ from src.services.core.loops.scheduler_loop import (
     TASK_TOKEN_REFRESH,
 )
 from src.services.core.loops.media_sync_loop import media_sync_loop
+from src.services.core.scheduler import SchedulerService
 
 # Module paths for patching
 _SCHEDULER = "src.services.core.loops.scheduler_loop"
@@ -88,11 +89,55 @@ class TestSchedulerLoop:
         # Should have called process_slot for each chat (first_tick=True on first tick)
         assert scheduler_service.process_slot.call_count == 2
         scheduler_service.process_slot.assert_any_call(
-            telegram_chat_id=-100111, first_tick=True
+            telegram_chat_id=-100111, first_tick=True, catchup_allowed=True
         )
         scheduler_service.process_slot.assert_any_call(
-            telegram_chat_id=-100222, first_tick=True
+            telegram_chat_id=-100222, first_tick=True, catchup_allowed=True
         )
+
+    @pytest.mark.asyncio
+    async def test_scheduler_loop_caps_catchup_posts_per_tick(self):
+        """On a mass-restart tick, only CAP catch-up make-ups are allowed;
+        the overflow is told catchup_allowed=False and defers to later ticks."""
+        cap = SchedulerService.CATCHUP_POSTS_PER_TICK_CAP
+        n = cap + 2
+
+        scheduler_service = Mock()
+        # Every tenant is a catch-up post this tick.
+        scheduler_service.process_slot = AsyncMock(
+            return_value={"posted": True, "catchup": True}
+        )
+        scheduler_service.cleanup_transactions = Mock()
+
+        posting_service = Mock()
+        posting_service.cleanup_transactions = Mock()
+
+        chats = [Mock(telegram_chat_id=-100000 - i) for i in range(n)]
+        settings_service = Mock()
+        settings_service.get_all_active_chats.return_value = chats
+
+        with (
+            patch(f"{_SCHEDULER}.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+            patch(f"{_SCHEDULER}.QueueRepository") as mock_queue_repo_cls,
+            patch(f"{_SCHEDULER}.ServiceRunRepository"),
+        ):
+            mock_queue_repo_cls.return_value.get_stale_sent.return_value = []
+            mock_sleep.side_effect = StopAsyncIteration
+            try:
+                await run_scheduler_loop(
+                    scheduler_service, posting_service, settings_service
+                )
+            except StopAsyncIteration:
+                pass
+
+        # Every tenant is still evaluated, but only the first CAP are granted a
+        # catch-up post; the rest ride subsequent ticks.
+        assert scheduler_service.process_slot.call_count == n
+        allowed_flags = [
+            c.kwargs["catchup_allowed"]
+            for c in scheduler_service.process_slot.call_args_list
+        ]
+        assert allowed_flags == [True] * cap + [False] * (n - cap)
 
     @pytest.mark.asyncio
     async def test_scheduler_loop_no_calls_when_no_tenants(self):
