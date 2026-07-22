@@ -33,6 +33,13 @@ class SchedulerService(BaseService):
 
     SCHEDULE_JITTER_MINUTES = 30
 
+    # Bound how many "catch-up" make-up posts (tenants behind >= 2 posting
+    # intervals) may fire in a single scheduler tick.  After a redeploy every
+    # behind tenant is due at once; uncapped they would all post immediately
+    # into the shared ~30/s bot-token budget on the first tick.  Overflow
+    # tenants defer and drain a cap-sized batch per subsequent tick.
+    CATCHUP_POSTS_PER_TICK_CAP = 8
+
     def __init__(self):
         super().__init__()
         self.media_repo = MediaRepository()
@@ -64,8 +71,7 @@ class SchedulerService(BaseService):
         if not self._in_posting_window(now, chat_settings):
             return False
 
-        window_hours = self._posting_window_hours(chat_settings)
-        interval_seconds = (window_hours * 3600) / chat_settings.posts_per_day
+        interval_seconds = self._interval_seconds(chat_settings)
 
         last_sent = ensure_utc(chat_settings.last_post_sent_at)
         if last_sent and (now - last_sent).total_seconds() < interval_seconds:
@@ -73,6 +79,30 @@ class SchedulerService(BaseService):
 
         # Pick category for this slot (scoped to this tenant's configured mix)
         return self._pick_category_for_slot(str(chat_settings.id))
+
+    def _interval_seconds(self, chat_settings) -> float:
+        """Seconds between posting slots for this tenant.
+
+        Derived from the posting-window length and posts_per_day.
+        """
+        window_hours = self._posting_window_hours(chat_settings)
+        return (window_hours * 3600) / chat_settings.posts_per_day
+
+    def _is_behind_catchup(self, chat_settings) -> bool:
+        """True when this tenant is behind by >= 2 posting intervals.
+
+        This is the "catch-up" condition: the tenant missed at least one
+        whole slot (e.g. the worker was down across a redeploy) and
+        process_slot would fire an immediate make-up post.  The scheduler
+        loop caps how many of these fire per tick (CATCHUP_POSTS_PER_TICK_CAP)
+        so a mass restart doesn't herd every behind tenant's card into one
+        tick's shared bot-token budget.
+        """
+        last_sent = ensure_utc(chat_settings.last_post_sent_at)
+        if not last_sent:
+            return False
+        elapsed = (datetime.now(timezone.utc) - last_sent).total_seconds()
+        return elapsed >= 2 * self._interval_seconds(chat_settings)
 
     def _compute_catchup_sent_at(
         self, chat_settings, *, first_tick: bool = False
@@ -92,40 +122,40 @@ class SchedulerService(BaseService):
             datetime to use as last_post_sent_at, or None for normal
             behavior (set to now).
         """
-        last_sent = ensure_utc(chat_settings.last_post_sent_at)
-        if not last_sent:
+        if not self._is_behind_catchup(chat_settings):
             return None
 
-        now = datetime.now(timezone.utc)
-        window_hours = self._posting_window_hours(chat_settings)
-        interval_seconds = (window_hours * 3600) / chat_settings.posts_per_day
-        elapsed = (now - last_sent).total_seconds()
+        last_sent = ensure_utc(chat_settings.last_post_sent_at)
+        interval_seconds = self._interval_seconds(chat_settings)
+        elapsed = (datetime.now(timezone.utc) - last_sent).total_seconds()
+        missed_slots = int(elapsed / interval_seconds) - 1
 
-        if elapsed >= 2 * interval_seconds:
-            missed_slots = int(elapsed / interval_seconds) - 1
-            if first_tick:
-                logger.info(
-                    f"[catchup] First tick after startup, behind by "
-                    f"{missed_slots} slot(s) "
-                    f"(last_sent={last_sent.isoformat()}, "
-                    f"elapsed={elapsed:.0f}s). "
-                    f"Posting immediately, resetting to now"
-                )
-                return None
-            catchup_to = last_sent + timedelta(seconds=interval_seconds)
+        if first_tick:
             logger.info(
-                f"[catchup] Behind by {missed_slots} slot(s) "
+                f"[catchup] First tick after startup, behind by "
+                f"{missed_slots} slot(s) "
                 f"(last_sent={last_sent.isoformat()}, "
-                f"interval={interval_seconds:.0f}s, "
                 f"elapsed={elapsed:.0f}s). "
-                f"Advancing last_post_sent_at to {catchup_to.isoformat()}"
+                f"Posting immediately, resetting to now"
             )
-            return catchup_to
+            return None
 
-        return None
+        catchup_to = last_sent + timedelta(seconds=interval_seconds)
+        logger.info(
+            f"[catchup] Behind by {missed_slots} slot(s) "
+            f"(last_sent={last_sent.isoformat()}, "
+            f"interval={interval_seconds:.0f}s, "
+            f"elapsed={elapsed:.0f}s). "
+            f"Advancing last_post_sent_at to {catchup_to.isoformat()}"
+        )
+        return catchup_to
 
     async def process_slot(
-        self, telegram_chat_id: int, *, first_tick: bool = False
+        self,
+        telegram_chat_id: int,
+        *,
+        first_tick: bool = False,
+        catchup_allowed: bool = True,
     ) -> dict:
         """Process a single scheduler tick for a tenant.
 
@@ -139,6 +169,12 @@ class SchedulerService(BaseService):
                 (last_post_sent_at = now) instead of advancing
                 gradually, so redeploy churn doesn't starve the
                 schedule.
+            catchup_allowed: When False, a tenant behind >= 2 intervals
+                (a catch-up make-up post) is deferred to a later tick
+                rather than posting.  The scheduler loop uses this to cap
+                catch-up posts per tick so a mass restart doesn't herd
+                every behind tenant into one tick's shared bot-token
+                budget.  Normally-due tenants are unaffected.
 
         Returns:
             Dict with keys: posted (bool), reason (str), and optionally
@@ -166,6 +202,16 @@ class SchedulerService(BaseService):
         if slot_result is False:
             return {"posted": False, "reason": "not_due"}
 
+        # Cap the restart 'catch-up herd': a tenant behind >= 2 intervals
+        # fires an immediate make-up post, and after a mass restart every
+        # behind tenant is due on the same tick.  When the loop's per-tick
+        # catch-up budget is spent (catchup_allowed=False), defer this
+        # make-up — last_post_sent_at is left untouched so the tenant stays
+        # due and retries next tick.  Normally-due tenants never defer.
+        is_catchup = self._is_behind_catchup(chat_settings)
+        if is_catchup and not catchup_allowed:
+            return {"posted": False, "reason": "catchup_deferred", "catchup": True}
+
         # Catch-up: on first tick, post immediately (reset to now).
         # On subsequent ticks, advance by one interval per tick.
         sent_at_override = self._compute_catchup_sent_at(
@@ -173,12 +219,14 @@ class SchedulerService(BaseService):
         )
 
         category = slot_result if isinstance(slot_result, str) else None
-        return await self._select_and_send(
+        result = await self._select_and_send(
             chat_settings,
             category=category,
             triggered_by="scheduler",
             sent_at_override=sent_at_override,
         )
+        result["catchup"] = is_catchup
+        return result
 
     async def force_send_next(
         self,
