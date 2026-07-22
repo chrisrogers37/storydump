@@ -118,12 +118,37 @@ async def _scheduler_tick(
         _scheduler_tick._no_active_ticks = 0
 
     if active_chats:
+        # Bound the restart 'catch-up herd': after a redeploy every behind
+        # tenant is due at once and would fire an immediate make-up card into
+        # the shared ~30/s bot-token budget on this single tick.  Grant at
+        # most CATCHUP_POSTS_PER_TICK_CAP make-ups per tick; the overflow
+        # defers and drains a batch at a time on subsequent ticks.  Normally-
+        # due tenants are never gated.
+        catchup_posts_this_tick = 0
         for chat in active_chats:
             chat_id = chat.telegram_chat_id
             try:
-                result = await scheduler_service.process_slot(
-                    telegram_chat_id=chat_id, first_tick=first_tick
+                catchup_allowed = (
+                    catchup_posts_this_tick
+                    < SchedulerService.CATCHUP_POSTS_PER_TICK_CAP
                 )
+                result = await scheduler_service.process_slot(
+                    telegram_chat_id=chat_id,
+                    first_tick=first_tick,
+                    catchup_allowed=catchup_allowed,
+                )
+
+                # Count catch-up ATTEMPTS, not just successes. A granted
+                # catch-up that fails to send still spent a call against the
+                # shared ~30/s budget, so a failed send must consume budget
+                # too — otherwise the cap fails open under exactly the
+                # send-failure contention it exists to bound (the first CAP
+                # sends failing would grant another CAP in the same tick). A
+                # deferral never reaches a send — it only happens when
+                # catchup_allowed is False — so gating on catchup_allowed
+                # excludes it.
+                if catchup_allowed and result.get("catchup"):
+                    catchup_posts_this_tick += 1
 
                 if result.get("posted"):
                     session_state.posts_sent += 1

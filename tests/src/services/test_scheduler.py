@@ -1671,6 +1671,146 @@ class TestFirstTickImmediatePost:
 
 
 # ------------------------------------------------------------------
+# Restart 'catch-up herd' cap (#714)
+# ------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestCatchupHerdDetection:
+    """_is_behind_catchup flags tenants behind by >= 2 posting intervals."""
+
+    def test_behind_two_intervals_is_catchup(self, scheduler_service_mocked):
+        service = scheduler_service_mocked
+        # Window 9-21 = 12h, 3 PPD => interval = 4h
+        cs = _make_chat_settings(
+            posting_hours_start=9,
+            posting_hours_end=21,
+            posts_per_day=3,
+            last_post_sent_at=datetime(2026, 3, 21, 9, 0, tzinfo=timezone.utc),
+        )
+        with patch("src.services.core.scheduler.datetime") as mock_dt:
+            # 9h elapsed = 2.25 intervals
+            mock_dt.now.return_value = datetime(2026, 3, 21, 18, 0, tzinfo=timezone.utc)
+            assert service._is_behind_catchup(cs) is True
+
+    def test_exactly_two_intervals_is_catchup(self, scheduler_service_mocked):
+        service = scheduler_service_mocked
+        cs = _make_chat_settings(
+            posting_hours_start=9,
+            posting_hours_end=21,
+            posts_per_day=3,
+            last_post_sent_at=datetime(2026, 3, 21, 9, 0, tzinfo=timezone.utc),
+        )
+        with patch("src.services.core.scheduler.datetime") as mock_dt:
+            # Exactly 8h = 2 intervals (boundary — a catch-up)
+            mock_dt.now.return_value = datetime(2026, 3, 21, 17, 0, tzinfo=timezone.utc)
+            assert service._is_behind_catchup(cs) is True
+
+    def test_one_interval_is_not_catchup(self, scheduler_service_mocked):
+        service = scheduler_service_mocked
+        cs = _make_chat_settings(
+            posting_hours_start=9,
+            posting_hours_end=21,
+            posts_per_day=3,
+            last_post_sent_at=datetime(2026, 3, 21, 9, 0, tzinfo=timezone.utc),
+        )
+        with patch("src.services.core.scheduler.datetime") as mock_dt:
+            # 5h elapsed = 1.25 intervals — normally due, not a catch-up
+            mock_dt.now.return_value = datetime(2026, 3, 21, 14, 0, tzinfo=timezone.utc)
+            assert service._is_behind_catchup(cs) is False
+
+    def test_no_last_sent_is_not_catchup(self, scheduler_service_mocked):
+        service = scheduler_service_mocked
+        cs = _make_chat_settings(last_post_sent_at=None)
+        assert service._is_behind_catchup(cs) is False
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestCatchupHerdCap:
+    """process_slot defers catch-up posts when the per-tick budget is spent."""
+
+    async def test_catchup_deferred_when_not_allowed(self, scheduler_service_mocked):
+        """A behind tenant does not post when catchup_allowed=False."""
+        service = scheduler_service_mocked
+        cs = _make_chat_settings(
+            is_paused=False,
+            posting_hours_start=9,
+            posting_hours_end=21,
+            posts_per_day=3,
+            last_post_sent_at=datetime(2026, 3, 21, 9, 0, tzinfo=timezone.utc),
+        )
+        service.settings_service.get_settings.return_value = cs
+        service._select_and_send = AsyncMock(return_value={"posted": True})
+
+        with patch("src.services.core.scheduler.datetime") as mock_dt:
+            # Behind by 2+ intervals
+            mock_dt.now.return_value = datetime(2026, 3, 21, 18, 0, tzinfo=timezone.utc)
+            service.category_mix_repo.get_current_mix_as_dict.return_value = {}
+            result = await service.process_slot(
+                telegram_chat_id=-100123, first_tick=True, catchup_allowed=False
+            )
+
+        assert result["posted"] is False
+        assert result["reason"] == "catchup_deferred"
+        assert result["catchup"] is True
+        # Deferred: no send, no timer advance — the tenant stays due for retry.
+        service._select_and_send.assert_not_called()
+
+    async def test_catchup_fires_and_tagged_when_allowed(
+        self, scheduler_service_mocked
+    ):
+        """A behind tenant posts (result tagged catchup) when allowed."""
+        service = scheduler_service_mocked
+        cs = _make_chat_settings(
+            is_paused=False,
+            posting_hours_start=9,
+            posting_hours_end=21,
+            posts_per_day=3,
+            last_post_sent_at=datetime(2026, 3, 21, 9, 0, tzinfo=timezone.utc),
+        )
+        service.settings_service.get_settings.return_value = cs
+        service._select_and_send = AsyncMock(return_value={"posted": True})
+
+        with patch("src.services.core.scheduler.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 3, 21, 18, 0, tzinfo=timezone.utc)
+            service.category_mix_repo.get_current_mix_as_dict.return_value = {}
+            result = await service.process_slot(
+                telegram_chat_id=-100123, first_tick=True, catchup_allowed=True
+            )
+
+        assert result["posted"] is True
+        assert result["catchup"] is True
+        service._select_and_send.assert_called_once()
+
+    async def test_normal_due_not_deferred_by_cap(self, scheduler_service_mocked):
+        """A normally-due tenant (behind < 2 intervals) posts even when
+        catchup_allowed=False — the cap only gates catch-up make-ups."""
+        service = scheduler_service_mocked
+        cs = _make_chat_settings(
+            is_paused=False,
+            posting_hours_start=9,
+            posting_hours_end=21,
+            posts_per_day=3,
+            last_post_sent_at=datetime(2026, 3, 21, 9, 0, tzinfo=timezone.utc),
+        )
+        service.settings_service.get_settings.return_value = cs
+        service._select_and_send = AsyncMock(return_value={"posted": True})
+
+        with patch("src.services.core.scheduler.datetime") as mock_dt:
+            # 5h elapsed = 1.25 intervals — due, but not a catch-up
+            mock_dt.now.return_value = datetime(2026, 3, 21, 14, 0, tzinfo=timezone.utc)
+            service.category_mix_repo.get_current_mix_as_dict.return_value = {}
+            result = await service.process_slot(
+                telegram_chat_id=-100123, catchup_allowed=False
+            )
+
+        assert result["posted"] is True
+        assert result["catchup"] is False
+        service._select_and_send.assert_called_once()
+
+
+# ------------------------------------------------------------------
 # Claim-before-publish: crash-replay safety for the auto-approve IG path (#549)
 # ------------------------------------------------------------------
 
