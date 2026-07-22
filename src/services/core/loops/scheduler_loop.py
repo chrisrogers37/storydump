@@ -128,19 +128,30 @@ async def _scheduler_tick(
         for chat in active_chats:
             chat_id = chat.telegram_chat_id
             try:
+                catchup_allowed = (
+                    catchup_posts_this_tick
+                    < SchedulerService.CATCHUP_POSTS_PER_TICK_CAP
+                )
                 result = await scheduler_service.process_slot(
                     telegram_chat_id=chat_id,
                     first_tick=first_tick,
-                    catchup_allowed=(
-                        catchup_posts_this_tick
-                        < SchedulerService.CATCHUP_POSTS_PER_TICK_CAP
-                    ),
+                    catchup_allowed=catchup_allowed,
                 )
+
+                # Count catch-up ATTEMPTS, not just successes. A granted
+                # catch-up that fails to send still spent a call against the
+                # shared ~30/s budget, so a failed send must consume budget
+                # too — otherwise the cap fails open under exactly the
+                # send-failure contention it exists to bound (the first CAP
+                # sends failing would grant another CAP in the same tick). A
+                # deferral never reaches a send — it only happens when
+                # catchup_allowed is False — so gating on catchup_allowed
+                # excludes it.
+                if catchup_allowed and result.get("catchup"):
+                    catchup_posts_this_tick += 1
 
                 if result.get("posted"):
                     session_state.posts_sent += 1
-                    if result.get("catchup"):
-                        catchup_posts_this_tick += 1
                     logger.info(
                         f"[chat={chat_id}] "
                         f"Posted: {result.get('media_file', '?')} "

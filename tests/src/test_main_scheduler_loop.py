@@ -140,6 +140,53 @@ class TestSchedulerLoop:
         assert allowed_flags == [True] * cap + [False] * (n - cap)
 
     @pytest.mark.asyncio
+    async def test_catchup_cap_counts_failed_attempts_not_just_successes(self):
+        """A granted catch-up that FAILS still consumed a shared-budget send,
+        so it must count against the per-tick cap. Otherwise the cap fails
+        open under exactly the send-failure contention it exists to bound —
+        e.g. if the first CAP sends fail, a success-only counter would grant
+        another CAP (2x the budget) in the same tick."""
+        cap = SchedulerService.CATCHUP_POSTS_PER_TICK_CAP
+        n = cap * 2 + 1  # well past the cap, so a fail-open is unmistakable
+
+        scheduler_service = Mock()
+        # Every catch-up send is ATTEMPTED but FAILS: posted=False, catchup=True.
+        scheduler_service.process_slot = AsyncMock(
+            return_value={"posted": False, "catchup": True}
+        )
+        scheduler_service.cleanup_transactions = Mock()
+
+        posting_service = Mock()
+        posting_service.cleanup_transactions = Mock()
+
+        chats = [Mock(telegram_chat_id=-100000 - i) for i in range(n)]
+        settings_service = Mock()
+        settings_service.get_all_active_chats.return_value = chats
+
+        with (
+            patch(f"{_SCHEDULER}.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+            patch(f"{_SCHEDULER}.QueueRepository") as mock_queue_repo_cls,
+            patch(f"{_SCHEDULER}.ServiceRunRepository"),
+        ):
+            mock_queue_repo_cls.return_value.get_stale_sent.return_value = []
+            mock_sleep.side_effect = StopAsyncIteration
+            try:
+                await run_scheduler_loop(
+                    scheduler_service, posting_service, settings_service
+                )
+            except StopAsyncIteration:
+                pass
+
+        # At most CAP catch-up sends are granted this tick, even though every
+        # one failed — failures count against the budget, not just successes.
+        granted = sum(
+            1
+            for c in scheduler_service.process_slot.call_args_list
+            if c.kwargs["catchup_allowed"]
+        )
+        assert granted == cap
+
+    @pytest.mark.asyncio
     async def test_scheduler_loop_no_calls_when_no_tenants(self):
         """Scheduler loop does nothing when no active chats exist."""
         scheduler_service = Mock()
