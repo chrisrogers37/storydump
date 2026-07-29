@@ -145,25 +145,32 @@ async def telegram_edit_with_retry(
     base_delay: float = 1.0,
     **kwargs,
 ) -> Optional[object]:
-    """Retry a Telegram message edit on transient failures.
+    """Retry a Telegram message edit on transient NETWORK failures.
 
-    Telegram's API can transiently fail with network timeouts,
-    rate limits (RetryAfter), or connection drops. This wrapper
-    retries with exponential backoff for those cases only.
+    Telegram's API can transiently fail with network timeouts or connection
+    drops; this wrapper retries those with exponential backoff.
+
+    Rate limiting (``RetryAfter``) is NOT retried here: the ``AIORateLimiter``
+    on the Application now owns rate limiting and RetryAfter retry as a single
+    layer (#686b). A RetryAfter that still escapes the limiter is treated as
+    terminal — return ``None`` immediately, never blocking-sleep (a sleep here
+    stalls the caller's per-item op-lock, the "Already Processing" freeze) and
+    never re-raise (callers rely on the None-on-failure contract below).
 
     Permanent rejections (``BadRequest`` — e.g. "message is not modified",
-    "message to edit not found") are not retried: they return ``None``
+    "message to edit not found") are likewise not retried: they return ``None``
     immediately. Unexpected exceptions are raised.
 
     Args:
         edit_func: The async Telegram method to call (e.g., query.edit_message_caption)
         *args: Positional args to pass to edit_func
-        max_retries: Maximum retry attempts (default 2, so 3 total attempts)
+        max_retries: Maximum retry attempts (default 2, so 3 total attempts) —
+            applies to network transients only.
         base_delay: Base delay in seconds for exponential backoff
         **kwargs: Keyword args to pass to edit_func
 
     Returns:
-        The result of edit_func, or None if all retries exhausted.
+        The result of edit_func, or None on any handled failure.
     """
     last_error = None
 
@@ -171,17 +178,14 @@ async def telegram_edit_with_retry(
         try:
             return await edit_func(*args, **kwargs)
         except RetryAfter as e:
-            # Telegram explicitly told us to wait
-            last_error = e
-            if attempt < max_retries:
-                wait = e.retry_after + 0.5
-                logger.warning(
-                    f"Telegram RetryAfter: waiting {wait}s "
-                    f"(attempt {attempt + 1}/{max_retries + 1})"
-                )
-                await asyncio.sleep(wait)
-            else:
-                logger.warning(f"Telegram RetryAfter exhausted retries: {e}")
+            # AIORateLimiter owns rate + RetryAfter retry now (one layer). A
+            # RetryAfter reaching here escaped the limiter's own max_retries;
+            # fail soft (terminal None) rather than stacking a second blocking
+            # retry under the caller's op-lock.
+            logger.warning(
+                f"Telegram RetryAfter past the rate limiter, not retrying: {e}"
+            )
+            return None
         except BadRequest as e:
             # Permanent API rejection ("message is not modified", "message to
             # edit not found", …): a retry can never succeed, so don't burn

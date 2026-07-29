@@ -146,10 +146,20 @@ class TelegramService(BaseService):
         # other user's tap behind it. Bounded — each concurrent callback holds its
         # own per-task DB session, so the bound keeps peak DB connections within
         # the pool (see settings.TELEGRAM_MAX_CONCURRENT_UPDATES).
+        # rate_limiter: smooth all bot API calls under Telegram's flood limits
+        # (#686b). Every callback edit (query.edit_message_*) routes through the
+        # Application's bot, so bursty taps are queued instead of tripping
+        # RetryAfter and freezing the card. Defaults are Telegram's real ceilings
+        # (overall 30/s, per-group 20/60s — the group bucket keys on chat_id, so
+        # it scales per-tenant for free); max_retries=3 lets the limiter absorb a
+        # transient RetryAfter internally instead of raising it up the stack.
+        from src.utils.telegram_rate_limiter import SmokeAlarmRateLimiter
+
         self.application = (
             Application.builder()
             .token(self.bot_token)
             .concurrent_updates(settings.TELEGRAM_MAX_CONCURRENT_UPDATES)
+            .rate_limiter(SmokeAlarmRateLimiter(max_retries=3))
             .build()
         )
 
