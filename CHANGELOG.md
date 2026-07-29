@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Ignore Claude fleet bot telemetry paths** — narrow any-depth `.gitignore` rules for `data/events/fleet-*.jsonl`, `data/.last-tool-call`, `data/.idle`: the files Claudlobby supervision hooks can write relative to the session cwd when the bot environment is absent (Claudfather/Claudlobby#874). Prevents a broad `git add` in an agent checkout from staging fleet telemetry into this public repo; product `data/` paths are unaffected.
+
 ### Added
 
 - **Outbound Telegram API pacing via AIORateLimiter — bursts queue smoothly instead of hitting 10–26s RetryAfter walls (#686)** — the worker's PTB `Application` now routes every outbound bot call through `AIORateLimiter` at Telegram's published budgets (PTB defaults: 30 msgs/s overall, 20 msgs/min per group, the per-group bucket keyed by `chat_id` so it scales across tenants), converting per-chat burst penalties into fair FIFO pacing. Callback answers carry no `chat_id` and skip the buckets entirely, so the instant acks shipped in #689 survive saturation — pinned by a contract test that fails loudly if a future PTB bump changes bucketing. Subsumes #653: the pending-caption fan-out is paced by the same per-group bucket, so no bespoke batch limiter is needed.
