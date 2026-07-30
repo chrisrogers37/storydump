@@ -16,7 +16,8 @@ documentation/
 ├── ROADMAP.md                     # Product roadmap and version history
 ├── SECURITY_REVIEW.md             # Security audit findings
 ├── planning/                       # Planning and design documents
-│   └── 2026-07-system-review/     # Full-system review: triage + detailed findings + issue backlog
+│   ├── 2026-07-system-review/     # Full-system review: triage + detailed findings + issue backlog
+│   └── 2026-07-29-data-model-evaluation/  # Data model evaluation: neutral prompt, self-evaluation, target model, epic, triage, migration plan
 │   ├── phases/                    # Phased implementation plans
 │   │   ├── 00_MASTER_ROADMAP.md   # Vision, architecture, phase overview
 │   │   ├── 02_shopify_integration.md        # PENDING
@@ -64,6 +65,14 @@ documentation/
 
 **[phases/07_dashboard_ui.md](planning/phases/07_dashboard_ui.md)** - PENDING
 - Next.js web dashboard, analytics visualizations, media-product management
+
+### Data Model Evaluation (2026-07-29)
+
+**[2026-07-29-data-model-evaluation/](planning/2026-07-29-data-model-evaluation/README.md)** - PROPOSED
+- Neutral, reusable prompt for evaluating the system and its data model (no recommendation leakage)
+- Repository-grounded self-evaluation: schema inventory, path traces, liabilities, comparison of three target approaches
+- Recommended workspace-rooted target model, implementation epic, P0–P3 issue triage, and an
+  expand/backfill/dual-write/shadow-read/cutover/contract migration plan with per-consumer coverage and rollback
 
 ### Feed & Queue Features (Research)
 
