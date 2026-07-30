@@ -33,8 +33,9 @@ The baseline has meaningful single-process protections:
 - Some queue claims and transitions use guarded updates or
   `FOR UPDATE SKIP LOCKED`.
 - Restart catch-up work is capped at eight tenants per scheduler tick.
-- The author-supplied baseline suite result was 2,194 passed and 56
-  PostgreSQL-dependent skips; this review did not independently reproduce it.
+- The baseline suite result was independently reproduced under safe local
+  configuration on 2026-07-30: 2,194 passed and 56 PostgreSQL-dependent skips in
+  40.04 seconds.
 
 Those protections do not yet compose into a system-wide guarantee:
 

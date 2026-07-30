@@ -81,7 +81,7 @@ replicated as-is, and durable jobs/outbox/shared limits do not exist.
 | Meta container is persisted before publish | Verified | `QueueRepository.mark_publishing()` and scheduler/autopost callbacks | Strong invariant to preserve in `provider_operations` |
 | Posting history idempotency has a DB uniqueness backstop | Contradicted | `HistoryRepository.create_idempotent()` is application-level; model has no unique constraint on `queue_item_id` | Existing duplicate groups must be remediated before adding the index |
 | End-to-end capacity telemetry exists | Contradicted | Health, service runs, logs, and pool logging exist; no OpenTelemetry/Prometheus queue-age/fairness model | Phase 1 measurement work is required before capacity claims |
-| Baseline test total is independently reproduced here | Unverified in this review | The supplied result is 2,194 passed / 56 skipped | Treat as the authoring baseline until CI/review reruns it |
+| Baseline test total is independently reproduced here | Verified | Safe local run on 2026-07-30 completed with 2,194 passed / 56 PostgreSQL-dependent skips in 40.04 seconds | Matches the supplied baseline count |
 
 ## 5. Failure-window analysis
 
