@@ -1,0 +1,19 @@
+# Ruff configuration.
+#
+# `select` is declared explicitly rather than inherited from ruff's built-in
+# defaults. Ruff's default rule set is not a stable contract — it expands
+# between releases, so a project that relies on it has a lint policy defined by
+# whichever ruff version CI happened to install that day, not by the project.
+#
+# These are the rules the codebase is held to. Widening the set is a deliberate
+# change: add the rule here, fix the findings, and land both together.
+
+target-version = "py310"
+
+[lint]
+select = [
+    "E4",  # pycodestyle — imports
+    "E7",  # pycodestyle — statement/comparison errors
+    "E9",  # pycodestyle — syntax/IO errors
+    "F",   # pyflakes — undefined names, unused imports
+]
