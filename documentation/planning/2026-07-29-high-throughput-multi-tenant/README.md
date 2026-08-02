@@ -60,6 +60,7 @@ normative in the epic and plan:
 | [`fable-evaluation-prompt.md`](fable-evaluation-prompt.md) | Portable prompt for an independent architecture review |
 | [`tiered-issue-triage.md`](tiered-issue-triage.md) | P0–P3 work packages, dependencies, and exit gates |
 | [`implementation-plan.md`](implementation-plan.md) | File-oriented, test-first execution sequence |
+| [`review-findings.md`](review-findings.md) | Independent-review outcome: five required changes, the capacity-envelope correction, and the Instagram platform constraints |
 
 Recommended review order: this index, `self-evaluation.md`, `epic.md`,
 `tiered-issue-triage.md`, then `implementation-plan.md`.
