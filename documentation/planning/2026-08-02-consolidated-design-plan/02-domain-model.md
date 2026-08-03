@@ -6,7 +6,17 @@ This file is DDL-complete: every table below is stated as executable PostgreSQL,
 
 - **Ids:** `id UUID PRIMARY KEY DEFAULT gen_random_uuid()` on every table unless a natural PK is shown. (Legacy tables mix `uuid_generate_v4()`/`gen_random_uuid()`; new DDL uses `gen_random_uuid()` only — no extension dependency.)
 - **Time:** every new timestamp column is `TIMESTAMPTZ`. Legacy columns are naive `TIMESTAMP`, UTC by convention; **every backfill converts with `AT TIME ZONE 'UTC'`** — this clause is mandatory in track DDL, and a bare cast is a review-blocking defect.
-- **Stamps:** `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`, `updated_at TIMESTAMPTZ NOT NULL DEFAULT now()` on every table; `updated_at` maintained by the shared `trg_touch_updated_at` trigger (one function, applied per table). One exception: `audit_events` has no `updated_at` and no touch trigger — it is append-only, UPDATE is granted to nobody, so the column could never legally change. `updated_at` is load-bearing on machinery tables: the §5 retention indexes and sweeps key terminal-row age on it. Omitted from the DDL blocks below for brevity — this paragraph is their single normative statement.
+- **Stamps:** `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`, `updated_at TIMESTAMPTZ NOT NULL DEFAULT now()` on every table; `updated_at` maintained by the shared `trg_touch_updated_at` trigger (one function, defined once here; each table's DDL block prints its own one-line `CREATE TRIGGER`). Exceptions — the append/insert-only class carries `created_at` only, no touch trigger, because a touch column could never legally change: `audit_events` (UPDATE granted to nobody), `post_intent_transitions` (matrix changes are INSERT/DELETE of edge rows), `command_dedup` (rows are written once; replay handling only reads), and `rate_counters` (only `count` moves; age is immutable in `window_start`, which is what its retention keys on). `updated_at` is load-bearing on the other machinery tables: the §5 retention indexes and sweeps key terminal-row age on it. **Nothing in this file is implicit:** every stamp column and every trigger statement appears literally in the blocks below.
+
+```sql
+CREATE FUNCTION trg_touch_updated_at() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  NEW.updated_at := now();
+  RETURN NEW;
+END $$;
+```
+
+- **Replay order (normative):** the advertised DDL replays from empty **in file order — this file top-to-bottom, then `07`'s blocks in their file order**. Ordering is therefore load-bearing: a block references only objects printed above it. `04` 0.2's CI carries a named fixture that extracts the advertised blocks and replays them verbatim; an edit that breaks file-order replay fails that gate.
 - **Enums are TEXT + named CHECK constraints**, never native `ENUM` types. Closed sets whose members must be *removable* (e.g. `fb_login_legacy` dies at G.2) make native enums a liability (`DROP VALUE` does not exist); CHECK text is also what the existing enum-SSOT parity gate (models ↔ latest migration DDL) already verifies. Adding/removing a value = enum edit + migration editing the named CHECK, held in lockstep by that gate.
 - **Tenant scoping:** every tenant-scoped table has `workspace_id UUID NOT NULL`; wherever it references another tenant-scoped table it uses a **composite FK** `(workspace_id, <ref>) REFERENCES parent (workspace_id, id)` so a cross-workspace reference is inexpressible (#721 D12, kept). Composite FKs require the parent-side `UNIQUE (workspace_id, id)` — those indexes are part of the parent DDL below.
 - **ON DELETE policy (three classes, no per-FK improvisation):**
@@ -14,9 +24,9 @@ This file is DDL-complete: every table below is stated as executable PostgreSQL,
   2. `users` references from tenant tables (`approved_by_user_id`, `added_by_user_id`, …): `ON DELETE SET NULL` — history survives a departed human (columns are nullable attribution, never authorization).
   3. `audit_events.workspace_id` carries **no FK** — the one deliberate exception: audit must outlive the tenant it describes; the retention sweep (`05`) is its only deleter. RLS still applies to it.
   Runtime roles hold **no DELETE grant** on any tenant table (§7 grant matrix), so "runtime never deletes" is structural, not discipline.
-- **JSONB payloads are versioned:** every JSONB document column carries `"v": <int>` at top level; readers accept `v` and `v-1` (the N-1 rule, `04` ground rules); a payload without `v` is invalid at the service boundary. Field schemas for each payload are stated at the column that owns them.
+- **JSONB payloads are versioned:** every JSONB document column carries `"v": <int>` at top level; readers accept `v` and `v-1` (the N-1 rule, `04` ground rules); a payload without `v` is invalid at the service boundary — and on the NOT NULL payload columns the database backstops it with a cheap shape CHECK, `jsonb_typeof(<col>->'v') = 'number'`, named per table below. Field schemas for each payload are stated at the column that owns them.
 - **Named constraints only** (`ck_`, `uq_`, `fk_`, `ix_` prefixes) — auto-generated names caused the legacy api_tokens 004/008 drop-miss; every constraint below is named so later DDL can target it.
-- **Writer identity GUCs:** every transaction that mutates domain state sets `app.actor_kind` (and `app.actor_user_id` / `app.channel` when a human/channel is involved) via `SET LOCAL`. The `§4` audit trigger raises on a missing `app.actor_kind` — anonymous writes are impossible, in the database, for every writer including a psql session.
+- **Writer identity GUCs:** every transaction that mutates domain state sets `app.actor_kind` (and `app.actor_user_id` / `app.channel` when a human/channel is involved) via `SET LOCAL`. Database enforcement covers a **named set**: the `§4` intent triggers (`post_intents` state changes) and the `§4` governance audit triggers (`workspaces`, `workspace_members`, `oauth_credentials`, `ig_accounts`, `channel_bindings`) raise on a missing `app.actor_kind` — on those tables anonymous writes are impossible, in the database, for every writer including a psql session. High-churn machinery tables (`jobs`, `channel_outbox`, `provider_operations`, `daily_post_counts`, `rate_counters`, `command_dedup`) are excluded by declared design: their rows are execution bookkeeping whose authority trail lives in the ledger transitions and audit rows the covered writers produce.
 
 ## §1. Identity and tenancy (FC-1, FC-2)
 
@@ -26,8 +36,12 @@ CREATE TABLE users (
   primary_email  TEXT NULL,
   state          TEXT NOT NULL DEFAULT 'active'
                  CONSTRAINT ck_users_state CHECK (state IN ('active','disabled')),
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
   CONSTRAINT uq_users_primary_email UNIQUE (primary_email)
 );
+CREATE TRIGGER tg_touch_users BEFORE UPDATE ON users
+  FOR EACH ROW EXECUTE FUNCTION trg_touch_updated_at();
 -- Platform-neutral human (FC-1.3): NO telegram columns. Telegram-only users have NULL email.
 -- users.state='disabled' denies access at the ONE ingress gate; rows/memberships survive.
 
@@ -39,9 +53,13 @@ CREATE TABLE user_identities (
   external_id  TEXT NOT NULL,          -- tg user id (as text) | lowercased email
   display_name TEXT NULL,
   verified_at  TIMESTAMPTZ NULL,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
   CONSTRAINT uq_identity_per_provider UNIQUE (provider, external_id),
   CONSTRAINT uq_user_provider         UNIQUE (user_id, provider)
 );
+CREATE TRIGGER tg_touch_user_identities BEFORE UPDATE ON user_identities
+  FOR EACH ROW EXECUTE FUNCTION trg_touch_updated_at();
 -- One identity per provider per user (v1; widening uq_user_provider is a deliberate migration).
 -- email_otp is the one non-Telegram provider X.3 requires; challenge/session mechanics in 07.
 
@@ -75,8 +93,12 @@ CREATE TABLE workspaces (
   skip_ttl_days           INTEGER NULL,
   caption_style           TEXT NULL
                           CONSTRAINT ck_ws_caption_style CHECK (caption_style IN ('enhanced','simple')),
-  enable_ai_captions      BOOLEAN NOT NULL DEFAULT false
+  enable_ai_captions      BOOLEAN NOT NULL DEFAULT false,
+  created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at              TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+CREATE TRIGGER tg_touch_workspaces BEFORE UPDATE ON workspaces
+  FOR EACH ROW EXECUTE FUNCTION trg_touch_updated_at();
 -- THE tenant root. tenant_id == workspaces.id everywhere. The composite-FK convention's
 -- UNIQUE (workspace_id, id) parent keys start one level DOWN from here — children reference
 -- workspaces(id) directly (their workspace_id column IS that reference); workspaces itself
@@ -96,23 +118,55 @@ CREATE TABLE workspace_members (
   role             TEXT NOT NULL
                    CONSTRAINT ck_members_role CHECK (role IN ('owner','admin','member')),
   added_by_user_id UUID NULL REFERENCES users(id) ON DELETE SET NULL,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (workspace_id, user_id)
 );
+CREATE TRIGGER tg_touch_workspace_members BEFORE UPDATE ON workspace_members
+  FOR EACH ROW EXECUTE FUNCTION trg_touch_updated_at();
 CREATE UNIQUE INDEX uq_members_one_owner ON workspace_members (workspace_id) WHERE role = 'owner';
--- AT MOST one owner per workspace, by index. AT LEAST one, by a deferred constraint trigger:
+-- AT MOST one owner per workspace, by index. AT LEAST one, by the deferred trigger PAIR below —
+-- the member-side trigger catches demote/remove, the workspace-side trigger catches the creation
+-- path (a workspace INSERT that commits with no owner member row — the pass-2 draft fired only on
+-- member UPDATE/DELETE, so creation could commit ownerless):
 
-CREATE FUNCTION trg_members_owner_exists() RETURNS trigger ... ;  -- for each touched workspace
-  -- that still exists: EXISTS a members row with role='owner', else RAISE
+CREATE FUNCTION trg_members_owner_exists() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM workspaces w WHERE w.id = OLD.workspace_id)
+     AND NOT EXISTS (SELECT 1 FROM workspace_members m
+                     WHERE m.workspace_id = OLD.workspace_id AND m.role = 'owner') THEN
+    RAISE EXCEPTION 'workspace % has no owner at commit', OLD.workspace_id
+      USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NULL;
+END $$;
 CREATE CONSTRAINT TRIGGER ct_members_owner_exists
   AFTER UPDATE OR DELETE ON workspace_members
   DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
   WHEN (OLD.role = 'owner')                    -- only owner-row changes can break the invariant
   EXECUTE FUNCTION trg_members_owner_exists();
--- Together: exactly one owner at every commit. Ownership transfer = demote old + promote new
--- in one transaction (06 §2 is the only writer that composes it); last-owner protection is
--- structural — demoting/removing the owner without promoting another fails at commit.
--- Workspace deletion (offboarding cascade) passes: the trigger checks only workspaces that
--- still exist at commit.
+
+CREATE FUNCTION trg_workspaces_owner_at_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM workspace_members m
+                 WHERE m.workspace_id = NEW.id AND m.role = 'owner') THEN
+    RAISE EXCEPTION 'workspace % created without an owner member row', NEW.id
+      USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NULL;
+END $$;
+CREATE CONSTRAINT TRIGGER ct_workspaces_owner_at_insert
+  AFTER INSERT ON workspaces
+  DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+  EXECUTE FUNCTION trg_workspaces_owner_at_insert();
+-- Together: exactly one owner at every commit — uq_members_one_owner is "at most one", the
+-- trigger pair is "at least one" (on every path: creation, demotion, removal). Ownership
+-- transfer = demote old + promote new in one transaction (06 §2 is the only writer that
+-- composes it); last-owner protection is structural — demoting/removing the owner without
+-- promoting another fails at commit; creating a workspace without inserting its owner member
+-- row in the same transaction fails at commit. Workspace deletion (offboarding cascade)
+-- passes: the member-side trigger checks only workspaces that still exist at commit, and the
+-- insert-side trigger fires on INSERT only.
 
 CREATE TABLE workspace_invitations (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -123,8 +177,12 @@ CREATE TABLE workspace_invitations (
   invited_by_user_id UUID NULL REFERENCES users(id) ON DELETE SET NULL,
   state           TEXT NOT NULL DEFAULT 'pending'
                   CONSTRAINT ck_invite_state CHECK (state IN ('pending','accepted','revoked','expired')),
-  expires_at      TIMESTAMPTZ NOT NULL          -- now() + 7 days at insert (05 seam)
+  expires_at      TIMESTAMPTZ NOT NULL,         -- now() + 7 days at insert (05 seam)
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+CREATE TRIGGER tg_touch_workspace_invitations BEFORE UPDATE ON workspace_invitations
+  FOR EACH ROW EXECUTE FUNCTION trg_touch_updated_at();
 CREATE UNIQUE INDEX uq_invite_live ON workspace_invitations (workspace_id, email)
   WHERE state = 'pending';
 -- Web-side membership door (06 §membership). Telegram-side membership continues to arrive via
@@ -146,9 +204,14 @@ CREATE TABLE channel_bindings (
   settings     JSONB NOT NULL DEFAULT '{"v":1}',
                -- {v:1, verbose_notifications?:bool, lifecycle_notifications?:bool}
                -- absent key = app default (materialization contract below)
+               CONSTRAINT ck_bindings_settings_v CHECK (jsonb_typeof(settings->'v') = 'number'),
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
   CONSTRAINT uq_binding_external UNIQUE (channel, external_ref),
   CONSTRAINT uq_bindings_ws_id   UNIQUE (workspace_id, id)
 );
+CREATE TRIGGER tg_touch_channel_bindings BEFORE UPDATE ON channel_bindings
+  FOR EACH ROW EXECUTE FUNCTION trg_touch_updated_at();
 -- A Telegram chat is one binding of a workspace (FC-1.2): 0..n per workspace — the widening from
 -- #721's one-chat v1 is DELIBERATE under FC-1.3 (a Telegram identity manages one-to-many
 -- workspaces; a web-only workspace has zero bindings) and recorded as decision D13 in 03.
@@ -178,8 +241,12 @@ CREATE TABLE ig_accounts (
   -- scheduling state (the clock's O(due) columns, H3):
   next_slot_at         TIMESTAMPTZ NULL,
   last_posted_at       TIMESTAMPTZ NULL,
+  created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
   CONSTRAINT uq_ig_accounts_ws_id UNIQUE (workspace_id, id)
 );
+CREATE TRIGGER tg_touch_ig_accounts BEFORE UPDATE ON ig_accounts
+  FOR EACH ROW EXECUTE FUNCTION trg_touch_updated_at();
 CREATE UNIQUE INDEX uq_ig_account_live ON ig_accounts (workspace_id, provider_account_ref)
   WHERE state <> 'moved';
 CREATE INDEX ix_ig_accounts_due ON ig_accounts (next_slot_at)
@@ -211,9 +278,12 @@ CREATE TABLE provider_quarantine (
   last_strike_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   alerted_at        TIMESTAMPTZ NULL,           -- notification dedup: re-alert only if > 1h old (05)
   reason            TEXT NULL,
-  entered_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),  -- first entry (§0 stamps; the decay
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),  -- anchor is last_strike_at, above)
   PRIMARY KEY (workspace_id, scope_ref)
 );
+CREATE TRIGGER tg_touch_provider_quarantine BEFORE UPDATE ON provider_quarantine
+  FOR EACH ROW EXECUTE FUNCTION trg_touch_updated_at();
 -- THE generic T2 fault-quarantine mechanism. Grain = the serialization key (pass-2 fix: the
 -- earlier '' = whole-(workspace,provider) wildcard could not be matched against prefixed
 -- serialization keys and silently made the fine grain a no-op; per-key rows are what adapters
@@ -235,6 +305,34 @@ CREATE TABLE provider_quarantine (
 --   NOT quarantine: credential revocation (state='revoked' → reauth flow, 07) and Meta cap
 --   error 9 (a cap, §8) — neither writes here.
 
+CREATE TABLE media_sources (
+  id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  workspace_id         UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  provider             TEXT NOT NULL
+                       CONSTRAINT ck_sources_provider CHECK (provider IN ('gdrive')),
+  config               JSONB NOT NULL           -- {v:1, folder_ref:text, root_name?:text}
+                       CONSTRAINT ck_sources_config_v CHECK (jsonb_typeof(config->'v') = 'number'),
+  sync_checkpoint      JSONB NULL,              -- {v:1, page_token?:text, cursor?:text}
+  next_sync_at         TIMESTAMPTZ NULL,
+  state                TEXT NOT NULL DEFAULT 'active'
+                       CONSTRAINT ck_sources_state CHECK (state IN ('active','paused','error')),
+  last_sync_success_at TIMESTAMPTZ NULL,
+  alerted_at           TIMESTAMPTZ NULL,        -- source-disconnect alert dedup (legacy gdrive_alerted_at)
+  created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT uq_sources_ws_id UNIQUE (workspace_id, id)
+);
+CREATE TRIGGER tg_touch_media_sources BEFORE UPDATE ON media_sources
+  FOR EACH ROW EXECUTE FUNCTION trg_touch_updated_at();
+CREATE INDEX ix_sources_sync_due ON media_sources (next_sync_at)
+  WHERE state = 'active' AND next_sync_at IS NOT NULL;
+-- Printed BEFORE oauth_credentials because that table's composite FK targets it (replay order,
+-- §0 — the pass-2 file order had these two swapped and could not replay as printed).
+-- State transitions (complete): active ↔ paused (user command) · active → error (sync failure
+-- classified persistent, e.g. folder gone/credential dead — alert via alerted_at dedup) ·
+-- error → active (successful sync after reconnect/repair — the pre-slot or on-demand sync
+-- IS the probe). The due-scan predicate reads state='active' only.
+
 CREATE TABLE oauth_credentials (
   id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   workspace_id      UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
@@ -249,12 +347,16 @@ CREATE TABLE oauth_credentials (
   next_refresh_at   TIMESTAMPTZ NULL,
   state             TEXT NOT NULL DEFAULT 'active'
                     CONSTRAINT ck_credentials_state CHECK (state IN ('active','expired','revoked')),
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   CONSTRAINT ck_credentials_one_owner CHECK (num_nonnulls(ig_account_id, media_source_id) = 1),
   CONSTRAINT fk_credentials_account FOREIGN KEY (workspace_id, ig_account_id)
     REFERENCES ig_accounts (workspace_id, id) ON DELETE CASCADE,
   CONSTRAINT fk_credentials_source  FOREIGN KEY (workspace_id, media_source_id)
     REFERENCES media_sources (workspace_id, id) ON DELETE CASCADE
 );
+CREATE TRIGGER tg_touch_oauth_credentials BEFORE UPDATE ON oauth_credentials
+  FOR EACH ROW EXECUTE FUNCTION trg_touch_updated_at();
 CREATE UNIQUE INDEX uq_credential_per_account ON oauth_credentials (workspace_id, ig_account_id, provider)
   WHERE ig_account_id IS NOT NULL;
 CREATE UNIQUE INDEX uq_credential_per_source  ON oauth_credentials (workspace_id, media_source_id, provider)
@@ -265,35 +367,17 @@ CREATE INDEX ix_credentials_refresh_due ON oauth_credentials (next_refresh_at)
 -- sensitive table (C4). The per-account unique keys by provider, which is what lets one account
 -- hold an ig_login and a fb_login_legacy row simultaneously during G-phase (legacy 040 semantics).
 -- State transitions (complete): active → expired (refresh determines the token is gone) ·
--- active → revoked (user disconnect / offboarding) · {active,expired,revoked} → active
--- (reconnect, 07 §2: an UPSERT on the owner unique key — payload swapped and state flipped on
--- the existing row, same row id, no delete, no zero-credential window; the swap is audited).
+-- active → revoked (user disconnect / offboarding / account movement — the move transaction
+-- revokes the source row as it copies the payload to the target workspace, 06 §4: a move, not a
+-- fork; exactly one active row per grant, so refresh can never diverge two copies) ·
+-- {active,expired,revoked} → active (reconnect, 07 §2: an UPSERT on the owner unique key —
+-- payload swapped and state flipped on the existing row, same row id, no delete, no
+-- zero-credential window; the swap is audited).
 -- fb_login_legacy is structurally closed to new rows at L.6:
 --   ALTER TABLE oauth_credentials ADD CONSTRAINT ck_no_new_fb_legacy
 --     CHECK (provider <> 'fb_login_legacy') NOT VALID;
 -- (existing rows tolerated, new rows impossible — VALIDATEd then dropped with the enum value at
 -- the FC-4 sunset G.2, together with uq/ix cleanup.)
-
-CREATE TABLE media_sources (
-  id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  workspace_id         UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-  provider             TEXT NOT NULL
-                       CONSTRAINT ck_sources_provider CHECK (provider IN ('gdrive')),
-  config               JSONB NOT NULL,          -- {v:1, folder_ref:text, root_name?:text}
-  sync_checkpoint      JSONB NULL,              -- {v:1, page_token?:text, cursor?:text}
-  next_sync_at         TIMESTAMPTZ NULL,
-  state                TEXT NOT NULL DEFAULT 'active'
-                       CONSTRAINT ck_sources_state CHECK (state IN ('active','paused','error')),
-  last_sync_success_at TIMESTAMPTZ NULL,
-  alerted_at           TIMESTAMPTZ NULL,        -- source-disconnect alert dedup (legacy gdrive_alerted_at)
-  CONSTRAINT uq_sources_ws_id UNIQUE (workspace_id, id)
-);
-CREATE INDEX ix_sources_sync_due ON media_sources (next_sync_at)
-  WHERE state = 'active' AND next_sync_at IS NOT NULL;
--- State transitions (complete): active ↔ paused (user command) · active → error (sync failure
--- classified persistent, e.g. folder gone/credential dead — alert via alerted_at dedup) ·
--- error → active (successful sync after reconnect/repair — the pre-slot or on-demand sync
--- IS the probe). The due-scan predicate reads state='active' only.
 
 CREATE TABLE media_items (
   id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -318,11 +402,15 @@ CREATE TABLE media_items (
                     CONSTRAINT ck_media_state CHECK (state IN ('available','unsupported','removed')),
   times_posted      INTEGER NOT NULL DEFAULT 0,
   last_posted_at    TIMESTAMPTZ NULL,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   CONSTRAINT uq_media_ws_id  UNIQUE (workspace_id, id),
   CONSTRAINT fk_media_source FOREIGN KEY (workspace_id, source_id)
     REFERENCES media_sources (workspace_id, id) ON DELETE CASCADE,
   CONSTRAINT uq_media_dedup  UNIQUE (workspace_id, content_hash)
 );
+CREATE TRIGGER tg_touch_media_items BEFORE UPDATE ON media_items
+  FOR EACH ROW EXECUTE FUNCTION trg_touch_updated_at();
 CREATE INDEX ix_media_selection ON media_items (workspace_id, state, category);
 CREATE INDEX ix_media_provider_ref ON media_items (workspace_id, source_id, provider_file_ref);
 -- uq_media_dedup: dedup is per-workspace BY SCHEMA; a global hash namespace is inexpressible (R4).
@@ -349,18 +437,25 @@ CREATE TABLE post_locks (
                                                 -- terminal-frozen; attribution only, never joined for
                                                 -- authorization
   created_by_user_id   UUID NULL REFERENCES users(id) ON DELETE SET NULL,
+  created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT ck_locks_recent_scope CHECK ((kind = 'recent') = (ig_account_id IS NOT NULL)),
   CONSTRAINT fk_locks_media   FOREIGN KEY (workspace_id, media_item_id)
     REFERENCES media_items (workspace_id, id) ON DELETE CASCADE,
   CONSTRAINT fk_locks_account FOREIGN KEY (workspace_id, ig_account_id)
     REFERENCES ig_accounts (workspace_id, id) ON DELETE CASCADE
 );
+CREATE TRIGGER tg_touch_post_locks BEFORE UPDATE ON post_locks
+  FOR EACH ROW EXECUTE FUNCTION trg_touch_updated_at();
 CREATE UNIQUE INDEX uq_lock_ws_scope ON post_locks (workspace_id, media_item_id, kind)
   WHERE ig_account_id IS NULL;
 CREATE UNIQUE INDEX uq_lock_acct_scope ON post_locks (workspace_id, media_item_id, kind, ig_account_id)
   WHERE ig_account_id IS NOT NULL;
 CREATE INDEX ix_locks_expiry ON post_locks (expires_at) WHERE expires_at IS NOT NULL;
 -- Scope semantics per kind — 06 §3 is the normative home ('recent' = account-scoped, everything
--- human-judgment or file-driven = workspace-scoped, and the selection rule).
+-- human-judgment or file-driven = workspace-scoped, and the selection rule). ck_locks_recent_scope
+-- is that rule's DB backstop (R4): a recent lock without an account, or any other kind carrying
+-- one, is rejected as a constraint violation — prose/service discipline is no longer the only guard.
 -- Expired rows are purged by the reap_expired sweep via ix_locks_expiry.
 -- Legacy kind mapping (W.3): recent_post→recent, skip→skip, permanent_reject→reject,
 -- manual_hold→hold, seasonal→seasonal.
@@ -402,7 +497,9 @@ CREATE TABLE post_intents (
   transit_asset_ref    TEXT NULL,               -- Cloudinary public id for FC-3.5 reap
   cap_consumed_on      DATE NULL,               -- the account-local calendar day this intent debited (R2)
   cap_refunded_at      TIMESTAMPTZ NULL,        -- set iff the debit was returned (failed after debit)
-  attempts_by_step     JSONB NOT NULL DEFAULT '{"v":1}',
+  attempts_by_step     JSONB NOT NULL DEFAULT '{"v":1}'
+                       CONSTRAINT ck_intent_attempts_v
+                       CHECK (jsonb_typeof(attempts_by_step->'v') = 'number'),
                        -- {v:1, <step>:{count:int, generation:int, last_error_class?:text}}
   last_error           JSONB NULL,              -- {v:1, class:text, provider_code?:text, message:text,
                        --  evidence?:object}  — reconciler evidence lands here (§6)
@@ -410,6 +507,8 @@ CREATE TABLE post_intents (
                                                 -- dropped only by W.6's mechanical condition
                                                 -- (30 d after W.5 contract + zero live carriers)
   entered_state_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
   CONSTRAINT fk_intent_account FOREIGN KEY (workspace_id, ig_account_id)
     REFERENCES ig_accounts (workspace_id, id),          -- NO CASCADE: intents outlive account rows
                                                         -- only via workspace offboarding; account
@@ -438,6 +537,8 @@ CREATE TABLE post_intents (
     -- ambiguity (§6: orphan containers are inert — confirmed-safe regeneration instead).
   CONSTRAINT ck_refund_after_debit CHECK (cap_refunded_at IS NULL OR cap_consumed_on IS NOT NULL)
 );
+CREATE TRIGGER tg_touch_post_intents BEFORE UPDATE ON post_intents
+  FOR EACH ROW EXECUTE FUNCTION trg_touch_updated_at();
 -- NOTE on the two NO-CASCADE composite FKs: workspace offboarding still cascades intents via the
 -- workspaces FK; the composite FKs to ig_accounts/media_items deliberately restrict, so nothing
 -- short of offboarding can delete a row that history references. This is the ON DELETE §0 policy
@@ -455,7 +556,9 @@ CREATE TABLE audit_events (
   actor_user_id UUID NULL,                      -- no FK: audit survives user deletion
   channel       TEXT NULL
                 CONSTRAINT ck_audit_channel CHECK (channel IN ('telegram','web','cli','system')),
-  detail        JSONB NULL                      -- {v:1, ...} — never secrets (07 §hygiene)
+  detail        JSONB NULL,                     -- {v:1, ...} — never secrets (07 §hygiene)
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+  -- created_at ONLY — no updated_at, no touch trigger (§0 exception: append-only)
 );
 CREATE INDEX ix_audit_entity ON audit_events (workspace_id, entity_kind, entity_id, id);
 CREATE INDEX ix_audit_time   ON audit_events (workspace_id, created_at);
@@ -469,10 +572,14 @@ CREATE TABLE daily_post_counts (
   local_date    DATE NOT NULL,                  -- account-effective-tz calendar day (06 §multi-account)
   count         INTEGER NOT NULL DEFAULT 0 CONSTRAINT ck_dpc_nonneg CHECK (count >= 0),
   cap_at_write  INTEGER NOT NULL,               -- the cap frozen at first debit of the day
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (workspace_id, ig_account_id, local_date),
   CONSTRAINT fk_dpc_account FOREIGN KEY (workspace_id, ig_account_id)
     REFERENCES ig_accounts (workspace_id, id) ON DELETE CASCADE
 );
+CREATE TRIGGER tg_touch_daily_post_counts BEFORE UPDATE ON daily_post_counts
+  FOR EACH ROW EXECUTE FUNCTION trg_touch_updated_at();
 -- OUR product cadence cap — never Meta's (§8). Debit/refund SQL is in §4 (the transition owns it).
 ```
 
@@ -488,8 +595,15 @@ CREATE UNIQUE INDEX uq_intent_live_subject ON post_intents (workspace_id, media_
 --    no transition leaves a terminal state, so a row is terminal at most once, permanently.
 -- 4. Publishing exclusivity per REAL account, across workspaces (H1, G1):
 CREATE UNIQUE INDEX uq_publish_exclusive ON post_intents (provider_account_ref)
-  WHERE state = 'publishing';
+  WHERE state IN ('publishing','publishing_ambiguous');
 -- The one deliberately non-workspace-leading key; its existence-oracle leak is accepted (§7).
+-- The predicate covers publishing_ambiguous too (pass-3 widening): an unresolved publish blocks
+-- that real account's NEXT publish until the reconciler terminalizes it — correct product
+-- behavior, since the ambiguous attempt may have consumed the story slot. review_required
+-- DELIBERATELY releases the key: the operator is already paged (05 parked-intent alarm), the
+-- account should not be frozen for the human's response time, and the residual risk — a second
+-- publish while an unresolved one later proves posted — is the same operator-resolution-error
+-- window R1 already names. Recorded, not accidental.
 ```
 
 Key 1 carries no intent-kind discriminator: exactly one kind exists; the closed-set convention makes a future kind a deliberate migration that widens the key (`03` C8).
@@ -502,7 +616,8 @@ The matrix is unchanged in substance from the first pass; what is new is that **
 CREATE TABLE post_intent_transitions (        -- the legal-edge reference table (seed data = matrix below)
   from_state TEXT NOT NULL,
   to_state   TEXT NOT NULL,
-  PRIMARY KEY (from_state, to_state)
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),  -- §0 insert-only class: edges are added or
+  PRIMARY KEY (from_state, to_state)              -- deleted, never updated — no touch machinery
 );
 
 CREATE FUNCTION trg_intent_guard() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -560,6 +675,95 @@ BEGIN
 END $$;
 CREATE TRIGGER tg_intent_insert_guard BEFORE INSERT ON post_intents
   FOR EACH ROW EXECUTE FUNCTION trg_intent_insert_guard();
+
+-- GOVERNANCE AUDIT (pass 3): one generic required-actor audit trigger applied to the five
+-- governance tables, making 06's "every membership/credential/account mutation is audited"
+-- DB-true rather than writer-path prose. §0 names the covered set and the deliberate
+-- machinery-table exclusions. Installed at L.1 with audit_events itself (04); from that
+-- increment on, every governance writer — including the F.3 dual-write mirror services —
+-- sets the actor GUCs.
+CREATE FUNCTION trg_governance_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+  r    RECORD;
+  kind TEXT;
+  ws   UUID;
+  ent  UUID;
+  fs   TEXT;
+  ts   TEXT;
+BEGIN
+  IF current_setting('app.actor_kind', true) IS NULL THEN
+    RAISE EXCEPTION 'governance mutation on % without app.actor_kind — anonymous writes are forbidden',
+      TG_TABLE_NAME;
+  END IF;
+  -- Machinery-column early-exit (§0's exclusion applied at COLUMN grain): two governance tables
+  -- are dual-role — the clock/worker advance their scheduling columns at publish frequency.
+  -- Those advances still require an actor (the RAISE above) but write no audit row: their
+  -- authority trail is the intent ledger, and auditing them would mint from=to noise at
+  -- publish rate, retained 400 d. Any change to a governance column below still audits.
+  IF TG_OP = 'UPDATE' AND TG_TABLE_NAME = 'ig_accounts'
+     AND ROW(NEW.workspace_id, NEW.provider_account_ref, NEW.handle, NEW.display_name, NEW.state,
+             NEW.posts_per_day, NEW.posting_hours_start, NEW.posting_hours_end, NEW.tz)
+         IS NOT DISTINCT FROM
+         ROW(OLD.workspace_id, OLD.provider_account_ref, OLD.handle, OLD.display_name, OLD.state,
+             OLD.posts_per_day, OLD.posting_hours_start, OLD.posting_hours_end, OLD.tz) THEN
+    RETURN NULL;                                 -- next_slot_at / last_posted_at advance only
+  END IF;
+  IF TG_OP = 'UPDATE' AND TG_TABLE_NAME = 'oauth_credentials'
+     AND ROW(NEW.workspace_id, NEW.ig_account_id, NEW.media_source_id, NEW.provider,
+             NEW.encrypted_payload, NEW.state)
+         IS NOT DISTINCT FROM
+         ROW(OLD.workspace_id, OLD.ig_account_id, OLD.media_source_id, OLD.provider,
+             OLD.encrypted_payload, OLD.state) THEN
+    RETURN NULL;                                 -- next_refresh_at / expires_at advance only
+  END IF;
+  IF TG_OP = 'DELETE' THEN r := OLD; ELSE r := NEW; END IF;
+  kind := CASE TG_TABLE_NAME
+            WHEN 'workspaces'        THEN 'workspace'
+            WHEN 'workspace_members' THEN 'member'
+            WHEN 'oauth_credentials' THEN 'credential'
+            WHEN 'ig_accounts'       THEN 'ig_account'
+            WHEN 'channel_bindings'  THEN 'channel_binding'
+          END;
+  IF TG_TABLE_NAME = 'workspaces' THEN
+    ws := r.id;           ent := r.id;
+  ELSIF TG_TABLE_NAME = 'workspace_members' THEN
+    ws := r.workspace_id; ent := r.user_id;
+  ELSE
+    ws := r.workspace_id; ent := r.id;
+  END IF;
+  IF TG_OP = 'UPDATE' THEN
+    IF TG_TABLE_NAME = 'workspace_members' THEN fs := OLD.role;  ts := NEW.role;
+    ELSE                                        fs := OLD.state; ts := NEW.state;
+    END IF;
+  ELSIF TG_OP = 'INSERT' THEN
+    IF TG_TABLE_NAME = 'workspace_members' THEN ts := NEW.role;  ELSE ts := NEW.state; END IF;
+  ELSE
+    IF TG_TABLE_NAME = 'workspace_members' THEN fs := OLD.role;  ELSE fs := OLD.state; END IF;
+  END IF;
+  INSERT INTO audit_events (workspace_id, entity_kind, entity_id, from_state, to_state,
+                            actor_kind, actor_user_id, channel, detail)
+  VALUES (ws, kind, ent, fs, ts,
+          current_setting('app.actor_kind'),
+          NULLIF(current_setting('app.actor_user_id', true), '')::uuid,
+          NULLIF(current_setting('app.channel', true), ''),
+          jsonb_build_object('v', 1, 'op', TG_OP));
+  RETURN NULL;
+END $$;
+CREATE TRIGGER tg_audit_workspaces        AFTER INSERT OR UPDATE OR DELETE ON workspaces
+  FOR EACH ROW EXECUTE FUNCTION trg_governance_audit();
+CREATE TRIGGER tg_audit_workspace_members AFTER INSERT OR UPDATE OR DELETE ON workspace_members
+  FOR EACH ROW EXECUTE FUNCTION trg_governance_audit();
+CREATE TRIGGER tg_audit_oauth_credentials AFTER INSERT OR UPDATE OR DELETE ON oauth_credentials
+  FOR EACH ROW EXECUTE FUNCTION trg_governance_audit();
+CREATE TRIGGER tg_audit_ig_accounts       AFTER INSERT OR UPDATE OR DELETE ON ig_accounts
+  FOR EACH ROW EXECUTE FUNCTION trg_governance_audit();
+CREATE TRIGGER tg_audit_channel_bindings  AFTER INSERT OR UPDATE OR DELETE ON channel_bindings
+  FOR EACH ROW EXECUTE FUNCTION trg_governance_audit();
+-- UPDATE audits record the state/role edge (other GOVERNANCE-column edits still audit, with
+-- from = to — presence matters more than diff granularity; detail carries the operation;
+-- machinery-column-only advances are the one early-exit, above). A credential reconnect's
+-- payload swap audits via the encrypted_payload compare — but encrypted_payload itself never
+-- appears in audit rows (07 §hygiene): the trigger writes states and ids only.
 ```
 
 Matrix actors map onto the `ck_audit_actor` GUC vocabulary as: `clock`/`reaper`/`reconciler`/`operator` → themselves; **`worker` → `'system'`**; `user` → `'user'`; backfill inserts → `'migration'`. This line is the mapping's single statement.
@@ -593,26 +797,42 @@ Why this and not a separate outcomes table: R3 needs *one immutable terminal rec
 | review_required | posted | user (operator) | **resolve-posted** (pass-2: the missing likeliest resolution — "it did publish"): legal only when a publish permit exists (`publish_step='publish_called'`, container present); the resolution UPDATE sets `publish_step='effect_confirmed'` + any evidence (`ig_media_id`) in the same statement, satisfying `ck_posted_complete`; cap debit stands |
 | review_required | approved / failed / cancelled | user (operator) | resolve-retry (new generation) / resolve-failed (refunds the cap) / cancel; audited with channel + actor |
 
-The **approved → publishing** transaction, verbatim shape (the R2 atomic debit — no check-then-act gap):
+The **approved → publishing** transaction, verbatim shape (the R2 atomic debit — no check-then-act gap, and the flip's row count is asserted so a consumed cap slot can never leak):
 
 ```sql
 BEGIN;
 SET LOCAL app.tenant_id = :workspace_id;  SET LOCAL app.actor_kind = 'system';
--- (a) cap debit: insert-or-increment, denied atomically at the cap
-INSERT INTO daily_post_counts AS d (workspace_id, ig_account_id, local_date, count, cap_at_write)
-VALUES (:ws, :acct, :local_date, 1, :effective_cap)
-ON CONFLICT (workspace_id, ig_account_id, local_date)
-  DO UPDATE SET count = d.count + 1 WHERE d.count < d.cap_at_write
-RETURNING local_date;
--- zero rows returned ⇒ DENIED: leave state, reschedule the job to the account's next slot
--- (worker updates jobs.run_at; intent stays 'approved'; audit row 'cap_deferred'). Approval does
--- not expire from deferral alone — the reaper's approval-TTL clock keeps running regardless.
--- (b) state flip — the trigger validates the edge; key 4 acquires publishing exclusivity
-UPDATE post_intents SET state = 'publishing', cap_consumed_on = :local_date
-  WHERE id = :intent AND state = 'approved';
--- unique_violation on uq_publish_exclusive ⇒ another workspace is publishing this real account:
--- treated exactly as a cap denial (defer, no error surfaced to the user)
-COMMIT;
+WITH debit AS (
+  -- cap debit: insert-or-increment, denied atomically at the cap
+  INSERT INTO daily_post_counts AS d (workspace_id, ig_account_id, local_date, count, cap_at_write)
+  VALUES (:ws, :acct, :local_date, 1, :effective_cap)
+  ON CONFLICT (workspace_id, ig_account_id, local_date)
+    DO UPDATE SET count = d.count + 1 WHERE d.count < d.cap_at_write
+  RETURNING local_date
+),
+flip AS (
+  -- state flip, COUPLED to the debit in one statement: no debit row ⇒ no flip attempt.
+  -- The §4 trigger validates the edge; key 4 acquires publishing exclusivity.
+  UPDATE post_intents
+     SET state = 'publishing', cap_consumed_on = (SELECT local_date FROM debit)
+   WHERE id = :intent AND state = 'approved' AND EXISTS (SELECT 1 FROM debit)
+  RETURNING id
+)
+SELECT (SELECT count(*) FROM debit) AS debited,
+       (SELECT count(*) FROM flip)  AS flipped;
+-- (0, 0) ⇒ cap DENIED — the statement wrote nothing; COMMIT is a no-op. Defer: the worker
+--   reschedules the job to the account's next slot (jobs.run_at); the intent stays 'approved';
+--   audit row 'cap_deferred'. Approval does not expire from deferral alone — the reaper's
+--   approval-TTL clock keeps running regardless.
+-- (1, 1) ⇒ proceed: COMMIT.
+-- (1, 0) ⇒ the intent was not 'approved' (a race terminalized or moved it). The service RAISES
+--   and the transaction ROLLS BACK — the debit rolls back with it. Pass-3 fix: the pass-2
+--   two-statement form could commit a debit around a zero-row flip, consuming capacity without
+--   entering publishing; the CTE coupling plus the asserted row count closes that leak (R2).
+-- unique_violation on uq_publish_exclusive ⇒ the real account already has a publishing or
+--   publishing_ambiguous intent in some workspace: treated exactly as a cap denial (transaction
+--   rolls back — debit included — defer, no error surfaced to the user).
+COMMIT;  -- or ROLLBACK per the outcome above
 ```
 
 Cap refund (the `publishing → failed` and ambiguous→failed companion, same tx as the terminal flip): `UPDATE daily_post_counts SET count = count - 1 WHERE (workspace_id, ig_account_id, local_date) = (:ws, :acct, intent.cap_consumed_on) AND count > 0;` plus `cap_refunded_at = now()` on the intent. The refund targets **the recorded debit day** (`cap_consumed_on`), so a timezone change or midnight crossing between debit and refund cannot touch the wrong bucket. `local_date` is computed in the account's effective tz *at debit time*; the product-facing DST/tz-change and mid-day-cadence-change rules live in 06 §3 — the one home.
@@ -631,10 +851,12 @@ CREATE TABLE jobs (
                       'reauth_prompt',
                       -- system kinds (workspace_id NULL):
                       'reconcile_ambiguous','reap_expired','reap_transit_assets','retention_sweep',
-                      'comparator_run','reencrypt_credentials')),
+                      'comparator_run','reencrypt_credentials','send_email')),
   workspace_id      UUID NULL REFERENCES workspaces(id) ON DELETE CASCADE,
   lane              TEXT NOT NULL CONSTRAINT ck_jobs_lane CHECK (lane IN ('interactive','bulk')),
-  serialization_key TEXT NULL,
+  serialization_key TEXT NOT NULL,              -- every registry kind names its key (pass-3:
+                                                -- nullability was vestigial, and a NULL key
+                                                -- bypassed both serialization guards)
   run_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
   state             TEXT NOT NULL DEFAULT 'ready' CONSTRAINT ck_jobs_state
                     CHECK (state IN ('ready','leased','succeeded','failed','review_required','cancelled')),
@@ -645,12 +867,17 @@ CREATE TABLE jobs (
   locked_by         TEXT NULL,
   locked_until      TIMESTAMPTZ NULL,
   lease_token       UUID NULL,
-  payload           JSONB NOT NULL DEFAULT '{"v":1}',
+  payload           JSONB NOT NULL DEFAULT '{"v":1}'
+                    CONSTRAINT ck_jobs_payload_v CHECK (jsonb_typeof(payload->'v') = 'number'),
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   CONSTRAINT ck_jobs_system_kinds CHECK (
-    (workspace_id IS NOT NULL) OR kind IN
+    (workspace_id IS NULL) = (kind IN
       ('reconcile_ambiguous','reap_expired','reap_transit_assets','retention_sweep',
-       'comparator_run','reencrypt_credentials'))
+       'comparator_run','reencrypt_credentials','send_email')))
 );
+CREATE TRIGGER tg_touch_jobs BEFORE UPDATE ON jobs
+  FOR EACH ROW EXECUTE FUNCTION trg_touch_updated_at();
 CREATE INDEX ix_jobs_claim ON jobs (lane, run_at) WHERE state = 'ready';
 CREATE INDEX ix_jobs_lease_expiry ON jobs (locked_until) WHERE state = 'leased';
 CREATE UNIQUE INDEX uq_jobs_serialized_lease ON jobs (serialization_key) WHERE state = 'leased';
@@ -662,7 +889,10 @@ CREATE INDEX ix_jobs_retire ON jobs (updated_at)
 -- provider_operations below.
 -- uq_jobs_serialized_lease is THE serialization guard: two leased jobs with one key are
 -- impossible by constraint, not by claim-query discipline. The claim query merely avoids
--- most conflicts; the index makes the race lose correctly.
+-- most conflicts; the index makes the race lose correctly. ck_jobs_system_kinds is an
+-- EQUIVALENCE (pass 3): a system kind with a workspace, or a tenant kind without one, is a
+-- constraint violation — the one-way form let malformed producer rows through in both
+-- directions the registry never intended.
 ```
 
 **Job-kind registry (closed; the CHECK above is its enforcement).** Per kind: payload schema (all `{v:1, …}`), producer, lane, serialization key:
@@ -678,18 +908,20 @@ CREATE INDEX ix_jobs_retire ON jobs (updated_at)
 | revoke_workspace_credentials | `{}` (workspace-keyed) | offboard_workspace | bulk | `ws:<workspace_id>` |
 | reauth_prompt | `{ig_account_id}` | G.1 campaign clock | bulk | `ig:<provider_account_ref>` |
 | reconcile_ambiguous | `{}` | clock (recurring) | bulk | `'reconciler'` (singleton by key) |
-| reap_expired | `{}` | clock (recurring) | bulk | `'reaper'` — remit: every expiry class in one bounded sweep: intent expiries (§4 reaper edges), expired `post_locks` (via `ix_locks_expiry`), expired/stale `workspace_invitations`, `otp_challenges`, `oauth_states` |
+| reap_expired | `{}` | clock (recurring) | bulk | `'reaper'` — remit: every expiry class in one bounded sweep — intent expiries (§4 reaper edges), expired `post_locks` (via `ix_locks_expiry`), `workspace_invitations`, `oauth_states`, `otp_challenges` — **staged by table availability** (pass 3): each class lands in the increment that creates its table, which extends the executor in the same PR, so the reaper can never name a table that does not exist (`04` names the increments). Auth-plane classes sweep through `fn_auth_plane_sweep` (§7 door) |
 | reap_transit_assets | `{}` | clock (recurring, FC-3.6) | bulk | `'transit-reaper'` |
 | retention_sweep | `{}` | clock (recurring) | bulk | `'retention'` |
 | comparator_run | `{track:text}` | clock (nightly, per active track) | bulk | `cmp:<track>` |
 | reencrypt_credentials | `{key_generation:int}` | rotation runbook (07) | bulk | `'reencrypt'` |
+| send_email | `{v:1, to:text, template:text, params:object, ref:uuid}` — everything the send needs; no tenant reads at send time | OTP issue / invitation create / bounce handler (07 §1) | interactive (a sign-in user is waiting) | `email:<ref>` (one key per send — retry ordering only, no cross-send serialization) |
 
-Producer authorization is code-level (each producer is one named service); the DB-level guard is the kind CHECK + the nullability pairing + RLS (§7). A new kind is a migration (CHECK edit) plus a registry row here — the closed-set convention applied to work itself. **Interactive commands are not jobs**: approve/skip/reject/settings/etc. are single-transaction state flips executed inline in ingress (the ack IS the transaction, R5); a command reaches this table only when it spawns real work, and then as its specific kind above (sync-now → `sync_media_source`, offboard → `offboard_workspace`, …) — there is deliberately no generic `run_command` kind.
+Producer authorization is code-level (each producer is one named service); the DB-level guard is the kind CHECK + the nullability pairing + RLS (§7). A new kind is a migration (CHECK edit) plus a registry row here — the closed-set convention applied to work itself. **Kind classing rule (why `send_email` is a system kind even when a tenant flow enqueues it):** a kind is system iff its executor is payload-complete — zero tenant reads or writes at execution time — regardless of who produced it; the pre-auth OTP send has no workspace to key, and the equivalence CHECK must hold for every row of a kind. Acknowledged residue: a tenant-originated send (invitation) escapes the workspace cascade, so an email job can outlive its workspace — the executor tolerates a dangling `ref` (send fires or fails on its own retry budget; nothing joins tenant tables). **Interactive commands are not jobs**: approve/skip/reject/settings/etc. are single-transaction state flips executed inline in ingress (the ack IS the transaction, R5); a command reaches this table only when it spawns real work, and then as its specific kind above (sync-now → `sync_media_source`, offboard → `offboard_workspace`, …) — there is deliberately no generic `run_command` kind.
 
 **The claim, verbatim shape (its race guard is the unique index, not the query):**
 
 ```sql
-BEGIN;  -- role: svc_claim (§7); its own short transaction, THEN execution runs tenant-scoped
+BEGIN;  -- the body of fn_claim_job(:lane) — SECURITY DEFINER, owner svc_claim (§7), EXECUTE
+        -- granted to svc_worker; its own short transaction, THEN execution runs tenant-scoped
 WITH candidate AS (
   SELECT j.id FROM jobs j
   WHERE j.state = 'ready' AND j.lane = :lane AND j.run_at <= now()
@@ -716,7 +948,7 @@ COMMIT;
 -- advisory backoff/fairness, not correctness gates — races defer the NEXT claim, never corrupt.
 ```
 
-Transitions: `ready → leased` (claim above) · `leased → succeeded | failed | review_required` (finalization CAS: `UPDATE jobs SET state=:terminal WHERE id=:id AND lease_token=:token` — zero rows = fenced, the worker aborts) · `leased → ready` (lease expiry: the expiry sweep re-readies; the stale owner's later finalization fails the CAS) · `ready → review_required` (poison) · `ready → cancelled` (cooperative; a leased job is cancelled only by its own worker at a checkpoint). The domain transaction (intent flip + counters + audit) and job finalization commit **together** — that co-location is why jobs live in Postgres (C3). Job state is execution bookkeeping only; it is never the authority on whether an external effect happened (§6). Heartbeat: one independent asyncio task per worker process extends `locked_until` for all its live leases every interval (`05`) in a single UPDATE guarded by lease tokens; a worker missing two beats is presumed dead well inside the lease; provider waits never block beats (the beat task is not in the pipeline's await chain).
+Transitions: `ready → leased` (claim above) · `leased → succeeded | failed | review_required` (finalization CAS: `UPDATE jobs SET state=:terminal WHERE id=:id AND lease_token=:token` — zero rows = fenced, the worker aborts) · `leased → ready` (lease expiry: the expiry sweep re-readies; the stale owner's later finalization fails the CAS) · `ready → review_required` (poison) · `ready → cancelled` (cooperative; a leased job is cancelled only by its own worker at a checkpoint). The domain transaction (intent flip + counters + audit) and job finalization commit **together** — that co-location is why jobs live in Postgres (C3). Job state is execution bookkeeping only; it is never the authority on whether an external effect happened (§6). Heartbeat: one independent asyncio task per worker process extends `locked_until` for all its live leases every interval (`05`) in a single `fn_extend_leases` call (§7 door) guarded by lease tokens; a worker missing two beats is presumed dead well inside the lease; provider waits never block beats (the beat task is not in the pipeline's await chain).
 
 **Transaction discipline (normative, the L.0 gate tests it): a database transaction never spans a provider call.** Pipelines run transaction-per-checkpoint — open, write the checkpoint/permit, commit, *then* talk to the provider. This is both the correctness seam (the §6 permit protocol depends on permit-commit-before-call) and the connection-budget arithmetic's premise (`05` tasks-vs-connections).
 
@@ -730,14 +962,19 @@ CREATE TABLE channel_outbox (
   kind                 TEXT NOT NULL CONSTRAINT ck_outbox_kind
                        CHECK (kind IN ('approval_prompt','prompt_supersede','notification','ack')),
   intent_id            UUID NULL,               -- plain UUID ref (intent may be terminal-frozen)
-  payload              JSONB NOT NULL,          -- {v:1, ...} channel-NEUTRAL content
+  payload              JSONB NOT NULL           -- {v:1, ...} channel-NEUTRAL content
+                       CONSTRAINT ck_outbox_payload_v CHECK (jsonb_typeof(payload->'v') = 'number'),
   state                TEXT NOT NULL DEFAULT 'pending' CONSTRAINT ck_outbox_state
                        CHECK (state IN ('pending','sending','sent','ambiguous','failed','superseded')),
   attempts             INTEGER NOT NULL DEFAULT 0,
   external_message_ref TEXT NULL,               -- tg message id after send
+  created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
   CONSTRAINT fk_outbox_binding FOREIGN KEY (workspace_id, binding_id)
     REFERENCES channel_bindings (workspace_id, id) ON DELETE CASCADE
 );
+CREATE TRIGGER tg_touch_channel_outbox BEFORE UPDATE ON channel_outbox
+  FOR EACH ROW EXECUTE FUNCTION trg_touch_updated_at();
 CREATE INDEX ix_outbox_due ON channel_outbox (binding_id, created_at) WHERE state = 'pending';
 CREATE INDEX ix_outbox_retire ON channel_outbox (updated_at)
   WHERE state IN ('sent','superseded','failed','ambiguous');   -- retention walk (§5 pattern)
@@ -755,8 +992,12 @@ CREATE TABLE provider_operations (
                       CHECK (state IN ('permitted','succeeded','failed','ambiguous')),
   lease_token         UUID NOT NULL,            -- the lease that authorized this permit
   response_ref        JSONB NULL,               -- {v:1, container_id?|media_id?|status_code?|error?}
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
   CONSTRAINT uq_ops_business_key UNIQUE (business_key)
 );
+CREATE TRIGGER tg_touch_provider_operations BEFORE UPDATE ON provider_operations
+  FOR EACH ROW EXECUTE FUNCTION trg_touch_updated_at();
 CREATE INDEX ix_ops_retire ON provider_operations (updated_at)
   WHERE state IN ('succeeded','failed');        -- retention walk; ambiguous rows are excluded
                                                 -- until the reconciler terminalizes them
@@ -771,9 +1012,9 @@ CREATE INDEX ix_intents_parked ON post_intents (entered_state_at)
 
 **Scope: the rail covers `ig` only.** Cloudinary is deliberately OFF the rail (first-pass design carried it; cut on review): upload and destroy are recoverable effects — a duplicate transit upload is a second short-lived asset, a missed destroy is caught by the FC-3.6 hard-TTL sweep. Their execution state lives in job attempts + `audit_events`, weightless. Instagram publish is irreversible and customer-visible; it gets the full machinery. Telegram delivery lives in the outbox (below). Drive is read-only.
 
-**The permit protocol (stale-worker fencing at the network boundary — the DB stops the call *before* it happens):**
+**The permit protocol (stale-worker fencing at the permit boundary).** What the database enforces, stated exactly (pass-3 rewording — the pass-2 claim "the DB stops the call *before* it happens" overstated the mechanism): the database **denies permits to fenced workers** (the lease CAS below) and **denies second permits per generation** (`uq_ops_business_key`). It does not literally stop an already-permitted call — a permit-holder whose lease expires or is reassigned *after* the permit commits can still place its one authorized call. At-most-once survives because that call was authorized exactly once and an unresolved publish permit is never re-called (the successor rule), not because a stale call is physically prevented.
 
-1. Inside the pipeline, immediately before any IG side-effecting call, the worker opens a short transaction and inserts the permit: `INSERT INTO provider_operations (…, business_key, lease_token) VALUES (…)` **in the same transaction as** a lease CAS re-check: `SELECT 1 FROM jobs WHERE id=:job AND lease_token=:token FOR SHARE` — zero rows ⇒ the lease moved on; the insert rolls back; the worker aborts with **no network call made**. For the `publish` op, the same transaction advances `publish_step` to `'publish_called'` — the permit IS the durable record that a publish may have been attempted (this is what makes `ck_ambiguous_called` exact).
+1. Inside the pipeline, immediately before any IG side-effecting call, the worker opens a short transaction and inserts the permit: `INSERT INTO provider_operations (…, business_key, lease_token) VALUES (…)` **in the same transaction as** a lease CAS re-check: `SELECT 1 FROM jobs WHERE id=:job AND lease_token=:token AND state='leased' AND locked_until > now() FOR SHARE` — zero rows ⇒ the lease moved on, expired, or was finalized (pass 3: state and expiry joined the check; the pass-2 id+token form passed a lease that had expired without reassignment); the insert rolls back; the worker aborts with **no network call made**. For the `publish` op, the same transaction advances `publish_step` to `'publish_called'` — the permit IS the durable record that a publish may have been attempted (this is what makes `ck_ambiguous_called` exact).
 2. Only after that transaction commits may the worker issue the provider call. Crash before commit: no permit, no call, clean resume. Crash after commit with no recorded outcome — **the two op kinds diverge, by blast radius**:
    - `container_create`: an orphaned container is inert (nothing published, containers expire unused, Meta caps count the publish step only). The resumed pipeline marks the unresolved op `failed` (`response_ref` notes `lost_response`), bumps `generation`, permits a fresh create. **Never intent-level ambiguity** — recoverable effects do not park the pipeline.
    - `publish`: the resumed pipeline **does not re-call**: it marks the op `ambiguous` and the intent `publishing_ambiguous`; the reconciler owns it from there, and `generation` never bumps out of ambiguity.
@@ -783,51 +1024,107 @@ CREATE INDEX ix_intents_parked ON post_intents (entered_state_at)
 
 **Send-state authority is single-homed:** the outbox row IS the delivery record and the only authority on "did this send" — the sender *job* carries execution state only. The `ambiguous` outbox state carries R8's no-blind-retry rule, resolved per kind, because Telegram provides no general read-back for a lost `sendMessage` response (there is no "list my sent messages" API): **`notification`/`ack`** — retry once after backoff, then `failed`; a duplicate notification is the accepted cost, bounded at one. **`approval_prompt`** — resend; two live cards for one intent are tolerable because both resolve to the same intent and terminal-state-first reads (R6) make whichever is tapped later render the terminal state; on any intent state change, supersede-all (`prompt_supersede` rows target every known `external_message_ref`; a card whose ref was lost simply ages out under R6 semantics). **Edits always go supersede-then-send** — never edit-in-place on an ambiguous ref. This is the complete ambiguity policy; there is no "stamp-heal" beyond the ref capture on a late Telegram response.
 
-**The reconciliation algorithm (ambiguous IG publish — evidence contract, R8):**
+**The reconciliation contract (ambiguous IG publish — evidence, R8).** Pass 3 stops assuming the platform fact 0.4 exists to verify: whether an Instagram container exposes an observable **post-publish** terminal status at all. Meta's Instagram collection documents `FINISHED` as "ready to be published", and `PUBLISHED` is documented for **Threads** containers — so the pass-2 contract may have borrowed its authoritative evidence from the wrong API (R3 review §6.11, marked uncertain, not false). **One contract, parameterized by evidence authority:** the config seam `reconciler_evidence_mode` records 0.4's doc-cited verdict as the sets of container `status_code` values that are **authoritative after `publish_called`** — which value (if any) is authoritative-positive (the effect happened) and which (if any) are authoritative-negative (it definitively did not). Setting the seam is a config change, never a design change. The machinery is mode-independent:
 
-- Evidence source 1 (authoritative): the persisted container id. `GET /{ig_container_id}?fields=status_code` — `PUBLISHED` ⇒ the effect happened: fetch media id/permalink if retrievable, terminalize `posted` (cap debit stands). `ERROR` / `EXPIRED` ⇒ effect did not happen: terminalize `failed`, refund the cap. `IN_PROGRESS`/`FINISHED` ⇒ still moving: re-poll within budget.
-- Evidence source 2 (corroboration only, never sole basis for `posted`): the account's stories list (`GET /{ig_user_id}/stories`), matched on timestamp window around `publish_called` — used to annotate evidence, not to decide.
-- Budget: poll source 1 at the `05` reconciler cadence until container expiry (~24 h). Expiry reached with no `PUBLISHED` observation ⇒ one final stories check for the window ⇒ still inconclusive ⇒ `review_required`, with the full evidence trail written to `last_error.evidence` (statuses seen, timestamps, stories-window result) for the operator surface (06 §5).
+- **Poll ladder:** per-intent exponential backoff (rungs and worst-case call budget in `05` — the ladder kills the flat-poll pathology of ~1,440 calls per ambiguous intent), polling `GET /{ig_container_id}?fields=status_code`, capped at container expiry (~24 h). The 60 s reconciler *sweep* cadence (`05`) is unchanged: `last_error.evidence` records `{checks:int, last_checked_at}`, and each sweep touches only intents whose next ladder step is due.
+- **Verdicts:** an observed **authoritative-positive** value terminalizes `posted` (fetch media id/permalink if retrievable; cap debit stands). An observed **authoritative-negative** value terminalizes `failed` and refunds the cap. Every other value — including `ERROR`/`EXPIRED` sightings whose post-`publish_called` meaning 0.4 could not confirm — is recorded as evidence, never acted on, and the ladder continues.
+- **Stories read-back** (`GET /{ig_user_id}/stories`, matched on the window around `publish_called`): evidence annotation only — never the sole basis for `posted`, in any mode.
+- **Ladder exhausted:** one final stories check, the full trail into `last_error.evidence`, park `review_required` for the operator surface (06 §5).
+- The two 0.4 outcomes are just the seam's values, named for `04`'s gates: **container-verdict mode** (a post-publish-observable value is confirmed — the authoritative-positive set is non-empty, and most ambiguities terminalize mechanically) and **evidence-capture mode** (0.4 finds none — both authoritative sets are empty, so the machine never self-terminalizes and every exhausted ladder parks `review_required` with the captured trail). `04` L.3's gate carries a test per mode.
 - Every reconciler (or operator-resolution) verdict also terminalizes the `provider_operations` row it judged — `ambiguous → succeeded|failed` with the evidence in `response_ref` — so no op row stays ambiguous after its intent resolves, and the `ix_ops_retire` retention class eventually covers everything.
-- The endpoint semantics above (container `status_code` vocabulary, stories lookback validity) join 0.4's primary-doc verification list — they are platform inputs under `05`'s revision rule.
-- Consequence for R1's honest wording (`01`): at-most-once *intended* publish is guaranteed by permit + fence + persisted container; the residual lost-response window always lands in `publishing_ambiguous`; a duplicate then requires both a lost response **and** an operator resolution error — the machinery never blind-retries.
+- The endpoint semantics (container `status_code` vocabulary **and which values, if any, are authoritative post-publish**, stories lookback validity) are 0.4 primary-doc verification items — platform inputs under `05`'s revision rule — and 0.4 is a named prerequisite of L.3/L.5 (`04`).
+- Consequence for R1's honest wording (`01`), mode-independent: at-most-once *intended* publish is guaranteed by permit + fence + persisted container; the residual lost-response window always lands in `publishing_ambiguous`; a duplicate requires both a lost response **and** an operator resolution error — the machinery never blind-retries. Evidence-capture mode narrows what the machine claims, not the guarantee: it parks more and decides less.
 
 **Inbound admission dedup (the L.8 replay gate's schema home — pass-2 addition; `01` §Process roles cites this):**
 
 ```sql
 CREATE TABLE command_dedup (
   channel      TEXT NOT NULL,                   -- 'telegram' | 'web' | 'cli'
+  principal    TEXT NOT NULL,                   -- '' for telegram (update ids are issued
+                                                -- bot-globally by Telegram, already unique);
+                                                -- session id (web) / service-token id (cli),
+                                                -- so a key collision across tenants is
+                                                -- structurally impossible (pass 3)
   external_ref TEXT NOT NULL,                   -- telegram update_id; web/cli idempotency token
-  seen_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (channel, external_ref)
+  fingerprint  TEXT NOT NULL,                   -- SHA256 over the normalized command payload
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),  -- §0 insert-only class: rows never update
+  PRIMARY KEY (channel, principal, external_ref)
 );
--- Idempotent admission: the adapter inserts before dispatching the command; a duplicate delivery
--- hits the PK and is acknowledged without re-execution (200 replayed callbacks ⇒ one command).
--- Rows age out via retention (`05`) — the replay window Telegram can produce is hours, the
--- retention class keeps days.
+-- Idempotent admission: the adapter inserts before dispatching the command. A duplicate delivery
+-- hits the PK; the adapter then compares fingerprints (pass 3 — request binding): SAME
+-- fingerprint ⇒ a true replay, acknowledged without re-execution (200 replayed callbacks ⇒ one
+-- command); DIFFERENT fingerprint ⇒ the key was reused for different content — rejected as a
+-- 409 conflict, never silently swallowed as a replay (a reused web/cli idempotency token with a
+-- new command body is a caller bug or an attack; treating it as a replay would silently drop
+-- the second command). Rows age out via retention (`05`) — the replay window Telegram can
+-- produce is hours, the retention class keeps days.
 ```
+
+**Durable pacing/admission counters (pass 3 — the one schema shared by L.4 sender pacing, S.2 admission, and 07 §1 pre-auth guards; previously each had numbers but no durable home):**
+
+```sql
+CREATE TABLE rate_counters (
+  scope          TEXT NOT NULL
+                 CONSTRAINT ck_rate_scope CHECK (scope IN
+                   ('tg_chat','tg_global','ws_admission','otp_email','otp_ip','preauth_ip')),
+  key            TEXT NOT NULL,                 -- per scope: binding id | '' (one global row) |
+                                                -- workspace id | lowercased email | client ip
+  window_start   TIMESTAMPTZ NOT NULL,          -- fixed window: now() truncated to the scope's
+                                                -- window length (05 owns lengths and limits)
+  count          INTEGER NOT NULL DEFAULT 0 CONSTRAINT ck_rate_nonneg CHECK (count >= 0),
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),  -- §0 insert-only-class stamps: only count
+  PRIMARY KEY (scope, key, window_start)              -- moves; age is immutable in window_start
+);
+CREATE INDEX ix_rate_retire ON rate_counters (window_start);  -- retention walk (§5 pattern)
+```
+
+The increment-and-check, verbatim — deliberately the same ON CONFLICT shape as the §4 cap debit, one idiom for every counter in the system:
+
+```sql
+INSERT INTO rate_counters AS rc (scope, key, window_start, count)
+VALUES (:scope, :key, :window_start, 1)
+ON CONFLICT (scope, key, window_start)
+  DO UPDATE SET count = rc.count + 1 WHERE rc.count < :limit
+RETURNING count;
+-- zero rows ⇒ over limit for this window: the consuming site defers (sender pacing) or rejects
+-- (admission / OTP issue). Atomic — never a lock, never check-then-act. :limit is the CURRENT
+-- config value (05), compared at each hit — deliberately NOT frozen per window: cap_at_write's
+-- freeze (§3) exists for refund integrity, counters have no refunds, and an abuse limit
+-- tightened mid-attack should bite immediately, not next window.
+```
+
+Scope ↔ consumer map (every number lives in `05`): `tg_chat`/`tg_global` — L.4 Telegram sender pacing, the durable home the AIORateLimiter budgets move into; `ws_admission` — S.2 per-workspace command admission; `otp_email`/`otp_ip`/`preauth_ip` — the 07 §1 pre-auth guards. Ships at L.2 with the jobs machinery; rows age out via retention (`05` — windows are minutes to hours, the class keeps days). **Client-IP source rule (stated once, here; 07 and `05` cite it):** the client IP for `*_ip` scopes derives from the platform-terminated proxy header chain resolved **right-to-left past Railway's own trusted hops** — never the raw leftmost `X-Forwarded-For` entry, which the sender controls. The deployment's actual header behavior is verified in the real environment at L.8's gate (the same check that verifies webhook header trust) **before any IP-keyed guard is load-bearing**.
 
 `service_runs` (legacy ops bookkeeping) survives unchanged during the program and is retired at S.4 (`03`).
 
 ## §7. RLS: policies, roles, and the tenancy backstop (C4)
 
-The first pass said "system actors use dedicated roles with explicit predicates" — insufficient (review B§1): without a policy or bypass, a role sees zero rows regardless of its predicates. The composing design:
+The first pass said "system actors use dedicated roles with explicit predicates" — insufficient (review B§1): without a policy or bypass, a role sees zero rows regardless of its predicates. The second pass gave every personality policies but let one login `SET LOCAL ROLE` between them — which defeats the separation (R3 review §1.2/§6.7: a login that can assume every personality *is* every personality, and `svc_maintenance` held DELETEs on auth-plane tables whose rows its policies could never see). The pass-3 model is **non-escalatable by construction: per-process logins + SECURITY DEFINER doors, no `SET ROLE` anywhere.**
 
-- **No `BYPASSRLS` anywhere. No owner-role runtime connections.** Every cross-tenant capability is a named, reviewable `CREATE POLICY` statement targeting a named role.
-- **Tenant roles** (`svc_ingress`, `svc_worker`): constant-expression tenant policies on every workspace-scoped table — `USING (workspace_id = current_setting('app.tenant_id')::uuid)` (and identical `WITH CHECK`). Every tenant transaction opens with `SET LOCAL app.tenant_id = …` set by the UoW factory, which takes `tenant_id` as a required constructor argument — a UoW without a tenant is unconstructible in code, and a query without one fails closed in the DB (`current_setting` on an unset GUC errors; the policy denies). Transaction-pooled connection reuse is safe because `SET LOCAL` dies with the transaction.
-- **System roles, each with explicit `USING (true)` policies on an enumerated table list** — the enumeration is the security review surface:
+- **Login roles — one per process class, and none is a member of any other role** (so `SET ROLE` to anything is impossible in the database, not merely forbidden by convention):
+  - `svc_ingress` — the ingress replicas' login.
+  - `svc_worker` — the worker replicas' login. The elected clock runs inside a worker process on this same login: its extra privilege lives in a door, not in the login.
+  - `svc_migration` — the runner/backfill login (Railway predeploy, six-stage tracks); broad per-track policies while tracks run; identifies itself via `app.actor_kind='migration'` (§4 insert guard).
+- **No `BYPASSRLS` anywhere. No owner-role runtime connections. No role memberships.** Every cross-tenant capability is a named, reviewable object: a `CREATE POLICY` on a login role, or a `SECURITY DEFINER` door owned by a NOLOGIN system role.
+- **Tenant policies** (on `svc_ingress`, `svc_worker`): constant-expression policies on every workspace-scoped table — `USING (workspace_id = current_setting('app.tenant_id')::uuid)` (and identical `WITH CHECK`). Every tenant transaction opens with `SET LOCAL app.tenant_id = …` set by the UoW factory, which takes `tenant_id` as a required constructor argument — a UoW without a tenant is unconstructible in code, and a query without one fails closed in the DB (`current_setting` on an unset GUC errors; the policy denies). Transaction-pooled connection reuse is safe because `SET LOCAL` dies with the transaction. **Machinery exception, stated exactly (`jobs`):** both logins' `jobs` policies read `USING (workspace_id IS NULL OR workspace_id = current_setting('app.tenant_id', true)::uuid)` — a worker must finalize and reschedule the system jobs it executes, and ingress must enqueue `send_email` before any tenant context exists; the missing-GUC form (`, true` → NULL) then exposes **only system rows**, never another tenant's. `rate_counters` (§6) carries plain role-scoped `USING (true)` policies for both logins — its keys are deliberately not all tenant-shaped — and no login may DELETE from it.
+- **NOLOGIN system roles own the cross-tenant capabilities as SECURITY DEFINER doors.** Every door: `SET search_path = pg_catalog, public`, owned by its system role, `EXECUTE` revoked from PUBLIC and granted **only** to the one login that drives it. The system role holds exactly the `USING (true)` policies and grants its door bodies need — **the door inventory below is the enumeration the security review reads**; a new door is a migration plus a row here. Each door sets its own actor GUC (`set_config('app.actor_kind', …, true)`) at entry, so the §4 audit machinery names the operation regardless of caller.
 
-| Role | Policies (`USING (true)`) on | Writes permitted (grants) | Used by |
-|---|---|---|---|
-| `svc_claim` | jobs, provider_quarantine | UPDATE jobs | the claim transaction only (§5) |
-| `svc_clock` | workspaces, ig_accounts, media_sources, oauth_credentials (read via the payload-free view); jobs, post_intents (insert) | INSERT jobs, INSERT post_intents (scheduled only — §4 insert guard), UPDATE next_* columns | scheduler-as-clock tick |
-| `svc_maintenance` | post_intents, jobs, channel_outbox, provider_operations, daily_post_counts, provider_quarantine, oauth_credentials, media_items, post_locks, workspace_invitations, audit_events (insert), workspaces | UPDATE the swept tables; DELETE only the retention/expiry targets (audit_events, jobs, channel_outbox, provider_operations, daily_post_counts, post_locks, workspace_invitations, command_dedup, otp_challenges, session_tokens, oauth_states — the `05` retention + reap classes) + workspaces (offboarding cascade root) | reapers, reconciler, retention, comparator, offboarding |
-| `svc_migration` | all (during tracks) | per-track INSERT/UPDATE; identifies itself via `app.actor_kind='migration'` (§4 insert guard) | backfills, dual-write mirrors |
+| Door (owner) | Body / effect | EXECUTE |
+|---|---|---|
+| `fn_claim_job(lane)` (`svc_claim`) | the §5 claim query, verbatim | `svc_worker` |
+| `fn_extend_leases(tokens uuid[])` (`svc_claim`) | heartbeat: one UPDATE extending `locked_until` on live leases matching the caller's lease tokens | `svc_worker` |
+| `fn_clock_tick()` (`svc_clock`) | the L.7 tick: due-scan over `ix_ig_accounts_due` + idempotent intent/job inserts (≤ the `05` per-tick bound); refresh scheduling reads `vw_credentials_schedule`, the payload-free view its owner role reads instead of the table | `svc_worker` (the elected clock) |
+| `fn_reconciler_sweep(lim int)` (`svc_maintenance`) | returns the ladder-due batch of parked intents (§6) with their workspace ids — a cross-tenant **read**; each verdict then writes tenant-scoped as `svc_worker` (the intent's workspace is known), so the write path needs no cross-tenant privilege | `svc_worker` |
+| `fn_reaper_sweep(lim int)` (`svc_maintenance`) | the §5 reap classes living in tenant tables — intent expiry flips, expired `post_locks`, stale `workspace_invitations` — plus the `jobs` expired-lease re-ready (`leased → ready` via `ix_jobs_lease_expiry`); bounded, inside the door | `svc_worker` |
+| `fn_retention_batch(class text)` (`svc_maintenance`) | one `05` retention class per call: age-qualified DELETE walking its `ix_*_retire` index; the `audit_events` class COPY-exports into the archive schema first and **aborts if the export fails** (07 §4) | `svc_worker` |
+| `fn_comparator_run(track text)` (`svc_maintenance`) | the six-stage shadow-read comparator for one track (counts + per-row checksums over the track's canonical mapping) | `svc_worker` |
+| `fn_offboard_finalize(ws uuid)` (`svc_maintenance`) | the final-deletion leg of 06 §1, guarded inside the body (state='offboarding', grace window elapsed, zero live intents) → DELETE the `workspaces` row; the §0 cascade does the rest | `svc_worker` (the `offboard_workspace` executor) |
+| `fn_auth_plane_sweep()` (`svc_maintenance`) | expiry/retention deletes on `otp_challenges`, `oauth_states`, `session_tokens`, `command_dedup`. `svc_maintenance` carries four enumerated auth-plane `USING (true)` policies + DELETEs **for exactly this door** — resolving the pass-2 contradiction (R3 §6.7, maintenance held DELETEs its policies could never see) by adding the missing policies to the NOLOGIN sweep owner, never by handing a login the DELETEs (a `svc_ingress`-owned definer body would have put auth-plane DELETE privileges on the internet-exposed login — falsifying the grant matrix below) | `svc_worker` (the reaper/retention schedule drives it) |
 
-**Auth-plane tables** (`07`: `otp_challenges`, `session_tokens`, `oauth_states`, `service_tokens`, plus `command_dedup` above) are deliberately **not tenant-RLS'd** — they are the door tenant context walks through (an OTP verify or OAuth callback happens before any `app.tenant_id` exists). They carry role-scoped `USING (true)` policies for `svc_ingress` only; no other role reads them. `workspace_invitations` IS tenant-scoped (accept runs post-auth, in tenant context) and follows the normal tenant policies.
-
-- **Execution-context flow:** claim commits under `svc_claim`; the worker then opens the job's domain transactions as `svc_worker` with `SET LOCAL app.tenant_id = job.workspace_id` (system jobs run as `svc_maintenance` instead — they are the enumerated sweeps). One connection may serve both phases: `SET LOCAL ROLE` inside each transaction selects the personality; nothing survives the commit.
-- **Grant matrix (beyond RLS):** runtime roles hold no DELETE on tenant tables (§0); nobody but `svc_maintenance` holds DELETE on anything; `audit_events` grants: INSERT to all service roles, UPDATE to none, DELETE to `svc_maintenance` only; `oauth_credentials.encrypted_payload` is SELECTable only by `svc_worker`/`svc_ingress` (credentials service paths) — `svc_clock` reads scheduling columns through a view without the payload column (`vw_credentials_schedule`).
+- **The boundary, stated honestly:** a compromised worker request path can call the doors its login holds (claim jobs, tick the clock, drive sweeps whose bodies are fixed SQL) and can write within tenant policies on the tenant it sets. It cannot `SET ROLE` (no memberships exist to assume), cannot DELETE anything directly (no login holds DELETE), cannot read auth-plane rows or credential ciphertext beyond its column grants, and cannot enlarge a sweep (door bodies are fixed, `search_path`-pinned SQL). Maintenance capability lives in door bodies, not in any login.
+- **Auth-plane tables** (`07`: `otp_challenges`, `session_tokens`, `oauth_states`, `service_tokens`, plus `command_dedup` above) are deliberately **not tenant-RLS'd** — they are the door tenant context walks through (an OTP verify or OAuth callback happens before any `app.tenant_id` exists). They carry role-scoped `USING (true)` policies for `svc_ingress` (the runtime reader/writer) and for `svc_maintenance` (the sweep-door owner, DELETE included) — no other role, and **no login but `svc_ingress`** touches them; their sweep is `fn_auth_plane_sweep`. `workspace_invitations` IS tenant-scoped (accept runs post-auth, in tenant context) and follows the normal tenant policies.
+- **Execution-context flow:** the worker claims via `fn_claim_job`, then opens the job's domain transactions as itself — `svc_worker` with `SET LOCAL app.tenant_id = job.workspace_id`; system jobs execute their doors on schedule. Nothing survives a commit, and no personality switch exists to leak.
+- **Grant matrix (beyond RLS):** **no login holds DELETE on anything** — tenant deletes happen only inside `svc_maintenance`-owned door bodies, auth-plane deletes only inside `fn_auth_plane_sweep` (§0's "runtime never deletes" is thereby structural for every login, not just tenant roles); `audit_events` grants: INSERT to all three logins and the system roles (trigger inserts run as the mutating role), UPDATE to none, DELETE only inside `fn_retention_batch`; `oauth_credentials.encrypted_payload` is column-SELECTable only by `svc_worker`/`svc_ingress` (credentials service paths) — clock scheduling reads happen inside `fn_clock_tick` through `vw_credentials_schedule`, which omits the column.
 - **The staged NOT NULL procedure (the only legal way this plan adds NOT NULL to a populated table — the first pass's "`NOT NULL` added `NOT VALID`" does not exist in PostgreSQL):**
   1. `ALTER TABLE t ADD CONSTRAINT ck_t_col_nn CHECK (col IS NOT NULL) NOT VALID;`
   2. backfill (batched, six-stage machine rules);
@@ -840,8 +1137,8 @@ The first pass said "system actors use dedicated roles with explicit predicates"
 ## §8. Two caps, never conflated
 
 - **Product cadence cap** — ours: `daily_post_counts` in the account's effective tz, calendar-day semantics, atomically debited in the approved→publishing transaction (§4 SQL), refunded on failure against the recorded debit day. The only cap we count locally.
-- **Meta publish cap** — theirs (`05` platform inputs: 25 / rolling 24 h / real account), enforced by Meta on the publish step (error 9). Never counted locally — a rolling window plus out-of-band posts (posted from the phone, other tools) make any local counter wrong by construction; 0.4 verifies the cap's shape against Meta's primary documentation. On error 9: defer with `available_at` derived from provider-reported usage — a cap, not a fault, so no quarantine row. Manual-mode posts (§4) debit only OUR cap; Meta's applies to API publishes alone.
-- **The advisory pre-check is lazy, inline, and shared — never a poller.** There is **no background refresh job** (no such kind exists in the §5 registry — an implementer following this plan cannot build one). The check runs inside the publish pipeline, immediately before the §4 flip transaction, against an in-process cache keyed on **`provider_account_ref`** (shared across duplicate workspace rows of one real account), TTL per `05`. Worst-case provider load is therefore ≤ one usage query per publish attempt — strictly bounded by publish traffic itself, never by account count. (First-pass defect, review B§6, quoted at its pass-1 envelope: up to 1,000 queries/min against ~87 publishes/min; at `05`'s corrected multi-account inputs the same eager reading is ~1,500/min against ~130/min — see D21. The advisory mechanism would have manufactured the very load it advises about, buying no correctness since error 9 is authoritative regardless.) Miss/stale/error on the pre-check ⇒ proceed to the flip; error 9 remains the arbiter.
+- **Meta publish cap** — theirs (`05` platform inputs: 25 / rolling 24 h / real account), enforced by Meta on the publish step (error 9). Never counted locally, and for the **right** reason (pass-3 correction of a self-contradiction, R3 review §6.10 — the pass-2 text blamed phone posts and then said the cap covers API publishes only; a phone post cannot consume an API-publishing quota): a local counter is wrong by construction because **other API grants on the same real account consume the same quota** — the account connected in other workspaces (PA-1(a)) and any other tool the customer has authorized — on top of the rolling-window shape. Our ledger sees only our own publishes; Meta's counter sees them all. 0.4 verifies the cap's shape against Meta's primary documentation. On error 9: defer — a cap, not a fault, so no quarantine row. **`available_at` derivation is uncertain pending 0.4:** the usage endpoint's documented shape (a count over a duration) does not obviously expose the oldest-publish timestamp an exact next-free-slot calculation needs; if 0.4 finds no usable shape, the stated fallback is a conservative deferral to the account's next product slot — correctness never depends on the derivation, because error 9 re-arbitrates on every attempt. Manual-mode posts (§4) debit only OUR cap; Meta's applies to API publishes alone.
+- **The advisory pre-check is lazy, inline, shared — and ships behind a default-off flag.** There is **no background refresh job** (no such kind exists in the §5 registry — an implementer following this plan cannot build one). When enabled, the check runs inside the publish pipeline, immediately before the §4 flip transaction, against an in-process cache keyed on **`provider_account_ref`** (shared across duplicate workspace rows of one real account), TTL per `05`. Worst-case provider load is therefore ≤ one usage query per publish attempt — strictly bounded by publish traffic itself, never by account count. (First-pass defect, review B§6, quoted at its pass-1 envelope: up to 1,000 queries/min against ~87 publishes/min; at `05`'s corrected multi-account inputs the same eager reading is ~1,500/min against ~130/min — see D21. The advisory mechanism would have manufactured the very load it advises about, buying no correctness since error 9 is authoritative regardless.) Miss/stale/error/flag-off on the pre-check ⇒ proceed to the flip; error 9 remains the arbiter. **The flag is OFF by default** (process-class flag, C7): even one read per attempt is a cost the check has not yet earned — the S.5 canary measures whether skipping doomed container/transit work pays for the calls, and the flag flips only on that evidence (`04` S.5).
 
 ## §9. Legacy → target mapping (all 14 current tables + ledger accounted for)
 

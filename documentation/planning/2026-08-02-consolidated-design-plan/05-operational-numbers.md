@@ -45,23 +45,24 @@ Derived:
 |---|---|---|
 | Scheduler tick | 15 s; ≤ 500 inserts/tick | O(due) scan over `ix_ig_accounts_due`; slot key 1 makes double-insert impossible |
 | Outbox sender poll | 2 s | replaces Redis wake-up (C3); invisible in pg at ≪1 msg/s |
-| Telegram pacing | 20 msgs/min/group, 30/s global | Telegram published budgets, carried into durable pacing |
+| Telegram pacing | 20 msgs/min/group, 30/s global | Telegram published budgets, carried into durable `rate_counters` rows (`02` §6 — scopes `tg_chat`/`tg_global`) |
 | Jobs-ready poll (workers) | 1 s interactive / 2 s bulk | the pg-polling cost the annex trigger watches |
-| Admission (pg fixed-window, S.2) | 30 commands/min/workspace; **no global ceiling** | per-workspace abuse guard, fail-closed. The pass-1 50/s global cap is struck (review A §4.1): no app-wide platform budget exists to protect; global protection = pool bounds + backpressure visibility |
+| Admission (pg fixed-window, S.2) | 30 commands/min/workspace; **no global ceiling** | per-workspace abuse guard, fail-closed; durable home: `rate_counters` scope `ws_admission` (`02` §6). The pass-1 50/s global cap is struck (review A §4.1): no app-wide platform budget exists to protect; global protection = pool bounds + backpressure visibility |
 | DB connections | 50 total (3×10 workers + 2×10 ingress) | inequality above; re-verify both sides at S.3 |
 | Media transfers per worker | 4 | EP:78's initial cap, kept |
 | Temp storage | 3 × 4 × 100 MB = 1.2 GB headroom per env | SE:234-235 inequality with declared inputs |
 | Sync baseline | every 6 h jittered; pre-slot sync at T−15 min if source stale > 30 min; first-ingest chunks of 200 files | H4 demand-driven shape |
 | Cloudinary (FC-3) | signed-URL TTL 15 min; transit hard TTL 24 h; reap sweep every 15 min | FC-3.2/3.6 |
-| Meta usage pre-check | inline-only at publish admission; in-process cache TTL 5 min keyed on `provider_account_ref` | `02` §8 — **no background refresh exists**; worst case ≤ 1 query per publish attempt (≤ ~130/min at ceiling), vs the struck eager reading's 1,500/min at 7,500 accounts (review B§6) |
+| Meta usage pre-check | inline-only at publish admission, **behind a default-off flag (the S.5 canary decides)**; in-process cache TTL 5 min keyed on `provider_account_ref` | `02` §8 — **no background refresh exists**; worst case ≤ 1 query per publish attempt (≤ ~130/min at ceiling), vs the struck eager reading's 1,500/min at 7,500 accounts (review B§6) |
 | Parked-intent alarm | `publishing_ambiguous` or `review_required` > 15 min pages; customer notification per `06` §5 after 24 h | observability floor (`01`) |
-| Reconciler cadence + budget | sweep every 60 s, LIMIT 50; per-intent evidence budget = poll to container expiry (~24 h), then one stories check, then `review_required` | bounded per H5/RF-R1; contract in `02` §6 |
+| Reconciler cadence + budget | sweep every 60 s, LIMIT 50; **per-intent poll ladder 60 s → 5 m → 30 m → 2 h (exponential, capped at container expiry ~24 h) — ≈ 15–20 status calls per ambiguous intent worst-case, vs ~1,440 at the pass-2 flat 60 s poll**; ladder exhausted ⇒ the `02` §6 exhaustion tail (final stories check, park `review_required`) | bounded per H5/RF-R1; mode-parameterized contract in `02` §6 |
 | Quarantine backoff ladder | 1 m / 5 m / 30 m / 2 h / 24 h (cap); strike decay 24 h; re-alert dedup 1 h | `02` §2 semantics |
 | Backfill batch / comparator window | 5,000 rows / 14 days | six-stage machine inputs (`04` §Ground rules) |
 | Approval TTL default (`approval_ttl_minutes` NULL) | 1,440 min (24 h) | workspace seam; reaper clock (`02` §4) |
 | Offboarding | grace window 30 days; publish-drain timeout 15 min; revocation retry 3 × 1 h backoff | `06` §1 workflow |
 | Invitations / OTP / sessions / OAuth state | invite expiry 7 d · OTP 10 min TTL, 5 verify attempts · session 30 d sliding · state token 15 min | `07` §§1–2 |
-| Pre-auth admission (unauthenticated surfaces) | OTP issue: 3/h per email, 10/h per source IP; other pre-auth endpoints 30/min per IP | `07` §1 — deliberately distinct from the per-workspace S.2 admission, which requires tenant context |
+| Pre-auth admission (unauthenticated surfaces) | OTP issue: 3/h per email, 10/h per source IP; other pre-auth endpoints 30/min per IP | `07` §1 via `rate_counters` scopes `otp_email`/`otp_ip`/`preauth_ip` (`02` §6, incl. the client-IP source rule) — deliberately distinct from the per-workspace S.2 admission, which requires tenant context |
+| Email delivery (`send_email`, `07` §1) | 3 attempts, backoff 1/5/15 min | provider + bounce semantics: `07` §1 (ack status: `03` pass-3 items); X.3's gate delivers a real code end-to-end |
 | Retention sweep cadence | daily, batches of 5,000 per class, walking the `ix_*_retire` indexes | `02` §5 pattern; H5-bounded |
 | Re-auth campaign cadence | 1 prompt / account / week; "no media available" notice dedup 24 h | `06` §5, G.1 |
 | Card TTL (W.6 drop condition) | 30 days | `04` W.6 mechanical drop rule |
@@ -79,19 +80,21 @@ Derived:
 | `daily_post_counts` | 400 d | delete |
 | `session_tokens` expired/revoked | 30 d | delete |
 | `command_dedup` | 7 d | delete (Telegram's replay window is hours) |
+| `rate_counters` | 7 d | delete (windows are minutes–hours; the class keeps days) |
 | Expiry-class rows (`post_locks`, `workspace_invitations`, `otp_challenges`, `oauth_states`) | on expiry | swept by `reap_expired` (`02` §5 remit), not this sweep |
 | `post_intents` terminal | **kept forever** | they ARE the posting history (product data, not bookkeeping) |
-| Contract-stage table dumps | 90 d | archive expiry |
+| Contract-stage snapshot tables (`archive` schema) | 90 d | DROP TABLE |
+| Audit export batch tables (`archive` schema) | 400 d after export | DROP TABLE |
 
 ## Backup / DR (review A §5.15)
 
 | Concern | Value |
 |---|---|
-| Archive location | the worker service's Railway persistent volume (`/archive`) — in-platform, no new vendor; holds contract-stage dumps + audit exports; revisit only if size approaches the volume limit |
+| Archive location | **the in-database `archive` schema (same Neon Postgres)** — audit export batches + contract-stage snapshots as tables; access rules `07` §4, rationale `03` D30. Revisit only if archive size threatens the Neon plan |
 | PITR floor | Neon PITR window ≥ 7 days — verified at 0.2's gate and re-checked when the plan changes |
 | RPO | Neon continuous WAL (~minutes) — no additional mechanism |
 | RTO target | 1 h (restore branch + repoint DATABASE_URL + smoke suite) |
-| Restore drill | quarterly, runbook'd: PITR branch → runner parity check → smoke suite; first drill is a W-phase gate |
+| Restore drill | quarterly, runbook'd: PITR branch → runner parity check → smoke suite; first drill is a W-phase gate. The `archive` schema is covered by construction (it IS the database); S.4's gate additionally proves one audit export and one snapshot restore |
 | Tenant-level recovery | PITR branch + selective per-workspace copy (runbook; exercised once in the first drill) — RLS keys make per-tenant extraction a WHERE clause, not archaeology |
 
 ## Redis annex (gated, C3/RF-R4)

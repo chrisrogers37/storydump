@@ -67,7 +67,7 @@ The domain is already channel-neutral at its heart — an approval is a state on
 
 ## Media transit (FC-3)
 
-The publish pipeline implements FC-3.1–3.6 exactly as tabled in `00-fixed-constraints.md` — workspace-prefixed scoped-preset signed authenticated uploads, short-TTL signed delivery, reap-on-success, and the hard-TTL sweep job — with values in `05`. Drive remains per-workspace OAuth (already scales per FC-0).
+The publish pipeline implements FC-3.1–3.6 exactly as tabled in `00-fixed-constraints.md` — workspace-prefixed, **per-request-signed**, authenticated uploads (FC-3.4 delivered via D28's signed-params mechanism, `03`), short-TTL signed delivery, reap-on-success, and the hard-TTL sweep job — with values in `05`. Drive remains per-workspace OAuth (already scales per FC-0).
 
 ## Instagram auth (FC-4)
 

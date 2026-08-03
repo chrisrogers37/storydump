@@ -49,6 +49,8 @@ The following are **requirements, not intentions** (each has an increment and a 
 
 Shared-environment capacity: the app-level environment plus a measured usage ceiling and a documented shard/upgrade path (from #730 §2's shared-scope finding) — capacity is an ops concern, never a user-onboarding concern.
 
+FC-3.4's **delivery mechanism** is decided in `03` D28 (server-signed per-request upload parameters; ratification status and the literal-presets fallback live there). D28 interprets the ruling's mechanism; it does not revise the ruling.
+
 ## FC-4 — Instagram API with Instagram Login; never a Facebook Page
 
 Ruling: design for the **Instagram API with Instagram Login** (July 2024): OAuth direct through Instagram, Instagram User access tokens, **no Facebook Page — never make a user auth a Facebook Page again**. What survives from the platform reference: the account must still be **Professional (Business or Creator)** — the funnel is exactly one conversion (personal → Professional), nothing else.

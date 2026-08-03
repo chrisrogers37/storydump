@@ -110,6 +110,20 @@ Same relitigation rule as above. "A §n"/"B §n" cite the two review comments on
 
 **Count-grain note (B comparison, for the record):** "5 blocking conflicts" was the cross-check's coarse count; A's A–P inventory is the same incompatibility at finer grain. Both reviews and this plan agree on the conclusion; neither count is a disagreement with the other.
 
+## Pass-3 decisions (R3 fresh-session implementer review, 2026-08-03)
+
+Same relitigation rule. "R3 §n" cites review 4840492901 on PR #731.
+
+**D28 — FC-3.4 delivery mechanism: server-signed per-request upload parameters (ratified by the product owner 2026-08-03, conditional).** The ruling's substance — per-workspace scoping, no global permissive preset — is delivered by signing every upload request server-side with per-request parameters (folder `ws/{workspace_id}/…`, `type=authenticated`, short TTL): **zero preset objects**, strictly tighter scoping than presets (each signature authorizes exactly one upload), no ~5,000-object Admin-API control plane, and no preset lifecycle to own or repair — R3 §4's Cloudinary control-plane-load finding dissolves instead of being provisioned. The ratification is **conditional on delivery**: if signed-params turn out not to deliver the per-workspace isolation cleanly, the implementer escalates rather than force-fits. The fallback is specced, not vague: literal per-workspace presets with lifecycle legs in `06` §1 (create/rename/offboard/repair), a preset-repair job kind, and an Admin-API budget row in `05`. FC-3's ruling itself is unchanged — one app-owned Cloudinary environment, no user onboarding, ever.
+
+**D29 — DB credential model: per-process logins + SECURITY DEFINER doors, no `SET ROLE` (`02` §7).** R3 §1.2's fork (separate credentials/pools vs narrowly scoped definer functions vs another non-escalatable arrangement), decided: three login roles with **zero role memberships**; every cross-tenant capability a named definer door owned by a NOLOGIN system role; R3 §6.7's contradiction (maintenance held auth-plane DELETEs its policies could never see) resolved by giving the NOLOGIN sweep owner the enumerated auth-plane policies — never by handing a login the DELETEs. Chosen over per-personality connection pools because pools multiply per replica against the `05` connection budget while buying the same boundary the doors deliver at zero pool cost; over any `SET ROLE` shape because an assumable personality *is* the escalation surface.
+
+**D30 — Archive home: the in-database `archive` schema, not the Railway volume.** The pass-2 location assumed cross-replica volume-sharing semantics nobody had verified — the unverified-platform-assumption class this plan bans (R3 §5.4 named the doubt). In-DB archive tables are PITR-covered, single-writer by construction, role-fenced (`07` §4), retention-dropped as tables, and inside the existing DR drill by construction. Accepted cost: archive bytes ride the Neon plan — revisit row in `05` §DR.
+
+**Pass-3 owner items (beside PA-1, which stays open exactly as before):**
+- **D28 ack — closed:** ratified 2026-08-03, conditional as recorded above.
+- **Email provider ack — OPEN:** `07` §1 names **Resend** as the EmailSender default; a new external service is a flagged decision, not an assumption. Until acked, the port ships provider-swappable; X.3's real-send gate is the only hard dependency on the choice.
+
 ## Overruled, explicitly
 
 #721: N3 single-process (by FC-0) · N7 RLS-later (by RF-R3) · N10 in-process scheduler (by C5) · outbox-executes (by D2) · chatless-tenant *schema letter* (by `02`, direction kept via FC-1) · Alembic preference (by C6, contested) · the (tenant, content) live-intent key (by C8).
