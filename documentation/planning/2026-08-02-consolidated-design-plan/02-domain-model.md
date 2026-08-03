@@ -49,8 +49,8 @@ CREATE TABLE user_identities (
   id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   provider     TEXT NOT NULL
-               CONSTRAINT ck_user_identities_provider CHECK (provider IN ('telegram','email_otp')),
-  external_id  TEXT NOT NULL,          -- tg user id (as text) | lowercased email
+               CONSTRAINT ck_user_identities_provider CHECK (provider IN ('telegram','google')),
+  external_id  TEXT NOT NULL,          -- tg user id (as text) | google OIDC sub (D32)
   display_name TEXT NULL,
   verified_at  TIMESTAMPTZ NULL,
   created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -61,7 +61,11 @@ CREATE TABLE user_identities (
 CREATE TRIGGER tg_touch_user_identities BEFORE UPDATE ON user_identities
   FOR EACH ROW EXECUTE FUNCTION trg_touch_updated_at();
 -- One identity per provider per user (v1; widening uq_user_provider is a deliberate migration).
--- email_otp is the one non-Telegram provider X.3 requires; challenge/session mechanics in 07.
+-- google is the one non-Telegram provider X.3 ships (FC-5; Apple re-entry = one CHECK value +
+-- one flow increment, D34). external_id is the provider's IMMUTABLE SUBJECT — the OIDC sub for
+-- google — never an email address (D32): emails are mutable and recyclable, so identity keyed
+-- on email is an account-takeover primitive. The verified email claim is metadata refreshed at
+-- sign-in. OIDC + session + linking mechanics in 07 §§1-2.
 
 CREATE TABLE workspaces (
   id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -171,22 +175,56 @@ CREATE CONSTRAINT TRIGGER ct_workspaces_owner_at_insert
 CREATE TABLE workspace_invitations (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   workspace_id    UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-  email           TEXT NOT NULL,                -- lowercased; the email_otp identity it will bind to
+  token_hash      TEXT NOT NULL,                -- THE accept credential (FC-6/D33): SHA256 of the
+                                                -- one-shot invite token, credential idiom as
+                                                -- session_tokens — possession accepts; email
+                                                -- never resolves an invitation
+  delivery_channel TEXT NOT NULL
+                  CONSTRAINT ck_invite_channel CHECK (delivery_channel IN ('email','telegram')),
+  email           TEXT NULL,                    -- lowercased; B's delivery address AND the D33
+                                                -- acceptance-constraint value; required when the
+                                                -- delivery channel is email (CHECK below)
+  invited_channel_ref TEXT NULL,                -- telegram-side hint recorded at invite time (tg
+                                                -- user id / username). ADVISORY constraint data,
+                                                -- never a key: acceptance never resolves an
+                                                -- invitation by this column (D33)
   role            TEXT NOT NULL DEFAULT 'member'
-                  CONSTRAINT ck_invite_role CHECK (role IN ('admin','member')),  -- never 'owner'
+                  CONSTRAINT ck_invite_role CHECK (role IN ('member')),
+                  -- member-only BY LEAN (03 pass-4 items; ratifier: product owner): a forwarded
+                  -- link's blast radius is bounded to ordinary membership; elevation is a
+                  -- post-join role change (06 §2). Re-widening to admin invites is one CHECK
+                  -- edit if ruled otherwise. Never 'owner' either way.
   invited_by_user_id UUID NULL REFERENCES users(id) ON DELETE SET NULL,
   state           TEXT NOT NULL DEFAULT 'pending'
                   CONSTRAINT ck_invite_state CHECK (state IN ('pending','accepted','revoked','expired')),
+  accepted_by_user_id UUID NULL REFERENCES users(id) ON DELETE SET NULL,
+  accepted_email_matched BOOLEAN NULL,          -- audit fact (D33): true = an identity proof ran
+                                                -- and matched; false = constraint bypassed for
+                                                -- lack of comparable proof (recorded skip);
+                                                -- mismatch never lands — accept refuses
   expires_at      TIMESTAMPTZ NOT NULL,         -- now() + 7 days at insert (05 seam)
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT uq_invite_token UNIQUE (token_hash),
+  CONSTRAINT ck_invite_email_required CHECK (delivery_channel <> 'email' OR email IS NOT NULL)
 );
 CREATE TRIGGER tg_touch_workspace_invitations BEFORE UPDATE ON workspace_invitations
   FOR EACH ROW EXECUTE FUNCTION trg_touch_updated_at();
 CREATE UNIQUE INDEX uq_invite_live ON workspace_invitations (workspace_id, email)
   WHERE state = 'pending';
--- Web-side membership door (06 §membership). Telegram-side membership continues to arrive via
--- group-membership sync on the binding (current behavior, kept — the adapter upserts members).
+-- Membership door for both surfaces (06 §2 is the flow's normative home; FC-6 the ruling).
+-- ACCEPT is one CAS with the member INSERT in the SAME transaction:
+--   UPDATE workspace_invitations
+--      SET state='accepted', accepted_by_user_id=:u, accepted_email_matched=:m
+--    WHERE id=:id AND state='pending' AND expires_at > now() RETURNING id;
+-- zero rows ⇒ used/revoked/expired (a re-read distinguishes "already yours" from "someone else
+-- took it"); workspace_members' PK (workspace_id, user_id) is the double-membership guard —
+-- already in the schema, nothing to add. uq_invite_live survives the nullable email: NULLs never
+-- collide, so telegram-delivery rows are exempt by construction, and re-invitation is INSERT new
+-- + revoke prior in the same transaction — which the partial unique then ENFORCES rather than
+-- breaks. Expired rows flip state via reap_expired (§5 remit), never delete: audit facts either
+-- way. Telegram-side membership continues to arrive via group-membership sync on the binding
+-- (current behavior, kept — the adapter upserts members).
 
 CREATE TABLE channel_bindings (
   id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -926,14 +964,14 @@ CREATE INDEX ix_jobs_retire ON jobs (updated_at)
 | revoke_workspace_credentials | `{}` (workspace-keyed) | offboard_workspace | bulk | `ws:<workspace_id>` |
 | reauth_prompt | `{ig_account_id}` | G.1 campaign clock | bulk | `ig:<provider_account_ref>` |
 | reconcile_ambiguous | `{}` | clock (recurring) | bulk | `'reconciler'` (singleton by key) |
-| reap_expired | `{}` | clock (recurring) | bulk | `'reaper'` — remit: every expiry class in one bounded sweep — intent expiries (§4 reaper edges), expired `post_locks` (via `ix_locks_expiry`), `workspace_invitations`, `oauth_states`, `otp_challenges` — **staged by table availability** (pass 3): each class lands in the increment that creates its table, which extends the executor in the same PR, so the reaper can never name a table that does not exist (`04` names the increments). Auth-plane classes sweep through `fn_auth_plane_sweep` (§7 door) |
+| reap_expired | `{}` | clock (recurring) | bulk | `'reaper'` — remit: every expiry class in one bounded sweep — intent expiries (§4 reaper edges), expired `post_locks` (via `ix_locks_expiry`), `workspace_invitations`, `oauth_states` — **staged by table availability** (pass 3): each class lands in the increment that creates its table, which extends the executor in the same PR, so the reaper can never name a table that does not exist (`04` names the increments). Auth-plane classes sweep through `fn_auth_plane_sweep` (§7 door) |
 | reap_transit_assets | `{}` | clock (recurring, FC-3.6) | bulk | `'transit-reaper'` |
 | retention_sweep | `{}` | clock (recurring) | bulk | `'retention'` |
 | comparator_run | `{track:text}` | clock (nightly, per active track) | bulk | `cmp:<track>` |
 | reencrypt_credentials | `{key_generation:int}` | rotation runbook (07) | bulk | `'reencrypt'` |
-| send_email | `{v:1, to:text, template:text, params:object, ref:uuid}` — everything the send needs; no tenant reads at send time | OTP issue / invitation create / bounce handler (07 §1) | interactive (a sign-in user is waiting) | `email:<ref>` (one key per send — retry ordering only, no cross-send serialization) |
+| send_email | `{v:1, to:text, template:text, params:object, ref:uuid}` — everything the send needs; no tenant reads at send time | invitation create / bounce handler (07 §1, FC-6) | interactive (the inviter is mid-flow awaiting send confirmation) | `email:<ref>` (one key per send — retry ordering only, no cross-send serialization) |
 
-Producer authorization is code-level (each producer is one named service); the DB-level guard is the kind CHECK + the nullability pairing + RLS (§7). A new kind is a migration (CHECK edit) plus a registry row here — the closed-set convention applied to work itself. **Kind classing rule (why `send_email` is a system kind even when a tenant flow enqueues it):** a kind is system iff its executor is payload-complete — zero tenant reads or writes at execution time — regardless of who produced it; the pre-auth OTP send has no workspace to key, and the equivalence CHECK must hold for every row of a kind. Acknowledged residue: a tenant-originated send (invitation) escapes the workspace cascade, so an email job can outlive its workspace — the executor tolerates a dangling `ref` (send fires or fails on its own retry budget; nothing joins tenant tables). **Interactive commands are not jobs**: approve/skip/reject/settings/etc. are single-transaction state flips executed inline in ingress (the ack IS the transaction, R5); a command reaches this table only when it spawns real work, and then as its specific kind above (sync-now → `sync_media_source`, offboard → `offboard_workspace`, …) — there is deliberately no generic `run_command` kind.
+Producer authorization is code-level (each producer is one named service); the DB-level guard is the kind CHECK + the nullability pairing + RLS (§7). A new kind is a migration (CHECK edit) plus a registry row here — the closed-set convention applied to work itself. **Kind classing rule (why `send_email` is a system kind even though a tenant flow enqueues it):** a kind is system iff its executor is payload-complete — zero tenant reads or writes at execution time — regardless of who produced it; the send executor reads nothing but its payload, and the equivalence CHECK must hold for every row of a kind. Acknowledged residue: the tenant-originated send escapes the workspace cascade, so an invitation email job can outlive its workspace — the executor tolerates a dangling `ref` (send fires or fails on its own retry budget; nothing joins tenant tables). That is the payload-complete, workspace-outliving case this classing rule exists to name. **Interactive commands are not jobs**: approve/skip/reject/settings/etc. are single-transaction state flips executed inline in ingress (the ack IS the transaction, R5); a command reaches this table only when it spawns real work, and then as its specific kind above (sync-now → `sync_media_source`, offboard → `offboard_workspace`, …) — there is deliberately no generic `run_command` kind.
 
 **The claim, verbatim shape (its race guard is the unique index, not the query):**
 
@@ -978,7 +1016,8 @@ CREATE TABLE channel_outbox (
   workspace_id         UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
   binding_id           UUID NOT NULL,
   kind                 TEXT NOT NULL CONSTRAINT ck_outbox_kind
-                       CHECK (kind IN ('approval_prompt','prompt_supersede','notification','ack')),
+                       CHECK (kind IN ('approval_prompt','prompt_supersede','notification','ack',
+                                       'invitation')),
   intent_id            UUID NULL,               -- plain UUID ref (intent may be terminal-frozen)
   payload              JSONB NOT NULL           -- {v:1, ...} channel-NEUTRAL content
                        CONSTRAINT ck_outbox_payload_v CHECK (jsonb_typeof(payload->'v') = 'number'),
@@ -1040,7 +1079,7 @@ CREATE INDEX ix_intents_parked ON post_intents (entered_state_at)
 
 **Business-key formats (closed):** `ig:container:<intent_id>:<generation>` · `ig:publish:<intent_id>:<generation>`. `generation` increments **only** on a confirmed-safe failure of the same op kind (provider said the previous attempt definitively did not happen); it never increments out of ambiguity. One business key = at most one intended provider effect (TT:P0-06's gate), and `uq_ops_business_key` is the object that enforces it.
 
-**Send-state authority is single-homed:** the outbox row IS the delivery record and the only authority on "did this send" — the sender *job* carries execution state only. The `ambiguous` outbox state carries R8's no-blind-retry rule, resolved per kind, because Telegram provides no general read-back for a lost `sendMessage` response (there is no "list my sent messages" API): **`notification`/`ack`** — retry once after backoff, then `failed`; a duplicate notification is the accepted cost, bounded at one. **`approval_prompt`** — resend; two live cards for one intent are tolerable because both resolve to the same intent and terminal-state-first reads (R6) make whichever is tapped later render the terminal state; on any intent state change, supersede-all (`prompt_supersede` rows target every known `external_message_ref`; a card whose ref was lost simply ages out under R6 semantics). **Edits always go supersede-then-send** — never edit-in-place on an ambiguous ref. This is the complete ambiguity policy; there is no "stamp-heal" beyond the ref capture on a late Telegram response.
+**Send-state authority is single-homed:** the outbox row IS the delivery record and the only authority on "did this send" — the sender *job* carries execution state only. The `ambiguous` outbox state carries R8's no-blind-retry rule, resolved per kind, because Telegram provides no general read-back for a lost `sendMessage` response (there is no "list my sent messages" API): **`notification`/`ack`** — retry once after backoff, then `failed`; a duplicate notification is the accepted cost, bounded at one. **`approval_prompt`** — resend; two live cards for one intent are tolerable because both resolve to the same intent and terminal-state-first reads (R6) make whichever is tapped later render the terminal state; on any intent state change, supersede-all (`prompt_supersede` rows target every known `external_message_ref`; a card whose ref was lost simply ages out under R6 semantics). **`invitation`** (FC-6 Telegram delivery) — approval-prompt semantics: resend on ambiguity, tolerate a duplicate card, and on ANY terminal transition of the invitation (accepted / revoked / expired) **supersede-all** — `prompt_supersede` rows target every known card ref. The card is addressed to the workspace's `telegram_group` binding, carries the accept button (callback → ingress inline transaction, R5) and the `t.me/<bot>?start=inv-<token>` deep link (`07` §2's start-token door), and is rendered and delivered by the existing sender under the same `tg:<binding_id>` serialization — zero new senders, zero parallel delivery paths. **Edits always go supersede-then-send** — never edit-in-place on an ambiguous ref. This is the complete ambiguity policy; there is no "stamp-heal" beyond the ref capture on a late Telegram response.
 
 **The reconciliation contract (ambiguous IG publish — evidence, R8).** Pass 3 stops assuming the platform fact 0.4 exists to verify: whether an Instagram container exposes an observable **post-publish** terminal status at all. Meta's Instagram collection documents `FINISHED` as "ready to be published", and `PUBLISHED` is documented for **Threads** containers — so the pass-2 contract may have borrowed its authoritative evidence from the wrong API (R3 review §6.11, marked uncertain, not false). **One contract, parameterized by evidence authority:** the config seam `reconciler_evidence_mode` records 0.4's doc-cited verdict as the sets of container `status_code` values that are **authoritative after `publish_called`** — which value (if any) is authoritative-positive (the effect happened) and which (if any) are authoritative-negative (it definitively did not). Setting the seam is a config change, never a design change. The machinery is mode-independent:
 
@@ -1084,9 +1123,9 @@ CREATE TABLE command_dedup (
 CREATE TABLE rate_counters (
   scope          TEXT NOT NULL
                  CONSTRAINT ck_rate_scope CHECK (scope IN
-                   ('tg_chat','tg_global','ws_admission','otp_email','otp_ip','preauth_ip')),
+                   ('tg_chat','tg_global','ws_admission','preauth_ip')),
   key            TEXT NOT NULL,                 -- per scope: binding id | '' (one global row) |
-                                                -- workspace id | lowercased email | client ip
+                                                -- workspace id | client ip
   window_start   TIMESTAMPTZ NOT NULL,          -- fixed window: now() truncated to the scope's
                                                 -- window length (05 owns lengths and limits)
   count          INTEGER NOT NULL DEFAULT 0 CONSTRAINT ck_rate_nonneg CHECK (count >= 0),
@@ -1105,13 +1144,13 @@ ON CONFLICT (scope, key, window_start)
   DO UPDATE SET count = rc.count + 1 WHERE rc.count < :limit
 RETURNING count;
 -- zero rows ⇒ over limit for this window: the consuming site defers (sender pacing) or rejects
--- (admission / OTP issue). Atomic — never a lock, never check-then-act. :limit is the CURRENT
+-- (admission / pre-auth guard). Atomic — never a lock, never check-then-act. :limit is the CURRENT
 -- config value (05), compared at each hit — deliberately NOT frozen per window: cap_at_write's
 -- freeze (§3) exists for refund integrity, counters have no refunds, and an abuse limit
 -- tightened mid-attack should bite immediately, not next window.
 ```
 
-Scope ↔ consumer map (every number lives in `05`): `tg_chat`/`tg_global` — L.4 Telegram sender pacing, the durable home the AIORateLimiter budgets move into; `ws_admission` — S.2 per-workspace command admission; `otp_email`/`otp_ip`/`preauth_ip` — the 07 §1 pre-auth guards. Ships at L.2 with the jobs machinery; rows age out via retention (`05` — windows are minutes to hours, the class keeps days). **Client-IP source rule (stated once, here; 07 and `05` cite it):** the client IP for `*_ip` scopes derives from the platform-terminated proxy header chain resolved **right-to-left past Railway's own trusted hops** — never the raw leftmost `X-Forwarded-For` entry, which the sender controls. The deployment's actual header behavior is verified in the real environment at L.8's gate (the same check that verifies webhook header trust) **before any IP-keyed guard is load-bearing**.
+Scope ↔ consumer map (every number lives in `05`): `tg_chat`/`tg_global` — L.4 Telegram sender pacing, the durable home the AIORateLimiter budgets move into; `ws_admission` — S.2 per-workspace command admission; `preauth_ip` — the 07 §1 pre-auth guard (the Google sign-in endpoints and every other unauthenticated surface). Ships at L.2 with the jobs machinery; rows age out via retention (`05` — windows are minutes to hours, the class keeps days). **Client-IP source rule (stated once, here; 07 and `05` cite it):** the client IP for `*_ip` scopes derives from the platform-terminated proxy header chain resolved **right-to-left past Railway's own trusted hops** — never the raw leftmost `X-Forwarded-For` entry, which the sender controls. The deployment's actual header behavior is verified in the real environment at L.8's gate (the same check that verifies webhook header trust) **before any IP-keyed guard is load-bearing**.
 
 `service_runs` (legacy ops bookkeeping) survives unchanged during the program and is retired at S.4 (`03`).
 
@@ -1124,7 +1163,7 @@ The first pass said "system actors use dedicated roles with explicit predicates"
   - `svc_worker` — the worker replicas' login. The elected clock runs inside a worker process on this same login: its extra privilege lives in a door, not in the login.
   - `svc_migration` — the runner/backfill login (Railway predeploy, six-stage tracks); broad per-track policies while tracks run; identifies itself via `app.actor_kind='migration'` (§4 insert guard).
 - **No `BYPASSRLS` anywhere. No owner-role runtime connections. No role memberships.** Every cross-tenant capability is a named, reviewable object: a `CREATE POLICY` on a login role, or a `SECURITY DEFINER` door owned by a NOLOGIN system role.
-- **Tenant policies** (on `svc_ingress`, `svc_worker`): constant-expression policies on every workspace-scoped table — `USING (workspace_id = current_setting('app.tenant_id')::uuid)` (and identical `WITH CHECK`). Every tenant transaction opens with `SET LOCAL app.tenant_id = …` set by the UoW factory, which takes `tenant_id` as a required constructor argument — a UoW without a tenant is unconstructible in code, and a query without one fails closed in the DB (`current_setting` on an unset GUC errors; the policy denies). Transaction-pooled connection reuse is safe because `SET LOCAL` dies with the transaction. **Machinery exception, stated exactly (`jobs`):** both logins' `jobs` policies read `USING (workspace_id IS NULL OR workspace_id = current_setting('app.tenant_id', true)::uuid)` — a worker must finalize and reschedule the system jobs it executes, and ingress must enqueue `send_email` before any tenant context exists; the missing-GUC form (`, true` → NULL) then exposes **only system rows**, never another tenant's. `rate_counters` (§6) carries plain role-scoped `USING (true)` policies for both logins — its keys are deliberately not all tenant-shaped — and no login may DELETE from it.
+- **Tenant policies** (on `svc_ingress`, `svc_worker`): constant-expression policies on every workspace-scoped table — `USING (workspace_id = current_setting('app.tenant_id')::uuid)` (and identical `WITH CHECK`). Every tenant transaction opens with `SET LOCAL app.tenant_id = …` set by the UoW factory, which takes `tenant_id` as a required constructor argument — a UoW without a tenant is unconstructible in code, and a query without one fails closed in the DB (`current_setting` on an unset GUC errors; the policy denies). Transaction-pooled connection reuse is safe because `SET LOCAL` dies with the transaction. **Machinery exception, stated exactly (`jobs`):** both logins' `jobs` policies read `USING (workspace_id IS NULL OR workspace_id = current_setting('app.tenant_id', true)::uuid)` — a worker must finalize and reschedule the system jobs it executes, and system-kind rows carry `workspace_id NULL` regardless of which context produced them (the §5 classing rule — the FC-6 invitation send is enqueued post-auth but its row is still NULL-workspace); the missing-GUC form (`, true` → NULL) then exposes **only system rows**, never another tenant's. `rate_counters` (§6) carries plain role-scoped `USING (true)` policies for both logins — its keys are deliberately not all tenant-shaped — and no login may DELETE from it.
 - **NOLOGIN system roles own the cross-tenant capabilities as SECURITY DEFINER doors.** Every door: `SET search_path = pg_catalog, public`, owned by its system role, `EXECUTE` revoked from PUBLIC and granted **only** to the one login that drives it. The system role holds exactly the `USING (true)` policies and grants its door bodies need — **the door inventory below is the enumeration the security review reads**; a new door is a migration plus a row here. Each door sets its own actor GUC (`set_config('app.actor_kind', …, true)`) at entry, so the §4 audit machinery names the operation regardless of caller.
 
 | Door (owner) | Body / effect | EXECUTE |
@@ -1137,10 +1176,10 @@ The first pass said "system actors use dedicated roles with explicit predicates"
 | `fn_retention_batch(class text)` (`svc_maintenance`) | one `05` retention class per call: age-qualified DELETE walking its `ix_*_retire` index; the `audit_events` class COPY-exports into the archive schema first and **aborts if the export fails** (07 §4) | `svc_worker` |
 | `fn_comparator_run(track text)` (`svc_maintenance`) | the six-stage shadow-read comparator for one track (counts + per-row checksums over the track's canonical mapping) | `svc_worker` |
 | `fn_offboard_finalize(ws uuid)` (`svc_maintenance`) | the final-deletion leg of 06 §1, guarded inside the body (state='offboarding', grace window elapsed, zero live intents) → DELETE the `workspaces` row; the §0 cascade does the rest | `svc_worker` (the `offboard_workspace` executor) |
-| `fn_auth_plane_sweep()` (`svc_maintenance`) | expiry/retention deletes on `otp_challenges`, `oauth_states`, `session_tokens`, `command_dedup`. `svc_maintenance` carries four enumerated auth-plane `USING (true)` policies + DELETEs **for exactly this door** — resolving the pass-2 contradiction (R3 §6.7, maintenance held DELETEs its policies could never see) by adding the missing policies to the NOLOGIN sweep owner, never by handing a login the DELETEs (a `svc_ingress`-owned definer body would have put auth-plane DELETE privileges on the internet-exposed login — falsifying the grant matrix below) | `svc_worker` (the reaper/retention schedule drives it) |
+| `fn_auth_plane_sweep()` (`svc_maintenance`) | expiry/retention deletes on `oauth_states`, `session_tokens`, `command_dedup`. `svc_maintenance` carries three enumerated auth-plane `USING (true)` policies + DELETEs **for exactly this door** — resolving the pass-2 contradiction (R3 §6.7, maintenance held DELETEs its policies could never see) by adding the missing policies to the NOLOGIN sweep owner, never by handing a login the DELETEs (a `svc_ingress`-owned definer body would have put auth-plane DELETE privileges on the internet-exposed login — falsifying the grant matrix below) | `svc_worker` (the reaper/retention schedule drives it) |
 
 - **The boundary, stated honestly:** a compromised worker request path can call the doors its login holds (claim jobs, tick the clock, drive sweeps whose bodies are fixed SQL) and can write within tenant policies on the tenant it sets. It cannot `SET ROLE` (no memberships exist to assume), cannot DELETE anything directly (no login holds DELETE), cannot read auth-plane rows or credential ciphertext beyond its column grants, and cannot enlarge a sweep (door bodies are fixed, `search_path`-pinned SQL). Maintenance capability lives in door bodies, not in any login.
-- **Auth-plane tables** (`07`: `otp_challenges`, `session_tokens`, `oauth_states`, `service_tokens`, plus `command_dedup` above) are deliberately **not tenant-RLS'd** — they are the door tenant context walks through (an OTP verify or OAuth callback happens before any `app.tenant_id` exists). They carry role-scoped `USING (true)` policies for `svc_ingress` (the runtime reader/writer) and for `svc_maintenance` (the sweep-door owner, DELETE included) — no other role, and **no login but `svc_ingress`** touches them; their sweep is `fn_auth_plane_sweep`. `workspace_invitations` IS tenant-scoped (accept runs post-auth, in tenant context) and follows the normal tenant policies.
+- **Auth-plane tables** (`07`: `session_tokens`, `oauth_states`, `service_tokens`, plus `command_dedup` above) are deliberately **not tenant-RLS'd** — they are the door tenant context walks through (a sign-in or OAuth callback happens before any `app.tenant_id` exists). They carry role-scoped `USING (true)` policies for `svc_ingress` (the runtime reader/writer) and for `svc_maintenance` (the sweep-door owner, DELETE included) — no other role, and **no login but `svc_ingress`** touches them; their sweep is `fn_auth_plane_sweep`. `workspace_invitations` IS tenant-scoped (accept runs post-auth, in tenant context) and follows the normal tenant policies.
 - **Execution-context flow:** the worker claims via `fn_claim_job`, then opens the job's domain transactions as itself — `svc_worker` with `SET LOCAL app.tenant_id = job.workspace_id`; system jobs execute their doors on schedule. Nothing survives a commit, and no personality switch exists to leak.
 - **Grant matrix (beyond RLS):** **no login holds DELETE on anything** — tenant deletes happen only inside `svc_maintenance`-owned door bodies, auth-plane deletes only inside `fn_auth_plane_sweep` (§0's "runtime never deletes" is thereby structural for every login, not just tenant roles); `audit_events` grants: INSERT to all three logins and the system roles (trigger inserts run as the mutating role), UPDATE to none, DELETE only inside `fn_retention_batch`; `oauth_credentials.encrypted_payload` is column-SELECTable only by `svc_worker`/`svc_ingress` (credentials service paths) — clock scheduling reads happen inside `fn_clock_tick` through `vw_credentials_schedule`, which omits the column.
 - **The staged NOT NULL procedure (the only legal way this plan adds NOT NULL to a populated table — the first pass's "`NOT NULL` added `NOT VALID`" does not exist in PostgreSQL):**
@@ -1175,7 +1214,7 @@ Every re-key runs on the six-stage machine (`04` §Ground rules). Column-level m
 | `posting_queue` | `post_intents` working states — pending→scheduled · processing→prompt_pending · sent_unconfirmed→prompt_pending · delivered→awaiting_approval · publishing→publishing · failed→failed(terminal); `instagram_container_id`→ig_container_id; telegram message/chat ids → `channel_outbox` rows with `external_message_ref` |
 | `posting_history` | `post_intents` terminal states (posted/failed/skipped/rejected/expired map 1:1; `posting_method`/usernames → audit detail; `instagram_media_id`/`instagram_story_id`/permalink → ig_media_id/ig_permalink; `queue_item_id` → legacy_queue_item_id) — inserted as actor `migration` (§4 insert guard) |
 | `category_post_case_mix` | **kept row-shaped** (it is a Type 2 SCD table today — `workspaces.category_mix` JSONB from the first pass is struck): `category_post_case_mix` re-keyed to `workspace_id`, SCD semantics unchanged, sum-to-1 stays service-enforced (a cross-row DB constraint would need a deferred aggregate trigger; not worth its complexity — recorded trade-off) |
-| `onboarding_sessions` | kept, re-keyed: `user_id` stays; `pending_chat_settings_id` → `pending_workspace_id`; step vocabulary widened for the web sign-in path (07 §1): `naming`,`awaiting_group`,`connect_email`,`complete` — this row is the step list's normative home; 24 h expiry + `UNIQUE(user_id)` (one live session per user) kept |
+| `onboarding_sessions` | kept, re-keyed: `user_id` stays; `pending_chat_settings_id` → `pending_workspace_id`; step vocabulary widened for the web sign-in path (07 §§1–2): `naming`,`awaiting_group`,`connect_identity`,`complete` — this row is the step list's normative home (`connect_identity` = link a web-capable identity, the 07 §2 `link` flow; the pass-3 name `connect_email` died with OTP); 24 h expiry + `UNIQUE(user_id)` (one live session per user) kept |
 | `audit_log` | merged into `audit_events` (entity_type/action/field/old/new → entity_kind + detail; rows migrated verbatim into `detail`) |
 | `service_runs` | kept as-is + nullable `workspace_id`; retired at S.4 (`03`) |
 | `schema_version` | superseded by the 0.2 runner's `schema_migrations` ledger (`04` 0.2 — richer metadata; old table retained read-only until W-phase contract) |

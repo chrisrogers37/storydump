@@ -61,9 +61,9 @@ Derived:
 | Backfill batch / comparator window | 5,000 rows / 14 days | six-stage machine inputs (`04` §Ground rules) |
 | Approval TTL default (`approval_ttl_minutes` NULL) | 1,440 min (24 h) | workspace seam; reaper clock (`02` §4) |
 | Offboarding | grace window 30 days; publish-drain timeout 15 min; revocation retry 3 × 1 h backoff | `06` §1 workflow |
-| Invitations / OTP / sessions / OAuth state | invite expiry 7 d · OTP 10 min TTL, 5 verify attempts · session 30 d sliding · state token 15 min | `07` §§1–2 |
-| Pre-auth admission (unauthenticated surfaces) | OTP issue: 3/h per email, 10/h per source IP; other pre-auth endpoints 30/min per IP | `07` §1 via `rate_counters` scopes `otp_email`/`otp_ip`/`preauth_ip` (`02` §6, incl. the client-IP source rule) — deliberately distinct from the per-workspace S.2 admission, which requires tenant context |
-| Email delivery (`send_email`, `07` §1) | 3 attempts, backoff 1/5/15 min | provider + bounce semantics: `07` §1 (ack status: `03` pass-3 items); X.3's gate delivers a real code end-to-end |
+| Invitations / sessions / OAuth state | invite expiry 7 d · session 30 d sliding · state token 15 min (every purpose — connect/reconnect/signin/link) | `07` §§1–2 |
+| Pre-auth admission (unauthenticated surfaces) | 30/min per IP (the Google sign-in endpoints included) | `07` §1 via `rate_counters` scope `preauth_ip` (`02` §6, incl. the client-IP source rule) — deliberately distinct from the per-workspace S.2 admission, which requires tenant context |
+| Email delivery (`send_email`, `07` §1) | 3 attempts, backoff 1/5/15 min | provider + bounce semantics: `07` §1 (ack status: `03` pass-4 items); X.3's gate delivers a real invitation email end-to-end |
 | Retention sweep cadence | daily, batches of 5,000 per class, walking the `ix_*_retire` indexes | `02` §5 pattern; H5-bounded |
 | Re-auth campaign cadence | 1 prompt / account / week; "no media available" notice dedup 24 h | `06` §5, G.1 |
 | Card TTL (W.6 drop condition) | 30 days | `04` W.6 mechanical drop rule |
@@ -82,7 +82,7 @@ Derived:
 | `session_tokens` expired/revoked | 30 d | delete |
 | `command_dedup` | 7 d | delete (Telegram's replay window is hours) |
 | `rate_counters` | 7 d | delete (windows are minutes–hours; the class keeps days) |
-| Expiry-class rows (`post_locks`, `workspace_invitations`, `otp_challenges`, `oauth_states`) | on expiry | swept by `reap_expired` (`02` §5 remit), not this sweep |
+| Expiry-class rows (`post_locks`, `workspace_invitations`, `oauth_states`) | on expiry | swept by `reap_expired` (`02` §5 remit), not this sweep |
 | `post_intents` terminal | **kept forever** | they ARE the posting history (product data, not bookkeeping) |
 | Contract-stage snapshot tables (`archive` schema) | 90 d | DROP TABLE |
 | Audit export batch tables (`archive` schema) | 400 d after export | DROP TABLE |

@@ -63,3 +63,20 @@ What *does* touch `graph.facebook.com` today is the auth plumbing itself — `oa
 2. **Existing connected accounts hold FB-vintage tokens.** They keep working through the existing dual-path refresh, marked legacy; each account migrates to an Instagram-Login credential on its next reconnect (assisted by a re-auth campaign). Sunset gate: zero active FB-vintage credentials → delete the legacy path. No silent cutover, no forced same-day re-auth.
 3. App Review for the Instagram-Login scopes starts at Phase 0 (2–4 weeks per permission, screencast each; schedule risk, not feasibility risk).
 4. If any future feature appears to need hashtag search or other-account metrics, that is a product-owner escalation (it would force the Facebook-Login path) — never a silent adoption.
+
+## FC-5 — Web sign-in: Google sign-in replaces email OTP; Apple descoped (ruling 2026-08-03)
+
+Ruling: web sign-in is **Google sign-in, not email OTP** ("we already have a Google App"); Apple was considered and **descoped** with the review panel's case in hand. Applied via the analysis on PR #731 (comments 5168818430 / 5170243666). Consequences (normative):
+
+1. **Sign-in ships Google-only at X.3.** The OTP machinery — challenge table, issue/verify flows, the OTP rate scopes, the `email_otp` identity provider — is out of the plan entirely. Sessions survive unchanged: sign-in still ends by issuing exactly the `07` §1 session.
+2. **Apple is descoped, not deferred** — no reserved enum values, no pre-built increment. Its re-entry cost is recorded in `03` D34: one provider CHECK value + one flow increment + one row in the D33 acceptance-constraint table.
+3. **Identity keys on the provider's immutable subject** (`external_id` = OIDC `sub`), never on email (`03` D32); account linking is explicit-only (`03` D35).
+4. **Pre-lock verification (recorded like FC-4's):** a web-application Google OAuth client already exists — `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` in `src/config/settings.py` driving the Drive redirect flow — so sign-in reuse is a second client ID under the same GCP project and consent screen, adding only the non-sensitive `openid email profile` scopes (no Google verification burden; the sensitive-scope burden is the Drive side, carried independently of this ruling). Owner item (`03` pass-4 items): the consent screen must be in **In production** publishing status — a prerequisite the multi-tenant Drive design already carries (Testing mode expires refresh tokens after 7 days), surfaced by this ruling rather than created by it.
+
+## FC-6 — Invitations: the app delivers, by email and Telegram (ruling 2026-08-03)
+
+Ruling: workspace invitations are **delivered by the app** — email, plus a Telegram option — option B of the delivery fork, ruled with the review panel's case in hand; the panel's *data model* (token as the accept credential) is adopted, its *delivery* recommendation (out-of-band links) is overruled. Consequences (normative):
+
+1. **The EmailSender port survives** with invitations as its consumer, and the email-provider ack (Resend as the swappable default) **reopens** as an owner item — surfaced, not silently re-closed (`03` pass-4 items).
+2. **Telegram delivery rides existing machinery only:** one new `channel_outbox` kind on the existing sender (`02` §6). Zero new senders, zero parallel delivery paths.
+3. **The accept credential is the invitation token** (`token_hash`), never the email address; email (and the Telegram-side hint) act as per-provider acceptance *constraints* — `03` D33, the day-one rule that makes Apple re-entry a flow increment rather than a model change.
