@@ -4,6 +4,14 @@
 **Supersedes:** the standalone adoption of either prior package (see Authority, below).
 **Executable by:** an implementer working increment-by-increment from `04-execution-sequence.md` with zero design judgment calls — every shape, key, state, number, and gate is stated here or explicitly incorporated by path.
 
+## Live status (position tracker — updated as work proceeds, not at stop time)
+
+- **Pass:** 3 — executed in full (all 7 items of the R3 ratification gate; gate-by-gate disposition on the PR).
+- **Position:** awaiting re-review of pass 3. No work in flight on this document.
+- **Ratified:** FC-0..FC-4 (rulings); D1–D30 per `03`, including D28 (FC-3.4 signed-params — 2026-08-03, conditional on clean delivery).
+- **Open (product owner):** PA-1 — implementers build default (a) until ruled; email-provider ack — Resend as swappable default until acked (`03` pass-3 items).
+- **Next:** on re-review, findings are dispositioned against the pass-3 disposition comment; the author does not merge.
+
 ## Start here — authority, reading order, self-containment
 
 **This directory is the authoritative plan.** Everything else under `documentation/planning/` that addresses multi-tenancy — in particular `../2026-07-29-high-throughput-multi-tenant/` (#722's package, of similar vintage) — is **historical input, superseded by this plan**; each of its files carries a banner saying so. Do not implement from anything outside this directory.
