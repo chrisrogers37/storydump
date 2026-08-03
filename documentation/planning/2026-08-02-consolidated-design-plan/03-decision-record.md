@@ -44,7 +44,7 @@ Citation conventions: **EP/IP/SE/TT** = `../2026-07-29-high-throughput-multi-ten
 
 ## Infrastructure
 
-**C3 — Postgres-only core; Redis is a gated annex.** RF-R4 as ratified. Peak job rates in the low tens per second with ~1.5/s sustained (`05` arithmetic) plus the transactional co-location argument (`01`) make a broker structurally unnecessary; #722's Redis increments are re-based to a pg fixed-window admission counter and indexed polling, and survive only as the `05` §annex behind a measured SLO breach. TT items P0-07/P1-02/P1-04 are incorporated with their Redis halves struck (`04` notes each).
+**C3 — Postgres-only core; Redis is a gated annex.** RF-R4 as ratified. Peak job rates in the low tens per second against a ~2.2/s sustained publish ceiling (`05` arithmetic, pass-2 corrected) plus the transactional co-location argument (`01`) make a broker structurally unnecessary; #722's Redis increments are re-based to a pg fixed-window admission counter and indexed polling, and survive only as the `05` §annex behind a measured SLO breach. TT items P0-07/P1-02/P1-04 are incorporated with their Redis halves struck (`04` notes each).
 
 **C6 — Migration tooling: formalized numbered-SQL runner, not Alembic (contested, reversible-with-cost).** The repo has 49 numbered migrations; #722's requirements (postconditions, checksums, replay-from-empty CI) bolt onto that reality cleanly and the known defects (023; #721's 010/034 missing-version-rows) are covered by the replay gate. #721 preferred Alembic and called its choice "ratified OWD" — no human ratification exists in the record, so this plan decides on evidence. Recorded as **contested**: if the team later wants ORM-autogen workflows, revisit after Phase W; the runner's artifacts (pure SQL + version rows) remain Alembic-importable.
 
@@ -70,7 +70,7 @@ FC-1/FC-2/FC-3/FC-4 are constraints, not adjudications — see `00`. Two derived
 - Consumer-contract track — restated in full as `04` W.6 (JWT claim, BFF lockstep, card-payload mapping column, CLI routing).
 - `integration_connections` concept → typed `oauth_credentials` (`02` §2, FLAG-1 fixed via typed owner FKs).
 - Settings materialization (D9) → `workspaces` config columns + `channel_bindings.settings`.
-- Onboarding merge (D10) → `onboarding_sessions` re-keyed to (workspace, user).
+- Onboarding merge (D10) → `onboarding_sessions` re-keyed per `02` §9: user-keyed with `pending_workspace_id`, one live session per user.
 
 ## Second-pass decisions (Codex reviews A/B, 2026-08-02→03)
 
@@ -101,6 +101,12 @@ Same relitigation rule as above. "A §n"/"B §n" cite the two review comments on
 **D23 — Category mix keeps its row shape.** Ground truth: `category_post_case_mix` is a Type 2 SCD table; pass 1's `workspaces.category_mix` JSONB would have flattened history for nothing. Re-keyed on the W.5 track, SCD semantics unchanged, sum-to-1 stays service-enforced (a deferred cross-row aggregate trigger was considered and rejected as complexity without a failure mode it prevents — the writer is one service). Settles A §3.14's delegated choice.
 
 **D24 — Runner ledger and chain reconciliation.** `schema_migrations` (checksums, advisory-lock serialization, postconditions, repair states) supersedes `schema_version`; migration 050 fix-forwards the known chain defects (004/008 orphaned unique, 010/034 missing stamps, caption_style type) so replay-from-empty equals production — with a `\d`-against-prod precondition before 050 is written. `04` 0.2 (answers A §3.26/§5.16).
+
+**D25 — Ownership has one home: the owner member row.** The pass-2 draft carried `workspaces.owner_user_id` beside the `role='owner'` member row and spent two sync triggers keeping them equal; the consolidation review cut the column. `uq_members_one_owner` (≤1) + a deferred owner-exists trigger (≥1) enforce exactly-one-owner at every commit; transfer is demote+promote in one transaction.
+
+**D26 — Quarantine grain = the serialization key.** The draft's `''`-wildcard (workspace, provider) scope could not be matched against prefixed serialization keys — the fine grain was silently a no-op, and the wildcard deferred *every* provider's jobs. Rows now always carry the exact serialization key they defer (what the faulting adapter actually knows); entry also pushes matching ready jobs' `run_at` out of the claim scan. T2's isolation intent is met at a finer grain than its original wording.
+
+**D27 — The manual posting path is first-class (`published_via`).** The first pass designed only the API pipeline; production's phase-1 manual flow (human posts by hand, taps Posted) had no edge — which also made the W.4 history backfill unsatisfiable against the completeness CHECKs. `published_via ('api'|'manual'|'legacy_backfill')` scopes the evidence requirements per path; `awaiting_approval → posted` (manual) and `review_required → posted` (operator resolve-posted) are legal, guarded edges. Surfaced by the pass-2 consolidation review, not by either Codex review.
 
 **Count-grain note (B comparison, for the record):** "5 blocking conflicts" was the cross-check's coarse count; A's A–P inventory is the same incompatibility at finer grain. Both reviews and this plan agree on the conclusion; neither count is a disagreement with the other.
 

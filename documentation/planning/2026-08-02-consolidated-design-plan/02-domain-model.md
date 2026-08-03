@@ -6,7 +6,7 @@ This file is DDL-complete: every table below is stated as executable PostgreSQL,
 
 - **Ids:** `id UUID PRIMARY KEY DEFAULT gen_random_uuid()` on every table unless a natural PK is shown. (Legacy tables mix `uuid_generate_v4()`/`gen_random_uuid()`; new DDL uses `gen_random_uuid()` only — no extension dependency.)
 - **Time:** every new timestamp column is `TIMESTAMPTZ`. Legacy columns are naive `TIMESTAMP`, UTC by convention; **every backfill converts with `AT TIME ZONE 'UTC'`** — this clause is mandatory in track DDL, and a bare cast is a review-blocking defect.
-- **Stamps:** `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`, `updated_at TIMESTAMPTZ NOT NULL DEFAULT now()` on every table; `updated_at` maintained by the shared `trg_touch_updated_at` trigger (one function, applied per table). Omitted from the DDL blocks below for brevity — this paragraph is their single normative statement.
+- **Stamps:** `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`, `updated_at TIMESTAMPTZ NOT NULL DEFAULT now()` on every table; `updated_at` maintained by the shared `trg_touch_updated_at` trigger (one function, applied per table). One exception: `audit_events` has no `updated_at` and no touch trigger — it is append-only, UPDATE is granted to nobody, so the column could never legally change. `updated_at` is load-bearing on machinery tables: the §5 retention indexes and sweeps key terminal-row age on it. Omitted from the DDL blocks below for brevity — this paragraph is their single normative statement.
 - **Enums are TEXT + named CHECK constraints**, never native `ENUM` types. Closed sets whose members must be *removable* (e.g. `fb_login_legacy` dies at G.2) make native enums a liability (`DROP VALUE` does not exist); CHECK text is also what the existing enum-SSOT parity gate (models ↔ latest migration DDL) already verifies. Adding/removing a value = enum edit + migration editing the named CHECK, held in lockstep by that gate.
 - **Tenant scoping:** every tenant-scoped table has `workspace_id UUID NOT NULL`; wherever it references another tenant-scoped table it uses a **composite FK** `(workspace_id, <ref>) REFERENCES parent (workspace_id, id)` so a cross-workspace reference is inexpressible (#721 D12, kept). Composite FKs require the parent-side `UNIQUE (workspace_id, id)` — those indexes are part of the parent DDL below.
 - **ON DELETE policy (three classes, no per-FK improvisation):**
@@ -43,13 +43,13 @@ CREATE TABLE user_identities (
   CONSTRAINT uq_user_provider         UNIQUE (user_id, provider)
 );
 -- One identity per provider per user (v1; widening uq_user_provider is a deliberate migration).
--- email_otp is the one non-Telegram provider X.4 requires; challenge/session mechanics in 07.
+-- email_otp is the one non-Telegram provider X.3 requires; challenge/session mechanics in 07.
 
 CREATE TABLE workspaces (
   id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name                    VARCHAR(100) NOT NULL,
-  owner_user_id           UUID NOT NULL REFERENCES users(id),   -- ON DELETE deliberately NO ACTION:
-                                                                -- an owner leaves only via transfer (06)
+  -- ownership has ONE home: the workspace_members row with role='owner' (below).
+  -- No owner_user_id column — a second home bought only sync triggers and drift.
   state                   TEXT NOT NULL DEFAULT 'active'
                           CONSTRAINT ck_workspaces_state
                           CHECK (state IN ('active','suspended','offboarding')),
@@ -87,7 +87,7 @@ CREATE TABLE workspaces (
 --   active_instagram_account_id → dissolved (multi-account; §2)
 --   last_post_sent_at → per-account slot anchor (§2 ig_accounts.next_slot_at derivation, 04 W.5)
 --   onboarding_step/onboarding_completed → onboarding_sessions (§9)
---   enable_instagram_api → routing flag row (§8 of 04's ground rules; it is cohort routing, not config)
+--   enable_instagram_api → routing flag row (C7 flag rows, 04 ground rules — it is cohort routing, not config)
 --   show_verbose_notifications, send_lifecycle_notifications → channel_bindings.settings
 
 CREATE TABLE workspace_members (
@@ -99,22 +99,20 @@ CREATE TABLE workspace_members (
   PRIMARY KEY (workspace_id, user_id)
 );
 CREATE UNIQUE INDEX uq_members_one_owner ON workspace_members (workspace_id) WHERE role = 'owner';
--- Exactly one owner-role member per workspace, by index. The pairing invariant —
--- workspaces.owner_user_id IS that member — is enforced by a deferred constraint trigger:
+-- AT MOST one owner per workspace, by index. AT LEAST one, by a deferred constraint trigger:
 
-CREATE FUNCTION trg_workspace_owner_sync() RETURNS trigger ... ;
-CREATE CONSTRAINT TRIGGER ct_workspace_owner_sync
-  AFTER INSERT OR UPDATE ON workspaces
-  DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION trg_workspace_owner_sync();
-CREATE CONSTRAINT TRIGGER ct_members_owner_sync
-  AFTER INSERT OR UPDATE OR DELETE ON workspace_members
-  DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION trg_workspace_owner_sync();
--- Both triggers run the same check at COMMIT: for every affected workspace,
--- EXISTS a members row (workspace_id, owner_user_id, role='owner'). RAISE otherwise.
--- Ownership transfer is therefore only expressible as ONE transaction that updates
--- workspaces.owner_user_id, demotes the old owner row, promotes the new (06 §membership).
--- Last-owner protection falls out: deleting/demoting the owner row without the paired
--- workspaces update fails at commit.
+CREATE FUNCTION trg_members_owner_exists() RETURNS trigger ... ;  -- for each touched workspace
+  -- that still exists: EXISTS a members row with role='owner', else RAISE
+CREATE CONSTRAINT TRIGGER ct_members_owner_exists
+  AFTER UPDATE OR DELETE ON workspace_members
+  DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+  WHEN (OLD.role = 'owner')                    -- only owner-row changes can break the invariant
+  EXECUTE FUNCTION trg_members_owner_exists();
+-- Together: exactly one owner at every commit. Ownership transfer = demote old + promote new
+-- in one transaction (06 §2 is the only writer that composes it); last-owner protection is
+-- structural — demoting/removing the owner without promoting another fails at commit.
+-- Workspace deletion (offboarding cascade) passes: the trigger checks only workspaces that
+-- still exist at commit.
 
 CREATE TABLE workspace_invitations (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -139,7 +137,12 @@ CREATE TABLE channel_bindings (
                CONSTRAINT ck_bindings_channel CHECK (channel IN ('telegram_group','telegram_dm')),
   external_ref TEXT NOT NULL,                   -- tg chat id as text
   state        TEXT NOT NULL DEFAULT 'active'
-               CONSTRAINT ck_bindings_state CHECK (state IN ('active','paused','revoked')),
+               CONSTRAINT ck_bindings_state CHECK (state IN ('active','revoked')),
+               -- revoked = bot kicked/blocked in the chat, written by the adapter on the
+               -- my_chat_member event. uq_binding_external holds across states, so re-adding the
+               -- bot to the same chat flips this row back to active (upsert), preserving history.
+               -- Muting notifications is settings, not state ('paused' was cut: it had no
+               -- consumer — the outbox already skips non-active bindings).
   settings     JSONB NOT NULL DEFAULT '{"v":1}',
                -- {v:1, verbose_notifications?:bool, lifecycle_notifications?:bool}
                -- absent key = app default (materialization contract below)
@@ -189,31 +192,46 @@ CREATE INDEX ix_ig_accounts_due ON ig_accounts (next_slot_at)
 -- tombstones excluded from uniqueness so an account can move away and later return (06 §movement).
 -- Real-account concurrency and Meta budgets key on provider_account_ref, never our row id
 -- (§3 key 4, §8). Account-level fault quarantine lives ONLY in provider_quarantine.
+-- State transitions (complete): active → reauth_required (refresh failure / provider revocation,
+-- 07 §3) · reauth_required → active (reconnect swaps the credential payload, 07 §2) ·
+-- active ↔ disabled (user command, audited) · {active,reauth_required,disabled} → moved
+-- (06 §4, terminal). The dispatcher's due-scan predicate reads state='active' only.
 
 CREATE TABLE provider_quarantine (
   workspace_id      UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
   provider          TEXT NOT NULL
                     CONSTRAINT ck_quarantine_provider
                     CHECK (provider IN ('ig','telegram','cloudinary','gdrive')),
-  scope_ref         TEXT NOT NULL DEFAULT '',   -- '' = whole (workspace, provider) pair;
-                                                -- else account ref / binding id / source id
+  scope_ref         TEXT NOT NULL,              -- ALWAYS a §5 serialization key ('ig:…','tg:…',
+                                                -- 'src:…','cred:…') — the exact work it defers;
+                                                -- provider is observability metadata, matching
+                                                -- never depends on it
   quarantined_until TIMESTAMPTZ NOT NULL,
   strike_count      INTEGER NOT NULL DEFAULT 1,
   last_strike_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   alerted_at        TIMESTAMPTZ NULL,           -- notification dedup: re-alert only if > 1h old (05)
   reason            TEXT NULL,
   entered_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (workspace_id, provider, scope_ref)
+  PRIMARY KEY (workspace_id, scope_ref)
 );
--- THE generic T2 fault-quarantine mechanism, both grains. Entry/backoff/exit semantics:
---   entry: a provider adapter classifying a fault as quarantine-worthy upserts the row;
---          quarantined_until = now() + backoff(strike_count) over 1m/5m/30m/2h/24h (05 seam);
---          repeat entry within decay window increments strike_count, else resets to 1
---          (decay: last_strike_at older than 24h).
---   effect: the §5 claim query defers matching jobs. That is the ONLY effect.
+-- THE generic T2 fault-quarantine mechanism. Grain = the serialization key (pass-2 fix: the
+-- earlier '' = whole-(workspace,provider) wildcard could not be matched against prefixed
+-- serialization keys and silently made the fine grain a no-op; per-key rows are what adapters
+-- can actually write — they always know the key of the job that faulted — and workspace-provider-
+-- wide faults quarantine organically, key by key, as each fails). Semantics:
+--   entry: the adapter upserts the row; quarantined_until = now() + backoff(strike_count) over
+--          1m/5m/30m/2h/24h (05 seam); repeat entry within the decay window increments
+--          strike_count, else resets to 1 (decay: last_strike_at older than 24h). The entry
+--          transaction also pushes matching ready jobs out of the claim scan's way:
+--          UPDATE jobs SET run_at = GREATEST(run_at, :until)
+--            WHERE state='ready' AND serialization_key = :key;
+--          (rare event, small ready set — keeps every subsequent claim from re-walking
+--          quarantined work at the front of the run_at order).
+--   effect: the §5 claim check defers late-inserted matching jobs. That is the ONLY effect.
 --   exit:   passive — quarantined_until passes and the next claim proceeds; that claim IS the
 --           probe (success rewrites nothing; the row is upserted again only on a fresh fault).
---   manual: clear-quarantine operator command deletes the row (audited).
+--   manual: clear-quarantine operator command deletes the row and re-readies deferred run_at
+--           (audited).
 --   NOT quarantine: credential revocation (state='revoked' → reauth flow, 07) and Meta cap
 --   error 9 (a cap, §8) — neither writes here.
 
@@ -246,6 +264,10 @@ CREATE INDEX ix_credentials_refresh_due ON oauth_credentials (next_refresh_at)
 -- Typed XOR owner FKs (not polymorphic) so the composite-FK convention holds on the MOST
 -- sensitive table (C4). The per-account unique keys by provider, which is what lets one account
 -- hold an ig_login and a fb_login_legacy row simultaneously during G-phase (legacy 040 semantics).
+-- State transitions (complete): active → expired (refresh determines the token is gone) ·
+-- active → revoked (user disconnect / offboarding) · {active,expired,revoked} → active
+-- (reconnect, 07 §2: an UPSERT on the owner unique key — payload swapped and state flipped on
+-- the existing row, same row id, no delete, no zero-credential window; the swap is audited).
 -- fb_login_legacy is structurally closed to new rows at L.6:
 --   ALTER TABLE oauth_credentials ADD CONSTRAINT ck_no_new_fb_legacy
 --     CHECK (provider <> 'fb_login_legacy') NOT VALID;
@@ -268,6 +290,10 @@ CREATE TABLE media_sources (
 );
 CREATE INDEX ix_sources_sync_due ON media_sources (next_sync_at)
   WHERE state = 'active' AND next_sync_at IS NOT NULL;
+-- State transitions (complete): active ↔ paused (user command) · active → error (sync failure
+-- classified persistent, e.g. folder gone/credential dead — alert via alerted_at dedup) ·
+-- error → active (successful sync after reconnect/repair — the pre-slot or on-demand sync
+-- IS the probe). The due-scan predicate reads state='active' only.
 
 CREATE TABLE media_items (
   id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -306,8 +332,9 @@ CREATE INDEX ix_media_provider_ref ON media_items (workspace_id, source_id, prov
 -- Legacy columns not carried: cloud_* transit columns (transit state is per-attempt:
 -- post_intents.transit_asset_ref), instagram_media_id/backfilled_at (posted evidence is per-intent:
 -- §3 ig_media_id; legacy values ride the W.4 history backfill), is_active+unsupported flags (state),
--- file_path (Drive path context folds into file_name; identity is provider_file_ref),
--- times_posted stays as a workspace-level advisory aggregate (per-account recency = post_locks).
+-- file_path (Drive path context folds into file_name; identity is provider_file_ref).
+-- times_posted and last_posted_at are workspace-level ADVISORY aggregates (display/selection
+-- hints; authority is the terminal intents) — per-account recency = post_locks.
 
 CREATE TABLE post_locks (
   id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -318,7 +345,9 @@ CREATE TABLE post_locks (
                        CONSTRAINT ck_locks_kind
                        CHECK (kind IN ('recent','skip','reject','unsupported','seasonal','hold')),
   expires_at           TIMESTAMPTZ NULL,        -- NULL = permanent
-  created_by_intent_id UUID NULL,
+  created_by_intent_id UUID NULL,               -- plain UUID ref, §0-exemption: the intent may be
+                                                -- terminal-frozen; attribution only, never joined for
+                                                -- authorization
   created_by_user_id   UUID NULL REFERENCES users(id) ON DELETE SET NULL,
   CONSTRAINT fk_locks_media   FOREIGN KEY (workspace_id, media_item_id)
     REFERENCES media_items (workspace_id, id) ON DELETE CASCADE,
@@ -330,11 +359,9 @@ CREATE UNIQUE INDEX uq_lock_ws_scope ON post_locks (workspace_id, media_item_id,
 CREATE UNIQUE INDEX uq_lock_acct_scope ON post_locks (workspace_id, media_item_id, kind, ig_account_id)
   WHERE ig_account_id IS NOT NULL;
 CREATE INDEX ix_locks_expiry ON post_locks (expires_at) WHERE expires_at IS NOT NULL;
--- Scope semantics (06 §multi-account): 'recent' is ACCOUNT-scoped (account A posting item X
--- yesterday does not block account B tomorrow); all human-judgment kinds ('skip','reject',
--- 'seasonal','hold') and 'unsupported' are WORKSPACE-scoped (a human said no to the content, or
--- the file is unusable — true for every account). Selection consults: workspace-wide locks
--- always; account-scoped locks for the account being scheduled.
+-- Scope semantics per kind — 06 §3 is the normative home ('recent' = account-scoped, everything
+-- human-judgment or file-driven = workspace-scoped, and the selection rule).
+-- Expired rows are purged by the reap_expired sweep via ix_locks_expiry.
 -- Legacy kind mapping (W.3): recent_post→recent, skip→skip, permanent_reject→reject,
 -- manual_hold→hold, seasonal→seasonal.
 ```
@@ -359,6 +386,12 @@ CREATE TABLE post_intents (
   approval_mode        TEXT NOT NULL
                        CONSTRAINT ck_intent_approval CHECK (approval_mode IN ('auto','manual')),
   approved_by_user_id  UUID NULL REFERENCES users(id) ON DELETE SET NULL,
+  published_via        TEXT NOT NULL DEFAULT 'api'
+                       CONSTRAINT ck_intent_via CHECK (published_via IN ('api','manual','legacy_backfill')),
+                       -- 'manual': the workspace posts by hand and confirms with the Posted tap —
+                       -- the live phase-1 flow, carried forward (pass-2 addition: the first pass
+                       -- designed only the API path; production has both). 'legacy_backfill':
+                       -- W.4 history rows, exempt from evidence requirements below.
   provider_account_ref TEXT NOT NULL,           -- immutable copy from ig_accounts at creation (key 4)
   publish_step         TEXT NOT NULL DEFAULT 'none' CONSTRAINT ck_intent_step CHECK (publish_step IN
                          ('none','transit_uploaded','container_created','container_ready',
@@ -373,7 +406,9 @@ CREATE TABLE post_intents (
                        -- {v:1, <step>:{count:int, generation:int, last_error_class?:text}}
   last_error           JSONB NULL,              -- {v:1, class:text, provider_code?:text, message:text,
                        --  evidence?:object}  — reconciler evidence lands here (§6)
-  legacy_queue_item_id UUID NULL,               -- W.6 card-mapping column; dropped at W.5 contract
+  legacy_queue_item_id UUID NULL,               -- L.9 correlation + W.6 card-mapping column;
+                                                -- dropped only by W.6's mechanical condition
+                                                -- (30 d after W.5 contract + zero live carriers)
   entered_state_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
   CONSTRAINT fk_intent_account FOREIGN KEY (workspace_id, ig_account_id)
     REFERENCES ig_accounts (workspace_id, id),          -- NO CASCADE: intents outlive account rows
@@ -384,14 +419,23 @@ CREATE TABLE post_intents (
     REFERENCES media_items (workspace_id, id),          -- NO CASCADE: same reason — media rows go
                                                         -- state='removed', never DELETE, while
                                                         -- referenced; offboarding deletes workspace-first
-  -- state-completeness CHECKs: the terminal row IS the complete outcome (R3):
+  -- state-completeness CHECKs: the terminal row IS the complete outcome (R3), scoped by path —
+  -- API posts prove themselves with provider evidence; manual posts prove a human confirmed
+  -- (cap still debited); legacy backfill rows are exempt (their evidence is the migrated history):
   CONSTRAINT ck_posted_complete CHECK (
-    state <> 'posted' OR (ig_container_id IS NOT NULL AND publish_step = 'effect_confirmed'
-                          AND cap_consumed_on IS NOT NULL)),
+    state <> 'posted'
+    OR published_via = 'legacy_backfill'
+    OR (published_via = 'manual' AND cap_consumed_on IS NOT NULL)
+    OR (published_via = 'api' AND ig_container_id IS NOT NULL
+        AND publish_step = 'effect_confirmed' AND cap_consumed_on IS NOT NULL)),
   CONSTRAINT ck_publishing_debited CHECK (
     state NOT IN ('publishing','publishing_ambiguous') OR cap_consumed_on IS NOT NULL),
   CONSTRAINT ck_ambiguous_called CHECK (
-    state <> 'publishing_ambiguous' OR publish_step IN ('publish_called','container_ready','container_created')),
+    state <> 'publishing_ambiguous' OR publish_step = 'publish_called'),
+    -- ambiguity exists ONLY for the publish effect: committing the publish permit advances
+    -- publish_step to 'publish_called' in the same transaction (§6), so an ambiguous intent
+    -- always carries exactly that step. Container-create loss never escalates to intent
+    -- ambiguity (§6: orphan containers are inert — confirmed-safe regeneration instead).
   CONSTRAINT ck_refund_after_debit CHECK (cap_refunded_at IS NULL OR cap_consumed_on IS NOT NULL)
 );
 -- NOTE on the two NO-CASCADE composite FKs: workspace offboarding still cascades intents via the
@@ -499,14 +543,17 @@ BEGIN
   RETURN NULL;
 END $$;
 CREATE TRIGGER tg_intent_audit AFTER UPDATE ON post_intents
-  FOR EACH ROW EXECUTE FUNCTION trg_intent_audit();
+  FOR EACH ROW
+  WHEN (OLD.state IS DISTINCT FROM NEW.state)   -- checkpoint updates skip the trigger entirely
+  EXECUTE FUNCTION trg_intent_audit();
 
 CREATE FUNCTION trg_intent_insert_guard() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
   -- runtime creates intents only in 'scheduled'; terminal-state inserts are the migration
-  -- backfill's privilege (W.4), gated on its GUC — history cannot be fabricated at runtime.
+  -- backfill's privilege (W.4), recognized by the actor GUC it already must set — no second
+  -- mechanism: history cannot be fabricated at runtime.
   IF NEW.state <> 'scheduled'
-     AND COALESCE(current_setting('app.migration_mode', true), '') <> 'on' THEN
+     AND COALESCE(current_setting('app.actor_kind', true), '') <> 'migration' THEN
     RAISE EXCEPTION 'post_intents are born scheduled (got %)', NEW.state;
   END IF;
   RETURN NEW;
@@ -514,6 +561,8 @@ END $$;
 CREATE TRIGGER tg_intent_insert_guard BEFORE INSERT ON post_intents
   FOR EACH ROW EXECUTE FUNCTION trg_intent_insert_guard();
 ```
+
+Matrix actors map onto the `ck_audit_actor` GUC vocabulary as: `clock`/`reaper`/`reconciler`/`operator` → themselves; **`worker` → `'system'`**; `user` → `'user'`; backfill inserts → `'migration'`. This line is the mapping's single statement.
 
 Why this and not a separate outcomes table: R3 needs *one immutable terminal record*; a second table holding terminal truth is the queue/history two-truths seam (RF-G1) that D1 exists to kill. The frozen intent row — freeze trigger + no-exit edges + the §3 completeness CHECKs — **is** the immutable record, and there is exactly one, structurally. R3's ledger wording is amended accordingly (`01`): "database-enforced (constraint or trigger), never application discipline."
 
@@ -526,20 +575,23 @@ Why this and not a separate outcomes table: R3 needs *one immutable terminal rec
 | prompt_pending | awaiting_approval | worker | prompt delivered on ≥ 1 binding, **or** workspace has web access (FC-2) |
 | prompt_pending | failed | worker | no reachable surface (all deliveries failed, no web access) |
 | prompt_pending | expired | reaper | expiry passed before delivery |
+| prompt_pending | cancelled | worker | `cancel_requested`, or workspace/account disabled (pass-2: this edge was missing — offboarding must be able to terminalize every working state) |
 | awaiting_approval | approved | user or system(auto) | manual command, or `auto_reapprove_returning` policy |
+| awaiting_approval | **posted** | user | **the manual-mode path** (pass-2: live phase-1 flow carried forward — the human posted by hand and taps Posted): same tx sets `published_via='manual'`, debits the cap (`cap_consumed_on`), `times_posted`++, account recent lock, `ig_accounts.last_posted_at` |
 | awaiting_approval | skipped / rejected | user | terminal; `rejected` upserts a workspace-scoped reject lock |
 | awaiting_approval | expired | reaper | approval window passed (`approval_ttl_minutes`); prompts superseded via outbox |
 | awaiting_approval | cancelled | worker | `cancel_requested` |
 | approved | publishing | worker | **one transaction** (SQL below): key-4 acquisition + atomic cap debit + lease held |
 | approved | expired | reaper | approval stale beyond policy |
 | approved | cancelled | worker | `cancel_requested` (pre-publish it is always honorable) |
-| publishing | posted | worker | `effect_confirmed`; same tx: `times_posted`++, recent lock upsert (account-scoped), FC-3.5 reap job insert |
+| publishing | posted | worker | `effect_confirmed`; same tx: `times_posted`++, recent lock upsert (account-scoped), `ig_accounts.last_posted_at`; after commit: best-effort inline FC-3.5 transit destroy (no job — the FC-3.6 sweep is the guarantee; a per-asset reap job would double jobs-table volume for coverage the sweep already owns) |
 | publishing | publishing_ambiguous | worker | timeout/crash after `publish_called` with unconfirmed effect (R8) |
 | publishing | failed | worker | terminal provider error; same tx: cap refund (below) |
 | publishing | review_required | worker | poison: attempts exhausted on a retryable class (G5) |
 | publishing_ambiguous | posted / failed | **reconciler only** | §6 evidence contract decides; `failed` refunds the cap |
 | publishing_ambiguous | review_required | reconciler | evidence budget exhausted — a human looks |
-| review_required | approved / failed / cancelled | user (operator) | explicit resolution command; audited with channel + actor |
+| review_required | posted | user (operator) | **resolve-posted** (pass-2: the missing likeliest resolution — "it did publish"): legal only when a publish permit exists (`publish_step='publish_called'`, container present); the resolution UPDATE sets `publish_step='effect_confirmed'` + any evidence (`ig_media_id`) in the same statement, satisfying `ck_posted_complete`; cap debit stands |
+| review_required | approved / failed / cancelled | user (operator) | resolve-retry (new generation) / resolve-failed (refunds the cap) / cancel; audited with channel + actor |
 
 The **approved → publishing** transaction, verbatim shape (the R2 atomic debit — no check-then-act gap):
 
@@ -563,7 +615,7 @@ UPDATE post_intents SET state = 'publishing', cap_consumed_on = :local_date
 COMMIT;
 ```
 
-Cap refund (the `publishing → failed` and ambiguous→failed companion, same tx as the terminal flip): `UPDATE daily_post_counts SET count = count - 1 WHERE (workspace_id, ig_account_id, local_date) = (:ws, :acct, intent.cap_consumed_on) AND count > 0;` plus `cap_refunded_at = now()` on the intent. The refund targets **the recorded debit day** (`cap_consumed_on`), so a timezone change or midnight crossing between debit and refund cannot touch the wrong bucket. DST and tz-change semantics: `local_date` is computed from the account's effective tz *at debit time*; a same-day tz change can shift the boundary for *later* debits by at most one slot — accepted and documented (06 §multi-account).
+Cap refund (the `publishing → failed` and ambiguous→failed companion, same tx as the terminal flip): `UPDATE daily_post_counts SET count = count - 1 WHERE (workspace_id, ig_account_id, local_date) = (:ws, :acct, intent.cap_consumed_on) AND count > 0;` plus `cap_refunded_at = now()` on the intent. The refund targets **the recorded debit day** (`cap_consumed_on`), so a timezone change or midnight crossing between debit and refund cannot touch the wrong bucket. `local_date` is computed in the account's effective tz *at debit time*; the product-facing DST/tz-change and mid-day-cadence-change rules live in 06 §3 — the one home.
 
 `cancel_requested` during `publishing`/`publishing_ambiguous` is **not** honored by force (C9: `publishing → cancelled` is forbidden — and now DB-forbidden: the edge is absent from `post_intent_transitions`); the pipeline completes or reconciles, then the reconciler consults the flag only where a real choice remains. A late interaction with any terminal intent renders the terminal state and never acts (R6).
 
@@ -575,7 +627,8 @@ CREATE TABLE jobs (
   kind              TEXT NOT NULL CONSTRAINT ck_jobs_kind CHECK (kind IN (
                       -- tenant kinds (workspace_id NOT NULL):
                       'publish_pipeline','deliver_outbox','sync_media_source','first_ingest_chunk',
-                      'refresh_credential','revoke_workspace_credentials','reauth_prompt',
+                      'refresh_credential','offboard_workspace','revoke_workspace_credentials',
+                      'reauth_prompt',
                       -- system kinds (workspace_id NULL):
                       'reconcile_ambiguous','reap_expired','reap_transit_assets','retention_sweep',
                       'comparator_run','reencrypt_credentials')),
@@ -601,6 +654,12 @@ CREATE TABLE jobs (
 CREATE INDEX ix_jobs_claim ON jobs (lane, run_at) WHERE state = 'ready';
 CREATE INDEX ix_jobs_lease_expiry ON jobs (locked_until) WHERE state = 'leased';
 CREATE UNIQUE INDEX uq_jobs_serialized_lease ON jobs (serialization_key) WHERE state = 'leased';
+CREATE INDEX ix_jobs_retire ON jobs (updated_at)
+  WHERE state IN ('succeeded','cancelled','failed','review_required');
+-- ix_jobs_retire gives the retention sweep an age-ordered walk over exactly the swept rows
+-- (updated_at = terminalization time — §0 stamps); without it every sweep batch re-scans the
+-- millions of terminal rows that accrue at envelope. Same pattern on channel_outbox and
+-- provider_operations below.
 -- uq_jobs_serialized_lease is THE serialization guard: two leased jobs with one key are
 -- impossible by constraint, not by claim-query discipline. The claim query merely avoids
 -- most conflicts; the index makes the race lose correctly.
@@ -615,16 +674,17 @@ CREATE UNIQUE INDEX uq_jobs_serialized_lease ON jobs (serialization_key) WHERE s
 | sync_media_source | `{source_id, reason:'pre_slot'\|'demand'\|'baseline'}` | clock / command | bulk | `src:<source_id>` |
 | first_ingest_chunk | `{source_id, page_token}` | sync job (chains) | bulk | `src:<source_id>` |
 | refresh_credential | `{credential_id}` | clock (next_refresh_at due) | bulk | `cred:<credential_id>` |
-| revoke_workspace_credentials | `{}` (workspace-keyed) | offboarding workflow (06) | bulk | `ws:<workspace_id>` |
+| offboard_workspace | `{}` (workspace-keyed) | offboarding command (06 §1 — orchestrates the workflow legs: enqueues revocation, terminalizes intents, drains, reaps transit, schedules final deletion) | bulk | `ws:<workspace_id>` |
+| revoke_workspace_credentials | `{}` (workspace-keyed) | offboard_workspace | bulk | `ws:<workspace_id>` |
 | reauth_prompt | `{ig_account_id}` | G.1 campaign clock | bulk | `ig:<provider_account_ref>` |
 | reconcile_ambiguous | `{}` | clock (recurring) | bulk | `'reconciler'` (singleton by key) |
-| reap_expired | `{}` | clock (recurring) | bulk | `'reaper'` |
+| reap_expired | `{}` | clock (recurring) | bulk | `'reaper'` — remit: every expiry class in one bounded sweep: intent expiries (§4 reaper edges), expired `post_locks` (via `ix_locks_expiry`), expired/stale `workspace_invitations`, `otp_challenges`, `oauth_states` |
 | reap_transit_assets | `{}` | clock (recurring, FC-3.6) | bulk | `'transit-reaper'` |
 | retention_sweep | `{}` | clock (recurring) | bulk | `'retention'` |
 | comparator_run | `{track:text}` | clock (nightly, per active track) | bulk | `cmp:<track>` |
 | reencrypt_credentials | `{key_generation:int}` | rotation runbook (07) | bulk | `'reencrypt'` |
 
-Producer authorization is code-level (each producer is one named service); the DB-level guard is the kind CHECK + the nullability pairing + RLS (§7). A new kind is a migration (CHECK edit) plus a registry row here — the closed-set convention applied to work itself.
+Producer authorization is code-level (each producer is one named service); the DB-level guard is the kind CHECK + the nullability pairing + RLS (§7). A new kind is a migration (CHECK edit) plus a registry row here — the closed-set convention applied to work itself. **Interactive commands are not jobs**: approve/skip/reject/settings/etc. are single-transaction state flips executed inline in ingress (the ack IS the transaction, R5); a command reaches this table only when it spawns real work, and then as its specific kind above (sync-now → `sync_media_source`, offboard → `offboard_workspace`, …) — there is deliberately no generic `run_command` kind.
 
 **The claim, verbatim shape (its race guard is the unique index, not the query):**
 
@@ -635,10 +695,14 @@ WITH candidate AS (
   WHERE j.state = 'ready' AND j.lane = :lane AND j.run_at <= now()
     AND NOT EXISTS (SELECT 1 FROM jobs h                     -- serialization pre-filter
                     WHERE h.serialization_key = j.serialization_key AND h.state = 'leased')
-    AND NOT EXISTS (SELECT 1 FROM provider_quarantine q      -- quarantine deferral (T2)
-                    WHERE q.workspace_id = j.workspace_id
-                      AND q.quarantined_until > now()
-                      AND q.scope_ref IN ('', j.serialization_key))
+    AND NOT EXISTS (SELECT 1 FROM provider_quarantine q      -- quarantine deferral (T2):
+                    WHERE q.workspace_id = j.workspace_id    --   exact per-key probe (PK) —
+                      AND q.scope_ref = j.serialization_key  --   backstop for jobs inserted
+                      AND q.quarantined_until > now())       --   after the entry-time run_at push
+    AND (j.workspace_id IS NULL OR                           -- per-workspace lane cap (05 #3):
+         (SELECT count(*) FROM jobs w                        --   leased set is small (≤ global
+          WHERE w.state = 'leased' AND w.lane = j.lane       --   concurrency), so the correlated
+            AND w.workspace_id = j.workspace_id) < :ws_lane_cap)  -- count is cheap
   ORDER BY j.run_at
   LIMIT 1 FOR UPDATE OF j SKIP LOCKED
 )
@@ -648,11 +712,13 @@ UPDATE jobs SET state='leased', locked_by=:worker, lease_token=gen_random_uuid()
 RETURNING jobs.*;
 COMMIT;
 -- unique_violation on uq_jobs_serialized_lease (two claimers picked different rows sharing a key):
--- retry the claim excluding that serialization_key. The quarantine check is advisory (a row
--- appearing mid-claim defers the NEXT claim) — quarantine is backoff, not a correctness gate.
+-- retry the claim excluding that serialization_key. The quarantine and per-workspace checks are
+-- advisory backoff/fairness, not correctness gates — races defer the NEXT claim, never corrupt.
 ```
 
 Transitions: `ready → leased` (claim above) · `leased → succeeded | failed | review_required` (finalization CAS: `UPDATE jobs SET state=:terminal WHERE id=:id AND lease_token=:token` — zero rows = fenced, the worker aborts) · `leased → ready` (lease expiry: the expiry sweep re-readies; the stale owner's later finalization fails the CAS) · `ready → review_required` (poison) · `ready → cancelled` (cooperative; a leased job is cancelled only by its own worker at a checkpoint). The domain transaction (intent flip + counters + audit) and job finalization commit **together** — that co-location is why jobs live in Postgres (C3). Job state is execution bookkeeping only; it is never the authority on whether an external effect happened (§6). Heartbeat: one independent asyncio task per worker process extends `locked_until` for all its live leases every interval (`05`) in a single UPDATE guarded by lease tokens; a worker missing two beats is presumed dead well inside the lease; provider waits never block beats (the beat task is not in the pipeline's await chain).
+
+**Transaction discipline (normative, the L.0 gate tests it): a database transaction never spans a provider call.** Pipelines run transaction-per-checkpoint — open, write the checkpoint/permit, commit, *then* talk to the provider. This is both the correctness seam (the §6 permit protocol depends on permit-commit-before-call) and the connection-budget arithmetic's premise (`05` tasks-vs-connections).
 
 ## §6. Outbound effects: `channel_outbox`, `provider_operations`, and the permit protocol
 
@@ -673,6 +739,8 @@ CREATE TABLE channel_outbox (
     REFERENCES channel_bindings (workspace_id, id) ON DELETE CASCADE
 );
 CREATE INDEX ix_outbox_due ON channel_outbox (binding_id, created_at) WHERE state = 'pending';
+CREATE INDEX ix_outbox_retire ON channel_outbox (updated_at)
+  WHERE state IN ('sent','superseded','failed','ambiguous');   -- retention walk (§5 pattern)
 
 CREATE TABLE provider_operations (
   id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -686,19 +754,29 @@ CREATE TABLE provider_operations (
   state               TEXT NOT NULL DEFAULT 'permitted' CONSTRAINT ck_ops_state
                       CHECK (state IN ('permitted','succeeded','failed','ambiguous')),
   lease_token         UUID NOT NULL,            -- the lease that authorized this permit
-  request_fingerprint TEXT NULL,
   response_ref        JSONB NULL,               -- {v:1, container_id?|media_id?|status_code?|error?}
   CONSTRAINT uq_ops_business_key UNIQUE (business_key)
 );
-CREATE INDEX ix_ops_ambiguous ON provider_operations (created_at) WHERE state = 'ambiguous';
+CREATE INDEX ix_ops_retire ON provider_operations (updated_at)
+  WHERE state IN ('succeeded','failed');        -- retention walk; ambiguous rows are excluded
+                                                -- until the reconciler terminalizes them
+
+-- The reconciler and the parked-intent alarm drive off post_intents, not this table:
+CREATE INDEX ix_intents_parked ON post_intents (entered_state_at)
+  WHERE state IN ('publishing_ambiguous','review_required');
+-- (one partial index serves the 60 s reconciler sweep, the 15 min alarm, and the 06 §5 operator
+-- list — without it those recurring scans would ride the live-subject index and filter the whole
+-- live set forever.)
 ```
 
 **Scope: the rail covers `ig` only.** Cloudinary is deliberately OFF the rail (first-pass design carried it; cut on review): upload and destroy are recoverable effects — a duplicate transit upload is a second short-lived asset, a missed destroy is caught by the FC-3.6 hard-TTL sweep. Their execution state lives in job attempts + `audit_events`, weightless. Instagram publish is irreversible and customer-visible; it gets the full machinery. Telegram delivery lives in the outbox (below). Drive is read-only.
 
 **The permit protocol (stale-worker fencing at the network boundary — the DB stops the call *before* it happens):**
 
-1. Inside the pipeline, immediately before any IG side-effecting call, the worker opens a short transaction and inserts the permit: `INSERT INTO provider_operations (…, business_key, lease_token) VALUES (…)` **in the same transaction as** a lease CAS re-check: `SELECT 1 FROM jobs WHERE id=:job AND lease_token=:token FOR SHARE` — zero rows ⇒ the lease moved on; the insert rolls back; the worker aborts with **no network call made**.
-2. Only after that transaction commits may the worker issue the provider call. Crash before commit: no permit, no call, clean resume. Crash after commit, before/during the call: a `permitted` row with no `response_ref` — the resumed pipeline (new lease) finds it and **does not re-call**: it marks the op `ambiguous` and the intent `publishing_ambiguous`; the reconciler owns it from there. (For `container_create`, whose loss is recoverable, the reconciler's confirmed-safe verdict bumps `generation` and permits a fresh attempt; for `publish`, never.)
+1. Inside the pipeline, immediately before any IG side-effecting call, the worker opens a short transaction and inserts the permit: `INSERT INTO provider_operations (…, business_key, lease_token) VALUES (…)` **in the same transaction as** a lease CAS re-check: `SELECT 1 FROM jobs WHERE id=:job AND lease_token=:token FOR SHARE` — zero rows ⇒ the lease moved on; the insert rolls back; the worker aborts with **no network call made**. For the `publish` op, the same transaction advances `publish_step` to `'publish_called'` — the permit IS the durable record that a publish may have been attempted (this is what makes `ck_ambiguous_called` exact).
+2. Only after that transaction commits may the worker issue the provider call. Crash before commit: no permit, no call, clean resume. Crash after commit with no recorded outcome — **the two op kinds diverge, by blast radius**:
+   - `container_create`: an orphaned container is inert (nothing published, containers expire unused, Meta caps count the publish step only). The resumed pipeline marks the unresolved op `failed` (`response_ref` notes `lost_response`), bumps `generation`, permits a fresh create. **Never intent-level ambiguity** — recoverable effects do not park the pipeline.
+   - `publish`: the resumed pipeline **does not re-call**: it marks the op `ambiguous` and the intent `publishing_ambiguous`; the reconciler owns it from there, and `generation` never bumps out of ambiguity.
 3. Completion: the worker records the outcome (`succeeded` + `response_ref`, or `failed` + error class) and advances `publish_step` in the same domain transaction (which also re-CASes the lease token — a fenced worker cannot record outcomes either).
 
 **Business-key formats (closed):** `ig:container:<intent_id>:<generation>` · `ig:publish:<intent_id>:<generation>`. `generation` increments **only** on a confirmed-safe failure of the same op kind (provider said the previous attempt definitively did not happen); it never increments out of ambiguity. One business key = at most one intended provider effect (TT:P0-06's gate), and `uq_ops_business_key` is the object that enforces it.
@@ -709,9 +787,25 @@ CREATE INDEX ix_ops_ambiguous ON provider_operations (created_at) WHERE state = 
 
 - Evidence source 1 (authoritative): the persisted container id. `GET /{ig_container_id}?fields=status_code` — `PUBLISHED` ⇒ the effect happened: fetch media id/permalink if retrievable, terminalize `posted` (cap debit stands). `ERROR` / `EXPIRED` ⇒ effect did not happen: terminalize `failed`, refund the cap. `IN_PROGRESS`/`FINISHED` ⇒ still moving: re-poll within budget.
 - Evidence source 2 (corroboration only, never sole basis for `posted`): the account's stories list (`GET /{ig_user_id}/stories`), matched on timestamp window around `publish_called` — used to annotate evidence, not to decide.
-- Budget: poll source 1 at the `05` reconciler cadence until container expiry (~24 h). Expiry reached with no `PUBLISHED` observation ⇒ one final stories check for the window ⇒ still inconclusive ⇒ `review_required`, with the full evidence trail written to `last_error.evidence` (statuses seen, timestamps, stories-window result) for the operator surface (06 §failure-visibility).
+- Budget: poll source 1 at the `05` reconciler cadence until container expiry (~24 h). Expiry reached with no `PUBLISHED` observation ⇒ one final stories check for the window ⇒ still inconclusive ⇒ `review_required`, with the full evidence trail written to `last_error.evidence` (statuses seen, timestamps, stories-window result) for the operator surface (06 §5).
+- Every reconciler (or operator-resolution) verdict also terminalizes the `provider_operations` row it judged — `ambiguous → succeeded|failed` with the evidence in `response_ref` — so no op row stays ambiguous after its intent resolves, and the `ix_ops_retire` retention class eventually covers everything.
 - The endpoint semantics above (container `status_code` vocabulary, stories lookback validity) join 0.4's primary-doc verification list — they are platform inputs under `05`'s revision rule.
 - Consequence for R1's honest wording (`01`): at-most-once *intended* publish is guaranteed by permit + fence + persisted container; the residual lost-response window always lands in `publishing_ambiguous`; a duplicate then requires both a lost response **and** an operator resolution error — the machinery never blind-retries.
+
+**Inbound admission dedup (the L.8 replay gate's schema home — pass-2 addition; `01` §Process roles cites this):**
+
+```sql
+CREATE TABLE command_dedup (
+  channel      TEXT NOT NULL,                   -- 'telegram' | 'web' | 'cli'
+  external_ref TEXT NOT NULL,                   -- telegram update_id; web/cli idempotency token
+  seen_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (channel, external_ref)
+);
+-- Idempotent admission: the adapter inserts before dispatching the command; a duplicate delivery
+-- hits the PK and is acknowledged without re-execution (200 replayed callbacks ⇒ one command).
+-- Rows age out via retention (`05`) — the replay window Telegram can produce is hours, the
+-- retention class keeps days.
+```
 
 `service_runs` (legacy ops bookkeeping) survives unchanged during the program and is retired at S.4 (`03`).
 
@@ -726,9 +820,11 @@ The first pass said "system actors use dedicated roles with explicit predicates"
 | Role | Policies (`USING (true)`) on | Writes permitted (grants) | Used by |
 |---|---|---|---|
 | `svc_claim` | jobs, provider_quarantine | UPDATE jobs | the claim transaction only (§5) |
-| `svc_clock` | workspaces, ig_accounts, media_sources, oauth_credentials (read); jobs, post_intents (insert) | INSERT jobs, INSERT post_intents (scheduled only — §4 insert guard), UPDATE next_* columns | scheduler-as-clock tick |
-| `svc_maintenance` | post_intents, jobs, channel_outbox, provider_operations, daily_post_counts, provider_quarantine, oauth_credentials, media_items, audit_events (insert), workspaces | UPDATE the swept tables; DELETE only: retention targets (audit_events, jobs, channel_outbox, provider_operations per `05` retention) + workspaces (offboarding cascade root) | reapers, reconciler, retention, comparator, offboarding |
-| `svc_migration` | all (during tracks) | per-track INSERT/UPDATE; sets `app.migration_mode` | backfills, dual-write mirrors |
+| `svc_clock` | workspaces, ig_accounts, media_sources, oauth_credentials (read via the payload-free view); jobs, post_intents (insert) | INSERT jobs, INSERT post_intents (scheduled only — §4 insert guard), UPDATE next_* columns | scheduler-as-clock tick |
+| `svc_maintenance` | post_intents, jobs, channel_outbox, provider_operations, daily_post_counts, provider_quarantine, oauth_credentials, media_items, post_locks, workspace_invitations, audit_events (insert), workspaces | UPDATE the swept tables; DELETE only the retention/expiry targets (audit_events, jobs, channel_outbox, provider_operations, daily_post_counts, post_locks, workspace_invitations, command_dedup, otp_challenges, session_tokens, oauth_states — the `05` retention + reap classes) + workspaces (offboarding cascade root) | reapers, reconciler, retention, comparator, offboarding |
+| `svc_migration` | all (during tracks) | per-track INSERT/UPDATE; identifies itself via `app.actor_kind='migration'` (§4 insert guard) | backfills, dual-write mirrors |
+
+**Auth-plane tables** (`07`: `otp_challenges`, `session_tokens`, `oauth_states`, `service_tokens`, plus `command_dedup` above) are deliberately **not tenant-RLS'd** — they are the door tenant context walks through (an OTP verify or OAuth callback happens before any `app.tenant_id` exists). They carry role-scoped `USING (true)` policies for `svc_ingress` only; no other role reads them. `workspace_invitations` IS tenant-scoped (accept runs post-auth, in tenant context) and follows the normal tenant policies.
 
 - **Execution-context flow:** claim commits under `svc_claim`; the worker then opens the job's domain transactions as `svc_worker` with `SET LOCAL app.tenant_id = job.workspace_id` (system jobs run as `svc_maintenance` instead — they are the enumerated sweeps). One connection may serve both phases: `SET LOCAL ROLE` inside each transaction selects the personality; nothing survives the commit.
 - **Grant matrix (beyond RLS):** runtime roles hold no DELETE on tenant tables (§0); nobody but `svc_maintenance` holds DELETE on anything; `audit_events` grants: INSERT to all service roles, UPDATE to none, DELETE to `svc_maintenance` only; `oauth_credentials.encrypted_payload` is SELECTable only by `svc_worker`/`svc_ingress` (credentials service paths) — `svc_clock` reads scheduling columns through a view without the payload column (`vw_credentials_schedule`).
@@ -739,13 +835,13 @@ The first pass said "system actors use dedicated roles with explicit predicates"
   4. `ALTER TABLE t ALTER COLUMN col SET NOT NULL;`  — PostgreSQL uses the validated CHECK to skip the scan
   5. `ALTER TABLE t DROP CONSTRAINT ck_t_col_nn;`
 - Enablement discipline per table: zero-NULL gates before and after cutover; the RLS harness runs as the exact runtime roles, no owner privileges, no session-affinity assumptions (#722 P0-09, kept verbatim).
-- Known limit, mitigated not ignored: integrity errors bypass RLS and can act as cross-tenant existence oracles. Every unique key on tenant-scoped tables leads with `workspace_id` and ids are UUIDs, so no enumerable oracle exists; `uq_publish_exclusive` (key 4) is the one deliberate exception, leaking only "some workspace is publishing to this real account" — accepted, documented, and kept out of logs/user-visible errors by the 07 hygiene rule (internal ids in every log line and error payload, never `provider_account_ref`).
+- Known limit, mitigated not ignored: integrity errors bypass RLS and can act as cross-tenant existence oracles. Unique keys on tenant-scoped tables lead with `workspace_id` and ids are UUIDs, so the general surface has no enumerable oracle. The complete inventory of deliberate exceptions (pass-2 correction — there are three, not one): **`uq_publish_exclusive`** (key 4) leaks "some workspace is publishing to this real account" — swallowed into the defer path, never user-visible; **`uq_binding_external`** leaks "this Telegram chat is already bound somewhere" on enumerable chat ids — inherent to the product (a chat cannot be double-bound, and the person probing must already be adding the bot to that chat); **`uq_ops_business_key`** is keyed on unguessable intent UUIDs — structurally not an oracle. Log/error hygiene per the 07 rule (internal ids everywhere, never `provider_account_ref`).
 
 ## §8. Two caps, never conflated
 
 - **Product cadence cap** — ours: `daily_post_counts` in the account's effective tz, calendar-day semantics, atomically debited in the approved→publishing transaction (§4 SQL), refunded on failure against the recorded debit day. The only cap we count locally.
-- **Meta publish cap** — theirs: 25 per rolling 24 h per real account, enforced by Meta on the publish step (error 9). Never counted locally (rolling window + out-of-band posts make local counters wrong by construction — vault doc). On error 9: defer with `available_at` derived from provider-reported usage — a cap, not a fault, so no quarantine row.
-- **The advisory pre-check is lazy, inline, and shared — never a poller.** There is **no background refresh job** (no such kind exists in the §5 registry — an implementer following this plan cannot build one). The check runs inside the publish pipeline, immediately before the §4 flip transaction, against an in-process cache keyed on **`provider_account_ref`** (shared across duplicate workspace rows of one real account), TTL per `05`. Worst-case provider load is therefore ≤ one usage query per publish attempt — strictly bounded by publish traffic itself, never by account count. (First-pass defect, review B§6: a 5-min per-account cache read as an eager refresher is up to 1,000 queries/min at the FC-0 envelope against ~87 publishes/min of real work — the advisory mechanism would have manufactured the very load it advises about, buying no correctness since error 9 is authoritative regardless.) Miss/stale/error on the pre-check ⇒ proceed to the flip; error 9 remains the arbiter.
+- **Meta publish cap** — theirs (`05` platform inputs: 25 / rolling 24 h / real account), enforced by Meta on the publish step (error 9). Never counted locally (rolling window + out-of-band posts make local counters wrong by construction — vault doc). On error 9: defer with `available_at` derived from provider-reported usage — a cap, not a fault, so no quarantine row. Manual-mode posts (§4) debit only OUR cap; Meta's applies to API publishes alone.
+- **The advisory pre-check is lazy, inline, and shared — never a poller.** There is **no background refresh job** (no such kind exists in the §5 registry — an implementer following this plan cannot build one). The check runs inside the publish pipeline, immediately before the §4 flip transaction, against an in-process cache keyed on **`provider_account_ref`** (shared across duplicate workspace rows of one real account), TTL per `05`. Worst-case provider load is therefore ≤ one usage query per publish attempt — strictly bounded by publish traffic itself, never by account count. (First-pass defect, review B§6, quoted at its pass-1 envelope: up to 1,000 queries/min against ~87 publishes/min; at `05`'s corrected multi-account inputs the same eager reading is ~1,500/min against ~130/min — see D21. The advisory mechanism would have manufactured the very load it advises about, buying no correctness since error 9 is authoritative regardless.) Miss/stale/error on the pre-check ⇒ proceed to the flip; error 9 remains the arbiter.
 
 ## §9. Legacy → target mapping (all 14 current tables + ledger accounted for)
 
@@ -762,9 +858,9 @@ Every re-key runs on the six-stage machine (`04` §Ground rules). Column-level m
 | `media_items` | `media_items` re-keyed (`chat_settings_id`→workspace via its chat; `source_type/identifier` → source_id/provider_file_ref; NULL-tenant legacy rows follow the 044 sole-tenant rule, ratified). **Precondition: per-workspace hash dedup remediation (W.3 gate)** |
 | `media_posting_locks` | `post_locks` (kind mapping in §2; `locked_until`→expires_at; permanent = NULL, kept) |
 | `posting_queue` | `post_intents` working states — pending→scheduled · processing→prompt_pending · sent_unconfirmed→prompt_pending · delivered→awaiting_approval · publishing→publishing · failed→failed(terminal); `instagram_container_id`→ig_container_id; telegram message/chat ids → `channel_outbox` rows with `external_message_ref` |
-| `posting_history` | `post_intents` terminal states (posted/failed/skipped/rejected/expired map 1:1; `posting_method`/usernames → audit detail; `instagram_media_id`/`instagram_story_id`/permalink → ig_media_id/ig_permalink; `queue_item_id` → legacy_queue_item_id) — inserted under `app.migration_mode` (§4 insert guard) |
+| `posting_history` | `post_intents` terminal states (posted/failed/skipped/rejected/expired map 1:1; `posting_method`/usernames → audit detail; `instagram_media_id`/`instagram_story_id`/permalink → ig_media_id/ig_permalink; `queue_item_id` → legacy_queue_item_id) — inserted as actor `migration` (§4 insert guard) |
 | `category_post_case_mix` | **kept row-shaped** (it is a Type 2 SCD table today — `workspaces.category_mix` JSONB from the first pass is struck): `category_post_case_mix` re-keyed to `workspace_id`, SCD semantics unchanged, sum-to-1 stays service-enforced (a cross-row DB constraint would need a deferred aggregate trigger; not worth its complexity — recorded trade-off) |
-| `onboarding_sessions` | kept, re-keyed: `user_id` stays; `pending_chat_settings_id` → `pending_workspace_id`; step vocabulary widened for the web path (07 §signup): `naming`,`awaiting_group`,`connect_email`,`complete`; 24 h expiry + `UNIQUE(user_id)` kept |
+| `onboarding_sessions` | kept, re-keyed: `user_id` stays; `pending_chat_settings_id` → `pending_workspace_id`; step vocabulary widened for the web sign-in path (07 §1): `naming`,`awaiting_group`,`connect_email`,`complete` — this row is the step list's normative home; 24 h expiry + `UNIQUE(user_id)` (one live session per user) kept |
 | `audit_log` | merged into `audit_events` (entity_type/action/field/old/new → entity_kind + detail; rows migrated verbatim into `detail`) |
 | `service_runs` | kept as-is + nullable `workspace_id`; retired at S.4 (`03`) |
 | `schema_version` | superseded by the 0.2 runner's `schema_migrations` ledger (`04` 0.2 — richer metadata; old table retained read-only until W-phase contract) |

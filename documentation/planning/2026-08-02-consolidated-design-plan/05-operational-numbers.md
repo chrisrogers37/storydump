@@ -60,7 +60,9 @@ Derived:
 | Backfill batch / comparator window | 5,000 rows / 14 days | six-stage machine inputs (`04` §Ground rules) |
 | Approval TTL default (`approval_ttl_minutes` NULL) | 1,440 min (24 h) | workspace seam; reaper clock (`02` §4) |
 | Offboarding | grace window 30 days; publish-drain timeout 15 min; revocation retry 3 × 1 h backoff | `06` §1 workflow |
-| Invitations / OTP / sessions / OAuth state | invite expiry 7 d · OTP 10 min, 5 attempts, issue rate 3/h/email · session 30 d sliding · state token 15 min | `07` §§1–2 |
+| Invitations / OTP / sessions / OAuth state | invite expiry 7 d · OTP 10 min TTL, 5 verify attempts · session 30 d sliding · state token 15 min | `07` §§1–2 |
+| Pre-auth admission (unauthenticated surfaces) | OTP issue: 3/h per email, 10/h per source IP; other pre-auth endpoints 30/min per IP | `07` §1 — deliberately distinct from the per-workspace S.2 admission, which requires tenant context |
+| Retention sweep cadence | daily, batches of 5,000 per class, walking the `ix_*_retire` indexes | `02` §5 pattern; H5-bounded |
 | Re-auth campaign cadence | 1 prompt / account / week; "no media available" notice dedup 24 h | `06` §5, G.1 |
 | Card TTL (W.6 drop condition) | 30 days | `04` W.6 mechanical drop rule |
 
@@ -71,17 +73,21 @@ Derived:
 | `audit_events` | 400 d | COPY-export to archive, delete (export-or-abort, `07` §4) |
 | `jobs` terminal (succeeded/cancelled) | 30 d | delete |
 | `jobs` terminal (failed/review_required) | 90 d | delete |
-| `provider_operations` resolved | 90 d | delete |
+| `provider_operations` succeeded/failed | 90 d | delete (ambiguous rows are excluded — the reconciler terminalizes every one, `02` §6, so the class drains) |
 | `channel_outbox` sent/superseded | 30 d | delete |
 | `channel_outbox` failed/ambiguous | 90 d | delete |
 | `daily_post_counts` | 400 d | delete |
+| `session_tokens` expired/revoked | 30 d | delete |
+| `command_dedup` | 7 d | delete (Telegram's replay window is hours) |
+| Expiry-class rows (`post_locks`, `workspace_invitations`, `otp_challenges`, `oauth_states`) | on expiry | swept by `reap_expired` (`02` §5 remit), not this sweep |
 | `post_intents` terminal | **kept forever** | they ARE the posting history (product data, not bookkeeping) |
-| Contract-stage table dumps | 90 d | archive expiry (`04` ground rules) |
+| Contract-stage table dumps | 90 d | archive expiry |
 
 ## Backup / DR (review A §5.15)
 
 | Concern | Value |
 |---|---|
+| Archive location | the worker service's Railway persistent volume (`/archive`) — in-platform, no new vendor; holds contract-stage dumps + audit exports; revisit only if size approaches the volume limit |
 | PITR floor | Neon PITR window ≥ 7 days — verified at 0.2's gate and re-checked when the plan changes |
 | RPO | Neon continuous WAL (~minutes) — no additional mechanism |
 | RTO target | 1 h (restore branch + repoint DATABASE_URL + smoke suite) |

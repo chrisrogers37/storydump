@@ -2,7 +2,7 @@
 
 The auth, secrets, and integrity designs review A §5.10–14 found missing. Same DDL conventions as `02` §0. Everything here is v1-executable; each mechanism names its increment in `04`.
 
-## §1. Web sign-in: email OTP + sessions (X.3/X.4; builds at W.6-adjacent web work)
+## §1. Web sign-in: email OTP + sessions (X.3; session infrastructure shared with W.6's web surfaces)
 
 ```sql
 CREATE TABLE otp_challenges (
@@ -11,8 +11,8 @@ CREATE TABLE otp_challenges (
   code_hash    TEXT NOT NULL,                   -- argon2id of the 6-digit code; plaintext never stored
   purpose      TEXT NOT NULL DEFAULT 'signin'
                CONSTRAINT ck_otp_purpose CHECK (purpose IN ('signin','email_change')),
-  attempts     INTEGER NOT NULL DEFAULT 0,      -- verify attempts; hard cap 5 then dead
-  expires_at   TIMESTAMPTZ NOT NULL,            -- now() + 10 min at issue (05 seam)
+  attempts     INTEGER NOT NULL DEFAULT 0,      -- verify attempts; hard cap then dead (05 seam)
+  expires_at   TIMESTAMPTZ NOT NULL,            -- now() + OTP TTL at issue (05 seam)
   consumed_at  TIMESTAMPTZ NULL
 );
 CREATE INDEX ix_otp_live ON otp_challenges (email) WHERE consumed_at IS NULL;
@@ -28,8 +28,8 @@ CREATE TABLE session_tokens (
 );
 ```
 
-- **Issue:** rate-limited per email and per source IP (the `05` admission seam); each issue invalidates prior live challenges for the email (`consumed_at = now()` sweep in the issue transaction).
-- **Verify:** one-shot compare-and-consume — `UPDATE otp_challenges SET consumed_at = now() WHERE id = :id AND consumed_at IS NULL AND expires_at > now() AND attempts < 5 RETURNING code_hash` then argon2 verify; a failed verify increments `attempts`. Success upserts `user_identities(provider='email_otp', external_id=email, verified_at=now())` (creating the `users` row on first sign-in) and issues a session.
+- **Issue:** rate-limited per email and per source IP — the **pre-auth admission row in `05`**, a mechanism deliberately distinct from the per-workspace S.2 admission (which is fail-closed on tenant context and structurally cannot serve unauthenticated requests). Each issue invalidates prior live challenges for the email (`consumed_at = now()` sweep in the issue transaction).
+- **Verify:** one-shot compare-and-consume — `UPDATE otp_challenges SET consumed_at = now() WHERE id = :id AND consumed_at IS NULL AND expires_at > now() AND attempts < :otp_max_attempts RETURNING code_hash` (`05` seam) then argon2 verify; a failed verify increments `attempts`. Success upserts `user_identities(provider='email_otp', external_id=email, verified_at=now())` (creating the `users` row on first sign-in) and issues a session.
 - **Sessions:** opaque random 256-bit value in an httpOnly/SameSite=Lax/secure cookie; only the hash is stored; verification is one indexed lookup + expiry/revocation check; sliding renewal. Sign-out and admin revoke set `revoked_at`. There is no JWT for human web sessions — JWTs exist only where W.6's consumer contract already has them (BFF/API), gaining the additive `workspace_id` claim there.
 - **Recovery:** none beyond OTP itself — the email **is** the factor. Email change = OTP challenge with `purpose='email_change'` against the *new* address from an authenticated session, then the identity's `external_id` swaps in one audited transaction. Losing the mailbox loses the account (v1 posture, documented; Telegram-identity users are unaffected — different provider row).
 
@@ -43,10 +43,12 @@ CREATE TABLE oauth_states (
   provider      TEXT NOT NULL CONSTRAINT ck_oauth_state_provider CHECK (provider IN ('ig_login','gdrive')),
   purpose       TEXT NOT NULL CONSTRAINT ck_oauth_state_purpose CHECK (purpose IN ('connect','reconnect')),
   reconnect_target UUID NULL,                   -- ig_account_id | media_source_id when purpose='reconnect'
-  expires_at    TIMESTAMPTZ NOT NULL,           -- now() + 15 min
+  expires_at    TIMESTAMPTZ NOT NULL,           -- now() + state-token TTL (05 seam)
   consumed_at   TIMESTAMPTZ NULL
 );
 ```
+
+RLS class: `otp_challenges`, `session_tokens`, `oauth_states`, and `service_tokens` are **auth-plane tables** — role-scoped `USING (true)` policies for `svc_ingress` only, no tenant RLS, because they are the door tenant context walks through (`02` §7 states the class; their expiry/retention classes are `05` rows swept by `reap_expired`/`retention_sweep`).
 
 - Issued only from an authenticated session whose user holds admin+ in `workspace_id` (checked at issue AND at callback — the row pins both, so a callback cannot be replayed into a different workspace).
 - Callback consume is one-shot CAS (`… WHERE state = :s AND consumed_at IS NULL AND expires_at > now() RETURNING …`); a consumed/expired/unknown state is rejected cold. CSRF safety comes from the state being unguessable, single-use, and session-bound.
@@ -61,13 +63,13 @@ CREATE TABLE oauth_states (
 
 ## §4. Audit integrity and retention (review A §5.13)
 
-- **Append-only in the database:** no role holds UPDATE on `audit_events`; DELETE only via `svc_maintenance`'s retention sweep (`02` §7). The §4 audit trigger's GUC requirement means every state change carries a named actor — including break-glass psql sessions (below).
-- **Retention:** `05` table — audit rows kept 400 days, then swept. Before each sweep batch is deleted it is COPY-exported to the archive location (`05`); the sweep aborts if the export fails. (v1 archive = object storage dump; queryability of archives is explicitly not a v1 feature.)
+- **Append-only in the database:** no role holds UPDATE on `audit_events`; DELETE only via `svc_maintenance`'s retention sweep (`02` §7). The `02` §4 audit trigger's GUC requirement means every state change carries a named actor — including break-glass psql sessions (below).
+- **Retention:** `05` table — audit rows kept 400 days, then swept. Before each sweep batch is deleted it is COPY-exported to the archive location (`05` §DR names it: the worker service's persistent volume); the sweep aborts if the export fails. Queryability of archives is explicitly not a v1 feature.
 - **Redaction rule:** `detail` JSONB never contains secrets, tokens, OTP codes, or `provider_account_ref` (internal UUIDs only); enforced by the writer helper everything routes through + a test that greps captured audit output in the harness. Tamper evidence beyond grants (hash chains, signed exports) is explicitly not v1 — the stated integrity level is "no role can rewrite history without leaving a grant violation," which is what the grant matrix delivers.
 
 ## §5. Existence-oracle and log hygiene (review A §5.14)
 
-The one deliberate cross-tenant key (`uq_publish_exclusive` on `provider_account_ref`) leaks, at most, "some workspace is publishing to this real account" — through constraint-violation timing only, since (`02` §4) the violation is swallowed into the defer path and never surfaces to a user. The hygiene rule that keeps it that way everywhere else:
+The deliberate cross-tenant keys are inventoried in `02` §7 (three, with per-key leak analysis; the material one — `uq_publish_exclusive` — is swallowed into the defer path and never surfaces to a user). The hygiene rule that keeps the rest of the output surface oracle-free:
 
 - Logs, metrics labels, user-visible errors, and audit `detail` reference internal UUIDs (`ig_accounts.id`, `workspaces.id`) — never `provider_account_ref`, handles being user-chosen display data are fine.
 - Provider identifiers appear exactly twice in the system's output surface: inside `oauth_credentials` (encrypted) and inside provider adapter calls. A grep-shaped CI check (F.6 ratchet mechanism, second pattern list) holds `provider_account_ref` out of logging call sites.
