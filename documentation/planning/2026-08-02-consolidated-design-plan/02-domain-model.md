@@ -259,10 +259,12 @@ CREATE INDEX ix_ig_accounts_due ON ig_accounts (next_slot_at)
 -- tombstones excluded from uniqueness so an account can move away and later return (06 §movement).
 -- Real-account concurrency and Meta budgets key on provider_account_ref, never our row id
 -- (§3 key 4, §8). Account-level fault quarantine lives ONLY in provider_quarantine.
--- State transitions (complete): active → reauth_required (refresh failure / provider revocation,
--- 07 §3) · reauth_required → active (reconnect swaps the credential payload, 07 §2) ·
--- active ↔ disabled (user command, audited) · {active,reauth_required,disabled} → moved
--- (06 §4, terminal). The dispatcher's due-scan predicate reads state='active' only.
+-- State transitions (complete): active → reauth_required (refresh failure / provider revocation
+-- (07 §3) / definitive publish-time auth-rejection — the §2 credential liveness edge (D31), same
+-- transaction as the credential flip) · reauth_required → active (reconnect swaps the credential
+-- payload, 07 §2) · active ↔ disabled (user command, audited) ·
+-- {active,reauth_required,disabled} → moved (06 §4, terminal). The dispatcher's due-scan
+-- predicate reads state='active' only.
 
 CREATE TABLE provider_quarantine (
   workspace_id      UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
@@ -366,7 +368,9 @@ CREATE INDEX ix_credentials_refresh_due ON oauth_credentials (next_refresh_at)
 -- Typed XOR owner FKs (not polymorphic) so the composite-FK convention holds on the MOST
 -- sensitive table (C4). The per-account unique keys by provider, which is what lets one account
 -- hold an ig_login and a fb_login_legacy row simultaneously during G-phase (legacy 040 semantics).
--- State transitions (complete): active → expired (refresh determines the token is gone) ·
+-- State transitions (complete): active → expired (a definitive provider auth-rejection observed
+-- on ANY Meta call — scheduled refresh, publish pipeline, or the §8 pre-check if enabled — or the
+-- 07 §3 decrypt failure; the liveness-edge paragraph below states the discrimination) ·
 -- active → revoked (user disconnect / offboarding / account movement — the move transaction
 -- revokes the source row as it copies the payload to the target workspace, 06 §4: a move, not a
 -- fork; exactly one active row per grant, so refresh can never diverge two copies) ·
@@ -378,6 +382,20 @@ CREATE INDEX ix_credentials_refresh_due ON oauth_credentials (next_refresh_at)
 --     CHECK (provider <> 'fb_login_legacy') NOT VALID;
 -- (existing rows tolerated, new rows impossible — VALIDATEd then dropped with the enum value at
 -- the FC-4 sunset G.2, together with uq/ix cleanup.)
+-- THE CREDENTIAL LIVENESS EDGE (D31): 'expired' is a PROVIDER-VERDICT state, not a calendar
+-- state — "the provider definitively rejected this credential", from whichever call observed it.
+-- Definitive = an auth-class rejection (Meta error 190 without a revocation subcode; the
+-- unparseable-token class per the corrupt-phrase discrimination already proven on main), never a
+-- transient network/5xx/429/timeout fault — those stay in the R8 retry taxonomy and
+-- provider_quarantine, which this edge does not touch. The observing worker performs BOTH flips
+-- in the SAME transaction as the failure it is recording: this row → 'expired' and the owning
+-- ig_accounts row → 'reauth_required' (§2 above). The dispatcher then mints no further intents
+-- for the account, the reauth machinery prompts (06 §5), and reconnect (07 §2) restores
+-- 'active'. Publish-time provider rejections are the abundant, free liveness signal: a
+-- dead-but-calendar-valid token costs exactly ONE wasted attempt before dispatch stops, bounded
+-- otherwise by the 05 refresh cadence — the scheduled refresh doubles as the liveness probe.
+-- Tenant-plane writes only, by the worker that already holds these UPDATEs (it executes
+-- refresh_credential): no new state, no new job kind, no new grants.
 
 CREATE TABLE media_items (
   id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
