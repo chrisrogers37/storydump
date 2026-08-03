@@ -4,7 +4,7 @@ These are rulings, not proposals. An implementer or reviewer who believes one is
 
 ## FC-0 — Envelope: thousands of tenants (prior ruling)
 
-Design and size for **thousands of provisioned workspaces** (working figure: 5,000 provisioned, ~25% concurrently active), not the ~200 the cold design originally used and not #721's single-process non-goal. This alone mandates multi-service topology and horizontal scale-out (see `03` C2).
+Design and size for **thousands of provisioned workspaces** (working figure: 5,000 provisioned, ~25% concurrently active), not the ~200 the cold design originally used and not #721's single-process non-goal. The envelope mandates horizontal scale-out; the three-role split additionally rests on fault-isolation and deploy-independence grounds stated in `03` C2 (as amended in pass 2 — tenant cardinality alone does not mandate role separation).
 
 ## FC-1 — Tenant identity: users own workspaces; workspaces own Instagram accounts
 

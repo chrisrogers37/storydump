@@ -1,6 +1,6 @@
 # Consolidated design plan — multi-tenant storydump (2026-08-02)
 
-**Status:** proposed — awaiting human ratification. Documentation only; no runtime behavior changes in this PR.
+**Status:** proposed — awaiting human ratification. Documentation only; no runtime behavior changes in this PR. Second design pass applied (Codex reviews A/B on this PR: executable DDL + database-enforced invariants, multi-account semantics, effect/reconciliation contracts, corrected sequencing). **One fork is open for the product owner: PA-1 in `03` (provider-account identity across workspaces); implementers build its default (a) until ruled.**
 **Supersedes:** the standalone adoption of either prior package (see Authority, below).
 **Executable by:** an implementer working increment-by-increment from `04-execution-sequence.md` with zero design judgment calls — every shape, key, state, number, and gate is stated here or explicitly incorporated by path.
 
@@ -29,7 +29,9 @@ This plan is the single consolidated output. Its spine is the cold design — th
 - `02-domain-model.md` — full schema, state machines with complete transition matrices and failure terminals, uniqueness keys, RLS.
 - `03-decision-record.md` — every contested decision: what was decided, the requirement it serves, what it supersedes, reversibility.
 - `04-execution-sequence.md` — the single consolidated increment sequence (supersedes both packages' phase plans), with exit gates and traceability to #722's P0/P1 items and #730's Rs.
-- `05-operational-numbers.md` — initial values for every operational setting (the package-level gap both priors left open), with derivations and the revision rule.
+- `05-operational-numbers.md` — initial values for every operational setting (the package-level gap both priors left open), with derivations, retention/DR tables, and the revision rule.
+- `06-product-lifecycles.md` — workspace/membership lifecycles, multi-account scheduling semantics, account movement, customer-visible failure behavior, named non-goals.
+- `07-security-model.md` — web sign-in (OTP + sessions), OAuth state binding, credential encryption + key rotation, audit integrity, oracle/log hygiene, first-party API auth.
 
 ## Authority and supersession
 

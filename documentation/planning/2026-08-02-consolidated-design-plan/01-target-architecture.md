@@ -5,9 +5,9 @@
 Derived from the product and platform, validated by cross-check and #730. `RF-Rn`/`RF-Gn` elsewhere in this plan cite `review-findings.md` (#730); bare `Rn`/`Tn`/`Hn` cite this ledger.
 
 **Correctness invariants**
-- **R1** At-most-once IG publish per approved item — over-posting to a customer's account is the worst failure. Claim-before-publish; container id persisted before the publish call.
-- **R2** Cadence caps enforced atomically per (workspace, account, local day) — no check-then-act gap under concurrent approvals.
-- **R3** Exactly one immutable terminal record per posting attempt, enforced by schema constraint, not application discipline.
+- **R1** At-most-once **intended** IG publish per approved item — over-posting to a customer's account is the worst failure. Claim-before-publish; container id persisted before the publish call; the residual lost-response window (request reached Meta, confirmation lost) always routes to `publishing_ambiguous` and is resolved by evidence, never by retry — a duplicate therefore requires both a lost response *and* an operator resolution error (`02` §6 states the guarantee's exact boundary).
+- **R2** Cadence caps enforced atomically per (workspace, account, account-local day) — no check-then-act gap under concurrent approvals.
+- **R3** Exactly one immutable terminal record per posting attempt, **database-enforced (constraint or trigger), never application discipline** — the enforcing objects are named in `02` §4.
 - **R4** Workspace-scoped repost prevention keyed on content hash; TTL and permanent lock semantics; no global hash namespace.
 - **R5** Every user interaction answered fast, even when the work continues async.
 - **R6** Prompts expire gracefully: terminal-state-first reads — a late interaction renders the terminal state, never acts on a stale row.
@@ -30,7 +30,7 @@ Derived from the product and platform, validated by cross-check and #730. `RF-Rn
 
 ## Workload truth (sets every ceiling)
 
-Meta caps API publishing per real account (25 / rolling 24 h, enforced on the publish step) and per user (200 calls/hr) — so throughput comes from account count, never posting faster. At the FC-0 envelope the fleet publish ceiling is ~1.45/s and interactive peaks reach the low tens per second; each publish is a long-latency I/O pipeline while interactions are latency-sensitive small operations. The defining requirement is lane isolation (H2/T2), not raw rate. **All figures, their derivations, and the bounding-case definition live in `05-operational-numbers.md` — the only home; do not re-derive or copy without citing it.**
+Meta caps API publishing per real account (25 / rolling 24 h, enforced on the publish step) and per user (200 calls/hr) — so throughput comes from account count, never posting faster. At the FC-0 envelope (with the FC-1 multi-account correction to the bounding account count) the fleet publish ceiling is ~2.2/s and interactive peaks reach the low tens per second; each publish is a long-latency I/O pipeline while interactions are latency-sensitive small operations. The defining requirement is lane isolation (H2/T2), not raw rate. **All figures, their derivations, and the bounding-case definition live in `05-operational-numbers.md` — the only home; do not re-derive or copy without citing it.**
 
 ## Process roles
 
@@ -61,7 +61,7 @@ The domain is already channel-neutral at its heart — an approval is a state on
 - **Two lanes with reserved capacity** (`interactive` / `bulk`): bulk can never occupy interactive capacity (H2, T2).
 - **Per-key serialization:** a job whose `serialization_key` has a running peer is skipped by the claim query. Publish serialization keys on the **provider account ref** (Meta IG user id) — one in-flight publish per *real* account even when it appears in multiple workspaces (H1, G1 in `03`).
 - **Leases + step checkpoints (R7):** publish is a resumable pipeline; each step checkpoints on the intent row (`02` §ledger). Dead worker → lease expires → job resumes at the checkpoint; a resumed stale owner is fenced and cannot produce a second provider effect.
-- **Ambiguity is owned (R8):** `publishing_ambiguous` intents belong to a reconciler job (bounded LIMIT sweeps, cadence in `05`) that reads back IG and terminalizes either way.
+- **Ambiguity is owned (R8):** `publishing_ambiguous` intents belong to a reconciler job (bounded LIMIT sweeps, cadence + evidence budget in `05`) running the `02` §6 evidence contract — container status decides; an exhausted budget parks the intent `review_required` for a human, never a blind retry.
 - **Quarantine, not global circuit-breaking (T2):** provider faults write a `provider_quarantine` row at the (workspace, provider[, account]) grain (`02` §quarantine); the claim query defers matching jobs with backoff, the workspace gets one alert on quarantine entry, everyone else is untouched.
 - **Demand-driven sync (H4):** pre-slot sync when a slot approaches and the source is stale; on-demand via command; slow jittered baseline for idle workspaces; first-time large-library ingest as chunked, checkpointed bulk jobs. Everything bounded per H5.
 

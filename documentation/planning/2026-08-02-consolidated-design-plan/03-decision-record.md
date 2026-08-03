@@ -20,7 +20,7 @@ Citation conventions: **EP/IP/SE/TT** = `../2026-07-29-high-throughput-multi-ten
 
 **C1 — Tenant root: `workspaces.id` (ruled).** FC-1 flips the earlier chat-rooted default: the pre-ruling adjudication kept `chat_settings.id` as the physical key because a rename bought zero isolation while costing a dual-key window; the product owner then ruled that multi-workspace/multi-account/multi-surface is the product. That is the exact contingency the default reserved ("if web-first onboarding / multi-chat / chatless tenants are on the roadmap, the workspace root should win now"). #722's neutral-`tenant_id`-at-service-boundaries rule is what makes the flip affordable: service code re-keys once, to the neutral name; only resolution changes. #721's workspaces *direction* is thereby resurrected; its letter is not (24 recorded quality flags — the five load-bearing ones are cited in this plan as FLAG-1/2/3/7/10; the full inventory is fleet-side working-set material, available on request, and nothing here depends on the other nineteen).
 
-**C2 — Topology: multi-service (ruled by envelope).** FC-0 (thousands of tenants) overrules #721's single-process non-goal (N3). Decided by the product owner's envelope, not by taste.
+**C2 — Topology: multi-service (envelope-ruled scale-out; role separation justified on its own grounds).** FC-0 (thousands of tenants) overrules #721's single-process non-goal (N3) for **horizontal replicas** — that much is the product owner's envelope. The three-**role** split is justified separately (pass-2 correction, review A §4.3: tenant cardinality alone does not mandate role separation): (1) R5/H2 fault isolation — a poisoned publish pipeline must not take down ingress ack latency; (2) webhook ingress needs an always-up HTTP surface deploy-decoupled from workers; (3) the deployment already runs API and worker as two Railway services today — the target topology is the status quo plus an elected clock, not new machinery.
 
 **C4 — RLS: enforce early, constant-expression policies.** RF-R3 as ratified (see map above); #721's RLS-later posture (N7) overruled; #721's composite tenant FKs (D12) kept — they complement RLS, catching what policies structurally cannot (cross-workspace FK references). Extended to credentials by the typed XOR owner FKs in `02` §2 (a polymorphic owner id would have broken the convention exactly where tokens live).
 
@@ -71,6 +71,38 @@ FC-1/FC-2/FC-3/FC-4 are constraints, not adjudications — see `00`. Two derived
 - `integration_connections` concept → typed `oauth_credentials` (`02` §2, FLAG-1 fixed via typed owner FKs).
 - Settings materialization (D9) → `workspaces` config columns + `channel_bindings.settings`.
 - Onboarding merge (D10) → `onboarding_sessions` re-keyed to (workspace, user).
+
+## Second-pass decisions (Codex reviews A/B, 2026-08-02→03)
+
+Same relitigation rule as above. "A §n"/"B §n" cite the two review comments on PR #731.
+
+**D13 — Chat cardinality 0..n per workspace is deliberate.** A §2 flagged it as a silent change to #721's one-chat v1 restriction. It is FC-1.3 applied (a Telegram identity manages one-to-many workspaces; web-only workspaces are legal), now recorded: the widening is a decision, not drift. `uq_binding_external` still binds each external chat exactly once globally.
+
+**D14 — R3's mechanism: frozen ledger row, not an outcomes table.** The immutable terminal record is the terminal `post_intents` row itself, made immutable by database machinery (`02` §4: legal-edge reference table + BEFORE UPDATE freeze trigger + AFTER UPDATE audit trigger requiring a named actor + INSERT guard + state-completeness CHECKs). The alternative — a separate terminal-outcomes table — was considered and **rejected**: a second terminal-truth home is precisely the queue/history seam (RF-G1) D1 kills. R3's ledger wording is amended to "database-enforced (constraint or trigger), never application discipline" — the honest claim for what triggers deliver (A §3.1, B §3: implement or drop — implemented).
+
+**D15 — Enums are TEXT + named CHECK, never native ENUM.** Members must be removable (`fb_login_legacy` dies at G.2; native `DROP VALUE` does not exist), and the existing enum-SSOT parity gate already verifies CHECK text. `02` §0.
+
+**D16 — ON DELETE is a three-class policy, not per-FK judgment.** Workspace-rooted/tenant-child edges CASCADE (deletion happens exactly once, at offboarding, by `svc_maintenance` — runtime roles hold no DELETE); `users` attributions SET NULL; `audit_events` carries no FK (audit outlives the tenant; retention is its only death). `02` §0. Replaces #721's per-FK RESTRICT posture (A §3.3 noted we carried nothing): CASCADE-from-root composes with T3 offboarding, and the two NO-CASCADE composite FKs on `post_intents` keep mid-life deletion of referenced rows impossible.
+
+**D17 — Cloudinary is off the provider-operations rail.** Pass 1 gave upload/destroy the same at-most-once weight as IG publish; A §4.6 is right that recoverable, TTL-reaped effects do not need an effect rail. `provider_operations` covers `ig` only; Cloudinary state lives in job attempts + audit. Reversal cost if wrong: re-adding a provider value is one CHECK migration.
+
+**D18 — Scheduling is per account; the workspace holds defaults (FC-1 completion).** Cadence, window, tz, and the slot cursor live on `ig_accounts` (NULL = inherit workspace column); caps debit per (workspace, account, account-local day); `recent` locks are account-scoped, human-judgment locks workspace-scoped; approvals carry the target account. `06` §3 is the normative statement (answers A §5.4/5.5, B §2's scheduling half).
+
+**D19 — Account movement is clone-and-retire.** New row in target workspace, credential ciphertext copied (the token is an app+user grant — it moves without provider ceremony), source row terminal `'moved'` and excluded from live uniqueness; history/counts/locks stay home; zero live intents precondition; admin+ in both workspaces. In-place re-key is inexpressible by design (composite FKs). `06` §4 (answers A §3.6).
+
+**PA-1 — OPEN FORK (ratifier: product owner): provider-account identity across workspaces.** B §2's question — may unrelated users connect the same real Instagram account, and what is the authority model? **(a) Independent connections** (the default this plan implements; DDL as in `02` §2): each workspace's connection is its own OAuth grant — independently refreshed, revoked, quarantined, alerted; possession of the Instagram login is the authority boundary (Meta's, not ours); global publish serialization + Meta budgets already key on `provider_account_ref`. **(b) Global single-ownership**: one live row per real account fleet-wide (partial unique), connect-elsewhere blocked, movement = transfer. (b) is one migration away from (a); nothing else in the plan changes. Recommendation on record: (a) — the platform fact that tokens are independent per-grant makes (b) a product restriction, not a technical necessity. **Until ruled, implementers build (a).**
+
+**D20 — Transaction substrate: the final async UoW, built at L.0, before any Phase-L machinery.** B §5 demanded the decision; A conflict I named the double-rewrite cost of deferring it. Phase L is all new code — it is born async on the final substrate; legacy sync paths keep their session until their cutovers; S.3 keeps egress hardening only.
+
+**D21 — The Meta usage pre-check is lazy, inline, and keyed on `provider_account_ref` — the eager reading is struck.** B §6 (the finding both reviews initially missed): a 5-min per-account cache read as a refresher is ~1,500 queries/min at the corrected envelope against ~130 publishes/min of real work — the advisory mechanism manufacturing the load it advises about. No background refresh exists (no job kind); cost is bounded by publish traffic; error 9 stays authoritative. `02` §8.
+
+**D22 — Admission is per-workspace only; there is no global command ceiling.** A §4.1 / B's S.2 criticism accepted: no app-wide platform budget exists to protect; a fleet-wide fixed ceiling invents a bottleneck. Global protection = bounded pools + backpressure visibility. `04` S.2, `05`.
+
+**D23 — Category mix keeps its row shape.** Ground truth: `category_post_case_mix` is a Type 2 SCD table; pass 1's `workspaces.category_mix` JSONB would have flattened history for nothing. Re-keyed on the W.5 track, SCD semantics unchanged, sum-to-1 stays service-enforced (a deferred cross-row aggregate trigger was considered and rejected as complexity without a failure mode it prevents — the writer is one service). Settles A §3.14's delegated choice.
+
+**D24 — Runner ledger and chain reconciliation.** `schema_migrations` (checksums, advisory-lock serialization, postconditions, repair states) supersedes `schema_version`; migration 050 fix-forwards the known chain defects (004/008 orphaned unique, 010/034 missing stamps, caption_style type) so replay-from-empty equals production — with a `\d`-against-prod precondition before 050 is written. `04` 0.2 (answers A §3.26/§5.16).
+
+**Count-grain note (B comparison, for the record):** "5 blocking conflicts" was the cross-check's coarse count; A's A–P inventory is the same incompatibility at finer grain. Both reviews and this plan agree on the conclusion; neither count is a disagreement with the other.
 
 ## Overruled, explicitly
 
