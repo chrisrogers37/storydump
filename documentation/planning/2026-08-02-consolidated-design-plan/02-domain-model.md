@@ -189,11 +189,14 @@ CREATE TABLE workspace_invitations (
                                                 -- never a key: acceptance never resolves an
                                                 -- invitation by this column (D33)
   role            TEXT NOT NULL DEFAULT 'member'
-                  CONSTRAINT ck_invite_role CHECK (role IN ('member')),
-                  -- member-only BY LEAN (03 pass-4 items; ratifier: product owner): a forwarded
-                  -- link's blast radius is bounded to ordinary membership; elevation is a
-                  -- post-join role change (06 §2). Re-widening to admin invites is one CHECK
-                  -- edit if ruled otherwise. Never 'owner' either way.
+                  CONSTRAINT ck_invite_role CHECK (role IN ('admin','member')),  -- never 'owner'
+                  -- BOTH ruled (FC-6.4). role is the invitation's CEILING, not an unconditional
+                  -- grant: member and admin invites are NOT the same object with a different
+                  -- enum value — they carry different risk and therefore different accept rules
+                  -- (D36). An admin invite grants 'admin' at accept ONLY on a matched identity
+                  -- proof (accepted_email_matched = true); on the recorded-skip path it grants
+                  -- 'member' + an elevation-pending notification, and admin arrives only through
+                  -- the existing audited role-change gate (06 §2).
   invited_by_user_id UUID NULL REFERENCES users(id) ON DELETE SET NULL,
   state           TEXT NOT NULL DEFAULT 'pending'
                   CONSTRAINT ck_invite_state CHECK (state IN ('pending','accepted','revoked','expired')),
@@ -219,7 +222,15 @@ CREATE UNIQUE INDEX uq_invite_live ON workspace_invitations (workspace_id, email
 --    WHERE id=:id AND state='pending' AND expires_at > now() RETURNING id;
 -- zero rows ⇒ used/revoked/expired (a re-read distinguishes "already yours" from "someone else
 -- took it"); workspace_members' PK (workspace_id, user_id) is the double-membership guard —
--- already in the schema, nothing to add. uq_invite_live survives the nullable email: NULLs never
+-- already in the schema, nothing to add. THE MEMBER INSERT'S ROLE IS COMPUTED, NOT COPIED (D36):
+--   role='member' invite ⇒ 'member' · role='admin' + :m = true ⇒ 'admin' ·
+--   role='admin' + :m = false (recorded skip — token possession was the only proof) ⇒ 'member',
+--   and the SAME transaction writes an elevation-pending outbox notification to the inviter's
+--   surface (workspace binding / web), after which admin arrives only via the existing 06 §2
+--   role-change gate. The D33 audit boolean is thereby also an authorization input — written and
+--   read in one transaction, no TOCTOU. A forwarded or screenshotted admin link cannot silently
+--   produce an admin: every path to 'admin' is a matched identity proof or an explicit
+--   admin-performed role change. uq_invite_live survives the nullable email: NULLs never
 -- collide, so telegram-delivery rows are exempt by construction, and re-invitation is INSERT new
 -- + revoke prior in the same transaction — which the partial unique then ENFORCES rather than
 -- breaks. Expired rows flip state via reap_expired (§5 remit), never delete: audit facts either

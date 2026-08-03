@@ -80,3 +80,4 @@ Ruling: workspace invitations are **delivered by the app** — email, plus a Tel
 1. **The EmailSender port survives** with invitations as its consumer, and the email-provider ack (Resend as the swappable default) **reopens** as an owner item — surfaced, not silently re-closed (`03` pass-4 items).
 2. **Telegram delivery rides existing machinery only:** one new `channel_outbox` kind on the existing sender (`02` §6). Zero new senders, zero parallel delivery paths.
 3. **The accept credential is the invitation token** (`token_hash`), never the email address; email (and the Telegram-side hint) act as per-provider acceptance *constraints* — `03` D33, the day-one rule that makes Apple re-entry a flow increment rather than a model change.
+4. **Invitations carry member or admin (ruled 2026-08-03: "we want both"; never owner).** An admin invitation is a *ceiling* gated by `03` D36's elevation rule — a forwarded or screenshotted admin link cannot silently produce an admin.
