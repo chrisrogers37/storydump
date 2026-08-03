@@ -2,7 +2,7 @@
 
 Every contested point between #721, #722 (as amended by #730), the cold design, and the 2026-08-02 rulings — what was decided, why, and what it supersedes. Implementers do not relitigate these; a reviewer who finds new *evidence* (not a re-argument) escalates.
 
-Citation conventions: **EP/IP/SE/TT** = `../2026-07-29-high-throughput-multi-tenant/{epic,implementation-plan,self-evaluation,tiered-issue-triage}.md`; **RF-Rn / RF-Gn** = that package's `review-findings.md` (#730: required changes R1–R5, gaps G1–G2); **FC** = `00-fixed-constraints.md`; bare **Rn/Tn/Hn** = `01` §Requirements ledger. Decision ids (**Cn/Dn/Gn**) preserve the fleet-side adjudication numbering — they are stable identifiers, not sequential (absent numbers were absorbed into other items before this plan; nothing is missing).
+Citation conventions: **EP/IP/SE/TT** = `../2026-07-29-high-throughput-multi-tenant/{epic,implementation-plan,self-evaluation,tiered-issue-triage}.md`; **RF-Rn / RF-Gn** = that package's `review-findings.md` (#730: required changes R1–R5, gaps G1–G2); **FC** = `00-fixed-constraints.md`; bare **Rn/Tn/Hn** = `01` §Requirements ledger. Decision ids (**Cn/Dn/Gn**) preserve the fleet-side adjudication numbering — they are stable identifiers, not sequential (absent numbers were absorbed into other items before this plan; nothing is missing). **These citations are provenance for auditors — evidence of where each decision came from — never required reading: no normative content lives outside this directory, and the package they point at is superseded (retained as the evidence trail).**
 
 ## #730 traceability (every RF item's consolidated home)
 

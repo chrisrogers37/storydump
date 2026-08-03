@@ -1,8 +1,13 @@
+> **⛔ SUPERSEDED PACKAGE — DO NOT IMPLEMENT FROM ANY DOCUMENT IN THIS DIRECTORY.**
+> The authoritative plan is [`../2026-08-02-consolidated-design-plan/`](../2026-08-02-consolidated-design-plan/README.md) — start at its README.
+> This package (#722) is one of the historical inputs that plan consolidated; a formal cross-check found it incompatible with the #721 data-model package as written, and the consolidated plan adjudicated every conflict (its `03-decision-record.md` records what survived, what lost, and why). It is retained in-tree only because the design reviews cite it — the evidence trail matters; the content does not govern anything.
+> One exception lives here: `review-findings.md` (#730, ratified) is honored — not superseded — and carries its own banner.
+
 # High-Throughput Multi-Tenant Architecture
 
 **Date:** 2026-07-29  
 **Baseline:** `main` at `683f7cf`  
-**Status:** PROPOSED — approved direction; final review pending  
+**Status:** SUPERSEDED by `../2026-08-02-consolidated-design-plan/` (2026-08-02) — historical input, retained as evidence
 **Scope:** Architecture and migration design only
 
 This session defines how Storydump can evolve from a single polling worker into a
