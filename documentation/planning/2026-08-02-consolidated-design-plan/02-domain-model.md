@@ -5,7 +5,7 @@ This file is DDL-complete: every table below is stated as executable PostgreSQL,
 ## §0. Conventions (normative — DDL below relies on these; they are decisions, not suggestions)
 
 - **Ids:** `id UUID PRIMARY KEY DEFAULT gen_random_uuid()` on every table unless a natural PK is shown. (Legacy tables mix `uuid_generate_v4()`/`gen_random_uuid()`; new DDL uses `gen_random_uuid()` only — no extension dependency.)
-- **Time:** every new timestamp column is `TIMESTAMPTZ`. Legacy columns are naive `TIMESTAMP`, UTC by convention; **every backfill converts with `AT TIME ZONE 'UTC'`** — this clause is mandatory in track DDL, and a bare cast is a review-blocking defect.
+- **Time:** every new timestamp column is `TIMESTAMPTZ`. Legacy columns are naive `TIMESTAMP`, UTC by convention, **with exactly three exceptions already `TIMESTAMPTZ` on `main`** (pass-4 anchor): `chat_settings.last_post_sent_at` (migration 019), `chat_settings.gdrive_alerted_at` (031), `api_tokens.revoked_at` (032). **Every backfill of a naive column converts with `AT TIME ZONE 'UTC'`** — mandatory in track DDL, a bare cast is a review-blocking defect — and the three tz-aware columns copy **as-is**: applying the conversion clause to them would corrupt the value, so each track's mapping states per column which rule applies.
 - **Stamps:** `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`, `updated_at TIMESTAMPTZ NOT NULL DEFAULT now()` on every table; `updated_at` maintained by the shared `trg_touch_updated_at` trigger (one function, defined once here; each table's DDL block prints its own one-line `CREATE TRIGGER`). Exceptions — the append/insert-only class carries `created_at` only, no touch trigger, because a touch column could never legally change: `audit_events` (UPDATE granted to nobody), `post_intent_transitions` (matrix changes are INSERT/DELETE of edge rows), `command_dedup` (rows are written once; replay handling only reads), and `rate_counters` (only `count` moves; age is immutable in `window_start`, which is what its retention keys on). `updated_at` is load-bearing on the other machinery tables: the §5 retention indexes and sweeps key terminal-row age on it. **Nothing in this file is implicit:** every stamp column and every trigger statement appears literally in the blocks below.
 
 ```sql
@@ -75,8 +75,12 @@ CREATE TABLE workspaces (
   state                   TEXT NOT NULL DEFAULT 'active'
                           CONSTRAINT ck_workspaces_state
                           CHECK (state IN ('active','suspended','offboarding')),
-  -- product configuration (typed columns, carried from chat_settings shapes; NULL = app default
-  -- from env, per the materialization contract at the end of this section):
+  -- product configuration (typed columns; NULL = app default from env, per the materialization
+  -- contract at the end of this section). Most shapes carry from chat_settings; THREE ARE NEW
+  -- (pass-4 anchor — no chat_settings counterpart exists): approval_mode,
+  -- auto_reapprove_returning, approval_ttl_minutes — today auto-reapproval exists only as a
+  -- posting_history.posting_method VALUE ('auto_reapproval'), behavior without a config column.
+  -- Rename: legacy posting_timezone → tz.
   tz                      TEXT NOT NULL DEFAULT 'UTC',          -- IANA name; workspace default
   posts_per_day           INTEGER NOT NULL DEFAULT 3
                           CONSTRAINT ck_ws_posts_per_day CHECK (posts_per_day BETWEEN 1 AND 50),
@@ -115,6 +119,8 @@ CREATE TRIGGER tg_touch_workspaces BEFORE UPDATE ON workspaces
 --   onboarding_step/onboarding_completed → onboarding_sessions (§9)
 --   enable_instagram_api → routing flag row (C7 flag rows, 04 ground rules — it is cohort routing, not config)
 --   show_verbose_notifications, send_lifecycle_notifications → channel_bindings.settings
+--   media_sync_enabled → media_sources.state (false = 'paused'; pass-4 anchor — this column was
+--     missing from the mapping)
 
 CREATE TABLE workspace_members (
   workspace_id     UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
@@ -486,8 +492,11 @@ CREATE INDEX ix_media_provider_ref ON media_items (workspace_id, source_id, prov
 -- this constraint lands (04 W.3), same pattern as 0.3's history remediation.
 -- Legacy columns not carried: cloud_* transit columns (transit state is per-attempt:
 -- post_intents.transit_asset_ref), instagram_media_id/backfilled_at (posted evidence is per-intent:
--- §3 ig_media_id; legacy values ride the W.4 history backfill), is_active+unsupported flags (state),
--- file_path (Drive path context folds into file_name; identity is provider_file_ref).
+-- §3 ig_media_id; legacy values ride the W.4 history backfill), is_active (→ state), file_path
+-- (Drive path context folds into file_name; identity is provider_file_ref). No legacy
+-- "unsupported" flag exists (pass-4 anchor): today Meta 9004 writes a permanent_reject LOCK, not
+-- a media_items column — those rows ride the W.3 lock mapping; the target's 'unsupported' media
+-- state and lock kind formalize the class going forward.
 -- times_posted and last_posted_at are workspace-level ADVISORY aggregates (display/selection
 -- hints; authority is the terminal intents) — per-account recency = post_locks.
 
@@ -1205,12 +1214,12 @@ The first pass said "system actors use dedicated roles with explicit predicates"
 ## §8. Two caps, never conflated
 
 - **Product cadence cap** — ours: `daily_post_counts` in the account's effective tz, calendar-day semantics, atomically debited in the approved→publishing transaction (§4 SQL), refunded on failure against the recorded debit day. The only cap we count locally.
-- **Meta publish cap** — theirs (`05` platform inputs: 25 / rolling 24 h / real account), enforced by Meta on the publish step (error 9). Never counted locally, and for the **right** reason (pass-3 correction of a self-contradiction, R3 review §6.10 — the pass-2 text blamed phone posts and then said the cap covers API publishes only; a phone post cannot consume an API-publishing quota): a local counter is wrong by construction because **other API grants on the same real account consume the same quota** — the account connected in other workspaces (PA-1(a)) and any other tool the customer has authorized — on top of the rolling-window shape. Our ledger sees only our own publishes; Meta's counter sees them all. 0.4 verifies the cap's shape against Meta's primary documentation. On error 9: defer — a cap, not a fault, so no quarantine row. **`available_at` derivation is uncertain pending 0.4:** the usage endpoint's documented shape (a count over a duration) does not obviously expose the oldest-publish timestamp an exact next-free-slot calculation needs; if 0.4 finds no usable shape, the stated fallback is a conservative deferral to the account's next product slot — correctness never depends on the derivation, because error 9 re-arbitrates on every attempt. Manual-mode posts (§4) debit only OUR cap; Meta's applies to API publishes alone.
-- **The advisory pre-check is lazy, inline, shared — and ships behind a default-off flag.** There is **no background refresh job** (no such kind exists in the §5 registry — an implementer following this plan cannot build one). When enabled, the check runs inside the publish pipeline, immediately before the §4 flip transaction, against an in-process cache keyed on **`provider_account_ref`** (shared across duplicate workspace rows of one real account), TTL per `05`. Worst-case provider load is therefore ≤ one usage query per publish attempt — strictly bounded by publish traffic itself, never by account count. (First-pass defect, review B§6, quoted at its pass-1 envelope: up to 1,000 queries/min against ~87 publishes/min; at `05`'s corrected multi-account inputs the same eager reading is ~1,500/min against ~130/min — see D21. The advisory mechanism would have manufactured the very load it advises about, buying no correctness since error 9 is authoritative regardless.) Miss/stale/error/flag-off on the pre-check ⇒ proceed to the flip; error 9 remains the arbiter. **The flag is OFF by default** (process-class flag, C7): even one read per attempt is a cost the check has not yet earned — the S.5 canary measures whether skipping doomed container/transit work pays for the calls, and the flag flips only on that evidence (`04` S.5).
+- **Meta publish cap** — theirs (`05` platform inputs: 100 / rolling 24 h / real account, corrected at the pass-4 anchor; the authoritative per-account value is the live `content_publishing_limit` read), enforced by Meta on the publish step (error 9). Never counted locally, and for the **right** reason (pass-3 correction of a self-contradiction, R3 review §6.10 — the pass-2 text blamed phone posts and then said the cap covers API publishes only; a phone post cannot consume an API-publishing quota): a local counter is wrong by construction because **other API grants on the same real account consume the same quota** — the account connected in other workspaces (PA-1(a)) and any other tool the customer has authorized — on top of the rolling-window shape. Our ledger sees only our own publishes; Meta's counter sees them all. 0.4 verifies the cap's shape against Meta's primary documentation. On error 9: defer — a cap, not a fault, so no quarantine row. **`available_at` derivation is uncertain pending 0.4:** the usage endpoint's documented shape (a count over a duration) does not obviously expose the oldest-publish timestamp an exact next-free-slot calculation needs; if 0.4 finds no usable shape, the stated fallback is a conservative deferral to the account's next product slot — correctness never depends on the derivation, because error 9 re-arbitrates on every attempt. Manual-mode posts (§4) debit only OUR cap; Meta's applies to API publishes alone.
+- **The advisory pre-check is lazy, inline, shared — and ships behind a default-off flag.** There is **no background refresh job** (no such kind exists in the §5 registry — an implementer following this plan cannot build one). When enabled, the check runs inside the publish pipeline, immediately before the §4 flip transaction, against an in-process cache keyed on **`provider_account_ref`** (shared across duplicate workspace rows of one real account), TTL per `05`. Worst-case provider load is therefore ≤ one usage query per publish attempt — strictly bounded by publish traffic itself, never by account count. (First-pass defect, review B§6, quoted at its pass-1 envelope: up to 1,000 queries/min against ~87 publishes/min; at `05`'s corrected multi-account inputs the same eager reading is ~1,500/min against ~130/min — see D21; at the pass-4 cap correction (25→100, `05` platform inputs) the absolute-ceiling rate is ~520/min, and the eager reading still exceeds the fleet's entire real work at full cap. The advisory mechanism would have manufactured the very load it advises about, buying no correctness since error 9 is authoritative regardless.) Miss/stale/error/flag-off on the pre-check ⇒ proceed to the flip; error 9 remains the arbiter. **The flag is OFF by default** (process-class flag, C7): even one read per attempt is a cost the check has not yet earned — the S.5 canary measures whether skipping doomed container/transit work pays for the calls, and the flag flips only on that evidence (`04` S.5).
 
 ## §9. Legacy → target mapping (all 14 current tables + ledger accounted for)
 
-Every re-key runs on the six-stage machine (`04` §Ground rules). Column-level mapping tables live in each track's spec (`04` Phases F/W) — this table is the disposition index. Legacy naive `TIMESTAMP` columns convert with `AT TIME ZONE 'UTC'` (§0), everywhere, no exceptions.
+Every re-key runs on the six-stage machine (`04` §Ground rules). Column-level mapping tables live in each track's spec (`04` Phases F/W) — this table is the disposition index. Legacy **naive** `TIMESTAMP` columns convert with `AT TIME ZONE 'UTC'` (§0), no exceptions among the naive set; the three already-`TIMESTAMPTZ` columns §0 names copy as-is.
 
 | Current (`origin/main`) | Target disposition |
 |---|---|

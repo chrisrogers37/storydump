@@ -1,6 +1,6 @@
 # Operational numbers
 
-Both prior packages shipped **zero** operational values (SE:246-248 enumerates nine required per-queue settings and assigns none; SE:34 concedes deployment numbers "not yet derived"). This file closes that gap and is the **only home** for these figures — other files cite, never restate. Every value is initial, revised only under the rule at the end. Implementers wire each number through a config seam (env or settings row per C7), never a literal, so revision is config-only.
+Both prior packages shipped **zero** operational values (SE:248-250 enumerates nine required per-queue settings and assigns none; SE:36 concedes deployment numbers "not yet derived" — package anchors re-pinned at the pass-4 anchor: the supersession banners shifted every pre-banner line by +2). This file closes that gap and is the **only home** for these figures — other files cite, never restate. Every value is initial, revised only under the rule at the end. Implementers wire each number through a config seam (env or settings row per C7), never a literal, so revision is config-only.
 
 ## Envelope arithmetic (the inputs everything derives from)
 
@@ -10,8 +10,8 @@ Declared inputs (each a config seam or a 0.4-verified platform fact):
 |---|---|---|
 | Provisioned workspaces (FC-0) | 5,000 | ruled envelope |
 | **Bounding posting accounts** | **7,500 at full cap** | declared input, decoupled from workspace count (FC-1: workspaces hold multiple accounts — pass-2 fix of the one-account-per-workspace conflation, review A §3.34); 1.5×workspaces is an initial planning ratio, revise via S.1 |
-| Meta publish cap | 25 / rolling 24 h / real account | platform fact, 0.4-verified |
-| Meta call rate | 200 / user / hr | platform fact, 0.4-verified |
+| Meta publish cap | **100** / rolling 24 h / real account | platform fact — **corrected at the pass-4 anchor** from the stale 25 and pinned against Meta's content-publishing doc 2026-08-03 ("Instagram accounts are limited to 100 API-published posts within a 24-hour moving period"). Meta has raised this over time (25→50→100), which is why `main` fetches the authoritative per-account value live (`GET /{ig-user}/content_publishing_limit`; `settings.py` fallback 100) — the live value, not this constant, is the runtime arbiter. In-tree guides still saying "25/hour" are their own drift (follow-up filed). 0.4 re-verifies alongside its other items |
+| Meta call rate | 200 / user / hr | platform input carried from the IG platform reference (not recorded in-tree); 0.4 verifies |
 | Worker replicas | 3 | initial |
 | Ingress replicas | 2 | initial |
 | Effective mean publish-pipeline duration | ~30 s | modeling assumption between p50 ~20 s and p95 ~90 s (poll-dominated tail); S.1 measures the real mean |
@@ -19,11 +19,11 @@ Declared inputs (each a config seam or a 0.4-verified platform fact):
 
 Derived:
 
-- **Publish ceiling:** 7,500 × 25 / 86,400 ≈ **2.2 publishes/s fleet average** (~130/min; absolute upper bound with every bounding account at cap; realistic steady state is a fraction).
-- **Interactive rate:** ~0.2–0.6/s fleet average; peak ×20 ≈ **4–12/s** (posting-window edges). Peak *job* rates sit in the low tens per second — two orders of magnitude inside Postgres territory, which is C3's arithmetic basis.
-- **Concurrent publish pipelines:** 2.2/s × 30 s ≈ **65 steady**; the bulk global pool of 150 below is **headroom sizing (~×2.3), not a requirement derivation** — the requirement is that the pool is bounded and configurable (H5); the size is an initial seam value S.1 revises (pass-2 reframing, review A §4.2).
+- **Publish ceiling:** 7,500 × 100 / 86,400 ≈ **8.7 publishes/s fleet average at absolute cap** (~520/min; the upper bound with every bounding account publishing at the full corrected cap — a bound, not a forecast; realistic steady state is a small fraction, and per-account **product cadence** (`posts_per_day` ≤ 50) binds long before Meta's 100 does). The pass-3 figure (2.2/s, ~130/min) was computed at the stale cap of 25.
+- **Interactive rate:** ~0.2–0.6/s fleet average; peak ×20 ≈ **4–12/s** (posting-window edges). Peak *job* rates even at the corrected absolute publish ceiling sit in the low tens per second — still well over an order of magnitude inside Postgres territory, which is C3's arithmetic basis (the margin narrowed with the cap correction; the conclusion did not move).
+- **Concurrent publish pipelines:** at the cadence-realistic steady state the pass-3 figure stands (≈ 2.2/s × 30 s ≈ **65 steady**, now read as a product-cadence working figure rather than the Meta bound); the absolute-cap bound is 8.7/s × 30 s ≈ **260**. The bulk global pool of 150 below is a **bounded seam, not a requirement derivation** — sized ~×2.3 over the steady working figure; at loads approaching the absolute bound the pool saturates first and defers (slip-a-slot, H5 — the designed behavior, not a failure); S.1 revises the size on measurement (pass-2 reframing, review A §4.2; pass-4 cap correction applied).
 
-## The nine per-queue settings (SE:246-248, now with values)
+## The nine per-queue settings (SE:248-250, now with values)
 
 | # | Setting | Interactive lane | Bulk lane | Derivation |
 |---|---|---|---|---|
@@ -37,7 +37,7 @@ Derived:
 | 8 | Attempt / deadline budget | 3 attempts, deadline +10 min | 5 attempts, backoff 1/5/15/60 min, deadline = slot end (or +6 h for non-slot jobs) | R8: retryable classes only; ambiguous never re-attempts (reconciler owns it) |
 | 9 | Reserved interactive capacity | 10 of each replica's 60 slots interactive-only (10:50, ≈17%) | — | H2: bulk can never occupy interactive capacity |
 
-**Tasks vs connections (the SE:228 inequality, made explicit — review A §3.35):** a pool slot is an asyncio task, not a connection; connections are held only inside transaction blocks, and the L.0 discipline (transaction-per-checkpoint, never across a provider call — `02` §5) keeps DB-active time ≲5% of pipeline wall time. Expected concurrent DB-active tasks ≈ 180 slots × 5% ≈ 9 fleet-wide; per-replica connection pools of 10 bound the spike case. The invariant to re-verify at S.3: Σ(replica × pool) = 3×10 + 2×10 = **50** ≥ peak DB-active tasks, and < the Neon plan ceiling (pgbouncer in front; clock runs inside an elected worker — no separate pool).
+**Tasks vs connections (the SE:230-234 inequality, made explicit — review A §3.35):** a pool slot is an asyncio task, not a connection; connections are held only inside transaction blocks, and the L.0 discipline (transaction-per-checkpoint, never across a provider call — `02` §5) keeps DB-active time ≲5% of pipeline wall time. Expected concurrent DB-active tasks ≈ 180 slots × 5% ≈ 9 fleet-wide; per-replica connection pools of 10 bound the spike case. The invariant to re-verify at S.3: Σ(replica × pool) = 3×10 + 2×10 = **50** ≥ peak DB-active tasks, and < the Neon plan ceiling (pgbouncer in front; clock runs inside an elected worker — no separate pool).
 
 ## Supporting cadences and budgets
 
@@ -49,12 +49,12 @@ Derived:
 | Jobs-ready poll (workers) | 1 s interactive / 2 s bulk | the pg-polling cost the annex trigger watches |
 | Admission (pg fixed-window, S.2) | 30 commands/min/workspace; **no global ceiling** | per-workspace abuse guard, fail-closed; durable home: `rate_counters` scope `ws_admission` (`02` §6). The pass-1 50/s global cap is struck (review A §4.1): no app-wide platform budget exists to protect; global protection = pool bounds + backpressure visibility |
 | DB connections | 50 total (3×10 workers + 2×10 ingress) | inequality above; re-verify both sides at S.3 |
-| Media transfers per worker | 4 | EP:78's initial cap, kept |
-| Temp storage | 3 × 4 × 100 MB = 1.2 GB headroom per env | SE:234-235 inequality with declared inputs |
+| Media transfers per worker | 4 | EP:80's initial cap, kept |
+| Temp storage | 3 × 4 × 100 MB = 1.2 GB headroom per env | SE:236-237 inequality with declared inputs |
 | Sync baseline | every 6 h jittered; pre-slot sync at T−15 min if source stale > 30 min; first-ingest chunks of 200 files | H4 demand-driven shape |
 | Credential refresh cadence (`next_refresh_at`) | every 7 d from issue, jittered — decoupled from expiry proximity | the scheduled refresh doubles as the credential **liveness probe** (`02` §2 D31), so this number bounds dead-token detection latency between publish attempts. The legacy semantics — refresh only within 7 d of expiry (`REFRESH_BUFFER_HOURS = 168`) — left a token dead at day 0 of a 60-day window unprobed for ~53 days (the 2026-05 incident class); decoupling from expiry proximity is the point. 0.4 verifies Meta's refresh-eligibility constraints (IG-Login long-lived tokens carry a min-age rule; the cadence must respect it) |
 | Cloudinary (FC-3) | signed-URL TTL 15 min; transit hard TTL 24 h; reap sweep every 15 min | FC-3.2/3.6 |
-| Meta usage pre-check | inline-only at publish admission, **behind a default-off flag (the S.5 canary decides)**; in-process cache TTL 5 min keyed on `provider_account_ref` | `02` §8 — **no background refresh exists**; worst case ≤ 1 query per publish attempt (≤ ~130/min at ceiling), vs the struck eager reading's 1,500/min at 7,500 accounts (review B§6) |
+| Meta usage pre-check | inline-only at publish admission, **behind a default-off flag (the S.5 canary decides)**; in-process cache TTL 5 min keyed on `provider_account_ref` | `02` §8 — **no background refresh exists**; worst case ≤ 1 query per publish attempt (≤ ~520/min at the corrected absolute ceiling; far less at cadence-realistic load), vs the struck eager reading's 1,500/min at 7,500 accounts (review B§6) |
 | Parked-intent alarm | `publishing_ambiguous` or `review_required` > 15 min pages; customer notification per `06` §5 after 24 h | observability floor (`01`) |
 | Reconciler cadence + budget | sweep every 60 s, LIMIT 50; **per-intent poll ladder 60 s → 5 m → 30 m → 2 h (exponential, capped at container expiry ~24 h) — ≈ 15–20 status calls per ambiguous intent worst-case, vs ~1,440 at the pass-2 flat 60 s poll**; ladder exhausted ⇒ the `02` §6 exhaustion tail (final stories check, park `review_required`) | bounded per H5/RF-R1; mode-parameterized contract in `02` §6 |
 | Quarantine backoff ladder | 1 m / 5 m / 30 m / 2 h / 24 h (cap); strike decay 24 h; re-alert dedup 1 h | `02` §2 semantics |

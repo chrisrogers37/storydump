@@ -1,16 +1,29 @@
 # Consolidated design plan — multi-tenant storydump (2026-08-02)
 
-**Status:** proposed — awaiting human ratification. Documentation only; no runtime behavior changes in this PR. Third design pass applied (R3 fresh-session implementer review, comment 4840492901 — its 7-item ratification gate in full: DDL replays from empty as printed, raw-SQL invariant tests threaded into the owning increments' gates, the non-escalatable credential model (`02` §7) + durable pacing/admission schema (`rate_counters`), the named defect fixes, platform-fact conditioning (evidence-authority-parameterized reconciliation contract behind 0.4), the egress floor moved to L.0, and the email + archive operational paths). **Open for the product owner: fork PA-1 in `03` (implementers build default (a) until ruled); the email-provider ack (reopened by FC-6 — Resend as swappable default meanwhile); the Google consent-screen publishing status — the last two are `03` pass-4 items. D28 (Cloudinary signed-params for FC-3.4) was ratified 2026-08-03, conditional on clean delivery.**
+**Status:** proposed — awaiting human ratification. Documentation only; no runtime behavior changes in this PR. Third design pass applied (R3 fresh-session implementer review, comment 4840492901 — its 7-item ratification gate in full: DDL replays from empty as printed, raw-SQL invariant tests threaded into the owning increments' gates, the non-escalatable credential model (`02` §7) + durable pacing/admission schema (`rate_counters`), the named defect fixes, platform-fact conditioning (evidence-authority-parameterized reconciliation contract behind 0.4), the egress floor moved to L.0, and the email + archive operational paths). **Fourth design pass applied (2026-08-03):** the #732 credential-liveness fix (D31); the 2026-08-03 rulings folded in as FC-5/FC-6 — Google-only sign-in with the OTP machinery removed, ruled invitation delivery (email + Telegram on existing machinery) with the D33 per-provider acceptance model and the D36 elevation gate; and the plan **anchored to the codebase** (§Codebase anchor below) — every current-repo claim verified against `main` @ `2e13f97`, disagreements resolved in the code's favor and recorded, most materially the Meta publish cap corrected 25→100 against Meta's primary documentation. **Open for the product owner: fork PA-1 in `03` (implementers build default (a) until ruled); the email-provider ack (reopened by FC-6 — Resend as swappable default meanwhile); the Google consent-screen publishing status — the last two are `03` pass-4 items. D28 (Cloudinary signed-params for FC-3.4) was ratified 2026-08-03, conditional on clean delivery.**
 **Supersedes:** the standalone adoption of either prior package (see Authority, below).
 **Executable by:** an implementer working increment-by-increment from `04-execution-sequence.md` with zero design judgment calls — every shape, key, state, number, and gate is stated here or explicitly incorporated by path.
 
 ## Live status (position tracker — updated as work proceeds, not at stop time)
 
-- **Pass:** 3 — executed in full (all 7 items of the R3 ratification gate; gate-by-gate disposition on the PR).
-- **Position:** awaiting re-review of pass 3. No work in flight on this document.
-- **Ratified:** FC-0..FC-4 (rulings); D1–D30 per `03`, including D28 (FC-3.4 signed-params — 2026-08-03, conditional on clean delivery).
+- **Pass:** 4 — executed in full (the #732 liveness delta; the FC-5/FC-6 ruling deltas incl. the mid-pass D36 role ruling; the codebase anchor below). Disposition on the PR.
+- **Position:** pass 4 delivered; awaiting the Codex ratification review. No work in flight on this document.
+- **Ratified:** FC-0..FC-6 (rulings); D1–D36 per `03`, including D28 (conditional on clean delivery).
 - **Open (product owner):** PA-1 — implementers build default (a) until ruled; email-provider ack (reopened by FC-6) — Resend as swappable default until acked; Google consent-screen publishing status (console fact) (`03` pass-4 items).
-- **Next:** on re-review, findings are dispositioned against the pass-3 disposition comment; the author does not merge.
+- **Next:** Codex review; findings are dispositioned against the pass-4 disposition comment; the author does not merge.
+
+## Codebase anchor (pass 4 — `main` @ `2e13f97`, 2026-08-03)
+
+Internal consistency is not truth about the repo, so pass 4 verified every claim this plan makes about the current codebase — cited files, functions, columns, line references, counts, and "main does / does not do X" statements — against `main` @ `2e13f97` (the tip that merged the 2026-05-26 investigation), via four independent verification passes over `00`–`07`. Where the plan and the code disagreed, the disagreement was recorded and resolved in the code's favor, in place, each marked "pass-4 anchor":
+
+- **Meta publish cap 25 → 100** (`05` platform inputs; pinned against Meta's content-publishing doc — the one 0.4 item this pre-completes) with the derived arithmetic corrected.
+- **W.4's attribution source**: `audit_log` never records account switches on `main` — the timeline reconstructs from `service_runs` `switch_account` rows, gaps to quarantine (`04` W.4).
+- **No JWT exists on `main`** — W.6's consumer contract re-grounded on the real HMAC-signed token mechanism (`04` W.6, `07` §1).
+- **Encryption is already MultiFernet** under `ENCRYPTION_KEYS` — the plan adopts the shipped env name and credits the existing rotation machinery (`07` §3).
+- **Three legacy timestamp columns are already `TIMESTAMPTZ`** — the naive-conversion rule now names its exception set (`02` §0/§9).
+- Smaller corrections: three workspace config columns are new rather than carried, `media_sync_enabled`'s disposition added, no legacy "unsupported" media flag (it is a lock today), no stored chat titles (F.2 fallback corrected), landing deploys to Vercel not Railway, `/health` not `/healthz`, two missing `graph.facebook.com` sites added to FC-4's enumeration, the FC-1.4 hierarchy described as chat-mediated, the superseded-package line anchors re-pinned (+2 after their banners), and the Telegram-module baseline re-counted (76 at this anchor).
+
+Also verified clean: the D31 liveness premises (the corrupt-phrase classifier, the `auth_method` filter, `REFRESH_BUFFER_HOURS = 168`, the fail-open #705/#707 gate — all present on `main` exactly as cited), the 2026-05 investigation chain (the newer in-tree host-routing RCA supersedes the storage-corruption theory, which this plan never asserts), FC-4's zero-feature-loss greps, the 14-table inventory and the full `02` §9 legacy column mapping, the 004/008/010/034 chain defects, the 6 duplicate groups (recorded in-tree), and manual-mode/membership-sync current behavior. **Bounds, honestly:** production database state (constraint residue, row counts, live types), console facts (Google consent-screen status, Railway topology), and non-Meta external platform constraints were **not** verifiable from the repo — the plan's existing gates (`0.2`'s `\d`-against-prod precondition, `0.4`, the `03` owner items) carry exactly those. Claim-by-claim tables with per-verifier coverage bounds are in the pass-4 disposition comment on PR #731.
 
 ## Start here — authority, reading order, self-containment
 
@@ -36,7 +49,7 @@ This plan is the single consolidated output. Its spine is the cold design — th
 | #730 ratified findings | `../2026-07-29-high-throughput-multi-tenant/review-findings.md` | R1–R5 all honored; mapping noted per decision in `03` |
 | #721 data-model package | PR #721 (not in-tree) | Intent-ledger direction, workspace-rooted tenancy direction, six-stage migration machine, consumer-contract track — letter re-derived (24 recorded quality flags) |
 | Cold design | fleet-side working set (externally held, **not required reading**); its requirement set R1–R8 / T1–T4 / H1–H6 is restated in full in `01` §Requirements ledger (the only normative home) | The requirements ledger and the overall shape of `01`/`02` |
-| IG platform reference | fleet vault doc (externally held, **not required reading** — every platform fact it contributed is restated in `05` and re-verified against Meta's primary documentation at `04` 0.4) | 25/rolling-24h publish cap, 200/user/hr, Instagram-Login-vs-Facebook-Login split, App Review lead times |
+| IG platform reference | fleet vault doc (externally held, **not required reading** — every platform fact it contributed is restated in `05` and re-verified against Meta's primary documentation at `04` 0.4) | the publish cap (its 25/rolling-24h was stale — corrected to 100 at the pass-4 anchor against Meta's primary doc, `05`), 200/user/hr, Instagram-Login-vs-Facebook-Login split, App Review lead times |
 
 ## File map
 
