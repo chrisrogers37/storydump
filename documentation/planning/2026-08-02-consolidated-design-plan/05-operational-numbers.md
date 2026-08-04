@@ -44,7 +44,7 @@ Derived:
 
 | Concern | Initial value | Derivation / note |
 |---|---|---|
-| Scheduler tick | 15 s; ≤ 500 inserts/tick | O(due) scan over `ix_ig_accounts_due`; slot key 1 makes double-insert impossible |
+| Scheduler tick | 15 s; ≤ 500 inserts/tick | O(due) scan over `ix_ig_accounts_due`; slot key 1 makes double-insert impossible. **The bound is `fn_clock_tick`'s `p_max` — the TOTAL insert budget across all four job classes, enforced by construction (each class's LIMIT is the remaining budget; priority recurring → plan_slot → refresh → sync; a starved class drains on later ticks — pass 6, R5)** |
 | Outbox sender poll | 2 s | replaces Redis wake-up (C3); invisible in pg at ≪1 msg/s |
 | Telegram pacing | 20 msgs/min/group, 30/s global | Telegram published budgets, carried into durable `rate_counters` rows (`02` §6 — scopes `tg_chat`/`tg_global`) |
 | Jobs-ready poll (workers) | 1 s interactive / 2 s bulk | the pg-polling cost the annex trigger watches |
@@ -57,7 +57,7 @@ Derived:
 | Cloudinary (FC-3) | **transit TTL = the asset's lifetime**: reap-on-success (minutes, FC-3.5) + hard TTL 24 h + reap sweep every 15 min (FC-3.6). Delivery URLs are **signed, non-expiring** (FC-3.2 as amended) | per D38 (the analysis's home). **Revisit trigger: sustained monthly Cloudinary credit consumption > 225 credits** (D38's condition; this row is the number's home) |
 | Meta usage pre-check | inline-only at publish admission, **behind a default-off flag (the S.5 canary decides)**; in-process cache TTL 5 min keyed on `provider_account_ref` | `02` §8 — **no background refresh exists**; worst case ≤ 1 query per publish attempt (≤ ~520/min at the corrected absolute ceiling; far less at cadence-realistic load), vs the struck eager reading's 1,500/min at 7,500 accounts (review B§6) |
 | Parked-intent alarm | `publishing_ambiguous` or `review_required` > 15 min pages; customer notification per `06` §5 after 24 h | observability floor (`01`) |
-| Reconciler cadence + budget | sweep every 60 s, LIMIT 50; **per-intent poll ladder 60 s → 5 m → 30 m → 2 h (exponential, capped at container expiry ~24 h) — ≈ 15–20 status calls per ambiguous intent worst-case, vs ~1,440 at the pass-2 flat 60 s poll**; ladder exhausted ⇒ the `02` §6 exhaustion tail (final stories check, park `review_required`) | bounded per H5/RF-R1; mode-parameterized contract in `02` §6 |
+| Reconciler cadence + budget | sweep every 60 s, LIMIT 50 — **the sweep's TOTAL across both reasons: ladder-due rows take priority (an unresolved ambiguity blocks its real account's next publish via key 4), notify-window rows fill the remainder; `fn_reconciler_sweep` budget-splits by construction (pass 6, R5)**; **per-intent poll ladder 60 s → 5 m → 30 m → 2 h (exponential, capped at container expiry ~24 h) — ≈ 15–20 status calls per ambiguous intent worst-case, vs ~1,440 at the pass-2 flat 60 s poll**; ladder exhausted ⇒ the `02` §6 exhaustion tail (final stories check, park `review_required`) | bounded per H5/RF-R1; mode-parameterized contract in `02` §6 |
 | Quarantine backoff ladder | 1 m / 5 m / 30 m / 2 h / 24 h (cap); strike decay 24 h; re-alert dedup 1 h | `02` §2 semantics |
 | Transform batch (M.1) | 5,000 rows | offline-transform batching (`04` §Ground rules; the 14-day comparator window died with shadow-read — FC-7) |
 | Approval TTL default (`approval_ttl_minutes` NULL) | 1,440 min (24 h) | workspace seam; reaper clock (`02` §4) |

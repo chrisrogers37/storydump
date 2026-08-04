@@ -1673,72 +1673,28 @@ END $$;
 -- 3/9 fn_clock_tick — one indexed pass per concern; every heavy step becomes a job. The tick
 -- INSERTS plan_slot jobs (never intents — §5 registry, pass 5), schedules refreshes off the
 -- payload-free view, schedules due syncs, and keeps the recurring system singletons alive.
+-- BUDGET IS STRUCTURAL (pass 6 — R5: four independent LIMIT p_max legs permitted 3×p_max +
+-- recurring inserts against 05's "≤ 500 inserts/tick" promise): p_max is the tick's TOTAL
+-- insert budget; each class's LIMIT is the budget remaining after the classes before it, so
+-- the sum cannot exceed p_max under any configuration. Priority order — recurring singletons
+-- (they keep the reconciler/reapers/retention alive and are bounded by the registry's kind
+-- count), then plan_slot (the product's visible output), then credential refreshes (7-day
+-- cadence; deferral by ticks is noise), then baseline syncs (6 h jittered). A starved class
+-- drains on later ticks — the cadence is 15 s.
 CREATE FUNCTION fn_clock_tick(p_max int, p_refresh_cadence interval,
                               p_recurring jsonb)  -- {v:1, "<kind>": seconds, …} (05 seam)
-RETURNS TABLE (slot_jobs int, refresh_jobs int, sync_jobs int, recurring_jobs int)
+RETURNS TABLE (o_slot_jobs int, o_refresh_jobs int, o_sync_jobs int, o_recurring_jobs int)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
 DECLARE k text; cadence interval; last_done timestamptz; n1 int := 0; n2 int := 0; n3 int := 0; n4 int := 0;
 BEGIN
   PERFORM set_config('app.actor_kind', 'clock', true);
-  -- (1) due accounts → plan_slot jobs + slot-cursor advance, one set-based statement
-  -- (the O(due) scan, H3; ix_ig_accounts_due serves it):
-  WITH due AS (
-    SELECT a.id, a.workspace_id, a.next_slot_at,
-           COALESCE(a.tz, w.tz)                                   AS eff_tz,
-           COALESCE(a.posts_per_day, w.posts_per_day)             AS eff_ppd,
-           COALESCE(a.posting_hours_start, w.posting_hours_start) AS eff_start,
-           COALESCE(a.posting_hours_end, w.posting_hours_end)     AS eff_end
-      FROM ig_accounts a JOIN workspaces w ON w.id = a.workspace_id
-     WHERE a.state = 'active' AND a.next_slot_at IS NOT NULL AND a.next_slot_at <= now()
-       AND w.state = 'active' AND NOT w.is_paused
-     ORDER BY a.next_slot_at LIMIT p_max
-  ), ins AS (
-    INSERT INTO jobs (kind, workspace_id, lane, serialization_key, run_at, max_attempts, payload)
-    SELECT 'plan_slot', d.workspace_id, 'bulk', 'acct:' || d.id, now(), 3,
-           jsonb_build_object('v', 1, 'ig_account_id', d.id, 'slot_at', d.next_slot_at)
-      FROM due d
-  )
-  UPDATE ig_accounts a
-     SET next_slot_at = fn_next_slot(d.next_slot_at, d.eff_tz, d.eff_start, d.eff_end, d.eff_ppd)
-    FROM due d WHERE a.id = d.id;
-  GET DIAGNOSTICS n1 = ROW_COUNT;
-  -- (2) due credential refreshes — one set-based statement (D31: the scheduled refresh is also
-  -- the liveness probe; the cadence is decoupled from expiry proximity). Reads ride svc_clock's
-  -- payload-free column grant; ix_credentials_refresh_due serves the scan:
-  WITH due AS (
-    SELECT id, workspace_id FROM oauth_credentials
-     WHERE state = 'active' AND next_refresh_at IS NOT NULL AND next_refresh_at <= now()
-     LIMIT p_max
-  ), ins AS (
-    INSERT INTO jobs (kind, workspace_id, lane, serialization_key, run_at, max_attempts, payload)
-    SELECT 'refresh_credential', d.workspace_id, 'bulk', 'cred:' || d.id, now(), 5,
-           jsonb_build_object('v', 1, 'credential_id', d.id)
-      FROM due d
-  )
-  UPDATE oauth_credentials c SET next_refresh_at = now() + p_refresh_cadence
-    FROM due d WHERE c.id = d.id;
-  GET DIAGNOSTICS n2 = ROW_COUNT;
-  -- (3) due source syncs — same shape (H4's slow jittered baseline; pre-slot/demand syncs are
-  -- produced by their own sites — the tick owns only the baseline). ix_sources_sync_due serves it:
-  WITH due AS (
-    SELECT id, workspace_id FROM media_sources
-     WHERE state = 'active' AND next_sync_at IS NOT NULL AND next_sync_at <= now()
-     LIMIT p_max
-  ), ins AS (
-    INSERT INTO jobs (kind, workspace_id, lane, serialization_key, run_at, max_attempts, payload)
-    SELECT 'sync_media_source', d.workspace_id, 'bulk', 'src:' || d.id, now(), 5,
-           jsonb_build_object('v', 1, 'source_id', d.id, 'reason', 'baseline')
-      FROM due d
-  )
-  UPDATE media_sources s SET next_sync_at = NULL                   -- the sync executor re-arms it
-    FROM due d WHERE s.id = d.id;
-  GET DIAGNOSTICS n3 = ROW_COUNT;
-  -- (4) recurring system singletons: if no ready/leased row holds the kind's singleton key,
+  -- (1) recurring system singletons: if no ready/leased row holds the kind's singleton key,
   -- insert the next run at last-completion + cadence (or now, whichever is later):
   FOR k, cadence IN
     SELECT key, (value::text)::numeric * interval '1 second'
       FROM jsonb_each(p_recurring) WHERE key <> 'v'
   LOOP
+    EXIT WHEN n4 >= p_max;
     IF NOT EXISTS (SELECT 1 FROM jobs
                    WHERE kind = k AND state IN ('ready','leased')) THEN
       SELECT max(updated_at) INTO last_done FROM jobs
@@ -1750,6 +1706,59 @@ BEGIN
       n4 := n4 + 1;
     END IF;
   END LOOP;
+  -- (2) due accounts → plan_slot jobs + slot-cursor advance, one set-based statement
+  -- (the O(due) scan, H3; ix_ig_accounts_due serves it):
+  WITH due AS (
+    SELECT a.id, a.workspace_id, a.next_slot_at,
+           COALESCE(a.tz, w.tz)                                   AS eff_tz,
+           COALESCE(a.posts_per_day, w.posts_per_day)             AS eff_ppd,
+           COALESCE(a.posting_hours_start, w.posting_hours_start) AS eff_start,
+           COALESCE(a.posting_hours_end, w.posting_hours_end)     AS eff_end
+      FROM ig_accounts a JOIN workspaces w ON w.id = a.workspace_id
+     WHERE a.state = 'active' AND a.next_slot_at IS NOT NULL AND a.next_slot_at <= now()
+       AND w.state = 'active' AND NOT w.is_paused
+     ORDER BY a.next_slot_at LIMIT GREATEST(p_max - n4, 0)
+  ), ins AS (
+    INSERT INTO jobs (kind, workspace_id, lane, serialization_key, run_at, max_attempts, payload)
+    SELECT 'plan_slot', d.workspace_id, 'bulk', 'acct:' || d.id, now(), 3,
+           jsonb_build_object('v', 1, 'ig_account_id', d.id, 'slot_at', d.next_slot_at)
+      FROM due d
+  )
+  UPDATE ig_accounts a
+     SET next_slot_at = fn_next_slot(d.next_slot_at, d.eff_tz, d.eff_start, d.eff_end, d.eff_ppd)
+    FROM due d WHERE a.id = d.id;
+  GET DIAGNOSTICS n1 = ROW_COUNT;
+  -- (3) due credential refreshes — one set-based statement (D31: the scheduled refresh is also
+  -- the liveness probe; the cadence is decoupled from expiry proximity). Reads ride svc_clock's
+  -- payload-free column grant; ix_credentials_refresh_due serves the scan:
+  WITH due AS (
+    SELECT id, workspace_id FROM oauth_credentials
+     WHERE state = 'active' AND next_refresh_at IS NOT NULL AND next_refresh_at <= now()
+     LIMIT GREATEST(p_max - n4 - n1, 0)
+  ), ins AS (
+    INSERT INTO jobs (kind, workspace_id, lane, serialization_key, run_at, max_attempts, payload)
+    SELECT 'refresh_credential', d.workspace_id, 'bulk', 'cred:' || d.id, now(), 5,
+           jsonb_build_object('v', 1, 'credential_id', d.id)
+      FROM due d
+  )
+  UPDATE oauth_credentials c SET next_refresh_at = now() + p_refresh_cadence
+    FROM due d WHERE c.id = d.id;
+  GET DIAGNOSTICS n2 = ROW_COUNT;
+  -- (4) due source syncs — same shape (H4's slow jittered baseline; pre-slot/demand syncs are
+  -- produced by their own sites — the tick owns only the baseline). ix_sources_sync_due serves it:
+  WITH due AS (
+    SELECT id, workspace_id FROM media_sources
+     WHERE state = 'active' AND next_sync_at IS NOT NULL AND next_sync_at <= now()
+     LIMIT GREATEST(p_max - n4 - n1 - n2, 0)
+  ), ins AS (
+    INSERT INTO jobs (kind, workspace_id, lane, serialization_key, run_at, max_attempts, payload)
+    SELECT 'sync_media_source', d.workspace_id, 'bulk', 'src:' || d.id, now(), 5,
+           jsonb_build_object('v', 1, 'source_id', d.id, 'reason', 'baseline')
+      FROM due d
+  )
+  UPDATE media_sources s SET next_sync_at = NULL                   -- the sync executor re-arms it
+    FROM due d WHERE s.id = d.id;
+  GET DIAGNOSTICS n3 = ROW_COUNT;
   RETURN QUERY SELECT n1, n2, n3, n4;
 END $$;
 ALTER FUNCTION fn_clock_tick(int, interval, jsonb) OWNER TO svc_clock;
@@ -1759,27 +1768,36 @@ GRANT EXECUTE ON FUNCTION fn_clock_tick(int, interval, jsonb) TO svc_worker;
 -- 4/9 fn_reconciler_sweep — the cross-tenant READ half of reconciliation (§6): returns the
 -- ladder-due ambiguous intents plus the parked review_required rows whose customer-notification
 -- window has passed; every verdict/notification WRITE then runs tenant-scoped as svc_worker.
+-- BUDGET IS STRUCTURAL (pass 6 — R5: LIMIT p_lim on each UNION branch permitted 2×p_lim rows
+-- against 05's "LIMIT 50" promise): p_lim bounds the whole sweep; ladder-due rows take
+-- priority — an unresolved ambiguity blocks its real account's next publish via
+-- uq_publish_exclusive, while a notify-window row is informational — and notify-window rows
+-- fill only the remaining budget.
 CREATE FUNCTION fn_reconciler_sweep(p_lim int, p_rungs interval[], p_notify_after interval)
-RETURNS TABLE (intent_id uuid, workspace_id uuid, reason text)
+RETURNS TABLE (o_intent_id uuid, o_workspace_id uuid, o_reason text)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
 BEGIN
   RETURN QUERY
-  (SELECT i.id, i.workspace_id, 'ladder_due'::text
-     FROM post_intents i
-    WHERE i.state = 'publishing_ambiguous'
-      AND COALESCE(
-            (i.last_error->'evidence'->>'last_checked_at')::timestamptz
-              + p_rungs[LEAST(COALESCE((i.last_error->'evidence'->>'checks')::int, 0) + 1,
-                              array_length(p_rungs, 1))],
-            i.entered_state_at) <= now()
-    ORDER BY i.entered_state_at LIMIT p_lim)
-  UNION ALL
-  (SELECT i.id, i.workspace_id, 'notify_window'::text
-     FROM post_intents i
-    WHERE i.state = 'review_required'
-      AND i.entered_state_at + p_notify_after <= now()
-      AND NOT COALESCE((i.last_error->'evidence'->>'customer_notified')::boolean, false)
-    ORDER BY i.entered_state_at LIMIT p_lim);
+  WITH ladder AS (
+    SELECT i.id, i.workspace_id, 'ladder_due'::text AS reason
+      FROM post_intents i
+     WHERE i.state = 'publishing_ambiguous'
+       AND COALESCE(
+             (i.last_error->'evidence'->>'last_checked_at')::timestamptz
+               + p_rungs[LEAST(COALESCE((i.last_error->'evidence'->>'checks')::int, 0) + 1,
+                               array_length(p_rungs, 1))],
+             i.entered_state_at) <= now()
+     ORDER BY i.entered_state_at LIMIT p_lim
+  ), notify AS (
+    SELECT i.id, i.workspace_id, 'notify_window'::text AS reason
+      FROM post_intents i
+     WHERE i.state = 'review_required'
+       AND i.entered_state_at + p_notify_after <= now()
+       AND NOT COALESCE((i.last_error->'evidence'->>'customer_notified')::boolean, false)
+     ORDER BY i.entered_state_at
+     LIMIT GREATEST(p_lim - (SELECT count(*) FROM ladder), 0)
+  )
+  SELECT * FROM ladder UNION ALL SELECT * FROM notify;
 END $$;
 ALTER FUNCTION fn_reconciler_sweep(int, interval[], interval) OWNER TO svc_maintenance;
 REVOKE ALL ON FUNCTION fn_reconciler_sweep(int, interval[], interval) FROM PUBLIC;
