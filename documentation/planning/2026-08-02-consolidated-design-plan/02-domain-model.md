@@ -101,9 +101,8 @@ CREATE TABLE workspaces (
   tz                      TEXT NOT NULL DEFAULT 'UTC'           -- IANA name; workspace default
                           CONSTRAINT ck_ws_tz_valid CHECK (fn_safe_tz(tz) = tz),
                           -- write-time backstop (R5: tz was unconstrained; the service boundary
-                          -- validates first, per the materialization contract). STABLE function
-                          -- in a CHECK: enforced at write; a tzdata removal after the fact is
-                          -- the runtime-degradation case fn_safe_tz's read-side use covers
+                          -- validates first, per the materialization contract; decay-after-write
+                          -- is the §0 fn_safe_tz read-side case)
   posts_per_day           INTEGER NOT NULL DEFAULT 3
                           CONSTRAINT ck_ws_posts_per_day CHECK (posts_per_day BETWEEN 1 AND 50),
   posting_hours_start     INTEGER NOT NULL DEFAULT 14
@@ -1067,7 +1066,7 @@ SELECT (SELECT count(*) FROM debit) AS debited,
 COMMIT;  -- or ROLLBACK per the outcome above
 ```
 
-Cap refund (the `publishing → failed`, ambiguous → failed, and `review_required → failed` companion, same tx as the terminal flip): `UPDATE daily_post_counts SET count = count - 1 WHERE (workspace_id, ig_account_id, local_date) = (:ws, :acct, intent.cap_consumed_on) AND count > 0;` plus `cap_refunded_at = now()` on the intent. The refund targets **the recorded debit day** (`cap_consumed_on`), so a timezone change or midnight crossing between debit and refund cannot touch the wrong bucket. `local_date` is computed in the account's effective tz *at debit time*; the product-facing DST/tz-change and mid-day-cadence-change rules live in 06 §3 — the one home.
+Cap refund (the `publishing → failed`, ambiguous → failed, and `review_required → failed` companion, same tx as the terminal flip): `UPDATE daily_post_counts SET count = count - 1 WHERE (workspace_id, ig_account_id, local_date) = (:ws, :acct, intent.cap_consumed_on) AND count > 0;` plus `cap_refunded_at = now()` on the intent. The refund targets **the recorded debit day** (`cap_consumed_on`), so a timezone change or midnight crossing between debit and refund cannot touch the wrong bucket. `local_date` is computed in the account's effective tz *at debit time* — service-side, the one tz consumer outside SQL: a zone the service runtime fails to resolve degrades to UTC for this computation (the §0 fn_safe_tz rule applied at that site; reachable only through service/database tzdata divergence, since the write CHECKs gate storage). The product-facing DST/tz-change and mid-day-cadence-change rules live in 06 §3 — the one home.
 
 The **resolve-retry** transaction (pass 5 — the matrix row's effects, printed; L.5's gate tests it):
 
@@ -1585,7 +1584,7 @@ CREATE POLICY p_member_ws      ON workspaces FOR SELECT TO svc_membership USING 
 CREATE POLICY p_maint_dedup ON command_dedup FOR ALL TO svc_maintenance USING (true) WITH CHECK (true);
 ```
 
-**The doors.** Every body: `SECURITY DEFINER`, `SET search_path = pg_catalog, public`, owned by its system role, `EXECUTE` revoked from PUBLIC and granted to exactly one login. Every `05` number arrives as a parameter — callers read config and pass values; a hardcoded number in a door body is the same review-blocking defect as anywhere else. **Output-name rule (R5):** a door's `RETURNS TABLE` column names carry an `o_` prefix — PL/pgSQL substitutes output variables into unqualified references in body statements *including `ON CONFLICT` inference lists*, so an output column named after a real column is a runtime ambiguity error waiting on the first unqualified use (R5 proved it: `workspace_id` in the accept door). The prefix removes the collision class instead of policing each statement.
+**The doors.** Every body: `SECURITY DEFINER`, `SET search_path = pg_catalog, public`, owned by its system role, `EXECUTE` revoked from PUBLIC and granted to exactly one login. Every `05` number arrives as a parameter — callers read config and pass values; a hardcoded number in a door body is the same review-blocking defect as anywhere else. **Output-name rule (R5):** a door's `RETURNS TABLE` column names carry an `o_` prefix — PL/pgSQL substitutes output variables into unqualified references in body statements *including `ON CONFLICT` inference lists*, so an output column named after a real column is a runtime ambiguity error waiting on the first unqualified use (R5 proved it: `workspace_id` in the accept door). The prefix removes the collision class instead of policing each statement. The same substitution covers `DECLARE` locals: a local named after a column any body statement references unqualified is the identical trap — locals take non-column names. **Bound rule (R5):** a door limit parameter that a `05` row publishes is a TOTAL unless the row says per-class; a multi-leg body enforces a total with one running remainder that every leg's LIMIT draws down, in the body's stated priority order (`fn_clock_tick` and `fn_reconciler_sweep` are the instances) — independent per-leg LIMITs against a published total are the R5 defect.
 
 ```sql
 -- 1/9 fn_claim_job — the §5 claim, verbatim, as the function it always claimed to be.
@@ -1675,17 +1674,19 @@ END $$;
 -- payload-free view, schedules due syncs, and keeps the recurring system singletons alive.
 -- BUDGET IS STRUCTURAL (pass 6 — R5: four independent LIMIT p_max legs permitted 3×p_max +
 -- recurring inserts against 05's "≤ 500 inserts/tick" promise): p_max is the tick's TOTAL
--- insert budget; each class's LIMIT is the budget remaining after the classes before it, so
--- the sum cannot exceed p_max under any configuration. Priority order — recurring singletons
--- (they keep the reconciler/reapers/retention alive and are bounded by the registry's kind
--- count), then plan_slot (the product's visible output), then credential refreshes (7-day
--- cadence; deferral by ticks is noise), then baseline syncs (6 h jittered). A starved class
--- drains on later ticks — the cadence is 15 s.
+-- insert budget, enforced per the §7 door bound rule — one running remainder, every leg
+-- LIMITed by it, so the sum cannot exceed p_max under any configuration. Priority order —
+-- recurring singletons (they keep the reconciler/reapers/retention alive and are bounded by
+-- the registry's kind count), then plan_slot (the product's visible output), then credential
+-- refreshes, then baseline syncs (both deferrable-by-ticks at their 05 cadences). A starved
+-- class drains on later ticks (the 05 tick cadence). This comment is the priority order's one
+-- home; the 05 rows cite it.
 CREATE FUNCTION fn_clock_tick(p_max int, p_refresh_cadence interval,
                               p_recurring jsonb)  -- {v:1, "<kind>": seconds, …} (05 seam)
 RETURNS TABLE (o_slot_jobs int, o_refresh_jobs int, o_sync_jobs int, o_recurring_jobs int)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
-DECLARE k text; cadence interval; last_done timestamptz; n1 int := 0; n2 int := 0; n3 int := 0; n4 int := 0;
+DECLARE k text; cadence interval; last_done timestamptz; rem int;
+        n1 int := 0; n2 int := 0; n3 int := 0; n4 int := 0;
 BEGIN
   PERFORM set_config('app.actor_kind', 'clock', true);
   -- (1) recurring system singletons: if no ready/leased row holds the kind's singleton key,
@@ -1706,6 +1707,9 @@ BEGIN
       n4 := n4 + 1;
     END IF;
   END LOOP;
+  rem := GREATEST(p_max - n4, 0);            -- the running remainder every later leg draws on;
+                                             -- each leg's LIMIT keeps its count ≤ rem, so the
+                                             -- plain subtractions below cannot go negative
   -- (2) due accounts → plan_slot jobs + slot-cursor advance, one set-based statement
   -- (the O(due) scan, H3; ix_ig_accounts_due serves it):
   WITH due AS (
@@ -1717,7 +1721,7 @@ BEGIN
       FROM ig_accounts a JOIN workspaces w ON w.id = a.workspace_id
      WHERE a.state = 'active' AND a.next_slot_at IS NOT NULL AND a.next_slot_at <= now()
        AND w.state = 'active' AND NOT w.is_paused
-     ORDER BY a.next_slot_at LIMIT GREATEST(p_max - n4, 0)
+     ORDER BY a.next_slot_at LIMIT rem
   ), ins AS (
     INSERT INTO jobs (kind, workspace_id, lane, serialization_key, run_at, max_attempts, payload)
     SELECT 'plan_slot', d.workspace_id, 'bulk', 'acct:' || d.id, now(), 3,
@@ -1728,13 +1732,14 @@ BEGIN
      SET next_slot_at = fn_next_slot(d.next_slot_at, d.eff_tz, d.eff_start, d.eff_end, d.eff_ppd)
     FROM due d WHERE a.id = d.id;
   GET DIAGNOSTICS n1 = ROW_COUNT;
+  rem := rem - n1;
   -- (3) due credential refreshes — one set-based statement (D31: the scheduled refresh is also
   -- the liveness probe; the cadence is decoupled from expiry proximity). Reads ride svc_clock's
   -- payload-free column grant; ix_credentials_refresh_due serves the scan:
   WITH due AS (
     SELECT id, workspace_id FROM oauth_credentials
      WHERE state = 'active' AND next_refresh_at IS NOT NULL AND next_refresh_at <= now()
-     LIMIT GREATEST(p_max - n4 - n1, 0)
+     LIMIT rem
   ), ins AS (
     INSERT INTO jobs (kind, workspace_id, lane, serialization_key, run_at, max_attempts, payload)
     SELECT 'refresh_credential', d.workspace_id, 'bulk', 'cred:' || d.id, now(), 5,
@@ -1744,12 +1749,13 @@ BEGIN
   UPDATE oauth_credentials c SET next_refresh_at = now() + p_refresh_cadence
     FROM due d WHERE c.id = d.id;
   GET DIAGNOSTICS n2 = ROW_COUNT;
+  rem := rem - n2;
   -- (4) due source syncs — same shape (H4's slow jittered baseline; pre-slot/demand syncs are
   -- produced by their own sites — the tick owns only the baseline). ix_sources_sync_due serves it:
   WITH due AS (
     SELECT id, workspace_id FROM media_sources
      WHERE state = 'active' AND next_sync_at IS NOT NULL AND next_sync_at <= now()
-     LIMIT GREATEST(p_max - n4 - n1 - n2, 0)
+     LIMIT rem
   ), ins AS (
     INSERT INTO jobs (kind, workspace_id, lane, serialization_key, run_at, max_attempts, payload)
     SELECT 'sync_media_source', d.workspace_id, 'bulk', 'src:' || d.id, now(), 5,
@@ -1985,10 +1991,7 @@ GRANT EXECUTE ON FUNCTION fn_auth_plane_sweep(interval, interval, interval, int)
 CREATE FUNCTION fn_invitation_accept(p_token_hash text, p_user uuid, p_provider text,
                                      p_verified_email text, p_tg_user_id bigint, p_channel text)
 RETURNS TABLE (o_workspace_id uuid, o_granted_role text, o_matched boolean)
--- o_ output names per the door output-name rule above: the body's member INSERT carries an
--- unqualified ON CONFLICT (workspace_id, user_id) inference list, and an output column named
--- workspace_id made that reference ambiguous at runtime (R5 — the door compiled but could not
--- accept a single invitation).
+-- o_ outputs per the §7 output-name rule (R5's reproduction was this door's ON CONFLICT list)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
 DECLARE inv record; m boolean; grant_role text; bind uuid;
 BEGIN
