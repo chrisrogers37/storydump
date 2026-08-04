@@ -16,7 +16,7 @@ Declared inputs (each a config seam or a 0.4-verified platform fact):
 | Ingress replicas | 2 | initial |
 | Effective mean publish-pipeline duration | ~30 s | modeling assumption between p50 ~20 s and p95 ~90 s (poll-dominated tail); S.1 measures the real mean |
 | Max accepted media file size | 100 MB | initial config seam |
-| Invitation email volume | launch: single digits/day; model = workspace-onboarding rate × invites/workspace (+ bounce notices) | pass-5 input (R4's Resend finding): the free tier is 100/day / 3,000/month **with sending paused at quota**, so a cohort-onboarding burst binds exactly when the product succeeds; the `email_global` budget below defers under our own ceiling instead of tripping the provider pause |
+| Invitation email volume | launch: single digits/day; model = workspace-onboarding rate × invites/workspace (+ bounce notices). Provider free tier: 100/day / 3,000/month, **paused at quota** | pass-5 input (R4's Resend finding); the burst-risk rationale lives in `07` §1; the `email_global` budget below defers under our own ceiling |
 
 Derived:
 
@@ -54,7 +54,7 @@ Derived:
 | Temp storage | 3 × 4 × 100 MB = 1.2 GB headroom per env | SE:236-237 inequality with declared inputs |
 | Sync baseline | every 6 h jittered; pre-slot sync at T−15 min if source stale > 30 min; first-ingest chunks of 200 files | H4 demand-driven shape |
 | Credential refresh cadence (`next_refresh_at`) | every 7 d from issue, jittered — decoupled from expiry proximity | the scheduled refresh doubles as the credential **liveness probe** (`02` §2 D31), so this number bounds dead-token detection latency between publish attempts. The legacy semantics — refresh only within 7 d of expiry (`REFRESH_BUFFER_HOURS = 168`) — left a token dead at day 0 of a 60-day window unprobed for ~53 days (the 2026-05 incident class); decoupling from expiry proximity is the point. 0.4 verifies Meta's refresh-eligibility constraints (IG-Login long-lived tokens carry a min-age rule; the cadence must respect it) |
-| Cloudinary (FC-3) | **transit TTL = the asset's lifetime**: reap-on-success (minutes, FC-3.5) + hard TTL 24 h + reap sweep every 15 min (FC-3.6). Delivery URLs are **signed, non-expiring** (FC-3.2 as amended; D38 — ruled 2026-08-04, "spend nothing at current users") | destruction 404s every URL, so asset lifetime is the effective expiry ceiling at $0; URL-level expiry is a paid mechanism (D38 records the pricing). **Revisit trigger (D38): sustained monthly Cloudinary credit consumption > 225 credits** — the Plus allowance, i.e. the point where bandwidth alone forces the Advanced tier and token-based URL expiry approaches zero marginal cost |
+| Cloudinary (FC-3) | **transit TTL = the asset's lifetime**: reap-on-success (minutes, FC-3.5) + hard TTL 24 h + reap sweep every 15 min (FC-3.6). Delivery URLs are **signed, non-expiring** (FC-3.2 as amended) | per D38 (the analysis's home). **Revisit trigger: sustained monthly Cloudinary credit consumption > 225 credits** (D38's condition; this row is the number's home) |
 | Meta usage pre-check | inline-only at publish admission, **behind a default-off flag (the S.5 canary decides)**; in-process cache TTL 5 min keyed on `provider_account_ref` | `02` §8 — **no background refresh exists**; worst case ≤ 1 query per publish attempt (≤ ~520/min at the corrected absolute ceiling; far less at cadence-realistic load), vs the struck eager reading's 1,500/min at 7,500 accounts (review B§6) |
 | Parked-intent alarm | `publishing_ambiguous` or `review_required` > 15 min pages; customer notification per `06` §5 after 24 h | observability floor (`01`) |
 | Reconciler cadence + budget | sweep every 60 s, LIMIT 50; **per-intent poll ladder 60 s → 5 m → 30 m → 2 h (exponential, capped at container expiry ~24 h) — ≈ 15–20 status calls per ambiguous intent worst-case, vs ~1,440 at the pass-2 flat 60 s poll**; ladder exhausted ⇒ the `02` §6 exhaustion tail (final stories check, park `review_required`) | bounded per H5/RF-R1; mode-parameterized contract in `02` §6 |
@@ -85,8 +85,8 @@ Derived:
 | `rate_counters` | 7 d | delete (windows are minutes–hours; the class keeps days) |
 | Expiry-class rows (`post_locks`, `workspace_invitations`, `oauth_states`) | on expiry | swept by `reap_expired` (`02` §5 remit), not this sweep |
 | `post_intents` terminal | **kept forever** | they ARE the posting history (product data, not bookkeeping) |
-| M.3 snapshot tables (`archive` schema) | 90 d | DROP TABLE via a dated runner migration (their names carry no date, so the sweep's name-based age test cannot see them — `02` §7-DDL) |
-| Audit export batch tables (`archive` schema) | 400 d after export | DROP TABLE (the `archive_tables` retention class — names encode their date) |
+| M.3 snapshot tables (`archive` schema) | 90 d | DROP TABLE — the `archive_snapshots` retention class (names carry the `04` date suffix, so one name-test mechanism ages both archive families) |
+| Audit export batch tables (`archive` schema) | 400 d after export | DROP TABLE — the `archive_audit` retention class |
 
 ## Backup / DR (review A §5.15)
 

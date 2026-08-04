@@ -73,7 +73,7 @@ The publish pipeline implements FC-3.1–3.6 exactly as tabled in `00-fixed-cons
 
 Media sources are a **pluggable adapter surface**: provider-neutral core, adapters at the edge, adding a provider costs an adapter rather than a core change — the third instance of this plan's per-provider discipline, after the interaction-layer port above and the D33/D34 auth providers. The port, justified operation-by-operation by an existing core need:
 
-- `list_changes(config, checkpoint) → (items, checkpoint')` — sync (H4); `items` carry the adapter's **canonical stable item ref** (`02` §2's contract: stable across provider-side rename/move, unique within the source — Drive: the file id, never a path) plus name/kind/size/hash inputs.
+- `list_changes(config, checkpoint) → (items, checkpoint')` — sync (H4); `items` carry the adapter's **canonical stable item ref** (the `02` §2 stable-ref contract — its normative home) plus name/kind/size/hash inputs.
 - `stream(ref) → bytes` — the publish pipeline's transit fetch.
 - `probe(config) → ok | error-class` — connect/repair validation (`media_sources.state` machine).
 
@@ -81,7 +81,7 @@ Provider-scoped shapes (`config`, `sync_checkpoint`) are versioned JSONB the cor
 
 ## Instagram auth (FC-4, under FC-7)
 
-Connect-account flows use Instagram Login OAuth in the ingress adapters; refresh via `graph.instagram.com`. **No FB-vintage credential exists in the target** (pass 5/FC-7: credentials do not migrate — the owner re-authenticates over Instagram Login at the `04` M.3 window, which is the FC-4 sunset end state reached at cutover; `00` FC-4 application note). The target ships Instagram-Login-only from its first production day.
+Connect-account flows use Instagram Login OAuth in the ingress adapters; refresh via `graph.instagram.com`. **No FB-vintage credential exists in the target** — the `00` FC-4 application note is the argument's home; the target is Instagram-Login-only from its first production day.
 
 ## Observability (thin but load-bearing)
 
