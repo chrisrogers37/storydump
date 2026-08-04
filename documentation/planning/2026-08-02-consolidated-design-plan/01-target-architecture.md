@@ -67,11 +67,21 @@ The domain is already **state-centric** at its heart — an approval is a databa
 
 ## Media transit (FC-3)
 
-The publish pipeline implements FC-3.1–3.6 exactly as tabled in `00-fixed-constraints.md` — workspace-prefixed, **per-request-signed**, authenticated uploads (FC-3.4 delivered via D28's signed-params mechanism, `03`), short-TTL signed delivery, reap-on-success, and the hard-TTL sweep job — with values in `05`. Drive remains per-workspace OAuth (already scales per FC-0).
+The publish pipeline implements FC-3.1–3.6 exactly as tabled in `00-fixed-constraints.md` — workspace-prefixed, **per-request-signed**, authenticated uploads (FC-3.4 delivered via D28's signed-params mechanism, `03`), signed non-expiring delivery with the TTL attached to the asset (FC-3.2 as amended; D38), reap-on-success, and the hard-TTL sweep job — with values in `05`. Drive remains per-workspace OAuth (already scales per FC-0).
 
-## Instagram auth (FC-4)
+## Media-source port (FC-8, D37 — FC-2's discipline applied to media)
 
-Connect-account flows use Instagram Login OAuth in the ingress adapters; refresh via `graph.instagram.com`. The FB-vintage path survives only inside the credentials service, structurally closed to new rows (`02` §credentials), until the FC-4 sunset gate executes in `04` G.2.
+Media sources are a **pluggable adapter surface**: provider-neutral core, adapters at the edge, adding a provider costs an adapter rather than a core change — the third instance of this plan's per-provider discipline, after the interaction-layer port above and the D33/D34 auth providers. The port, justified operation-by-operation by an existing core need:
+
+- `list_changes(config, checkpoint) → (items, checkpoint')` — sync (H4); `items` carry the adapter's **canonical stable item ref** (`02` §2's contract: stable across provider-side rename/move, unique within the source — Drive: the file id, never a path) plus name/kind/size/hash inputs.
+- `stream(ref) → bytes` — the publish pipeline's transit fetch.
+- `probe(config) → ok | error-class` — connect/repair validation (`media_sources.state` machine).
+
+Provider-scoped shapes (`config`, `sync_checkpoint`) are versioned JSONB the core never interprets (`02` §2). **v1 implements exactly one adapter — Google Drive — through this port; there is no upload/write operation** (media ingestion is sync-only; the command vocabulary has no upload, a recorded non-goal with this port as the extension seam). The boundary is D37's core sentence: **the ruling asks for the seam, not the second implementation** — a Dropbox adapter is a drop-in when asked for, and building it unasked is out of scope.
+
+## Instagram auth (FC-4, under FC-7)
+
+Connect-account flows use Instagram Login OAuth in the ingress adapters; refresh via `graph.instagram.com`. **No FB-vintage credential exists in the target** (pass 5/FC-7: credentials do not migrate — the owner re-authenticates over Instagram Login at the `04` M.3 window, which is the FC-4 sunset end state reached at cutover; `00` FC-4 application note). The target ships Instagram-Login-only from its first production day.
 
 ## Observability (thin but load-bearing)
 
@@ -79,4 +89,4 @@ Per-lane queue depth + oldest-runnable-age (the backpressure signal), per-worksp
 
 ## What deliberately does not exist
 
-No broker/Celery/second datastore in the core; no per-workspace bot tokens, processes, or env vars (T3); no polling-loop hierarchy (the legacy background loops collapse into clock → jobs → workers + webhook); no global mutable singletons (breakers, sync gates, class-var counters — all cross-request state is rows); no fixed **short-cadence per-source** Drive polling as the freshness mechanism (H4's demand-driven shape + slow jittered baseline replaces it); no per-user Cloudinary credentials (FC-3); no Facebook Page auth (FC-4).
+No broker/Celery/second datastore in the core; no per-workspace bot tokens, processes, or env vars (T3); no polling-loop hierarchy (the legacy background loops collapse into clock → jobs → workers + webhook); no global mutable singletons (breakers, sync gates, class-var counters — all cross-request state is rows); no fixed **short-cadence per-source** Drive polling as the freshness mechanism (H4's demand-driven shape + slow jittered baseline replaces it); no per-user Cloudinary credentials (FC-3); no Facebook Page auth (FC-4); no local-filesystem media path (FC-8 — full cloud; sources speak only through the media-source port above).

@@ -16,6 +16,7 @@ Declared inputs (each a config seam or a 0.4-verified platform fact):
 | Ingress replicas | 2 | initial |
 | Effective mean publish-pipeline duration | ~30 s | modeling assumption between p50 ~20 s and p95 ~90 s (poll-dominated tail); S.1 measures the real mean |
 | Max accepted media file size | 100 MB | initial config seam |
+| Invitation email volume | launch: single digits/day; model = workspace-onboarding rate × invites/workspace (+ bounce notices) | pass-5 input (R4's Resend finding): the free tier is 100/day / 3,000/month **with sending paused at quota**, so a cohort-onboarding burst binds exactly when the product succeeds; the `email_global` budget below defers under our own ceiling instead of tripping the provider pause |
 
 Derived:
 
@@ -37,7 +38,7 @@ Derived:
 | 8 | Attempt / deadline budget | 3 attempts, deadline +10 min | 5 attempts, backoff 1/5/15/60 min, deadline = slot end (or +6 h for non-slot jobs) | R8: retryable classes only; ambiguous never re-attempts (reconciler owns it) |
 | 9 | Reserved interactive capacity | 10 of each replica's 60 slots interactive-only (10:50, ≈17%) | — | H2: bulk can never occupy interactive capacity |
 
-**Tasks vs connections (the SE:230-234 inequality, made explicit — review A §3.35):** a pool slot is an asyncio task, not a connection; connections are held only inside transaction blocks, and the L.0 discipline (transaction-per-checkpoint, never across a provider call — `02` §5) keeps DB-active time ≲5% of pipeline wall time. Expected concurrent DB-active tasks ≈ 180 slots × 5% ≈ 9 fleet-wide; per-replica connection pools of 10 bound the spike case. The invariant to re-verify at S.3: Σ(replica × pool) = 3×10 + 2×10 = **50** ≥ peak DB-active tasks, and < the Neon plan ceiling (pgbouncer in front; clock runs inside an elected worker — no separate pool).
+**Tasks vs connections (the SE:230-234 inequality, made explicit — review A §3.35):** a pool slot is an asyncio task, not a connection; connections are held only inside transaction blocks, and the L.0 discipline (transaction-per-checkpoint, never across a provider call — `02` §5) keeps DB-active time ≲5% of pipeline wall time. Expected concurrent DB-active tasks ≈ 180 slots × 5% ≈ 9 fleet-wide; per-replica connection pools of 10 bound the spike case. **The inequality counts `pool_size + max_overflow`, and `max_overflow` is pinned to 0 at L.0** (pass 5 — R4's finding: the anchored repo ships `DB_MAX_OVERFLOW=20`, which silently makes the true ceiling (10+20)×5 = 150, not 50; the pool-slots-are-tasks model sizes `pool_size` for the spike case, so overflow un-bounds the invariant for nothing). The invariant: Σ(replica × (pool + overflow)) = 3×(10+0) + 2×(10+0) = **50** ≥ peak DB-active tasks, and < the actual Neon plan ceiling — **first verified against the real plan at M.3's smoke, re-verified at S.3 scale** (pgbouncer in front; clock runs inside an elected worker — no separate pool).
 
 ## Supporting cadences and budgets
 
@@ -53,20 +54,20 @@ Derived:
 | Temp storage | 3 × 4 × 100 MB = 1.2 GB headroom per env | SE:236-237 inequality with declared inputs |
 | Sync baseline | every 6 h jittered; pre-slot sync at T−15 min if source stale > 30 min; first-ingest chunks of 200 files | H4 demand-driven shape |
 | Credential refresh cadence (`next_refresh_at`) | every 7 d from issue, jittered — decoupled from expiry proximity | the scheduled refresh doubles as the credential **liveness probe** (`02` §2 D31), so this number bounds dead-token detection latency between publish attempts. The legacy semantics — refresh only within 7 d of expiry (`REFRESH_BUFFER_HOURS = 168`) — left a token dead at day 0 of a 60-day window unprobed for ~53 days (the 2026-05 incident class); decoupling from expiry proximity is the point. 0.4 verifies Meta's refresh-eligibility constraints (IG-Login long-lived tokens carry a min-age rule; the cadence must respect it) |
-| Cloudinary (FC-3) | signed-URL TTL 15 min; transit hard TTL 24 h; reap sweep every 15 min | FC-3.2/3.6 |
+| Cloudinary (FC-3) | **transit TTL = the asset's lifetime**: reap-on-success (minutes, FC-3.5) + hard TTL 24 h + reap sweep every 15 min (FC-3.6). Delivery URLs are **signed, non-expiring** (FC-3.2 as amended; D38 — ruled 2026-08-04, "spend nothing at current users") | destruction 404s every URL, so asset lifetime is the effective expiry ceiling at $0; URL-level expiry is a paid mechanism (D38 records the pricing). **Revisit trigger (D38): sustained monthly Cloudinary credit consumption > 225 credits** — the Plus allowance, i.e. the point where bandwidth alone forces the Advanced tier and token-based URL expiry approaches zero marginal cost |
 | Meta usage pre-check | inline-only at publish admission, **behind a default-off flag (the S.5 canary decides)**; in-process cache TTL 5 min keyed on `provider_account_ref` | `02` §8 — **no background refresh exists**; worst case ≤ 1 query per publish attempt (≤ ~520/min at the corrected absolute ceiling; far less at cadence-realistic load), vs the struck eager reading's 1,500/min at 7,500 accounts (review B§6) |
 | Parked-intent alarm | `publishing_ambiguous` or `review_required` > 15 min pages; customer notification per `06` §5 after 24 h | observability floor (`01`) |
 | Reconciler cadence + budget | sweep every 60 s, LIMIT 50; **per-intent poll ladder 60 s → 5 m → 30 m → 2 h (exponential, capped at container expiry ~24 h) — ≈ 15–20 status calls per ambiguous intent worst-case, vs ~1,440 at the pass-2 flat 60 s poll**; ladder exhausted ⇒ the `02` §6 exhaustion tail (final stories check, park `review_required`) | bounded per H5/RF-R1; mode-parameterized contract in `02` §6 |
 | Quarantine backoff ladder | 1 m / 5 m / 30 m / 2 h / 24 h (cap); strike decay 24 h; re-alert dedup 1 h | `02` §2 semantics |
-| Backfill batch / comparator window | 5,000 rows / 14 days | six-stage machine inputs (`04` §Ground rules) |
+| Transform batch (M.1) | 5,000 rows | offline-transform batching (`04` §Ground rules; the 14-day comparator window died with shadow-read — FC-7) |
 | Approval TTL default (`approval_ttl_minutes` NULL) | 1,440 min (24 h) | workspace seam; reaper clock (`02` §4) |
 | Offboarding | grace window 30 days; publish-drain timeout 15 min; revocation retry 3 × 1 h backoff | `06` §1 workflow |
 | Invitations / sessions / OAuth state | invite expiry 7 d · session 30 d sliding · state token 15 min (every purpose — connect/reconnect/signin/link) | `07` §§1–2 |
 | Pre-auth admission (unauthenticated surfaces) | 30/min per IP (the Google sign-in endpoints included) | `07` §1 via `rate_counters` scope `preauth_ip` (`02` §6, incl. the client-IP source rule) — deliberately distinct from the per-workspace S.2 admission, which requires tenant context |
-| Email delivery (`send_email`, `07` §1) | 3 attempts, backoff 1/5/15 min | provider + bounce semantics: `07` §1 (ack status: `03` pass-4 items); X.3's gate delivers a real invitation email end-to-end |
+| Email delivery (`send_email`, `07` §1) | 3 attempts, backoff 1/5/15 min; **provider-wide budget 90/day** (`rate_counters` scope `email_global`, key `''` — headroom under the free tier's 100/day hard pause; over budget ⇒ the job defers on its retry schedule) | provider + bounce semantics: `07` §1 (ack status: `03` items); the volume model is the envelope input above; X.3's gate delivers a real invitation email end-to-end |
 | Retention sweep cadence | daily, batches of 5,000 per class, walking the `ix_*_retire` indexes | `02` §5 pattern; H5-bounded |
-| Re-auth campaign cadence | 1 prompt / account / week; "no media available" notice dedup 24 h | `06` §5, G.1 |
-| Card TTL (W.6 drop condition) | 30 days | `04` W.6 mechanical drop rule |
+| Reauth-prompt cadence | 1 prompt / account / week; "no media available" notice dedup 24 h | `06` §5 (runtime credential death — `reauth_prompt` jobs; the G-phase campaign died with FC-7) |
+| `legacy_queue_item_id` drop condition | 30 days after M.3 + zero non-terminal carriers | `02` §3 mechanical drop rule |
 
 ## Retention (swept by `retention_sweep`, S.4; per-class, terminal/age-qualified)
 
@@ -79,13 +80,13 @@ Derived:
 | `channel_outbox` sent/superseded | 30 d | delete |
 | `channel_outbox` failed/ambiguous | 90 d | delete |
 | `daily_post_counts` | 400 d | delete |
-| `session_tokens` expired/revoked | 30 d | delete |
-| `command_dedup` | 7 d | delete (Telegram's replay window is hours) |
+| `session_tokens` expired/revoked | 30 d | delete (via `fn_auth_plane_sweep`, on this sweep's schedule) |
+| `command_dedup` | 7 d | delete (via `fn_auth_plane_sweep`; Telegram's replay window is hours) |
 | `rate_counters` | 7 d | delete (windows are minutes–hours; the class keeps days) |
 | Expiry-class rows (`post_locks`, `workspace_invitations`, `oauth_states`) | on expiry | swept by `reap_expired` (`02` §5 remit), not this sweep |
 | `post_intents` terminal | **kept forever** | they ARE the posting history (product data, not bookkeeping) |
-| Contract-stage snapshot tables (`archive` schema) | 90 d | DROP TABLE |
-| Audit export batch tables (`archive` schema) | 400 d after export | DROP TABLE |
+| M.3 snapshot tables (`archive` schema) | 90 d | DROP TABLE via a dated runner migration (their names carry no date, so the sweep's name-based age test cannot see them — `02` §7-DDL) |
+| Audit export batch tables (`archive` schema) | 400 d after export | DROP TABLE (the `archive_tables` retention class — names encode their date) |
 
 ## Backup / DR (review A §5.15)
 
@@ -95,7 +96,7 @@ Derived:
 | PITR floor | Neon PITR window ≥ 7 days — verified at 0.2's gate and re-checked when the plan changes |
 | RPO | Neon continuous WAL (~minutes) — no additional mechanism |
 | RTO target | 1 h (restore branch + repoint DATABASE_URL + smoke suite) |
-| Restore drill | quarterly, runbook'd: PITR branch → runner parity check → smoke suite; first drill is a W-phase gate. The `archive` schema is covered by construction (it IS the database); S.4's gate additionally proves one audit export and one snapshot restore |
+| Restore drill | quarterly, runbook'd: PITR branch → runner parity check → smoke suite; **the M.2 rehearsal IS the first drill** (pass 5 — it runs exactly this sequence on a production PITR branch). The `archive` schema is covered by construction (it IS the database); S.4's gate additionally proves one audit export and one snapshot restore |
 | Tenant-level recovery | PITR branch + selective per-workspace copy (runbook; exercised once in the first drill) — RLS keys make per-tenant extraction a WHERE clause, not archaeology |
 
 ## Redis annex (gated, C3/RF-R4)
