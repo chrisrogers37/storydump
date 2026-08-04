@@ -1429,6 +1429,10 @@ GRANT SELECT, DELETE ON onboarding_sessions TO svc_maintenance;        -- stale-
 GRANT SELECT, UPDATE, DELETE ON jobs TO svc_maintenance;               -- lease re-ready + retention
 GRANT SELECT, DELETE ON channel_outbox, provider_operations,
                         daily_post_counts, rate_counters TO svc_maintenance;  -- retention classes
+GRANT SELECT, DELETE ON command_dedup TO svc_maintenance;  -- fn_auth_plane_sweep's third leg
+                        -- (R5: the p_maint_dedup policy existed with no table grant behind it —
+                        -- a policy narrows rows but cannot confer the verb; the sweep hit
+                        -- permission denied at the GRANT layer)
 GRANT SELECT, DELETE ON audit_events TO svc_maintenance;               -- export-then-delete only
 GRANT SELECT, DELETE ON workspaces TO svc_maintenance;                 -- fn_offboard_finalize
 GRANT SELECT ON workspaces TO svc_membership;
@@ -1559,7 +1563,7 @@ CREATE POLICY p_member_ws      ON workspaces FOR SELECT TO svc_membership USING 
 CREATE POLICY p_maint_dedup ON command_dedup FOR ALL TO svc_maintenance USING (true) WITH CHECK (true);
 ```
 
-**The doors.** Every body: `SECURITY DEFINER`, `SET search_path = pg_catalog, public`, owned by its system role, `EXECUTE` revoked from PUBLIC and granted to exactly one login. Every `05` number arrives as a parameter — callers read config and pass values; a hardcoded number in a door body is the same review-blocking defect as anywhere else.
+**The doors.** Every body: `SECURITY DEFINER`, `SET search_path = pg_catalog, public`, owned by its system role, `EXECUTE` revoked from PUBLIC and granted to exactly one login. Every `05` number arrives as a parameter — callers read config and pass values; a hardcoded number in a door body is the same review-blocking defect as anywhere else. **Output-name rule (R5):** a door's `RETURNS TABLE` column names carry an `o_` prefix — PL/pgSQL substitutes output variables into unqualified references in body statements *including `ON CONFLICT` inference lists*, so an output column named after a real column is a runtime ambiguity error waiting on the first unqualified use (R5 proved it: `workspace_id` in the accept door). The prefix removes the collision class instead of policing each statement.
 
 ```sql
 -- 1/9 fn_claim_job — the §5 claim, verbatim, as the function it always claimed to be.
@@ -1809,7 +1813,10 @@ DECLARE n int := 0; tbl text;
 BEGIN
   PERFORM set_config('app.actor_kind', 'reaper', true);
   IF p_class = 'audit_events' THEN
-    tbl := 'audit_export_' || to_char(now(), 'YYYYMMDD_HH24MISS');
+    -- clock_timestamp(), never now(): now() is transaction-stable, so two batches in one
+    -- transaction would mint the same name and collide (R5). Microsecond suffix keeps
+    -- same-second batches distinct; the archive_audit age test reads only the first 8 digits.
+    tbl := 'audit_export_' || to_char(clock_timestamp(), 'YYYYMMDD_HH24MISS_US');
     EXECUTE format(
       'CREATE TABLE archive.%I AS SELECT * FROM audit_events
         WHERE created_at < now() - %L::interval ORDER BY id LIMIT %s',
@@ -1926,7 +1933,11 @@ GRANT EXECUTE ON FUNCTION fn_auth_plane_sweep(interval, interval, interval, int)
 -- fact is computed where it is consumed. Caller (ingress) rate-limits via the preauth_ip scope.
 CREATE FUNCTION fn_invitation_accept(p_token_hash text, p_user uuid, p_provider text,
                                      p_verified_email text, p_tg_user_id bigint, p_channel text)
-RETURNS TABLE (workspace_id uuid, granted_role text, matched boolean)
+RETURNS TABLE (o_workspace_id uuid, o_granted_role text, o_matched boolean)
+-- o_ output names per the door output-name rule above: the body's member INSERT carries an
+-- unqualified ON CONFLICT (workspace_id, user_id) inference list, and an output column named
+-- workspace_id made that reference ambiguous at runtime (R5 — the door compiled but could not
+-- accept a single invitation).
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
 DECLARE inv record; m boolean; grant_role text; bind uuid;
 BEGIN
