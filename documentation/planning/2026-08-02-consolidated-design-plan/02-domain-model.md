@@ -898,21 +898,31 @@ BEGIN
   -- Those advances still require an actor (the RAISE above) but write no audit row: their
   -- authority trail is the intent ledger, and auditing them would mint from=to noise at
   -- publish rate, retained 400 d. Any change to a governance column below still audits.
-  IF TG_OP = 'UPDATE' AND TG_TABLE_NAME = 'ig_accounts'
-     AND ROW(NEW.workspace_id, NEW.provider_account_ref, NEW.handle, NEW.display_name, NEW.state,
+  -- PL/pgSQL RULE THIS SHAPE DEPENDS ON (normative for every generic multi-table trigger in
+  -- this plan): a NEW./OLD. field reference is resolved when its enclosing EXPRESSION is set
+  -- up for the firing table's row type — a false left conjunct short-circuits the VALUE, never
+  -- the FIELD resolution. `TG_TABLE_NAME = 'x' AND NEW.<x-only field> …` as ONE expression
+  -- therefore errors on every OTHER table (`record "new" has no field …`, the R5 P0). Table
+  -- dispatch must be an IF STATEMENT, whose branch body is parsed only when reached for a row
+  -- type that has the fields — which is why the exits below are nested, not AND-chained.
+  IF TG_OP = 'UPDATE' THEN
+    IF TG_TABLE_NAME = 'ig_accounts' THEN
+      IF ROW(NEW.workspace_id, NEW.provider_account_ref, NEW.handle, NEW.display_name, NEW.state,
              NEW.posts_per_day, NEW.posting_hours_start, NEW.posting_hours_end, NEW.tz)
          IS NOT DISTINCT FROM
          ROW(OLD.workspace_id, OLD.provider_account_ref, OLD.handle, OLD.display_name, OLD.state,
              OLD.posts_per_day, OLD.posting_hours_start, OLD.posting_hours_end, OLD.tz) THEN
-    RETURN NULL;                                 -- next_slot_at / last_posted_at advance only
-  END IF;
-  IF TG_OP = 'UPDATE' AND TG_TABLE_NAME = 'oauth_credentials'
-     AND ROW(NEW.workspace_id, NEW.ig_account_id, NEW.media_source_id, NEW.provider,
+        RETURN NULL;                             -- next_slot_at / last_posted_at advance only
+      END IF;
+    ELSIF TG_TABLE_NAME = 'oauth_credentials' THEN
+      IF ROW(NEW.workspace_id, NEW.ig_account_id, NEW.media_source_id, NEW.provider,
              NEW.encrypted_payload, NEW.state)
          IS NOT DISTINCT FROM
          ROW(OLD.workspace_id, OLD.ig_account_id, OLD.media_source_id, OLD.provider,
              OLD.encrypted_payload, OLD.state) THEN
-    RETURN NULL;                                 -- next_refresh_at / expires_at advance only
+        RETURN NULL;                             -- next_refresh_at / expires_at advance only
+      END IF;
+    END IF;
   END IF;
   IF TG_OP = 'DELETE' THEN r := OLD; ELSE r := NEW; END IF;
   kind := CASE TG_TABLE_NAME
