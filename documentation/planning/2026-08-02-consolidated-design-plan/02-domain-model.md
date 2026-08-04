@@ -17,7 +17,7 @@ END $$;
 ```
 
 - **Replay order (normative):** the advertised DDL replays from empty **in file order — this file top-to-bottom, then `07`'s blocks in their file order**. Ordering is therefore load-bearing: a block references only objects printed above it. `04` 0.2's CI carries a named fixture that extracts the advertised blocks and replays them verbatim; an edit that breaks file-order replay fails that gate.
-- **Enums are TEXT + named CHECK constraints**, never native `ENUM` types. Closed sets whose members must be *removable* (e.g. `fb_login_legacy` dies at G.2) make native enums a liability (`DROP VALUE` does not exist); CHECK text is also what the existing enum-SSOT parity gate (models ↔ latest migration DDL) already verifies. Adding/removing a value = enum edit + migration editing the named CHECK, held in lockstep by that gate.
+- **Enums are TEXT + named CHECK constraints**, never native `ENUM` types. Closed sets whose members must be *addable and removable by plain migration* (the D34/D37 per-provider discipline depends on exactly this) make native enums a liability (`DROP VALUE` does not exist); CHECK text is also what the existing enum-SSOT parity gate (models ↔ latest migration DDL) already verifies. Adding/removing a value = enum edit + migration editing the named CHECK, held in lockstep by that gate.
 - **Tenant scoping:** every tenant-scoped table has `workspace_id UUID NOT NULL`; wherever it references another tenant-scoped table it uses a **composite FK** `(workspace_id, <ref>) REFERENCES parent (workspace_id, id)` so a cross-workspace reference is inexpressible (#721 D12, kept). Composite FKs require the parent-side `UNIQUE (workspace_id, id)` — those indexes are part of the parent DDL below.
 - **ON DELETE policy (three classes, no per-FK improvisation):**
   1. Workspace-rooted and tenant-child edges: `ON DELETE CASCADE`. Deletion of tenant data happens exactly once — at offboarding (T3), as `svc_maintenance` deleting the `workspaces` row after the `06` offboarding workflow; the cascade is the mechanism.
@@ -60,6 +60,7 @@ CREATE TABLE user_identities (
 );
 CREATE TRIGGER tg_touch_user_identities BEFORE UPDATE ON user_identities
   FOR EACH ROW EXECUTE FUNCTION trg_touch_updated_at();
+
 -- One identity per provider per user (v1; widening uq_user_provider is a deliberate migration).
 -- google is the one non-Telegram provider X.3 ships (FC-5; Apple re-entry = one CHECK value +
 -- one flow increment, D34). external_id is the provider's IMMUTABLE SUBJECT — the OIDC sub for
@@ -102,6 +103,16 @@ CREATE TABLE workspaces (
   caption_style           TEXT NULL
                           CONSTRAINT ck_ws_caption_style CHECK (caption_style IN ('enhanced','simple')),
   enable_ai_captions      BOOLEAN NOT NULL DEFAULT false,
+  api_publishing_enabled  BOOLEAN NOT NULL DEFAULT false,
+                          -- the manual-vs-API mode flag (06 §3 semantics: off = manual-mode cards,
+                          -- on = hybrid with the publish pipeline). FC-7 successor of the C7
+                          -- cohort-routing flag row: with the cutover flags dead, the one
+                          -- surviving per-workspace routing fact is plain product config, and a
+                          -- workspaces column is its home (legacy chat_settings.enable_instagram_api)
+  offboarding_at          TIMESTAMPTZ NULL,
+                          -- set when state enters 'offboarding'; cleared on restore. The durable
+                          -- grace-window anchor fn_offboard_finalize guards on (§7-DDL) — audit
+                          -- rows record the transition but a door must not parse audit to tell time
   created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at              TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -117,7 +128,9 @@ CREATE TRIGGER tg_touch_workspaces BEFORE UPDATE ON workspaces
 --   active_instagram_account_id → dissolved (multi-account; §2)
 --   last_post_sent_at → per-account slot anchor (§2 ig_accounts.next_slot_at derivation, 04 W.5)
 --   onboarding_step/onboarding_completed → onboarding_sessions (§9)
---   enable_instagram_api → routing flag row (C7 flag rows, 04 ground rules — it is cohort routing, not config)
+--   enable_instagram_api → workspaces.api_publishing_enabled (pass 5/FC-7: the cohort-routing
+--     flag table died with the live cutover; the surviving per-workspace mode flag is product
+--     config, homed above)
 --   show_verbose_notifications, send_lifecycle_notifications → channel_bindings.settings
 --   media_sync_enabled → media_sources.state (false = 'paused'; pass-4 anchor — this column was
 --     missing from the mapping)
@@ -190,10 +203,19 @@ CREATE TABLE workspace_invitations (
   email           TEXT NULL,                    -- lowercased; B's delivery address AND the D33
                                                 -- acceptance-constraint value; required when the
                                                 -- delivery channel is email (CHECK below)
-  invited_channel_ref TEXT NULL,                -- telegram-side hint recorded at invite time (tg
-                                                -- user id / username). ADVISORY constraint data,
-                                                -- never a key: acceptance never resolves an
-                                                -- invitation by this column (D33)
+  invited_tg_user_id  BIGINT NULL,              -- the ONLY value the D33 Telegram acceptance
+                                                -- constraint may match (pass 5, R4 finding): the
+                                                -- provider's IMMUTABLE numeric user id — the same
+                                                -- rule D32 applies to sign-in identity, one level
+                                                -- finer. Never a key: acceptance resolves by
+                                                -- token_hash alone
+  invited_channel_hint TEXT NULL,               -- display/delivery data only (a username, a name)
+                                                -- — NEVER an authorization input: usernames are
+                                                -- mutable and recyclable, so a username match can
+                                                -- not set the accepted-proof fact; an invitation
+                                                -- carrying only a hint always takes the
+                                                -- recorded-skip path (member + elevation-pending,
+                                                -- D36)
   role            TEXT NOT NULL DEFAULT 'member'
                   CONSTRAINT ck_invite_role CHECK (role IN ('admin','member')),  -- never 'owner'
                   -- BOTH ruled (FC-6.4). role is the invitation's CEILING, not an unconditional
@@ -222,13 +244,19 @@ CREATE TRIGGER tg_touch_workspace_invitations BEFORE UPDATE ON workspace_invitat
 CREATE UNIQUE INDEX uq_invite_live ON workspace_invitations (workspace_id, email)
   WHERE state = 'pending';
 -- Membership door for both surfaces (06 §2 is the flow's normative home; FC-6 the ruling).
--- ACCEPT is one CAS with the member INSERT in the SAME transaction:
+-- ACCEPT runs inside fn_invitation_accept (§7-DDL — the pre-membership door R4 found missing:
+-- the acceptor is authenticated but not yet a member, holds only the token, and tenant RLS
+-- structurally cannot resolve token_hash → workspace_id for them). The body is one CAS with the
+-- member INSERT in the SAME transaction:
 --   UPDATE workspace_invitations
 --      SET state='accepted', accepted_by_user_id=:u, accepted_email_matched=:m
 --    WHERE id=:id AND state='pending' AND expires_at > now() RETURNING id;
 -- zero rows ⇒ used/revoked/expired (a re-read distinguishes "already yours" from "someone else
 -- took it"); workspace_members' PK (workspace_id, user_id) is the double-membership guard —
--- already in the schema, nothing to add. THE MEMBER INSERT'S ROLE IS COMPUTED, NOT COPIED (D36):
+-- already in the schema, nothing to add. The match fact :m is computed IN the door body from raw
+-- inputs (google: the verified id_token email vs the row email; telegram: the tapping identity's
+-- numeric id vs invited_tg_user_id — never the hint column), so the authorization fact is
+-- computed where it is consumed. THE MEMBER INSERT'S ROLE IS COMPUTED, NOT COPIED (D36):
 --   role='member' invite ⇒ 'member' · role='admin' + :m = true ⇒ 'admin' ·
 --   role='admin' + :m = false (recorded skip — token possession was the only proof) ⇒ 'member',
 --   and the SAME transaction writes an elevation-pending outbox notification to the inviter's
@@ -274,6 +302,28 @@ CREATE TRIGGER tg_touch_channel_bindings BEFORE UPDATE ON channel_bindings
 ```
 
 **Settings materialization contract (the whole of it):** effective config = app defaults (env, one place: `src/config/defaults.py` successor) overridden by workspace typed columns (NULL column = inherit default) overridden, for notification prefs only, by `channel_bindings.settings` keys. No other layer exists; no config lives in JSONB except per-binding notification prefs; service code reads config through one `effective_settings(workspace_id [, binding_id])` resolver. Validation is at the service boundary (writes reject unknown keys/values); the DB CHECKs above are the backstop for typed columns.
+
+```sql
+CREATE TABLE onboarding_sessions (            -- target DDL (pass 5 — R4 finding 3e; §9 row).
+                                              -- Printed after workspaces: the FK below needs it
+  id                     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id                UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  step                   TEXT NOT NULL DEFAULT 'naming'
+                         CONSTRAINT ck_onboarding_step
+                         CHECK (step IN ('naming','awaiting_group','connect_identity','complete')),
+  pending_workspace_name TEXT NULL,            -- legacy pending_instance_name, target vocabulary
+  pending_workspace_id   UUID NULL REFERENCES workspaces(id) ON DELETE SET NULL,
+  expires_at             TIMESTAMPTZ NOT NULL, -- now() + 24 h at insert (05 seam)
+  created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT uq_onboarding_one_per_user UNIQUE (user_id)   -- one live session per user (§9)
+);
+CREATE TRIGGER tg_touch_onboarding_sessions BEFORE UPDATE ON onboarding_sessions
+  FOR EACH ROW EXECUTE FUNCTION trg_touch_updated_at();
+-- User-plane (no workspace key — onboarding precedes the workspace it creates); §7-DDL policy
+-- class 3. The step list here is normative (§9): connect_identity = link a web-capable identity
+-- (the 07 §2 link flow). Stale sessions expire via reap_expired (§5 remit).
+```
 
 ## §2. Accounts, sources, media, quarantine
 
@@ -357,8 +407,11 @@ CREATE TRIGGER tg_touch_provider_quarantine BEFORE UPDATE ON provider_quarantine
 --   effect: the §5 claim check defers late-inserted matching jobs. That is the ONLY effect.
 --   exit:   passive — quarantined_until passes and the next claim proceeds; that claim IS the
 --           probe (success rewrites nothing; the row is upserted again only on a fresh fault).
---   manual: clear-quarantine operator command deletes the row and re-readies deferred run_at
---           (audited).
+--   manual: clear-quarantine operator command EXPIRES the row — UPDATE SET quarantined_until =
+--           now(), strike_count = 0 — and re-readies deferred run_at (audited). Pass-5
+--           consistency fix: the pass-4 text said "deletes the row", which no login may do
+--           (§7 grant matrix: no login holds DELETE); expiry-by-update delivers the same
+--           behavior inside the grants, and the row is simply overwritten by the next fault.
 --   NOT quarantine: credential revocation (state='revoked' → reauth flow, 07) and Meta cap
 --   error 9 (a cap, §8) — neither writes here.
 
@@ -367,9 +420,17 @@ CREATE TABLE media_sources (
   workspace_id         UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
   provider             TEXT NOT NULL
                        CONSTRAINT ck_sources_provider CHECK (provider IN ('gdrive')),
-  config               JSONB NOT NULL           -- {v:1, folder_ref:text, root_name?:text}
+                       -- FC-8/D37: sources are a pluggable adapter surface; the CHECK stays a
+                       -- closed set per §0 (D15), and the OPEN set is the add cost — one adapter
+                       -- module against the 01 port + one value here (+ in ck_credentials_provider)
+                       -- + one row in D37's per-provider contract table + zero core changes.
+                       -- v1 ships exactly 'gdrive' (the seam, not the second implementation)
+  config               JSONB NOT NULL           -- adapter-defined, versioned; gdrive: {v:1,
+                       -- folder_ref:text, root_name?:text}. Each provider's shape is a D37
+                       -- contract-table row
                        CONSTRAINT ck_sources_config_v CHECK (jsonb_typeof(config->'v') = 'number'),
-  sync_checkpoint      JSONB NULL,              -- {v:1, page_token?:text, cursor?:text}
+  sync_checkpoint      JSONB NULL,              -- adapter-defined, versioned; gdrive: {v:1,
+                       -- page_token?:text}; cursor-style providers use their own keys
   next_sync_at         TIMESTAMPTZ NULL,
   state                TEXT NOT NULL DEFAULT 'active'
                        CONSTRAINT ck_sources_state CHECK (state IN ('active','paused','error')),
@@ -397,7 +458,13 @@ CREATE TABLE oauth_credentials (
   media_source_id   UUID NULL,
   provider          TEXT NOT NULL
                     CONSTRAINT ck_credentials_provider
-                    CHECK (provider IN ('ig_login','fb_login_legacy','gdrive')),
+                    CHECK (provider IN ('ig_login','gdrive')),
+                    -- no fb_login_legacy value exists (pass 5/FC-7): credentials do not migrate —
+                    -- the owner re-authenticates over Instagram Login at M.3, so no FB-vintage
+                    -- row can ever exist in the target and the FC-4 sunset end state ships on
+                    -- day one. A media-source credential's provider always equals its source's
+                    -- provider (D37 invariant, service-enforced; the per-source unique below
+                    -- already keys by provider). Media providers extend per D37's add cost
   encrypted_payload TEXT NOT NULL,              -- Fernet/MultiFernet ciphertext (07 §rotation);
                                                 -- never plaintext, never in logs/traces
   expires_at        TIMESTAMPTZ NULL,
@@ -421,8 +488,9 @@ CREATE UNIQUE INDEX uq_credential_per_source  ON oauth_credentials (workspace_id
 CREATE INDEX ix_credentials_refresh_due ON oauth_credentials (next_refresh_at)
   WHERE state = 'active' AND next_refresh_at IS NOT NULL;
 -- Typed XOR owner FKs (not polymorphic) so the composite-FK convention holds on the MOST
--- sensitive table (C4). The per-account unique keys by provider, which is what lets one account
--- hold an ig_login and a fb_login_legacy row simultaneously during G-phase (legacy 040 semantics).
+-- sensitive table (C4). The per-account unique keys by provider — one credential per (account,
+-- provider); with the target ig-side set at exactly 'ig_login' this is one live IG credential
+-- per account row in practice, and the key shape needs no change if a provider is ever added.
 -- State transitions (complete): active → expired (a definitive provider auth-rejection observed
 -- on ANY Meta call — scheduled refresh, publish pipeline, or the §8 pre-check if enabled — or the
 -- 07 §3 decrypt failure; the liveness-edge paragraph below states the discrimination) ·
@@ -432,11 +500,6 @@ CREATE INDEX ix_credentials_refresh_due ON oauth_credentials (next_refresh_at)
 -- {active,expired,revoked} → active (reconnect, 07 §2: an UPSERT on the owner unique key —
 -- payload swapped and state flipped on the existing row, same row id, no delete, no
 -- zero-credential window; the swap is audited).
--- fb_login_legacy is structurally closed to new rows at L.6:
---   ALTER TABLE oauth_credentials ADD CONSTRAINT ck_no_new_fb_legacy
---     CHECK (provider <> 'fb_login_legacy') NOT VALID;
--- (existing rows tolerated, new rows impossible — VALIDATEd then dropped with the enum value at
--- the FC-4 sunset G.2, together with uq/ix cleanup.)
 -- THE CREDENTIAL LIVENESS EDGE (D31): 'expired' is a PROVIDER-VERDICT state, not a calendar
 -- state — "the provider definitively rejected this credential", from whichever call observed it.
 -- Definitive = an auth-class rejection (Meta error 190 without a revocation subcode; the
@@ -456,7 +519,15 @@ CREATE TABLE media_items (
   id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   workspace_id      UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
   source_id         UUID NOT NULL,
-  provider_file_ref TEXT NOT NULL,              -- Drive file id (legacy source_identifier)
+  provider_file_ref TEXT NOT NULL,              -- the adapter's CANONICAL STABLE item identifier
+                                                -- (legacy source_identifier), adapter-defined
+                                                -- format, opaque to core. ADAPTER CONTRACT (D37,
+                                                -- normative): stable across provider-side
+                                                -- rename/move and unique within the source —
+                                                -- gdrive: the file id; a path is never a legal
+                                                -- ref (an unstable ref makes sync mint a fresh
+                                                -- row on rename, resetting recency and evading
+                                                -- the media_item_id-keyed recent locks, R4/D37)
   content_hash      TEXT NOT NULL,              -- SHA256 (legacy file_hash)
   media_kind        TEXT NOT NULL
                     CONSTRAINT ck_media_kind CHECK (media_kind IN ('image','video')),
@@ -533,8 +604,34 @@ CREATE INDEX ix_locks_expiry ON post_locks (expires_at) WHERE expires_at IS NOT 
 -- is that rule's DB backstop (R4): a recent lock without an account, or any other kind carrying
 -- one, is rejected as a constraint violation — prose/service discipline is no longer the only guard.
 -- Expired rows are purged by the reap_expired sweep via ix_locks_expiry.
--- Legacy kind mapping (W.3): recent_post→recent, skip→skip, permanent_reject→reject,
+-- Legacy kind mapping (M.1 transform): recent_post→recent, skip→skip, permanent_reject→reject,
 -- manual_hold→hold, seasonal→seasonal.
+
+CREATE TABLE category_post_case_mix (         -- target DDL (pass 5 — R4 finding 3e; §9 row, D23:
+                                              -- kept row-shaped, Type 2 SCD semantics unchanged)
+  id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  workspace_id       UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  category           TEXT NOT NULL,            -- matches media_items.category
+  ratio              NUMERIC(5,4) NOT NULL
+                     CONSTRAINT ck_case_mix_ratio CHECK (ratio >= 0),
+  effective_from     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  effective_to       TIMESTAMPTZ NULL,         -- NULL = the current row (SCD-2, legacy semantics;
+                                               -- the legacy is_current boolean is redundant with
+                                               -- this and is not carried — the M.1 mapping states it)
+  created_by_user_id UUID NULL REFERENCES users(id) ON DELETE SET NULL,
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER tg_touch_category_post_case_mix BEFORE UPDATE ON category_post_case_mix
+  FOR EACH ROW EXECUTE FUNCTION trg_touch_updated_at();
+CREATE UNIQUE INDEX uq_case_mix_current ON category_post_case_mix (workspace_id, category)
+  WHERE effective_to IS NULL;
+CREATE INDEX ix_case_mix_current ON category_post_case_mix (workspace_id)
+  WHERE effective_to IS NULL;
+-- Supersede = set effective_to on the current row + INSERT the new one, one transaction (the
+-- partial unique makes two current rows for a category impossible). Sum-to-1 across a
+-- workspace's current rows stays service-enforced (D23's recorded trade-off: a deferred
+-- cross-row aggregate trigger is complexity without a failure mode it prevents — one writer).
 ```
 
 ## §3. The intent ledger (heart of the system)
@@ -572,16 +669,20 @@ CREATE TABLE post_intents (
   ig_permalink         TEXT NULL,
   transit_asset_ref    TEXT NULL,               -- Cloudinary public id for FC-3.5 reap
   cap_consumed_on      DATE NULL,               -- the account-local calendar day this intent debited (R2)
-  cap_refunded_at      TIMESTAMPTZ NULL,        -- set iff the debit was returned (failed after debit)
+  cap_refunded_at      TIMESTAMPTZ NULL,        -- set iff the debit was returned (failed after
+                                                -- debit); cleared with cap_consumed_on on
+                                                -- resolve-retry so the row reads debit-neutral (§4)
   attempts_by_step     JSONB NOT NULL DEFAULT '{"v":1}'
                        CONSTRAINT ck_intent_attempts_v
                        CHECK (jsonb_typeof(attempts_by_step->'v') = 'number'),
                        -- {v:1, <step>:{count:int, generation:int, last_error_class?:text}}
   last_error           JSONB NULL,              -- {v:1, class:text, provider_code?:text, message:text,
                        --  evidence?:object}  — reconciler evidence lands here (§6)
-  legacy_queue_item_id UUID NULL,               -- L.9 correlation + W.6 card-mapping column;
-                                                -- dropped only by W.6's mechanical condition
-                                                -- (30 d after W.5 contract + zero live carriers)
+  legacy_queue_item_id UUID NULL,               -- transform provenance (pass 5/FC-7: populated
+                                                -- only by M.3's history transform). Drop rule,
+                                                -- mechanical: 30 d after M.3 with zero
+                                                -- non-terminal carriers → plain column-drop
+                                                -- migration
   entered_state_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
   created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -689,12 +790,32 @@ Key 1 carries no intent-kind discriminator: exactly one kind exists; the closed-
 The matrix is unchanged in substance from the first pass; what is new is that **every rule below names the database object that enforces it**. Application code (one transition service) orchestrates; the database is the authority — a raw UPDATE from any client obeys the same rules.
 
 ```sql
-CREATE TABLE post_intent_transitions (        -- the legal-edge reference table (seed data = matrix below)
+CREATE TABLE post_intent_transitions (        -- the legal-edge reference table, seeded below
   from_state TEXT NOT NULL,
   to_state   TEXT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),  -- §0 insert-only class: edges are added or
   PRIMARY KEY (from_state, to_state)              -- deleted, never updated — no touch machinery
 );
+
+-- THE SEED ROWS (pass 5 — R4 finding: the matrix was printed but never seeded, so a replayed
+-- schema rejected every transition while replaying green). These 27 rows ARE the matrix below,
+-- one row per edge; the matrix table remains the annotated normative statement (actors, guards,
+-- effects), and the advertised_ddl_replay fixture (04 0.2) replays this block and then asserts
+-- one legal transition succeeds and one illegal transition raises — text and seeds cannot drift.
+INSERT INTO post_intent_transitions (from_state, to_state) VALUES
+  ('scheduled','prompt_pending'), ('scheduled','expired'), ('scheduled','cancelled'),
+  ('prompt_pending','awaiting_approval'), ('prompt_pending','failed'),
+  ('prompt_pending','expired'), ('prompt_pending','cancelled'),
+  ('awaiting_approval','approved'), ('awaiting_approval','posted'),
+  ('awaiting_approval','skipped'), ('awaiting_approval','rejected'),
+  ('awaiting_approval','expired'), ('awaiting_approval','cancelled'),
+  ('approved','publishing'), ('approved','expired'), ('approved','cancelled'),
+  ('publishing','posted'), ('publishing','publishing_ambiguous'),
+  ('publishing','failed'), ('publishing','review_required'),
+  ('publishing_ambiguous','posted'), ('publishing_ambiguous','failed'),
+  ('publishing_ambiguous','review_required'),
+  ('review_required','posted'), ('review_required','approved'),
+  ('review_required','failed'), ('review_required','cancelled');
 
 CREATE FUNCTION trg_intent_guard() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
@@ -848,7 +969,7 @@ Why this and not a separate outcomes table: R3 needs *one immutable terminal rec
 
 | From | To | Actor | Guard / effect (with its enforcing object) |
 |---|---|---|---|
-| — | scheduled | clock (slot planner) | key-1 insert (`uq_intent_slot`); caps pre-checked advisory only |
+| — | scheduled | worker (`plan_slot` executor; the clock produces the job — pass 5, §5 registry) | key-1 insert (`uq_intent_slot`); caps pre-checked advisory only |
 | scheduled | prompt_pending | worker | outbox rows created for active push bindings, same tx |
 | scheduled | expired | reaper | slot passed unclaimed |
 | scheduled | cancelled | worker | `cancel_requested`, or workspace/account disabled |
@@ -871,7 +992,9 @@ Why this and not a separate outcomes table: R3 needs *one immutable terminal rec
 | publishing_ambiguous | posted / failed | **reconciler only** | §6 evidence contract decides; `failed` refunds the cap |
 | publishing_ambiguous | review_required | reconciler | evidence budget exhausted — a human looks |
 | review_required | posted | user (operator) | **resolve-posted** (pass-2: the missing likeliest resolution — "it did publish"): legal only when a publish permit exists (`publish_step='publish_called'`, container present); the resolution UPDATE sets `publish_step='effect_confirmed'` + any evidence (`ig_media_id`) in the same statement, satisfying `ck_posted_complete`; cap debit stands |
-| review_required | approved / failed / cancelled | user (operator) | resolve-retry (new generation) / resolve-failed (refunds the cap) / cancel; audited with channel + actor |
+| review_required | approved | user (operator) | **resolve-retry, exact same-transaction effects (pass 5 — R4's double-debit finding):** refund the recorded debit day, then clear `cap_consumed_on`, `cap_refunded_at`, `ig_container_id`, `transit_asset_ref`, and reset `publish_step='none'` — the intent returns to `approved` **debit-neutral**, and the next §4 flip debits the then-current day exactly once (SQL below the flip). The step generation in `attempts_by_step` increments, so the retry's permits mint fresh business keys. Without the refund, retry double-debited: the flip re-debits unconditionally and overwrites the recorded day, orphaning the first slot |
+| review_required | failed | user (operator) | resolve-failed: refunds the cap (companion SQL below) |
+| review_required | cancelled | user (operator) | cancel: **retains the debit — a stated decision (pass 5):** a `review_required` intent may in fact have published (that is what the state means); refunding on cancel risks under-counting toward R1's worst failure (over-posting). The operator who has determined it did not publish has resolve-failed, which refunds |
 
 The **approved → publishing** transaction, verbatim shape (the R2 atomic debit — no check-then-act gap, and the flip's row count is asserted so a consumed cap slot can never leak):
 
@@ -911,7 +1034,29 @@ SELECT (SELECT count(*) FROM debit) AS debited,
 COMMIT;  -- or ROLLBACK per the outcome above
 ```
 
-Cap refund (the `publishing → failed` and ambiguous→failed companion, same tx as the terminal flip): `UPDATE daily_post_counts SET count = count - 1 WHERE (workspace_id, ig_account_id, local_date) = (:ws, :acct, intent.cap_consumed_on) AND count > 0;` plus `cap_refunded_at = now()` on the intent. The refund targets **the recorded debit day** (`cap_consumed_on`), so a timezone change or midnight crossing between debit and refund cannot touch the wrong bucket. `local_date` is computed in the account's effective tz *at debit time*; the product-facing DST/tz-change and mid-day-cadence-change rules live in 06 §3 — the one home.
+Cap refund (the `publishing → failed`, ambiguous → failed, and `review_required → failed` companion, same tx as the terminal flip): `UPDATE daily_post_counts SET count = count - 1 WHERE (workspace_id, ig_account_id, local_date) = (:ws, :acct, intent.cap_consumed_on) AND count > 0;` plus `cap_refunded_at = now()` on the intent. The refund targets **the recorded debit day** (`cap_consumed_on`), so a timezone change or midnight crossing between debit and refund cannot touch the wrong bucket. `local_date` is computed in the account's effective tz *at debit time*; the product-facing DST/tz-change and mid-day-cadence-change rules live in 06 §3 — the one home.
+
+The **resolve-retry** transaction (pass 5 — the matrix row's effects, printed; L.5's gate tests it):
+
+```sql
+BEGIN;
+SET LOCAL app.tenant_id = :workspace_id;  SET LOCAL app.actor_kind = 'operator';
+-- refund the recorded day FIRST (the UPDATE below clears the pointer it targets):
+UPDATE daily_post_counts SET count = count - 1
+ WHERE (workspace_id, ig_account_id, local_date) = (:ws, :acct,
+        (SELECT cap_consumed_on FROM post_intents WHERE id = :intent))
+   AND count > 0;
+UPDATE post_intents
+   SET state = 'approved',
+       cap_consumed_on = NULL, cap_refunded_at = NULL,   -- debit-neutral: the row re-enters the
+                                                          -- working states as if freshly approved
+       publish_step = 'none', ig_container_id = NULL, transit_asset_ref = NULL,
+       attempts_by_step = :attempts_with_generation_bumped  -- service-computed; fresh business keys
+ WHERE id = :intent AND state = 'review_required';
+-- zero rows on the intent UPDATE ⇒ a race resolved it first: ROLLBACK (the refund rolls back too).
+COMMIT;
+```
+`ck_refund_after_debit` holds throughout (both columns end NULL), and `ck_publishing_debited` re-arms for the next flip.
 
 `cancel_requested` during `publishing`/`publishing_ambiguous` is **not** honored by force (C9: `publishing → cancelled` is forbidden — and now DB-forbidden: the edge is absent from `post_intent_transitions`); the pipeline completes or reconciles, then the reconciler consults the flag only where a real choice remains. A late interaction with any terminal intent renders the terminal state and never acts (R6).
 
@@ -922,12 +1067,12 @@ CREATE TABLE jobs (
   id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   kind              TEXT NOT NULL CONSTRAINT ck_jobs_kind CHECK (kind IN (
                       -- tenant kinds (workspace_id NOT NULL):
-                      'publish_pipeline','deliver_outbox','sync_media_source','first_ingest_chunk',
-                      'refresh_credential','offboard_workspace','revoke_workspace_credentials',
-                      'reauth_prompt',
+                      'plan_slot','publish_pipeline','deliver_outbox','sync_media_source',
+                      'first_ingest_chunk','refresh_credential','offboard_workspace',
+                      'revoke_workspace_credentials','reauth_prompt',
                       -- system kinds (workspace_id NULL):
                       'reconcile_ambiguous','reap_expired','reap_transit_assets','retention_sweep',
-                      'comparator_run','reencrypt_credentials','send_email')),
+                      'reencrypt_credentials','send_email')),
   workspace_id      UUID NULL REFERENCES workspaces(id) ON DELETE CASCADE,
   lane              TEXT NOT NULL CONSTRAINT ck_jobs_lane CHECK (lane IN ('interactive','bulk')),
   serialization_key TEXT NOT NULL,              -- every registry kind names its key (pass-3:
@@ -950,7 +1095,7 @@ CREATE TABLE jobs (
   CONSTRAINT ck_jobs_system_kinds CHECK (
     (workspace_id IS NULL) = (kind IN
       ('reconcile_ambiguous','reap_expired','reap_transit_assets','retention_sweep',
-       'comparator_run','reencrypt_credentials','send_email')))
+       'reencrypt_credentials','send_email')))
 );
 CREATE TRIGGER tg_touch_jobs BEFORE UPDATE ON jobs
   FOR EACH ROW EXECUTE FUNCTION trg_touch_updated_at();
@@ -975,6 +1120,7 @@ CREATE INDEX ix_jobs_retire ON jobs (updated_at)
 
 | kind | payload | producer | lane | serialization_key |
 |---|---|---|---|---|
+| plan_slot | `{ig_account_id, slot_at}` | clock (`fn_clock_tick` — the tick inserts this job, never the intent: media selection is the heavy step a millisecond tick must not do) | bulk | `acct:<ig_account_id>` (per-account ordering) — **pass-5 addition, found while printing the door bodies:** the matrix's intent creation + `scheduled → prompt_pending` progression (media selection per the 06 §3 rule, prompt creation, actor `worker`) had **no job kind driving it** — every prior revision printed the edges and no producer. The executor creates the intent (`INSERT … ON CONFLICT ON CONSTRAINT uq_intent_slot DO NOTHING` — key 1 makes the double-insert impossible, so a duplicate job is harmless), selects media, writes the prompt outbox rows, and advances the intent; empty selection ⇒ no intent + the 06 §5 "no media available" notification under its dedup window |
 | publish_pipeline | `{intent_id}` | approval flip / clock (auto mode) | bulk | `ig:<provider_account_ref>` |
 | deliver_outbox | `{binding_id}` | outbox insert / sender reschedule | interactive | `tg:<binding_id>` (per-chat send ordering) |
 | sync_media_source | `{source_id, reason:'pre_slot'\|'demand'\|'baseline'}` | clock / command | bulk | `src:<source_id>` |
@@ -982,12 +1128,11 @@ CREATE INDEX ix_jobs_retire ON jobs (updated_at)
 | refresh_credential | `{credential_id}` | clock (next_refresh_at due) | bulk | `cred:<credential_id>` |
 | offboard_workspace | `{}` (workspace-keyed) | offboarding command (06 §1 — orchestrates the workflow legs: enqueues revocation, terminalizes intents, drains, reaps transit, schedules final deletion) | bulk | `ws:<workspace_id>` |
 | revoke_workspace_credentials | `{}` (workspace-keyed) | offboard_workspace | bulk | `ws:<workspace_id>` |
-| reauth_prompt | `{ig_account_id}` | G.1 campaign clock | bulk | `ig:<provider_account_ref>` |
+| reauth_prompt | `{ig_account_id}` | clock (reauth-prompt cadence, 05 — for accounts sitting `reauth_required`; 06 §5) | bulk | `ig:<provider_account_ref>` |
 | reconcile_ambiguous | `{}` | clock (recurring) | bulk | `'reconciler'` (singleton by key) |
-| reap_expired | `{}` | clock (recurring) | bulk | `'reaper'` — remit: every expiry class in one bounded sweep — intent expiries (§4 reaper edges), expired `post_locks` (via `ix_locks_expiry`), `workspace_invitations`, `oauth_states` — **staged by table availability** (pass 3): each class lands in the increment that creates its table, which extends the executor in the same PR, so the reaper can never name a table that does not exist (`04` names the increments). Auth-plane classes sweep through `fn_auth_plane_sweep` (§7 door) |
+| reap_expired | `{}` | clock (recurring) | bulk | `'reaper'` — remit: every expiry class in one bounded sweep — intent expiries (§4 reaper edges), expired `post_locks` (via `ix_locks_expiry`), `workspace_invitations`, stale `onboarding_sessions`, `oauth_states` — **staged by table availability** (pass 3): each class lands in the increment that creates its table, which extends the executor in the same PR, so the reaper can never name a table that does not exist (`04` names the increments; with F.2 landing the whole schema, L.6's `oauth_states` extension is the one staged remainder). Auth-plane classes sweep through `fn_auth_plane_sweep` (§7-DDL door); the rest through `fn_reaper_sweep` |
 | reap_transit_assets | `{}` | clock (recurring, FC-3.6) | bulk | `'transit-reaper'` |
 | retention_sweep | `{}` | clock (recurring) | bulk | `'retention'` |
-| comparator_run | `{track:text}` | clock (nightly, per active track) | bulk | `cmp:<track>` |
 | reencrypt_credentials | `{key_generation:int}` | rotation runbook (07) | bulk | `'reencrypt'` |
 | send_email | `{v:1, to:text, template:text, params:object, ref:uuid}` — everything the send needs; no tenant reads at send time | invitation create / bounce handler (07 §1, FC-6) | interactive (the inviter is mid-flow awaiting send confirmation) | `email:<ref>` (one key per send — retry ordering only, no cross-send serialization) |
 
@@ -1143,7 +1288,7 @@ CREATE TABLE command_dedup (
 CREATE TABLE rate_counters (
   scope          TEXT NOT NULL
                  CONSTRAINT ck_rate_scope CHECK (scope IN
-                   ('tg_chat','tg_global','ws_admission','preauth_ip')),
+                   ('tg_chat','tg_global','ws_admission','preauth_ip','email_global')),
   key            TEXT NOT NULL,                 -- per scope: binding id | '' (one global row) |
                                                 -- workspace id | client ip
   window_start   TIMESTAMPTZ NOT NULL,          -- fixed window: now() truncated to the scope's
@@ -1170,9 +1315,9 @@ RETURNING count;
 -- tightened mid-attack should bite immediately, not next window.
 ```
 
-Scope ↔ consumer map (every number lives in `05`): `tg_chat`/`tg_global` — L.4 Telegram sender pacing, the durable home the AIORateLimiter budgets move into; `ws_admission` — S.2 per-workspace command admission; `preauth_ip` — the 07 §1 pre-auth guard (the Google sign-in endpoints and every other unauthenticated surface). Ships at L.2 with the jobs machinery; rows age out via retention (`05` — windows are minutes to hours, the class keeps days). **Client-IP source rule (stated once, here; 07 and `05` cite it):** the client IP for `*_ip` scopes derives from the platform-terminated proxy header chain resolved **right-to-left past Railway's own trusted hops** — never the raw leftmost `X-Forwarded-For` entry, which the sender controls. The deployment's actual header behavior is verified in the real environment at L.8's gate (the same check that verifies webhook header trust) **before any IP-keyed guard is load-bearing**.
+Scope ↔ consumer map (every number lives in `05`): `tg_chat`/`tg_global` — L.4 Telegram sender pacing, the durable home the AIORateLimiter budgets move into; `ws_admission` — S.2 per-workspace command admission; `preauth_ip` — the 07 §1 pre-auth guard (the Google sign-in endpoints and every other unauthenticated surface); `email_global` — the provider-wide email budget (pass 5, R4's Resend finding: the `send_email` executor consumes one unit per send against the `05` daily budget, key `''` — over budget ⇒ the job defers to its retry schedule rather than tripping the provider's paused-at-quota state). Ships at L.2 with the jobs machinery; rows age out via retention (`05` — windows are minutes to hours, the class keeps days). **Client-IP source rule (stated once, here; 07 and `05` cite it):** the client IP for `*_ip` scopes derives from the platform-terminated proxy header chain resolved **right-to-left past Railway's own trusted hops** — never the raw leftmost `X-Forwarded-For` entry, which the sender controls. The deployment's actual header behavior is verified in the real environment at L.8's gate (the same check that verifies webhook header trust) **before any IP-keyed guard is load-bearing**.
 
-`service_runs` (legacy ops bookkeeping) survives unchanged during the program and is retired at S.4 (`03`).
+`service_runs` (legacy ops bookkeeping) is consumed by the M.1 history-attribution transform, snapshotted to the archive schema at M.3, and never lands in the target (pass 5/FC-7; `03`).
 
 ## §7. RLS: policies, roles, and the tenancy backstop (C4)
 
@@ -1194,8 +1339,8 @@ The first pass said "system actors use dedicated roles with explicit predicates"
 | `fn_reconciler_sweep(lim int)` (`svc_maintenance`) | returns the ladder-due batch of parked intents (§6) with their workspace ids — a cross-tenant **read**; each verdict then writes tenant-scoped as `svc_worker` (the intent's workspace is known), so the write path needs no cross-tenant privilege | `svc_worker` |
 | `fn_reaper_sweep(lim int)` (`svc_maintenance`) | the §5 reap classes living in tenant tables — intent expiry flips, expired `post_locks`, stale `workspace_invitations` — plus the `jobs` expired-lease re-ready (`leased → ready` via `ix_jobs_lease_expiry`); bounded, inside the door | `svc_worker` |
 | `fn_retention_batch(class text)` (`svc_maintenance`) | one `05` retention class per call: age-qualified DELETE walking its `ix_*_retire` index; the `audit_events` class COPY-exports into the archive schema first and **aborts if the export fails** (07 §4) | `svc_worker` |
-| `fn_comparator_run(track text)` (`svc_maintenance`) | the six-stage shadow-read comparator for one track (counts + per-row checksums over the track's canonical mapping) | `svc_worker` |
-| `fn_offboard_finalize(ws uuid)` (`svc_maintenance`) | the final-deletion leg of 06 §1, guarded inside the body (state='offboarding', grace window elapsed, zero live intents) → DELETE the `workspaces` row; the §0 cascade does the rest | `svc_worker` (the `offboard_workspace` executor) |
+| `fn_offboard_finalize(ws uuid)` (`svc_maintenance`) | the final-deletion leg of 06 §1, guarded inside the body (state='offboarding', grace window elapsed on `workspaces.offboarding_at`, zero live intents) → DELETE the `workspaces` row; the §0 cascade does the rest | `svc_worker` (the `offboard_workspace` executor) |
+| `fn_invitation_accept(token_hash, user, provider, proof inputs)` (`svc_membership`) | the pre-membership door (pass 5 — R4 finding 7): token→row lookup, the D33 match computed in-body from raw inputs (google verified email / telegram immutable numeric id — never the hint column), one-shot CAS + computed-role member INSERT + D36 elevation-pending notification, one transaction | `svc_ingress` |
 | `fn_auth_plane_sweep()` (`svc_maintenance`) | expiry/retention deletes on `oauth_states`, `session_tokens`, `command_dedup`. `svc_maintenance` carries three enumerated auth-plane `USING (true)` policies + DELETEs **for exactly this door** — resolving the pass-2 contradiction (R3 §6.7, maintenance held DELETEs its policies could never see) by adding the missing policies to the NOLOGIN sweep owner, never by handing a login the DELETEs (a `svc_ingress`-owned definer body would have put auth-plane DELETE privileges on the internet-exposed login — falsifying the grant matrix below) | `svc_worker` (the reaper/retention schedule drives it) |
 
 - **The boundary, stated honestly:** a compromised worker request path can call the doors its login holds (claim jobs, tick the clock, drive sweeps whose bodies are fixed SQL) and can write within tenant policies on the tenant it sets. It cannot `SET ROLE` (no memberships exist to assume), cannot DELETE anything directly (no login holds DELETE), cannot read auth-plane rows or credential ciphertext beyond its column grants, and cannot enlarge a sweep (door bodies are fixed, `search_path`-pinned SQL). Maintenance capability lives in door bodies, not in any login.
@@ -1211,6 +1356,622 @@ The first pass said "system actors use dedicated roles with explicit predicates"
 - Enablement discipline per table: zero-NULL gates before and after cutover; the RLS harness runs as the exact runtime roles, no owner privileges, no session-affinity assumptions (#722 P0-09, kept verbatim).
 - Known limit, mitigated not ignored: integrity errors bypass RLS and can act as cross-tenant existence oracles. Unique keys on tenant-scoped tables lead with `workspace_id` and ids are UUIDs, so the general surface has no enumerable oracle. The complete inventory of deliberate exceptions (pass-2 correction — there are three, not one): **`uq_publish_exclusive`** (key 4) leaks "some workspace is publishing to this real account" — swallowed into the defer path, never user-visible; **`uq_binding_external`** leaks "this Telegram chat is already bound somewhere" on enumerable chat ids — inherent to the product (a chat cannot be double-bound, and the person probing must already be adding the bot to that chat); **`uq_ops_business_key`** is keyed on unguessable intent UUIDs — structurally not an oracle. Log/error hygiene per the 07 rule (internal ids everywhere, never `provider_account_ref`).
 
+## §7-DDL. The executable security objects (pass 5 — R4 findings 3b/3c/7 closed)
+
+R4's replay proved §7 was a designed-but-unprinted model: zero `CREATE POLICY`, zero `ENABLE ROW LEVEL SECURITY`, zero door bodies. This section prints all of it, in replay order (roles → view → grants → enablement → policies → doors). Every number a body needs arrives as a parameter — the values live in `05` and are wired through config, per the revision rule. `07`'s three auth-plane tables get their enablement and policies in `07` (file order: their DDL lives there).
+
+```sql
+-- ROLES. Passwords and connection strings are deployment env, never DDL. The replay fixture
+-- runs on a scratch cluster; production adoption skips roles that exist.
+CREATE ROLE svc_ingress    LOGIN;   -- ingress replicas
+CREATE ROLE svc_worker     LOGIN;   -- worker replicas (the elected clock runs inside one)
+CREATE ROLE svc_migration  LOGIN;   -- the runner's login; owns every object; never in runtime env
+CREATE ROLE svc_claim      NOLOGIN; -- door owner: job claiming/leasing
+CREATE ROLE svc_clock      NOLOGIN; -- door owner: the tick
+CREATE ROLE svc_maintenance NOLOGIN;-- door owner: sweeps, retention, reconciler read, offboard finalize
+CREATE ROLE svc_membership NOLOGIN; -- door owner: invitation accept (pass 5 — the pre-membership
+                                    -- door needs powers no other owner should hold: cross-tenant
+                                    -- invitation lookup + member INSERT. A fourth NOLOGIN role is
+                                    -- one row here; overloading svc_maintenance would put
+                                    -- membership-granting inside the deletion owner)
+
+-- THE PAYLOAD-FREE CREDENTIALS VIEW (the clock's read surface; §7 grant-matrix line).
+CREATE VIEW vw_credentials_schedule AS
+  SELECT id, workspace_id, ig_account_id, media_source_id, provider,
+         expires_at, next_refresh_at, state
+    FROM oauth_credentials;                    -- encrypted_payload deliberately absent
+ALTER VIEW vw_credentials_schedule OWNER TO svc_clock;
+
+-- GRANT BASELINE: nothing by default, then narrow verb grants. RLS then narrows rows.
+REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC;
+GRANT USAGE ON SCHEMA public
+  TO svc_ingress, svc_worker, svc_claim, svc_clock, svc_maintenance, svc_membership;
+
+-- Login verb grants. NO DELETE APPEARS ANYWHERE IN THIS BLOCK — §0's "runtime never deletes",
+-- structural: deletes exist only inside door bodies below, as their NOLOGIN owners.
+GRANT SELECT, INSERT, UPDATE ON
+  workspaces, workspace_members, channel_bindings, workspace_invitations,
+  ig_accounts, provider_quarantine, media_sources, oauth_credentials,
+  media_items, post_locks, post_intents, daily_post_counts,
+  channel_outbox, provider_operations, category_post_case_mix,
+  jobs, users, user_identities, onboarding_sessions
+  TO svc_ingress, svc_worker;
+GRANT SELECT, INSERT, UPDATE ON rate_counters TO svc_ingress, svc_worker;
+GRANT SELECT, INSERT ON command_dedup TO svc_ingress;
+GRANT SELECT ON post_intent_transitions
+  TO svc_ingress, svc_worker, svc_claim, svc_clock, svc_maintenance, svc_membership;
+GRANT INSERT ON audit_events
+  TO svc_ingress, svc_worker, svc_claim, svc_clock, svc_maintenance, svc_membership;
+GRANT SELECT ON audit_events TO svc_ingress, svc_worker;   -- the web audit view (06 §7)
+
+-- Door-owner verb grants (each enumerated privilege backs exactly one body below).
+GRANT SELECT, UPDATE ON jobs TO svc_claim;
+GRANT SELECT ON provider_quarantine TO svc_claim;
+GRANT SELECT ON workspaces, ig_accounts, media_sources TO svc_clock;
+GRANT UPDATE (next_slot_at)    ON ig_accounts   TO svc_clock;  -- column-grant: the tick advances
+GRANT UPDATE (next_sync_at)    ON media_sources TO svc_clock;  -- machinery columns and nothing else
+GRANT SELECT (id, workspace_id, ig_account_id, media_source_id, provider,
+              expires_at, next_refresh_at, state) ON oauth_credentials TO svc_clock;
+GRANT UPDATE (next_refresh_at) ON oauth_credentials TO svc_clock;
+GRANT SELECT, INSERT ON jobs TO svc_clock;
+GRANT SELECT, UPDATE ON post_intents TO svc_maintenance;               -- reaper edge flips
+GRANT SELECT, DELETE ON post_locks TO svc_maintenance;                 -- expired-lock purge
+GRANT SELECT, UPDATE ON workspace_invitations TO svc_maintenance;      -- expiry state flips
+GRANT SELECT, DELETE ON onboarding_sessions TO svc_maintenance;        -- stale-session purge
+GRANT SELECT, UPDATE, DELETE ON jobs TO svc_maintenance;               -- lease re-ready + retention
+GRANT SELECT, DELETE ON channel_outbox, provider_operations,
+                        daily_post_counts, rate_counters TO svc_maintenance;  -- retention classes
+GRANT SELECT, DELETE ON audit_events TO svc_maintenance;               -- export-then-delete only
+GRANT SELECT, DELETE ON workspaces TO svc_maintenance;                 -- fn_offboard_finalize
+GRANT SELECT ON workspaces TO svc_membership;
+GRANT SELECT, UPDATE ON workspace_invitations TO svc_membership;
+GRANT SELECT, INSERT ON workspace_members TO svc_membership;
+GRANT SELECT ON channel_bindings TO svc_membership;
+GRANT INSERT ON channel_outbox TO svc_membership;
+-- The archive schema: created empty here; M.3 snapshot migrations ALTER their tables' OWNER TO
+-- svc_maintenance so retention can DROP them on expiry (05). No login role receives any grant.
+CREATE SCHEMA archive;
+GRANT USAGE, CREATE ON SCHEMA archive TO svc_maintenance;
+
+-- ROW LEVEL SECURITY: enabled on every table in this file, at creation (FC-7 killed the staged
+-- W-phase completion — there is no "later"). ENABLE without FORCE, deliberately: svc_migration
+-- owns the tables and owner-bypass is what lets the runner transform without blanket migration
+-- policies; the control is that svc_migration's credential exists only in the runner's deploy
+-- context (F.4 gate asserts runtime env carries exactly svc_ingress and svc_worker).
+ALTER TABLE users                   ENABLE ROW LEVEL SECURITY;
+ALTER TABLE user_identities         ENABLE ROW LEVEL SECURITY;
+ALTER TABLE onboarding_sessions     ENABLE ROW LEVEL SECURITY;
+ALTER TABLE workspaces              ENABLE ROW LEVEL SECURITY;
+ALTER TABLE workspace_members       ENABLE ROW LEVEL SECURITY;
+ALTER TABLE workspace_invitations   ENABLE ROW LEVEL SECURITY;
+ALTER TABLE channel_bindings        ENABLE ROW LEVEL SECURITY;
+ALTER TABLE ig_accounts             ENABLE ROW LEVEL SECURITY;
+ALTER TABLE provider_quarantine     ENABLE ROW LEVEL SECURITY;
+ALTER TABLE media_sources           ENABLE ROW LEVEL SECURITY;
+ALTER TABLE oauth_credentials       ENABLE ROW LEVEL SECURITY;
+ALTER TABLE media_items             ENABLE ROW LEVEL SECURITY;
+ALTER TABLE post_locks              ENABLE ROW LEVEL SECURITY;
+ALTER TABLE category_post_case_mix  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE post_intents            ENABLE ROW LEVEL SECURITY;
+ALTER TABLE post_intent_transitions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE audit_events            ENABLE ROW LEVEL SECURITY;
+ALTER TABLE daily_post_counts       ENABLE ROW LEVEL SECURITY;
+ALTER TABLE jobs                    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE channel_outbox          ENABLE ROW LEVEL SECURITY;
+ALTER TABLE provider_operations     ENABLE ROW LEVEL SECURITY;
+ALTER TABLE command_dedup           ENABLE ROW LEVEL SECURITY;
+ALTER TABLE rate_counters           ENABLE ROW LEVEL SECURITY;
+
+-- POLICIES, by class. The tenant predicate is NULL-safe by construction: an unset GUC yields
+-- NULL, NULL matches no row, and "absent context reads nothing" is exactly the F.4 gate.
+
+-- Class 1 — tenant-plane, the standard pair. workspaces keys on id (it IS the tenant); signup
+-- pre-assigns the new id and sets the GUC before INSERT (the UoW factory requires tenant_id).
+CREATE POLICY p_tenant_workspaces ON workspaces FOR ALL TO svc_ingress, svc_worker
+  USING      (id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+  WITH CHECK (id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+CREATE POLICY p_tenant ON workspace_members FOR ALL TO svc_ingress, svc_worker
+  USING      (workspace_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+  WITH CHECK (workspace_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+-- …the same two-line policy repeats, verbatim except the table name, on: workspace_invitations,
+-- channel_bindings, ig_accounts, provider_quarantine, media_sources, oauth_credentials,
+-- media_items, post_locks, category_post_case_mix, post_intents, daily_post_counts,
+-- channel_outbox, provider_operations. The migration file spells all thirteen out; this document
+-- states the pattern once and the replay fixture generates them from this list, so the plan text
+-- cannot silently diverge from the file (the list IS the normative enumeration).
+
+-- Class 2 — jobs: tenant rows in tenant context, system rows (workspace_id IS NULL) visible to
+-- both logins — workers execute system kinds, and ingress produces the payload-complete
+-- send_email system kind (§5 classing rule).
+CREATE POLICY p_jobs ON jobs FOR ALL TO svc_ingress, svc_worker
+  USING      (workspace_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
+              OR workspace_id IS NULL)
+  WITH CHECK (workspace_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
+              OR workspace_id IS NULL);
+
+-- Class 3 — user-plane (users, user_identities, onboarding_sessions): no workspace key exists —
+-- identity precedes tenancy (sign-in, identity upsert, onboarding all run before any
+-- app.tenant_id can be set). Role-scoped row-open policies; the isolation authority for these
+-- tables is the one central authorization gate (01 §Process roles), stated as a deliberate class.
+CREATE POLICY p_user_plane ON users FOR ALL TO svc_ingress, svc_worker
+  USING (true) WITH CHECK (true);
+-- …repeated on user_identities and onboarding_sessions (same normative-list rule as class 1).
+
+-- Class 4 — machinery counters and admission dedup.
+CREATE POLICY p_rate ON rate_counters FOR ALL TO svc_ingress, svc_worker
+  USING (true) WITH CHECK (true);
+CREATE POLICY p_dedup ON command_dedup FOR ALL TO svc_ingress
+  USING (true) WITH CHECK (true);
+
+-- Class 5 — reference data: readable by everyone, writable by migrations only (owner bypass).
+CREATE POLICY p_transitions_read ON post_intent_transitions FOR SELECT
+  TO svc_ingress, svc_worker, svc_claim, svc_clock, svc_maintenance, svc_membership
+  USING (true);
+
+-- Class 6 — audit: tenant-scoped INSERT/SELECT for logins; row-open INSERT for door owners
+-- (their bodies' triggers insert as the owner); retention's SELECT/DELETE for the sweep owner.
+CREATE POLICY p_audit_ins ON audit_events FOR INSERT TO svc_ingress, svc_worker
+  WITH CHECK (workspace_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+CREATE POLICY p_audit_sel ON audit_events FOR SELECT TO svc_ingress, svc_worker
+  USING (workspace_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+CREATE POLICY p_audit_sys ON audit_events FOR INSERT
+  TO svc_claim, svc_clock, svc_maintenance, svc_membership WITH CHECK (true);
+CREATE POLICY p_audit_retention_sel ON audit_events FOR SELECT TO svc_maintenance USING (true);
+CREATE POLICY p_audit_retention_del ON audit_events FOR DELETE TO svc_maintenance USING (true);
+
+-- Class 7 — door-owner enumerated policies (each backs one body below; the complete list, per
+-- §7's rule that every cross-tenant capability is a named reviewable object):
+CREATE POLICY p_claim_jobs   ON jobs FOR ALL TO svc_claim USING (true) WITH CHECK (true);
+CREATE POLICY p_claim_quar   ON provider_quarantine FOR SELECT TO svc_claim USING (true);
+CREATE POLICY p_clock_ws     ON workspaces      FOR SELECT TO svc_clock USING (true);
+CREATE POLICY p_clock_acct_s ON ig_accounts     FOR SELECT TO svc_clock USING (true);
+CREATE POLICY p_clock_acct_u ON ig_accounts     FOR UPDATE TO svc_clock USING (true) WITH CHECK (true);
+CREATE POLICY p_clock_src_s  ON media_sources   FOR SELECT TO svc_clock USING (true);
+CREATE POLICY p_clock_src_u  ON media_sources   FOR UPDATE TO svc_clock USING (true) WITH CHECK (true);
+CREATE POLICY p_clock_cred_s ON oauth_credentials FOR SELECT TO svc_clock USING (true);
+CREATE POLICY p_clock_cred_u ON oauth_credentials FOR UPDATE TO svc_clock USING (true) WITH CHECK (true);
+CREATE POLICY p_clock_jobs   ON jobs FOR ALL TO svc_clock USING (true) WITH CHECK (true);
+CREATE POLICY p_maint_intents ON post_intents FOR ALL TO svc_maintenance USING (true) WITH CHECK (true);
+CREATE POLICY p_maint_locks   ON post_locks   FOR ALL TO svc_maintenance USING (true) WITH CHECK (true);
+CREATE POLICY p_maint_invites ON workspace_invitations FOR ALL TO svc_maintenance USING (true) WITH CHECK (true);
+CREATE POLICY p_maint_onboard ON onboarding_sessions   FOR ALL TO svc_maintenance USING (true) WITH CHECK (true);
+CREATE POLICY p_maint_jobs    ON jobs FOR ALL TO svc_maintenance USING (true) WITH CHECK (true);
+CREATE POLICY p_maint_outbox  ON channel_outbox      FOR ALL TO svc_maintenance USING (true) WITH CHECK (true);
+CREATE POLICY p_maint_ops     ON provider_operations FOR ALL TO svc_maintenance USING (true) WITH CHECK (true);
+CREATE POLICY p_maint_dpc     ON daily_post_counts   FOR ALL TO svc_maintenance USING (true) WITH CHECK (true);
+CREATE POLICY p_maint_rate    ON rate_counters       FOR ALL TO svc_maintenance USING (true) WITH CHECK (true);
+CREATE POLICY p_maint_ws      ON workspaces FOR ALL TO svc_maintenance USING (true) WITH CHECK (true);
+CREATE POLICY p_member_invites ON workspace_invitations FOR ALL TO svc_membership USING (true) WITH CHECK (true);
+CREATE POLICY p_member_members ON workspace_members FOR ALL TO svc_membership USING (true) WITH CHECK (true);
+CREATE POLICY p_member_binds   ON channel_bindings FOR SELECT TO svc_membership USING (true);
+CREATE POLICY p_member_outbox  ON channel_outbox FOR INSERT TO svc_membership WITH CHECK (true);
+CREATE POLICY p_member_ws      ON workspaces FOR SELECT TO svc_membership USING (true);
+-- (command_dedup, session_tokens, oauth_states: the auth-plane policies for svc_ingress and the
+-- sweep owner are printed with those tables — command_dedup above, the 07 pair in 07.)
+CREATE POLICY p_maint_dedup ON command_dedup FOR ALL TO svc_maintenance USING (true) WITH CHECK (true);
+```
+
+**The doors.** Every body: `SECURITY DEFINER`, `SET search_path = pg_catalog, public`, owned by its system role, `EXECUTE` revoked from PUBLIC and granted to exactly one login. Every `05` number arrives as a parameter — callers read config and pass values; a hardcoded number in a door body is the same review-blocking defect as anywhere else.
+
+```sql
+-- 1/9 fn_claim_job — the §5 claim, verbatim, as the function it always claimed to be.
+CREATE FUNCTION fn_claim_job(p_lane text, p_worker text, p_lease interval, p_ws_lane_cap int)
+RETURNS SETOF jobs LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+BEGIN
+  RETURN QUERY
+  WITH candidate AS (
+    SELECT j.id FROM jobs j
+    WHERE j.state = 'ready' AND j.lane = p_lane AND j.run_at <= now()
+      AND NOT EXISTS (SELECT 1 FROM jobs h
+                      WHERE h.serialization_key = j.serialization_key AND h.state = 'leased')
+      AND NOT EXISTS (SELECT 1 FROM provider_quarantine q
+                      WHERE q.workspace_id = j.workspace_id
+                        AND q.scope_ref = j.serialization_key
+                        AND q.quarantined_until > now())
+      AND (j.workspace_id IS NULL OR
+           (SELECT count(*) FROM jobs w
+            WHERE w.state = 'leased' AND w.lane = j.lane
+              AND w.workspace_id = j.workspace_id) < p_ws_lane_cap)
+    ORDER BY j.run_at
+    LIMIT 1 FOR UPDATE OF j SKIP LOCKED
+  )
+  UPDATE jobs SET state = 'leased', locked_by = p_worker, lease_token = gen_random_uuid(),
+                  locked_until = now() + p_lease, attempts = attempts + 1
+    FROM candidate WHERE jobs.id = candidate.id
+  RETURNING jobs.*;
+END $$;
+ALTER FUNCTION fn_claim_job(text, text, interval, int) OWNER TO svc_claim;
+REVOKE ALL ON FUNCTION fn_claim_job(text, text, interval, int) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fn_claim_job(text, text, interval, int) TO svc_worker;
+
+-- 2/9 fn_extend_leases — the heartbeat. Extends only live leases matching the caller's tokens;
+-- an expired or reassigned lease is silently not extended (the count return lets the worker see it).
+CREATE FUNCTION fn_extend_leases(p_tokens uuid[], p_lease interval)
+RETURNS int LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+DECLARE n int;
+BEGIN
+  UPDATE jobs SET locked_until = now() + p_lease
+   WHERE lease_token = ANY (p_tokens) AND state = 'leased' AND locked_until > now();
+  GET DIAGNOSTICS n = ROW_COUNT;
+  RETURN n;
+END $$;
+ALTER FUNCTION fn_extend_leases(uuid[], interval) OWNER TO svc_claim;
+REVOKE ALL ON FUNCTION fn_extend_leases(uuid[], interval) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fn_extend_leases(uuid[], interval) TO svc_worker;
+
+-- Slot arithmetic (the tick's helper; v1 policy = uniform spacing inside the account-local
+-- posting window, the legacy create-schedule semantics carried forward; start = end ⇒ 24 h window,
+-- start > end ⇒ the window wraps midnight, both current semantics).
+CREATE FUNCTION fn_next_slot(p_after timestamptz, p_tz text,
+                             p_start_h int, p_end_h int, p_ppd int)
+RETURNS timestamptz LANGUAGE plpgsql IMMUTABLE AS $$
+DECLARE
+  win_hours  numeric := CASE WHEN p_end_h = p_start_h THEN 24
+                             ELSE ((p_end_h - p_start_h + 24) % 24) END;
+  spacing    interval := (win_hours / p_ppd) * interval '1 hour';
+  cand_local timestamp := (p_after AT TIME ZONE p_tz) + spacing;
+  day_start  timestamp := date_trunc('day', cand_local) + p_start_h * interval '1 hour';
+  tod        numeric := EXTRACT(hour FROM cand_local) + EXTRACT(minute FROM cand_local)/60.0;
+  in_window  boolean := CASE
+                          WHEN p_end_h = p_start_h THEN true
+                          WHEN p_start_h < p_end_h THEN tod >= p_start_h AND tod < p_end_h
+                          ELSE tod >= p_start_h OR tod < p_end_h   -- wraps midnight
+                        END;
+BEGIN
+  IF NOT in_window THEN
+    cand_local := CASE WHEN cand_local < day_start THEN day_start
+                       ELSE day_start + interval '1 day' END;
+  END IF;
+  RETURN cand_local AT TIME ZONE p_tz;
+END $$;
+
+-- 3/9 fn_clock_tick — one indexed pass per concern; every heavy step becomes a job. The tick
+-- INSERTS plan_slot jobs (never intents — §5 registry, pass 5), schedules refreshes off the
+-- payload-free view, schedules due syncs, and keeps the recurring system singletons alive.
+CREATE FUNCTION fn_clock_tick(p_max int, p_refresh_cadence interval,
+                              p_recurring jsonb)  -- {v:1, "<kind>": seconds, …} (05 seam)
+RETURNS TABLE (slot_jobs int, refresh_jobs int, sync_jobs int, recurring_jobs int)
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+DECLARE r record; k text; cadence interval; last_done timestamptz; n1 int := 0; n2 int := 0; n3 int := 0; n4 int := 0;
+BEGIN
+  PERFORM set_config('app.actor_kind', 'clock', true);
+  -- (1) due accounts → plan_slot jobs + slot-cursor advance (the O(due) scan, H3):
+  FOR r IN
+    SELECT a.id, a.workspace_id, a.next_slot_at,
+           COALESCE(a.tz, w.tz)                                   AS eff_tz,
+           COALESCE(a.posts_per_day, w.posts_per_day)             AS eff_ppd,
+           COALESCE(a.posting_hours_start, w.posting_hours_start) AS eff_start,
+           COALESCE(a.posting_hours_end, w.posting_hours_end)     AS eff_end
+      FROM ig_accounts a JOIN workspaces w ON w.id = a.workspace_id
+     WHERE a.state = 'active' AND a.next_slot_at IS NOT NULL AND a.next_slot_at <= now()
+       AND w.state = 'active' AND NOT w.is_paused
+     ORDER BY a.next_slot_at LIMIT p_max
+  LOOP
+    INSERT INTO jobs (kind, workspace_id, lane, serialization_key, run_at, max_attempts, payload)
+    VALUES ('plan_slot', r.workspace_id, 'bulk', 'acct:' || r.id, now(), 3,
+            jsonb_build_object('v', 1, 'ig_account_id', r.id, 'slot_at', r.next_slot_at));
+    UPDATE ig_accounts
+       SET next_slot_at = fn_next_slot(r.next_slot_at, r.eff_tz, r.eff_start, r.eff_end, r.eff_ppd)
+     WHERE id = r.id;
+    n1 := n1 + 1;
+  END LOOP;
+  -- (2) due credential refreshes, through the payload-free view (D31: the scheduled refresh is
+  -- also the liveness probe; the cadence is decoupled from expiry proximity):
+  FOR r IN SELECT id, workspace_id FROM vw_credentials_schedule
+            WHERE state = 'active' AND next_refresh_at IS NOT NULL AND next_refresh_at <= now()
+            LIMIT p_max
+  LOOP
+    INSERT INTO jobs (kind, workspace_id, lane, serialization_key, run_at, max_attempts, payload)
+    VALUES ('refresh_credential', r.workspace_id, 'bulk', 'cred:' || r.id, now(), 5,
+            jsonb_build_object('v', 1, 'credential_id', r.id));
+    UPDATE oauth_credentials SET next_refresh_at = now() + p_refresh_cadence WHERE id = r.id;
+    n2 := n2 + 1;
+  END LOOP;
+  -- (3) due source syncs (H4's slow jittered baseline; pre-slot/demand syncs are produced by
+  -- their own sites — the tick owns only the baseline):
+  FOR r IN SELECT id, workspace_id, next_sync_at FROM media_sources
+            WHERE state = 'active' AND next_sync_at IS NOT NULL AND next_sync_at <= now()
+            LIMIT p_max
+  LOOP
+    INSERT INTO jobs (kind, workspace_id, lane, serialization_key, run_at, max_attempts, payload)
+    VALUES ('sync_media_source', r.workspace_id, 'bulk', 'src:' || r.id, now(), 5,
+            jsonb_build_object('v', 1, 'source_id', r.id, 'reason', 'baseline'));
+    UPDATE media_sources SET next_sync_at = NULL WHERE id = r.id;  -- the sync executor re-arms it
+    n3 := n3 + 1;
+  END LOOP;
+  -- (4) recurring system singletons: if no ready/leased row holds the kind's singleton key,
+  -- insert the next run at last-completion + cadence (or now, whichever is later):
+  FOR k, cadence IN
+    SELECT key, (value::text)::numeric * interval '1 second'
+      FROM jsonb_each(p_recurring) WHERE key <> 'v'
+  LOOP
+    IF NOT EXISTS (SELECT 1 FROM jobs
+                   WHERE kind = k AND state IN ('ready','leased')) THEN
+      SELECT max(updated_at) INTO last_done FROM jobs
+       WHERE kind = k AND state = 'succeeded';
+      INSERT INTO jobs (kind, workspace_id, lane, serialization_key, run_at, max_attempts, payload)
+      VALUES (k, NULL, 'bulk',
+              CASE k WHEN 'reconcile_ambiguous' THEN 'reconciler'
+                     WHEN 'reap_expired'        THEN 'reaper'
+                     WHEN 'reap_transit_assets' THEN 'transit-reaper'
+                     WHEN 'retention_sweep'     THEN 'retention'
+                     ELSE k END,
+              GREATEST(now(), COALESCE(last_done + cadence, now())), 3,
+              jsonb_build_object('v', 1));
+      n4 := n4 + 1;
+    END IF;
+  END LOOP;
+  RETURN QUERY SELECT n1, n2, n3, n4;
+END $$;
+ALTER FUNCTION fn_clock_tick(int, interval, jsonb) OWNER TO svc_clock;
+REVOKE ALL ON FUNCTION fn_clock_tick(int, interval, jsonb) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fn_clock_tick(int, interval, jsonb) TO svc_worker;
+
+-- 4/9 fn_reconciler_sweep — the cross-tenant READ half of reconciliation (§6): returns the
+-- ladder-due ambiguous intents plus the parked review_required rows whose customer-notification
+-- window has passed; every verdict/notification WRITE then runs tenant-scoped as svc_worker.
+CREATE FUNCTION fn_reconciler_sweep(p_lim int, p_rungs interval[], p_notify_after interval)
+RETURNS TABLE (intent_id uuid, workspace_id uuid, reason text)
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+BEGIN
+  RETURN QUERY
+  (SELECT i.id, i.workspace_id, 'ladder_due'::text
+     FROM post_intents i
+    WHERE i.state = 'publishing_ambiguous'
+      AND COALESCE(
+            (i.last_error->'evidence'->>'last_checked_at')::timestamptz
+              + p_rungs[LEAST(COALESCE((i.last_error->'evidence'->>'checks')::int, 0) + 1,
+                              array_length(p_rungs, 1))],
+            i.entered_state_at) <= now()
+    ORDER BY i.entered_state_at LIMIT p_lim)
+  UNION ALL
+  (SELECT i.id, i.workspace_id, 'notify_window'::text
+     FROM post_intents i
+    WHERE i.state = 'review_required'
+      AND i.entered_state_at + p_notify_after <= now()
+      AND NOT COALESCE((i.last_error->'evidence'->>'customer_notified')::boolean, false)
+    ORDER BY i.entered_state_at LIMIT p_lim);
+END $$;
+ALTER FUNCTION fn_reconciler_sweep(int, interval[], interval) OWNER TO svc_maintenance;
+REVOKE ALL ON FUNCTION fn_reconciler_sweep(int, interval[], interval) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fn_reconciler_sweep(int, interval[], interval) TO svc_worker;
+
+-- 5/9 fn_reaper_sweep — the tenant-table expiry classes, one bounded pass per class. Intent
+-- expiry TTLs: slot lapse for scheduled/prompt_pending (the slot passed unclaimed/undelivered),
+-- the workspace's approval TTL (else p_approval_ttl) for awaiting_approval, p_approved_ttl for
+-- stale approvals. Every intent flip fires the §4 guard + audit triggers as this owner.
+CREATE FUNCTION fn_reaper_sweep(p_lim int, p_approval_ttl interval, p_approved_ttl interval)
+RETURNS int LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+DECLARE n int := 0; c int;
+BEGIN
+  PERFORM set_config('app.actor_kind', 'reaper', true);
+  UPDATE post_intents SET state = 'expired'
+   WHERE id IN (SELECT id FROM post_intents
+                 WHERE state IN ('scheduled','prompt_pending') AND schedule_slot_at < now()
+                 LIMIT p_lim);
+  GET DIAGNOSTICS c = ROW_COUNT; n := n + c;
+  UPDATE post_intents i SET state = 'expired'
+   WHERE i.id IN (
+     SELECT i2.id FROM post_intents i2 JOIN workspaces w ON w.id = i2.workspace_id
+      WHERE i2.state = 'awaiting_approval'
+        AND i2.entered_state_at
+            + COALESCE(w.approval_ttl_minutes * interval '1 minute', p_approval_ttl) < now()
+      LIMIT p_lim);
+  GET DIAGNOSTICS c = ROW_COUNT; n := n + c;
+  UPDATE post_intents SET state = 'expired'
+   WHERE id IN (SELECT id FROM post_intents
+                 WHERE state = 'approved' AND entered_state_at + p_approved_ttl < now()
+                 LIMIT p_lim);
+  GET DIAGNOSTICS c = ROW_COUNT; n := n + c;
+  DELETE FROM post_locks
+   WHERE id IN (SELECT id FROM post_locks
+                 WHERE expires_at IS NOT NULL AND expires_at < now() LIMIT p_lim);
+  GET DIAGNOSTICS c = ROW_COUNT; n := n + c;
+  UPDATE workspace_invitations SET state = 'expired'
+   WHERE id IN (SELECT id FROM workspace_invitations
+                 WHERE state = 'pending' AND expires_at < now() LIMIT p_lim);
+  GET DIAGNOSTICS c = ROW_COUNT; n := n + c;
+  DELETE FROM onboarding_sessions
+   WHERE id IN (SELECT id FROM onboarding_sessions WHERE expires_at < now() LIMIT p_lim);
+  GET DIAGNOSTICS c = ROW_COUNT; n := n + c;
+  UPDATE jobs SET state = 'ready', locked_by = NULL, lease_token = NULL, locked_until = NULL
+   WHERE id IN (SELECT id FROM jobs
+                 WHERE state = 'leased' AND locked_until < now() LIMIT p_lim);
+  GET DIAGNOSTICS c = ROW_COUNT; n := n + c;
+  RETURN n;
+END $$;
+ALTER FUNCTION fn_reaper_sweep(int, interval, interval) OWNER TO svc_maintenance;
+REVOKE ALL ON FUNCTION fn_reaper_sweep(int, interval, interval) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fn_reaper_sweep(int, interval, interval) TO svc_worker;
+
+-- 6/9 fn_retention_batch — one 05 retention class per call; the audit class exports before it
+-- deletes and ABORTS if the export fails (raise propagates, transaction rolls back — 07 §4).
+-- Auth-plane classes are NOT here — they sweep through fn_auth_plane_sweep on the same schedule.
+CREATE FUNCTION fn_retention_batch(p_class text, p_keep interval, p_batch int)
+RETURNS int LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+DECLARE n int := 0; tbl text;
+BEGIN
+  PERFORM set_config('app.actor_kind', 'reaper', true);
+  IF p_class = 'audit_events' THEN
+    tbl := 'audit_export_' || to_char(now(), 'YYYYMMDD_HH24MISS');
+    EXECUTE format(
+      'CREATE TABLE archive.%I AS SELECT * FROM audit_events
+        WHERE created_at < now() - %L::interval ORDER BY id LIMIT %s',
+      tbl, p_keep, p_batch);                    -- export-or-abort: failure raises out
+    EXECUTE format(
+      'DELETE FROM audit_events WHERE id IN (SELECT id FROM archive.%I)', tbl);
+    GET DIAGNOSTICS n = ROW_COUNT;
+  ELSIF p_class = 'jobs_ok' THEN
+    DELETE FROM jobs WHERE id IN (SELECT id FROM jobs
+      WHERE state IN ('succeeded','cancelled') AND updated_at < now() - p_keep LIMIT p_batch);
+    GET DIAGNOSTICS n = ROW_COUNT;
+  ELSIF p_class = 'jobs_bad' THEN
+    DELETE FROM jobs WHERE id IN (SELECT id FROM jobs
+      WHERE state IN ('failed','review_required') AND updated_at < now() - p_keep LIMIT p_batch);
+    GET DIAGNOSTICS n = ROW_COUNT;
+  ELSIF p_class = 'provider_operations' THEN
+    DELETE FROM provider_operations WHERE id IN (SELECT id FROM provider_operations
+      WHERE state IN ('succeeded','failed') AND updated_at < now() - p_keep LIMIT p_batch);
+    GET DIAGNOSTICS n = ROW_COUNT;
+  ELSIF p_class = 'channel_outbox' THEN
+    DELETE FROM channel_outbox WHERE id IN (SELECT id FROM channel_outbox
+      WHERE state IN ('sent','superseded','failed','ambiguous')
+        AND updated_at < now() - p_keep LIMIT p_batch);
+    GET DIAGNOSTICS n = ROW_COUNT;
+  ELSIF p_class = 'daily_post_counts' THEN
+    DELETE FROM daily_post_counts WHERE (workspace_id, ig_account_id, local_date) IN (
+      SELECT workspace_id, ig_account_id, local_date FROM daily_post_counts
+       WHERE local_date < (now() - p_keep)::date LIMIT p_batch);
+    GET DIAGNOSTICS n = ROW_COUNT;
+  ELSIF p_class = 'rate_counters' THEN
+    DELETE FROM rate_counters WHERE (scope, key, window_start) IN (
+      SELECT scope, key, window_start FROM rate_counters
+       WHERE window_start < now() - p_keep LIMIT p_batch);
+    GET DIAGNOSTICS n = ROW_COUNT;
+  ELSIF p_class = 'archive_tables' THEN
+    -- Drops aged AUDIT EXPORTS only — their names encode their date. The M.3 snapshot tables
+    -- (*_pre_cutover) are created by dated migrations and are dropped the symmetric way: a
+    -- dated runner migration when their 05 retention row expires (a name-based age test cannot
+    -- see their age, and a catalog creation-time source does not reliably exist).
+    FOR tbl IN SELECT c.relname FROM pg_class c JOIN pg_namespace ns ON ns.oid = c.relnamespace
+                WHERE ns.nspname = 'archive' AND c.relkind = 'r'
+                  AND c.relname LIKE 'audit\_export\_%'
+                  AND c.relname < 'audit_export_' || to_char(now() - p_keep, 'YYYYMMDD')
+    LOOP
+      EXECUTE format('DROP TABLE archive.%I', tbl); n := n + 1;
+    END LOOP;
+  ELSE
+    RAISE EXCEPTION 'unknown retention class %', p_class;
+  END IF;
+  RETURN n;
+END $$;
+ALTER FUNCTION fn_retention_batch(text, interval, int) OWNER TO svc_maintenance;
+REVOKE ALL ON FUNCTION fn_retention_batch(text, interval, int) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fn_retention_batch(text, interval, int) TO svc_worker;
+
+-- 7/9 fn_offboard_finalize — the final-deletion leg of 06 §1, guards INSIDE the body: the
+-- workspace is offboarding, the grace window (anchored on workspaces.offboarding_at) has
+-- elapsed, and zero live intents remain. The §0 cascade does the rest; audit_events survives.
+CREATE FUNCTION fn_offboard_finalize(p_ws uuid, p_grace interval)
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+BEGIN
+  PERFORM set_config('app.actor_kind', 'system', true);
+  IF NOT EXISTS (SELECT 1 FROM workspaces
+                  WHERE id = p_ws AND state = 'offboarding'
+                    AND offboarding_at IS NOT NULL AND offboarding_at + p_grace <= now()) THEN
+    RAISE EXCEPTION 'workspace % is not finalizable (state/grace guard)', p_ws;
+  END IF;
+  IF EXISTS (SELECT 1 FROM post_intents WHERE workspace_id = p_ws
+              AND state NOT IN ('posted','skipped','rejected','expired','failed','cancelled')) THEN
+    RAISE EXCEPTION 'workspace % still holds live intents', p_ws;
+  END IF;
+  DELETE FROM workspaces WHERE id = p_ws;
+END $$;
+ALTER FUNCTION fn_offboard_finalize(uuid, interval) OWNER TO svc_maintenance;
+REVOKE ALL ON FUNCTION fn_offboard_finalize(uuid, interval) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fn_offboard_finalize(uuid, interval) TO svc_worker;
+
+-- 8/9 fn_auth_plane_sweep — expiry/retention deletes on the auth-plane trio. svc_maintenance
+-- carries exactly the enumerated auth-plane policies this body needs (07 prints the two for its
+-- tables; command_dedup's is above) — the R3 §6.7 resolution, kept.
+CREATE FUNCTION fn_auth_plane_sweep(p_state_slack interval, p_session_keep interval,
+                                    p_dedup_keep interval, p_batch int)
+RETURNS int LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+DECLARE n int := 0; c int;
+BEGIN
+  DELETE FROM oauth_states WHERE state IN (
+    SELECT state FROM oauth_states
+     WHERE (consumed_at IS NOT NULL AND consumed_at < now() - p_state_slack)
+        OR expires_at < now() - p_state_slack
+     LIMIT p_batch);
+  GET DIAGNOSTICS c = ROW_COUNT; n := n + c;
+  DELETE FROM session_tokens WHERE id IN (
+    SELECT id FROM session_tokens
+     WHERE (revoked_at IS NOT NULL AND revoked_at < now() - p_session_keep)
+        OR expires_at < now() - p_session_keep
+     LIMIT p_batch);
+  GET DIAGNOSTICS c = ROW_COUNT; n := n + c;
+  DELETE FROM command_dedup WHERE (channel, principal, external_ref) IN (
+    SELECT channel, principal, external_ref FROM command_dedup
+     WHERE created_at < now() - p_dedup_keep LIMIT p_batch);
+  GET DIAGNOSTICS c = ROW_COUNT; n := n + c;
+  RETURN n;
+END $$;
+ALTER FUNCTION fn_auth_plane_sweep(interval, interval, interval, int) OWNER TO svc_maintenance;
+REVOKE ALL ON FUNCTION fn_auth_plane_sweep(interval, interval, interval, int) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fn_auth_plane_sweep(interval, interval, interval, int) TO svc_worker;
+
+-- 9/9 fn_invitation_accept — the pre-membership door (pass 5, R4 finding 7: the acceptor is
+-- authenticated but not yet a member; tenant RLS structurally cannot resolve token → workspace
+-- for them, and the central membership gate would refuse them). The D33 match fact is computed
+-- HERE, from raw inputs — google: the verified id_token email; telegram: the tapping identity's
+-- immutable numeric id vs invited_tg_user_id (never the hint column) — so the authorization
+-- fact is computed where it is consumed. Caller (ingress) rate-limits via the preauth_ip scope.
+CREATE FUNCTION fn_invitation_accept(p_token_hash text, p_user uuid, p_provider text,
+                                     p_verified_email text, p_tg_user_id bigint, p_channel text)
+RETURNS TABLE (workspace_id uuid, granted_role text, matched boolean)
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+DECLARE inv record; m boolean; grant_role text; bind uuid;
+BEGIN
+  PERFORM set_config('app.actor_kind', 'user', true);
+  PERFORM set_config('app.actor_user_id', p_user::text, true);
+  PERFORM set_config('app.channel', COALESCE(p_channel, 'web'), true);
+  SELECT * INTO inv FROM workspace_invitations i
+   WHERE i.token_hash = p_token_hash AND i.state = 'pending' AND i.expires_at > now()
+   FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'invitation not acceptable (used, revoked, expired, or unknown)'
+      USING ERRCODE = 'no_data_found';
+  END IF;
+  -- D33 per-provider acceptance constraint, evaluated in-body:
+  IF p_provider = 'google' THEN
+    IF inv.email IS NOT NULL THEN
+      IF lower(p_verified_email) IS DISTINCT FROM lower(inv.email) THEN
+        RAISE EXCEPTION 'identity proof mismatch' USING ERRCODE = 'check_violation';
+      END IF;
+      m := true;
+    ELSE m := false;                             -- no comparable proof: recorded skip
+    END IF;
+  ELSIF p_provider = 'telegram' THEN
+    IF inv.invited_tg_user_id IS NOT NULL THEN
+      IF p_tg_user_id IS DISTINCT FROM inv.invited_tg_user_id THEN
+        RAISE EXCEPTION 'identity proof mismatch' USING ERRCODE = 'check_violation';
+      END IF;
+      m := true;
+    ELSE m := false;                             -- hint-only or bare token: recorded skip (D36)
+    END IF;
+  ELSE
+    RAISE EXCEPTION 'unknown acceptance provider %', p_provider;
+  END IF;
+  UPDATE workspace_invitations
+     SET state = 'accepted', accepted_by_user_id = p_user, accepted_email_matched = m
+   WHERE id = inv.id;
+  grant_role := CASE WHEN inv.role = 'admin' AND m THEN 'admin' ELSE 'member' END;
+  INSERT INTO workspace_members (workspace_id, user_id, role, added_by_user_id)
+  VALUES (inv.workspace_id, p_user, grant_role, inv.invited_by_user_id)
+  ON CONFLICT (workspace_id, user_id) DO NOTHING;  -- already a member: invite consumed, the
+                                                    -- existing role stands (role changes go
+                                                    -- through the 06 §2 gate)
+  IF inv.role = 'admin' AND NOT m THEN             -- D36 elevation-pending, same transaction
+    SELECT b.id INTO bind FROM channel_bindings b
+     WHERE b.workspace_id = inv.workspace_id AND b.state = 'active'
+     ORDER BY b.created_at LIMIT 1;
+    IF bind IS NOT NULL THEN
+      INSERT INTO channel_outbox (workspace_id, binding_id, kind, payload)
+      VALUES (inv.workspace_id, bind, 'notification',
+              jsonb_build_object('v', 1, 'template', 'elevation_pending',
+                                 'invitation_id', inv.id, 'accepted_by', p_user));
+    END IF;                                        -- zero-binding workspace: the pending
+  END IF;                                          -- elevation is visible on the web surface
+  RETURN QUERY SELECT inv.workspace_id, grant_role, m;
+END $$;
+ALTER FUNCTION fn_invitation_accept(text, uuid, text, text, bigint, text) OWNER TO svc_membership;
+REVOKE ALL ON FUNCTION fn_invitation_accept(text, uuid, text, text, bigint, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fn_invitation_accept(text, uuid, text, text, bigint, text) TO svc_ingress;
+```
+
+**What changed in the door inventory (pass 5):** `fn_comparator_run` is deleted (FC-7 — shadow-read died with the six-stage machine), `fn_invitation_accept` is added (R4 finding 7), and `svc_membership` joins the NOLOGIN owners — net inventory stays nine doors, all nine now printed above. The inventory table earlier in §7 remains the reviewer's enumeration; this section is its implementation, and the two are held in lockstep by the `advertised_ddl_replay` fixture (a door in one and not the other fails the replay or the review, whichever comes first).
+
 ## §8. Two caps, never conflated
 
 - **Product cadence cap** — ours: `daily_post_counts` in the account's effective tz, calendar-day semantics, atomically debited in the approved→publishing transaction (§4 SQL), refunded on failure against the recorded debit day. The only cap we count locally.
@@ -1219,23 +1980,23 @@ The first pass said "system actors use dedicated roles with explicit predicates"
 
 ## §9. Legacy → target mapping (all 14 current tables + ledger accounted for)
 
-Every re-key runs on the six-stage machine (`04` §Ground rules). Column-level mapping tables live in each track's spec (`04` Phases F/W) — this table is the disposition index. Legacy **naive** `TIMESTAMP` columns convert with `AT TIME ZONE 'UTC'` (§0), no exceptions among the naive set; the three already-`TIMESTAMPTZ` columns §0 names copy as-is.
+Every re-key runs **once, as the M.3 offline transform** (`04` Phase M — FC-7 replaced the six-stage machine). Column-level mapping tables live in the transform spec (`04` M.1) — this table is the disposition index. Legacy **naive** `TIMESTAMP` columns convert with `AT TIME ZONE 'UTC'` (§0), no exceptions among the naive set; the three already-`TIMESTAMPTZ` columns §0 names copy as-is.
 
 | Current (`origin/main`) | Target disposition |
 |---|---|
 | `users` | `users` (state from `is_active`; role dissolves into memberships) + `user_identities(provider='telegram')` (telegram_user_id/username/names) |
-| `chat_settings` | split: tenant config columns → `workspaces` (§1 lists the full column mapping inline); chat facts → `channel_bindings(channel='telegram_group')`; media source config + `gdrive_alerted_at` → `media_sources`; `active_instagram_account_id` dissolves (multi-account); `last_post_sent_at` seeds per-account `next_slot_at` at W.5 cutover; onboarding columns → `onboarding_sessions` |
+| `chat_settings` | split: tenant config columns → `workspaces` (§1 lists the full column mapping inline); chat facts → `channel_bindings(channel='telegram_group')`; media source config + `gdrive_alerted_at` → `media_sources`; `active_instagram_account_id` dissolves (multi-account); `last_post_sent_at` seeds per-account `next_slot_at` in the M.1 transform; onboarding columns → `onboarding_sessions` |
 | `user_chat_memberships` | `workspace_members` (instance_role maps 1:1: owner/admin/member; `is_active=false` rows are dropped with an audit record — membership is presence, not a flag, in the target) |
 | `user_interactions` | `audit_events` (append-only, channel-tagged; `interaction_*` → entity_kind/detail) |
-| `instagram_accounts` | `ig_accounts` — **fan-out**: the legacy row is global identity + per-chat selection; the target row is per-workspace ownership. One target row per (workspace, `instagram_account_id`) pair derived from `api_tokens` ownership (W.1 mapping rule; `instagram_account_id` → `provider_account_ref`, `instagram_username` → handle) |
-| `api_tokens` | `oauth_credentials` (typed owner FKs; `service_name`+`auth_method` → provider: instagram×instagram_login → `ig_login`, instagram×oauth/manual → `fb_login_legacy`, google_drive → `gdrive`; `token_value` ciphertext carried as-is; `revoked_at IS NOT NULL` → state `revoked`). Non-IG/Drive rows: none exist (verified). The 004/008 constraint residue is reconciled by the 0.2 runner-formalization fix-forward migration before any of this |
-| `media_items` | `media_items` re-keyed (`chat_settings_id`→workspace via its chat; `source_type/identifier` → source_id/provider_file_ref; NULL-tenant legacy rows follow the 044 sole-tenant rule, ratified). **Precondition: per-workspace hash dedup remediation (W.3 gate)** |
+| `instagram_accounts` | `ig_accounts` — **fan-out**: the legacy row is global identity + per-chat selection; the target row is per-workspace ownership. One target row per (workspace, `instagram_account_id`) pair derived from `api_tokens` ownership (M.1 mapping rule; `instagram_account_id` → `provider_account_ref`, `instagram_username` → handle) — rows born `reauth_required` with zero credentials (FC-7.2) |
+| `api_tokens` | **NOT migrated (FC-7.2, ruled):** no ciphertext is carried — the owner re-authenticates IG and Drive by hand post-cutover, and target `oauth_credentials` rows are created by those reconnect flows, never by transform. The legacy table is snapshotted to the archive schema and dropped; best-effort provider revocation of the old tokens is an M.3 runbook courtesy step. The 004/008 constraint residue is still reconciled by 0.2's fix-forward (050) before the window |
+| `media_items` | `media_items` re-keyed (`chat_settings_id`→workspace via its chat; `source_type/identifier` → source_id/provider_file_ref; NULL-tenant legacy rows follow the 044 sole-tenant rule, ratified). **Preconditions: per-workspace hash dedup remediation (M window precondition, human-gated like 0.3) AND the FC-8 zero-row gate — local/upload-origin rows have no target destination (M.1)** |
 | `media_posting_locks` | `post_locks` (kind mapping in §2; `locked_until`→expires_at; permanent = NULL, kept) |
-| `posting_queue` | `post_intents` working states — pending→scheduled · processing→prompt_pending · sent_unconfirmed→prompt_pending · delivered→awaiting_approval · publishing→publishing · failed→failed(terminal); `instagram_container_id`→ig_container_id; telegram message/chat ids → `channel_outbox` rows with `external_message_ref` |
+| `posting_queue` | **NOT transformed (FC-7.4, ruled: "we can throw the queue out"):** pending in-flight items are cancelled by the cutover itself — the rows are snapshotted to the archive schema and no intents are minted for them; the target scheduler re-plans from cadence at resume. A stated drop, never an omission — `04` M.1 carries the ruling verbatim-in-substance. (The pass-4 state mapping this row used to hold is preserved in the archive snapshot's own columns should anyone ever need to read the thrown-out backlog) |
 | `posting_history` | `post_intents` terminal states (posted/failed/skipped/rejected/expired map 1:1; `posting_method`/usernames → audit detail; `instagram_media_id`/`instagram_story_id`/permalink → ig_media_id/ig_permalink; `queue_item_id` → legacy_queue_item_id) — inserted as actor `migration` (§4 insert guard) |
 | `category_post_case_mix` | **kept row-shaped** (it is a Type 2 SCD table today — `workspaces.category_mix` JSONB from the first pass is struck): `category_post_case_mix` re-keyed to `workspace_id`, SCD semantics unchanged, sum-to-1 stays service-enforced (a cross-row DB constraint would need a deferred aggregate trigger; not worth its complexity — recorded trade-off) |
 | `onboarding_sessions` | kept, re-keyed: `user_id` stays; `pending_chat_settings_id` → `pending_workspace_id`; step vocabulary widened for the web sign-in path (07 §§1–2): `naming`,`awaiting_group`,`connect_identity`,`complete` — this row is the step list's normative home (`connect_identity` = link a web-capable identity, the 07 §2 `link` flow; the pass-3 name `connect_email` died with OTP); 24 h expiry + `UNIQUE(user_id)` (one live session per user) kept |
 | `audit_log` | merged into `audit_events` (entity_type/action/field/old/new → entity_kind + detail; rows migrated verbatim into `detail`) |
 | `service_runs` | kept as-is + nullable `workspace_id`; retired at S.4 (`03`) |
-| `schema_version` | superseded by the 0.2 runner's `schema_migrations` ledger (`04` 0.2 — richer metadata; old table retained read-only until W-phase contract) |
+| `schema_version` | superseded by the 0.2 runner's `schema_migrations` ledger via `runner adopt` (`04` 0.2/M.3 — postcondition-verified baseline seeding, never trust of the old rows, whose 010/034 gaps are the point); the old table is snapshotted to the archive schema and dropped in the window |
 | `waitlist_signups` | **out of scope, permanently**: owned by the landing site's Drizzle ORM; no Python migration may touch it (existing repo rule, carried forward) |

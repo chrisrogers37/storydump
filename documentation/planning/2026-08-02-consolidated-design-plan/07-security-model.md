@@ -22,14 +22,14 @@ CREATE TRIGGER tg_touch_session_tokens BEFORE UPDATE ON session_tokens
   FOR EACH ROW EXECUTE FUNCTION trg_touch_updated_at();
 ```
 
-- **The flow (server-side confidential client — X.3):** `GET /auth/google` issues an anonymous `oauth_states` row (`purpose='signin'`, §2) and redirects to Google's authorization endpoint; the callback exchanges the code server-side (the client secret never leaves the server), verifies the `id_token` against Google's published JWKS — `iss`, `aud`, `exp`, and the `nonce` binding stated in §2 — and signs the user in. JWKS is fetched from Google's discovery endpoint and cached with its HTTP cache headers; the two OIDC hosts (`accounts.google.com`, `oauth2.googleapis.com`) join the egress allowlist at X.3 (`04`). The OIDC verification utility is the only genuinely new code class in this ruling, and it is small.
+- **The flow (server-side confidential client — X.3):** `GET /auth/google` issues an anonymous `oauth_states` row (`purpose='signin'`, §2) and redirects to Google's authorization endpoint; the callback exchanges the code server-side (the client secret never leaves the server), verifies the `id_token` against Google's published JWKS — `iss`, `aud`, `exp`, and the `nonce` binding stated in §2 — and signs the user in. JWKS is fetched from Google's discovery endpoint and cached with its HTTP cache headers; **three** OIDC hosts join the egress allowlist at X.3 (`04`): `accounts.google.com`, `oauth2.googleapis.com`, and `www.googleapis.com` — the discovery document's `jwks_uri` lives on the third (`https://www.googleapis.com/oauth2/v3/certs`, verified against the live discovery document 2026-08-04; the pass-4 two-host list would have blocked ID-token verification under the strict egress floor — R4 finding). The OIDC verification utility is the only genuinely new code class in this ruling, and it is small.
 - **Identity (D32 — `sub`, never email):** success upserts `user_identities(provider='google', external_id = <OIDC sub>, verified_at = now())`, creating the `users` row on first sign-in. `external_id` is the provider's immutable subject — **never the email address**: emails are mutable and recyclable, so keying identity on email is an account-takeover primitive. The verified email claim is metadata, refreshed at each sign-in; `users.primary_email` fills from it when NULL; a claim colliding with a *different* user's `primary_email` surfaces as an error — it never merges accounts (D35).
 - **Sessions:** opaque random 256-bit value in an httpOnly/SameSite=Lax/secure cookie; only the hash is stored; verification is one indexed lookup + expiry/revocation check; sliding renewal. Sign-out and admin revoke set `revoked_at`. There is no JWT for human web sessions — and none exists anywhere on `main` today (pass-4 anchor: current API auth is HMAC-signed WebApp init-data + signed URL tokens, `src/utils/webapp_auth.py`); the machine/consumer surfaces get the additive `workspace_id` field on their own signed tokens per W.6 (`04`), and first-party service auth is §6's `service_tokens`.
 - **Pre-auth rate limiting:** the sign-in endpoints ride the `preauth_ip` scope (`rate_counters`, `02` §6; the `05` pre-auth row; the client-IP source rule is stated once at the `02` §6 table) — a mechanism deliberately distinct from the per-workspace S.2 admission, which is fail-closed on tenant context and structurally cannot serve unauthenticated requests. The OTP-specific scopes died with OTP.
 - **Recovery:** account recovery is Google's problem — a strictly stronger posture than pass 3's "losing the mailbox loses the account". Email *change* ceases to exist as a flow: email is a provider claim, not stored credential material. Telegram-identity users are unaffected (different provider row).
 - **Linking (D35 — explicit-only, stated once here):** identities attach to a user only through an action performed inside that user's authenticated session — §2's `link` purpose covers both directions (Telegram-first → Google via OAuth redirect; Google-first → Telegram via the start-token transport). No email auto-merge exists, in any direction; a (provider, subject) already attached to another user rejects with "already linked elsewhere" (`uq_identity_per_provider`); merging two populated users is an operator action with an audit trail, explicitly out of v1.
 
-**Email delivery — the `EmailSender` port (consumer: invitations — FC-6).** One port: `send(to, template, params) → provider_message_ref`, drained by `send_email` jobs (`02` §5 registry — interactive lane: the inviter is mid-flow awaiting send confirmation; payload carries everything, no tenant reads at send time). **Named default provider: Resend** — no email infrastructure exists in this repository today, the free tier covers our volume, and the integration is one authenticated POST. **A new external service is a flagged decision, not an assumption: the owner ack is OPEN (`03` pass-4 items — reopened by FC-6 after the sign-in ruling had briefly mooted it); the port keeps the provider swappable until it lands.** Retry budget per `05`. The bounce/complaint webhook (ingress-hosted) now targets invitations: a bounced invitation email writes an audit event and notifies the inviter via an outbox `notification` on the workspace's binding — the pass-3 behavior (invalidating a live challenge) retired with the challenges themselves. Sender-domain setup (SPF/DKIM/return-path) is X.3's runbook item, and X.3's gate delivers a real invitation email end-to-end.
+**Email delivery — the `EmailSender` port (consumer: invitations — FC-6).** One port: `send(to, template, params) → provider_message_ref`, drained by `send_email` jobs (`02` §5 registry — interactive lane: the inviter is mid-flow awaiting send confirmation; payload carries everything, no tenant reads at send time). **Named default provider: Resend** — no email infrastructure exists in this repository today and the integration is one authenticated POST. **The volume claim, quantified (pass 5 — R4 finding):** post-FC-5/FC-6, email = invitations + bounce notices only; the free tier is 100/day and 3,000/month **with sending paused at quota** — launch volume is a rounding error against that, but a cohort-onboarding burst (tens of workspaces × a few invites in a day) crosses 100/day exactly when the product is succeeding, and a paused sender silently strands invitation delivery. The `05` email budget row + the `rate_counters` `email_global` scope (`02` §6) exist so the app defers under its own budget instead of tripping the provider's pause; the input row in `05` names the volume model. **A new external service is a flagged decision, not an assumption: the owner ack is OPEN (`03` pass-4 items — reopened by FC-6 after the sign-in ruling had briefly mooted it); the port keeps the provider swappable until it lands.** Retry budget per `05`. The bounce/complaint webhook (ingress-hosted) now targets invitations: a bounced invitation email writes an audit event and notifies the inviter via an outbox `notification` on the workspace's binding — the pass-3 behavior (invalidating a live challenge) retired with the challenges themselves. Sender-domain setup (SPF/DKIM/return-path) is X.3's runbook item, and X.3's gate delivers a real invitation email end-to-end.
 
 ## §2. OAuth flows: state tokens, sign-in/link states, and reconnect binding (L.6; signin/link widening at X.3)
 
@@ -119,6 +119,31 @@ CREATE TRIGGER tg_touch_service_tokens BEFORE UPDATE ON service_tokens
 - Issuance/revocation is an operator action in the web admin surface (or the bootstrap runbook for the first token: an INSERT in the break-glass session).
 - **Degraded operation:** if the API is down the CLI is down — accepted; the break-glass psql runbook (§5) is the only bypass, and DB-down means the runbook's target is gone too, which is the DR plan's territory (`05` §DR), not an auth question.
 
+## §6b. Auth-plane RLS DDL (pass 5 — this file's tables; the `02` §7-DDL conventions apply)
+
+The three tables above are the auth-plane class `02` §7 describes: no tenant policies — they are the door tenant context walks through — and exactly two principals: `svc_ingress` (the runtime reader/writer) and `svc_maintenance` (the sweep-door owner; its rows reach it only through `fn_auth_plane_sweep`). Printed here because replay order is file order and these tables are created in this file:
+
+```sql
+ALTER TABLE session_tokens ENABLE ROW LEVEL SECURITY;
+ALTER TABLE oauth_states   ENABLE ROW LEVEL SECURITY;
+ALTER TABLE service_tokens ENABLE ROW LEVEL SECURITY;
+GRANT SELECT, INSERT, UPDATE ON session_tokens, oauth_states, service_tokens TO svc_ingress;
+GRANT SELECT, DELETE ON session_tokens, oauth_states TO svc_maintenance;
+CREATE POLICY p_auth_ingress_sessions ON session_tokens FOR ALL TO svc_ingress
+  USING (true) WITH CHECK (true);
+CREATE POLICY p_auth_ingress_states   ON oauth_states   FOR ALL TO svc_ingress
+  USING (true) WITH CHECK (true);
+CREATE POLICY p_auth_ingress_svctok   ON service_tokens FOR ALL TO svc_ingress
+  USING (true) WITH CHECK (true);
+CREATE POLICY p_auth_sweep_sessions ON session_tokens FOR ALL TO svc_maintenance
+  USING (true) WITH CHECK (true);
+CREATE POLICY p_auth_sweep_states   ON oauth_states   FOR ALL TO svc_maintenance
+  USING (true) WITH CHECK (true);
+-- service_tokens has NO sweep policy and svc_maintenance holds no grant on it: issuance and
+-- revocation are operator actions (§6), rows are few, and no retention class exists — a sweep
+-- door privilege nobody's schedule drives would be an unreviewed capability.
+```
+
 ## §7. Where each piece lands (increment index)
 
 | Mechanism | Increment |
@@ -127,9 +152,9 @@ CREATE TRIGGER tg_touch_service_tokens BEFORE UPDATE ON service_tokens
 | MultiFernet ring + reencrypt job | L.6 (ring), runbook standing; job kind exists from L.2 |
 | audit grants + GUC-required trigger | L.1 (ledger create) |
 | retention sweep + archive export | S.4 (with `05` retention table) |
-| Google OIDC sign-in + session_tokens + invitations flow | X.3 (sign-up without Telegram) |
-| EmailSender port + Resend default + bounce webhook | X.3 (the `send_email` job kind exists from L.2's registry) |
+| Google OIDC sign-in + session_tokens + invitations flow | X.3 (sign-up without Telegram); acceptance runs through `fn_invitation_accept` (`02` §7-DDL) |
+| EmailSender port + Resend default + bounce webhook | X.3 (the `send_email` job kind exists from L.2's registry; the `email_global` budget scope from L.2) |
 | rate_counters pre-auth scope (`preauth_ip`) | schema at L.2 (`02` §6); consumed here at X.3 |
-| `archive` schema (audit exports + contract snapshots) | created by the first contract-stage migration that snapshots (`04` ground rules); exports live from S.4; access rules §4 |
-| service_tokens + CLI routing | W.6 (consumer contracts) |
+| `archive` schema (audit exports + M.3 snapshots) | created by the `02` §7-DDL block (F.2 schema landing); M.3 snapshot tables ALTER OWNER to svc_maintenance; exports live from S.4; access rules §4 |
+| service_tokens + CLI routing | X.2 (pass 5 — relocated from the deleted W.6) |
 | hygiene ratchet patterns (provider_account_ref out of logs) | F.6 (second pattern list on the same ratchet) |
