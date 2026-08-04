@@ -14,6 +14,22 @@ BEGIN
   NEW.updated_at := now();
   RETURN NEW;
 END $$;
+
+-- The one tz gate (pass 6 — R5): returns its argument when PostgreSQL recognizes it as a time
+-- zone, 'UTC' otherwise. Two consumers, one rule: the ck_*_tz_valid CHECKs below make a bad
+-- value unstorable at write, and fn_next_slot converts through it so a stored value that later
+-- DECAYS (tzdata removals are rare but real — the reason this is not IMMUTABLE) degrades that
+-- one row to UTC instead of aborting the caller's whole set-based statement. The legacy
+-- scheduler caught invalid zones per row and fell back to UTC; R5's regression finding is the
+-- general rule — replacing a per-row path with a set-based one must not turn a survivable
+-- per-row fault into a whole-batch abort.
+CREATE FUNCTION fn_safe_tz(p_tz text) RETURNS text LANGUAGE plpgsql STABLE AS $$
+BEGIN
+  PERFORM now() AT TIME ZONE p_tz;
+  RETURN p_tz;
+EXCEPTION WHEN invalid_parameter_value THEN
+  RETURN 'UTC';
+END $$;
 ```
 
 - **Replay order (normative):** the advertised DDL replays from empty **in file order — this file top-to-bottom, then `07`'s blocks in their file order**. Ordering is therefore load-bearing: a block references only objects printed above it. `04` 0.2's CI carries a named fixture that extracts the advertised blocks and replays them verbatim; an edit that breaks file-order replay fails that gate.
@@ -82,7 +98,12 @@ CREATE TABLE workspaces (
   -- auto_reapprove_returning, approval_ttl_minutes — today auto-reapproval exists only as a
   -- posting_history.posting_method VALUE ('auto_reapproval'), behavior without a config column.
   -- Rename: legacy posting_timezone → tz.
-  tz                      TEXT NOT NULL DEFAULT 'UTC',          -- IANA name; workspace default
+  tz                      TEXT NOT NULL DEFAULT 'UTC'           -- IANA name; workspace default
+                          CONSTRAINT ck_ws_tz_valid CHECK (fn_safe_tz(tz) = tz),
+                          -- write-time backstop (R5: tz was unconstrained; the service boundary
+                          -- validates first, per the materialization contract). STABLE function
+                          -- in a CHECK: enforced at write; a tzdata removal after the fact is
+                          -- the runtime-degradation case fn_safe_tz's read-side use covers
   posts_per_day           INTEGER NOT NULL DEFAULT 3
                           CONSTRAINT ck_ws_posts_per_day CHECK (posts_per_day BETWEEN 1 AND 50),
   posting_hours_start     INTEGER NOT NULL DEFAULT 14
@@ -337,7 +358,8 @@ CREATE TABLE ig_accounts (
                        CONSTRAINT ck_iga_ppd CHECK (posts_per_day BETWEEN 1 AND 50),
   posting_hours_start  INTEGER NULL CONSTRAINT ck_iga_hs CHECK (posting_hours_start BETWEEN 0 AND 23),
   posting_hours_end    INTEGER NULL CONSTRAINT ck_iga_he CHECK (posting_hours_end BETWEEN 0 AND 23),
-  tz                   TEXT NULL,
+  tz                   TEXT NULL
+                       CONSTRAINT ck_iga_tz_valid CHECK (tz IS NULL OR fn_safe_tz(tz) = tz),
   -- scheduling state (the clock's O(due) columns, H3):
   next_slot_at         TIMESTAMPTZ NULL,
   last_posted_at       TIMESTAMPTZ NULL,
@@ -1614,27 +1636,38 @@ GRANT EXECUTE ON FUNCTION fn_extend_leases(uuid[], interval) TO svc_worker;
 -- Slot arithmetic (the tick's helper; v1 policy = uniform spacing inside the account-local
 -- posting window, the legacy create-schedule semantics carried forward; start = end ⇒ 24 h window,
 -- start > end ⇒ the window wraps midnight, both current semantics).
+-- REWRITTEN AT PASS 6 (R5: 7,344 of the 28,800 legal (start,end,ppd) combinations produced an
+-- extra boundary slot — reproduced exactly). The defect class: accumulate a fractional interval,
+-- then test the boundary on hour+minute — microsecond rounding lands 03:59:59.999998 "inside" a
+-- window that ends 04:00. The rewrite makes the per-cycle count structural: slots are computed
+-- BY INDEX on the cycle grid (slot i = cycle_start + i·window/ppd, i ∈ [0, ppd)), so a cycle
+-- holds exactly ppd slots by integer arithmetic and no time-precision boundary test exists to
+-- get wrong; rounding cannot accumulate because every slot derives from cycle_start, not from
+-- its predecessor. round() (not floor) recovers the index: a slot re-read from µs-rounded
+-- storage sits within ±1 µs of its grid point and nearest-index snapping absorbs both
+-- directions — floor would step a µs-early value back one slot and re-mint it immediately,
+-- 1 µs apart, which uq_intent_slot (exact-timestamp key) would NOT dedup.
+-- STABLE, not IMMUTABLE: the result depends on the tz database via AT TIME ZONE.
 CREATE FUNCTION fn_next_slot(p_after timestamptz, p_tz text,
                              p_start_h int, p_end_h int, p_ppd int)
-RETURNS timestamptz LANGUAGE plpgsql IMMUTABLE AS $$
+RETURNS timestamptz LANGUAGE plpgsql STABLE AS $$
 DECLARE
-  win_hours  numeric := CASE WHEN p_end_h = p_start_h THEN 24
-                             ELSE ((p_end_h - p_start_h + 24) % 24) END;
-  spacing    interval := (win_hours / p_ppd) * interval '1 hour';
-  cand_local timestamp := (p_after AT TIME ZONE p_tz) + spacing;
-  day_start  timestamp := date_trunc('day', cand_local) + p_start_h * interval '1 hour';
-  tod        numeric := EXTRACT(hour FROM cand_local) + EXTRACT(minute FROM cand_local)/60.0;
-  in_window  boolean := CASE
-                          WHEN p_end_h = p_start_h THEN true
-                          WHEN p_start_h < p_end_h THEN tod >= p_start_h AND tod < p_end_h
-                          ELSE tod >= p_start_h OR tod < p_end_h   -- wraps midnight
-                        END;
+  tz         text      := fn_safe_tz(p_tz);     -- §0 tz rule: a decayed stored zone degrades
+                                                -- this row to UTC, never aborts the caller's
+                                                -- set-based tick statement (R5 regression note)
+  win_hours  numeric   := CASE WHEN p_end_h = p_start_h THEN 24
+                               ELSE ((p_end_h - p_start_h + 24) % 24) END;
+  aft_local  timestamp := p_after AT TIME ZONE tz;
+  anchor     timestamp := date_trunc('day', aft_local) + p_start_h * interval '1 hour';
+  cyc_start  timestamp;                         -- latest window start at or before p_after
+  idx        int;
 BEGIN
-  IF NOT in_window THEN
-    cand_local := CASE WHEN cand_local < day_start THEN day_start
-                       ELSE day_start + interval '1 day' END;
+  cyc_start := CASE WHEN aft_local >= anchor THEN anchor ELSE anchor - interval '1 day' END;
+  idx := round(EXTRACT(epoch FROM (aft_local - cyc_start)) * p_ppd / (win_hours * 3600.0));
+  IF idx + 1 >= p_ppd THEN
+    RETURN (cyc_start + interval '1 day') AT TIME ZONE tz;        -- next cycle's first slot
   END IF;
-  RETURN cand_local AT TIME ZONE p_tz;
+  RETURN (cyc_start + ((idx + 1) * win_hours / p_ppd) * interval '1 hour') AT TIME ZONE tz;
 END $$;
 
 -- 3/9 fn_clock_tick — one indexed pass per concern; every heavy step becomes a job. The tick
