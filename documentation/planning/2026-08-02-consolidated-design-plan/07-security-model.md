@@ -2,7 +2,7 @@
 
 The auth, secrets, and integrity designs review A §5.10–14 found missing. Same DDL conventions as `02` §0. Everything here is v1-executable; each mechanism names its increment in `04`.
 
-## §1. Web sign-in: Google OIDC + sessions (X.3; session infrastructure shared with W.6's web surfaces)
+## §1. Web sign-in: Google OIDC + sessions (X.3; session infrastructure shared with X.2's web surfaces)
 
 Sign-in is **Google sign-in, not email OTP** (FC-5). The session half of this section is unchanged from pass 3 — sign-in still ends by issuing exactly the session below; what changed is how a user proves who they are, and that the pre-auth email surface (challenges, codes, OTP rate scopes) no longer exists.
 
@@ -24,7 +24,7 @@ CREATE TRIGGER tg_touch_session_tokens BEFORE UPDATE ON session_tokens
 
 - **The flow (server-side confidential client — X.3):** `GET /auth/google` issues an anonymous `oauth_states` row (`purpose='signin'`, §2) and redirects to Google's authorization endpoint; the callback exchanges the code server-side (the client secret never leaves the server), verifies the `id_token` against Google's published JWKS — `iss`, `aud`, `exp`, and the `nonce` binding stated in §2 — and signs the user in. JWKS is fetched from Google's discovery endpoint and cached with its HTTP cache headers; **three** OIDC hosts join the egress allowlist at X.3 (`04`): `accounts.google.com`, `oauth2.googleapis.com`, and `www.googleapis.com` — the discovery document's `jwks_uri` lives on the third (`https://www.googleapis.com/oauth2/v3/certs`, verified against the live discovery document 2026-08-04; the pass-4 two-host list would have blocked ID-token verification under the strict egress floor — R4 finding). The OIDC verification utility is the only genuinely new code class in this ruling, and it is small.
 - **Identity (D32 — `sub`, never email):** success upserts `user_identities(provider='google', external_id = <OIDC sub>, verified_at = now())`, creating the `users` row on first sign-in. `external_id` is the provider's immutable subject — **never the email address**: emails are mutable and recyclable, so keying identity on email is an account-takeover primitive. The verified email claim is metadata, refreshed at each sign-in; `users.primary_email` fills from it when NULL; a claim colliding with a *different* user's `primary_email` surfaces as an error — it never merges accounts (D35).
-- **Sessions:** opaque random 256-bit value in an httpOnly/SameSite=Lax/secure cookie; only the hash is stored; verification is one indexed lookup + expiry/revocation check; sliding renewal. Sign-out and admin revoke set `revoked_at`. There is no JWT for human web sessions — and none exists anywhere on `main` today (pass-4 anchor: current API auth is HMAC-signed WebApp init-data + signed URL tokens, `src/utils/webapp_auth.py`); the machine/consumer surfaces get the additive `workspace_id` field on their own signed tokens per W.6 (`04`), and first-party service auth is §6's `service_tokens`.
+- **Sessions:** opaque random 256-bit value in an httpOnly/SameSite=Lax/secure cookie; only the hash is stored; verification is one indexed lookup + expiry/revocation check; sliding renewal. Sign-out and admin revoke set `revoked_at`. There is no JWT for human web sessions — and none exists anywhere on `main` today (pass-4 anchor: current API auth is HMAC-signed WebApp init-data + signed URL tokens, `src/utils/webapp_auth.py`); the machine/consumer surfaces carry `workspace_id` in their signed payloads (born workspace-aware at X.2 — the pass-4 dual-shape migration window died with FC-7), and first-party service auth is §6's `service_tokens`.
 - **Pre-auth rate limiting:** the sign-in endpoints ride the `preauth_ip` scope (`rate_counters`, `02` §6; the `05` pre-auth row; the client-IP source rule is stated once at the `02` §6 table) — a mechanism deliberately distinct from the per-workspace S.2 admission, which is fail-closed on tenant context and structurally cannot serve unauthenticated requests. The OTP-specific scopes died with OTP.
 - **Recovery:** account recovery is Google's problem — a strictly stronger posture than pass 3's "losing the mailbox loses the account". Email *change* ceases to exist as a flow: email is a provider claim, not stored credential material. Telegram-identity users are unaffected (different provider row).
 - **Linking (D35 — explicit-only, stated once here):** identities attach to a user only through an action performed inside that user's authenticated session — §2's `link` purpose covers both directions (Telegram-first → Google via OAuth redirect; Google-first → Telegram via the start-token transport). No email auto-merge exists, in any direction; a (provider, subject) already attached to another user rejects with "already linked elsewhere" (`uq_identity_per_provider`); merging two populated users is an operator action with an audit trail, explicitly out of v1.
@@ -95,7 +95,7 @@ The deliberate cross-tenant keys are inventoried in `02` §7 (three, with per-ke
 - Provider identifiers appear exactly twice in the system's output surface: inside `oauth_credentials` (encrypted) and inside provider adapter calls. A grep-shaped CI check (F.6 ratchet mechanism, second pattern list) holds `provider_account_ref` out of logging call sites.
 - Admin/operator queries run through the audited surfaces (§7 of `06`); the break-glass psql runbook requires `SET app.actor_kind = 'operator'` (the audit trigger refuses anonymous writes) and is itself logged at the Neon level.
 
-## §6. First-party API auth for CLI and operator surfaces (review A §3.31; W.6)
+## §6. First-party API auth for CLI and operator surfaces (review A §3.31; X.2)
 
 ```sql
 CREATE TABLE service_tokens (
@@ -115,7 +115,7 @@ CREATE TRIGGER tg_touch_service_tokens BEFORE UPDATE ON service_tokens
   FOR EACH ROW EXECUTE FUNCTION trg_touch_updated_at();
 ```
 
-- The CLI (service-routed per W.6 — never direct DB) authenticates with a bearer `service_token`; `operator` role reaches the admin endpoints, `readonly` the inspection ones; every use stamps `last_used_at` and operator mutations audit as `actor_kind='operator'`, `channel='cli'`.
+- The CLI (service-routed per X.2 — never direct DB) authenticates with a bearer `service_token`; `operator` role reaches the admin endpoints, `readonly` the inspection ones; every use stamps `last_used_at` and operator mutations audit as `actor_kind='operator'`, `channel='cli'`.
 - Issuance/revocation is an operator action in the web admin surface (or the bootstrap runbook for the first token: an INSERT in the break-glass session).
 - **Degraded operation:** if the API is down the CLI is down — accepted; the break-glass psql runbook (§5) is the only bypass, and DB-down means the runbook's target is gone too, which is the DR plan's territory (`05` §DR), not an auth question.
 

@@ -126,7 +126,7 @@ CREATE TRIGGER tg_touch_workspaces BEFORE UPDATE ON workspaces
 --   telegram_chat_id → channel_bindings.external_ref        display_name → name
 --   media_source_type/root, gdrive_alerted_at → media_sources
 --   active_instagram_account_id → dissolved (multi-account; §2)
---   last_post_sent_at → per-account slot anchor (§2 ig_accounts.next_slot_at derivation, 04 W.5)
+--   last_post_sent_at → per-account slot anchor (§2 ig_accounts.next_slot_at derivation, 04 M.1)
 --   onboarding_step/onboarding_completed → onboarding_sessions (§9)
 --   enable_instagram_api → workspaces.api_publishing_enabled (pass 5/FC-7: the cohort-routing
 --     flag table died with the live cutover; the surviving per-workspace mode flag is product
@@ -558,15 +558,15 @@ CREATE TRIGGER tg_touch_media_items BEFORE UPDATE ON media_items
 CREATE INDEX ix_media_selection ON media_items (workspace_id, state, category);
 CREATE INDEX ix_media_provider_ref ON media_items (workspace_id, source_id, provider_file_ref);
 -- uq_media_dedup: dedup is per-workspace BY SCHEMA; a global hash namespace is inexpressible (R4).
--- Legacy file_hash is NOT unique today (duplicates exist in production) — the W.3 track carries a
--- human-gated dedup remediation (existing dedup-media tooling) with a zero-duplicates gate BEFORE
--- this constraint lands (04 W.3), same pattern as 0.3's history remediation.
+-- Legacy file_hash is NOT unique today (duplicates exist in production) — the M window carries a
+-- human-gated dedup remediation precondition (existing dedup-media tooling) with a
+-- zero-duplicates gate BEFORE the transform runs (04 M.1), same pattern as 0.3's remediation.
 -- Legacy columns not carried: cloud_* transit columns (transit state is per-attempt:
 -- post_intents.transit_asset_ref), instagram_media_id/backfilled_at (posted evidence is per-intent:
--- §3 ig_media_id; legacy values ride the W.4 history backfill), is_active (→ state), file_path
+-- §3 ig_media_id; legacy values ride the M.1 history transform), is_active (→ state), file_path
 -- (Drive path context folds into file_name; identity is provider_file_ref). No legacy
 -- "unsupported" flag exists (pass-4 anchor): today Meta 9004 writes a permanent_reject LOCK, not
--- a media_items column — those rows ride the W.3 lock mapping; the target's 'unsupported' media
+-- a media_items column — those rows ride the M.1 lock mapping; the target's 'unsupported' media
 -- state and lock kind formalize the class going forward.
 -- times_posted and last_posted_at are workspace-level ADVISORY aggregates (display/selection
 -- hints; authority is the terminal intents) — per-account recency = post_locks.
@@ -659,7 +659,7 @@ CREATE TABLE post_intents (
                        -- 'manual': the workspace posts by hand and confirms with the Posted tap —
                        -- the live phase-1 flow, carried forward (pass-2 addition: the first pass
                        -- designed only the API path; production has both). 'legacy_backfill':
-                       -- W.4 history rows, exempt from evidence requirements below.
+                       -- M.1 history-transform rows, exempt from evidence requirements below.
   provider_account_ref TEXT NOT NULL,           -- immutable copy from ig_accounts at creation (key 4)
   publish_step         TEXT NOT NULL DEFAULT 'none' CONSTRAINT ck_intent_step CHECK (publish_step IN
                          ('none','transit_uploaded','container_created','container_ready',
@@ -862,7 +862,7 @@ CREATE TRIGGER tg_intent_audit AFTER UPDATE ON post_intents
 CREATE FUNCTION trg_intent_insert_guard() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
   -- runtime creates intents only in 'scheduled'; terminal-state inserts are the migration
-  -- backfill's privilege (W.4), recognized by the actor GUC it already must set — no second
+  -- transform's privilege (M.1), recognized by the actor GUC it already must set — no second
   -- mechanism: history cannot be fabricated at runtime.
   IF NEW.state <> 'scheduled'
      AND COALESCE(current_setting('app.actor_kind', true), '') <> 'migration' THEN
@@ -877,8 +877,7 @@ CREATE TRIGGER tg_intent_insert_guard BEFORE INSERT ON post_intents
 -- governance tables, making 06's "every membership/credential/account mutation is audited"
 -- DB-true rather than writer-path prose. §0 names the covered set and the deliberate
 -- machinery-table exclusions. Installed at L.1 with audit_events itself (04); from that
--- increment on, every governance writer — including the F.3 dual-write mirror services —
--- sets the actor GUCs.
+-- increment on, every governance writer sets the actor GUCs.
 CREATE FUNCTION trg_governance_audit() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE
   r    RECORD;
@@ -1326,7 +1325,7 @@ The first pass said "system actors use dedicated roles with explicit predicates"
 - **Login roles — one per process class, and none is a member of any other role** (so `SET ROLE` to anything is impossible in the database, not merely forbidden by convention):
   - `svc_ingress` — the ingress replicas' login.
   - `svc_worker` — the worker replicas' login. The elected clock runs inside a worker process on this same login: its extra privilege lives in a door, not in the login.
-  - `svc_migration` — the runner/backfill login (Railway predeploy, six-stage tracks); broad per-track policies while tracks run; identifies itself via `app.actor_kind='migration'` (§4 insert guard).
+  - `svc_migration` — the runner's login (Railway predeploy; the M.3 transform): owns every object, bypasses RLS as owner by design, and exists **only** in the runner's deploy context — never in runtime env (F.4 gate; §7-DDL states the ENABLE-without-FORCE rationale); identifies itself via `app.actor_kind='migration'` (§4 insert guard).
 - **No `BYPASSRLS` anywhere. No owner-role runtime connections. No role memberships.** Every cross-tenant capability is a named, reviewable object: a `CREATE POLICY` on a login role, or a `SECURITY DEFINER` door owned by a NOLOGIN system role.
 - **Tenant policies** (on `svc_ingress`, `svc_worker`): constant-expression policies on every workspace-scoped table — `USING (workspace_id = current_setting('app.tenant_id')::uuid)` (and identical `WITH CHECK`). Every tenant transaction opens with `SET LOCAL app.tenant_id = …` set by the UoW factory, which takes `tenant_id` as a required constructor argument — a UoW without a tenant is unconstructible in code, and a query without one fails closed in the DB (`current_setting` on an unset GUC errors; the policy denies). Transaction-pooled connection reuse is safe because `SET LOCAL` dies with the transaction. **Machinery exception, stated exactly (`jobs`):** both logins' `jobs` policies read `USING (workspace_id IS NULL OR workspace_id = current_setting('app.tenant_id', true)::uuid)` — a worker must finalize and reschedule the system jobs it executes, and system-kind rows carry `workspace_id NULL` regardless of which context produced them (the §5 classing rule — the FC-6 invitation send is enqueued post-auth but its row is still NULL-workspace); the missing-GUC form (`, true` → NULL) then exposes **only system rows**, never another tenant's. `rate_counters` (§6) carries plain role-scoped `USING (true)` policies for both logins — its keys are deliberately not all tenant-shaped — and no login may DELETE from it.
 - **NOLOGIN system roles own the cross-tenant capabilities as SECURITY DEFINER doors.** Every door: `SET search_path = pg_catalog, public`, owned by its system role, `EXECUTE` revoked from PUBLIC and granted **only** to the one login that drives it. The system role holds exactly the `USING (true)` policies and grants its door bodies need — **the door inventory below is the enumeration the security review reads**; a new door is a migration plus a row here. Each door sets its own actor GUC (`set_config('app.actor_kind', …, true)`) at entry, so the §4 audit machinery names the operation regardless of caller.
@@ -1349,7 +1348,7 @@ The first pass said "system actors use dedicated roles with explicit predicates"
 - **Grant matrix (beyond RLS):** **no login holds DELETE on anything** — tenant deletes happen only inside `svc_maintenance`-owned door bodies, auth-plane deletes only inside `fn_auth_plane_sweep` (§0's "runtime never deletes" is thereby structural for every login, not just tenant roles); `audit_events` grants: INSERT to all three logins and the system roles (trigger inserts run as the mutating role), UPDATE to none, DELETE only inside `fn_retention_batch`; `oauth_credentials.encrypted_payload` is column-SELECTable only by `svc_worker`/`svc_ingress` (credentials service paths) — clock scheduling reads happen inside `fn_clock_tick` through `vw_credentials_schedule`, which omits the column.
 - **The staged NOT NULL procedure (the only legal way this plan adds NOT NULL to a populated table — the first pass's "`NOT NULL` added `NOT VALID`" does not exist in PostgreSQL):**
   1. `ALTER TABLE t ADD CONSTRAINT ck_t_col_nn CHECK (col IS NOT NULL) NOT VALID;`
-  2. backfill (batched, six-stage machine rules);
+  2. backfill (batched, the `04` transform batching rules);
   3. `ALTER TABLE t VALIDATE CONSTRAINT ck_t_col_nn;`
   4. `ALTER TABLE t ALTER COLUMN col SET NOT NULL;`  — PostgreSQL uses the validated CHECK to skip the scan
   5. `ALTER TABLE t DROP CONSTRAINT ck_t_col_nn;`
