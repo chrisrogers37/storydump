@@ -6,12 +6,12 @@
 
 ## Live status (position tracker — updated as work proceeds, not at stop time)
 
-- **Pass:** 6 — executed in full (the R5 disposition applied: every finding reproduced at runtime on PostgreSQL 15, fixed, and re-verified by executing the printed SQL — replay from empty, replay over the real 001–049 production lineage through the new M.3 sequence, all nine doors driven as their runtime roles, the full 28,800-combination slot property scan at 0 failures). Disposition comment on the PR carries the per-finding evidence.
-- **Position:** pass 6 delivered; awaiting re-review. No work in flight on this document.
-- **Ratified:** FC-0..FC-8 (rulings, incl. the FC-3.2 amendment); D1–D39 per `03`, including D28 (conditional on clean delivery) and D38 (scoped to launch scale with its stated revisit trigger).
+- **Pass:** 7 — executed in full (the R6 disposition applied: every finding reproduced at runtime on PostgreSQL 15 **under the production actor** before fixing — the F.2 stream now executes as `svc_migration` end-to-end over the real 001–049 lineage with real legacy ownership, behind the new `04` step-0 bootstrap and ahead of the step-8 stand-down whose membership-zero gate is machine-checked; the in-window rollback is four legs and runner-retryable, proven by a rollback-then-retry-to-completion run; the door bound rule is true for every door, with the reaper on a jobs-first running remainder and the archive retention branch honoring its per-class batch. 30-assertion battery, 30 green, zero superuser past cluster init). Disposition comment on the PR carries the per-finding evidence.
+- **Position:** pass 7 delivered; awaiting re-review. No work in flight on this document.
+- **Ratified:** FC-0..FC-8 (rulings, incl. the FC-3.2 amendment); D1–D41 per `03`, including D28 (conditional on clean delivery), D38 (scoped to launch scale with its stated revisit trigger), and D40/D41 (the window privilege split and the rollback ledger boundary — pass 7).
 - **Open (product owner):** PA-1 — implementers build default (a) until ruled; email-provider ack — Resend as swappable default until acked; Google consent-screen publishing status (console fact); the three M.1 proposed drops, served as one batch (`03` pass-5 items — none load-bearing).
 - **Schedule gate:** the M.3 window cannot open before 0.1 App Review approval (FC-7.5) — submitting 0.1 is the program's long pole.
-- **Next:** re-review; findings are dispositioned against the pass-6 record; the author does not merge.
+- **Next:** re-review; findings are dispositioned against the pass-7 record; the author does not merge.
 
 ## Codebase anchor (pass 4 — `main` @ `2e13f97`, 2026-08-03)
 
