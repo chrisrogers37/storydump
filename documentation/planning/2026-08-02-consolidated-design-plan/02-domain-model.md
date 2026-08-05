@@ -1673,7 +1673,7 @@ END $$;
 
 -- 3/9 fn_clock_tick — one indexed pass per concern; every heavy step becomes a job. The tick
 -- INSERTS plan_slot jobs (never intents — §5 registry, pass 5), schedules refreshes off the
--- payload-free view, schedules due syncs, and keeps the recurring system singletons alive.
+-- payload-free column grant, schedules due syncs, and keeps the recurring system singletons alive.
 -- BUDGET IS STRUCTURAL (pass 6 — R5: four independent LIMIT p_max legs permitted 3×p_max +
 -- recurring inserts against 05's "≤ 500 inserts/tick" promise): p_max is the tick's TOTAL
 -- insert budget, enforced per the §7 door bound rule — one running remainder, every leg
