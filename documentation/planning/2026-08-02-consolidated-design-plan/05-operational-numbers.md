@@ -61,6 +61,7 @@ Derived:
 | Quarantine backoff ladder | 1 m / 5 m / 30 m / 2 h / 24 h (cap); strike decay 24 h; re-alert dedup 1 h | `02` §2 semantics |
 | Transform batch (M.1) | 5,000 rows | offline-transform batching (`04` §Ground rules; the 14-day comparator window died with shadow-read — FC-7) |
 | Approval TTL default (`approval_ttl_minutes` NULL) | 1,440 min (24 h) | workspace seam; reaper clock (`02` §4) |
+| Reaper cadence + budget (`fn_reaper_sweep p_lim`) | sweep every 60 s, 500 — the sweep's TOTAL, enforced by construction per the `02` §7 door bound rule (pass 7 — R6: this row did not exist and the legs drew p_lim each); priority and fill: the door's own comment is the one home | same bound family as the tick's per-tick 500 |
 | Offboarding | grace window 30 days; publish-drain timeout 15 min; revocation retry 3 × 1 h backoff | `06` §1 workflow |
 | Invitations / sessions / OAuth state | invite expiry 7 d · session 30 d sliding · state token 15 min (every purpose — connect/reconnect/signin/link) | `07` §§1–2 |
 | Pre-auth admission (unauthenticated surfaces) | 30/min per IP (the Google sign-in endpoints included) | `07` §1 via `rate_counters` scope `preauth_ip` (`02` §6, incl. the client-IP source rule) — deliberately distinct from the per-workspace S.2 admission, which requires tenant context |

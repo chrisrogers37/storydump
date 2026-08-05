@@ -32,7 +32,7 @@ EXCEPTION WHEN invalid_parameter_value THEN
 END $$;
 ```
 
-- **Replay order (normative):** the advertised DDL replays from empty **in file order — this file top-to-bottom, then `07`'s blocks in their file order**. Ordering is therefore load-bearing: a block references only objects printed above it. **The advertised stream = the literal `sql` blocks (illustrative transaction shapes — bind-parameter/`BEGIN;` examples — excluded) PLUS the mechanical expansion of the two policy lists §7-DDL declares by pattern (pass 6 — R5: literal-only replay leaves those 15 policies absent, so "verbatim" and "complete" were contradictory claims; expansion is now part of the stream's definition, not a property of the migration files).** `04` 0.2's CI carries the named fixture that extracts, expands, and replays this stream, and holds the F.2 files equal to it by diff; an edit that breaks file-order replay fails that gate.
+- **Replay order (normative):** the advertised DDL replays from empty **in file order — this file top-to-bottom, then `07`'s blocks in their file order**. Ordering is therefore load-bearing: a block references only objects printed above it. **The advertised stream = the literal `sql` blocks (illustrative transaction shapes — bind-parameter/`BEGIN;` examples — excluded) PLUS the mechanical expansion of the two policy lists §7-DDL declares by pattern (pass 6 — R5: literal-only replay leaves those 15 policies absent, so "verbatim" and "complete" were contradictory claims; expansion is now part of the stream's definition, not a property of the migration files).** **The stream's executor is part of its definition (pass 7 — R6's P0): it runs as `svc_migration`, after the `04` window bootstrap has run as the database-owner actor — parity means same artifacts, same actors, same order, and a stream that only replays as scratch-cluster superuser tests an environment production does not have.** `04` 0.2's CI carries the named fixture that extracts, expands, and replays this stream — bootstrap as the owner actor, stream as `svc_migration` — and holds the F.2 files equal to it by diff; an edit that breaks file-order replay, or that only replays under a more privileged actor than the declared one, fails that gate.
 - **Enums are TEXT + named CHECK constraints**, never native `ENUM` types. Closed sets whose members must be *addable and removable by plain migration* (the D34/D37 per-provider discipline depends on exactly this) make native enums a liability (`DROP VALUE` does not exist); CHECK text is also what the existing enum-SSOT parity gate (models ↔ latest migration DDL) already verifies. Adding/removing a value = enum edit + migration editing the named CHECK, held in lockstep by that gate.
 - **Tenant scoping:** every tenant-scoped table has `workspace_id UUID NOT NULL`; wherever it references another tenant-scoped table it uses a **composite FK** `(workspace_id, <ref>) REFERENCES parent (workspace_id, id)` so a cross-workspace reference is inexpressible (#721 D12, kept). Composite FKs require the parent-side `UNIQUE (workspace_id, id)` — those indexes are part of the parent DDL below.
 - **ON DELETE policy (three classes, no per-FK improvisation):**
@@ -1355,25 +1355,25 @@ Scope ↔ consumer map (every number lives in `05`): `tg_chat`/`tg_global` — L
 
 The first pass said "system actors use dedicated roles with explicit predicates" — insufficient (review B§1): without a policy or bypass, a role sees zero rows regardless of its predicates. The second pass gave every personality policies but let one login `SET LOCAL ROLE` between them — which defeats the separation (R3 review §1.2/§6.7: a login that can assume every personality *is* every personality, and `svc_maintenance` held DELETEs on auth-plane tables whose rows its policies could never see). The pass-3 model is **non-escalatable by construction: per-process logins + SECURITY DEFINER doors, no `SET ROLE` anywhere.**
 
-- **Login roles — one per process class, and none is a member of any other role** (so `SET ROLE` to anything is impossible in the database, not merely forbidden by convention):
+- **Login roles — one per process class, and none is a member of any other role whenever any login credential is live** (so `SET ROLE` to anything is impossible in the database, not merely forbidden by convention; the offline window's bounded exception and its machine-checked restoration: the invariant bullet below):
   - `svc_ingress` — the ingress replicas' login.
   - `svc_worker` — the worker replicas' login. The elected clock runs inside a worker process on this same login: its extra privilege lives in a door, not in the login.
   - `svc_migration` — the runner's login (Railway predeploy; the M.3 transform): owns every object, bypasses RLS as owner by design, and exists **only** in the runner's deploy context — never in runtime env (F.4 gate; §7-DDL states the ENABLE-without-FORCE rationale); identifies itself via `app.actor_kind='migration'` (§4 insert guard).
-- **No `BYPASSRLS` anywhere. No owner-role runtime connections. No role memberships.** Every cross-tenant capability is a named, reviewable object: a `CREATE POLICY` on a login role, or a `SECURITY DEFINER` door owned by a NOLOGIN system role.
+- **No `BYPASSRLS` anywhere. No owner-role runtime connections. No role memberships — a steady-state invariant with exactly one bounded exception (pass 7 — R6's P0):** during the M.3 window, the `04` bootstrap grants `svc_migration` membership in the four NOLOGIN door-owner roles — PostgreSQL's `ALTER … OWNER TO` demands the executor be a member of the receiving role, so a membership-free window cannot assign door ownership at all. The window-close step revokes them, and its gate asserts `pg_auth_members` holds **zero** rows among the seven service roles — the invariant is restored *and machine-checked*, not assumed. At runtime nothing changes: the memberships never coexist with runtime traffic (the window is offline, FC-7), and `svc_migration`'s credential exists only in the runner's deploy context (F.4). Every cross-tenant capability is a named, reviewable object: a `CREATE POLICY` on a login role, or a `SECURITY DEFINER` door owned by a NOLOGIN system role.
 - **Tenant policies** (on `svc_ingress`, `svc_worker`): constant-expression policies on every workspace-scoped table — `USING (workspace_id = current_setting('app.tenant_id')::uuid)` (and identical `WITH CHECK`). Every tenant transaction opens with `SET LOCAL app.tenant_id = …` set by the UoW factory, which takes `tenant_id` as a required constructor argument — a UoW without a tenant is unconstructible in code, and a query without one fails closed in the DB (`current_setting` on an unset GUC errors; the policy denies). Transaction-pooled connection reuse is safe because `SET LOCAL` dies with the transaction. **Machinery exception, stated exactly (`jobs`):** both logins' `jobs` policies read `USING (workspace_id IS NULL OR workspace_id = current_setting('app.tenant_id', true)::uuid)` — a worker must finalize and reschedule the system jobs it executes, and system-kind rows carry `workspace_id NULL` regardless of which context produced them (the §5 classing rule — the FC-6 invitation send is enqueued post-auth but its row is still NULL-workspace); the missing-GUC form (`, true` → NULL) then exposes **only system rows**, never another tenant's. `rate_counters` (§6) carries plain role-scoped `USING (true)` policies for both logins — its keys are deliberately not all tenant-shaped — and no login may DELETE from it.
 - **NOLOGIN system roles own the cross-tenant capabilities as SECURITY DEFINER doors.** Every door: `SET search_path = pg_catalog, public`, owned by its system role, `EXECUTE` revoked from PUBLIC and granted **only** to the one login that drives it. The system role holds exactly the `USING (true)` policies and grants its door bodies need — **the door inventory below is the enumeration the security review reads**; a new door is a migration plus a row here. Each door sets its own actor GUC (`set_config('app.actor_kind', …, true)`) at entry, so the §4 audit machinery names the operation regardless of caller.
 
-| Door (owner) | Body / effect | EXECUTE |
-|---|---|---|
-| `fn_claim_job(lane)` (`svc_claim`) | the §5 claim query, verbatim | `svc_worker` |
-| `fn_extend_leases(tokens uuid[])` (`svc_claim`) | heartbeat: one UPDATE extending `locked_until` on live leases matching the caller's lease tokens | `svc_worker` |
-| `fn_clock_tick()` (`svc_clock`) | the L.7 tick: due-scan over `ix_ig_accounts_due` + idempotent `plan_slot`/refresh/sync/recurring job inserts (≤ the `05` per-tick bound; the tick never creates intents — §5 `plan_slot`); credential reads ride svc_clock's payload-free column grant (§7-DDL) | `svc_worker` (the elected clock) |
-| `fn_reconciler_sweep(lim int)` (`svc_maintenance`) | returns the ladder-due batch of parked intents (§6) with their workspace ids — a cross-tenant **read**; each verdict then writes tenant-scoped as `svc_worker` (the intent's workspace is known), so the write path needs no cross-tenant privilege | `svc_worker` |
-| `fn_reaper_sweep(lim int)` (`svc_maintenance`) | the §5 reap classes living in tenant tables — intent expiry flips, expired `post_locks`, stale `workspace_invitations` — plus the `jobs` expired-lease re-ready (`leased → ready` via `ix_jobs_lease_expiry`); bounded, inside the door | `svc_worker` |
-| `fn_retention_batch(class text)` (`svc_maintenance`) | one `05` retention class per call: age-qualified DELETE walking its `ix_*_retire` index; the `audit_events` class COPY-exports into the archive schema first and **aborts if the export fails** (07 §4) | `svc_worker` |
-| `fn_offboard_finalize(ws uuid)` (`svc_maintenance`) | the final-deletion leg of 06 §1, guarded inside the body (state='offboarding', grace window elapsed on `workspaces.offboarding_at`, zero live intents) → DELETE the `workspaces` row; the §0 cascade does the rest | `svc_worker` (the `offboard_workspace` executor) |
-| `fn_invitation_accept(token_hash, user, provider, proof inputs)` (`svc_membership`) | the pre-membership door (pass 5 — R4 finding 7): token→row lookup, the D33 match computed in-body from raw inputs (google verified email / telegram immutable numeric id — never the hint column), one-shot CAS + computed-role member INSERT + D36 elevation-pending notification, one transaction | `svc_ingress` |
-| `fn_auth_plane_sweep()` (`svc_maintenance`) | expiry/retention deletes on `oauth_states`, `session_tokens`, `command_dedup`. `svc_maintenance` carries three enumerated auth-plane `USING (true)` policies + DELETEs **for exactly this door** — resolving the pass-2 contradiction (R3 §6.7, maintenance held DELETEs its policies could never see) by adding the missing policies to the NOLOGIN sweep owner, never by handing a login the DELETEs (a `svc_ingress`-owned definer body would have put auth-plane DELETE privileges on the internet-exposed login — falsifying the grant matrix below) | `svc_worker` (the reaper/retention schedule drives it) |
+| Door (owner) | Body / effect | Bound | EXECUTE |
+|---|---|---|---|
+| `fn_claim_job(lane)` (`svc_claim`) | the §5 claim query, verbatim | structural — `LIMIT 1` | `svc_worker` |
+| `fn_extend_leases(tokens uuid[])` (`svc_claim`) | heartbeat: one UPDATE extending `locked_until` on live leases matching the caller's lease tokens | structural — the caller's token array | `svc_worker` |
+| `fn_clock_tick()` (`svc_clock`) | the L.7 tick: due-scan over `ix_ig_accounts_due` + idempotent `plan_slot`/refresh/sync/recurring job inserts (≤ the `05` per-tick bound; the tick never creates intents — §5 `plan_slot`); credential reads ride svc_clock's payload-free column grant (§7-DDL) | `p_max` TOTAL, running remainder | `svc_worker` (the elected clock) |
+| `fn_reconciler_sweep(lim int)` (`svc_maintenance`) | returns the ladder-due batch of parked intents (§6) with their workspace ids — a cross-tenant **read**; each verdict then writes tenant-scoped as `svc_worker` (the intent's workspace is known), so the write path needs no cross-tenant privilege | `p_lim` TOTAL, running remainder | `svc_worker` |
+| `fn_reaper_sweep(lim int)` (`svc_maintenance`) | the §5 reap classes living in tenant tables — intent expiry flips, expired `post_locks`, stale `workspace_invitations` — plus the `jobs` expired-lease re-ready (`leased → ready` via `ix_jobs_lease_expiry`); bounded, inside the door | `p_lim` TOTAL, running remainder (pass 7) | `svc_worker` |
+| `fn_retention_batch(class text)` (`svc_maintenance`) | one `05` retention class per call: age-qualified DELETE walking its `ix_*_retire` index; the `audit_events` class COPY-exports into the archive schema first and **aborts if the export fails** (07 §4) | `p_batch` per class per call (`05`) | `svc_worker` |
+| `fn_offboard_finalize(ws uuid)` (`svc_maintenance`) | the final-deletion leg of 06 §1, guarded inside the body (state='offboarding', grace window elapsed on `workspaces.offboarding_at`, zero live intents) → DELETE the `workspaces` row; the §0 cascade does the rest | single subject | `svc_worker` (the `offboard_workspace` executor) |
+| `fn_invitation_accept(token_hash, user, provider, proof inputs)` (`svc_membership`) | the pre-membership door (pass 5 — R4 finding 7): token→row lookup, the D33 match computed in-body from raw inputs (google verified email / telegram immutable numeric id — never the hint column), one-shot CAS + computed-role member INSERT + D36 elevation-pending notification, one transaction | single subject | `svc_ingress` |
+| `fn_auth_plane_sweep()` (`svc_maintenance`) | expiry/retention deletes on `oauth_states`, `session_tokens`, `command_dedup`. `svc_maintenance` carries three enumerated auth-plane `USING (true)` policies + DELETEs **for exactly this door** — resolving the pass-2 contradiction (R3 §6.7, maintenance held DELETEs its policies could never see) by adding the missing policies to the NOLOGIN sweep owner, never by handing a login the DELETEs (a `svc_ingress`-owned definer body would have put auth-plane DELETE privileges on the internet-exposed login — falsifying the grant matrix below) | `p_batch` per class (`05`) | `svc_worker` (the reaper/retention schedule drives it) |
 
 - **The boundary, stated honestly:** a compromised worker request path can call the doors its login holds (claim jobs, tick the clock, drive sweeps whose bodies are fixed SQL) and can write within tenant policies on the tenant it sets. It cannot `SET ROLE` (no memberships exist to assume), cannot DELETE anything directly (no login holds DELETE), cannot read auth-plane rows or credential ciphertext beyond its column grants, and cannot enlarge a sweep (door bodies are fixed, `search_path`-pinned SQL). Maintenance capability lives in door bodies, not in any login.
 - **Auth-plane tables** (`07`: `session_tokens`, `oauth_states`, `service_tokens`, plus `command_dedup` above) are deliberately **not tenant-RLS'd** — they are the door tenant context walks through (a sign-in or OAuth callback happens before any `app.tenant_id` exists). They carry role-scoped `USING (true)` policies for `svc_ingress` (the runtime reader/writer) and for `svc_maintenance` (the sweep-door owner, DELETE included) — no other role, and **no login but `svc_ingress`** touches them; their sweep is `fn_auth_plane_sweep`. `workspace_invitations` IS tenant-scoped (accept runs post-auth, in tenant context) and follows the normal tenant policies.
@@ -1390,22 +1390,16 @@ The first pass said "system actors use dedicated roles with explicit predicates"
 
 ## §7-DDL. The executable security objects (pass 5 — R4 findings 3b/3c/7 closed)
 
-R4's replay proved §7 was a designed-but-unprinted model: zero `CREATE POLICY`, zero `ENABLE ROW LEVEL SECURITY`, zero door bodies. This section prints all of it, in replay order (roles → view → grants → enablement → policies → doors). Every number a body needs arrives as a parameter — the values live in `05` and are wired through config, per the revision rule. `07`'s three auth-plane tables get their enablement and policies in `07` (file order: their DDL lives there).
+R4's replay proved §7 was a designed-but-unprinted model: zero `CREATE POLICY`, zero `ENABLE ROW LEVEL SECURITY`, zero door bodies. This section prints all of it, in replay order (grants → enablement → policies → doors; roles precede the stream via the `04` bootstrap). Every number a body needs arrives as a parameter — the values live in `05` and are wired through config, per the revision rule. `07`'s three auth-plane tables get their enablement and policies in `07` (file order: their DDL lives there).
 
 ```sql
--- ROLES. Passwords and connection strings are deployment env, never DDL. The replay fixture
--- runs on a scratch cluster; production adoption skips roles that exist.
-CREATE ROLE svc_ingress    LOGIN;   -- ingress replicas
-CREATE ROLE svc_worker     LOGIN;   -- worker replicas (the elected clock runs inside one)
-CREATE ROLE svc_migration  LOGIN;   -- the runner's login; owns every object; never in runtime env
-CREATE ROLE svc_claim      NOLOGIN; -- door owner: job claiming/leasing
-CREATE ROLE svc_clock      NOLOGIN; -- door owner: the tick
-CREATE ROLE svc_maintenance NOLOGIN;-- door owner: sweeps, retention, reconciler read, offboard finalize
-CREATE ROLE svc_membership NOLOGIN; -- door owner: invitation accept (pass 5 — the pre-membership
-                                    -- door needs powers no other owner should hold: cross-tenant
-                                    -- invitation lookup + member INSERT. A fourth NOLOGIN role is
-                                    -- one row here; overloading svc_maintenance would put
-                                    -- membership-granting inside the deletion owner)
+-- ROLES ARE NOT CREATED HERE (pass 7 — R6's P0; the split and its rejected alternatives: D40).
+-- This stream executes as svc_migration, which must not hold role DDL's cluster privileges;
+-- the seven service roles (inventory: §7 above) are provisioned by the 04 window-bootstrap
+-- artifact, the one place guarded/conditional DDL is legal — the pass-6 "production adoption
+-- skips roles that exist" prose escape is dead, and this stream stays byte-fixed AND
+-- executable by its declared production actor.
+-- Passwords and connection strings are deployment env, never DDL.
 
 -- GRANT BASELINE: nothing by default, then narrow verb grants. RLS then narrows rows.
 -- (Pass-5 simplification: the pass-3 payload-free VIEW is gone — svc_clock's column-level
@@ -1584,9 +1578,17 @@ CREATE POLICY p_member_ws      ON workspaces FOR SELECT TO svc_membership USING 
 CREATE POLICY p_maint_dedup ON command_dedup FOR ALL TO svc_maintenance USING (true) WITH CHECK (true);
 ```
 
-**The doors.** Every body: `SECURITY DEFINER`, `SET search_path = pg_catalog, public`, owned by its system role, `EXECUTE` revoked from PUBLIC and granted to exactly one login. Every `05` number arrives as a parameter — callers read config and pass values; a hardcoded number in a door body is the same review-blocking defect as anywhere else. **Output-name rule (R5):** a door's `RETURNS TABLE` column names carry an `o_` prefix — PL/pgSQL substitutes output variables into unqualified references in body statements *including `ON CONFLICT` inference lists*, so an output column named after a real column is a runtime ambiguity error waiting on the first unqualified use (R5 proved it: `workspace_id` in the accept door). The prefix removes the collision class instead of policing each statement. The same substitution covers `DECLARE` locals: a local named after a column any body statement references unqualified is the identical trap — locals take non-column names. **Bound rule (R5):** a door limit parameter that a `05` row publishes is a TOTAL unless the row says per-class; a multi-leg body enforces a total with one running remainder that every leg's LIMIT draws down, in the body's stated priority order (`fn_clock_tick` and `fn_reconciler_sweep` are the instances) — independent per-leg LIMITs against a published total are the R5 defect.
+**The doors.** Every body: `SECURITY DEFINER`, `SET search_path = pg_catalog, public`, owned by its system role, `EXECUTE` revoked from PUBLIC and granted to exactly one login. Every `05` number arrives as a parameter — callers read config and pass values; a hardcoded number in a door body is the same review-blocking defect as anywhere else. **Output-name rule (R5):** a door's `RETURNS TABLE` column names carry an `o_` prefix — PL/pgSQL substitutes output variables into unqualified references in body statements *including `ON CONFLICT` inference lists*, so an output column named after a real column is a runtime ambiguity error waiting on the first unqualified use (R5 proved it: `workspace_id` in the accept door). The prefix removes the collision class instead of policing each statement. The same substitution covers `DECLARE` locals: a local named after a column any body statement references unqualified is the identical trap — locals take non-column names. **Bound rule (R5; instance inventory completed pass 7 — R6):** a door limit parameter is a TOTAL unless its `05` row says per-class — and every door limit parameter HAS a `05` row (a bound with no published value has no config source, so callers would invent one). A multi-leg body enforces a total with one running remainder that every leg's LIMIT draws down, in the body's stated priority order — independent per-leg LIMITs against a total bound are the R5 defect (R6 measured the reaper at 7×p_lim). The priority order's choice criterion, once for every door: **a starved leg must cost latency, never liveness or blocking** — each body's comment derives its own order from this and is that order's one home. Per-door bound classes live in the **Bound** column of the door inventory above — one enumeration, in the table the security review already reads.
 
 ```sql
+-- TRANSIENT, BRACKETED (pass 7 — R6's P0, empirically forced): ALTER FUNCTION … OWNER TO
+-- requires the executor to be a member of the new owning role (bootstrap grants svc_migration
+-- those memberships for the window, 04) AND the new owner to hold CREATE on the schema —
+-- membership alone fails with "permission denied for schema public". Granted here by the
+-- schema's owner, revoked as this section's last statement: the steady-state grant matrix
+-- never carries CREATE for a door owner, and the stream is self-cleaning either way.
+GRANT CREATE ON SCHEMA public TO svc_claim, svc_clock, svc_maintenance, svc_membership;
+
 -- 1/9 fn_claim_job — the §5 claim, verbatim, as the function it always claimed to be.
 CREATE FUNCTION fn_claim_job(p_lane text, p_worker text, p_lease interval, p_ws_lane_cap int)
 RETURNS SETOF jobs LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
@@ -1813,11 +1815,24 @@ GRANT EXECUTE ON FUNCTION fn_reconciler_sweep(int, interval[], interval) TO svc_
 -- expiry TTLs: slot lapse for scheduled/prompt_pending (the slot passed unclaimed/undelivered),
 -- the workspace's approval TTL (else p_approval_ttl) for awaiting_approval, p_approved_ttl for
 -- stale approvals. Every intent flip fires the §4 guard + audit triggers as this owner.
+-- BUDGET IS STRUCTURAL (pass 7 — R6: seven independent LIMIT p_lim legs permitted 7×p_lim
+-- against the §7 bound rule's TOTAL default): p_lim is the sweep's TOTAL row budget — one
+-- running remainder, every leg's LIMIT draws it down, sum cannot exceed p_lim (the `05` row).
+-- Priority order is liveness-first: the jobs expired-lease re-ready leg runs FIRST — a crashed
+-- worker's leased jobs are invisible to claiming until re-readied, so this leg gates all lane
+-- throughput; every other leg is expiry bookkeeping whose latency only lengthens a TTL. Then
+-- intent slot-lapse (a lapsed slot must not fire late), the two intent age TTLs, then the
+-- small-table classes. A leg starved at p_lim carries to the next sweep on the recurring
+-- reap_expired schedule — residue is latency, never loss.
 CREATE FUNCTION fn_reaper_sweep(p_lim int, p_approval_ttl interval, p_approved_ttl interval)
 RETURNS int LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
-DECLARE n int := 0; c int;
+DECLARE n int := 0; c int; rem int := GREATEST(p_lim, 0);
 BEGIN
   PERFORM set_config('app.actor_kind', 'reaper', true);
+  UPDATE jobs SET state = 'ready', locked_by = NULL, lease_token = NULL, locked_until = NULL
+   WHERE id IN (SELECT id FROM jobs
+                 WHERE state = 'leased' AND locked_until < now() LIMIT rem);
+  GET DIAGNOSTICS c = ROW_COUNT; n := n + c; rem := rem - c;   -- ix_jobs_lease_expiry
   -- Intent expiry legs ride the §3 partial reap indexes: each scan touches only live working
   -- rows (small at any instant), never the kept-forever terminal ledger. Fixed-TTL predicates
   -- are written sargable (col < now() - ttl); the per-workspace-TTL leg's bound varies per row,
@@ -1825,35 +1840,31 @@ BEGIN
   UPDATE post_intents SET state = 'expired'
    WHERE id IN (SELECT id FROM post_intents
                  WHERE state IN ('scheduled','prompt_pending') AND schedule_slot_at < now()
-                 LIMIT p_lim);                                  -- ix_intents_reap_slot
-  GET DIAGNOSTICS c = ROW_COUNT; n := n + c;
+                 LIMIT rem);                                    -- ix_intents_reap_slot
+  GET DIAGNOSTICS c = ROW_COUNT; n := n + c; rem := rem - c;
   UPDATE post_intents i SET state = 'expired'
    WHERE i.id IN (
      SELECT i2.id FROM post_intents i2 JOIN workspaces w ON w.id = i2.workspace_id
       WHERE i2.state = 'awaiting_approval'
         AND i2.entered_state_at
             < now() - COALESCE(w.approval_ttl_minutes * interval '1 minute', p_approval_ttl)
-      LIMIT p_lim);                                             -- ix_intents_reap_age
-  GET DIAGNOSTICS c = ROW_COUNT; n := n + c;
+      LIMIT rem);                                               -- ix_intents_reap_age
+  GET DIAGNOSTICS c = ROW_COUNT; n := n + c; rem := rem - c;
   UPDATE post_intents SET state = 'expired'
    WHERE id IN (SELECT id FROM post_intents
                  WHERE state = 'approved' AND entered_state_at < now() - p_approved_ttl
-                 LIMIT p_lim);                                  -- ix_intents_reap_age
-  GET DIAGNOSTICS c = ROW_COUNT; n := n + c;
+                 LIMIT rem);                                    -- ix_intents_reap_age
+  GET DIAGNOSTICS c = ROW_COUNT; n := n + c; rem := rem - c;
   DELETE FROM post_locks
    WHERE id IN (SELECT id FROM post_locks
-                 WHERE expires_at IS NOT NULL AND expires_at < now() LIMIT p_lim);
-  GET DIAGNOSTICS c = ROW_COUNT; n := n + c;
+                 WHERE expires_at IS NOT NULL AND expires_at < now() LIMIT rem);
+  GET DIAGNOSTICS c = ROW_COUNT; n := n + c; rem := rem - c;
   UPDATE workspace_invitations SET state = 'expired'
    WHERE id IN (SELECT id FROM workspace_invitations
-                 WHERE state = 'pending' AND expires_at < now() LIMIT p_lim);
-  GET DIAGNOSTICS c = ROW_COUNT; n := n + c;
+                 WHERE state = 'pending' AND expires_at < now() LIMIT rem);
+  GET DIAGNOSTICS c = ROW_COUNT; n := n + c; rem := rem - c;
   DELETE FROM onboarding_sessions
-   WHERE id IN (SELECT id FROM onboarding_sessions WHERE expires_at < now() LIMIT p_lim);
-  GET DIAGNOSTICS c = ROW_COUNT; n := n + c;
-  UPDATE jobs SET state = 'ready', locked_by = NULL, lease_token = NULL, locked_until = NULL
-   WHERE id IN (SELECT id FROM jobs
-                 WHERE state = 'leased' AND locked_until < now() LIMIT p_lim);
+   WHERE id IN (SELECT id FROM onboarding_sessions WHERE expires_at < now() LIMIT rem);
   GET DIAGNOSTICS c = ROW_COUNT; n := n + c;
   RETURN n;
 END $$;
@@ -1911,13 +1922,17 @@ BEGIN
   ELSIF p_class IN ('archive_audit', 'archive_snapshots') THEN
     -- Every archive table's name encodes its date (audit_export_<ts>; <table>_pre_cutover_<ymd>
     -- — the 04 snapshot naming rule exists exactly so this one mechanism covers both families),
-    -- so age is a name comparison and no second drop mechanism is needed.
+    -- so age is a name comparison and no second drop mechanism is needed. p_batch bounds the
+    -- drops per call like every other class (pass 7 — R6: the loop ignored it), oldest first
+    -- so a starved backlog converges from the aged end; relname tiebreak keeps order total.
     FOR tbl IN SELECT c.relname FROM pg_class c JOIN pg_namespace ns ON ns.oid = c.relnamespace
                 WHERE ns.nspname = 'archive' AND c.relkind = 'r'
                   AND c.relname LIKE CASE p_class WHEN 'archive_audit' THEN 'audit\_export\_%'
                                                   ELSE '%\_pre\_cutover\_%' END
                   AND substring(c.relname FROM '[0-9]{8}')
                       < to_char(now() - p_keep, 'YYYYMMDD')
+                ORDER BY substring(c.relname FROM '[0-9]{8}'), c.relname
+                LIMIT p_batch
     LOOP
       EXECUTE format('DROP TABLE archive.%I', tbl); n := n + 1;
     END LOOP;
@@ -2050,6 +2065,10 @@ END $$;
 ALTER FUNCTION fn_invitation_accept(text, uuid, text, text, bigint, text) OWNER TO svc_membership;
 REVOKE ALL ON FUNCTION fn_invitation_accept(text, uuid, text, text, bigint, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION fn_invitation_accept(text, uuid, text, text, bigint, text) TO svc_ingress;
+
+-- Close the transient bracket opened before door 1/9: every ownership transfer above is done,
+-- and no door owner keeps CREATE. The replay gate asserts this end state (04 0.2).
+REVOKE CREATE ON SCHEMA public FROM svc_claim, svc_clock, svc_maintenance, svc_membership;
 ```
 
 **What changed in the door inventory (pass 5):** `fn_comparator_run` is deleted (FC-7 — shadow-read died with the six-stage machine), `fn_invitation_accept` is added (R4 finding 7), and `svc_membership` joins the NOLOGIN owners — net inventory stays nine doors, all nine now printed above. The inventory table earlier in §7 remains the reviewer's enumeration; this section is its implementation, and the two are held in lockstep by the `advertised_ddl_replay` fixture (a door in one and not the other fails the replay or the review, whichever comes first).
