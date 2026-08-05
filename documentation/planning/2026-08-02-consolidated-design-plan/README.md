@@ -6,12 +6,12 @@
 
 ## Live status (position tracker — updated as work proceeds, not at stop time)
 
-- **Pass:** 7 — executed in full (the R6 disposition applied: every finding reproduced at runtime on PostgreSQL 15 **under the production actor** before fixing — the F.2 stream now executes as `svc_migration` end-to-end over the real 001–049 lineage with real legacy ownership, behind the new `04` step-0 bootstrap and ahead of the step-8 stand-down whose membership-zero gate is machine-checked; the in-window rollback is four legs and runner-retryable, proven by a rollback-then-retry-to-completion run; the door bound rule is true for every door, with the reaper on a jobs-first running remainder and the archive retention branch honoring its per-class batch. 30-assertion battery, 30 green, zero superuser past cluster init). Disposition comment on the PR carries the per-finding evidence.
-- **Position:** pass 7 delivered; awaiting re-review. No work in flight on this document.
-- **Ratified:** FC-0..FC-8 (rulings, incl. the FC-3.2 amendment); D1–D41 per `03`, including D28 (conditional on clean delivery), D38 (scoped to launch scale with its stated revisit trigger), and D40/D41 (the window privilege split and the rollback ledger boundary — pass 7).
+- **Pass:** 8 — executed in full (the R7 disposition applied: R7 closed R6's three findings on the retry path and executed the one that remained — abandoning the window left `svc_migration` owning `public` with schema CREATE and all fifteen legacy SELECTs while the membership gate passed. The stand-down is now two printed per-path variants whose gates assert the shape each path promises — the abandon variant restores the pre-window privilege state (owner back to `pg_database_owner`, bootstrap grants revoked) and was proven by a rollback-then-abandon run whose gate checks capabilities, not mechanisms; the PG16+ actor/ADMIN contract R7 confirmed on 17.7 is stated at 0.2's Login bullet; the two stale payload-free-view references are corrected. 35-assertion battery, 35 green, zero superuser past cluster init). Disposition comment on the PR carries the per-finding evidence.
+- **Position:** pass 8 delivered; awaiting re-review. No work in flight on this document.
+- **Ratified:** FC-0..FC-8 (rulings, incl. the FC-3.2 amendment); D1–D41 per `03`, including D28 (conditional on clean delivery), D38 (scoped to launch scale with its stated revisit trigger), and D40/D41 (the window privilege split and the rollback ledger boundary — pass 7, amended pass 8 with the both-exits closure rule).
 - **Open (product owner):** PA-1 — implementers build default (a) until ruled; email-provider ack — Resend as swappable default until acked; Google consent-screen publishing status (console fact); the three M.1 proposed drops, served as one batch (`03` pass-5 items — none load-bearing).
 - **Schedule gate:** the M.3 window cannot open before 0.1 App Review approval (FC-7.5) — submitting 0.1 is the program's long pole.
-- **Next:** re-review; findings are dispositioned against the pass-7 record; the author does not merge.
+- **Next:** re-review; findings are dispositioned against the pass-8 record; the author does not merge.
 
 ## Codebase anchor (pass 4 — `main` @ `2e13f97`, 2026-08-03)
 
