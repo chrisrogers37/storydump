@@ -61,7 +61,7 @@ pytest                               # Tests - always safe
 
 ## Project Overview
 
-**Storydump** is a self-hosted Instagram Story scheduling and automation system with Telegram-based team collaboration.
+**Storydump** is a hosted, multi-tenant Instagram Story scheduling and automation service with Telegram-based team collaboration. We operate one deployment and serve tenants on it; the operator and a tenant are different parties, which is why per-tenant isolation is a product requirement rather than a hardening preference.
 
 **Core Philosophy**: Phased deployment — 100% manual posting (Phase 1), optional Instagram API automation (Phase 2), web UI (Phase 3).
 
