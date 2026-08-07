@@ -55,7 +55,7 @@ class TestSendGdriveAuthAlert:
         bot.send_message.assert_called_once()
         call_kwargs = bot.send_message.call_args.kwargs
         assert "Disconnected" in call_kwargs["text"]
-        assert call_kwargs["reply_markup"] is not None
+        assert "/start" in call_kwargs["text"]
 
         posting_service.settings_service.set_gdrive_alerted_at.assert_called_once()
         args, _ = posting_service.settings_service.set_gdrive_alerted_at.call_args
@@ -117,12 +117,17 @@ class TestSendGdriveAuthAlert:
 
     @pytest.mark.asyncio
     @patch("src.services.core.posting.settings")
-    async def test_no_reconnect_button_without_oauth_url(
+    async def test_alert_carries_no_oauth_deep_link(
         self, mock_settings, posting_service
     ):
-        """No reconnect button when OAUTH_REDIRECT_BASE_URL is not set."""
+        """The alert never hands out a start link, configured base URL or not (#725).
+
+        The scheduler raises this for a chat, not for a user, so there is no
+        member to sign a URL token for; an unsigned link would be a start
+        endpoint invocation for a chat_id anyone can read off the message.
+        """
         mock_settings.ADMIN_TELEGRAM_CHAT_ID = -100123
-        mock_settings.OAUTH_REDIRECT_BASE_URL = None
+        mock_settings.OAUTH_REDIRECT_BASE_URL = "https://example.com"
         posting_service.settings_service.get_settings_if_exists.return_value = (
             _chat_settings(alerted_at=None)
         )
@@ -131,7 +136,8 @@ class TestSendGdriveAuthAlert:
         await posting_service.send_gdrive_auth_alert(-100123, bot=bot)
 
         call_kwargs = bot.send_message.call_args.kwargs
-        assert call_kwargs["reply_markup"] is None
+        assert "/auth/google-drive/start" not in call_kwargs["text"]
+        assert call_kwargs.get("reply_markup") is None
 
     @pytest.mark.asyncio
     @patch("src.services.core.posting.settings")
