@@ -11,6 +11,23 @@ from src.config.settings import settings
 INIT_DATA_TTL = 3600  # 1 hour
 URL_TOKEN_TTL = 3600  # 1 hour
 
+# How far ahead of our own clock a credential's timestamp may sit before we
+# reject it. Credentials are stamped by a peer whose clock we do not control —
+# Telegram stamps initData; the worker mints URL tokens that the API validates
+# from a separate container — so some forward skew is normal and must be
+# tolerated, or ordinary drift becomes an auth outage.
+#
+# It has to be bounded, though: expiry is computed from the age of the stamp,
+# so an unbounded future timestamp yields a negative age that never exceeds
+# the TTL and the credential never expires.
+#
+# The worst-case validity window is this value plus the TTL, so 60s against a
+# 3600s TTL leaves the window governed by the TTL while absorbing drift far
+# beyond what a synced host shows. Fernet picks the same value for the same
+# rule (cryptography.fernet._MAX_CLOCK_SKEW). Skew past a minute is a clock to
+# fix, not a tolerance to widen.
+CLOCK_SKEW_TOLERANCE = 60  # 1 minute
+
 
 def validate_init_data(init_data: str) -> dict:
     """Validate Telegram WebApp initData and extract user info.
@@ -26,7 +43,8 @@ def validate_init_data(init_data: str) -> dict:
         dict with user_id, first_name
 
     Raises:
-        ValueError: If signature is invalid, data is expired, or hash is missing
+        ValueError: If signature is invalid, data is expired or future-dated,
+            or hash is missing
     """
     if not init_data:
         raise ValueError("Empty initData")
@@ -52,9 +70,12 @@ def validate_init_data(init_data: str) -> dict:
     if not hmac.compare_digest(computed_hash, received_hash):
         raise ValueError("Invalid initData signature")
 
-    # Check TTL
+    # Check TTL — bounded in both directions, see CLOCK_SKEW_TOLERANCE
     auth_date = int(parsed.get("auth_date", [0])[0])
-    if time.time() - auth_date > INIT_DATA_TTL:
+    age = time.time() - auth_date
+    if age < -CLOCK_SKEW_TOLERANCE:
+        raise ValueError("initData auth_date is in the future")
+    if age > INIT_DATA_TTL:
         raise ValueError("initData expired")
 
     # Parse user JSON
@@ -102,7 +123,8 @@ def validate_url_token(token: str) -> dict:
         dict with user_id, chat_id
 
     Raises:
-        ValueError: If signature is invalid or token is expired.
+        ValueError: If signature is invalid, or the token is expired or
+            future-dated.
     """
     if not token:
         raise ValueError("Empty token")
@@ -130,8 +152,11 @@ def validate_url_token(token: str) -> dict:
     if not hmac.compare_digest(computed_sig, received_sig):
         raise ValueError("Invalid token signature")
 
-    # Check TTL
-    if time.time() - timestamp > URL_TOKEN_TTL:
+    # Check TTL — bounded in both directions, see CLOCK_SKEW_TOLERANCE
+    age = time.time() - timestamp
+    if age < -CLOCK_SKEW_TOLERANCE:
+        raise ValueError("Token timestamp is in the future")
+    if age > URL_TOKEN_TTL:
         raise ValueError("Token expired")
 
     return {"user_id": user_id, "chat_id": chat_id}
