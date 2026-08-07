@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from src.api.rate_limit import limiter
-from src.api.routes.onboarding.helpers import service_error_handler
+from src.api.routes.onboarding.helpers import _validate_request, service_error_handler
 from src.services.core.oauth_service import OAuthService
 from src.services.integrations.google_drive_oauth import GoogleDriveOAuthService
 from src.services.integrations.instagram_login_oauth import InstagramLoginOAuthService
@@ -20,13 +20,22 @@ router = APIRouter(tags=["oauth"])
 async def instagram_oauth_start(
     request: Request,
     chat_id: int = Query(..., description="Telegram chat ID initiating the flow"),
+    init_data: str = Query(..., description="Telegram initData or signed URL token"),
 ):
     """
     Generate Instagram OAuth authorization URL.
 
     Called when user clicks "Connect Instagram" in Telegram.
     Returns a redirect to Meta's authorization page.
+
+    The caller must be an active member of ``chat_id``. The state token minted
+    below carries whatever chat_id reaches it, and the callback stores the
+    resulting account against that chat — so this check, not the signed state,
+    is what stops an account being attached to someone else's tenant. The state
+    token is CSRF protection for the round trip; it was never an authorization
+    check on who may start a flow.
     """
+    _validate_request(init_data, chat_id, request)
     with OAuthService() as oauth_service, service_error_handler():
         auth_url = oauth_service.generate_authorization_url(chat_id)
         return RedirectResponse(url=auth_url)
@@ -194,13 +203,21 @@ async def instagram_login_oauth_callback(
 async def google_drive_oauth_start(
     request: Request,
     chat_id: int = Query(..., description="Telegram chat ID initiating the flow"),
+    init_data: str = Query(..., description="Telegram initData or signed URL token"),
 ):
     """
     Generate Google Drive OAuth authorization URL.
 
     Called when user clicks "Connect Google Drive" in Telegram.
     Returns a redirect to Google's consent screen.
+
+    Membership is required for the same reason as the Instagram flow, and the
+    consequence here is worse: the callback points the tenant's media source at
+    whatever Drive the initiator consented with. Reconnect links sent into
+    Telegram carry a signed URL token as ``init_data`` — a browser click out of
+    a chat message has no initData to offer.
     """
+    _validate_request(init_data, chat_id, request)
     with GoogleDriveOAuthService() as gdrive_service, service_error_handler():
         auth_url = gdrive_service.generate_authorization_url(chat_id)
         return RedirectResponse(url=auth_url)
