@@ -9,7 +9,13 @@ from urllib.parse import urlencode
 import pytest
 from unittest.mock import patch
 
-from src.utils.webapp_auth import validate_init_data, INIT_DATA_TTL
+from src.utils.webapp_auth import (
+    INIT_DATA_TTL,
+    URL_TOKEN_TTL,
+    generate_url_token,
+    validate_init_data,
+    validate_url_token,
+)
 
 
 def _build_init_data(
@@ -162,3 +168,110 @@ class TestValidateInitData:
         result = validate_init_data(init_data)
 
         assert "chat_id" not in result
+
+    @patch("src.utils.webapp_auth.settings")
+    def test_far_future_auth_date_raises(self, mock_settings):
+        """initData dated well beyond any plausible clock skew is rejected.
+
+        A future auth_date yields a negative age, which is never greater than
+        the TTL — so without a ceiling the token never expires.
+        """
+        mock_settings.TELEGRAM_BOT_TOKEN = "test-bot-token"
+
+        future_time = int(time.time()) + 86400  # 24 hours ahead
+        init_data = _build_init_data(auth_date=future_time)
+
+        with pytest.raises(ValueError, match="future"):
+            validate_init_data(init_data)
+
+    @patch("src.utils.webapp_auth.settings")
+    def test_near_future_auth_date_within_skew_is_accepted(self, mock_settings):
+        """Modest forward skew is tolerated — the ceiling must not be so tight
+        that a slightly fast peer clock locks real users out.
+
+        The offset is deliberately a literal rather than a fraction of
+        CLOCK_SKEW_TOLERANCE: it pins an absolute floor of ten seconds of
+        forward skew. Derived from the constant, this test would shrink along
+        with any tightening and could never detect one.
+        """
+        mock_settings.TELEGRAM_BOT_TOKEN = "test-bot-token"
+
+        near_future = int(time.time()) + 10
+        init_data = _build_init_data(auth_date=near_future)
+
+        result = validate_init_data(init_data)
+        assert result["user_id"] == 12345
+
+
+@pytest.mark.unit
+class TestValidateUrlToken:
+    """Test signed URL token validation."""
+
+    @patch("src.utils.webapp_auth.settings")
+    def test_far_future_timestamp_raises(self, mock_settings):
+        """A URL token stamped well ahead of the validator's clock is rejected.
+
+        The worker mints these; the API validates them. The two run as separate
+        Railway services with independent clocks, so a token can legitimately
+        arrive stamped ahead — but a far-future stamp must not buy immortality.
+        """
+        mock_settings.TELEGRAM_BOT_TOKEN = "test-bot-token"
+
+        future_time = time.time() + 86400  # 24 hours ahead
+        with patch("src.utils.webapp_auth.time.time", return_value=future_time):
+            token = generate_url_token(chat_id=-1001234567890, user_id=12345)
+
+        with pytest.raises(ValueError, match="future"):
+            validate_url_token(token)
+
+    @patch("src.utils.webapp_auth.settings")
+    def test_near_future_timestamp_within_skew_is_accepted(self, mock_settings):
+        """A token minted by a slightly fast worker clock still validates.
+
+        Literal offset, same reasoning as the initData case: an absolute floor
+        of ten seconds, not a fraction of the tolerance being tested.
+        """
+        mock_settings.TELEGRAM_BOT_TOKEN = "test-bot-token"
+
+        near_future = time.time() + 10
+        with patch("src.utils.webapp_auth.time.time", return_value=near_future):
+            token = generate_url_token(chat_id=-1001234567890, user_id=12345)
+
+        result = validate_url_token(token)
+        assert result["user_id"] == 12345
+        assert result["chat_id"] == -1001234567890
+
+    @patch("src.utils.webapp_auth.settings")
+    def test_valid_token_round_trip(self, mock_settings):
+        """Happy path: a freshly minted token validates."""
+        mock_settings.TELEGRAM_BOT_TOKEN = "test-bot-token"
+
+        token = generate_url_token(chat_id=-1001234567890, user_id=12345)
+        result = validate_url_token(token)
+
+        assert result["user_id"] == 12345
+        assert result["chat_id"] == -1001234567890
+
+    @patch("src.utils.webapp_auth.settings")
+    def test_expired_token_raises(self, mock_settings):
+        """A token older than the TTL is rejected."""
+        mock_settings.TELEGRAM_BOT_TOKEN = "test-bot-token"
+
+        old_time = time.time() - URL_TOKEN_TTL - 60
+        with patch("src.utils.webapp_auth.time.time", return_value=old_time):
+            token = generate_url_token(chat_id=-1001234567890, user_id=12345)
+
+        with pytest.raises(ValueError, match="Token expired"):
+            validate_url_token(token)
+
+    @patch("src.utils.webapp_auth.settings")
+    def test_tampered_token_raises(self, mock_settings):
+        """A token whose payload was edited fails the signature check."""
+        mock_settings.TELEGRAM_BOT_TOKEN = "test-bot-token"
+
+        token = generate_url_token(chat_id=-1001234567890, user_id=12345)
+        chat_id, _user_id, timestamp, signature = token.split(":")
+        tampered = f"{chat_id}:99999:{timestamp}:{signature}"
+
+        with pytest.raises(ValueError, match="Invalid token signature"):
+            validate_url_token(tampered)
