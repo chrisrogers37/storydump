@@ -7,6 +7,7 @@ from src.services.core.settings_service import SettingsService
 from src.repositories.queue_repository import QueueRepository
 from src.repositories.history_repository import HistoryRepository
 from src.repositories.base_repository import BaseRepository
+from src.services.core.telegram_utils import GDRIVE_RECONNECT_GUIDANCE
 from src.config.settings import settings
 from src.utils.logger import logger
 
@@ -676,7 +677,7 @@ class HealthCheckService(BaseService):
             "expires_in_days": expires_in_days,
         }
 
-    def format_token_alert(self, token_info: dict, telegram_chat_id: int) -> str | None:
+    def format_token_alert(self, token_info: dict) -> str | None:
         """Format a Telegram alert for expiring/expired Google Drive token.
 
         Returns None if no alert needed (healthy token).
@@ -691,11 +692,7 @@ class HealthCheckService(BaseService):
         else:
             text = "\u26a0\ufe0f Google Drive token has expired — reconnect required."
 
-        # No deep link: the start endpoint authorizes a member, and this alert
-        # is raised by the scheduler for a chat, not by a user — so there is no
-        # member to sign a URL token for. /start opens the dashboard, whose
-        # reconnect path is already authenticated.
-        text += "\n\nSend /start to open the dashboard and re-authenticate."
+        text += f"\n\n{GDRIVE_RECONNECT_GUIDANCE}"
 
         if expires_in_days is not None and expires_in_days > 0:
             expiry_date = (

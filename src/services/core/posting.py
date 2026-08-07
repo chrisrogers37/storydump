@@ -7,6 +7,7 @@ from telegram import Bot
 
 from src.services.base_service import BaseService
 from src.services.core.settings_service import SettingsService
+from src.services.core.telegram_utils import GDRIVE_RECONNECT_GUIDANCE
 from src.config.settings import settings
 from src.utils.logger import logger
 
@@ -57,15 +58,11 @@ class PostingService(BaseService):
             return
 
         try:
-            # No deep link: the start endpoint authorizes a member, and this
-            # alert is raised by the scheduler for a chat, not by a user — so
-            # there is no member to sign a URL token for. /start opens the
-            # dashboard, whose reconnect path is already authenticated.
             text = (
                 "⚠️ *Google Drive Disconnected*\n\n"
                 "Your Google Drive token has expired or been revoked. "
                 "Scheduled posts are paused until you reconnect.\n\n"
-                "Send /start to open the dashboard and reconnect."
+                f"{GDRIVE_RECONNECT_GUIDANCE}"
             )
 
             await bot.send_message(

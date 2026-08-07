@@ -866,7 +866,7 @@ class TestHealthCheckService:
 
         with patch("src.services.core.health_check.settings") as mock_settings:
             mock_settings.OAUTH_REDIRECT_BASE_URL = "https://example.com"
-            result = token_service.format_token_alert(token_info, -123)
+            result = token_service.format_token_alert(token_info)
 
         assert result is not None
         assert "3 day" in result
@@ -883,7 +883,7 @@ class TestHealthCheckService:
 
         with patch("src.services.core.health_check.settings") as mock_settings:
             mock_settings.OAUTH_REDIRECT_BASE_URL = "https://example.com"
-            result = token_service.format_token_alert(token_info, -123)
+            result = token_service.format_token_alert(token_info)
 
         assert "/auth/google-drive/start" not in result
 
@@ -893,7 +893,7 @@ class TestHealthCheckService:
 
         with patch("src.services.core.health_check.settings") as mock_settings:
             mock_settings.OAUTH_REDIRECT_BASE_URL = "https://example.com"
-            result = token_service.format_token_alert(token_info, -123)
+            result = token_service.format_token_alert(token_info)
 
         assert result is not None
         assert "expired" in result
@@ -903,6 +903,6 @@ class TestHealthCheckService:
         """Format alert returns None for healthy token."""
         token_info = {"healthy": True, "expires_in_days": 30}
 
-        result = token_service.format_token_alert(token_info, -123)
+        result = token_service.format_token_alert(token_info)
 
         assert result is None

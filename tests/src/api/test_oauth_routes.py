@@ -8,17 +8,20 @@ from tests.src.api.conftest import CHAT_ID, mock_validate, service_ctx
 OTHER_CHAT_ID = -1009876543210
 
 
+@pytest.fixture
+def authenticated_caller():
+    """A valid caller, for the classes that predate the #725 gate.
+
+    Those tests exercise the flow, not the gate; authorization itself is
+    covered by ``TestOAuthStartAuthorization``, which must NOT get this.
+    """
+    with mock_validate():
+        yield
+
+
+@pytest.mark.usefixtures("authenticated_caller")
 class TestOAuthStartEndpoint:
     """Test GET /auth/instagram/start."""
-
-    @pytest.fixture(autouse=True)
-    def _authenticated_caller(self):
-        """These tests predate the #725 gate and exercise the flow, not the gate.
-
-        Authorization itself is covered by ``TestOAuthStartAuthorization``.
-        """
-        with mock_validate():
-            yield
 
     def test_start_redirects_to_meta(self, client):
         """GET /auth/instagram/start redirects to Meta OAuth."""
@@ -235,17 +238,9 @@ class TestOAuthCallbackEndpoint:
 # ==================== Google Drive OAuth Routes ====================
 
 
+@pytest.mark.usefixtures("authenticated_caller")
 class TestGDriveOAuthStartEndpoint:
     """Test GET /auth/google-drive/start."""
-
-    @pytest.fixture(autouse=True)
-    def _authenticated_caller(self):
-        """These tests predate the #725 gate and exercise the flow, not the gate.
-
-        Authorization itself is covered by ``TestOAuthStartAuthorization``.
-        """
-        with mock_validate():
-            yield
 
     def test_start_redirects_to_google(self, client):
         """GET /auth/google-drive/start redirects to Google consent screen."""
@@ -599,10 +594,7 @@ class TestOAuthStartAuthorization:
     def test_instagram_start_without_auth_is_rejected(self, client):
         """No credential at all cannot reach state-token minting."""
         with patch("src.api.routes.oauth.OAuthService") as MockService:
-            svc = MockService.return_value
-            svc.generate_authorization_url.return_value = "https://facebook.com/x"
-            svc.__enter__ = Mock(return_value=svc)
-            svc.__exit__ = Mock(return_value=False)
+            svc = service_ctx(MockService)
 
             response = client.get(
                 f"/auth/instagram/start?chat_id={CHAT_ID}",
@@ -631,7 +623,9 @@ class TestOAuthStartAuthorization:
         self, client, _authorize_membership_by_default
     ):
         """An authenticated non-member cannot start a flow for the chat."""
-        _authorize_membership_by_default.return_value.__enter__.return_value.is_active_member.return_value = False
+        _authorize_membership_by_default.return_value.is_active_member.return_value = (
+            False
+        )
 
         with (
             mock_validate(),
@@ -649,10 +643,7 @@ class TestOAuthStartAuthorization:
     def test_gdrive_start_without_auth_is_rejected(self, client):
         """No credential at all cannot reach state-token minting."""
         with patch("src.api.routes.oauth.GoogleDriveOAuthService") as MockService:
-            svc = MockService.return_value
-            svc.generate_authorization_url.return_value = "https://google.com/x"
-            svc.__enter__ = Mock(return_value=svc)
-            svc.__exit__ = Mock(return_value=False)
+            svc = service_ctx(MockService)
 
             response = client.get(
                 f"/auth/google-drive/start?chat_id={CHAT_ID}",
@@ -685,7 +676,9 @@ class TestOAuthStartAuthorization:
         self, client, _authorize_membership_by_default
     ):
         """An authenticated non-member cannot start a flow for the chat."""
-        _authorize_membership_by_default.return_value.__enter__.return_value.is_active_member.return_value = False
+        _authorize_membership_by_default.return_value.is_active_member.return_value = (
+            False
+        )
 
         with (
             mock_validate(),

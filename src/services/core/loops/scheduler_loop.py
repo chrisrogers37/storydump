@@ -282,9 +282,7 @@ async def _token_health_tick(
                 token_info = health_check_service.check_gdrive_token_for_chat(
                     chat_id, chat_settings=chat
                 )
-                alert_text = health_check_service.format_token_alert(
-                    token_info, chat_id
-                )
+                alert_text = health_check_service.format_token_alert(token_info)
                 if alert_text:
                     await bot.send_message(chat_id=chat_id, text=alert_text)
                     token_alert_last_sent[chat_id] = now_t
