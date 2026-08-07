@@ -753,15 +753,14 @@ class TestDeploymentModel:
         - ONE admin channel (TELEGRAM_CHANNEL_ID / ADMIN_TELEGRAM_CHAT_ID)
         - ONE Instagram account (INSTAGRAM_ACCOUNT_ID)
 
-        This is BY DESIGN for Phase 1. Multi-tenancy is Phase 3.
+        This is the CURRENT (env-keyed) shape, not the target one. Storydump
+        is a hosted product we operate (design plan FC-9); the target model is
+        many tenants as rows on this one deployment, not one deployment per
+        group. Onboarding a further group is therefore a provisioning action
+        here, never a fork-and-deploy-your-own.
 
-        If another group wants to use storydump, they should:
-        1. Fork/clone the repository
-        2. Deploy their own instance
-        3. Configure their own .env with their credentials
-        4. Run their own bot
-
-        They should NOT try to share a single bot instance.
+        Until that lands, a single deployment still binds one bot to one admin
+        channel, and nothing should try to share a single bot across groups.
         """
         # This test documents the architecture decision
         # Verify the .env template mentions single-tenant

@@ -137,7 +137,7 @@ export function AutomateInstagramStories() {
       </p>
       <p>
         If your media already lives in Google Drive and you want one-tap
-        approvals from your phone, a self-hosted pipeline like{" "}
+        approvals from your phone, a managed pipeline like{" "}
         <Link href="/">Storydump</Link> gives you more control for less
         ongoing effort.
       </p>

@@ -496,7 +496,7 @@ storydump-cli reactivate-instagram-account <account-uuid>
 1. **Never commit `.env`** to version control
 2. **Page tokens are permanent** - treat them like passwords
 3. **Backup your encryption key** - losing it means re-bootstrapping tokens
-4. **App is in Development Mode** - only testers can use it (which is fine for self-hosting)
+4. **App is in Development Mode** - only testers can use it, so it does not serve customers; App Review is what lifts that limit, and it carries 2-4 weeks of lead time per permission
 
 ---
 
