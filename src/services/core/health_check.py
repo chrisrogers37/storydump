@@ -691,13 +691,11 @@ class HealthCheckService(BaseService):
         else:
             text = "\u26a0\ufe0f Google Drive token has expired — reconnect required."
 
-        reconnect_url = None
-        if settings.OAUTH_REDIRECT_BASE_URL:
-            reconnect_url = (
-                f"{settings.OAUTH_REDIRECT_BASE_URL}"
-                f"/auth/google-drive/start?chat_id={telegram_chat_id}"
-            )
-            text += f"\n\nRe-authenticate: {reconnect_url}"
+        # No deep link: the start endpoint authorizes a member, and this alert
+        # is raised by the scheduler for a chat, not by a user — so there is no
+        # member to sign a URL token for. /start opens the dashboard, whose
+        # reconnect path is already authenticated.
+        text += "\n\nSend /start to open the dashboard and re-authenticate."
 
         if expires_in_days is not None and expires_in_days > 0:
             expiry_date = (

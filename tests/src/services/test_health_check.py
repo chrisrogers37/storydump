@@ -861,7 +861,7 @@ class TestHealthCheckService:
         assert result["healthy"] is True
 
     def test_format_token_alert_expiring(self, token_service):
-        """Format alert includes expiry countdown and re-auth link."""
+        """Format alert includes the expiry countdown and points at /start."""
         token_info = {"healthy": False, "expires_in_days": 3}
 
         with patch("src.services.core.health_check.settings") as mock_settings:
@@ -870,7 +870,22 @@ class TestHealthCheckService:
 
         assert result is not None
         assert "3 day" in result
-        assert "/auth/google-drive/start?chat_id=-123" in result
+        assert "/start" in result
+
+    def test_format_token_alert_carries_no_oauth_deep_link(self, token_service):
+        """The alert never hands out a start link (#725).
+
+        This alert is raised by the scheduler for a chat, so there is no member
+        to sign a URL token for — and an unsigned link would be a start
+        endpoint invocation for a chat_id anyone can read off the message.
+        """
+        token_info = {"healthy": False, "expires_in_days": 0}
+
+        with patch("src.services.core.health_check.settings") as mock_settings:
+            mock_settings.OAUTH_REDIRECT_BASE_URL = "https://example.com"
+            result = token_service.format_token_alert(token_info, -123)
+
+        assert "/auth/google-drive/start" not in result
 
     def test_format_token_alert_expired(self, token_service):
         """Format alert for already-expired token."""
