@@ -99,11 +99,11 @@ documentation/
 
 ## Getting Started Guides
 
-### Quick Start (10 Minutes)
+### Quick Start
 **[quickstart.md](guides/quickstart.md)**
-- Fastest path to running the application
-- Step-by-step setup: clone, venv, database, configure, index media, run
-- Essential CLI and Telegram bot commands
+- Routes by intent: using the hosted product, working on it, or operating it
+- Onboarding happens at storydump.app and in the Telegram bot — there is no instance to install
+- Telegram bot commands for day-to-day use
 - Troubleshooting common issues
 
 ### Deployment Guide (Railway + Neon)
@@ -264,7 +264,7 @@ Completed and historical documents (see [archive/ARCHIVE_INDEX.md](archive/ARCHI
 ## Quick Reference
 
 ### For New Developers
-1. Start with **[quickstart.md](guides/quickstart.md)** (10 min setup)
+1. Start with **[quickstart.md](guides/quickstart.md)**, then **[dev-environment-setup.md](guides/dev-environment-setup.md)** (local setup)
 2. Read **[testing-guide.md](guides/testing-guide.md)** (understand testing)
 3. Review **[phases/00_MASTER_ROADMAP.md](planning/phases/00_MASTER_ROADMAP.md)** (architecture and roadmap)
 4. Read root **[CLAUDE.md](../CLAUDE.md)** for detailed service/model reference and safety rules
@@ -356,7 +356,7 @@ When adding new documentation:
 
 ## Need Help?
 
-- **Setup issues?** → See [quickstart.md](guides/quickstart.md) troubleshooting
+- **Setup issues?** → See [quickstart.md](guides/quickstart.md) troubleshooting, or [dev-environment-setup.md](guides/dev-environment-setup.md) for a local environment
 - **Deployment questions?** → Check [deployment.md](guides/deployment.md)
 - **Test failures?** → Review [testing-guide.md](guides/testing-guide.md)
 - **Architecture questions?** → Read [phases/00_MASTER_ROADMAP.md](planning/phases/00_MASTER_ROADMAP.md)

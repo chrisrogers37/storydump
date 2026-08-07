@@ -274,7 +274,7 @@ storydump/
 📚 **[Complete Documentation Index](documentation/README.md)**
 
 Key resources:
-- **[Quick Start Guide](documentation/guides/quickstart.md)** - Get running in 10 minutes
+- **[Quick Start Guide](documentation/guides/quickstart.md)** - Start here: using, developing, or operating Storydump
 - **[Deployment Guide](documentation/guides/deployment.md)** - Production deployment checklist
 - **[Testing Guide](documentation/guides/testing-guide.md)** - How to run and write tests
 - **[Technical Specification](documentation/planning/instagram_automation_plan.md)** - Complete implementation plan
