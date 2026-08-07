@@ -280,7 +280,9 @@ class TestGDriveOAuthStartEndpoint:
             mock_svc.__enter__ = Mock(return_value=mock_svc)
             mock_svc.__exit__ = Mock(return_value=False)
 
-            response = client.get("/auth/google-drive/start?chat_id=-100123&init_data=t")
+            response = client.get(
+                "/auth/google-drive/start?chat_id=-100123&init_data=t"
+            )
 
         assert response.status_code == 400
         assert "GOOGLE_CLIENT_ID" in response.json()["detail"]
