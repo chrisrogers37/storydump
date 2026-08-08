@@ -50,16 +50,25 @@ class UsageService(BaseService):
             since=window_end - timedelta(days=days), until=until
         )
 
-    def usage_totals(self, days: int = 30, until: Optional[datetime] = None) -> dict:
-        """Deployment-wide totals for the same window.
+    @staticmethod
+    def summarize(rows: list[dict]) -> dict:
+        """Fold rows from :meth:`usage_by_tenant` into deployment-wide totals.
+
+        Takes rows rather than a window so a caller wanting both the table and
+        its totals pays for one query, over one window. Two calls would compute
+        two windows microseconds apart, and a row landing between them would
+        make the totals disagree with the rows above them.
 
         Returns:
             ``tenants`` (how many posted at all), plus summed ``total``,
             ``successful``, ``failed``, ``api_posts`` and ``manual_posts``.
         """
-        rows = self.usage_by_tenant(days=days, until=until)
         summed = {
             key: sum(row[key] for row in rows)
             for key in ("total", "successful", "failed", "api_posts", "manual_posts")
         }
         return {"tenants": len(rows), **summed}
+
+    def usage_totals(self, days: int = 30, until: Optional[datetime] = None) -> dict:
+        """Deployment-wide totals for the window, for callers wanting only these."""
+        return self.summarize(self.usage_by_tenant(days=days, until=until))

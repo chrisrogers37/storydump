@@ -13,23 +13,32 @@ console = Console()
 
 
 @click.command(name="usage-report")
-@click.option("--days", default=30, show_default=True, help="Trailing window in days.")
+@click.option(
+    "--days",
+    default=30,
+    show_default=True,
+    type=click.IntRange(min=1),
+    help="Trailing window in days.",
+)
 @click.option(
     "--limit",
     default=None,
-    type=int,
+    type=click.IntRange(min=1),
     help="Show only the busiest N tenants. Totals still cover every tenant.",
 )
 def usage_report(days: int, limit: int | None):
     """Report per-tenant posting activity over a trailing window."""
     with UsageService() as service:
         rows = service.usage_by_tenant(days=days)
-        totals = service.usage_totals(days=days)
 
     if not rows:
         console.print(f"[yellow]No posting activity in the last {days} days[/yellow]")
         return
 
+    # Folded from the rows already fetched: one query, one window. Asking the
+    # service for totals separately would re-run the aggregate over a window
+    # computed microseconds later, and the footer could disagree with the table.
+    totals = UsageService.summarize(rows)
     shown = rows[:limit] if limit else rows
 
     table = Table(title=f"Usage — last {days} days")

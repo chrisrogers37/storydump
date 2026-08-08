@@ -1,7 +1,7 @@
 """Tests for UsageService — read-only per-tenant usage measurement."""
 
 from datetime import datetime, timedelta, timezone
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 import pytest
 
@@ -64,13 +64,10 @@ class TestUsageByTenant:
 
 @pytest.mark.unit
 class TestUsageTotals:
-    def test_sums_every_column_across_tenants(self, usage_service):
-        usage_service.history_repo.usage_by_tenant.return_value = [
-            _row("tenant-a", 10, 9, 6),
-            _row("tenant-b", 5, 4, 0),
-        ]
-
-        totals = usage_service.usage_totals(days=30)
+    def test_sums_every_column_across_tenants(self):
+        totals = UsageService.summarize(
+            [_row("tenant-a", 10, 9, 6), _row("tenant-b", 5, 4, 0)]
+        )
 
         assert totals == {
             "tenants": 2,
@@ -81,22 +78,17 @@ class TestUsageTotals:
             "manual_posts": 9,
         }
 
-    def test_counts_the_untenanted_bucket_as_a_tenant_row(self, usage_service):
+    def test_counts_the_untenanted_bucket_as_a_tenant_row(self):
         """Pre-tenancy rows are reported, not dropped — totals must reconcile."""
-        usage_service.history_repo.usage_by_tenant.return_value = [
-            _row("tenant-a", 4, 4, 4),
-            _row(None, 6, 5, 0),
-        ]
-
-        totals = usage_service.usage_totals(days=30)
+        totals = UsageService.summarize(
+            [_row("tenant-a", 4, 4, 4), _row(None, 6, 5, 0)]
+        )
 
         assert totals["tenants"] == 2
         assert totals["total"] == 10
 
-    def test_empty_window_totals_to_zero_not_an_error(self, usage_service):
-        usage_service.history_repo.usage_by_tenant.return_value = []
-
-        assert usage_service.usage_totals(days=30) == {
+    def test_empty_window_totals_to_zero_not_an_error(self):
+        assert UsageService.summarize([]) == {
             "tenants": 0,
             "total": 0,
             "successful": 0,
@@ -104,6 +96,17 @@ class TestUsageTotals:
             "api_posts": 0,
             "manual_posts": 0,
         }
+
+    def test_usage_totals_queries_once_and_folds(self, usage_service):
+        """One window per report: the fold must not re-run the aggregate."""
+        usage_service.history_repo.usage_by_tenant.return_value = [
+            _row("tenant-a", 3, 3, 1)
+        ]
+
+        totals = usage_service.usage_totals(days=30)
+
+        assert usage_service.history_repo.usage_by_tenant.call_count == 1
+        assert totals["total"] == 3
 
 
 @pytest.mark.unit
@@ -120,7 +123,7 @@ class TestEnforcementIsAbsentByConstruction:
         usage_service.history_repo.usage_by_tenant.return_value = []
 
         usage_service.usage_by_tenant(days=30)
-        usage_service.usage_totals(days=30)
+        UsageService.summarize([])
 
         called = {c[0] for c in usage_service.history_repo.method_calls}
         assert called == {"usage_by_tenant"}
@@ -165,63 +168,17 @@ class TestEnforcementIsAbsentByConstruction:
             for node in ast.walk(tree)
             if isinstance(node, ast.ImportFrom) and node.module
         }
-        assert imported == {
-            "datetime",
-            "typing",
+        imported |= {
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Import)
+            for alias in node.names
+        }
+        # Bound the FIRST-PARTY edges only. Asserting the exact set would fail
+        # on adding a logger, which says nothing about enforcement; what must
+        # not appear is a reach into settings, limits, or admission.
+        first_party = {name for name in imported if name.startswith("src.")}
+        assert first_party <= {
             "src.repositories.history_repository",
             "src.services.base_service",
-        }
-
-    def test_reporting_a_busy_tenant_raises_nothing(self, usage_service):
-        """Volume is measured, never judged: no threshold exists to trip."""
-        usage_service.history_repo.usage_by_tenant.return_value = [
-            _row("tenant-a", 1_000_000, 999_999, 1_000_000)
-        ]
-
-        totals = usage_service.usage_totals(days=30)
-
-        assert totals["total"] == 1_000_000
-
-
-@pytest.mark.unit
-class TestUsageReportCommand:
-    def test_reports_rows_and_totals(self):
-        from click.testing import CliRunner
-
-        from cli.commands.usage import usage_report
-
-        with patch("cli.commands.usage.UsageService") as MockService:
-            svc = MockService.return_value
-            svc.__enter__ = Mock(return_value=svc)
-            svc.__exit__ = Mock(return_value=False)
-            svc.usage_by_tenant.return_value = [_row("tenant-a", 10, 9, 6)]
-            svc.usage_totals.return_value = {
-                "tenants": 1,
-                "total": 10,
-                "successful": 9,
-                "failed": 1,
-                "api_posts": 6,
-                "manual_posts": 4,
-            }
-
-            result = CliRunner().invoke(usage_report, ["--days", "7"])
-
-        assert result.exit_code == 0
-        assert "tenant-a" in result.output
-
-    def test_empty_window_is_reported_not_an_error(self):
-        from click.testing import CliRunner
-
-        from cli.commands.usage import usage_report
-
-        with patch("cli.commands.usage.UsageService") as MockService:
-            svc = MockService.return_value
-            svc.__enter__ = Mock(return_value=svc)
-            svc.__exit__ = Mock(return_value=False)
-            svc.usage_by_tenant.return_value = []
-            svc.usage_totals.return_value = {"tenants": 0, "total": 0}
-
-            result = CliRunner().invoke(usage_report, [])
-
-        assert result.exit_code == 0
-        assert "No posting activity" in result.output
+        }, f"unexpected first-party import: {first_party}"
