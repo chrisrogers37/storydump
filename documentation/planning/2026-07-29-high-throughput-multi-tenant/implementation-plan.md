@@ -1,3 +1,5 @@
+> **⛔ SUPERSEDED — DO NOT IMPLEMENT FROM THIS DOCUMENT.** The authoritative plan is [`../2026-08-02-consolidated-design-plan/`](../2026-08-02-consolidated-design-plan/README.md); every increment, gate, and shape this file proposed is restated or struck there. Retained only as historical input and evidence for the reviews that cite it.
+
 # Test-Driven Implementation Plan
 
 **Epic:** [`epic.md`](epic.md)  

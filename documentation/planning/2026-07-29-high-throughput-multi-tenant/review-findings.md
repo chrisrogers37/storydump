@@ -1,3 +1,5 @@
+> **📌 RATIFIED FINDINGS — honored in full, but implement from the consolidated plan.** These #730 findings amended the (now superseded) package in this directory; the findings themselves are NOT superseded — each R/G is anchored to its consolidated home in [`../2026-08-02-consolidated-design-plan/03-decision-record.md`](../2026-08-02-consolidated-design-plan/03-decision-record.md) (§#730 traceability). Do not implement from this directory.
+
 # Review Findings and Envelope Correction
 
 **Date:** 2026-08-02
