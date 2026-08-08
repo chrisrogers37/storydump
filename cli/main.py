@@ -31,6 +31,7 @@ from cli.commands.media import (
 from cli.commands.queue import reset_queue, list_queue, queue_preview
 from cli.commands.sync import sync_media, sync_status
 from cli.commands.tokens import revoke_tokens, rotate_keys
+from cli.commands.usage import usage_report
 from cli.commands.users import list_users, promote_user
 from src import __version__
 
@@ -54,6 +55,7 @@ cli.add_command(validate)
 cli.add_command(list_queue)
 cli.add_command(reset_queue)
 cli.add_command(queue_preview)
+cli.add_command(usage_report)
 cli.add_command(list_users)
 cli.add_command(promote_user)
 cli.add_command(check_health)
