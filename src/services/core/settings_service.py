@@ -75,6 +75,17 @@ class SettingsService(BaseService):
             return self.settings_repo.get_or_create(telegram_chat_id)
         return self.settings_repo.get_by_chat_id(telegram_chat_id)
 
+    def migrate_chat_id(
+        self, old_chat_id: int, new_chat_id: int
+    ) -> Optional[ChatSettings]:
+        """Follow a group->supergroup migration to the chat's new id (#743).
+
+        Thin pass-through: the work is one atomic multi-table update and lives
+        in the repository, because each repository owns its own session and
+        splitting it across three would make a partial migration possible.
+        """
+        return self.settings_repo.migrate_chat_id(old_chat_id, new_chat_id)
+
     def get_settings_if_exists(self, telegram_chat_id: int) -> Optional[ChatSettings]:
         """Look up settings for a chat without creating a row.
 
