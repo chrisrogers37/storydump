@@ -7,7 +7,22 @@ from sqlalchemy import or_
 
 from src.repositories.base_repository import BaseRepository
 from src.models.chat_settings import ChatSettings
+from src.models.posting_queue import PostingQueue
+from src.models.user_interaction import UserInteraction
 from src.config import defaults
+from src.utils.logger import logger
+
+
+class ChatIdMigrationConflict(Exception):
+    """A tenant already exists at the new chat id, so the migration cannot be
+    applied without choosing which of two tenants survives.
+
+    Raised rather than resolved. By the time this fires, ``get_or_create`` has
+    usually already minted a blank tenant at the new id (that is the #743 bug),
+    but it may equally be a tenant that has since accumulated real settings.
+    Picking a winner silently would be the same data loss this handler exists
+    to prevent, so the caller is told and nothing is written.
+    """
 
 
 class ChatSettingsRepository(BaseRepository):
@@ -38,6 +53,89 @@ class ChatSettingsRepository(BaseRepository):
         )
         self.end_read_transaction()
         return result
+
+    def migrate_chat_id(
+        self, old_chat_id: int, new_chat_id: int
+    ) -> Optional[ChatSettings]:
+        """Re-point a tenant at the chat id Telegram moved it to (#743).
+
+        A group→supergroup migration changes the chat id. Without this, the
+        first update from the new id reaches ``get_or_create``, which finds
+        nothing and mints a fresh blank tenant — while settings, Instagram
+        links, memberships, category mixes and posting history stay attached to
+        the dead id, unreachable and with no error raised.
+
+        The repair is small because the schema is already migration-shaped:
+        eight tables key on the ``chat_settings_id`` surrogate and survive
+        untouched. Only three columns hold the raw id — this row's unique
+        anchor, and the two denormalized carriers swept below.
+
+        WHY ALL THREE UPDATES LIVE IN ONE REPOSITORY, against the usual layering
+        (services orchestrate, repositories do single-table CRUD): each
+        repository owns a ContextVar-scoped Session of its own, so a service
+        calling three repositories would run three transactions. A migration
+        that committed ``chat_settings`` and then failed would strand the queue
+        on a dead id — the exact defect being fixed, in a narrower form. One
+        session is the only way this is atomic.
+
+        Idempotent: Telegram delivers the migration update twice, and the
+        ``ChatMigrated`` backstop can re-deliver it indefinitely, so a repeat
+        call is a no-op rather than an error.
+
+        Returns the migrated tenant, or None when there was nothing to migrate.
+        Raises ChatIdMigrationConflict when the new id is already occupied.
+        """
+        if old_chat_id == new_chat_id:
+            return self.get_by_chat_id(new_chat_id)
+
+        existing_old = (
+            self.db.query(ChatSettings)
+            .filter(ChatSettings.telegram_chat_id == old_chat_id)
+            .first()
+        )
+        existing_new = (
+            self.db.query(ChatSettings)
+            .filter(ChatSettings.telegram_chat_id == new_chat_id)
+            .first()
+        )
+
+        if existing_old is None:
+            # Already migrated (the duplicate update, or the permanent
+            # ChatMigrated backstop firing again), or a chat this bot never held
+            # settings for. Either way: do not mint. get_or_create is the only
+            # thing allowed to create a tenant.
+            self.end_read_transaction()
+            return existing_new
+
+        if existing_new is not None:
+            raise ChatIdMigrationConflict(
+                f"cannot migrate chat {old_chat_id} -> {new_chat_id}: a tenant "
+                f"already exists at the new id (chat_settings_id="
+                f"{existing_new.id}); refusing rather than choosing which "
+                f"tenant survives"
+            )
+
+        existing_old.telegram_chat_id = new_chat_id
+
+        # The two raw-id carriers. posting_queue denormalizes the chat id and
+        # FILTERS on it, so pending posts strand invisibly otherwise;
+        # user_interactions holds the raw id and nothing else tenant-shaped, so
+        # analytics fork across the boundary.
+        self.db.query(PostingQueue).filter(
+            PostingQueue.telegram_chat_id == old_chat_id
+        ).update({"telegram_chat_id": new_chat_id}, synchronize_session=False)
+        self.db.query(UserInteraction).filter(
+            UserInteraction.telegram_chat_id == old_chat_id
+        ).update({"telegram_chat_id": new_chat_id}, synchronize_session=False)
+
+        self.commit()
+        logger.info(
+            "chat id migrated: %s -> %s (chat_settings_id=%s)",
+            old_chat_id,
+            new_chat_id,
+            existing_old.id,
+        )
+        return existing_old
 
     def get_or_create(self, telegram_chat_id: int) -> ChatSettings:
         """

@@ -286,6 +286,16 @@ class TelegramService(BaseService):
                 filters.TEXT & ~filters.COMMAND, self._handle_conversation_message
             )
         )
+        # Group -> supergroup migration changes the chat id (#743). Order
+        # relative to the text handler above does not matter: a migration
+        # arrives as a SERVICE message with no text, so filters.TEXT cannot
+        # match it and the two never compete.
+        self.application.add_handler(
+            MessageHandler(
+                filters.StatusUpdate.MIGRATE,
+                self.membership_handler.handle_chat_migration,
+            )
+        )
         self.application.add_handler(
             ChatMemberHandler(
                 self.membership_handler.handle_my_chat_member,

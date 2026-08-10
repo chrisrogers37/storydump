@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
+from src.repositories.chat_settings_repository import ChatIdMigrationConflict
 from src.utils.logger import logger
 
 if TYPE_CHECKING:
@@ -130,6 +131,49 @@ class TelegramMembershipHandler:
             f"Bot removed from group {chat.id} — "
             f"deactivated {count} membership(s), evicted {evicted} cache entries"
         )
+
+    async def handle_chat_migration(self, update, context):
+        """Follow a group->supergroup migration (#743).
+
+        Telegram changes a chat's id on migration and announces it with a
+        service message carrying ``migrate_from_chat_id`` on the NEW chat. With
+        no handler, the next update from the new id reaches ``get_or_create``,
+        which finds nothing and mints a blank tenant while the real one strands
+        on the dead id, silently.
+
+        Telegram delivers this update twice; the repository call is idempotent,
+        so the duplicate is a no-op rather than an error.
+        """
+        message = update.effective_message
+        if not message or not message.migrate_from_chat_id:
+            return
+
+        old_chat_id = message.migrate_from_chat_id
+        new_chat_id = message.chat.id
+
+        try:
+            migrated = self.service.settings_service.migrate_chat_id(
+                old_chat_id, new_chat_id
+            )
+        except ChatIdMigrationConflict:
+            # Both ids hold a tenant. Refusing is deliberate — see the
+            # repository. Loud, because it needs a human to merge them.
+            logger.error(
+                "chat migration %s -> %s BLOCKED: a tenant already exists at the "
+                "new id. Settings for the original chat are stranded and need "
+                "manual reconciliation.",
+                old_chat_id,
+                new_chat_id,
+            )
+            return
+
+        if migrated is None:
+            logger.info(
+                "chat migration %s -> %s: nothing to migrate (no settings for "
+                "the old id)",
+                old_chat_id,
+                new_chat_id,
+            )
 
     async def handle_onboarding_message(self, update, context):
         """Handle text input during DM onboarding (naming step)."""
