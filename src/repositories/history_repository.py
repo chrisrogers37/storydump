@@ -3,9 +3,10 @@
 from dataclasses import dataclass
 from typing import Optional, List
 from datetime import datetime, timedelta, timezone
-from sqlalchemy import func, and_
+from sqlalchemy import func, and_, case
 
 from src.repositories.base_repository import BaseRepository
+from src.models.enums import PostingMethod
 from src.models.posting_history import PostingHistory
 
 
@@ -661,3 +662,60 @@ class HistoryRepository(BaseRepository):
             dow_data["approval_rate"] = round(posted / total, 2) if total else 0
 
         return [by_dow[d] for d in sorted(by_dow)]
+
+    def usage_by_tenant(
+        self, since: datetime, until: Optional[datetime] = None
+    ) -> List[dict]:
+        """Count posting activity per tenant over a window.
+
+        Read-only usage measurement. Groups by ``chat_settings_id`` deliberately
+        rather than filtering to one tenant: the caller is the operator asking
+        what the whole deployment did, not a tenant asking about itself. Rows
+        whose ``chat_settings_id`` is NULL are pre-tenancy history and are
+        reported under a ``None`` key rather than dropped, so the totals here
+        reconcile with a plain ``COUNT(*)`` over the same window.
+
+        Args:
+            since: Start of the window, inclusive.
+            until: End of the window, exclusive. Open-ended when omitted.
+
+        Returns:
+            One dict per tenant: ``chat_settings_id``, ``total``, ``successful``,
+            ``failed``, ``api_posts``, ``manual_posts``. Sorted by ``total``
+            descending so the busiest tenant reads first.
+        """
+        query = self.db.query(
+            PostingHistory.chat_settings_id.label("chat_settings_id"),
+            func.count(PostingHistory.id).label("total"),
+            func.count(case((PostingHistory.success, 1))).label("successful"),
+            func.count(
+                case(
+                    (
+                        PostingHistory.posting_method
+                        == PostingMethod.INSTAGRAM_API.value,
+                        1,
+                    )
+                )
+            ).label("api_posts"),
+        ).filter(PostingHistory.posted_at >= since)
+        if until is not None:
+            query = query.filter(PostingHistory.posted_at < until)
+
+        rows = query.group_by(PostingHistory.chat_settings_id).all()
+        self.end_read_transaction()
+
+        usage = [
+            {
+                "chat_settings_id": (
+                    str(chat_settings_id) if chat_settings_id is not None else None
+                ),
+                "total": total,
+                "successful": successful,
+                "failed": total - successful,
+                "api_posts": api_posts,
+                "manual_posts": total - api_posts,
+            }
+            for chat_settings_id, total, successful, api_posts in rows
+        ]
+        usage.sort(key=lambda row: row["total"], reverse=True)
+        return usage

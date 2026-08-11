@@ -3,10 +3,11 @@
 from datetime import datetime, timezone
 from typing import Optional
 
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Bot
 
 from src.services.base_service import BaseService
 from src.services.core.settings_service import SettingsService
+from src.services.core.telegram_utils import GDRIVE_RECONNECT_GUIDANCE
 from src.config.settings import settings
 from src.utils.logger import logger
 
@@ -57,36 +58,17 @@ class PostingService(BaseService):
             return
 
         try:
-            reconnect_url = None
-            if settings.OAUTH_REDIRECT_BASE_URL:
-                reconnect_url = (
-                    f"{settings.OAUTH_REDIRECT_BASE_URL}"
-                    f"/auth/google-drive/start?chat_id={chat_id}"
-                )
-
             text = (
                 "⚠️ *Google Drive Disconnected*\n\n"
                 "Your Google Drive token has expired or been revoked. "
-                "Scheduled posts are paused until you reconnect."
+                "Scheduled posts are paused until you reconnect.\n\n"
+                f"{GDRIVE_RECONNECT_GUIDANCE}"
             )
-
-            reply_markup = None
-            if reconnect_url:
-                reply_markup = InlineKeyboardMarkup(
-                    [
-                        [
-                            InlineKeyboardButton(
-                                "🔗 Reconnect Google Drive", url=reconnect_url
-                            )
-                        ]
-                    ]
-                )
 
             await bot.send_message(
                 chat_id=chat_id,
                 text=text,
                 parse_mode="Markdown",
-                reply_markup=reply_markup,
             )
             logger.info(f"Sent Google Drive auth alert to chat {chat_id}")
 

@@ -18,6 +18,7 @@ from src.services.core.telegram_utils import (
 )
 from src.utils.datetime_utils import ensure_utc
 from src.utils.logger import logger
+from src.utils.webapp_auth import generate_url_token
 
 if TYPE_CHECKING:
     from src.services.core.telegram_service import TelegramService
@@ -792,7 +793,14 @@ class TelegramCommandHandlers:
         )
 
     async def _send_gdrive_reconnect_message(self, update, chat_id: int) -> None:
-        """Send a Google Drive reconnect message with an inline button."""
+        """Send a Google Drive reconnect message with an inline button.
+
+        The button carries a signed URL token: the start endpoint authorizes
+        the caller for ``chat_id``, and a browser click out of a Telegram
+        message has no initData to present. The token binds the member who
+        triggered this message, so the link is not usable by a bystander who
+        knows the chat id.
+        """
         text = (
             "⚠️ *Google Drive Disconnected*\n\n"
             "Your Google Drive token has expired or been revoked. "
@@ -801,9 +809,10 @@ class TelegramCommandHandlers:
 
         reply_markup = None
         if settings.OAUTH_REDIRECT_BASE_URL:
+            token = generate_url_token(chat_id, update.effective_user.id)
             reconnect_url = (
                 f"{settings.OAUTH_REDIRECT_BASE_URL}"
-                f"/auth/google-drive/start?chat_id={chat_id}"
+                f"/auth/google-drive/start?chat_id={chat_id}&init_data={token}"
             )
             reply_markup = InlineKeyboardMarkup(
                 [[InlineKeyboardButton("🔗 Reconnect Google Drive", url=reconnect_url)]]

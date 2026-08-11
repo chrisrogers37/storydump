@@ -74,6 +74,18 @@ _TERMINAL_CAPTION_PREFIXES = (
 # for a late tap on a reaped card.
 EXPIRED_CAPTION = "⌛ Expired — no action needed"
 
+# Guidance appended to a scheduler-raised Google Drive reconnect alert. Single
+# source of truth for both alert sites (PostingService.send_gdrive_auth_alert,
+# HealthCheckService.format_token_alert).
+#
+# These alerts carry no reconnect deep link. The OAuth start endpoint
+# authorizes an active member, and a scheduler tick knows only the chat — no
+# member identity exists at SEND time to sign a URL token for, and a token
+# signed for one member would sit in chat history as a bearer credential for
+# their authority. /start opens the dashboard, whose reconnect path is already
+# authenticated and identifies whoever actually taps it.
+GDRIVE_RECONNECT_GUIDANCE = "Send /start to open the dashboard and reconnect."
+
 
 def _has_terminal_caption(query) -> bool:
     """Check whether the message already shows a terminal action caption.

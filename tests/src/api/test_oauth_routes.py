@@ -1,8 +1,25 @@
 """Unit tests for OAuth API routes (Instagram and Google Drive)."""
 
+import pytest
 from unittest.mock import AsyncMock, Mock, patch
 
+from tests.src.api.conftest import CHAT_ID, mock_validate, service_ctx
 
+OTHER_CHAT_ID = -1009876543210
+
+
+@pytest.fixture
+def authenticated_caller():
+    """A valid caller, for the classes that predate the #725 gate.
+
+    Those tests exercise the flow, not the gate; authorization itself is
+    covered by ``TestOAuthStartAuthorization``, which must NOT get this.
+    """
+    with mock_validate():
+        yield
+
+
+@pytest.mark.usefixtures("authenticated_caller")
 class TestOAuthStartEndpoint:
     """Test GET /auth/instagram/start."""
 
@@ -17,7 +34,7 @@ class TestOAuthStartEndpoint:
             mock_svc.__exit__ = Mock(return_value=False)
 
             response = client.get(
-                "/auth/instagram/start?chat_id=-1001234567890",
+                "/auth/instagram/start?chat_id=-1001234567890&init_data=t",
                 follow_redirects=False,
             )
 
@@ -26,7 +43,7 @@ class TestOAuthStartEndpoint:
 
     def test_start_missing_chat_id_returns_422(self, client):
         """GET /auth/instagram/start without chat_id returns validation error."""
-        response = client.get("/auth/instagram/start")
+        response = client.get("/auth/instagram/start?init_data=t")
         assert response.status_code == 422
 
     def test_start_invalid_config_returns_400(self, client):
@@ -39,7 +56,9 @@ class TestOAuthStartEndpoint:
             mock_svc.__enter__ = Mock(return_value=mock_svc)
             mock_svc.__exit__ = Mock(return_value=False)
 
-            response = client.get("/auth/instagram/start?chat_id=-1001234567890")
+            response = client.get(
+                "/auth/instagram/start?chat_id=-1001234567890&init_data=t"
+            )
 
         assert response.status_code == 400
         assert "FACEBOOK_APP_ID" in response.json()["detail"]
@@ -55,7 +74,7 @@ class TestOAuthStartEndpoint:
             mock_svc.__exit__ = Mock(return_value=False)
 
             client.get(
-                "/auth/instagram/start?chat_id=-100123",
+                "/auth/instagram/start?chat_id=-100123&init_data=t",
                 follow_redirects=False,
             )
 
@@ -69,7 +88,7 @@ class TestOAuthStartEndpoint:
             mock_svc.__enter__ = Mock(return_value=mock_svc)
             mock_svc.__exit__ = Mock(return_value=False)
 
-            client.get("/auth/instagram/start?chat_id=-100123")
+            client.get("/auth/instagram/start?chat_id=-100123&init_data=t")
 
         mock_svc.__exit__.assert_called_once()
 
@@ -219,6 +238,7 @@ class TestOAuthCallbackEndpoint:
 # ==================== Google Drive OAuth Routes ====================
 
 
+@pytest.mark.usefixtures("authenticated_caller")
 class TestGDriveOAuthStartEndpoint:
     """Test GET /auth/google-drive/start."""
 
@@ -233,7 +253,7 @@ class TestGDriveOAuthStartEndpoint:
             mock_svc.__exit__ = Mock(return_value=False)
 
             response = client.get(
-                "/auth/google-drive/start?chat_id=-1001234567890",
+                "/auth/google-drive/start?chat_id=-1001234567890&init_data=t",
                 follow_redirects=False,
             )
 
@@ -242,7 +262,7 @@ class TestGDriveOAuthStartEndpoint:
 
     def test_start_missing_chat_id_returns_422(self, client):
         """GET /auth/google-drive/start without chat_id returns validation error."""
-        response = client.get("/auth/google-drive/start")
+        response = client.get("/auth/google-drive/start?init_data=t")
         assert response.status_code == 422
 
     def test_start_invalid_config_returns_400(self, client):
@@ -255,7 +275,9 @@ class TestGDriveOAuthStartEndpoint:
             mock_svc.__enter__ = Mock(return_value=mock_svc)
             mock_svc.__exit__ = Mock(return_value=False)
 
-            response = client.get("/auth/google-drive/start?chat_id=-100123")
+            response = client.get(
+                "/auth/google-drive/start?chat_id=-100123&init_data=t"
+            )
 
         assert response.status_code == 400
         assert "GOOGLE_CLIENT_ID" in response.json()["detail"]
@@ -271,7 +293,7 @@ class TestGDriveOAuthStartEndpoint:
             mock_svc.__exit__ = Mock(return_value=False)
 
             client.get(
-                "/auth/google-drive/start?chat_id=-100123",
+                "/auth/google-drive/start?chat_id=-100123&init_data=t",
                 follow_redirects=False,
             )
 
@@ -285,7 +307,7 @@ class TestGDriveOAuthStartEndpoint:
             mock_svc.__enter__ = Mock(return_value=mock_svc)
             mock_svc.__exit__ = Mock(return_value=False)
 
-            client.get("/auth/google-drive/start?chat_id=-100123")
+            client.get("/auth/google-drive/start?chat_id=-100123&init_data=t")
 
         mock_svc.__exit__.assert_called_once()
 
@@ -558,3 +580,144 @@ class TestInstagramLoginCallback:
 
         assert response.status_code == 200
         assert "Failed" in response.text
+
+
+class TestOAuthStartAuthorization:
+    """The start endpoints must authorize the caller for chat_id (#725).
+
+    ``chat_id`` is not a secret — it is plaintext in the URL-token format and
+    known to every member of a group. Without these gates a caller who merely
+    knows a chat_id can mint a state token bound to a tenant they have no
+    membership in and attach an account they control to it.
+    """
+
+    def test_instagram_start_without_auth_is_rejected(self, client):
+        """No credential at all cannot reach state-token minting."""
+        with patch("src.api.routes.oauth.OAuthService") as MockService:
+            svc = service_ctx(MockService)
+
+            response = client.get(
+                f"/auth/instagram/start?chat_id={CHAT_ID}",
+                follow_redirects=False,
+            )
+
+        assert response.status_code == 422
+        svc.generate_authorization_url.assert_not_called()
+
+    def test_instagram_start_rejects_foreign_chat_id(self, client):
+        """A token bound to one chat cannot start a flow for another."""
+        with (
+            mock_validate(return_value={"user_id": 555, "chat_id": CHAT_ID}),
+            patch("src.api.routes.oauth.OAuthService") as MockService,
+        ):
+            svc = service_ctx(MockService)
+            response = client.get(
+                f"/auth/instagram/start?chat_id={OTHER_CHAT_ID}&init_data=t",
+                follow_redirects=False,
+            )
+
+        assert response.status_code == 403
+        svc.generate_authorization_url.assert_not_called()
+
+    def test_instagram_start_rejects_non_member(
+        self, client, _authorize_membership_by_default
+    ):
+        """An authenticated non-member cannot start a flow for the chat."""
+        _authorize_membership_by_default.return_value.is_active_member.return_value = (
+            False
+        )
+
+        with (
+            mock_validate(),
+            patch("src.api.routes.oauth.OAuthService") as MockService,
+        ):
+            svc = service_ctx(MockService)
+            response = client.get(
+                f"/auth/instagram/start?chat_id={CHAT_ID}&init_data=t",
+                follow_redirects=False,
+            )
+
+        assert response.status_code == 403
+        svc.generate_authorization_url.assert_not_called()
+
+    def test_gdrive_start_without_auth_is_rejected(self, client):
+        """No credential at all cannot reach state-token minting."""
+        with patch("src.api.routes.oauth.GoogleDriveOAuthService") as MockService:
+            svc = service_ctx(MockService)
+
+            response = client.get(
+                f"/auth/google-drive/start?chat_id={CHAT_ID}",
+                follow_redirects=False,
+            )
+
+        assert response.status_code == 422
+        svc.generate_authorization_url.assert_not_called()
+
+    def test_gdrive_start_rejects_foreign_chat_id(self, client):
+        """A token bound to one chat cannot start a flow for another.
+
+        This is the account-injection direction that matters most: a Drive
+        account the initiator controls attached to a tenant's media source.
+        """
+        with (
+            mock_validate(return_value={"user_id": 555, "chat_id": CHAT_ID}),
+            patch("src.api.routes.oauth.GoogleDriveOAuthService") as MockService,
+        ):
+            svc = service_ctx(MockService)
+            response = client.get(
+                f"/auth/google-drive/start?chat_id={OTHER_CHAT_ID}&init_data=t",
+                follow_redirects=False,
+            )
+
+        assert response.status_code == 403
+        svc.generate_authorization_url.assert_not_called()
+
+    def test_gdrive_start_rejects_non_member(
+        self, client, _authorize_membership_by_default
+    ):
+        """An authenticated non-member cannot start a flow for the chat."""
+        _authorize_membership_by_default.return_value.is_active_member.return_value = (
+            False
+        )
+
+        with (
+            mock_validate(),
+            patch("src.api.routes.oauth.GoogleDriveOAuthService") as MockService,
+        ):
+            svc = service_ctx(MockService)
+            response = client.get(
+                f"/auth/google-drive/start?chat_id={CHAT_ID}&init_data=t",
+                follow_redirects=False,
+            )
+
+        assert response.status_code == 403
+        svc.generate_authorization_url.assert_not_called()
+
+    def test_gdrive_start_accepts_a_signed_url_token(self, client):
+        """The reconnect-link path: a signed URL token authorizes the start.
+
+        Browser clicks from a Telegram message carry no initData, so the
+        server-minted URL token is the credential those links use.
+        """
+        with (
+            patch(
+                "src.api.routes.onboarding.helpers.validate_init_data",
+                side_effect=ValueError("not initData"),
+            ),
+            patch(
+                "src.api.routes.onboarding.helpers.validate_url_token",
+                return_value={"user_id": 555, "chat_id": CHAT_ID},
+            ),
+            patch("src.api.routes.oauth.GoogleDriveOAuthService") as MockService,
+        ):
+            svc = service_ctx(MockService)
+            svc.generate_authorization_url.return_value = (
+                "https://accounts.google.com/o/oauth2/auth?client_id=123"
+            )
+            response = client.get(
+                f"/auth/google-drive/start?chat_id={CHAT_ID}&init_data=signed-token",
+                follow_redirects=False,
+            )
+
+        assert response.status_code == 307
+        assert "google.com" in response.headers["location"]
