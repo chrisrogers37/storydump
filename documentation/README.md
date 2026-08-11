@@ -2,7 +2,7 @@
 
 Welcome to the Storydump documentation hub. All project documentation is organized here by purpose.
 
-**Last Updated**: 2026-07-14
+**Last Updated**: 2026-07-30
 **Current Version**: v1.6.0
 **Current Phase**: Phase 2 (Instagram API Automation) - COMPLETED | Phase 1.8 (Telegram UX) - COMPLETED
 **Next Phase**: Phase 3 (Shopify Integration) - PENDING
@@ -17,7 +17,9 @@ documentation/
 ├── SECURITY_REVIEW.md             # Security audit findings
 ├── planning/                       # Planning and design documents
 │   ├── 2026-07-system-review/     # Full-system review: triage + detailed findings + issue backlog
-│   └── 2026-07-29-data-model-evaluation/  # Data model evaluation: neutral prompt, self-evaluation, target model, epic, triage, migration plan
+│   ├── 2026-07-29-data-model-evaluation/  # Data model evaluation: neutral prompt, self-evaluation, target model, epic, triage, migration plan
+│   ├── 2026-07-29-high-throughput-multi-tenant/
+│   │                               # Durable multi-tenant/worker architecture and migration plan
 │   ├── phases/                    # Phased implementation plans
 │   │   ├── 00_MASTER_ROADMAP.md   # Vision, architecture, phase overview
 │   │   ├── 02_shopify_integration.md        # PENDING
@@ -26,17 +28,22 @@ documentation/
 │   │   ├── 05_llm_integration.md            # PENDING
 │   │   ├── 06_order_email_automation.md     # PENDING
 │   │   └── 07_dashboard_ui.md              # PENDING
-│   └── 01B_telegram_mini_app_secure_input.md  # PENDING (Future)
 ├── cloudinary/                     # Cloudinary usage analyses and enhancement proposals
 ├── guides/                         # How-to guides and tutorials
 ├── operations/                     # Operational runbooks
-├── updates/                        # Project updates, bugfixes, patches
-└── archive/                        # Completed/obsolete documents
+└── updates/                        # Project updates, bugfixes, patches
 ```
 
 ---
 
 ## Planning & Architecture
+
+### High-Throughput Multi-Tenant Architecture
+**[2026-07-29-high-throughput-multi-tenant/](planning/2026-07-29-high-throughput-multi-tenant/README.md)** - PROPOSED
+- PostgreSQL-authoritative commands, leased jobs, provider operations, and transactional outbox
+- Redis-based shared admission and work wake-ups with independent ready-job recovery
+- Webhook ingress, fair worker pools, mandatory tenant context, and RLS defense in depth
+- Independent review prompt, repository self-evaluation, P0-P3 triage, and file-oriented implementation plan
 
 ### Master Roadmap
 **[phases/00_MASTER_ROADMAP.md](planning/phases/00_MASTER_ROADMAP.md)** - Phases 1-2.5 COMPLETED
@@ -76,16 +83,8 @@ documentation/
 
 ### Feed & Queue Features (Research)
 
-**[feed-queue-features/00_OVERVIEW.md](planning/feed-queue-features/00_OVERVIEW.md)** - RESEARCH (3 workstreams)
 - **[01: Live Story Visibility](planning/feed-queue-features/01_live_story_visibility.md)** — Fetch & display live stories in `/status` (Ready)
 - **[02: Feed Reset](planning/feed-queue-features/02_feed_reset.md)** — Clear live stories from Instagram (Blocked — no DELETE API)
-- **[03: Queue Enhancements](planning/feed-queue-features/03_queue_enhancements.md)** — Queue preview, health indicators, quick refill (Ready)
-
-### Other Planning Documents
-
-**[01B_telegram_mini_app_secure_input.md](planning/01B_telegram_mini_app_secure_input.md)** - PENDING (Future)
-- Telegram Mini App for secure credential input (replaces message-based token entry)
-- Decision: proceed with message-based approach for now
 
 ### Test Coverage Report
 **[TEST_COVERAGE.md](guides/TEST_COVERAGE.md)** - CURRENT (1,417 tests)
@@ -216,14 +215,13 @@ documentation/
 - All bugs identified during code review and deployment testing
 
 *Note: Updates folder contains dated documents for bug fixes, patches, and significant changes.*
-*Historical handoffs have been moved to `archive/`.*
 *Line numbers in older updates reference pre-refactor code (v1.6.0 refactored TelegramService).*
 
 ---
 
 ## Security
 
-**[planning/2026-07-system-review/](planning/2026-07-system-review/README.md)** - Full-system review (2026-07-02)
+**[planning/2026-07-system-review/triage-tracker.md](planning/2026-07-system-review/triage-tracker.md)** - Full-system review (2026-07-02)
 - 91 triaged findings (bugs, security, architecture, over-complication, tests)
 - Organized under 5 cross-cutting epics; filed as 36 GitHub issues (26 individual P0/P1 + 10 clusters)
 - Prioritizes data-integrity, security, and multi-tenant isolation work first
@@ -247,26 +245,6 @@ Coming in Phase 5 (Dashboard UI):
 - Rate limiting
 - WebSocket events
 - SDK documentation
-
----
-
-## Archive
-
-Completed and historical documents (see [archive/ARCHIVE_INDEX.md](archive/ARCHIVE_INDEX.md) for full list):
-
-| Document | Status | Description |
-|----------|--------|-------------|
-| [IMPLEMENTATION_COMPLETE.md](archive/IMPLEMENTATION_COMPLETE.md) | COMPLETED | Phase 1 completion checklist (v1.0.1) |
-| [HANDOFF-2026-01-05.md](archive/HANDOFF-2026-01-05.md) | COMPLETED | v1.2.0 deployment handoff |
-| [upcoming_build_notes.md](archive/upcoming_build_notes.md) | COMPLETED | Feature brainstorming (all implemented) |
-| [phase-1.5-telegram-enhancements.md](archive/phase-1.5-telegram-enhancements.md) | COMPLETED | Phase 1.5 planning (v1.3.0) |
-| [instagram_automation_plan.md](archive/instagram_automation_plan.md) | Superseded | Original plan, replaced by phases/ docs |
-| [01_instagram_api.md](archive/01_instagram_api.md) | COMPLETED | Phase 2 Instagram API (v1.5.0) |
-| [telegram-service-refactor-plan.md](archive/telegram-service-refactor-plan.md) | COMPLETED | TelegramService decomposition (v1.6.0) |
-| [verbose-settings-improvement-plan.md](archive/verbose-settings-improvement-plan.md) | COMPLETED | Verbose notifications expansion (v1.6.0) |
-| [phase-1.7-inline-account-selector.md](archive/phase-1.7-inline-account-selector.md) | COMPLETED | Inline account selection (v1.5.0) |
-| [user-interactions-design.md](archive/user-interactions-design.md) | COMPLETED | InteractionService design (v1.4.0) |
-| [prod-hardening_2026-02-23/](archive/prod-hardening_2026-02-23/) | COMPLETED | Production hardening tech debt (4 phases, PRs #78-#81) |
 
 ---
 
@@ -329,7 +307,8 @@ When adding new documentation:
    - How-to guides → `guides/`
    - Operations → `operations/`
    - Bug fixes/patches → `updates/` (use dated filenames: `YYYY-MM-DD-description.md`)
-   - Completed plans → `archive/` (update `archive/ARCHIVE_INDEX.md`)
+   - Completed plans → keep in their current documentation area with a clear
+     `COMPLETED` or `Superseded` status
 
 2. **Update this index** (`documentation/README.md`)
 
@@ -348,18 +327,18 @@ When adding new documentation:
 
 | Area | Status | Files | Notes |
 |------|--------|-------|-------|
-| **Planning** | Current | 7 active phase plans + 4 feed-queue + 4 tech-debt + 2 other | Phases 1-2 complete, 3-8 pending |
+| **Planning** | Current | 26 Markdown files, including the 6-document throughput/tenancy set | Phases 1-2 complete; high-throughput design proposed; later product phases pending |
 | **Guides** | Current | 9 guides | Setup, deployment, testing, Instagram API, dev env, deployment options, Tailscale, test coverage |
 | **Operations** | Current | 3 files | Monitoring, backup, troubleshooting |
 | **Updates** | Current | 3 files | Bugfixes, category scheduling, force posting |
 | **Security** | Current | 1 file | Security review (updated post-refactor) |
-| **Archive** | Organized | 22 entries | Historical docs preserved with index |
 | **API Docs** | Future | 0 files | Planned for Phase 5 (Dashboard UI) |
 
 ### Document Status Legend
 - **COMPLETED** - Fully implemented and documented
 - **IN PROGRESS** - Work actively underway
 - **PENDING** - Planned for future implementation
+- **PROPOSED** - Design is documented but still requires review and phase-specific approval
 
 ---
 
@@ -375,4 +354,4 @@ When adding new documentation:
 
 ---
 
-*Last updated: 2026-03-28*
+*Last updated: 2026-07-30*
