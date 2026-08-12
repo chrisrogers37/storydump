@@ -10,6 +10,14 @@
 -- Created: 2026-07-20
 -- Issue: #680 #687
 --
+-- runner:reapply-safe
+-- Applied state is undecidable in place (data-only; no structural delta), so
+-- the adoption probe reads the live limbo population instead: when lingering
+-- 'processing' rows exist the runner leaves this pending and a gated apply
+-- re-runs it, which parks them exactly as the delivery-state model intends.
+-- Safe live: a genuinely in-flight claim holds its row lock, so the UPDATE
+-- waits and then matches zero rows.
+--
 -- ORDERING: apply only AFTER the delivered-on-stamp code (PR3) is deployed —
 -- expand (047) -> code cutover -> backfill (this) -> invariant (049).
 --

@@ -53,7 +53,16 @@ class TestMediaItemModel:
         assert MediaItem.cloud_url.nullable is not False
 
     def test_instagram_media_id_is_unique(self):
-        assert MediaItem.instagram_media_id.unique is True
+        # Uniqueness is the partial index mirrored from migration 013
+        # (unique among non-NULL values), not a column-level flag.
+        index = next(
+            ix
+            for ix in MediaItem.__table__.indexes
+            if ix.name == "idx_media_items_instagram_media_id"
+        )
+        assert index.unique is True
+        assert [c.name for c in index.columns] == ["instagram_media_id"]
+        assert "IS NOT NULL" in str(index.dialect_options["postgresql"]["where"])
 
     def test_repr_format(self):
         item = MediaItem(file_name="test_image.jpg", times_posted=5)

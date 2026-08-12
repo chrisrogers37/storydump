@@ -93,3 +93,6 @@ pytest-of-chris/
 **/data/events/fleet-*.jsonl
 **/data/.last-tool-call
 **/data/.idle
+
+# Editable-install venvs under either name
+.venv/
