@@ -1,6 +1,8 @@
 """Media item model - source of truth for all media."""
 
 from sqlalchemy import (
+    Index,
+    text,
     Column,
     String,
     BigInteger,
@@ -67,9 +69,8 @@ class MediaItem(Base):
     thumbnail_url = Column(Text)
 
     # Instagram backfill tracking (Phase 05 Cloud Media)
-    instagram_media_id = Column(
-        Text, unique=True, index=True
-    )  # Instagram Graph API media ID
+    instagram_media_id = Column(Text)  # Instagram Graph API media ID
+    # (uniqueness is the partial index in __table_args__, mirroring mig 013)
     backfilled_at = Column(DateTime)  # When this item was backfilled from Instagram
 
     # Tracking
@@ -95,6 +96,20 @@ class MediaItem(Base):
     __table_args__ = (
         UniqueConstraint(
             "file_path", "chat_settings_id", name="unique_file_path_per_tenant"
+        ),
+        # Partial uniques mirrored from migrations 013/014 so a
+        # models-built schema equals a migration-built one (parity gate).
+        Index(
+            "idx_media_items_instagram_media_id",
+            "instagram_media_id",
+            unique=True,
+            postgresql_where=text("instagram_media_id IS NOT NULL"),
+        ),
+        Index(
+            "idx_media_items_file_path_legacy_unique",
+            "file_path",
+            unique=True,
+            postgresql_where=text("chat_settings_id IS NULL"),
         ),
     )
 

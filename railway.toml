@@ -3,6 +3,13 @@ builder = "NIXPACKS"
 buildCommand = "pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media"
 
 [deploy]
+# DORMANT (plan §0.2 / #712): the migration runner ships unarmed — enabling
+# the predeploy apply is a human-gated step AFTER `runner adopt` has entered
+# production into the ledger. To arm, uncomment on both services; the
+# runner's advisory lock serializes concurrent deploys, and a migration
+# failure aborts the deploy with the old version still serving.
+# See documentation/operations/migration-runner.md.
+# preDeployCommand = "python -m scripts.migration_runner apply"
 healthcheckPath = "/health"
 healthcheckTimeout = 30
 restartPolicyType = "ON_FAILURE"

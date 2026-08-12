@@ -21,9 +21,12 @@ bootstraps the schema with SQLAlchemy ``Base.metadata.create_all``
 ``scripts/migrations/*.sql`` — so any DB introspection here would only ever see
 the MODEL constraint, never the applied migration. We therefore assert
 statically that (1) the MODEL-declared constraint matches the Enum, and (2) the
-latest migration FILE that adds the constraint matches the Enum. Follow-up:
-once a migration-replay CI harness exists (the #510 P0 migration rails), upgrade
-(2) to introspect ``pg_constraint`` on the replayed DB. Tracked in the PR body.
+latest migration FILE that adds the constraint matches the Enum. The
+migration-replay harness this note used to defer to now exists:
+``tests/scripts/test_migration_gate.py`` replays the corpus through the runner
+and compares ``pg_constraint`` definitions on the replayed database against the
+models (plan 0.2). This file keeps the cheap unit-tier text check; the replayed
+introspection lives there.
 """
 
 import re
