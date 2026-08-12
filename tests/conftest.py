@@ -1,4 +1,16 @@
-"""Pytest configuration and fixtures."""
+"""Pytest configuration and fixtures.
+
+**The test database is named per session (#758).** Every checkout on a host
+points at the same PostgreSQL, and this file owns a database BY NAME — creating
+it, terminating every connection to it, and dropping it. With a fixed name, two
+concurrent runs shared one database and whichever finished first ran that
+teardown against the other's live session: connections killed mid-test, tables
+dropped underneath a running suite, and nondeterministic red that each side
+reads as their own code. The per-session suffix below removes the collision
+rather than serialising around it.
+"""
+
+import uuid
 
 import pytest
 from dotenv import load_dotenv
@@ -12,6 +24,26 @@ load_dotenv(".env.test", override=True)
 
 from src.config.database import Base  # noqa: E402
 from src.config.settings import settings  # noqa: E402
+
+#: One database name per session (#758), mirroring the ``runner_test_{uuid}``
+#: pattern ``tests/scripts/conftest.py`` already proved for its scratch
+#: databases — this was the one place still using a fixed name.
+#:
+#: Mutating the settings singleton is deliberate: it is the single point every
+#: consumer already reads — this file's create and drop,
+#: ``settings.test_database_url``, and the repository concurrency suite — so
+#: there is no second name to keep in step. Assigned once, at import, before
+#: anything can read the old value.
+#:
+#: The base is whatever the environment configured and is NOT assumed to be the
+#: default in ``settings.py``: measured across the estate, ``.env.test`` sets it
+#: to different values in different checkouts, so the name people collide on is
+#: not one literal and checkouts fall into separate collision groups. Suffixing
+#: whatever is configured makes that irrelevant — there is no name to look up
+#: and no group to belong to.
+TEST_DB_BASE_NAME = settings.TEST_DB_NAME
+SESSION_DB_SUFFIX = uuid.uuid4().hex[:10]
+settings.TEST_DB_NAME = f"{TEST_DB_BASE_NAME}_{SESSION_DB_SUFFIX}"
 
 # Global flag to track if database is available
 _database_available = None
