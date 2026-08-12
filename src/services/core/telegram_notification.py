@@ -2,11 +2,11 @@
 
 from typing import Optional
 
-from telegram.error import TimedOut
+from telegram.error import ChatMigrated, TimedOut
 
 from src.config import defaults
 from src.exceptions.google_drive import GoogleDriveAuthError
-from src.exceptions.telegram import AmbiguousDeliveryError
+from src.exceptions.telegram import AmbiguousDeliveryError, ChatMigratedError
 from src.services.core.telegram_utils import escape_markdown as _escape_md
 from src.utils.logger import logger
 
@@ -166,6 +166,24 @@ class TelegramNotificationService:
 
         except GoogleDriveAuthError:
             raise
+        except ChatMigrated as e:
+            # The chat migrated to a supergroup and changed id (#743). This is
+            # the permanent send-path backstop — the only migration channel
+            # that can still reach a chat whose live service message was
+            # missed, which is every chat stranded before #744 shipped.
+            #
+            # It must not fall through to the blanket handler below. That
+            # returned False, and the scheduler recorded the literal string
+            # "send_notification returned False", so the new id — the one fact
+            # a recovery pass needs — survived only in a log line and aged out
+            # with log retention.
+            #
+            # Both ids are carried because neither alone is actionable:
+            # telegram.error.ChatMigrated supplies only the new one, and the
+            # old one is known only here, from the chat we addressed.
+            raise ChatMigratedError(
+                old_chat_id=tenant_chat_id, new_chat_id=e.new_chat_id
+            ) from e
         except TimedOut as e:
             # Ambiguous delivery: Telegram may have posted the card even
             # though the response never arrived, so this must not read as a

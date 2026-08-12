@@ -7,7 +7,7 @@ import random
 
 from src.exceptions.google_drive import GoogleDriveAuthError
 from src.exceptions.instagram import is_container_confirmed_failed
-from src.exceptions.telegram import AmbiguousDeliveryError
+from src.exceptions.telegram import AmbiguousDeliveryError, ChatMigratedError
 from src.services.base_service import BaseService
 from src.services.core.queue_reap import record_expiry_and_delete
 from src.services.core.settings_service import SettingsService
@@ -488,6 +488,30 @@ class SchedulerService(BaseService):
                     queue_item, "GoogleDriveAuthError: credentials invalid"
                 )
                 raise
+
+            except ChatMigratedError as e:
+                # The chat migrated to a supergroup and changed id (#743).
+                #
+                # Not retried, for the same reason as the auth error above: a
+                # migrated id never un-migrates, so the remaining attempts are
+                # guaranteed failures against a dead chat — spent on every
+                # scheduler tick, forever, because last_post_sent_at only
+                # advances on success and the stranded tenant stays in
+                # get_all_active().
+                #
+                # Recorded rather than merely logged: e.durable_message()
+                # carries BOTH chat ids into posting_history.error_message,
+                # which is what makes a stranded tenant recoverable at all.
+                # This says nothing about what recovery then does with the
+                # pair — merge, re-point or archive is still open — it only
+                # stops the fact being discarded while that is decided.
+                logger.error(
+                    f"Chat migrated for {queue_item_id}: "
+                    f"{e.old_chat_id} -> {e.new_chat_id} — marking failed "
+                    "(not retryable); tenant is stranded until reconciled"
+                )
+                self._record_send_failure(queue_item, e.durable_message())
+                return False
 
             except AmbiguousDeliveryError as e:
                 # The card may already be in the chat, so a resend would post a
