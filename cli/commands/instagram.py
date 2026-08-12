@@ -49,7 +49,6 @@ def instagram_auth(manual: bool):
             "\n[bold red]Error:[/bold red] FACEBOOK_APP_ID not configured in .env"
         )
         console.print("Please add your Facebook App ID to .env first.")
-        console.print("\nSee: documentation/guides/instagram-api-setup.md")
         return
 
     if not settings.FACEBOOK_APP_SECRET:
