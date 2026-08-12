@@ -102,8 +102,12 @@ none of this is armed by merging the PR that adds it.
    hand-applied history actually was; 050 pending. Any hard failure names the
    discrepancy — resolve with a human, never by editing the manifest to make
    it pass.
-4. **Gated apply** — `runner apply` applies whatever adopt left pending
-   (046–050 at most, 050 at least).
+4. **Gated apply** — if 048 is in the pending tail (step 3 explicitly
+   anticipates this), first run its pre-flight precondition query (in the
+   048 file header) against production and pause on a large deviation from
+   the recorded snapshot — that snapshot is from 2026-07-20 and has never
+   been re-run against current production. Then `runner apply` applies
+   whatever adopt left pending (046–050 at most, 050 at least).
 5. **Arm the deploy pipeline** — uncomment `preDeployCommand` in
    `railway.toml` (both services; the advisory lock serializes them). From
    then on merged == applied, and the deploy fails closed if a migration
