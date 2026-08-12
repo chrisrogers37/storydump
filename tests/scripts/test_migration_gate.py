@@ -105,12 +105,38 @@ class TestAdoptProductionShaped:
         assert 48 not in [m.version for m in report.adopted]
         assert [m.version for m in report.pending] == [48, 50]
 
+        # A FRESH in-flight claim (mason's #749 repro): claim_for_processing
+        # COMMITS at queue_repository.py:63, so nothing holds the row lock
+        # while the handler works — the re-applied backfill must not touch it.
+        # Only the bound on the UPDATE (matching the probe's >24h evidence)
+        # protects this row.
+        fresh = fetch_one(
+            at49_db,
+            "INSERT INTO media_items (file_path, file_name, file_size, file_hash)"
+            " VALUES ('/fresh.jpg', 'fresh.jpg', 1, 'cafebabe') RETURNING id",
+        )
+        execute(
+            at49_db,
+            "INSERT INTO posting_queue"
+            " (media_item_id, status, telegram_message_id, scheduled_for)"
+            " VALUES (%s, 'processing', 555555, now())",
+            (fresh[0],),
+        )
+
         apply_pending(at49_db, MIGRATIONS_DIR)
         parked = fetch_one(
             at49_db,
             "SELECT status FROM posting_queue WHERE telegram_message_id = 424242",
         )
         assert parked[0] == "delivered"
+        live = fetch_one(
+            at49_db,
+            "SELECT status FROM posting_queue WHERE telegram_message_id = 555555",
+        )
+        assert live[0] == "processing", (
+            "a re-applied 048 must not rewrite a fresh live claim — the"
+            " UPDATE's row-set must match the probe's evidence (>24h)"
+        )
 
     def test_deliberately_removed_constraint_fails_loudly_by_name(self, at49_db):
         # Target the REQUIRED FLOOR: a missing constraint the manifest

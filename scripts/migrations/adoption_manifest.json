@@ -240,7 +240,7 @@
     {
       "version": 48,
       "probe": "SELECT coalesce((SELECT pg_get_constraintdef(oid) LIKE '%sent_unconfirmed%' FROM pg_constraint WHERE conname = 'check_status'), false) AND NOT EXISTS (SELECT 1 FROM posting_queue WHERE status = 'processing' AND scheduled_for < now() - interval '24 hours')",
-      "note": "data-only and undecidable in place; the probe asserts the file's EFFECT currently holds (delivery vocabulary present AND no aged limbo rows) - an empty queue without 047's vocabulary is not evidence. False leaves it pending, and the runner:reapply-safe marker lets the gated apply re-run it, parking lingering rows exactly as the delivery-state model intends"
+      "note": "data-only and undecidable in place; the probe asserts the file's EFFECT currently holds (delivery vocabulary present AND no aged limbo rows) - an empty queue without 047's vocabulary is not evidence. False leaves it pending, and the runner:reapply-safe marker lets the gated apply re-run it; the file's UPDATEs are bounded to the same >24h population the probe reads, so a fresh in-flight claim is outside the row set by construction"
     },
     {
       "version": 49,

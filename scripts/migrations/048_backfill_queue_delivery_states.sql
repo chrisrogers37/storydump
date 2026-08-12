@@ -15,8 +15,10 @@
 -- the adoption probe reads the live limbo population instead: when lingering
 -- 'processing' rows exist the runner leaves this pending and a gated apply
 -- re-runs it, which parks them exactly as the delivery-state model intends.
--- Safe live: a genuinely in-flight claim holds its row lock, so the UPDATE
--- waits and then matches zero rows.
+-- Safe live BECAUSE THE UPDATES ARE BOUNDED to the probe's own evidence
+-- (rows older than 24h): a fresh in-flight claim is outside the row set by
+-- construction. Nothing else protects it — claim_for_processing commits the
+-- claim before handler work, so no row lock is held while a handler runs.
 --
 -- ORDERING: apply only AFTER the delivered-on-stamp code (PR3) is deployed —
 -- expand (047) -> code cutover -> backfill (this) -> invariant (049).
@@ -38,10 +40,12 @@
 -- means stuck rows accumulated since — investigate before mapping them.
 
 UPDATE posting_queue SET status = 'delivered'
-  WHERE status = 'processing' AND telegram_message_id IS NOT NULL;
+  WHERE status = 'processing' AND telegram_message_id IS NOT NULL
+    AND scheduled_for < now() - interval '24 hours';
 
 UPDATE posting_queue SET status = 'sent_unconfirmed'
-  WHERE status = 'processing' AND telegram_message_id IS NULL;
+  WHERE status = 'processing' AND telegram_message_id IS NULL
+    AND scheduled_for < now() - interval '24 hours';
 
 INSERT INTO schema_version (version, description, applied_at)
 VALUES (48, 'Backfill legacy processing rows to delivery states (#680/#687)', NOW())
