@@ -41,6 +41,7 @@ from scripts.migration_runner import (
 from scripts.schema_parity import schema_diff, schema_signature
 from src.utils.validators import MIGRATIONS_DIR
 from tests.scripts.conftest import (
+    as_user,
     LEGACY_LINEAGE_MAX,
     SETUP_SQL,
     execute,
@@ -229,7 +230,7 @@ class TestTheLaneReplaysAcrossTheBoundary:
         )
 
     def test_the_legacy_bound_is_load_bearing_not_tidy(
-        self, scratch_db, second_scratch_db
+        self, owner_actor, owner_db, second_scratch_db
     ):
         """Why every replay in `test_migration_gate.py` passes the bound, as an
         executable fact rather than a comment. Same corpus, same runner, one
@@ -242,11 +243,15 @@ class TestTheLaneReplaysAcrossTheBoundary:
         The lane tests that assert the LANE keep it, because that is where the
         first policy-carrying table will need it.
         """
-        psql_apply(scratch_db, [SETUP_SQL])
-        apply_pending(scratch_db, MIGRATIONS_DIR, LEGACY_LINEAGE_MAX)
+        # The bounded arm runs as the OWNER ACTOR (#753): the legacy-lineage
+        # replay's declared seed identity, so no superuser replay path
+        # survives anywhere in these suites.
+        as_owner = as_user(owner_db, owner_actor)
+        psql_apply(as_owner, [SETUP_SQL])
+        apply_pending(as_owner, MIGRATIONS_DIR, LEGACY_LINEAGE_MAX)
         run_lane(second_scratch_db)
 
-        assert tables_in(scratch_db, "public"), (
+        assert tables_in(owner_db, "public"), (
             "bounded: the legacy schema is still in public, which is what the"
             " legacy-lineage suites assert against"
         )
