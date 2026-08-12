@@ -4,7 +4,16 @@ from datetime import datetime, timezone
 from typing import Optional
 import uuid
 
-from sqlalchemy import Column, String, DateTime, Text, UniqueConstraint, ForeignKey, Index, text
+from sqlalchemy import (
+    Column,
+    String,
+    DateTime,
+    Text,
+    UniqueConstraint,
+    ForeignKey,
+    Index,
+    text,
+)
 from sqlalchemy.dialects.postgresql import UUID, ARRAY, JSONB
 from sqlalchemy.orm import relationship
 
