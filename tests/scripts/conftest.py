@@ -21,6 +21,14 @@ from src.config.settings import settings
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SETUP_SQL = REPO_ROOT / "scripts" / "setup_database.sql"
+BOOTSTRAP_SQL = REPO_ROOT / "scripts" / "window" / "step0_bootstrap.sql"
+
+#: The seven service roles, split as `02` §7 declares them and the `04` step-0
+#: bootstrap provisions them. Held here rather than re-listed per test so the
+#: inventory has one home on the test side too.
+LOGIN_ROLES = ("svc_ingress", "svc_worker", "svc_migration")
+NOLOGIN_ROLES = ("svc_claim", "svc_clock", "svc_maintenance", "svc_membership")
+SERVICE_ROLES = LOGIN_ROLES + NOLOGIN_ROLES
 
 
 def _dsn(database: str) -> str:
@@ -94,6 +102,109 @@ def at49_template(admin_conn):
 def at49_db(admin_conn, at49_template):
     """A private copy of the at-49 shape, safe to mutate."""
     yield from _scratch(admin_conn, template=at49_template)
+
+
+# --- the 04 step-0 window bootstrap (F.2.1, #746) ---------------------------
+#
+# Service roles are CLUSTER-scoped, so they outlive the per-test scratch
+# databases every other fixture here relies on. That is not an inconvenience to
+# work around — it is why role provisioning cannot be a runner migration in the
+# first place (`02` §7-DDL: "ROLES ARE NOT CREATED HERE"). The helpers below
+# own the lifecycle explicitly instead of leaning on database teardown.
+
+
+def actor_lacks_createrole(admin_conn) -> str | None:
+    """The reason the current actor cannot run the bootstrap, or None.
+
+    Returned as a reason string rather than a bool so the skip names the
+    missing privilege. CI's `postgres:15` service makes `POSTGRES_USER` the
+    cluster superuser, so the gate genuinely runs there; a local PostgreSQL
+    whose test role was created by hand usually has neither flag, and a silent
+    pass would read as coverage this suite did not have.
+    """
+    with admin_conn.cursor() as cur:
+        cur.execute(
+            "SELECT rolsuper, rolcreaterole FROM pg_roles WHERE rolname = current_user"
+        )
+        row = cur.fetchone()
+    if row and (row[0] or row[1]):
+        return None
+    return (
+        "actor cannot provision roles: needs SUPERUSER or CREATEROLE. "
+        "`04` 0.2 declares the bootstrap actor as non-superuser + CREATEROLE; "
+        "grant it with: ALTER ROLE <test role> CREATEROLE;"
+    )
+
+
+def drop_service_roles(admin_conn, extra=()) -> None:
+    """Remove the seven roles (plus any test-local ones) from the cluster.
+
+    ORDER IS LOAD-BEARING and cost a round of red tests to learn: a privilege
+    granted *inside* a database — `GRANT CREATE ON DATABASE`, a schema grant, a
+    table grant — is a catalog dependency on the role, so PostgreSQL refuses
+    the drop with `DependentObjectsStillExist` while that database is still
+    there. Dropping the database first discards the dependencies with it.
+    Callers must not hand-roll this order; use `roleless_db`/`bootstrapped_db`,
+    whose teardown sequences it correctly.
+    """
+    with admin_conn.cursor() as cur:
+        for role in tuple(extra) + SERVICE_ROLES:
+            cur.execute(f'DROP ROLE IF EXISTS "{role}"')
+
+
+def run_bootstrap(dsn: str) -> None:
+    """Apply the step-0 artifact as the current (owner) actor.
+
+    Executed through psycopg2 rather than `psql_apply` so a guard's RAISE
+    surfaces as an exception the caller can assert the *message* of — the
+    precondition is the point of the artifact, not an incidental failure mode.
+    """
+    conn = psycopg2.connect(dsn)
+    conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(BOOTSTRAP_SQL.read_text())
+    finally:
+        conn.close()
+
+
+@pytest.fixture()
+def roleless_db(admin_conn):
+    """A fresh database with the seven service roles guaranteed ABSENT.
+
+    Yields ``(dsn, extra_roles)`` — append any test-local role name to
+    ``extra_roles`` and teardown drops it in the right order too. Roles are
+    cluster-scoped, so "absent" has to be established at setup rather than
+    assumed from a fresh database.
+    """
+    reason = actor_lacks_createrole(admin_conn)
+    if reason:
+        pytest.skip(reason)
+    drop_service_roles(admin_conn)
+    extra: list[str] = []
+    name = f"runner_test_{uuid.uuid4().hex[:10]}"
+    dsn = _create_db(admin_conn, name)
+    try:
+        yield dsn, extra
+    finally:
+        _drop_db(admin_conn, name)
+        drop_service_roles(admin_conn, extra)
+
+
+@pytest.fixture()
+def bootstrapped_db(roleless_db):
+    """A fresh database with the seven service roles provisioned.
+
+    What F.2.2 onward needs: a policy naming `svc_ingress` is uncreatable until
+    the role exists, so every policy-carrying table PR replays through here.
+
+    Built on `roleless_db` so the capability skip and the drop-database-then-
+    drop-roles teardown order have exactly one home — the same reason the
+    scratch fixtures above share `_scratch`.
+    """
+    dsn, _ = roleless_db
+    run_bootstrap(dsn)
+    return dsn
 
 
 def migration_files(limit: int):
