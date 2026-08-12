@@ -95,6 +95,11 @@ jobs:
           # Security — generate a fresh Fernet key per run instead of
           # committing a static test key in the workflow file.
           ENCRYPTION_KEY: ${{ steps.gen-key.outputs.key }}
+          # Integration coverage is MANDATORY here (#758). Without this, a
+          # service container that fails to come up makes every DB-backed test
+          # SKIP, and the run still exits 0 and shows a green tick — a pass
+          # that never executed the tests it claims to cover.
+          REQUIRE_TEST_DATABASE: "1"
           # Development
           DRY_RUN_MODE: "true"
           LOG_LEVEL: DEBUG
