@@ -65,6 +65,31 @@ class Settings(BaseSettings):
     INSTAGRAM_APP_SECRET: Optional[str] = None  # Instagram Login OAuth (preferred)
     OAUTH_REDIRECT_BASE_URL: Optional[str] = None  # e.g., "https://api.storydump.app"
 
+    # Which peers may set X-Forwarded-For / X-Forwarded-Proto on our behalf.
+    #
+    # Comma-separated addresses and/or CIDR networks. This is the set of hosts
+    # whose forwarded-for claims the app believes; every other peer is
+    # attributed by its real TCP address and its headers are ignored.
+    #
+    # The default is the private ranges rather than a specific edge address.
+    # A public-internet client can never hold an RFC1918 source address, so it
+    # can never place itself in this set, and the value needs no per-platform
+    # tuning. Narrow it to the concrete edge address if the platform publishes
+    # a stable one.
+    #
+    # NEVER set this to "*". The wildcard makes uvicorn take the LEFTMOST
+    # X-Forwarded-For entry, which is wholly caller-supplied, so every
+    # IP-keyed control in the app (rate limiting, auth-failure alerting)
+    # becomes attacker-partitionable. See issue #726.
+    TRUSTED_PROXY_HOSTS: str = (
+        "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.1,::1,fd00::/8"
+    )
+
+    @property
+    def trusted_proxy_hosts(self) -> list[str]:
+        """`TRUSTED_PROXY_HOSTS` as the list uvicorn's middleware expects."""
+        return [h.strip() for h in self.TRUSTED_PROXY_HOSTS.split(",") if h.strip()]
+
     # Google Drive OAuth (Phase 05 Multi-Tenant)
     GOOGLE_CLIENT_ID: Optional[str] = None
     GOOGLE_CLIENT_SECRET: Optional[str] = None
