@@ -162,6 +162,5 @@ This means you can configure both and the system will prefer the newer flow.
 
 ## Related Documentation
 
-- [Instagram API Setup Guide](./instagram-api-setup.md) — Original setup guide (Facebook Login flow, manual tokens)
 - [Design Spec](../planning/2026-03-31-meta-app-launch-design.md) — Full architecture design for this feature
 - [Meta Developer Docs: Instagram Login](https://developers.facebook.com/docs/instagram-platform/instagram-api-with-instagram-login/) — Official reference

@@ -6,7 +6,7 @@
 
 ## What This Project Does
 
-Storydump is a self-hosted Instagram Story scheduling system with Telegram-based workflow:
+Storydump is a hosted, multi-tenant Instagram Story scheduling service with Telegram-based workflow:
 1. Media files are indexed from Google Drive (or local filesystem)
 2. A JIT scheduler checks if a posting slot is due each tick
 3. At each slot, the bot either:
