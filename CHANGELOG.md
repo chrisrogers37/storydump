@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **F.1 ownership inventory and fail-closed interface spec (#746)** — classifies all 14 legacy tables against the ratified plan: 9 tenant-owned, 2 global (user-plane), 3 with no target. Documentation only; no schema, no migration, no production-table change.
+  - **The answer key is `02` §9 composed with `02` §7-DDL, not §9 alone.** §9 is a disposition index (legacy → target) and never uses the words "global" or "tenant-owned"; the ownership taxonomy lives in §7-DDL as seven normative policy classes. Recorded so the composition does not have to be rediscovered.
+  - **`chat_settings` splits across two ownership classes** — config to `workspaces` (Class 1, tenant-plane) but onboarding columns to `onboarding_sessions` (Class 3, user-plane, where §7-DDL states "identity precedes tenancy"). F.1's "required leading `tenant_id`" rule applied uniformly would break onboarding by demanding a value that does not exist yet, so the spec attaches the rule to the class rather than the table.
+  - **F.6 baseline re-measured and it does not reproduce.** The plan anchors 75/76 telegram-referencing modules; measured 64 in `src/` and 67 in `src/`+`cli/`, at both the plan date and today. The code has not drifted (64 → 64), and #744 moved the module set by zero. The predicate that produced 75 is not recorded anywhere, so F.6 should commit the executable rule and derive the count from it rather than committing a bare number.
+
 ### Fixed
 
 - **A group migrating to a supergroup no longer strands its tenant (#743)** — Telegram changes a chat's id when a group is migrated to a supergroup, and there was no handling for it anywhere. `ChatSettingsRepository.get_or_create` is the primary access path, so the first update arriving from the *new* id found nothing and **minted a fresh, blank tenant**: settings, Instagram account links, memberships, category mixes, posting history and queued work all stayed attached to the dead id and became unreachable. Nothing raised. From the user's side the bot appeared to reset itself.
