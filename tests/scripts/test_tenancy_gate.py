@@ -25,11 +25,18 @@ from scripts.tenancy_gate import (
 
 
 def _sig(**tables):
-    """Synthetic signature: {table: (has_tenant_key, rls_enabled, policy_count)}."""
-    return {
-        name: {"tenant_keyed": t, "rls_enabled": r, "policies": p}
-        for name, (t, r, p) in tables.items()
-    }
+    """Synthetic signature: {table: (tenant_keyed, rls_enabled, policies[, forced])}."""
+    out = {}
+    for name, spec in tables.items():
+        t, r, p = spec[0], spec[1], spec[2]
+        forced = spec[3] if len(spec) > 3 else False
+        out[name] = {
+            "tenant_keyed": t,
+            "rls_enabled": r,
+            "policies": p,
+            "rls_forced": forced,
+        }
+    return out
 
 
 class TestTheGateCanFail:
@@ -161,6 +168,7 @@ class TestTheGateFiresOnRealPostgres:
         assert sig["gate_probe"] == {
             "tenant_keyed": True,
             "rls_enabled": True,
+            "rls_forced": False,  # the ratified posture: ENABLE without FORCE
             "policies": 1,
         }
         assert tenancy_violations(sig) == [], "a correctly born table was flagged"
@@ -185,3 +193,70 @@ class TestTheGateFiresOnRealPostgres:
         assert sig["gate_probe_global"]["tenant_keyed"] is False
         assert tenancy_violations(sig) == []
         self._exec(scratch_db, "DROP TABLE gate_probe_global;")
+
+
+class TestOwnerBypassPosture:
+    """rajan's #750 finding. Policies do NOT apply to a table's OWNER unless
+    FORCE is set — so ENABLE + policies + no FORCE is owner-readable wholesale.
+
+    Measured on real Postgres before choosing what to gate:
+      ENABLE only, deny-all policy  -> owner reads the row   (bypass is real)
+      + FORCE                       -> owner reads nothing   (FORCE works)
+      + one `NO FORCE` statement    -> owner reads it again  (owner can undo it)
+
+    `02` §7-DDL rules ENABLE-without-FORCE deliberately, because owner-bypass is
+    what lets the M.3 transform run without blanket migration policies. So the
+    gate does NOT require FORCE — that would fail every table built to spec.
+    It gates AGREEMENT, because a mixed estate is the state nobody can see.
+    """
+
+    def test_a_table_deviating_from_the_posture_is_flagged(self):
+        v = tenancy_violations(_sig(media_items=(True, True, 2, True)))
+        assert any("media_items" in x and "posture" in x for x in v), v
+
+    def test_the_posture_message_is_distinguishable_from_the_other_two(self):
+        """Three invariants, three messages — an operator reading red has to
+        know WHICH one broke, and 'RLS' appears in all three descriptions."""
+        no_rls = tenancy_violations(_sig(a=(True, False, 0)))[0]
+        no_pol = tenancy_violations(_sig(b=(True, True, 0)))[0]
+        posture = tenancy_violations(_sig(c=(True, True, 2, True)))[0]
+        assert len({no_rls, no_pol, posture}) == 3
+        assert "not enabled" in no_rls
+        assert "no policy" in no_pol
+        assert "posture deviates" in posture
+
+    def test_conforming_tables_are_silent(self):
+        assert tenancy_violations(_sig(a=(True, True, 1, False))) == []
+
+
+@pytest.mark.integration
+class TestPostureFiresOnRealPostgres:
+    def _exec(self, dsn, sql):
+        import psycopg2
+
+        conn = psycopg2.connect(dsn)
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute(sql)
+        conn.close()
+
+    def test_setting_force_on_one_table_turns_the_gate_red(self, scratch_db):
+        self._exec(
+            scratch_db,
+            "CREATE TABLE posture_probe (id UUID PRIMARY KEY, workspace_id UUID NOT NULL)",
+        )
+        self._exec(scratch_db, "ALTER TABLE posture_probe ENABLE ROW LEVEL SECURITY")
+        self._exec(
+            scratch_db,
+            "CREATE POLICY p ON posture_probe FOR ALL USING (workspace_id IS NOT NULL)",
+        )
+        assert tenancy_violations(tenancy_signature(scratch_db)) == []
+
+        # THE MUTATION: one table deviates from the ratified posture.
+        self._exec(scratch_db, "ALTER TABLE posture_probe FORCE ROW LEVEL SECURITY")
+        sig = tenancy_signature(scratch_db)
+        assert sig["posture_probe"]["rls_forced"] is True
+        v = tenancy_violations(sig)
+        assert any("posture_probe" in x and "posture deviates" in x for x in v), v
+
+        self._exec(scratch_db, "DROP TABLE posture_probe")

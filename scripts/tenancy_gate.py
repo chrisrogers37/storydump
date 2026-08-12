@@ -36,6 +36,17 @@ TENANT_KEY = "workspace_id"
 #: though it has no `workspace_id` column.
 TENANT_ROOT = "workspaces"
 
+#: The ratified posture on owner-bypass (`02` §7-DDL, verbatim): "ENABLE without
+#: FORCE, deliberately: svc_migration owns the tables and owner-bypass is what
+#: lets the runner transform without blanket migration policies".
+#:
+#: So FORCE is NOT required — requiring it would fail every table built to spec.
+#: What IS gated is CONSISTENCY: every tenant-keyed table agrees. A mixed estate
+#: is the dangerous state, because it reads as uniform to anyone spot-checking
+#: one table, and the plan's rationale only holds if the posture is universal.
+#: Flip this to True if the posture is ever re-ratified; the gate follows.
+FORCE_REQUIRED = False
+
 #: Tables that legitimately carry no tenant key. Kept as an explicit, empty
 #: allowlist rather than omitted: `02` §7-DDL Class 3 (user-plane) and Class 4
 #: (machinery counters, admission dedup) have no workspace column BY DESIGN,
@@ -61,6 +72,7 @@ def tenancy_signature(dsn: str) -> dict:
             cur.execute(
                 "SELECT c.relname,"
                 "       c.relrowsecurity,"
+                "       c.relforcerowsecurity,"
                 "       EXISTS (SELECT 1 FROM information_schema.columns col"
                 "               WHERE col.table_schema = 'public'"
                 "                 AND col.table_name = c.relname"
@@ -69,10 +81,11 @@ def tenancy_signature(dsn: str) -> dict:
                 " WHERE n.nspname = 'public' AND c.relkind = 'r'",
                 (TENANT_KEY,),
             )
-            for name, rls, has_key in cur.fetchall():
+            for name, rls, forced, has_key in cur.fetchall():
                 sig[name] = {
                     "tenant_keyed": bool(has_key) or name == TENANT_ROOT,
                     "rls_enabled": bool(rls),
+                    "rls_forced": bool(forced),
                     "policies": 0,
                 }
 
@@ -100,6 +113,34 @@ def tenancy_violations(sig: dict) -> list[str]:
       way that looks like a bug elsewhere.
     """
     out: list[str] = []
+    keyed = {
+        t for t, e in sig.items() if e["tenant_keyed"] and t not in TENANT_KEY_EXEMPT
+    }
+
+    # THIRD INVARIANT — owner-bypass posture (rajan, #750 review). Policies do
+    # not apply to a table's OWNER unless FORCE is set, so ENABLE + policies +
+    # no FORCE leaves the table readable wholesale by the owning role. The plan
+    # accepts that deliberately and says why; what it cannot survive is a MIXED
+    # estate, where some tables are owner-bypassable and some are not and
+    # nothing says which. Checked as agreement with FORCE_REQUIRED so the gate
+    # states the posture rather than inferring it from whatever landed first.
+    forced = {t for t in keyed if sig[t].get("rls_forced")}
+    deviating = (keyed - forced) if FORCE_REQUIRED else forced
+    for table in sorted(deviating):
+        want = (
+            "FORCE is required"
+            if FORCE_REQUIRED
+            else "the posture is ENABLE without FORCE"
+        )
+        have = "not forced" if FORCE_REQUIRED else "FORCE is set"
+        out.append(
+            f"{table}: owner-bypass posture deviates — {have}, but {want} "
+            f"(`02` §7-DDL). A mixed estate is the failure: policies do not "
+            f"apply to the table OWNER unless FORCE is set, so half the tables "
+            f"being owner-readable while the other half are not is invisible to "
+            f"anyone spot-checking one of them"
+        )
+
     for table in sorted(sig):
         entry = sig[table]
         if not entry["tenant_keyed"] or table in TENANT_KEY_EXEMPT:
