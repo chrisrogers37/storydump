@@ -1,6 +1,6 @@
 # Storydump - Instagram Story Automation System
 
-A self-hosted Instagram Story scheduling system with Telegram-based team collaboration.
+A hosted, multi-tenant Instagram Story scheduling service with Telegram-based team collaboration.
 
 ## Features
 
@@ -15,7 +15,11 @@ A self-hosted Instagram Story scheduling system with Telegram-based team collabo
 - 📱 **Instagram Deep Links**: One-tap button to open Instagram app/web
 - ✨ **Enhanced Captions**: Clean workflow instructions with actionable steps
 
-## Quick Start
+## Local Development Setup
+
+These steps stand up a development environment for working on storydump. They
+are not a deployment guide — the service runs as one hosted deployment we
+operate, and tenants are provisioned on it rather than installing their own.
 
 ### 1. Installation
 
@@ -270,7 +274,7 @@ storydump/
 📚 **[Complete Documentation Index](documentation/README.md)**
 
 Key resources:
-- **[Quick Start Guide](documentation/guides/quickstart.md)** - Get running in 10 minutes
+- **[Quick Start Guide](documentation/guides/quickstart.md)** - Start here: using, developing, or operating Storydump
 - **[Deployment Guide](documentation/guides/deployment.md)** - Production deployment checklist
 - **[Testing Guide](documentation/guides/testing-guide.md)** - How to run and write tests
 - **[Technical Specification](documentation/planning/instagram_automation_plan.md)** - Complete implementation plan

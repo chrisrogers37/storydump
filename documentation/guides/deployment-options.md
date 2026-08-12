@@ -71,15 +71,17 @@ All CI runs on **GitHub cloud runners** (`ubuntu-latest`), which are safe for pu
 
 ## Multitenancy Model
 
-When others use this project:
+Storydump runs as **one deployment we operate**, serving many tenants on it.
+Onboarding a tenant is a row, not a deploy: no per-tenant Railway project, Neon
+database, environment variables, or bot token. Tenant isolation is enforced
+inside that single deployment — per-workspace scoping in the database and in
+every service boundary — which is what makes it safe for unrelated customers to
+share it.
 
-1. **Users fork/clone the repository**
-2. **Users create their own Railway project**
-3. **Users set up their own Neon database**
-4. **Users configure their own environment variables** in Railway
-5. **Users deploy to their own Railway services**
-
-**Your infrastructure is never accessed by other users.** Everyone runs their own instance.
+This replaces an earlier fork-and-run-your-own model. That model was never
+operated, and it is not what the product is: see the consolidated design plan's
+FC-9 (hosted product) and its T3 constraint, "workspaces are rows, not
+deploys".
 
 ---
 

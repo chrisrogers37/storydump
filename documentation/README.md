@@ -107,11 +107,11 @@ documentation/
 
 ## Getting Started Guides
 
-### Quick Start (10 Minutes)
+### Quick Start
 **[quickstart.md](guides/quickstart.md)**
-- Fastest path to running the application
-- Step-by-step setup: clone, venv, database, configure, index media, run
-- Essential CLI and Telegram bot commands
+- Routes by intent: using the hosted product, working on it, or operating it
+- Onboarding happens at storydump.app and in the Telegram bot — there is no instance to install
+- Telegram bot commands for day-to-day use
 - Troubleshooting common issues
 
 ### Deployment Guide (Railway + Neon)
@@ -139,13 +139,16 @@ documentation/
 - Test fixtures and patterns (session-scoped DB, function-scoped transactions)
 - CI/CD integration (GitHub Actions)
 
-### Instagram API Setup
-**[instagram-api-setup.md](guides/instagram-api-setup.md)**
-- Meta Business Suite and developer app setup (12 steps)
-- Instagram Graph API token generation and extension
+### Instagram Login Setup
+**[instagram-login-setup.md](guides/instagram-login-setup.md)**
+- The current path: OAuth direct through Instagram, Instagram User access tokens
+- Scopes, redirect configuration, and token refresh via `graph.instagram.com`
 - Cloudinary integration for media hosting
-- Multi-account management via CLI commands
-- Token bootstrapping (.env to DB), encryption, and troubleshooting
+- Multi-account management
+
+The legacy Facebook-Login setup guide was removed: the design plan's FC-4 rules
+out the Facebook Page path ("never make a user auth a Facebook Page again"), so
+a guide walking a reader through it contradicted a fixed constraint.
 
 ### Development Environment Setup
 **[dev-environment-setup.md](guides/dev-environment-setup.md)**
@@ -251,7 +254,7 @@ Coming in Phase 5 (Dashboard UI):
 ## Quick Reference
 
 ### For New Developers
-1. Start with **[quickstart.md](guides/quickstart.md)** (10 min setup)
+1. Start with **[quickstart.md](guides/quickstart.md)**, then **[dev-environment-setup.md](guides/dev-environment-setup.md)** (local setup)
 2. Read **[testing-guide.md](guides/testing-guide.md)** (understand testing)
 3. Review **[phases/00_MASTER_ROADMAP.md](planning/phases/00_MASTER_ROADMAP.md)** (architecture and roadmap)
 4. Read root **[CLAUDE.md](../CLAUDE.md)** for detailed service/model reference and safety rules
@@ -262,7 +265,7 @@ Coming in Phase 5 (Dashboard UI):
 3. Configure Neon database (Section 2)
 4. Deploy to Railway (Section 4)
 5. Test and go live (Sections 5-11)
-6. For Instagram API: **[instagram-api-setup.md](guides/instagram-api-setup.md)**
+6. For Instagram: **[instagram-login-setup.md](guides/instagram-login-setup.md)**
 7. For cloud-specific details: **[cloud-deployment.md](guides/cloud-deployment.md)**
 
 ### For Understanding Architecture
@@ -344,12 +347,12 @@ When adding new documentation:
 
 ## Need Help?
 
-- **Setup issues?** → See [quickstart.md](guides/quickstart.md) troubleshooting
+- **Setup issues?** → See [quickstart.md](guides/quickstart.md) troubleshooting, or [dev-environment-setup.md](guides/dev-environment-setup.md) for a local environment
 - **Deployment questions?** → Check [deployment.md](guides/deployment.md)
 - **Test failures?** → Review [testing-guide.md](guides/testing-guide.md)
 - **Architecture questions?** → Read [phases/00_MASTER_ROADMAP.md](planning/phases/00_MASTER_ROADMAP.md)
 - **Version history?** → Check [ROADMAP.md](ROADMAP.md) or [../CHANGELOG.md](../CHANGELOG.md)
-- **Instagram API setup?** → Follow [instagram-api-setup.md](guides/instagram-api-setup.md)
+- **Instagram setup?** → Follow [instagram-login-setup.md](guides/instagram-login-setup.md)
 - **Security concerns?** → Review [SECURITY_REVIEW.md](SECURITY_REVIEW.md)
 
 ---

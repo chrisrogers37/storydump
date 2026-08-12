@@ -54,8 +54,7 @@ export default function TermsOfService() {
             can post on your behalf through the Instagram Graph API, with
             optional Google Drive integration for media sync. Operator
             notifications and team interactions are handled through Telegram.
-            Storydump is offered as a hosted service and as self-hostable
-            software.
+            Storydump is offered as a hosted service.
           </p>
         </section>
 
