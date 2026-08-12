@@ -192,8 +192,16 @@ def discover_migrations(migrations_dir, max_version: int | None = None) -> list:
             execution_mode=_execution_mode(no_transaction, statements),
             schema_move=schema_move,
         )
-    versions = sorted(v for v in by_version if max_version is None or v <= max_version)
-    return [by_version[v] for v in versions]
+    return _within([by_version[v] for v in sorted(by_version)], max_version)
+
+
+def _within(migrations, max_version: int | None):
+    """The replay window: files at or below ``max_version``, all of them if
+    unbounded. One home for the bound so a caller that already holds the whole
+    corpus derives the same window `discover_migrations` would have."""
+    if max_version is None:
+        return list(migrations)
+    return [m for m in migrations if m.version <= max_version]
 
 
 def schema_move_migration(migrations_dir):
@@ -482,10 +490,10 @@ class AdoptReport:
     already: list = field(default_factory=list)
 
 
-def _load_manifest(manifest_path, migrations):
+def _load_manifest(manifest_path, window, corpus):
     """The adoption manifest is a reviewed contract.
 
-    Every discovered file is paired with adoption evidence, one of:
+    Every file in the replay window is paired with adoption evidence, one of:
 
     - an explicit ``probe`` entry (SQL returning bool);
     - an explicit ``asserted`` entry (data-only files with no structural
@@ -493,6 +501,21 @@ def _load_manifest(manifest_path, migrations):
       floor trust is never the mechanism);
     - no entry at all, iff the file carries ``runner:postcondition`` lines —
       the probe derives from them, so the predicate has one home.
+
+    **The two checks below ask different questions and take different lists,
+    and conflating them is what made a bounded adopt lie** (#746 review). One
+    list serving both looks harmless until a bound exists:
+
+    - *unpaired* is a **window** question — "does everything I am about to
+      decide on have a probe?" Adopt decides nothing about files outside the
+      window, so demanding evidence for them would fail a legacy-lineage adopt
+      because a *target* file lacks a probe: true, and about the wrong files.
+    - *orphans* is a **corpus** question — "does every manifest key name a
+      real file?" Asked against the window instead, every entry above the
+      bound is reported as having *no migration file* when the file is right
+      there and was merely filtered out. That message sends an operator
+      looking for files that exist, which is worse than no message: it answers
+      a question nobody asked, confidently, mid-incident.
     """
     data = json.loads(Path(manifest_path).read_text())
     required_through = int(data["required_through"])
@@ -520,9 +543,9 @@ def _load_manifest(manifest_path, migrations):
         else:
             entries[version] = ("probe", (entry["probe"],))
 
-    by_version = {m.version: m for m in migrations}
+    in_corpus = {m.version for m in corpus}
     unpaired = []
-    for migration in migrations:
+    for migration in window:
         if migration.version in entries:
             continue
         if migration.postconditions:
@@ -535,7 +558,7 @@ def _load_manifest(manifest_path, migrations):
             " runner:postcondition lines to derive one from: "
             + ", ".join(f"{v:03d}" for v in unpaired)
         )
-    orphans = sorted(set(entries) - set(by_version))
+    orphans = sorted(set(entries) - in_corpus)
     if orphans:
         raise MigrationRunnerError(
             "adoption manifest names versions with no migration file: "
@@ -558,8 +581,9 @@ def adopt(
     about. The legacy ``schema_version`` table is never read; its known
     010/034 gaps are exactly the hazard this replaces.
     """
-    migrations = discover_migrations(migrations_dir, max_version)
-    required_through, entries = _load_manifest(manifest_path, migrations)
+    corpus = discover_migrations(migrations_dir)
+    migrations = _within(corpus, max_version)
+    required_through, entries = _load_manifest(manifest_path, migrations, corpus)
     report = AdoptReport()
     conn = _connect(dsn)
     try:

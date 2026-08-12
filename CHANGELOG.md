@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A bounded `adopt` reported "no migration file" for files that exist (#755)** — `adopt(..., max_version)` handed the *bounded* migration list to `_load_manifest`, which used it for two checks that ask questions at different scopes. The orphan check ("does every manifest key name a real file?") is a question about the **corpus**; asked against the replay window instead, every manifest entry above the bound was reported as having no migration file while the file sat in the tree, filtered out by the bound. Latent today — the manifest tops out at 049 and 051 carries postconditions rather than an entry — and it fires the moment F.2.2 gives a target migration a manifest entry, taking all four bounded `adopt` call sites with it.
+  - **The severity is the diagnostic, not the crash.** It answers a question nobody asked, confidently: the reader goes looking for missing files, finds them present, and stops believing the tool — at the moment they can least afford it.
+  - **The fix separates the two questions rather than narrowing one.** The probe requirement stays scoped to the **window** (adopt decides nothing about files outside it, and widening it would fail a legacy-lineage adopt because a *target* file has no probe yet — true, and about the wrong files); the orphan check reads the **corpus**. The bound now has one home, `_within`, so a caller holding the whole corpus derives the same window `discover_migrations` would have.
+  - **Chosen over the narrower form suggested on the issue** (filter the orphan list to the bound), which fixes the false report but also silences the check for an entry naming a genuinely absent file on every bounded run. Measured on the case that separates them: manifest names 009, no 009 in the tree, bounded — this fix reports it, the narrower one passes silently. Both forms are otherwise identical across the 17-test adopt suite.
+  - Four mutants killed, none inert, including the original defect and the narrower form.
+
 ### Added
 
 - **F.2.1b — the lineage lane, and the boundary that makes two lineages fit in one directory (#746)** — F.2.2's tables were blocked three independent ways, all of them downstream of one fact: both gate tests replay the whole migrations directory unbounded, so any file numbered 051+ joins both runs automatically with no opt-in. The target schema shares four table names with the legacy one (`users`, `media_items`, `onboarding_sessions`, `category_post_case_mix`), so the first target `CREATE TABLE` dies; and the 3c schema move that clears that collision is itself what breaks parity the other way, emptying `public` of the ~14 legacy tables whose models are still registered on `Base`. This increment lands the move, bounds the legacy lineage, and stands up the lane that replays across the boundary.
