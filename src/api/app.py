@@ -69,9 +69,14 @@ app = FastAPI(
 # Security headers — HSTS, CSP, X-Frame-Options, X-Content-Type-Options
 app.add_middleware(SecurityHeadersMiddleware)
 
-# Proxy headers — trust X-Forwarded-For/Proto from Railway's load balancer
-# so request.client.host returns the real client IP, not the proxy IP.
-app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=["*"])
+# Proxy headers — trust X-Forwarded-For/Proto from the edge that fronts us, so
+# request.client.host returns the real client IP rather than the proxy's.
+#
+# Named hosts, never "*": under the wildcard uvicorn honours the header from any
+# peer AND takes its leftmost entry, which the caller writes. Every IP-keyed
+# control downstream — the limiter's key_func, auth_monitor's failure buckets —
+# then partitions on a value the caller chooses. See TRUSTED_PROXY_HOSTS (#726).
+app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=settings.trusted_proxy_hosts)
 
 # Rate limiting — 30 req/min per IP global default (see src/api/rate_limit.py)
 app.state.limiter = limiter

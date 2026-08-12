@@ -283,3 +283,167 @@ class TestStartupSecretValidation:
             ENCRYPTION_KEY=None, ENCRYPTION_KEYS="key1,key2"
         )
         assert is_valid
+
+
+class TestForwardedForAttribution:
+    """Who the app believes the client is, when the caller writes the header (#726).
+
+    Every IP-keyed control in this app reads one value: `request.client.host`,
+    as rewritten by uvicorn's ProxyHeadersMiddleware. The limiter keys on it
+    (`src/api/rate_limit.py`), and `auth_monitor` buckets failures on it
+    (`src/api/routes/onboarding/helpers.py:_client_ip`). If a caller can choose
+    that value, they get a fresh bucket per request and both controls stop
+    accumulating — silently, which is the part worth testing.
+
+    The topology these tests model, which is the real one:
+
+        attacker box (public IP) -> edge (private IP, our TCP peer) -> app
+
+    A standards-compliant proxy APPENDS the address it observed, so the app
+    receives "<whatever the caller sent>, <caller's real address>". Every entry
+    except the last is caller-controlled. Under `trusted_hosts=["*"]` uvicorn
+    returns the FIRST entry; under a named set it walks from the right and
+    returns the first untrusted one.
+    """
+
+    EDGE = "10.0.0.5"  # our TCP peer: the platform edge
+    CALLER = "192.0.2.50"  # the caller's real address, appended by the edge
+    FORGED = "198.51.100.7"  # what the caller writes into the header
+
+    @staticmethod
+    def _attributed(trusted_hosts, xff, peer):
+        """Run the real middleware; return the client host it attributes."""
+        import asyncio
+
+        from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+
+        seen = {}
+
+        async def app(scope, receive, send):
+            seen["host"] = scope["client"][0] if scope.get("client") else None
+
+        headers = [(b"x-forwarded-for", xff.encode())] if xff else []
+        middleware = ProxyHeadersMiddleware(app, trusted_hosts=trusted_hosts)
+        asyncio.run(
+            middleware(
+                {"type": "http", "client": (peer, 54321), "headers": headers},
+                None,
+                None,
+            )
+        )
+        return seen["host"]
+
+    def _configured(self):
+        from src.config.settings import settings
+
+        return settings.trusted_proxy_hosts
+
+    def test_the_wildcard_is_not_configured(self):
+        """The wildcard is the defect itself, not merely a loose setting.
+
+        Asserted on the parsed value rather than on the literal string, so it
+        also catches "*" arriving via the environment.
+        """
+        assert "*" not in self._configured(), (
+            "TRUSTED_PROXY_HOSTS contains the wildcard. uvicorn then honours "
+            "X-Forwarded-For from any peer and takes its leftmost entry, which "
+            "the caller writes — see #726."
+        )
+
+    def test_a_forged_leading_entry_does_not_win_behind_the_edge(self):
+        got = self._attributed(
+            self._configured(), f"{self.FORGED}, {self.CALLER}", peer=self.EDGE
+        )
+        assert got == self.CALLER, (
+            f"attributed to {got!r}; the caller forged {self.FORGED!r} and the "
+            f"edge appended the truth {self.CALLER!r}"
+        )
+
+    def test_a_forged_private_hop_does_not_launder_the_claim(self):
+        """A caller who pads the chain with a trusted-looking hop still loses.
+
+        The edge appends last, so the rightmost entry is the one it observed
+        no matter what precedes it.
+        """
+        got = self._attributed(
+            self._configured(),
+            f"{self.FORGED}, 10.0.0.9, {self.CALLER}",
+            peer=self.EDGE,
+        )
+        assert got == self.CALLER
+
+    def test_a_direct_caller_cannot_forge_at_all(self):
+        """Reaching the app directly, the caller is not a trusted peer, so the
+        header is not read and their real address stands."""
+        got = self._attributed(self._configured(), self.FORGED, peer=self.CALLER)
+        assert got == self.CALLER
+
+    def test_no_public_address_can_join_the_trusted_set(self):
+        """The default is the private ranges precisely because a public client
+        can never hold one. Pins that property rather than the literal list."""
+        for public in ("192.0.2.50", "198.51.100.7", "203.0.113.9", "8.8.8.8"):
+            got = self._attributed(self._configured(), "1.2.3.4", peer=public)
+            assert got == public, f"{public} was treated as a trusted proxy"
+
+    def test_rate_limit_buckets_do_not_partition_on_a_forged_value(self):
+        """The end-to-end consequence, through the real limiter.
+
+        60 requests against a 30/minute limit, each forging a different address.
+        Correct behaviour is that the ceiling still applies.
+        """
+        from fastapi import FastAPI, Request
+        from slowapi import Limiter, _rate_limit_exceeded_handler
+        from slowapi.errors import RateLimitExceeded
+        from slowapi.middleware import SlowAPIMiddleware
+        from slowapi.util import get_remote_address
+        from starlette.testclient import TestClient
+        from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+
+        limiter = Limiter(
+            key_func=get_remote_address,
+            default_limits=["30/minute"],
+            storage_uri="memory://",
+        )
+        api = FastAPI()
+        api.state.limiter = limiter
+        api.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+        api.add_middleware(SlowAPIMiddleware)
+
+        @api.get("/probe")
+        def probe(request: Request):
+            return {"ok": True}
+
+        client = TestClient(
+            ProxyHeadersMiddleware(api, trusted_hosts=self._configured())
+        )
+        blocked = 0
+        for i in range(60):
+            resp = client.get(
+                "/probe",
+                headers={"X-Forwarded-For": f"198.51.100.{i}, {self.CALLER}"},
+            )
+            if resp.status_code == 429:
+                blocked += 1
+
+        assert blocked == 30, (
+            f"{blocked} of 60 rotating-source requests were limited; expected 30. "
+            "A caller rotating X-Forwarded-For is getting a fresh bucket per request."
+        )
+
+    def test_the_checks_can_fail(self):
+        """The predicate against the vulnerable configuration it never sees.
+
+        Without this, every assertion above would also pass against a middleware
+        that ignored X-Forwarded-For entirely, and nothing here would prove the
+        tests observe the setting at all.
+        """
+        forged_chain = f"{self.FORGED}, {self.CALLER}"
+
+        # The wildcard takes the leftmost, caller-written entry...
+        assert self._attributed(["*"], forged_chain, peer=self.EDGE) == self.FORGED
+        # ...and believes a direct caller with no proxy in front of them.
+        assert self._attributed(["*"], self.FORGED, peer=self.CALLER) == self.FORGED
+        # A named set rejects both.
+        assert (
+            self._attributed([self.EDGE], forged_chain, peer=self.EDGE) == self.CALLER
+        )
