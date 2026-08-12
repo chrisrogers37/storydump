@@ -17,11 +17,27 @@ import psycopg2
 import pytest
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 
+from scripts.migration_runner import legacy_lineage_max
 from src.config.settings import settings
+from src.utils.validators import MIGRATIONS_DIR
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SETUP_SQL = REPO_ROOT / "scripts" / "setup_database.sql"
 BOOTSTRAP_SQL = REPO_ROOT / "scripts" / "window" / "step0_bootstrap.sql"
+
+#: The last version of the LEGACY lineage — everything numbered below the 3c
+#: schema move. **Derived from the move file's own marker, never written down
+#: here**: a bound stated as a literal is a second enumeration of the corpus,
+#: and it would be right on the day it was typed and silently wrong the first
+#: time anyone renumbered anything. Read it, do not replace it with an int.
+#:
+#: What it is FOR: from 051 on the corpus holds two lineages in one directory,
+#: and the suites below guard the legacy one — the schema the running
+#: application is built on. Replaying past the boundary renames `public` out
+#: from under them, so every legacy-lineage replay passes this bound. The lane
+#: that replays *across* the boundary is `test_lineage_lane.py`, deliberately
+#: a separate suite rather than a flag on these.
+LEGACY_LINEAGE_MAX = legacy_lineage_max(MIGRATIONS_DIR)
 
 #: The seven service roles, split as `02` §7 declares them and the `04` step-0
 #: bootstrap provisions them. Held here rather than re-listed per test so the
@@ -212,11 +228,7 @@ def migration_files(limit: int):
     discovery so the gate cannot drift from production's file set."""
     from scripts.migration_runner import discover_migrations
 
-    files = [
-        m.path
-        for m in discover_migrations(REPO_ROOT / "scripts" / "migrations")
-        if m.version <= limit
-    ]
+    files = [m.path for m in discover_migrations(MIGRATIONS_DIR, limit)]
     assert files, "no migration files found"
     return files
 
