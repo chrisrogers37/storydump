@@ -187,6 +187,77 @@ class TestAdoptHardFailures:
             adopt(scratch_db, tmp_path, manifest)
 
 
+class TestAdoptUnderALineageBound:
+    """`max_version` selects a replay WINDOW out of a corpus that holds two
+    lineages (#746). The manifest is not windowed — it describes the whole
+    corpus — and the two manifest checks therefore ask questions at different
+    scopes. Answering both from the bounded list is what made adopt lie (#755).
+    """
+
+    def test_a_file_above_the_bound_is_not_reported_as_missing(
+        self, scratch_db, three_file_tree
+    ):
+        """THE REGRESSION. Bounded, the manifest's 002 and 003 were reported as
+        `no migration file` — while both files sat in the tree, filtered out by
+        the bound. An operator reads that and goes looking for files that are
+        already there, which costs more than no diagnostic: they find the files
+        present and stop believing the tool, mid-incident.
+        """
+        manifest = three_entry_manifest(three_file_tree)
+        execute(scratch_db, "CREATE TABLE adopted_one (id INT)")
+
+        report = adopt(scratch_db, three_file_tree, manifest, 1)
+
+        assert [m.version for m in report.adopted] == [1]
+        assert [m.version for m in report.pending] == []
+
+    def test_a_manifest_entry_with_no_file_is_still_reported_when_bounded(
+        self, scratch_db, tmp_path
+    ):
+        """The half a narrower fix loses. Silencing the orphan check *at* the
+        bound also silences it for an entry naming a file that genuinely does
+        not exist — the check stops asking its own question on every bounded
+        run. Pointing it at the corpus instead keeps the question intact and
+        makes the answer true: 009 is absent from the tree, bound or no bound.
+        """
+        write_migration(tmp_path, 1, "CREATE TABLE adopted_one (id INT);")
+        write_migration(tmp_path, 2, "CREATE TABLE adopted_two (id INT);")
+        manifest = write_manifest(
+            tmp_path,
+            1,
+            [
+                {"version": 1, "probe": probe_table("adopted_one")},
+                {"version": 9, "probe": "SELECT true"},
+            ],
+        )
+
+        with pytest.raises(MigrationRunnerError, match="009"):
+            adopt(scratch_db, tmp_path, manifest, 1)
+
+    def test_the_probe_requirement_stays_scoped_to_the_window(
+        self, scratch_db, three_file_tree
+    ):
+        """The other direction, and why the corpus is not simply handed to both
+        checks. "Every file needs adoption evidence" is a question about what
+        adopt is deciding on — it decides nothing above the bound. Widened to
+        the corpus, a legacy-lineage adopt would fail because a TARGET file has
+        no probe yet: true, and about the wrong files.
+
+        The contrast is in one test because the two calls differ in exactly one
+        argument.
+        """
+        manifest = write_manifest(
+            three_file_tree, 1, [{"version": 1, "probe": probe_table("adopted_one")}]
+        )
+        execute(scratch_db, "CREATE TABLE adopted_one (id INT)")
+
+        report = adopt(scratch_db, three_file_tree, manifest, 1)
+        assert [m.version for m in report.adopted] == [1]
+
+        with pytest.raises(MigrationRunnerError, match="002"):
+            adopt(scratch_db, three_file_tree, manifest)
+
+
 class TestAdoptTrustsProbesNotSchemaVersion:
     def test_legacy_schema_version_rows_are_ignored(self, scratch_db, three_file_tree):
         """The legacy self-stamp table contradicts the probes (its known
