@@ -8,8 +8,21 @@ teardown against the other's live session: connections killed mid-test, tables
 dropped underneath a running suite, and nondeterministic red that each side
 reads as their own code. The per-session suffix below removes the collision
 rather than serialising around it.
+
+**A database that dies is a failure, not a skip (#758 part 2).** The setup
+fixture used to catch every exception and degrade to skipping the integration
+tests. A run whose database vanished then reported ``N passed, M skipped`` at
+``rc 0`` — so the tick, and "0 failed", both said the integration tests passed
+when they had never executed. A false FAIL costs an hour and makes you look; a
+false PASS makes you ship.
+
+The discriminator is *did the server ever answer*, which is observable rather
+than guessed: no PostgreSQL at the configured address means none was
+configured, and skipping is honest. A server that answered and then failed is a
+real failure and propagates.
 """
 
+import os
 import uuid
 
 import pytest
@@ -45,14 +58,82 @@ TEST_DB_BASE_NAME = settings.TEST_DB_NAME
 SESSION_DB_SUFFIX = uuid.uuid4().hex[:10]
 settings.TEST_DB_NAME = f"{TEST_DB_BASE_NAME}_{SESSION_DB_SUFFIX}"
 
+#: Set where integration coverage is MANDATORY — CI. It turns the one honest
+#: local behaviour (no database, so skip) into a failure, because in CI "no
+#: database" is not a contributor without PostgreSQL, it is the service
+#: container failing to come up, and a run that quietly skips its integration
+#: tests there is exactly the false PASS this file exists to stop.
+REQUIRE_DB_ENV = "REQUIRE_TEST_DATABASE"
+
+#: Upper bound on legitimately-skipped tests, enforced only where a database is
+#: required. Verified against CI: five consecutive runs at exactly 10 skipped
+#: while the passed count moved (2356 -> 2376); two of them (31648859395,
+#: 31642935597) re-measured independently.
+#:
+#: **This number is hand-maintained and WILL drift** — that is its deliberate
+#: cost, and it is why `integration_verdict` (which derives its input) is the
+#: load-bearing gate and this is only a backstop. It catches mass-skip shapes
+#: the verdict cannot see: a stray module-level skipmark, a missing optional
+#: dependency. If you add a legitimate skip, raise this on purpose rather than
+#: deleting the check.
+MAX_EXPECTED_SKIPS = 10
+
 # Global flag to track if database is available
 _database_available = None
 _test_engine = None
 
 
-def create_test_database():
-    """Create test database if it doesn't exist."""
-    # Connect to default postgres database to create test database
+def database_is_required() -> bool:
+    return os.environ.get(REQUIRE_DB_ENV, "").strip().lower() in ("1", "true", "yes")
+
+
+def integration_verdict(server_answered: bool, required: bool) -> str:
+    """``run`` | ``skip`` | ``fail`` — the whole policy, in one place.
+
+    Pure, so the policy is assertable with no PostgreSQL anywhere near it. The
+    bug this replaces was a policy decision buried in an ``except Exception``:
+    nothing could test it, and every failure mode collapsed into one answer.
+    """
+    if server_answered:
+        return "run"
+    return "fail" if required else "skip"
+
+
+def skip_ceiling_breach(skipped: int, ceiling: int, required: bool):
+    """The message for a mass skip, or None. Only meaningful where a database
+    is required — elsewhere a large skip count is a contributor without one."""
+    if not required or skipped <= ceiling:
+        return None
+    return (
+        f"{skipped} tests were skipped, ceiling is {ceiling}. In an environment"
+        f" that sets {REQUIRE_DB_ENV}, a skip count above the baseline is a"
+        " swallowed database or a stray skipmark until proven otherwise — the"
+        " run passed without executing the tests it claims to cover. Raise"
+        " MAX_EXPECTED_SKIPS deliberately if the new skips are legitimate."
+    )
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Fail the run on a mass skip. ``rc`` and "0 failed" are both blind to it."""
+    reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+    if reporter is None:
+        return
+    breach = skip_ceiling_breach(
+        len(reporter.stats.get("skipped", [])),
+        MAX_EXPECTED_SKIPS,
+        database_is_required(),
+    )
+    if breach:
+        print(f"\n\u274c {breach}")
+        session.exitstatus = 1
+
+
+def maintenance_connection():
+    """A connection to the ``postgres`` maintenance database.
+
+    One door, so the reachability probe and the create/drop pair cannot
+    disagree about what "the server" means.
+    """
     conn = psycopg2.connect(
         host=settings.DB_HOST,
         port=settings.DB_PORT,
@@ -61,6 +142,38 @@ def create_test_database():
         database="postgres",
     )
     conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+    return conn
+
+
+def server_answered() -> bool:
+    """Did a PostgreSQL answer at the configured address?
+
+    THE DISCRIMINATOR. It separates "no database was configured" — the only
+    condition under which skipping the integration tests is honest — from "a
+    database was configured and then failed", which is a real failure. Only
+    ``OperationalError`` is caught: that is the could-not-connect class, and
+    anything else here is a defect that must surface rather than be read as an
+    absent server.
+
+    Bound, stated rather than glossed: at FIRST contact a server that has just
+    died is genuinely indistinguishable from one that was never there, so that
+    single case reads as not-configured. Every later failure is unambiguous and
+    is raised.
+    """
+    try:
+        maintenance_connection().close()
+        return True
+    except psycopg2.OperationalError as exc:
+        print(
+            f"\n\u26a0\ufe0f  No PostgreSQL answered at"
+            f" {settings.DB_HOST}:{settings.DB_PORT} — {exc}"
+        )
+        return False
+
+
+def create_test_database():
+    """Create this session's test database."""
+    conn = maintenance_connection()
     cursor = conn.cursor()
 
     # Check if test database exists
@@ -80,16 +193,8 @@ def create_test_database():
 
 
 def drop_test_database():
-    """Drop test database."""
-    # Connect to default postgres database to drop test database
-    conn = psycopg2.connect(
-        host=settings.DB_HOST,
-        port=settings.DB_PORT,
-        user=settings.DB_USER,
-        password=settings.DB_PASSWORD,
-        database="postgres",
-    )
-    conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+    """Drop this session's test database."""
+    conn = maintenance_connection()
     cursor = conn.cursor()
 
     # Terminate all connections to test database
@@ -111,43 +216,67 @@ def drop_test_database():
 @pytest.fixture(scope="session", autouse=True)
 def setup_test_database():
     """
-    Session-scoped fixture to create test database before tests run.
+    Session-scoped fixture owning this session's test database.
 
-    This fixture:
-    1. Tries to create the test database if it doesn't exist
-    2. Creates all tables using SQLAlchemy models
-    3. Yields control to tests
-    4. Drops the test database after all tests complete
+    1. Probes whether a PostgreSQL answers at all (`server_answered`) — the
+       skip-or-fail discriminator.
+    2. Creates this session's uniquely-named database and builds the schema
+       from the SQLAlchemy models.
+    3. Yields the engine to tests.
+    4. Drops the schema and the database after all tests complete.
 
-    If database connection fails, yields None and allows pure unit tests to run.
+    THREE outcomes rather than two, and the third is the point:
+
+    - **server answered** — run.
+    - **no server, database not required** — yield None; consumers skip. The
+      only condition under which skipping integration tests is honest.
+    - **no server, database required** (`REQUIRE_TEST_DATABASE`) — raise. In CI
+      "no database" is not a contributor without PostgreSQL, it is the service
+      container failing to come up, and skipping there produces a green run
+      that never executed its integration tests.
+
+    Nothing after the probe is swallowed: a database that answered and then
+    failed is a real failure and propagates.
     """
     global _database_available, _test_engine
 
-    try:
-        # Create test database
-        create_test_database()
+    verdict = integration_verdict(server_answered(), database_is_required())
 
-        # Create engine and tables
-        engine = create_engine(settings.test_database_url)
-        Base.metadata.create_all(engine)
-        print("✓ Created all tables in test database")
+    if verdict == "fail":
+        raise RuntimeError(
+            f"{REQUIRE_DB_ENV} is set, so integration coverage is mandatory"
+            f" here, but no PostgreSQL answered at {settings.DB_HOST}:"
+            f"{settings.DB_PORT}. Failing rather than skipping: a run that"
+            " silently skips its integration tests still exits 0 and reads as"
+            " a pass (#758)."
+        )
 
-        _database_available = True
-        _test_engine = engine
-
-        yield engine
-
-        # Cleanup: drop all tables and database
-        Base.metadata.drop_all(engine)
-        engine.dispose()
-        drop_test_database()
-
-    except Exception as e:
-        print(f"\n⚠️ Database setup skipped: {e}")
+    if verdict == "skip":
         print("   Pure unit tests will still run. Integration tests will be skipped.")
         _database_available = False
         _test_engine = None
         yield None
+        return
+
+    # The server answered. NOTHING below is swallowed — every failure from here
+    # is a database that WAS configured and then went wrong, which is exactly
+    # the case the old `except Exception` turned into a green run.
+    create_test_database()
+    engine = create_engine(settings.test_database_url)
+    Base.metadata.create_all(engine)
+    print("✓ Created all tables in test database")
+
+    _database_available = True
+    _test_engine = engine
+
+    yield engine
+
+    # Teardown sits OUTSIDE any except-and-yield path deliberately: the old
+    # shape yielded a SECOND time when teardown raised, which pytest reports as
+    # an unreadable fixture error instead of the cleanup failure it is.
+    Base.metadata.drop_all(engine)
+    engine.dispose()
+    drop_test_database()
 
 
 @pytest.fixture(scope="function")
