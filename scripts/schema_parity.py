@@ -37,7 +37,7 @@ def schema_signature(dsn: str) -> dict:
             if table in EXCLUDED_TABLES:
                 continue
             entry = sig.setdefault(
-                table, {"columns": {}, "checks": {}, "uniques": set()}
+                table, {"columns": {}, "checks": {}, "uniques": set(), "fks": set()}
             )
             entry["columns"][column] = (data_type, nullable)
 
@@ -70,6 +70,19 @@ def schema_signature(dsn: str) -> dict:
         for table, columns, predicate in cur.fetchall():
             if table in sig:
                 sig[table]["uniques"].add((tuple(columns), " ".join(predicate.split())))
+        # Foreign keys. Added F.2.0: both sides emit them (measured —
+        # create_all produced 24), so unlike RLS they are comparable, and a
+        # composite FK dropped on one side is exactly the drift this gate is
+        # for. Compared by definition text rather than name: the name is
+        # historical, the referential shape is the contract.
+        cur.execute(
+            "SELECT c.conrelid::regclass::text, pg_get_constraintdef(c.oid)"
+            " FROM pg_constraint c JOIN pg_namespace n ON n.oid = c.connamespace"
+            " WHERE n.nspname = 'public' AND c.contype = 'f'"
+        )
+        for table, definition in cur.fetchall():
+            if table in sig:
+                sig[table]["fks"].add(" ".join(definition.split()))
     conn.close()
     return sig
 
@@ -95,4 +108,8 @@ def schema_diff(replayed: dict, models: dict) -> list:
             diffs.append(f"unique {table}{unique}: only in first schema")
         for unique in sorted(m["uniques"] - r["uniques"]):
             diffs.append(f"unique {table}{unique}: only in second schema")
+        for fk in sorted(r.get("fks", set()) - m.get("fks", set())):
+            diffs.append(f"fk {table}: only in first schema — {fk}")
+        for fk in sorted(m.get("fks", set()) - r.get("fks", set())):
+            diffs.append(f"fk {table}: only in second schema — {fk}")
     return diffs
