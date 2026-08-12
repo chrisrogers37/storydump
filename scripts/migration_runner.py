@@ -28,6 +28,21 @@ runbook cites it):
   state is undecidable in place (048's class): adopt may leave them pending
   below an adopted head without calling the chain incoherent, and apply
   re-runs them there.
+- ``-- runner:schema-move`` — the one file that renames ``public`` to
+  ``legacy`` and re-creates an empty ``public`` (M.3 step 3c). It is the
+  corpus's **lineage boundary**: below it is the legacy lineage, above it the
+  target schema. Exactly one file may carry it. Callers needing the boundary
+  call ``legacy_lineage_max`` and let the marker locate it — the boundary is
+  never written down as a version, because a written-down number is a second
+  enumeration that drifts from the file it describes (``04``'s own rollback
+  leg names it "the 3c move file", not a number, for the same reason).
+
+The three doors that WRITE from the corpus — ``discover_migrations``,
+``apply_pending`` and ``adopt`` — take an optional ``max_version``: a bound
+callers use to replay one *lineage* rather than the whole tree. ``status``
+deliberately does not: an operator asking what is pending wants the whole
+answer, target lineage included. Production never passes a bound either — the
+M.3 window is one invocation in file order.
 
 A file's execution mode is a declared discovery-time fact — ``wrapped`` (the
 runner owns one transaction, ledger row inside it), ``self-managed`` (the file
@@ -57,6 +72,7 @@ RUNNER_LOCK_KEY = 712_050_2026
 NO_TRANSACTION_MARKER = "-- runner:no-transaction"
 POSTCONDITION_MARKER = "-- runner:postcondition"
 REAPPLY_SAFE_MARKER = "-- runner:reapply-safe"
+SCHEMA_MOVE_MARKER = "-- runner:schema-move"
 
 _FILENAME_RE = re.compile(r"^(\d+)_.+\.sql$")
 
@@ -88,6 +104,7 @@ class Migration:
     reapply_safe: bool
     postconditions: tuple
     execution_mode: str  # wrapped | self-managed | no-transaction
+    schema_move: bool
 
     @property
     def label(self) -> str:
@@ -102,6 +119,7 @@ class ApplyReport:
 def _parse_markers(text: str):
     no_transaction = False
     reapply_safe = False
+    schema_move = False
     postconditions = []
     for line in text.splitlines():
         stripped = line.strip()
@@ -109,11 +127,13 @@ def _parse_markers(text: str):
             no_transaction = True
         elif stripped == REAPPLY_SAFE_MARKER:
             reapply_safe = True
+        elif stripped == SCHEMA_MOVE_MARKER:
+            schema_move = True
         elif stripped.startswith(POSTCONDITION_MARKER):
             sql = stripped[len(POSTCONDITION_MARKER) :].strip()
             if sql:
                 postconditions.append(sql)
-    return no_transaction, reapply_safe, tuple(postconditions)
+    return no_transaction, reapply_safe, schema_move, tuple(postconditions)
 
 
 def _execution_mode(no_transaction: bool, statements) -> str:
@@ -134,11 +154,15 @@ def _execution_mode(no_transaction: bool, statements) -> str:
     return "wrapped"
 
 
-def discover_migrations(migrations_dir) -> list:
+def discover_migrations(migrations_dir, max_version: int | None = None) -> list:
     """Numbered ``NNN_*.sql`` files in numeric order; anything else ignored.
 
     Reads, checksums, splits, and mode-classifies each file exactly once —
     every later stage works from the returned records.
+
+    ``max_version`` bounds the result to files at or below that version. It is
+    how a caller replays one *lineage* out of a tree that holds two (see
+    ``legacy_lineage_max``); production never passes it.
     """
     migrations_dir = Path(migrations_dir)
     by_version = {}
@@ -154,7 +178,7 @@ def discover_migrations(migrations_dir) -> list:
             )
         raw = path.read_bytes()
         sql = raw.decode()
-        no_transaction, reapply_safe, postconditions = _parse_markers(sql)
+        no_transaction, reapply_safe, schema_move, postconditions = _parse_markers(sql)
         statements = tuple(split_statements(sql))
         by_version[version] = Migration(
             version=version,
@@ -166,8 +190,59 @@ def discover_migrations(migrations_dir) -> list:
             reapply_safe=reapply_safe,
             postconditions=postconditions,
             execution_mode=_execution_mode(no_transaction, statements),
+            schema_move=schema_move,
         )
-    return [by_version[v] for v in sorted(by_version)]
+    versions = sorted(v for v in by_version if max_version is None or v <= max_version)
+    return [by_version[v] for v in versions]
+
+
+def schema_move_migration(migrations_dir):
+    """The corpus's one lineage-boundary file, located by its own marker.
+
+    The single home of the "find the boundary" rule, so the three questions
+    callers actually ask — which file is it, what is below it, what does it
+    assert — cannot answer from three different scans.
+
+    Loud in both directions. **No move file is a hard failure, not an
+    unbounded pass**: callers are asking "where does the legacy lineage end",
+    and answering "nowhere, take all of it" when the boundary cannot be found
+    hands back the whole target schema under the legacy one's name — absence of
+    evidence read as evidence of absence, on a door that licenses a replay.
+    Two move files is a hard failure because the corpus then has no single
+    boundary to derive.
+
+    Cardinality is checked here rather than in ``discover_migrations`` so that
+    a corpus is refused to the caller that needs a boundary, not to every
+    caller that merely reads files. Moving it into discovery would be a
+    stronger invariant; it is also a behavioural change to ``apply_pending``
+    and ``adopt``, so it belongs to whoever decides that deliberately.
+    """
+    moves = [m for m in discover_migrations(migrations_dir) if m.schema_move]
+    if not moves:
+        raise MigrationRunnerError(
+            f"no migration in {migrations_dir} carries {SCHEMA_MOVE_MARKER!r} —"
+            " the legacy/target lineage boundary is derived from that marker"
+            " and cannot be guessed"
+        )
+    if len(moves) > 1:
+        names = ", ".join(m.path.name for m in moves)
+        raise MigrationRunnerError(
+            f"{len(moves)} migrations carry {SCHEMA_MOVE_MARKER!r} ({names}) —"
+            " the corpus has exactly one lineage boundary"
+        )
+    return moves[0]
+
+
+def legacy_lineage_max(migrations_dir) -> int:
+    """The last version of the LEGACY lineage — one below the schema move.
+
+    Derived from the marker, never declared: the move file says which file it
+    is, so renumbering it moves the boundary with it and there is no second
+    inventory to keep in step. That is the same property that decided the
+    target-model fork (#746) — a check whose input is derived cannot drift from
+    the artifact it describes, and a check whose input is written down will.
+    """
+    return schema_move_migration(migrations_dir).version - 1
 
 
 def split_statements(sql: str) -> list:
@@ -355,9 +430,16 @@ def _apply_one(conn, migration) -> None:
             raise
 
 
-def apply_pending(dsn: str, migrations_dir) -> ApplyReport:
-    """Apply every pending migration in version order."""
-    migrations = discover_migrations(migrations_dir)
+def apply_pending(
+    dsn: str, migrations_dir, max_version: int | None = None
+) -> ApplyReport:
+    """Apply every pending migration in version order.
+
+    ``max_version`` replays one lineage out of the tree (``legacy_lineage_max``
+    derives the legacy one). Production leaves it unset — the M.3 window is a
+    single unbounded invocation in file order.
+    """
+    migrations = discover_migrations(migrations_dir, max_version)
     report = ApplyReport()
     conn = _connect(dsn)
     try:
@@ -462,7 +544,9 @@ def _load_manifest(manifest_path, migrations):
     return required_through, entries
 
 
-def adopt(dsn: str, migrations_dir, manifest_path) -> AdoptReport:
+def adopt(
+    dsn: str, migrations_dir, manifest_path, max_version: int | None = None
+) -> AdoptReport:
     """Enter a live database that predates the ledger into it.
 
     Probe-decided per file, never trusted: a probe returning true adopts the
@@ -474,7 +558,7 @@ def adopt(dsn: str, migrations_dir, manifest_path) -> AdoptReport:
     about. The legacy ``schema_version`` table is never read; its known
     010/034 gaps are exactly the hazard this replaces.
     """
-    migrations = discover_migrations(migrations_dir)
+    migrations = discover_migrations(migrations_dir, max_version)
     required_through, entries = _load_manifest(manifest_path, migrations)
     report = AdoptReport()
     conn = _connect(dsn)

@@ -65,6 +65,7 @@ class TestAgainstTheRealReplay:
     @pytest.mark.integration
     def test_replayed_corpus_has_no_tenancy_violations(self, scratch_db):
         from tests.scripts.test_migration_gate import (
+            LEGACY_LINEAGE_MAX,
             MIGRATIONS_DIR,
             SETUP_SQL,
             apply_pending,
@@ -72,7 +73,7 @@ class TestAgainstTheRealReplay:
         )
 
         psql_apply(scratch_db, [SETUP_SQL])
-        apply_pending(scratch_db, MIGRATIONS_DIR)
+        apply_pending(scratch_db, MIGRATIONS_DIR, LEGACY_LINEAGE_MAX)
         sig = tenancy_signature(scratch_db)
         assert tenancy_violations(sig) == []
 
@@ -86,6 +87,7 @@ class TestAgainstTheRealReplay:
         green above for enforcement.
         """
         from tests.scripts.test_migration_gate import (
+            LEGACY_LINEAGE_MAX,
             MIGRATIONS_DIR,
             SETUP_SQL,
             apply_pending,
@@ -93,7 +95,7 @@ class TestAgainstTheRealReplay:
         )
 
         psql_apply(scratch_db, [SETUP_SQL])
-        apply_pending(scratch_db, MIGRATIONS_DIR)
+        apply_pending(scratch_db, MIGRATIONS_DIR, LEGACY_LINEAGE_MAX)
         sig = tenancy_signature(scratch_db)
         keyed = [t for t, e in sig.items() if e["tenant_keyed"]]
         assert keyed == [], (

@@ -1,12 +1,24 @@
 """CI migration gate (plan §0.2) — the REAL corpus, replayed and adopted.
 
-- Replay-from-empty: legacy setup + the full corpus through the runner.
+- Replay-from-empty: legacy setup + the legacy lineage through the runner.
 - Adoption: production-shaped fixtures built by hand-psql (the way production
   actually got its schema), entered into the ledger by ``runner adopt`` at
   both ends of the live uncertainty (at-45 and at-49) — the design
   requirement that adopt works without knowing which world it is in.
 - Tamper: a deliberately-removed floor constraint fails adoption loudly.
 - Parity: the runner-replayed schema equals the models-built schema.
+
+**Every replay here is bounded to ``LEGACY_LINEAGE_MAX`` (#746, F.2.1b), and
+the bound is load-bearing rather than tidy.** From 051 the corpus holds two
+lineages in one directory: the legacy schema this file guards, and the target
+schema created into the empty ``public`` the 3c move leaves behind. An
+unbounded replay runs the move, so ``public`` ends the run empty and every
+assertion below — parity against the legacy models, the ``schema_version``
+self-stamp, the adopt fixtures' queue rows — is asserted against a schema that
+is no longer there. `test_lineage_lane.py` replays *across* the boundary and
+asserts that emptiness on purpose; these tests replay up to it. The bound is
+derived from the move file's own marker, so it follows a renumbering; nothing
+here names a version.
 """
 
 import pytest
@@ -20,6 +32,7 @@ from scripts.migration_runner import (
 from scripts.schema_parity import schema_diff, schema_signature
 from src.utils.validators import MIGRATIONS_DIR
 from tests.scripts.conftest import (
+    LEGACY_LINEAGE_MAX,
     SETUP_SQL,
     execute,
     fetch_ledger,
@@ -34,14 +47,14 @@ MANIFEST = MIGRATIONS_DIR / "adoption_manifest.json"
 
 
 def corpus_versions():
-    return [m.version for m in discover_migrations(MIGRATIONS_DIR)]
+    return [m.version for m in discover_migrations(MIGRATIONS_DIR, LEGACY_LINEAGE_MAX)]
 
 
 class TestReplayFromEmpty:
     def test_runner_replays_full_corpus_from_empty(self, scratch_db):
         psql_apply(scratch_db, [SETUP_SQL])
 
-        report = apply_pending(scratch_db, MIGRATIONS_DIR)
+        report = apply_pending(scratch_db, MIGRATIONS_DIR, LEGACY_LINEAGE_MAX)
 
         versions = [m.version for m in report.applied]
         assert versions == corpus_versions()
@@ -56,14 +69,14 @@ class TestAdoptProductionShaped:
         (048's limbo probe reads clean on a fixture with no queue rows) and
         only 050 stays pending. The seven data-only floor files enter as
         declared assertions, reported distinctly."""
-        report = adopt(at49_db, MIGRATIONS_DIR, MANIFEST)
+        report = adopt(at49_db, MIGRATIONS_DIR, MANIFEST, LEGACY_LINEAGE_MAX)
 
         recorded = sorted(m.version for m in report.adopted + report.asserted)
         assert recorded == list(range(1, 50))
         assert [m.version for m in report.asserted] == [18, 22, 24, 27, 36, 39, 44]
         assert [m.version for m in report.pending] == [50]
 
-        after = apply_pending(at49_db, MIGRATIONS_DIR)
+        after = apply_pending(at49_db, MIGRATIONS_DIR, LEGACY_LINEAGE_MAX)
         assert [m.version for m in after.applied] == [50]
 
     def test_at_45_the_tail_stays_pending_then_applies(self, scratch_db):
@@ -72,13 +85,13 @@ class TestAdoptProductionShaped:
         same command, no foreknowledge."""
         psql_apply(scratch_db, [SETUP_SQL] + migration_files(45))
 
-        report = adopt(scratch_db, MIGRATIONS_DIR, MANIFEST)
+        report = adopt(scratch_db, MIGRATIONS_DIR, MANIFEST, LEGACY_LINEAGE_MAX)
 
         recorded = sorted(m.version for m in report.adopted + report.asserted)
         assert recorded == list(range(1, 46))
         assert [m.version for m in report.pending] == [46, 47, 48, 49, 50]
 
-        after = apply_pending(scratch_db, MIGRATIONS_DIR)
+        after = apply_pending(scratch_db, MIGRATIONS_DIR, LEGACY_LINEAGE_MAX)
         assert [m.version for m in after.applied] == [46, 47, 48, 49, 50]
         assert len(fetch_ledger(scratch_db)) == len(corpus_versions())
 
@@ -100,7 +113,7 @@ class TestAdoptProductionShaped:
             (row[0],),
         )
 
-        report = adopt(at49_db, MIGRATIONS_DIR, MANIFEST)
+        report = adopt(at49_db, MIGRATIONS_DIR, MANIFEST, LEGACY_LINEAGE_MAX)
 
         assert 48 not in [m.version for m in report.adopted]
         assert [m.version for m in report.pending] == [48, 50]
@@ -123,7 +136,7 @@ class TestAdoptProductionShaped:
             (fresh[0],),
         )
 
-        apply_pending(at49_db, MIGRATIONS_DIR)
+        apply_pending(at49_db, MIGRATIONS_DIR, LEGACY_LINEAGE_MAX)
         parked = fetch_one(
             at49_db,
             "SELECT status FROM posting_queue WHERE telegram_message_id = 424242",
@@ -149,7 +162,7 @@ class TestAdoptProductionShaped:
         )
 
         with pytest.raises(MigrationRunnerError, match="040"):
-            adopt(at49_db, MIGRATIONS_DIR, MANIFEST)
+            adopt(at49_db, MIGRATIONS_DIR, MANIFEST, LEGACY_LINEAGE_MAX)
 
         assert fetch_ledger(at49_db) == []
 
@@ -160,7 +173,7 @@ class TestSchemaParity:
         SQLAlchemy builds from the models — DB-only drift (types, missing
         constraints) fails a test instead of surfacing in production."""
         psql_apply(scratch_db, [SETUP_SQL])
-        apply_pending(scratch_db, MIGRATIONS_DIR)
+        apply_pending(scratch_db, MIGRATIONS_DIR, LEGACY_LINEAGE_MAX)
 
         from sqlalchemy import create_engine
 
@@ -205,7 +218,7 @@ class TestLegacyStampParity:
         convention holds: every corpus file that stamps itself does so on a
         runner replay too (psycopg2 executes the INSERTs like psql did)."""
         psql_apply(scratch_db, [SETUP_SQL])
-        apply_pending(scratch_db, MIGRATIONS_DIR)
+        apply_pending(scratch_db, MIGRATIONS_DIR, LEGACY_LINEAGE_MAX)
 
         row = fetch_one(scratch_db, "SELECT max(version) FROM schema_version")
         assert row[0] == max(corpus_versions())
