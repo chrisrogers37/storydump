@@ -414,9 +414,10 @@ class TestPairIsDurable:
         Deliberately the ONLY database test here. A separate
         write-one-row-and-read-it-back test was dropped as subsumed: this
         assertion cannot pass unless the migration row survived the round trip
-        intact, and it additionally proves the discrimination. The database is
-        a contended shared resource on this host (#758), so a DB test that
-        adds no claim is a cost with no return.
+        intact, and it additionally proves the discrimination. Subsumption is
+        the whole reason — #763 gave each session its own database, so DB tests
+        are no longer a contended resource and scarcity is not an argument for
+        dropping one.
         """
         media_item_id = _seed_media_item(test_db)
         now = datetime.now(timezone.utc)
