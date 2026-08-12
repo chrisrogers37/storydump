@@ -56,7 +56,7 @@ class ChatSettings(Base):
 
     # Caption rendering style ('enhanced' = emoji-rich, 'simple' = plain text).
     # NULL = use CAPTION_STYLE env default.
-    caption_style = Column(String(20), nullable=True)
+    caption_style = Column(Text, nullable=True)
 
     # Whether the worker pushes startup/shutdown lifecycle notifications to
     # this chat. NULL = use SEND_LIFECYCLE_NOTIFICATIONS env default.

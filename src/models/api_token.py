@@ -4,7 +4,16 @@ from datetime import datetime, timezone
 from typing import Optional
 import uuid
 
-from sqlalchemy import Column, String, DateTime, Text, UniqueConstraint, ForeignKey
+from sqlalchemy import (
+    Column,
+    String,
+    DateTime,
+    Text,
+    UniqueConstraint,
+    ForeignKey,
+    Index,
+    text,
+)
 from sqlalchemy.dialects.postgresql import UUID, ARRAY, JSONB
 from sqlalchemy.orm import relationship
 
@@ -99,6 +108,18 @@ class ApiToken(Base):
     instagram_account = relationship("InstagramAccount", back_populates="tokens")
 
     __table_args__ = (
+        # Partial unique mirrored from migration 015 (parity gate): one
+        # Google Drive token per chat.
+        Index(
+            "unique_google_drive_token_per_chat",
+            "service_name",
+            "token_type",
+            "chat_settings_id",
+            unique=True,
+            postgresql_where=text(
+                "service_name = 'google_drive' AND chat_settings_id IS NOT NULL"
+            ),
+        ),
         # One token per (service, type, account, auth_method) — the
         # auth_method dimension lets a single account hold both an
         # instagram_login token AND an fb_login token simultaneously

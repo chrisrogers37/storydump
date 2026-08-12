@@ -1,0 +1,251 @@
+{
+  "_comment": "runner adopt contract (plan 0.2): every numbered migration is paired with adoption evidence - an explicit probe (SQL returning one boolean), an explicit asserted entry (data-only files with no structural delta; legal only at or below required_through, reported distinctly by adopt), or no entry at all when the file carries runner:postcondition lines the probe derives from (050 onward). required_through is the floor the production database is known to carry (the application demonstrably runs against the 045-era schema); a false probe at or below it is a hard failure. Files above the floor are the uncertainty window: probe true adopts, probe false leaves the file pending for a gated apply - so adopt works whether production is at 45 or 49 without knowing which. The legacy schema_version table is never read.",
+  "required_through": 45,
+  "entries": [
+    {
+      "version": 1,
+      "probe": "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'media_items' AND column_name = 'category')",
+      "note": "adds media_items.category"
+    },
+    {
+      "version": 2,
+      "probe": "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'category_post_case_mix')",
+      "note": "creates category_post_case_mix"
+    },
+    {
+      "version": 3,
+      "probe": "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'user_interactions')",
+      "note": "creates user_interactions"
+    },
+    {
+      "version": 4,
+      "probe": "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'api_tokens')",
+      "note": "creates api_tokens (also cloud_* columns + check_posting_method)"
+    },
+    {
+      "version": 5,
+      "probe": "SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'idx_user_interactions_bot_response')",
+      "note": "bot_response partial index (its CHECK widen is probed via the index, the surviving unique residue)"
+    },
+    {
+      "version": 6,
+      "probe": "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'chat_settings')",
+      "note": "creates chat_settings"
+    },
+    {
+      "version": 7,
+      "probe": "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'instagram_accounts')",
+      "note": "creates instagram_accounts"
+    },
+    {
+      "version": 8,
+      "probe": "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'api_tokens' AND column_name = 'instagram_account_id')",
+      "note": "adds api_tokens.instagram_account_id (its named unique was later replaced by 040)"
+    },
+    {
+      "version": 9,
+      "probe": "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'chat_settings' AND column_name = 'active_instagram_account_id')",
+      "note": "adds chat_settings.active_instagram_account_id"
+    },
+    {
+      "version": 10,
+      "probe": "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'chat_settings' AND column_name = 'show_verbose_notifications')",
+      "note": "adds show_verbose_notifications; one of the two known schema_version self-stamp gaps - the probe decides, the gap is irrelevant here"
+    },
+    {
+      "version": 11,
+      "probe": "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'media_items' AND column_name = 'source_type')",
+      "note": "adds media source columns"
+    },
+    {
+      "version": 12,
+      "probe": "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'chat_settings' AND column_name = 'media_sync_enabled')",
+      "note": "adds media_sync_enabled"
+    },
+    {
+      "version": 13,
+      "probe": "SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'idx_media_items_instagram_media_id')",
+      "note": "backfill tracking unique index"
+    },
+    {
+      "version": 14,
+      "probe": "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'unique_file_path_per_tenant')",
+      "note": "multi-tenant FKs + per-tenant file uniqueness"
+    },
+    {
+      "version": 15,
+      "probe": "SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'unique_google_drive_token_per_chat')",
+      "note": "per-chat Google Drive token uniqueness"
+    },
+    {
+      "version": 16,
+      "probe": "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'chat_settings' AND column_name = 'onboarding_step')",
+      "note": "onboarding tracking columns"
+    },
+    {
+      "version": 17,
+      "probe": "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'chat_settings' AND column_name = 'media_source_type')",
+      "note": "media source settings columns"
+    },
+    {
+      "version": 18,
+      "asserted": true,
+      "reason": "data-only migration: no structural delta to probe; asserted applied on the required floor - the application has run over its effect since it shipped (queue tenancy backfill)"
+    },
+    {
+      "version": 19,
+      "probe": "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'chat_settings' AND column_name = 'last_post_sent_at')",
+      "note": "adds last_post_sent_at"
+    },
+    {
+      "version": 20,
+      "probe": "SELECT NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'posting_queue' AND column_name = 'web_hosted_url')",
+      "note": "cleanup: probes a surviving drop (web_hosted_url); its check_status delta was superseded by 034/043/047, and error_message was re-added by 034"
+    },
+    {
+      "version": 21,
+      "probe": "SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'unique_permanent_lock_per_media')",
+      "note": "permanent-lock partial unique index"
+    },
+    {
+      "version": 22,
+      "asserted": true,
+      "reason": "sole delta (instagram_accounts.auth_method) was later dropped by 041 - no surviving residue; asserted, 041's probe covers the terminal state"
+    },
+    {
+      "version": 23,
+      "probe": "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'user_chat_memberships')",
+      "note": "multi-account data layer tables"
+    },
+    {
+      "version": 24,
+      "asserted": true,
+      "reason": "data-only migration: no structural delta to probe; asserted applied on the required floor - the application has run over its effect since it shipped (phantom chat_settings cleanup)"
+    },
+    {
+      "version": 25,
+      "probe": "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'audit_log')",
+      "note": "creates audit_log"
+    },
+    {
+      "version": 26,
+      "probe": "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'chat_settings' AND column_name = 'enable_ai_captions')",
+      "note": "AI caption columns"
+    },
+    {
+      "version": 27,
+      "asserted": true,
+      "reason": "data-only migration: no structural delta to probe; asserted applied on the required floor - the application has run over its effect since it shipped (onboarding_completed fix)"
+    },
+    {
+      "version": 28,
+      "probe": "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'media_items' AND column_name = 'thumbnail_url')",
+      "note": "adds thumbnail_url"
+    },
+    {
+      "version": 29,
+      "probe": "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'chat_settings' AND column_name = 'repost_ttl_days')",
+      "note": "per-chat lock TTLs"
+    },
+    {
+      "version": 30,
+      "probe": "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'chat_settings' AND column_name = 'caption_style')",
+      "note": "per-chat caption lifecycle columns (type normalized separately by 050)"
+    },
+    {
+      "version": 31,
+      "probe": "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'chat_settings' AND column_name = 'gdrive_alerted_at')",
+      "note": "Drive disconnect alert state"
+    },
+    {
+      "version": 32,
+      "probe": "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'api_tokens' AND column_name = 'revoked_at')",
+      "note": "token revocation timestamp"
+    },
+    {
+      "version": 33,
+      "probe": "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'chat_settings' AND column_name = 'posting_timezone')",
+      "note": "per-chat posting timezone"
+    },
+    {
+      "version": 34,
+      "probe": "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'posting_history' AND column_name = 'error_message')",
+      "note": "re-adds posting_history.error_message (surviving residue); its check_status delta was superseded by 043/047"
+    },
+    {
+      "version": 35,
+      "probe": "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'api_tokens' AND column_name = 'meta_account_id')",
+      "note": "credential refactor phase 1 column"
+    },
+    {
+      "version": 36,
+      "asserted": true,
+      "reason": "data-only migration: no structural delta to probe; asserted applied on the required floor - the application has run over its effect since it shipped (meta_account_id backfill)"
+    },
+    {
+      "version": 37,
+      "probe": "SELECT (SELECT column_default FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'chat_settings' AND column_name = 'dry_run_mode') = 'false'",
+      "note": "default flip is structurally probeable via column_default"
+    },
+    {
+      "version": 38,
+      "probe": "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'api_tokens' AND column_name = 'auth_method')",
+      "note": "credential refactor phase 4 columns"
+    },
+    {
+      "version": 39,
+      "asserted": true,
+      "reason": "data-only migration: no structural delta to probe; asserted applied on the required floor - the application has run over its effect since it shipped (auth_method backfill)"
+    },
+    {
+      "version": 40,
+      "probe": "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'unique_credential_per_account')",
+      "note": "expanded credential uniqueness"
+    },
+    {
+      "version": 41,
+      "probe": "SELECT NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'instagram_accounts' AND column_name = 'auth_method')",
+      "note": "drops the legacy auth_method column"
+    },
+    {
+      "version": 42,
+      "probe": "SELECT pg_get_constraintdef(oid) LIKE '%expired%' FROM pg_constraint WHERE conname = 'check_history_status'",
+      "note": "history status vocabulary includes expired"
+    },
+    {
+      "version": 43,
+      "probe": "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'posting_queue' AND column_name = 'instagram_container_id')",
+      "note": "claim-before-publish anchor column (its check_status delta superseded by 047)"
+    },
+    {
+      "version": 44,
+      "asserted": true,
+      "reason": "data-only migration: no structural delta to probe; asserted applied on the required floor - the application has run over its effect since it shipped (sole-tenant media backfill, #412)"
+    },
+    {
+      "version": 45,
+      "probe": "SELECT pg_get_constraintdef(oid) LIKE '%system_expiry%' FROM pg_constraint WHERE conname = 'check_posting_method'",
+      "note": "posting_method vocabulary includes system_expiry"
+    },
+    {
+      "version": 46,
+      "probe": "SELECT pg_get_constraintdef(oid) LIKE '%auto_reapproval%' FROM pg_constraint WHERE conname = 'check_posting_method'",
+      "note": "posting_method vocabulary includes auto_reapproval (enum SSOT, #693)"
+    },
+    {
+      "version": 47,
+      "probe": "SELECT pg_get_constraintdef(oid) LIKE '%sent_unconfirmed%' FROM pg_constraint WHERE conname = 'check_status'",
+      "note": "queue delivery-state vocabulary (#694)"
+    },
+    {
+      "version": 48,
+      "probe": "SELECT coalesce((SELECT pg_get_constraintdef(oid) LIKE '%sent_unconfirmed%' FROM pg_constraint WHERE conname = 'check_status'), false) AND NOT EXISTS (SELECT 1 FROM posting_queue WHERE status = 'processing' AND scheduled_for < now() - interval '24 hours')",
+      "note": "data-only and undecidable in place; the probe asserts the file's EFFECT currently holds (delivery vocabulary present AND no aged limbo rows) - an empty queue without 047's vocabulary is not evidence. False leaves it pending, and the runner:reapply-safe marker lets the gated apply re-run it; the file's UPDATEs are bounded to the same >24h population the probe reads, so a fresh in-flight claim is outside the row set by construction"
+    },
+    {
+      "version": 49,
+      "probe": "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'check_delivered_stamped')",
+      "note": "INV-1: delivered requires stamp (#698)"
+    }
+  ]
+}
