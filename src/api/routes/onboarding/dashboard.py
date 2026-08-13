@@ -309,15 +309,40 @@ _MAGIC_SIGNATURES = {
 }
 
 
+#: Major brand identifying QuickTime inside an ISO base media `ftyp` box. The
+#: trailing spaces are part of the four-byte field, not padding in this literal.
+_QUICKTIME_BRAND = b"qt  "
+
+
 def _detect_mime_from_magic(content: bytes) -> str | None:
-    """Detect MIME type from file magic bytes. Returns None if unrecognized."""
+    """Detect MIME type from file magic bytes. Returns None if unrecognized.
+
+    A None return REJECTS the upload (see `_validate_upload_content`), so every
+    type in `ALLOWED_MIME_TYPES` must be detectable here — `_detectable_mime_types`
+    pins that.
+    """
     for signature, mime in _MAGIC_SIGNATURES.items():
         if content[: len(signature)] == signature:
             return mime
-    # MP4/QuickTime: check for ftyp box (byte 4-7)
-    if len(content) >= 8 and content[4:8] == b"ftyp":
+    # ISO base media: `ftyp` box at bytes 4-8, major brand at 8-12. MP4 and
+    # QuickTime BOTH carry an ftyp box, so the brand is what separates them.
+    # Mapping every ftyp to video/mp4 rejected genuine .mov uploads as a type
+    # mismatch even though video/quicktime is allowlisted (#761).
+    if len(content) >= 12 and content[4:8] == b"ftyp":
+        if content[8:12] == _QUICKTIME_BRAND:
+            return "video/quicktime"
         return "video/mp4"
     return None
+
+
+def _detectable_mime_types() -> set[str]:
+    """Every MIME type `_detect_mime_from_magic` can return.
+
+    `ALLOWED_MIME_TYPES` must be a subset. Allowlisting a type detection cannot
+    emit means every genuine upload of it is rejected as a mismatch — which is
+    what `video/quicktime` did before #761.
+    """
+    return set(_MAGIC_SIGNATURES.values()) | {"video/mp4", "video/quicktime"}
 
 
 async def _validate_upload_content(
@@ -349,8 +374,22 @@ async def _validate_upload_content(
             f"Allowed: {', '.join(sorted(ALLOWED_MIME_TYPES))}",
         )
 
+    # Unrecognised content is REJECTED, not waved through (#761). The declared
+    # type is attacker-controlled -- a header, or the filename extension -- so
+    # detection is the only real check here. Skipping the comparison when
+    # detection returned nothing made an unrecognised format *more* trusted than
+    # a recognised one, and `Image.open()` downstream dispatches on content, so
+    # `photo.jpg` carrying another format reaches that format's decoder.
     actual_mime = _detect_mime_from_magic(content)
-    if actual_mime is not None and actual_mime != claimed_mime:
+    if actual_mime is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "File content was not recognized as a supported format. "
+                f"Allowed: {', '.join(sorted(ALLOWED_MIME_TYPES))}"
+            ),
+        )
+    if actual_mime != claimed_mime:
         raise HTTPException(
             status_code=400,
             detail=f"File content ({actual_mime}) does not match declared type ({claimed_mime})",
