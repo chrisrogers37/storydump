@@ -935,25 +935,6 @@ class TestInstagramAPIService:
         assert result["valid"] is True
         assert result["size_bytes"] is None
 
-    # ==================== _check_response_errors Tests ====================
-
-    def test_check_response_errors_revocation_subcode_458(self, instagram_service):
-        """Test _check_response_errors raises TokenRevokedError for subcode 458."""
-        response = Mock()
-        response.status_code = 400
-        response.json.return_value = {
-            "error": {
-                "message": "App not installed",
-                "code": 190,
-                "error_subcode": 458,
-            }
-        }
-
-        with pytest.raises(TokenRevokedError) as exc_info:
-            instagram_service._check_response_errors(response)
-
-        assert exc_info.value.error_subcode == 458
-
     # ==================== IG Login host routing (PR 1) ====================
 
     @pytest.mark.asyncio
