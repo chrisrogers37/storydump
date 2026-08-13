@@ -108,6 +108,43 @@ def _validate_request(
     return user_info
 
 
+def _validate_admin(init_data: str, request: Request | None = None) -> dict:
+    """Validate auth and authorize the caller as a SYSTEM administrator.
+
+    For endpoints exposing deployment-wide operational telemetry rather than
+    tenant data. Authentication proves who the caller is; it does not make
+    them an operator. Every *authenticated* tenant user reaching a fleet-wide
+    view is precisely the gap this closes — the data carries no tenant rows,
+    so it is an authorization gap rather than a data leak, but a tenant still
+    has no business reading the deployment's health.
+
+    The gate is the system-level ``users.role``. It is deliberately NOT
+    ``UserChatMembership.instance_role``: that role makes someone an owner of
+    their own instance, which is not the same authority, and accepting it
+    here would re-open the endpoint one tenant at a time.
+
+    Raises HTTPException(401) on auth failure, HTTPException(403) if the
+    caller is authenticated but not a system administrator.
+    """
+    user_info = _validate_auth(init_data, request)
+
+    user_id = user_info.get("user_id")
+    with MembershipService() as membership_service:
+        authorized = membership_service.is_system_admin(user_id)
+
+    if not authorized:
+        ip = _client_ip(request)
+        logger.warning(
+            "Admin denied: user_id=%s is not a system administrator (ip=%s)",
+            user_id,
+            ip,
+        )
+        auth_monitor.record_failure(ip, "admin role required")
+        raise HTTPException(status_code=403, detail="Administrator access required")
+
+    return user_info
+
+
 def _get_setup_state(telegram_chat_id: int) -> dict:
     """Build the current setup state for a chat."""
     with SetupStateService() as service:

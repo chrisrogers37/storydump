@@ -171,18 +171,21 @@ async def onboarding_content_reuse(
 
 @router.get("/analytics/service-health")
 async def onboarding_service_health(
+    request: Request,
     init_data: str,
     hours: int = Query(default=24, ge=1, le=168),
 ) -> dict:
     """Return service execution telemetry from service_runs table.
 
-    Global view — service_runs are system-level, not per-tenant.
-    Requires valid init_data for authentication but does not scope by chat.
+    Global view — service_runs are system-level, not per-tenant. Because it is
+    global, there is no chat_id to scope by, and authentication alone used to
+    be the whole gate: any authenticated tenant user could read the entire
+    deployment's operational health. The system admin role is the gate that
+    fits the scope of the data.
     """
-    # Auth-only validation (no chat_id scoping — service runs are global)
-    from .helpers import _validate_auth
+    from .helpers import _validate_admin
 
-    _validate_auth(init_data)
+    _validate_admin(init_data, request)
 
     with DashboardService() as service:
         return service.get_service_health_stats(hours=hours)
