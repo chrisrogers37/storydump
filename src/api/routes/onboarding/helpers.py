@@ -16,6 +16,16 @@ GDRIVE_FOLDER_RE = re.compile(
     r"https?://drive\.google\.com/drive/folders/([a-zA-Z0-9_-]+)"
 )
 
+# What a rejected caller is told by the _validate_auth cascade, decoupled from
+# what the monitor records. Scoped to that cascade; it is not a deployment-wide
+# 401 string.
+#
+# The specific reason is a small oracle: it separates "well-formed but
+# mis-signed" from "expired" from "wrong credential type entirely", which is
+# exactly the discrimination a probe wants and a legitimate client does not
+# need. The operator still gets every reason, via auth_monitor.
+AUTH_FAILURE_DETAIL = "Invalid authentication credentials"
+
 
 def _client_ip(request: Request | None) -> str:
     """Extract client IP from a FastAPI request, or 'unknown'."""
@@ -30,17 +40,33 @@ def _validate_auth(init_data: str, request: Request | None = None) -> dict:
     Accepts either Telegram WebApp initData (from Mini App) or a signed
     URL token (from browser links). Returns user info dict on success.
 
-    Raises HTTPException(401) on auth failure.
+    Raises HTTPException(401) on auth failure. The 401 detail is deliberately
+    constant (``AUTH_FAILURE_DETAIL``); the specific reason goes to
+    ``auth_monitor``, not to the caller.
     """
     try:
         return validate_init_data(init_data)
-    except ValueError:
+    except ValueError as initdata_error:
         try:
             return validate_url_token(init_data)
-        except ValueError as e:
+        except ValueError as urltoken_error:
             ip = _client_ip(request)
-            auth_monitor.record_failure(ip, str(e))
-            raise HTTPException(status_code=401, detail=str(e))
+            # Both reasons, attributed to their format.
+            #
+            # The urlToken reason is uninformative for an initData caller: a
+            # real initData querystring URL-encodes its colons as %3A, so it
+            # never presents four colon-separated parts and dies at
+            # validate_url_token's format check before any check can describe
+            # the real problem. Recording that one alone spells every initData
+            # rejection identically, whatever caused it.
+            #
+            # Both are carried rather than picking one by the shape of the
+            # input. Shape is a heuristic, and it would misread precisely the
+            # input worth reading correctly — a malformed initData that
+            # happens to contain a literal colon. Carrying both never guesses.
+            reason = f"initData: {initdata_error}; urlToken: {urltoken_error}"
+            auth_monitor.record_failure(ip, reason)
+            raise HTTPException(status_code=401, detail=AUTH_FAILURE_DETAIL)
 
 
 def _validate_request(
