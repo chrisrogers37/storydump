@@ -36,7 +36,9 @@ class MediaItem(Base):
     file_path = Column(Text, nullable=False, index=True)
     file_name = Column(Text, nullable=False)
     file_size = Column(BigInteger, nullable=False)
-    file_hash = Column(Text, nullable=False, index=True)  # SHA256 of content
+    # MD5 of content, always via src.utils.file_hash — the value is only useful
+    # because rows from different sources are comparable.
+    file_hash = Column(Text, nullable=False, index=True)
     mime_type = Column(String(100))
 
     # Media source (provider abstraction - Phase 01 Cloud Media)

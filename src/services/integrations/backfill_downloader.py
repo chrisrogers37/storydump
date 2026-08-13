@@ -1,6 +1,5 @@
 """Media downloading, storage, and Instagram API calls for backfill."""
 
-import hashlib
 import mimetypes
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,6 +14,7 @@ from src.exceptions import (
     BackfillMediaNotFoundError,
     InstagramAPIError,
 )
+from src.utils.file_hash import calculate_bytes_hash
 from src.utils.logger import logger
 
 if False:  # TYPE_CHECKING without import overhead
@@ -105,7 +105,7 @@ class BackfillDownloader:
 
         file_path.write_bytes(file_bytes)
 
-        file_hash = hashlib.sha256(file_bytes).hexdigest()
+        file_hash = calculate_bytes_hash(file_bytes)
 
         mime_type, _ = mimetypes.guess_type(str(file_path))
         if not mime_type:
