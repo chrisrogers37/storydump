@@ -161,7 +161,9 @@ class TestDownloadAndIndex:
         call_kwargs = downloader.service.media_repo.create.call_args[1]
         assert call_kwargs["source_type"] == "instagram_backfill"
         assert call_kwargs["source_identifier"] == "ig-1"
-        assert call_kwargs["file_hash"] == hashlib.sha256(file_bytes).hexdigest()
+        # MD5, not merely "whatever the helper returns" — a backfilled item has
+        # to be comparable to Drive's md5Checksum or cross-source dedup misses.
+        assert call_kwargs["file_hash"] == hashlib.md5(file_bytes).hexdigest()
         assert mock_media_item.instagram_media_id == "ig-1"
 
     async def test_timestamp_in_filename(self, downloader, tmp_path):

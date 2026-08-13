@@ -1,6 +1,5 @@
 """Google Drive media source provider."""
 
-import hashlib
 import io
 import time
 from datetime import datetime
@@ -26,6 +25,7 @@ from src.exceptions import (
     GoogleDriveRateLimitError,
 )
 from src.services.media_sources.base_provider import MediaFileInfo, MediaSourceProvider
+from src.utils.file_hash import calculate_bytes_hash
 from src.utils.logger import logger
 
 import logging
@@ -275,7 +275,9 @@ class GoogleDriveProvider(MediaSourceProvider):
 
     def calculate_file_hash(self, file_identifier: str) -> str:
         """Get content hash using Drive's md5Checksum (avoids downloading).
-        Falls back to SHA256 of downloaded content if md5Checksum unavailable."""
+        Falls back to hashing downloaded content if md5Checksum unavailable —
+        with the same algorithm, so both paths stay comparable to every other
+        source."""
         try:
             file_meta = self._execute_with_retry(
                 self.service.files().get(
@@ -291,7 +293,7 @@ class GoogleDriveProvider(MediaSourceProvider):
                 f"No md5Checksum for {file_identifier}, downloading to compute hash"
             )
             file_bytes = self.download_file(file_identifier)
-            return hashlib.sha256(file_bytes).hexdigest()
+            return calculate_bytes_hash(file_bytes)
         except HttpError as e:
             if e.resp.status == 404:
                 raise GoogleDriveFileNotFoundError(
