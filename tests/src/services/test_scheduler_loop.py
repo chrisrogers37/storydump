@@ -234,3 +234,114 @@ class TestAlertSweepIsolation:
         warnings = " ".join(str(c) for c in mock_logger.warning.call_args_list)
         assert ChatMigratedError.parse_pair(warnings) == (-100, -1001)
         assert self._swept(bot) == [-100, -200, -300]
+
+
+@pytest.mark.unit
+class TestAutoApproveNotificationIsObservable:
+    """#782: the auto-approve notify was sent under a bare `except Exception: pass`.
+
+    The post itself succeeds; only the courtesy confirmation fails. So nothing
+    downstream looks wrong, and with no log line there is no signal anywhere
+    that a tenant has stopped hearing from the bot.
+
+    The shape is #758's, one surface over: a failure that degrades into
+    silence is indistinguishable from the thing never having happened. These
+    tests pin BOTH sides of that distinction, because a fix that logs on every
+    tick would satisfy the first assertion while destroying the signal.
+    """
+
+    CHAT = -100123
+
+    def _tick_args(self, send_effect, *, auto_approved=True, with_telegram=True):
+        scheduler_service = Mock()
+        scheduler_service.process_slot = AsyncMock(
+            return_value={
+                "posted": True,
+                "auto_approved": auto_approved,
+                "media_file": "img.jpg",
+                "category": "cat",
+            }
+        )
+        if with_telegram:
+            bot = Mock()
+            bot.send_message = AsyncMock(side_effect=send_effect)
+            scheduler_service.telegram_service.application.bot = bot
+        else:
+            scheduler_service.telegram_service = None
+
+        chat = Mock(telegram_chat_id=self.CHAT)
+        settings_service = Mock()
+        settings_service.get_all_active_chats.return_value = [chat]
+        queue_repo = Mock()
+        queue_repo.get_stale_sent.return_value = []
+        return scheduler_service, Mock(), settings_service, queue_repo
+
+    async def _run(self, send_effect, **kw):
+        from src.services.core.loops.scheduler_loop import _scheduler_tick
+
+        args = self._tick_args(send_effect, **kw)
+        with (
+            patch("src.services.core.loops.scheduler_loop.session_state") as state,
+            patch("src.services.core.loops.scheduler_loop.logger") as log,
+        ):
+            state.initial_sync_complete = True
+            await _scheduler_tick(*args)
+        return log
+
+    def _alert_lines(self, log):
+        return [str(c.args[0]) for c in log.warning.call_args_list]
+
+    @pytest.mark.asyncio
+    async def test_a_failed_notification_is_logged_rather_than_swallowed(self):
+        """THE REGRESSION. Before the fix this produced no record of any kind."""
+        log = await self._run(RuntimeError("telegram exploded"))
+
+        lines = self._alert_lines(log)
+        assert any("Auto-approve" in ln for ln in lines), (
+            f"a failed auto-approve notification left no warning: {lines}"
+        )
+        assert any(str(self.CHAT) in ln for ln in lines), (
+            f"the failure is logged without naming the tenant: {lines}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_notification_never_attempted_is_not_logged(self):
+        """The other half of the distinction, and the reason the first
+        assertion means anything. A post that was not auto-approved sends no
+        confirmation, so there is nothing to have failed — logging here would
+        make 'never happened' and 'happened and was lost' look identical
+        again, in the opposite direction."""
+        log = await self._run(None, auto_approved=False)
+
+        assert not any("Auto-approve" in ln for ln in self._alert_lines(log))
+
+    @pytest.mark.asyncio
+    async def test_no_telegram_service_is_not_logged_either(self):
+        log = await self._run(None, with_telegram=False)
+
+        assert not any("Auto-approve" in ln for ln in self._alert_lines(log))
+
+    @pytest.mark.asyncio
+    async def test_a_migrated_tenant_leaves_a_RECOVERABLE_pair(self):
+        """The named hole in the #743 recovery corpus, closed.
+
+        `ChatMigratedError.parse_pair`'s docstring cites this exact site as a
+        shape that produces no row, which is why 'not in this corpus' has to
+        be read as *unknown* rather than *did not migrate*. A migration here
+        used to lose the new chat id outright — the single fact a recovery
+        pass needs. Asserted by round-tripping through the real parser rather
+        than by matching prose, so a reworded message that stopped being
+        machine-recoverable would fail this.
+        """
+        new_id = -100999
+        log = await self._run(ChatMigrated(new_chat_id=new_id))
+
+        pairs = [
+            ChatMigratedError.parse_pair(ln)
+            for ln in self._alert_lines(log)
+            if "Auto-approve" in ln
+        ]
+        assert (self.CHAT, new_id) in pairs, (
+            f"the new chat id is not recoverable from the log line: "
+            f"{self._alert_lines(log)}"
+        )
