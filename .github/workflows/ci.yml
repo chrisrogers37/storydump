@@ -26,11 +26,15 @@ jobs:
       - name: Install ruff
         run: pip install ruff
 
+      # tests/ is linted here for the same reason src/ is: a test that does
+      # not run is not a weaker defect than code that does not work, and the
+      # pyflakes rules the repo selects (F811 in particular) catch a shadowed
+      # definition that no test count, tick or coverage number can show.
       - name: Run ruff check
-        run: ruff check src/ cli/ --output-format=github
+        run: ruff check src/ cli/ tests/ --output-format=github
 
       - name: Run ruff format check
-        run: ruff format src/ cli/ --check
+        run: ruff format src/ cli/ tests/ --check
 
   test:
     name: Test

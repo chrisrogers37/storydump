@@ -110,7 +110,7 @@ When enabled, Instagram API is tried first. On failure or rate-limit, falls back
 
 **Run before every commit:**
 ```bash
-source venv/bin/activate && ruff check src/ tests/ && ruff format --check src/ tests/ && pytest
+source venv/bin/activate && ruff check src/ cli/ tests/ && ruff format --check src/ cli/ tests/ && pytest
 ```
 
 **ALWAYS update CHANGELOG.md** when creating PRs — CI will fail without it. Use [Keep a Changelog](https://keepachangelog.com/) format, entries under `## [Unreleased]`.
