@@ -255,6 +255,17 @@ class TestTheDisclosureReachesTheOutputAnOperatorReads:
         assert "google_drive" in out
         assert "live=3" in out and "total=4" in out
 
+    def test_the_halt_routing_block_is_absent_from_a_clear_render(self):
+        """Companion negative control to the one above, for #795's block.
+
+        Without it, a `render` that emitted the routing text unconditionally
+        would satisfy every assertion in `TestTheHaltRoutingTextSurvives` while
+        telling an operator on a CLEAR run to go resolve a halt that did not
+        happen."""
+        out = render(Census(by_source={"google_drive": {"live": 5, "total": 5}}))
+        assert "Routes to the owner" not in out
+        assert "accept-loss" not in out
+
     def test_the_default_path_prints_the_text_disclosure_to_stdout(
         self, replayed_db, capsys
     ):
@@ -269,3 +280,99 @@ class TestTheDisclosureReachesTheOutputAnOperatorReads:
         assert "UNCLASSIFIED" in out
         assert "is_active IS NULL" in out
         assert not out.lstrip().startswith("{"), "default must be text, not JSON"
+
+
+def _flat(text: str) -> str:
+    """Collapse whitespace so assertions bind to CONTENT, not line wrapping.
+
+    The routing block is a wrapped paragraph — `accept-loss` and `list.` sit on
+    different lines today. Asserting against the raw string would force either
+    fragments too short to mean anything, or a test that goes red on a pure
+    reflow that changed nothing an operator reads. Normalising separates the
+    two: a re-wrap stays green, a deleted fact goes red.
+    """
+    return " ".join(text.split())
+
+
+class TestTheHaltRoutingTextSurvives:
+    """#795 — the `if c.halts:` block's presence is covered; its content is not.
+
+    Deliberately a lower tier than the disclosure buckets above. Deleting this
+    block loses nothing the exit code and the VERDICT line do not already carry,
+    so an operator ends up less well served rather than uninformed. That is the
+    whole argument for it being robustness rather than silent information loss.
+
+    The argument rests on the VERDICT line still saying HALT — which nothing
+    asserted either, so the premise of its own lower tier was unpinned. It is
+    pinned here, first test below.
+
+    One assertion per fact rather than one over the block: these six facts are
+    independently deletable — a wrapped paragraph can lose one resolution and
+    keep the other, and read as deliberate either way — so a single blob
+    assertion would leave a hole the size of whatever it did not name. Separate
+    tests rather than several asserts in one, because the first failing assert
+    masks the rest, which is the same hole one level down.
+
+    Pure-function tests over `render()`; no database.
+    """
+
+    HALTING = Census(
+        live_named=2,
+        history_named=1,
+        by_source={"local": {"live": 2, "total": 3}},
+    )
+
+    def test_the_verdict_line_says_halt_and_what_it_stops(self):
+        """The fallback the tier argument depends on. If this line degraded to a
+        bare marker, losing the routing block below WOULD start hiding something,
+        and #795's reasoning for filing it lower would silently stop holding."""
+        out = render(self.HALTING)
+        assert "VERDICT: HALT" in out
+        assert "window prep stops" in out, (
+            "the verdict must say what halted, not only that something did"
+        )
+
+    def test_it_says_where_the_halt_routes_and_that_counts_go_with_it(self):
+        out = _flat(render(self.HALTING))
+        assert "Routes to the owner with the counts" in out
+
+    def test_it_cites_the_plan_line_the_resolutions_come_from(self):
+        """Provenance is what makes the two resolutions checkable rather than
+        this script's own invention — the same reason the gate refuses to
+        invent a third halt condition."""
+        out = _flat(render(self.HALTING))
+        assert "Resolutions per `04` L87" in out
+
+    def test_the_migrate_resolution_survives(self):
+        out = _flat(render(self.HALTING))
+        assert "migrate the files to Drive first" in out
+
+    def test_the_accept_loss_resolution_survives(self):
+        """Asserted separately from the migrate resolution on purpose. They are
+        one sentence in the source and either can be dropped alone; a single
+        assertion naming one would report green while the other went missing."""
+        out = _flat(render(self.HALTING))
+        assert "an explicit accept-loss list" in out
+
+    def test_both_resolutions_are_stated_to_be_zero_schema(self):
+        """Why these two and not others — without it the pair reads as an
+        arbitrary shortlist."""
+        out = _flat(render(self.HALTING))
+        assert "Both are zero-schema" in out
+
+    def test_the_rejected_resolution_stays_recorded_as_rejected(self):
+        """The most losable fact in the block, and the one whose loss costs
+        most: absent it, weakening the `02` NOT NULL chain reads as an untried
+        third option rather than a considered and refused one, and the next
+        person under window-prep pressure re-proposes it."""
+        out = _flat(render(self.HALTING))
+        assert "weakening the `02` NOT NULL chain is recorded as rejected" in out
+
+    def test_a_history_only_halt_routes_identically(self):
+        """`halts` is either count nonzero. A block keyed on `live_named` alone
+        would pass every test above and print nothing for the halt that arrives
+        through `posting_history` — the count that has no origin column and is
+        therefore the harder of the two to have reasoned about."""
+        out = _flat(render(Census(live_named=0, history_named=1)))
+        assert "Routes to the owner with the counts" in out
+        assert "an explicit accept-loss list" in out
