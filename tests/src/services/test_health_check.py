@@ -1012,3 +1012,84 @@ class TestMediaPoolAggregateSurvivesOneUnreachableTenant:
         assert any("-1" in ln for ln in lines), (
             f"the unreachable tenant is not named in any warning: {lines}"
         )
+
+
+@pytest.mark.unit
+class TestIncompleteCoverageIsNotHealthy:
+    """#791 review, blocking: isolating each tenant stopped one failure ending
+    the sweep — and on its own turned a genuinely fatal condition into a
+    per-item shrug. With every tenant unreachable the endpoint reported
+    `healthy: True`, so a total pool outage read GREEN.
+
+    Before isolation, any failure reached the outer handler and reported
+    unhealthy. So the first version of the fix traded "one tenant hides the
+    rest" for "every tenant can fail and it still looks fine", which is the
+    worse of the two. This is the #764 distinction once more: a degraded state
+    must not be able to masquerade as a clean one, which means some failures
+    still have to fail the check rather than be counted and waved through.
+    """
+
+    @pytest.fixture
+    def svc(self):
+        service = HealthCheckService()
+        service.queue_repo = Mock()
+        service.history_repo = Mock()
+        service._media_repo = Mock()
+        service._settings_service = Mock()
+        return service
+
+    def _run(self, svc, n, failing, runway=99.0):
+        chats = [Mock(telegram_chat_id=-(i + 1)) for i in range(n)]
+        svc._settings_service.get_all_active_chats.return_value = chats
+
+        def side_effect(chat_id, chat_settings=None):
+            if chat_id in failing:
+                raise RuntimeError("tenant unreachable")
+            return {
+                "categories": [
+                    {"category": "memes", "runway_days": runway, "eligible": 9}
+                ]
+            }
+
+        svc.check_media_pool_for_chat = Mock(side_effect=side_effect)
+        with patch("src.services.core.health_check.logger"):
+            return svc._check_media_pool()
+
+    def test_a_total_outage_is_not_healthy(self, svc):
+        """THE BLOCKING REGRESSION. Every tenant unreachable used to return
+        healthy: True with nothing checked at all."""
+        result = self._run(svc, 3, {-1, -2, -3})
+
+        assert result["healthy"] is False, result
+        assert result["tenants_checked"] == 0
+        assert result["tenants_unreachable"] == 3
+
+    def test_a_PARTIAL_outage_is_not_healthy_either(self, svc):
+        """Broader than the report. The regression was not limited to the
+        total case: one unreachable tenant among reachable healthy ones also
+        returned healthy: True, because the verdict was computed from whoever
+        answered. A verdict over an incomplete population cannot be a healthy
+        one — the unknown tenants might be the critical ones."""
+        result = self._run(svc, 3, {-1})
+
+        assert result["healthy"] is False, result
+        assert result["tenants_checked"] == 2
+        assert result["tenants_unreachable"] == 1
+
+    def test_full_coverage_and_good_runway_is_still_healthy(self, svc):
+        """The control. Without it, 'healthy is False' could be satisfied by
+        never returning healthy at all."""
+        result = self._run(svc, 3, set())
+
+        assert result["healthy"] is True
+        assert result["tenants_unreachable"] == 0
+
+    def test_full_coverage_with_a_critical_pool_is_still_reported_critical(self, svc):
+        """The severity logic must survive the coverage gate. If the gate had
+        been layered in front of it, a real critical finding on a fully-covered
+        estate could have been masked by the completeness check passing."""
+        result = self._run(svc, 3, set(), runway=1.0)
+
+        assert result["healthy"] is False
+        assert "memes" in result["message"]
+        assert result["tenants_unreachable"] == 0

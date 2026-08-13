@@ -66,24 +66,38 @@ class TelegramCommandHandlers:
         keyboard_rows = []
         if instances:
             for i, inst in enumerate(instances, 1):
-                raw_name = inst["display_name"] or f"Chat {inst['telegram_chat_id']}"
-                name = escape_markdownv2(raw_name)
-                media = inst["media_count"]
-                ppd = inst["posts_per_day"]
-                last = format_last_post(inst["last_post_at"])
-                status = "⏸️ paused" if inst["is_paused"] else "✅ active"
-                lines.append(
-                    f"{i}\\. *{name}* "
-                    f"\\({ppd}/day · {media} media · last post {last} · {status}\\)"
-                )
-                keyboard_rows.append(
-                    [
-                        InlineKeyboardButton(
-                            f"Manage {raw_name}",
-                            callback_data=f"instance_manage:{inst['chat_settings_id']}",
-                        )
-                    ]
-                )
+                # Per instance, not per message (#783 review, #767 family). One
+                # malformed row used to lose the ENTIRE listing and every instance
+                # behind it, and the user was told nothing. The guard spans the whole
+                # body deliberately: `lines` and `keyboard_rows` are built in parallel,
+                # so a failure between the two appends would leave a numbered instance
+                # with no button -- a half-rendered row is worse than a skipped one.
+                try:
+                    raw_name = (
+                        inst["display_name"] or f"Chat {inst['telegram_chat_id']}"
+                    )
+                    name = escape_markdownv2(raw_name)
+                    media = inst["media_count"]
+                    ppd = inst["posts_per_day"]
+                    last = format_last_post(inst["last_post_at"])
+                    status = "⏸️ paused" if inst["is_paused"] else "✅ active"
+                    lines.append(
+                        f"{i}\\. *{name}* "
+                        f"\\({ppd}/day · {media} media · last post {last} · {status}\\)"
+                    )
+                    keyboard_rows.append(
+                        [
+                            InlineKeyboardButton(
+                                f"Manage {raw_name}",
+                                callback_data=f"instance_manage:{inst['chat_settings_id']}",
+                            )
+                        ]
+                    )
+                except Exception as e:  # noqa: BLE001 - one row must not lose the list
+                    logger.warning(
+                        f"[chat={inst.get('telegram_chat_id', '?')}] "
+                        f"Instance list: skipping malformed row: {e}"
+                    )
         else:
             lines.append("No instances configured yet\\.")
 
@@ -727,21 +741,33 @@ class TelegramCommandHandlers:
         lines = ["Your instances:"]
         keyboard_rows = []
         for i, inst in enumerate(instances, 1):
-            name = inst["display_name"] or f"Chat {inst['telegram_chat_id']}"
-            media = inst["media_count"]
-            ppd = inst["posts_per_day"]
-            status = "paused" if inst["is_paused"] else "active"
-            lines.append(
-                f"{i}\\. *{escape_markdownv2(name)}* \\({media} media · {ppd}/day · {status}\\)"
-            )
-            keyboard_rows.append(
-                [
-                    InlineKeyboardButton(
-                        f"Manage {name}",
-                        callback_data=f"instance_manage:{inst['chat_settings_id']}",
-                    )
-                ]
-            )
+            # Per instance, not per message (#783 review, #767 family). One
+            # malformed row used to lose the ENTIRE listing and every instance
+            # behind it, and the user was told nothing. The guard spans the whole
+            # body deliberately: `lines` and `keyboard_rows` are built in parallel,
+            # so a failure between the two appends would leave a numbered instance
+            # with no button -- a half-rendered row is worse than a skipped one.
+            try:
+                name = inst["display_name"] or f"Chat {inst['telegram_chat_id']}"
+                media = inst["media_count"]
+                ppd = inst["posts_per_day"]
+                status = "paused" if inst["is_paused"] else "active"
+                lines.append(
+                    f"{i}\\. *{escape_markdownv2(name)}* \\({media} media · {ppd}/day · {status}\\)"
+                )
+                keyboard_rows.append(
+                    [
+                        InlineKeyboardButton(
+                            f"Manage {name}",
+                            callback_data=f"instance_manage:{inst['chat_settings_id']}",
+                        )
+                    ]
+                )
+            except Exception as e:  # noqa: BLE001 - one row must not lose the list
+                logger.warning(
+                    f"[chat={inst.get('telegram_chat_id', '?')}] "
+                    f"Instance list: skipping malformed row: {e}"
+                )
 
         keyboard_rows.append(
             [InlineKeyboardButton("+ New Instance", callback_data="instance_new")]

@@ -448,6 +448,36 @@ class HealthCheckService(BaseService):
 
             coverage = {"tenants_checked": checked, "tenants_unreachable": unreachable}
 
+            # A verdict over an INCOMPLETE population cannot be a healthy one.
+            #
+            # Isolating each tenant (above) stops one failure ending the sweep;
+            # on its own it would also turn a genuinely fatal condition into a
+            # per-item shrug. Before isolation any failure reached the outer
+            # handler and reported unhealthy — so without this, the fix would
+            # trade "one tenant hides the rest" for "every tenant can fail and
+            # the endpoint still reads green", which is the worse of the two:
+            # a total pool outage would be indistinguishable from a clean bill
+            # of health. That is the #764 distinction again — do not let a
+            # degraded state masquerade as a clean one — and it is why some
+            # failures must still fail the check rather than be counted and
+            # waved through.
+            if unreachable:
+                detail = (
+                    f" Worst of those reached: '{worst_detail['category']}' "
+                    f"({worst_detail['runway_days']:.0f} days)"
+                    if worst_detail
+                    else ""
+                )
+                return {
+                    "healthy": False,
+                    "message": (
+                        f"Pool check incomplete: {unreachable} of "
+                        f"{checked + unreachable} tenants unreachable.{detail}"
+                    ),
+                    **({"worst_category": worst_detail} if worst_detail else {}),
+                    **coverage,
+                }
+
             if worst_detail is None:
                 return {
                     "healthy": True,
