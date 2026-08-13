@@ -405,15 +405,29 @@ class HealthCheckService(BaseService):
         Reports the lowest-runway category across all tenants.
         For per-tenant detail, use check_media_pool_for_chat().
         """
+        # Declared before the try so the outer handler can disclose whatever
+        # coverage the sweep reached (#794). A caller reading these keys on the
+        # happy path and not on the failure paths is the never-happened-versus-
+        # lost confusion the keys exist to close, one level up.
+        checked = 0
+        unreachable = 0
+
         try:
             active_chats = self.settings_service.get_all_active_chats()
             if not active_chats:
-                return {"healthy": True, "message": "No active chats configured"}
+                # 0 of 0 is the TRUE coverage here, not a placeholder: the
+                # population was enumerated successfully and it was empty.
+                # Distinguished from the outer handler's 0 of 0 — where
+                # enumeration itself may have failed — by `healthy`.
+                return {
+                    "healthy": True,
+                    "message": "No active chats configured",
+                    "tenants_checked": 0,
+                    "tenants_unreachable": 0,
+                }
 
             worst_runway = float("inf")
             worst_detail = None
-            checked = 0
-            unreachable = 0
 
             for chat in active_chats:
                 chat_id = chat.telegram_chat_id
@@ -429,10 +443,32 @@ class HealthCheckService(BaseService):
                 # disclosed below, because "worst of 9, 3 unreachable" and
                 # "worst of 12" are different claims and the caller cannot
                 # tell them apart otherwise.
+                # THE GUARD SPANS THE WHOLE PER-TENANT UNIT, not just the call
+                # (#794). Reading this tenant's categories is this tenant's
+                # work, so a malformed row — a category missing `runway_days` —
+                # belongs inside its own isolation rather than outside it.
+                # Guarding only the call fails closed, but at a site that
+                # already LOOKS fixed, which is the worse shape: the next
+                # reader sees a `try` and stops looking.
                 try:
                     pool_info = self.check_media_pool_for_chat(
                         chat_id, chat_settings=chat
                     )
+                    tenant_worst = None
+                    tenant_runway = None
+                    for cat_info in pool_info.get("categories", []):
+                        # Read UNCONDITIONALLY, and keep the number rather than
+                        # re-reading the row later. Both halves are load-bearing
+                        # and the first was got wrong here once: written as
+                        # `tenant_worst is None or cat_info["runway_days"] < ...`
+                        # the short-circuit skips the lookup for the first row,
+                        # so a malformed row is adopted without ever being read
+                        # and raises at the commit below — OUTSIDE this guard,
+                        # which is the defect being fixed, one line further on.
+                        runway = cat_info["runway_days"]
+                        if tenant_runway is None or runway < tenant_runway:
+                            tenant_runway = runway
+                            tenant_worst = cat_info
                 except Exception as e:  # noqa: BLE001 — one tenant must not end the sweep
                     unreachable += 1
                     logger.warning(
@@ -440,11 +476,17 @@ class HealthCheckService(BaseService):
                     )
                     continue
 
+                # Committed only once the tenant's whole unit has succeeded, so
+                # a failure part-way through cannot count the tenant BOTH
+                # checked and unreachable. That keeps checked + unreachable
+                # equal to the population, which is the property the disclosure
+                # is worth anything for.
                 checked += 1
-                for cat_info in pool_info.get("categories", []):
-                    if cat_info["runway_days"] < worst_runway:
-                        worst_runway = cat_info["runway_days"]
-                        worst_detail = cat_info
+                # Nothing here dereferences the row: `tenant_runway` was read
+                # inside the guard, so this line cannot raise on tenant data.
+                if tenant_runway is not None and tenant_runway < worst_runway:
+                    worst_runway = tenant_runway
+                    worst_detail = tenant_worst
 
             coverage = {"tenants_checked": checked, "tenants_unreachable": unreachable}
 
@@ -517,7 +559,18 @@ class HealthCheckService(BaseService):
 
         except Exception as e:  # noqa: BLE001 — health check must not crash
             logger.error(f"Media pool check failed: {e}", exc_info=True)
-            return {"healthy": False, "message": f"Pool check error: {str(e)}"}
+            # Coverage reports what the sweep actually REACHED before aborting,
+            # which is 0 of 0 when enumeration itself failed (#794). Read with
+            # `healthy`, that is not the same claim as the empty-population
+            # return above: this one is False. A caller that aggregates these
+            # counts must not treat an aborted sweep as a fully-covered empty
+            # one, and `healthy` is what tells the two apart.
+            return {
+                "healthy": False,
+                "message": f"Pool check error: {str(e)}",
+                "tenants_checked": checked,
+                "tenants_unreachable": unreachable,
+            }
 
     def check_media_pool_for_chat(
         self, telegram_chat_id: int, *, chat_settings=None
