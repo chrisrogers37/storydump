@@ -1093,3 +1093,180 @@ class TestIncompleteCoverageIsNotHealthy:
         assert result["healthy"] is False
         assert "memes" in result["message"]
         assert result["tenants_unreachable"] == 0
+
+
+@pytest.mark.unit
+class TestMediaPoolFailClosedGapsFromThe791Merge:
+    """#794: the two gaps mason raised on #791 and that were deliberately left
+    open, because each already failed closed and neither blocked the merge.
+
+    Failing closed is why they were not urgent. It is also why they needed
+    tests that bind to the SPECIFIC failure: a fail-closed path returns
+    `healthy: False`, and so does almost every other failure, so an assertion
+    on `healthy` alone would pass whether or not the gap was ever exercised —
+    a green earned by nothing having been tried. Every test below therefore
+    asserts what the sweep DID (call counts, which tenants were reached, which
+    counter moved), not merely that the result was unhealthy.
+    """
+
+    @pytest.fixture
+    def pool_service(self):
+        service = HealthCheckService()
+        service.queue_repo = Mock()
+        service.history_repo = Mock()
+        service._media_repo = Mock()
+        service._settings_service = Mock()
+        return service
+
+    def _chats(self, n):
+        return [Mock(telegram_chat_id=-(i + 1)) for i in range(n)]
+
+    def _pool(self, runway):
+        return {
+            "categories": [
+                {"category": "memes", "runway_days": runway, "eligible": int(runway)}
+            ]
+        }
+
+    # --- gap 1: the per-tenant guard wrapped the CALL, not the UNIT ----------
+
+    def test_a_malformed_category_row_is_isolated_to_its_own_tenant(self, pool_service):
+        """THE REGRESSION for gap 1, and it is deliberately NOT a raising call.
+
+        The old guard wrapped `check_media_pool_for_chat` only, so a call that
+        RETURNS was already isolated. The work left outside was reading this
+        tenant's categories — so the failure that discriminates the two shapes
+        is a successful call returning a row with no `runway_days`. Before the
+        fix that KeyError escaped to the outer handler and ended the sweep;
+        after it, it is this tenant's problem alone.
+        """
+        chats = self._chats(3)
+        pool_service._settings_service.get_all_active_chats.return_value = chats
+
+        def side_effect(chat_id, chat_settings=None):
+            if chat_id == chats[0].telegram_chat_id:
+                # returns fine — a malformed ROW, not a failing call
+                return {"categories": [{"category": "memes", "eligible": 4}]}
+            return self._pool(1.0 if chat_id == chats[-1].telegram_chat_id else 99.0)
+
+        pool_service.check_media_pool_for_chat = Mock(side_effect=side_effect)
+
+        with patch("src.services.core.health_check.logger"):
+            result = pool_service._check_media_pool()
+
+        assert pool_service.check_media_pool_for_chat.call_count == 3, (
+            "the malformed row ended the sweep: only "
+            f"{pool_service.check_media_pool_for_chat.call_count} of 3 tenants examined"
+        )
+        assert result.get("worst_category", {}).get("runway_days") == 1.0, (
+            f"the critical tenant behind the malformed one was never seen: {result}"
+        )
+        assert result["tenants_unreachable"] == 1, result
+        assert result["tenants_checked"] == 2, result
+
+    def test_a_tenant_that_fails_mid_unit_is_counted_once_not_twice(self, pool_service):
+        """The counting invariant the widened guard has to preserve.
+
+        Committing `checked` before the category loop would count a tenant that
+        then fails as BOTH checked and unreachable, so the disclosure would
+        over-report the population it covered — the failure mode of a fix that
+        merely moves the `try` without moving the commit.
+        """
+        chats = self._chats(4)
+        pool_service._settings_service.get_all_active_chats.return_value = chats
+
+        def side_effect(chat_id, chat_settings=None):
+            if chat_id == chats[1].telegram_chat_id:
+                return {"categories": [{"category": "memes"}]}  # no runway_days
+            if chat_id == chats[2].telegram_chat_id:
+                raise RuntimeError("tenant unreachable")
+            return self._pool(50.0)
+
+        pool_service.check_media_pool_for_chat = Mock(side_effect=side_effect)
+
+        with patch("src.services.core.health_check.logger"):
+            result = pool_service._check_media_pool()
+
+        assert result["tenants_checked"] + result["tenants_unreachable"] == len(
+            chats
+        ), (
+            "coverage does not account for the population: "
+            f"{result['tenants_checked']} + {result['tenants_unreachable']} != {len(chats)}"
+        )
+        assert (result["tenants_checked"], result["tenants_unreachable"]) == (2, 2)
+
+    def test_a_reachable_tenant_with_no_categories_is_checked_not_unreachable(
+        self, pool_service
+    ):
+        """THE CONTROL that stops the widened guard swallowing healthy tenants.
+
+        An empty category list is a normal answer, not a fault. Without this, a
+        fix that counted every tenant yielding no worst-category as unreachable
+        would pass every assertion above while quietly reporting a fleet-wide
+        outage.
+        """
+        chats = self._chats(2)
+        pool_service._settings_service.get_all_active_chats.return_value = chats
+        pool_service.check_media_pool_for_chat = Mock(return_value={"categories": []})
+
+        result = pool_service._check_media_pool()
+
+        assert (result["tenants_checked"], result["tenants_unreachable"]) == (2, 0)
+        assert result["healthy"] is True, result
+
+    # --- gap 2: **coverage absent from two return paths ---------------------
+
+    def test_the_empty_population_path_discloses_coverage(self, pool_service):
+        """`if not active_chats` returned no coverage keys, so a caller reading
+        them got them on the normal path and not here."""
+        pool_service._settings_service.get_all_active_chats.return_value = []
+
+        result = pool_service._check_media_pool()
+
+        assert result["tenants_checked"] == 0
+        assert result["tenants_unreachable"] == 0
+        assert result["healthy"] is True
+
+    def test_the_aborted_sweep_path_discloses_coverage(self, pool_service):
+        """The outer handler returned no coverage keys either.
+
+        Asserts the enumeration was actually ATTEMPTED, not just that the
+        result was unhealthy — otherwise this passes for a service that never
+        ran at all, which is the vacuous shape this class exists to avoid.
+        """
+        pool_service._settings_service.get_all_active_chats.side_effect = RuntimeError(
+            "database gone"
+        )
+
+        with patch("src.services.core.health_check.logger"):
+            result = pool_service._check_media_pool()
+
+        assert pool_service._settings_service.get_all_active_chats.called
+        assert result["healthy"] is False
+        assert result["tenants_checked"] == 0
+        assert result["tenants_unreachable"] == 0
+
+    def test_an_empty_population_and_an_aborted_sweep_are_distinguishable(
+        self, pool_service
+    ):
+        """Both now report 0 of 0, so the keys alone cannot separate them — and
+        conflating them is the never-happened-versus-lost confusion the keys
+        were added to close. `healthy` is what carries the distinction, and
+        that is asserted here rather than assumed, as a PAIR: either verdict
+        alone is satisfied by an implementation that always returns it.
+        """
+        pool_service._settings_service.get_all_active_chats.return_value = []
+        empty = pool_service._check_media_pool()
+
+        pool_service._settings_service.get_all_active_chats.side_effect = RuntimeError(
+            "database gone"
+        )
+        pool_service._settings_service.get_all_active_chats.return_value = None
+        with patch("src.services.core.health_check.logger"):
+            aborted = pool_service._check_media_pool()
+
+        coverage_of = lambda r: (r["tenants_checked"], r["tenants_unreachable"])  # noqa: E731
+        assert coverage_of(empty) == coverage_of(aborted) == (0, 0)
+        assert (empty["healthy"], aborted["healthy"]) == (True, False), (
+            "an aborted sweep is indistinguishable from an empty population"
+        )
