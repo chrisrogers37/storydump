@@ -176,8 +176,16 @@ async def _scheduler_tick(
                                     f"[{result.get('category', '?')}]"
                                 ),
                             )
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            # Best-effort courtesy send: the post itself already
+                            # succeeded, so this must not end the tick — but it
+                            # must not vanish either. Swallowed silently, a
+                            # tenant stops hearing from the bot with no signal
+                            # anywhere, and a ChatMigrated here loses the new
+                            # chat id, which is the one fact a recovery pass
+                            # needs (#782; the hole named in
+                            # ChatMigratedError.parse_pair's docstring).
+                            _log_alert_failure("Auto-approve notification", chat_id, e)
 
             except GoogleDriveAuthError:
                 logger.error(
