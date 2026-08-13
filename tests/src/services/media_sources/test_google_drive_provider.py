@@ -376,15 +376,24 @@ class TestGoogleDriveProviderCalculateFileHash:
 
         assert result == "drive_md5_hash"
 
-    def test_calculate_file_hash_fallback_sha256(self, provider, mock_drive_service):
-        """Test SHA256 fallback when md5Checksum is not available."""
+    def test_calculate_file_hash_fallback_matches_the_md5checksum_path(
+        self, provider, mock_drive_service
+    ):
+        """#619: the no-md5Checksum fallback must produce the SAME value the
+        md5Checksum path would have.
+
+        Otherwise one Drive file hashes two different ways depending on what
+        the API happened to return, inside the very method that exists to make
+        sources comparable. Expectation anchored to `hashlib.md5`, which is
+        what Drive's md5Checksum field actually contains.
+        """
         mock_drive_service.files().get().execute.return_value = {
             "id": "file123",
         }
 
         # Mock download_file for fallback
         file_content = b"test file content"
-        expected_hash = hashlib.sha256(file_content).hexdigest()
+        expected_hash = hashlib.md5(file_content).hexdigest()
 
         with patch.object(provider, "download_file", return_value=file_content):
             result = provider.calculate_file_hash("file123")

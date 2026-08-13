@@ -1,6 +1,5 @@
 """Dashboard detail endpoints for onboarding Mini App."""
 
-import hashlib
 import mimetypes
 from pathlib import Path
 
@@ -15,6 +14,7 @@ from src.services.core.dashboard_service import DashboardService
 from src.services.core.health_check import HealthCheckService
 from src.services.core.instagram_account_service import InstagramAccountService
 from src.services.core.settings_service import SettingsService
+from src.utils.file_hash import calculate_bytes_hash
 from src.utils.logger import logger
 
 from .helpers import _validate_request
@@ -456,7 +456,7 @@ async def onboarding_upload_media(
     _validate_request(init_data, chat_id)
 
     content, claimed_mime = await _validate_upload_content(request, file)
-    file_hash = hashlib.sha256(content).hexdigest()
+    file_hash = calculate_bytes_hash(content)
 
     safe_name = Path(file.filename or "upload").name
     if not safe_name or safe_name.startswith("."):
