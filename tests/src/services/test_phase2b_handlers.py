@@ -550,3 +550,84 @@ class TestOnboardingCleanup:
             await _onboarding_cleanup_tick()
 
         mock_conv.cleanup_expired.assert_called_once()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestInstanceListSurvivesOneMalformedRow:
+    """#783 review (#767 family): three more per-instance loops had no
+    per-item guard, so one malformed row lost the ENTIRE listing and every
+    instance behind it — and the user was told nothing.
+
+    These were invisible to two rigorous enumerations because both encoded the
+    proxy "a loop inside a try" rather than the defect "a per-item loop with no
+    per-item guard". None of the three sits inside a `try` at all. The check
+    that terminates is enumerating the POPULATION — the two functions through
+    which a tenant list enters `src/` — not loop shapes.
+    """
+
+    def _rows(self):
+        good = {
+            "chat_settings_id": "abc",
+            "telegram_chat_id": -100123,
+            "display_name": "Good Instance",
+            "media_count": 50,
+            "posts_per_day": 3,
+            "is_paused": False,
+            "last_post_at": None,
+            "instance_role": "owner",
+        }
+        bad = dict(good, telegram_chat_id=-100999, display_name="Broken Ltd")
+        del bad["media_count"]
+        after = dict(good, telegram_chat_id=-100777, display_name="Behind It")
+        return [good, bad, after]
+
+    async def test_handle_instances_still_lists_the_rows_around_it(
+        self, mock_command_handlers
+    ):
+        """THE REGRESSION. Before the guard, the malformed second row aborted
+        the loop and 'Behind It' was never rendered."""
+        handlers = mock_command_handlers
+        _make_user(handlers.service)
+        mock_update = _make_update(12345, chat_type="private")
+
+        with (
+            patch("src.services.core.telegram_commands.DashboardService") as MockDash,
+            patch("src.services.core.telegram_commands.logger") as log,
+        ):
+            mock_dash = MockDash.return_value
+            mock_dash.__enter__ = Mock(return_value=mock_dash)
+            mock_dash.__exit__ = Mock(return_value=False)
+            mock_dash.get_user_instances.return_value = {"instances": self._rows()}
+
+            await handlers.handle_instances(mock_update, Mock())
+
+        rendered = str(mock_update.message.reply_text.call_args)
+        assert "Good Instance" in rendered
+        assert "Behind It" in rendered, (
+            f"the row after the malformed one is missing: {rendered}"
+        )
+        warnings = [str(c.args[0]) for c in log.warning.call_args_list]
+        assert any("-100999" in w for w in warnings), (
+            f"the malformed row was dropped without being named: {warnings}"
+        )
+
+    async def test_a_clean_list_logs_nothing(self, mock_command_handlers):
+        """The control: without it, a guard that logged unconditionally would
+        satisfy the assertion above while destroying the signal."""
+        handlers = mock_command_handlers
+        _make_user(handlers.service)
+        mock_update = _make_update(12345, chat_type="private")
+
+        with (
+            patch("src.services.core.telegram_commands.DashboardService") as MockDash,
+            patch("src.services.core.telegram_commands.logger") as log,
+        ):
+            mock_dash = MockDash.return_value
+            mock_dash.__enter__ = Mock(return_value=mock_dash)
+            mock_dash.__exit__ = Mock(return_value=False)
+            mock_dash.get_user_instances.return_value = {"instances": self._rows()[:1]}
+
+            await handlers.handle_instances(mock_update, Mock())
+
+        assert log.warning.call_args_list == []

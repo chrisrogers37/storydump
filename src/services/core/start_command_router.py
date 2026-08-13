@@ -11,6 +11,7 @@ from src.services.core.conversation_service import ConversationService
 from src.services.core.dashboard_service import DashboardService
 from src.repositories.membership_repository import MembershipRepository
 from src.services.core.telegram_utils import build_webapp_button, escape_markdownv2
+from src.utils.logger import logger
 
 if TYPE_CHECKING:
     from src.services.core.telegram_service import TelegramService
@@ -273,23 +274,35 @@ class StartCommandRouter:
 
         keyboard_rows = []
         for i, inst in enumerate(instances, 1):
-            name = inst["display_name"] or f"Chat {inst['telegram_chat_id']}"
-            media = inst["media_count"]
-            ppd = inst["posts_per_day"]
-            status = "⏸️ paused" if inst["is_paused"] else "✅ active"
-            lines.append(
-                f"{i}\\. *{escape_markdownv2(name)}* "
-                f"\\({media} media · {ppd}/day · {status}\\)"
-            )
+            # Per instance, not per message (#783 review, #767 family). One
+            # malformed row used to lose the ENTIRE listing and every instance
+            # behind it, and the user was told nothing. The guard spans the whole
+            # body deliberately: `lines` and `keyboard_rows` are built in parallel,
+            # so a failure between the two appends would leave a numbered instance
+            # with no button -- a half-rendered row is worse than a skipped one.
+            try:
+                name = inst["display_name"] or f"Chat {inst['telegram_chat_id']}"
+                media = inst["media_count"]
+                ppd = inst["posts_per_day"]
+                status = "⏸️ paused" if inst["is_paused"] else "✅ active"
+                lines.append(
+                    f"{i}\\. *{escape_markdownv2(name)}* "
+                    f"\\({media} media · {ppd}/day · {status}\\)"
+                )
 
-            keyboard_rows.append(
-                [
-                    InlineKeyboardButton(
-                        f"Manage {name}",
-                        callback_data=f"instance_manage:{inst['chat_settings_id']}",
-                    )
-                ]
-            )
+                keyboard_rows.append(
+                    [
+                        InlineKeyboardButton(
+                            f"Manage {name}",
+                            callback_data=f"instance_manage:{inst['chat_settings_id']}",
+                        )
+                    ]
+                )
+            except Exception as e:  # noqa: BLE001 - one row must not lose the list
+                logger.warning(
+                    f"[chat={inst.get('telegram_chat_id', '?')}] "
+                    f"Instance list: skipping malformed row: {e}"
+                )
 
         keyboard_rows.append(
             [InlineKeyboardButton("+ New Instance", callback_data="instance_new")]
