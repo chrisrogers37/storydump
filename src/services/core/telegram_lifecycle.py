@@ -53,18 +53,34 @@ class TelegramLifecycleHandler:
             if instances:
                 lines.append("Your instances:")
                 for i, inst in enumerate(instances, 1):
-                    raw_name = (
-                        inst["display_name"] or f"Chat {inst['telegram_chat_id']}"
-                    )
-                    name = escape_markdown(raw_name)
-                    media = inst["media_count"]
-                    ppd = inst["posts_per_day"]
-                    last = format_last_post(inst["last_post_at"])
-                    status = "⏸️ paused" if inst["is_paused"] else "✅ active"
-                    lines.append(
-                        f"{i}. *{name}* — {ppd}/day, {media} media, "
-                        f"last post {last} ({status})"
-                    )
+                    # Per instance, not per notification (#783, matching
+                    # #767/#781). This loop only formats, so it fails on bad
+                    # data rather than on I/O -- but one malformed row used to
+                    # abort the whole message, and the admin was told NOTHING
+                    # rather than told about the others. From the reader's side
+                    # "no startup message" is indistinguishable from "the bot
+                    # did not start", so the loss was total and silent at once.
+                    try:
+                        raw_name = (
+                            inst["display_name"] or f"Chat {inst['telegram_chat_id']}"
+                        )
+                        name = escape_markdown(raw_name)
+                        media = inst["media_count"]
+                        ppd = inst["posts_per_day"]
+                        last = format_last_post(inst["last_post_at"])
+                        status = "⏸️ paused" if inst["is_paused"] else "✅ active"
+                        lines.append(
+                            f"{i}. *{name}* — {ppd}/day, {media} media, "
+                            f"last post {last} ({status})"
+                        )
+                    except Exception as e:  # noqa: BLE001 — one row must not end the list
+                        # Named, not just skipped: a quietly dropped row trades
+                        # a total loss for a partial one nobody can see.
+                        logger.warning(
+                            f"[chat={inst.get('telegram_chat_id', '?')}] "
+                            f"Startup notification: skipping malformed instance "
+                            f"row: {e}"
+                        )
             else:
                 lines.append("No instances configured yet.")
 

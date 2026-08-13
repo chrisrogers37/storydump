@@ -412,18 +412,48 @@ class HealthCheckService(BaseService):
 
             worst_runway = float("inf")
             worst_detail = None
+            checked = 0
+            unreachable = 0
 
             for chat in active_chats:
-                pool_info = self.check_media_pool_for_chat(
-                    chat.telegram_chat_id, chat_settings=chat
-                )
+                chat_id = chat.telegram_chat_id
+                # Per tenant, not per sweep (#783, matching #767/#781). Active
+                # chats come back ordered by created_at ASC, so a tenant that
+                # reliably raises aborts at the same position on every run and
+                # every tenant created after it is never examined.
+                #
+                # Here that is worse than a silenced alert: this function's
+                # whole job is a CROSS-TENANT AGGREGATE, and an aggregate over
+                # an arbitrary prefix is not a smaller answer, it is a wrong
+                # one. So isolation alone is not enough — the population is
+                # disclosed below, because "worst of 9, 3 unreachable" and
+                # "worst of 12" are different claims and the caller cannot
+                # tell them apart otherwise.
+                try:
+                    pool_info = self.check_media_pool_for_chat(
+                        chat_id, chat_settings=chat
+                    )
+                except Exception as e:  # noqa: BLE001 — one tenant must not end the sweep
+                    unreachable += 1
+                    logger.warning(
+                        f"[chat={chat_id}] Media pool check failed for tenant: {e}"
+                    )
+                    continue
+
+                checked += 1
                 for cat_info in pool_info.get("categories", []):
                     if cat_info["runway_days"] < worst_runway:
                         worst_runway = cat_info["runway_days"]
                         worst_detail = cat_info
 
+            coverage = {"tenants_checked": checked, "tenants_unreachable": unreachable}
+
             if worst_detail is None:
-                return {"healthy": True, "message": "No categories configured"}
+                return {
+                    "healthy": True,
+                    "message": "No categories configured",
+                    **coverage,
+                }
 
             if worst_runway <= self.POOL_CRITICAL_DAYS:
                 return {
@@ -434,6 +464,7 @@ class HealthCheckService(BaseService):
                         f"({worst_detail['runway_days']:.0f} days remaining)"
                     ),
                     "worst_category": worst_detail,
+                    **coverage,
                 }
 
             if worst_runway <= self.POOL_WARNING_DAYS:
@@ -445,11 +476,13 @@ class HealthCheckService(BaseService):
                         f"({worst_detail['runway_days']:.0f} days remaining)"
                     ),
                     "worst_category": worst_detail,
+                    **coverage,
                 }
 
             return {
                 "healthy": True,
                 "message": f"All categories have >{self.POOL_WARNING_DAYS} days of runway",
+                **coverage,
             }
 
         except Exception as e:  # noqa: BLE001 — health check must not crash
