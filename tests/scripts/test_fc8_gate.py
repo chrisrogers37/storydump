@@ -12,7 +12,7 @@ table returns ERROR, not zero.
 import psycopg2
 import pytest
 
-from scripts.fc8_gate import CLEAR, ERROR, HALT, census, main
+from scripts.fc8_gate import CLEAR, ERROR, HALT, Census, census, main, render
 from tests.scripts.conftest import execute
 
 pytestmark = [pytest.mark.integration]
@@ -178,3 +178,94 @@ class TestExitCodes:
         payload = json.loads(capsys.readouterr().out)
         assert payload["verdict"] == "CLEAR"
         assert payload["unclassified_source_types"] == ["instagram_backfill"]
+
+
+class TestTheDisclosureReachesTheOutputAnOperatorReads:
+    """The two disclosure buckets, covered where they are actually read.
+
+    `census()` computing them and `--json` carrying them are both covered
+    above — and neither would notice if the **text** blocks were deleted from
+    `render()`. Text is the DEFAULT path (`--json` is opt-in), so that deletion
+    would leave every other test green, CI green, both halt counts still
+    correct, and the unknowns simply gone from what a human sees.
+
+    That matters more than coverage arithmetic because these two buckets *are*
+    the mechanism keeping unruled things visible: they are what stopped
+    `instagram_backfill` being swept to the safe side by a `NOT IN` that would
+    have read as deliberate, and what stopped the nullable `is_active` third
+    state being silently assigned. A mechanism whose failure produces silence
+    rather than an error has to be pinned where it is consumed.
+
+    These are pure-function tests over `render()` — no database — so they are
+    fast and cannot contend for the host. One end-to-end case below proves the
+    wiring, which pure tests cannot.
+    """
+
+    UNCLASSIFIED_CENSUS = Census(
+        live_named=0,
+        history_named=0,
+        by_source={
+            "google_drive": {"live": 3, "total": 4},
+            "instagram_backfill": {"live": 2, "total": 2},
+        },
+        unclassified=["instagram_backfill"],
+        null_active=0,
+    )
+
+    def test_an_unclassified_origin_is_named_and_marked_in_the_text(self):
+        out = render(self.UNCLASSIFIED_CENSUS)
+        assert "instagram_backfill" in out
+        assert "UNCLASSIFIED" in out
+        # The inline marker and the explanatory block are two separate
+        # disclosures; either can be deleted alone, so both are asserted.
+        marked = [ln for ln in out.splitlines() if "instagram_backfill" in ln]
+        assert any("UNCLASSIFIED" in ln for ln in marked), (
+            "the row itself must carry the mark — a reader scanning the census"
+            f" table must not have to correlate it with a block below: {marked}"
+        )
+
+    def test_the_unclassified_block_keeps_the_reason_not_just_the_label(self):
+        """A bare marker degrades to noise. What makes it actionable is that it
+        says why it did not halt and whose call it is — so that survives too."""
+        out = render(self.UNCLASSIFIED_CENSUS)
+        assert "does NOT halt" in out
+        assert "owner ruling" in out
+        assert "gdrive" in out, "the closed target CHECK is why this matters"
+
+    def test_a_null_is_active_count_is_stated_with_its_number(self):
+        out = render(
+            Census(by_source={"local": {"live": 0, "total": 1}}, null_active=7)
+        )
+        assert "7 media_items have is_active IS NULL" in out
+        assert "neither live nor dead" in out
+
+    def test_a_clean_census_prints_neither_disclosure(self):
+        """The negative control. Without it, a `render` that unconditionally
+        printed both blocks would satisfy every assertion above while telling
+        an operator nothing."""
+        out = render(Census(by_source={"google_drive": {"live": 5, "total": 5}}))
+        assert "UNCLASSIFIED" not in out
+        assert "is_active IS NULL" not in out
+        assert "VERDICT: CLEAR" in out
+
+    def test_every_origin_present_is_listed_with_its_counts(self):
+        """The census table is itself a disclosure — a classified origin going
+        missing would hide the corpus's shape just as effectively."""
+        out = render(self.UNCLASSIFIED_CENSUS)
+        assert "google_drive" in out
+        assert "live=3" in out and "total=4" in out
+
+    def test_the_default_path_prints_the_text_disclosure_to_stdout(
+        self, replayed_db, capsys
+    ):
+        """The wiring, which no pure test can reach: text is what `main`
+        actually emits without `--json`. If the default ever flipped, every
+        assertion above would still pass against a `render` nobody calls."""
+        _media(replayed_db, "instagram_backfill")
+        _media(replayed_db, "local", is_active=None)
+
+        assert main(["--dsn", replayed_db]) == CLEAR
+        out = capsys.readouterr().out
+        assert "UNCLASSIFIED" in out
+        assert "is_active IS NULL" in out
+        assert not out.lstrip().startswith("{"), "default must be text, not JSON"
