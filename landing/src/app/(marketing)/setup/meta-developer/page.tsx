@@ -14,6 +14,13 @@ export const metadata: Metadata = {
   title: "Meta Developer App Setup",
   description,
   alternates: { canonical: "/setup/meta-developer" },
+  // Withheld from search until this page has a destination. It walks the reader
+  // through registering their own Meta app, and the product accepts no
+  // tenant-supplied App ID or Secret — credentials are deployment-level — so an
+  // arriving reader spends the advertised 30-60 minutes and then finds no field
+  // to enter the result in. The page stays reachable for anyone mid-flow; only
+  // its search-arrival path is closed. See #802.
+  robots: { index: false, follow: true },
   ...ogMeta("Meta Developer App Setup", description),
 }
 
