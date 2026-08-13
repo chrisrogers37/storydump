@@ -157,6 +157,23 @@ class TestManifestRatchet:
         with pytest.raises(AdvertisedDDLError, match="unclassified"):
             build_stream([doc], manifest)
 
+    def test_build_stream_fails_closed_on_an_orphaned_manifest_entry(self, tmp_path):
+        """The ORPHAN direction of fail-closed, which the unclassified test
+        does NOT cover (rajan, #784): build_stream iterates doc-blocks, so an
+        unclassified block KeyErrors on its own — but an orphaned manifest
+        entry (a hash with no matching block) is never looked up, so WITHOUT
+        the ratchet guard build_stream silently returns a normal-looking
+        stream. The guard is the only thing that catches it; this proves the
+        guard raises rather than emitting a stream built over a stale manifest."""
+        doc = tmp_path / "d.md"
+        doc.write_text(FIXTURE_DOC)
+        blocks = extract_blocks(doc)
+        ghost = {"sha256": "0" * 64, "class": "normative", "label": "ghost"}
+        manifest = load_manifest(self._manifest(tmp_path, blocks, extra=[ghost]))
+
+        with pytest.raises(AdvertisedDDLError, match="orphaned"):
+            build_stream([doc], manifest)
+
     def test_illustrative_without_a_reason_is_rejected_at_load(self, tmp_path):
         import json
 
