@@ -304,6 +304,12 @@ class TestForwardedForAttribution:
     except the last is caller-controlled. Under `trusted_hosts=["*"]` uvicorn
     returns the FIRST entry; under a named set it walks from the right and
     returns the first untrusted one.
+
+    Scope: these assert the ATTRIBUTION layer -- what ProxyHeadersMiddleware
+    computes, given a configuration. What the limiter then does with that value
+    depends on where the limiter sits in the assembled app, which nothing here
+    can see; that is asserted against `src.api.app:app` itself in
+    `TestGlobalRateLimitKeysOnTheCorrectedClient` (#776).
     """
 
     EDGE = "10.0.0.5"  # our TCP peer: the platform edge
@@ -385,50 +391,15 @@ class TestForwardedForAttribution:
             got = self._attributed(self._configured(), "1.2.3.4", peer=public)
             assert got == public, f"{public} was treated as a trusted proxy"
 
-    def test_rate_limit_buckets_do_not_partition_on_a_forged_value(self):
-        """The end-to-end consequence, through the real limiter.
-
-        60 requests against a 30/minute limit, each forging a different address.
-        Correct behaviour is that the ceiling still applies.
-        """
-        from fastapi import FastAPI, Request
-        from slowapi import Limiter, _rate_limit_exceeded_handler
-        from slowapi.errors import RateLimitExceeded
-        from slowapi.middleware import SlowAPIMiddleware
-        from slowapi.util import get_remote_address
-        from starlette.testclient import TestClient
-        from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
-
-        limiter = Limiter(
-            key_func=get_remote_address,
-            default_limits=["30/minute"],
-            storage_uri="memory://",
-        )
-        api = FastAPI()
-        api.state.limiter = limiter
-        api.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-        api.add_middleware(SlowAPIMiddleware)
-
-        @api.get("/probe")
-        def probe(request: Request):
-            return {"ok": True}
-
-        client = TestClient(
-            ProxyHeadersMiddleware(api, trusted_hosts=self._configured())
-        )
-        blocked = 0
-        for i in range(60):
-            resp = client.get(
-                "/probe",
-                headers={"X-Forwarded-For": f"198.51.100.{i}, {self.CALLER}"},
-            )
-            if resp.status_code == 429:
-                blocked += 1
-
-        assert blocked == 30, (
-            f"{blocked} of 60 rotating-source requests were limited; expected 30. "
-            "A caller rotating X-Forwarded-For is getting a fresh bucket per request."
-        )
+    # The end-to-end limiter consequence used to be asserted here, against a
+    # FastAPI app built inline for the purpose. It was removed in #776 rather
+    # than repaired: it wired ProxyHeadersMiddleware OUTSIDE the limiter, which
+    # is the correct order and was never the deployed one, so no change to
+    # src/api/app.py could make it fail. Its `blocked == 30` also could not tell
+    # the two worlds apart -- one shared bucket and one correctly-attributed
+    # caller both produce 30. It is superseded by
+    # TestGlobalRateLimitKeysOnTheCorrectedClient, which drives the real app and
+    # varies the two candidate keys independently.
 
     def test_the_checks_can_fail(self):
         """The predicate against the vulnerable configuration it never sees.
@@ -505,9 +476,7 @@ class TestForwardedForAmbiguity:
             )
         )
         asyncio.run(
-            stack(
-                {"type": "http", "client": (peer, 54321), "headers": raw}, None, None
-            )
+            stack({"type": "http", "client": (peer, 54321), "headers": raw}, None, None)
         )
         return seen["host"]
 
@@ -520,25 +489,19 @@ class TestForwardedForAmbiguity:
 
     def test_two_headers_real_then_forged_does_not_attribute_to_the_forgery(self):
         """The exact #765 shape: edge's real header first, forged bare one second."""
-        got = self._xff(
-            [f"{self.FORGED}, {self.CALLER}", self.FORGED], peer=self.EDGE
-        )
+        got = self._xff([f"{self.FORGED}, {self.CALLER}", self.FORGED], peer=self.EDGE)
         assert got != self.FORGED, f"attributed to the forged value {self.FORGED!r}"
 
     def test_two_headers_forged_then_real_does_not_attribute_to_the_forgery(self):
         """Same shape, reversed -- the fix must not depend on arrival order."""
-        got = self._xff(
-            [self.FORGED, f"{self.FORGED}, {self.CALLER}"], peer=self.EDGE
-        )
+        got = self._xff([self.FORGED, f"{self.FORGED}, {self.CALLER}"], peer=self.EDGE)
         assert got != self.FORGED
 
     def test_ambiguous_xff_falls_back_to_the_raw_peer(self):
         """Falls back exactly where "no X-Forwarded-For at all" already lands
         -- not CALLER (unrecoverable from a flattened, ambiguous shape) and
         never FORGED."""
-        got = self._xff(
-            [self.FORGED, f"{self.FORGED}, {self.CALLER}"], peer=self.EDGE
-        )
+        got = self._xff([self.FORGED, f"{self.FORGED}, {self.CALLER}"], peer=self.EDGE)
         assert got == self.EDGE
 
     def test_three_or_more_headers_still_drops(self):
@@ -629,4 +592,248 @@ class TestForwardedForAmbiguity:
         assert blocked == 30, (
             f"{blocked} of 60 rotating multi-header requests were limited; "
             "expected 30 -- the shared fallback-peer bucket."
+        )
+
+
+# =============================================================================
+# Global rate-limit keying, on the assembled application (#776)
+# =============================================================================
+
+
+@pytest.mark.unit
+class TestGlobalRateLimitKeysOnTheCorrectedClient:
+    """Which address the GLOBAL default limit buckets on, in the real app.
+
+    `TestForwardedForAttribution` above proves ProxyHeadersMiddleware attributes
+    correctly, and that the limiter respects that attribution — but it proves the
+    second half against a hand-assembled replica, and the replica wires
+    ProxyHeadersMiddleware OUTSIDE the limiter. The deployed app did the reverse
+    for as long as both existed, and no test looked, because the replica was the
+    only thing under assertion (#776).
+
+    Two properties have to hold at once, and they pull in opposite directions:
+
+      1. Distinct clients must get distinct buckets. Otherwise the 30/minute
+         default is a ceiling on the whole service rather than a per-abuser
+         control -- behind one edge, every tenant shares one bucket.
+      2. One client must not be able to MINT buckets by writing the header.
+         Otherwise the limit is not a limit.
+
+    Ordering is what satisfies both: the limiter must read the value
+    ProxyHeadersMiddleware already corrected, and that correction must itself
+    resist forgery. So these drive `src.api.app:app` as assembled -- the object
+    uvicorn serves -- and never a rebuild of it.
+
+    The counts are deliberately NOT asserted as equalities. `blocked == 30`
+    cannot separate the healthy app from the broken one: a single shared bucket
+    and a correctly-attributed single caller both produce exactly 30, for
+    opposite reasons. The discriminator is whether the count moves when the two
+    candidate keys are varied INDEPENDENTLY, which is what these do.
+    """
+
+    EDGE = "10.0.0.5"  # our TCP peer: the platform edge (trusted)
+    CALLER = "192.0.2.50"  # one caller's real address, appended by the edge
+
+    # Every drive gets a key space no other drive has used, allocated from this
+    # counter rather than from a per-test constant.
+    #
+    # The limiter is a module-level singleton shared by the whole session, and
+    # `_drive` resetting its storage is not sufficient on its own: driving the
+    # full `tests/src/api/` suite, this class failed roughly one run in twelve
+    # with clients that had made a single request each being rate-limited, and
+    # never once when the file was run alone (0/25, 0/14). The mechanism was not
+    # established. What IS established is that the failure needs a key to have
+    # been seen before, so allocating fresh keys removes its precondition
+    # without depending on a diagnosis. The reset stays as well -- one of these
+    # is a fix for a cause I could not name, and it should not also be the only
+    # thing standing between a shared singleton and a false security result.
+    _next_block = 0
+
+    @classmethod
+    def _fresh_range(cls):
+        """A /24 of synthetic, process-local client addresses, never reused.
+
+        Documentation-range third octet walks upward; these addresses only ever
+        exist inside an ASGI scope in this process. The requirement is that they
+        are not inside TRUSTED_PROXY_HOSTS, which the private ranges hold.
+        """
+        cls._next_block += 1
+        return f"198.51.{cls._next_block}"
+
+    @pytest.fixture(autouse=True)
+    def _limiter_on(self):
+        """Undo the module-wide `_disable_rate_limits` for this class only.
+
+        `tests/src/api/conftest.py` switches the limiter off for every API test,
+        which is right for tests that merely need to call an endpoint without
+        tripping a 429 -- and fatal here, where the limiter IS the subject.
+        Under that fixture these tests do not fail; they stop meaning anything,
+        and the "distinct clients share no bucket" assertion passes on an app
+        that has no limiter running at all.
+        """
+        from src.api.rate_limit import limiter
+
+        prior = limiter.enabled
+        limiter.enabled = True
+        yield
+        limiter.enabled = prior
+
+    @staticmethod
+    def _drive(headers_for, peer, n=60):
+        """n requests to /health through the real app.
+
+        Returns the INDICES of the blocked requests, not a bare count. The
+        index pattern is what tells the two failure modes apart, and a count
+        cannot: exhausting one shared bucket blocks a contiguous TAIL (the
+        limit is spent, everything after it fails), while two tests colliding
+        on a key blocks a SCATTERED few. Both can produce the same total. A
+        rate-limit test that fails intermittently will be re-run until it is
+        green unless its message says which one happened.
+        """
+        from starlette.testclient import TestClient
+
+        from src.api.app import app
+        from src.api.rate_limit import limiter
+
+        assert limiter.enabled, (
+            "the limiter is disabled, so every count below would be 0 and every "
+            "assertion here would be vacuous -- see the _limiter_on fixture"
+        )
+        limiter._storage.reset()
+        client = TestClient(app, client=(peer, 51234))
+        try:
+            return [
+                i
+                for i in range(n)
+                if client.get("/health", headers=headers_for(i)).status_code == 429
+            ]
+        finally:
+            client.close()
+
+    @staticmethod
+    def _shape(blocked, n=60):
+        """Describe a blocked-index list well enough to diagnose it."""
+        if not blocked:
+            return "none blocked"
+        contiguous_tail = blocked == list(range(blocked[0], n))
+        return f"{len(blocked)} of {n} blocked, first at request {blocked[0]}, " + (
+            "contiguous to the end -- the signature of ONE shared bucket "
+            "being exhausted, i.e. the limiter keyed on something every "
+            "request has in common (the peer)"
+            if contiguous_tail
+            else f"scattered at {blocked[:8]} -- the signature of a key "
+            "COLLISION with another test rather than a keying defect"
+        )
+
+    def test_distinct_clients_behind_the_edge_do_not_share_one_bucket(self):
+        """The exposure itself: 60 tenants, one edge, one bucket.
+
+        Each request carries a DIFFERENT real client address, appended by the
+        edge as the rightmost entry. Sixty distinct clients making one request
+        each cannot exceed any per-minute limit, so a single block means they
+        were bucketed together -- on the peer, which is the edge, which is
+        shared by everyone.
+        """
+        rng = self._fresh_range()
+        blocked = self._drive(
+            lambda i: {"X-Forwarded-For": f"{rng}.{i % 254 + 1}"},
+            peer=self.EDGE,
+        )
+        assert blocked == [], (
+            f"{self._shape(blocked)}. Every request came from a distinct "
+            "address and made exactly one call, so none can have exceeded a "
+            "limit on its own. A contiguous tail means the limiter is reading "
+            "the raw peer -- SlowAPIMiddleware running ABOVE "
+            "ProxyHeadersMiddleware (#776); anything scattered is test "
+            "pollution, not a product defect, and should be chased as such."
+        )
+
+    def test_a_caller_cannot_mint_buckets_by_forging_a_leading_entry(self):
+        """The property the reorder must not cost.
+
+        One caller, rotating a forged leading entry, with the edge appending
+        their true address on the right. uvicorn walks the chain right-to-left
+        and stops at the first untrusted entry -- the true one -- so every
+        request must land in the same bucket and the ceiling must still bite.
+        """
+        rng = self._fresh_range()
+        blocked = self._drive(
+            lambda i: {"X-Forwarded-For": f"{rng}.{i % 254 + 1}, {self.CALLER}"},
+            peer=self.EDGE,
+        )
+        assert blocked, (
+            "A caller rotating a forged X-Forwarded-For entry was never limited "
+            "in 60 requests -- they are minting a fresh bucket per request. The "
+            "global limit is now forgeable."
+        )
+
+    def test_a_direct_untrusted_caller_cannot_forge_at_all(self):
+        """Control. Reaching the app directly, the header is not read at all,
+        so the caller's real address stands and the ceiling applies."""
+        rng = self._fresh_range()
+        blocked = self._drive(
+            lambda i: {"X-Forwarded-For": f"{rng}.{i % 254 + 1}"},
+            peer="203.0.113.9",
+        )
+        assert blocked, (
+            "An untrusted direct caller partitioned the limit by writing "
+            "X-Forwarded-For; only trusted peers' headers may be read."
+        )
+
+    def test_a_caller_cannot_mint_buckets_with_repeated_headers(self):
+        """The shape this ordering does not defend on its own, and #765 does.
+
+        Two X-Forwarded-For header instances let the caller win
+        ProxyHeadersMiddleware's `dict(scope["headers"])` collapse. Keying the
+        limiter on the corrected client is what puts that value in reach of the
+        limiter at all; `DropAmbiguousForwardedForMiddleware` (#774) is what
+        makes it safe to be in reach, by dropping the header and falling back to
+        the peer.
+
+        This carried an `xfail(strict=True)` while #774 was unmerged. It fired
+        on the rebase -- `[XPASS(strict)]`, a build failure demanding its own
+        removal -- which is the only reason the marker was retired deliberately
+        rather than left behind asserting a gap that had closed.
+
+        **What this test does and does not guard, measured rather than assumed.**
+        Reverting `DropAmbiguousForwardedForMiddleware` turns it red. Reverting
+        the #776 ordering does NOT -- it stays green, because with the limiter
+        back above ProxyHeadersMiddleware every request keys on the peer and the
+        ceiling bites for the wrong reason. So this is an INERT mutant for the
+        ordering, and it is not evidence for #776 at all: that is carried by
+        `test_distinct_clients_behind_the_edge_do_not_share_one_bucket` and
+        `test_the_limiter_is_assembled_below_proxy_headers`. Recorded because a
+        test sitting in a #776 class, passing, reads as coverage of #776.
+        """
+        rng = self._fresh_range()
+        blocked = self._drive(
+            lambda i: [
+                ("x-forwarded-for", self.CALLER),
+                ("x-forwarded-for", f"{rng}.{i % 254 + 1}"),
+            ],
+            peer=self.EDGE,
+        )
+        assert blocked, (
+            "A caller sending two X-Forwarded-For headers minted a fresh bucket "
+            "per request."
+        )
+
+    def test_the_limiter_is_assembled_below_proxy_headers(self):
+        """The invariant behind all of the above, asserted directly.
+
+        The behavioural tests are the evidence; this one names the cause, so a
+        reordering shows up as "you moved the middleware" rather than as four
+        puzzling count failures.
+        """
+        from slowapi.middleware import SlowAPIMiddleware
+        from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+
+        from src.api.app import app
+
+        order = [mw.cls for mw in app.user_middleware]
+        assert order.index(ProxyHeadersMiddleware) < order.index(SlowAPIMiddleware), (
+            "SlowAPIMiddleware is assembled above ProxyHeadersMiddleware, so the "
+            "global default limit keys on the raw peer rather than the corrected "
+            "client. add_middleware prepends: add SlowAPIMiddleware BEFORE "
+            "ProxyHeadersMiddleware to put it below on the request path. See #776."
         )

@@ -122,6 +122,25 @@ app = FastAPI(
 # Security headers — HSTS, CSP, X-Frame-Options, X-Content-Type-Options
 app.add_middleware(SecurityHeadersMiddleware)
 
+# Rate limiting — 30 req/min per IP global default (see src/api/rate_limit.py)
+#
+# MUST be added BEFORE ProxyHeadersMiddleware, which puts it BELOW it on the
+# request path. Starlette's add_middleware prepends, so the middleware added
+# last runs first; running second here means the scope's client has already
+# been corrected when the limiter reads it.
+#
+# The ordering is the control, not the limiter's configuration. SlowAPIMiddleware
+# evaluates the global default limit itself, in its own dispatch, for every route
+# that carries no @limiter.limit decorator of its own. Above ProxyHeadersMiddleware
+# it keys that limit on the raw connecting peer — behind a single edge, every
+# tenant on every undecorated route shares one 30/minute bucket, which is a
+# capacity ceiling on the whole service rather than a per-abuser control. The
+# @limiter.limit decorators were never affected: those evaluate at the endpoint,
+# already inside ProxyHeadersMiddleware. See #776.
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
+
 # Proxy headers — trust X-Forwarded-For/Proto from the edge that fronts us, so
 # request.client.host returns the real client IP rather than the proxy's.
 #
@@ -141,11 +160,6 @@ app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=settings.trusted_proxy_
 # it here: Starlette's add_middleware prepends, so the middleware added last
 # runs first. See #765.
 app.add_middleware(DropAmbiguousForwardedForMiddleware)
-
-# Rate limiting — 30 req/min per IP global default (see src/api/rate_limit.py)
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-app.add_middleware(SlowAPIMiddleware)
 
 # CORS middleware — restrict to our own domain in production
 _cors_origins = (
