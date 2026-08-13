@@ -435,11 +435,17 @@ class MediaSyncService(BaseService):
         if source_type == "local":
             return MediaSourceFactory.create(source_type, base_path=source_root)
         elif source_type == "google_drive":
-            chat_id = telegram_chat_id or settings.TELEGRAM_CHANNEL_ID
+            # The tenant is passed through as-is, including None. Substituting
+            # the deployment-wide TELEGRAM_CHANNEL_ID here named a tenant this
+            # sync is not, so an untenanted sync resolved — and refreshed —
+            # whichever tenant that env var happens to point at's OAuth
+            # credentials, then used them against THIS sync's folder. None is
+            # the honest value: it means no tenant is claimed, which the
+            # factory answers with the deployment's service account.
             return MediaSourceFactory.create(
                 source_type,
                 root_folder_id=source_root,
-                telegram_chat_id=chat_id,
+                telegram_chat_id=telegram_chat_id,
             )
         else:
             return MediaSourceFactory.create(source_type)
