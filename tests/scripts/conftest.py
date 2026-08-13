@@ -9,23 +9,21 @@ instead of this one differently.
 Host model (#758/#763/#768 — several bots share this cluster): the DATABASE
 half of isolation is per-session naming (#763's session suffix, reused here
 so one run has one identity); the ROLE half cannot be namespaced — the seven
-``svc_*`` roles are cluster-scoped spec names — so this suite SERIALIZES
-host-wide on the cluster's own advisory lock and QUEUES behind concurrent
-runs instead of corrupting them. Every cleanup path is scoped to this
-suite's own database prefixes; nothing here can touch a database it did not
-name.
+``svc_*`` roles are cluster-scoped spec names — so this suite SERIALIZES on
+the cluster's own advisory lock and QUEUES behind concurrent runs instead of
+corrupting them. Every cleanup path is scoped to this suite's own database
+prefixes; nothing here can touch a database it did not name.
+
+ONE lock, not two (#785). The mutex is ``SUITE_CLUSTER_LOCK_KEY``, held
+session-wide by ``admin_conn``. It reaches every process that can reach the
+cluster, which is the scope the guarded resource actually has.
 """
 
-import fcntl
 import functools
 import json
-import os
-import re
 import subprocess
-import tempfile
 import time
 import uuid
-from contextlib import contextmanager
 from pathlib import Path
 
 import psycopg2
@@ -48,7 +46,28 @@ SUITE_DB_PREFIXES = (TEST_DB_PREFIX, TPL_DB_PREFIX)
 #: shared objects (service roles, scratch namespaces)". Distinct from the
 #: runner's own RUNNER_LOCK_KEY; same idea one level up: PostgreSQL is the
 #: shared resource, so PostgreSQL's lock is the mutex that actually reaches
-#: every process on the host, whichever bot owns it.
+#: every process that can reach it, whichever bot or host owns it.
+#:
+#: THE SINGLE PRIMITIVE (#785). A `flock` keyed on the same cluster used to
+#: guard the role lifecycle redundantly alongside this. It was dropped rather
+#: than widened, for reasons that are properties of the two mechanisms and not
+#: of the current fleet:
+#:
+#: - **Scope.** The roles are CLUSTER-scoped; a `flock` is HOST-scoped. Two
+#:   containers or hosts pointing at one cluster do not share a temp directory,
+#:   so the file lock silently fails to serialise them while this one still
+#:   does. `tempfile.gettempdir()` also follows `TMPDIR`, so the same divergence
+#:   is reachable on a single host.
+#: - **Coverage by container, not by enumeration.** This lock is held for the
+#:   whole session, so it covers `_sweep_leftovers` — which drops OTHER
+#:   sessions' suite-prefixed databases and is the most destructive thing here.
+#:   Widening a per-fixture lock means maintaining a list of fixture names that
+#:   goes stale the next time one is added.
+#: - **Crash safety is not a discriminator.** Measured on this cluster: SIGKILL
+#:   the holder with no cleanup path and the lock clears anyway (the backend
+#:   sees EOF and exits). Both mechanisms have the property.
+#: - **It can name its holder.** The wait below prints pid/user/application
+#:   from `pg_locks`; a file lock cannot say who holds it.
 SUITE_CLUSTER_LOCK_KEY = 753_2026
 SUITE_LOCK_WAIT_SECONDS = 1200
 
@@ -467,81 +486,6 @@ def actor_lacks_createrole(admin_conn) -> str | None:
     )
 
 
-#: How long a session waits for the service-role lock before giving up. The
-#: wait is bounded rather than infinite because an indefinite block in CI is a
-#: job that hangs to its global timeout with nothing explaining why; a bounded
-#: wait fails with the lock path in the message.
-#:
-#: UNION NOTE (#753 PR-A rebase over #772): this flock and the session-wide
-#: advisory lock admin_conn holds BOTH serialise the same cluster-scoped svc_*
-#: provisioning — independently and redundantly. They are kept side by side
-#: deliberately: #772 shipped merged + tested, PR-A was written before it, and
-#: folding one into the other during a rebase would put unreviewed structure
-#: behind rajan's completed review of PR-A. The redundancy is harmless (both
-#: serialise; neither breaks the other) and the consolidation to a single lock
-#: is tracked as its own issue.
-ROLE_LOCK_TIMEOUT_S = float(os.environ.get("SVC_ROLE_LOCK_TIMEOUT_S", "300"))
-
-
-def service_role_lock_path() -> Path:
-    """The lock file guarding this CLUSTER's service roles.
-
-    Keyed on host:port, derived rather than declared: roles are cluster-scoped,
-    so the cluster is exactly the right mutual-exclusion scope. Two checkouts
-    pointing at the same PostgreSQL must serialise; two pointing at different
-    ones must not, and a single hardcoded path would make them queue for no
-    reason. The name is readable on purpose — an operator finding it in the
-    temp dir should be able to tell what it guards.
-    """
-    key = re.sub(r"[^A-Za-z0-9]+", "-", f"{settings.DB_HOST}-{settings.DB_PORT}")
-    return Path(tempfile.gettempdir()) / f"storydump-svc-roles-{key}.lock"
-
-
-@contextmanager
-def service_role_lock():
-    """Exclusive, host-wide, for the whole role lifecycle (#758 part 3).
-
-    The seven service roles are CLUSTER-scoped, so a per-session database name
-    cannot isolate them the way #763 isolated the database. Two concurrent
-    sessions collide **setup against in-use**, in both directions: one
-    session's `roleless_db` setup drops roles the other is actively using, and
-    a drop can equally fail with `DependentObjectsStillExist` because the other
-    session's database still holds grants. Measured: two concurrent runs of the
-    role suites both return rc=1 while the same suite alone is green (#768).
-
-    `flock` is released by the kernel when the holder exits, so a crashed or
-    killed session cannot leave a stale lock behind — which is the property a
-    lock file with hand-rolled cleanup would not have.
-    """
-    path = service_role_lock_path()
-    # 0o666 so bots running as different users can share the same lock file;
-    # umask may narrow it, which is a real bound rather than a guarantee.
-    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o666)
-    deadline = time.monotonic() + ROLE_LOCK_TIMEOUT_S
-    try:
-        while True:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                if time.monotonic() >= deadline:
-                    raise RuntimeError(
-                        f"timed out after {ROLE_LOCK_TIMEOUT_S:.0f}s waiting for"
-                        f" the service-role lock at {path}. Another test session"
-                        " on this host is provisioning the cluster-scoped svc_*"
-                        " roles. If nothing is running, a holder was killed"
-                        " without releasing — flock clears on process exit, so"
-                        " check for a live holder rather than deleting the file."
-                    ) from None
-                time.sleep(0.1)
-        yield
-    finally:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        finally:
-            os.close(fd)
-
-
 def _drop_roles_hardened(cur, roles: tuple) -> None:
     """Drop roles; on DependentObjectsStillExist, drop exactly the SUITE
     databases actually blocking them (asked of pg_shdepend) and retry once.
@@ -641,22 +585,20 @@ def roleless_db(admin_conn):
     reason = actor_lacks_createrole(admin_conn)
     if reason:
         pytest.skip(reason)
-    # UNION (PR-A over #772): PR-A's `_scratch(roles=)` lifecycle — which owns
-    # the drop-database-then-roles order and the pg_shdepend/ownership-predicate
-    # hardening — run INSIDE #772's flock, which spans the whole role lifecycle
-    # (the collision is this fixture's SETUP against another session's in-use
-    # roles, so a teardown-only lock would leave the measured #768 failure as
-    # is). The flock is redundant with admin_conn's session-wide advisory lock
-    # and consolidation is tracked separately; both are kept so neither review
-    # is silently undone.
-    with service_role_lock():
-        extra: list[str] = []
-        gen = _scratch(admin_conn, roles=extra)
-        dsn = next(gen)
-        try:
-            yield dsn, extra
-        finally:
-            gen.close()
+    # No lock is taken HERE, and that is the point of #785 rather than an
+    # omission: depending on `admin_conn` already places this fixture inside
+    # the session-wide `SUITE_CLUSTER_LOCK_KEY`, which is held from before the
+    # first fixture runs until the session ends. The collision #768 measured is
+    # this fixture's SETUP against another session's in-use roles, and a
+    # session-wide lock covers setup by construction — earlier and wider than
+    # the per-fixture lock it replaces, not later or narrower.
+    extra: list[str] = []
+    gen = _scratch(admin_conn, roles=extra)
+    dsn = next(gen)
+    try:
+        yield dsn, extra
+    finally:
+        gen.close()
 
 
 @pytest.fixture()
