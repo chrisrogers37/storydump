@@ -7,10 +7,15 @@ a credential or port move breaks every suite the same way instead of this one
 differently.
 """
 
+import fcntl
 import json
 import os
+import re
 import subprocess
+import tempfile
+import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 import psycopg2
@@ -71,14 +76,57 @@ def _create_db(admin_conn, name: str, template: str | None = None) -> str:
     return _dsn(name)
 
 
-def _drop_db(admin_conn, name: str) -> None:
-    with admin_conn.cursor() as cur:
-        cur.execute(
-            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity"
-            " WHERE datname = %s AND pid <> pg_backend_pid()",
-            (name,),
-        )
-        cur.execute(f'DROP DATABASE IF EXISTS "{name}"')
+def _drop_db(admin_conn, name: str, timeout_s: float = 20.0) -> None:
+    """Drop a scratch database, tolerating backends we are not allowed to kill.
+
+    **A failure here is not local** (#758 part 3): teardown drops the database
+    *before* the roles, because a grant inside a database is a catalog
+    dependency on the role. So a drop that raises leaves the database standing,
+    which leaves the roles undroppable, which fails the SETUP of every
+    subsequent test in the session. Measured: one teardown error produced five
+    cascaded `DependentObjectsStillExist` setup errors behind it.
+
+    Two things make the naive form fail, and only the first is obvious:
+
+    - **`pg_terminate_backend` can refuse.** It raises
+      `InsufficientPrivilege: must be a superuser to terminate superuser
+      process` when a superuser-owned backend — an autovacuum worker is the one
+      that actually happens — is attached to the database. That is a normal,
+      transient condition, and it becomes *likely* rather than rare when two
+      sessions are churning databases at once. Terminating is best-effort:
+      being unable to kill one backend is not a reason to abandon the drop.
+    - **The backend may not be gone yet.** Termination is asynchronous, and
+      autovacuum detaches on its own, so `DROP DATABASE` is retried within a
+      bound instead of being attempted exactly once.
+
+    Raises if the database still stands at the deadline — the one thing this
+    must not do is return quietly having left it behind.
+    """
+    deadline = time.monotonic() + timeout_s
+    last_error = None
+    while True:
+        with admin_conn.cursor() as cur:
+            try:
+                cur.execute(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity"
+                    " WHERE datname = %s AND pid <> pg_backend_pid()",
+                    (name,),
+                )
+            except psycopg2.errors.InsufficientPrivilege:
+                pass  # a superuser backend (autovacuum); it will detach itself
+        with admin_conn.cursor() as cur:
+            try:
+                cur.execute(f'DROP DATABASE IF EXISTS "{name}"')
+                return
+            except psycopg2.errors.ObjectInUse as exc:
+                last_error = exc
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                f"could not drop scratch database {name} within {timeout_s:.0f}s"
+                f" — {last_error}. Leaving it would block every later role drop"
+                " in this session, so this fails loudly rather than silently."
+            )
+        time.sleep(0.25)
 
 
 def _scratch(admin_conn, template: str | None = None):
@@ -152,6 +200,72 @@ def actor_lacks_createrole(admin_conn) -> str | None:
     )
 
 
+#: How long a session waits for the service-role lock before giving up. The
+#: wait is bounded rather than infinite because an indefinite block in CI is a
+#: job that hangs to its global timeout with nothing explaining why; a bounded
+#: wait fails with the lock path in the message.
+ROLE_LOCK_TIMEOUT_S = float(os.environ.get("SVC_ROLE_LOCK_TIMEOUT_S", "300"))
+
+
+def service_role_lock_path() -> Path:
+    """The lock file guarding this CLUSTER's service roles.
+
+    Keyed on host:port, derived rather than declared: roles are cluster-scoped,
+    so the cluster is exactly the right mutual-exclusion scope. Two checkouts
+    pointing at the same PostgreSQL must serialise; two pointing at different
+    ones must not, and a single hardcoded path would make them queue for no
+    reason. The name is readable on purpose — an operator finding it in the
+    temp dir should be able to tell what it guards.
+    """
+    key = re.sub(r"[^A-Za-z0-9]+", "-", f"{settings.DB_HOST}-{settings.DB_PORT}")
+    return Path(tempfile.gettempdir()) / f"storydump-svc-roles-{key}.lock"
+
+
+@contextmanager
+def service_role_lock():
+    """Exclusive, host-wide, for the whole role lifecycle (#758 part 3).
+
+    The seven service roles are CLUSTER-scoped, so a per-session database name
+    cannot isolate them the way #763 isolated the database. Two concurrent
+    sessions collide **setup against in-use**, in both directions: one
+    session's `roleless_db` setup drops roles the other is actively using, and
+    a drop can equally fail with `DependentObjectsStillExist` because the other
+    session's database still holds grants. Measured: two concurrent runs of the
+    role suites both return rc=1 while the same suite alone is green (#768).
+
+    `flock` is released by the kernel when the holder exits, so a crashed or
+    killed session cannot leave a stale lock behind — which is the property a
+    lock file with hand-rolled cleanup would not have.
+    """
+    path = service_role_lock_path()
+    # 0o666 so bots running as different users can share the same lock file;
+    # umask may narrow it, which is a real bound rather than a guarantee.
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o666)
+    deadline = time.monotonic() + ROLE_LOCK_TIMEOUT_S
+    try:
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        f"timed out after {ROLE_LOCK_TIMEOUT_S:.0f}s waiting for"
+                        f" the service-role lock at {path}. Another test session"
+                        " on this host is provisioning the cluster-scoped svc_*"
+                        " roles. If nothing is running, a holder was killed"
+                        " without releasing — flock clears on process exit, so"
+                        " check for a live holder rather than deleting the file."
+                    ) from None
+                time.sleep(0.1)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
 def drop_service_roles(admin_conn, extra=()) -> None:
     """Remove the seven roles (plus any test-local ones) from the cluster.
 
@@ -196,15 +310,20 @@ def roleless_db(admin_conn):
     reason = actor_lacks_createrole(admin_conn)
     if reason:
         pytest.skip(reason)
-    drop_service_roles(admin_conn)
-    extra: list[str] = []
-    name = f"runner_test_{uuid.uuid4().hex[:10]}"
-    dsn = _create_db(admin_conn, name)
-    try:
-        yield dsn, extra
-    finally:
-        _drop_db(admin_conn, name)
-        drop_service_roles(admin_conn, extra)
+    # The lock spans the WHOLE role lifecycle — the opening drop, the test, and
+    # the closing drop — because the collision is this fixture's SETUP against
+    # another session's in-use roles. Holding it only for teardown would leave
+    # the measured failure exactly as it is.
+    with service_role_lock():
+        drop_service_roles(admin_conn)
+        extra: list[str] = []
+        name = f"runner_test_{uuid.uuid4().hex[:10]}"
+        dsn = _create_db(admin_conn, name)
+        try:
+            yield dsn, extra
+        finally:
+            _drop_db(admin_conn, name)
+            drop_service_roles(admin_conn, extra)
 
 
 @pytest.fixture()
