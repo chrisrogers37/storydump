@@ -358,7 +358,7 @@ Use the Telegram bot itself as a health indicator:
 | Mini App won't load | Ensure web service is running and domain has HTTPS. Check `OAUTH_REDIRECT_BASE_URL`. |
 | Service restarts frequently | Check memory limits in Railway. Review logs for OOM or crash loops. |
 | "idle in transaction" | Built-in cleanup runs every 30 seconds. Reduce pool size if persistent. |
-| Instagram API rate limited | Default: 25 posts/hour. Check `INSTAGRAM_POSTS_PER_HOUR`. |
+| Instagram API rate limited | Meta caps API publishing per account over a rolling 24h window, and the app reads that account's live quota (`GET /{ig-user}/content_publishing_limit`) rather than assuming a number. Only if that read fails does it fall back to `INSTAGRAM_PUBLISH_LIMIT_FALLBACK` (default 100), so check that var and the credential behind the failed read. |
 
 ---
 

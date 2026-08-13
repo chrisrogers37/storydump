@@ -140,7 +140,7 @@ Build a delightful Instagram Story automation system that:
 #### Core Instagram API Integration
 - ✅ **Instagram Graph API Service** - Story creation and publishing
   - Media container status polling
-  - Rate limit tracking (25 posts/hour default)
+  - Publish-quota tracking against Meta's live per-account rolling-24h limit
   - Error categorization and handling
   - Multi-account support
 
