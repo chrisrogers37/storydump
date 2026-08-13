@@ -12,7 +12,7 @@ from src.api.routes.onboarding.helpers import (
     _validate_request,
     service_error_handler,
 )
-from tests.src.api.conftest import CHAT_ID
+from tests.src.api.conftest import CHAT_ID, mock_validate
 
 
 class TestServiceErrorHandler:
@@ -70,9 +70,9 @@ class TestValidateAuthRecordsTheRealReason:
                 side_effect=ValueError(initdata_error),
             ),
             patch("src.api.routes.onboarding.helpers.auth_monitor") as monitor,
+            pytest.raises(HTTPException) as exc,
         ):
-            with pytest.raises(HTTPException) as exc:
-                _validate_auth(init_data)
+            _validate_auth(init_data)
 
         assert monitor.record_failure.called, "nothing was recorded at all"
         return monitor.record_failure.call_args[0][1], exc.value
@@ -85,29 +85,23 @@ class TestValidateAuthRecordsTheRealReason:
 
         assert "auth_date is in the future" in recorded, recorded
 
-    def test_the_urltoken_reason_is_kept_as_well(self):
-        """Both reasons, not a swap. A fix that recorded only the initData
-        reason passes the test above while losing the other half — and the
-        URL-token branch is a real credential type (browser links), not a
-        formality."""
-        recorded, _ = self._run("initData expired")
+    def test_both_reasons_are_recorded_attributed_to_their_formats(self):
+        """Both halves, each labelled with the format that produced it.
 
-        assert "Invalid token format" in recorded, recorded
+        Asserted as label+reason pairs rather than as four independent
+        substrings, so that swapping the two labels fails: an operator has to
+        be able to tell which credential type produced which reason, and
+        ``initData: Invalid token format`` is a different and false claim.
 
-    def test_the_two_reasons_are_attributed_to_their_formats(self):
-        """Labelled, not run together. An operator has to be able to tell
-        which credential type produced which reason; the two concatenated
-        into one sentence is a different and unreadable claim."""
-        recorded, _ = self._run("initData expired")
+        The URL-token half is not a formality — browser links are a real
+        credential type — so a fix that recorded only the initData reason
+        would satisfy the test above while losing the other half.
 
-        assert "initData:" in recorded, recorded
-        assert "urlToken:" in recorded, recorded
-
-    def test_a_real_initdata_querystring_dies_at_the_format_check(self):
-        """The mechanism the issue names, with the real validator running.
-
-        This is what makes the second reason uninformative for every initData
-        caller, and it is why recording only that one erased the cause.
+        Uses a real initData querystring, which is the mechanism the issue
+        names: its colons are URL-encoded as ``%3A``, so it never presents
+        four colon-separated parts and dies at ``validate_url_token``'s format
+        check. That is what makes the second reason uninformative for every
+        initData caller, and why recording only that one erased the cause.
         """
         real_initdata = (
             "query_id=AAF&user=%7B%22id%22%3A123%7D&auth_date=1700000000&hash=abc"
@@ -115,8 +109,8 @@ class TestValidateAuthRecordsTheRealReason:
 
         recorded, _ = self._run("Invalid initData signature", init_data=real_initdata)
 
-        assert "urlToken: Invalid token format" in recorded, recorded
         assert "initData: Invalid initData signature" in recorded, recorded
+        assert "urlToken: Invalid token format" in recorded, recorded
 
     def test_the_client_is_not_told_which_check_failed(self):
         """The diagnostic string and the client-facing string are decoupled.
@@ -129,16 +123,11 @@ class TestValidateAuthRecordsTheRealReason:
 
         assert exc.status_code == 401
         assert exc.detail == AUTH_FAILURE_DETAIL
-        assert "signature" not in exc.detail, exc.detail
-        assert "initData" not in exc.detail, exc.detail
 
     def test_valid_initdata_still_authenticates(self):
         """Control. Without it every assertion above is satisfied by a
         chokepoint that rejects everything."""
-        with patch(
-            "src.api.routes.onboarding.helpers.validate_init_data",
-            return_value={"user_id": 1},
-        ):
+        with mock_validate({"user_id": 1}):
             assert _validate_auth("good")["user_id"] == 1
 
     def test_a_valid_url_token_still_authenticates_through_the_cascade(self):

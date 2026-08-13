@@ -16,16 +16,14 @@ GDRIVE_FOLDER_RE = re.compile(
     r"https?://drive\.google\.com/drive/folders/([a-zA-Z0-9_-]+)"
 )
 
-# What a rejected caller is told, decoupled from what the monitor records.
+# What a rejected caller is told by the _validate_auth cascade, decoupled from
+# what the monitor records. Scoped to that cascade; it is not a deployment-wide
+# 401 string.
 #
 # The specific reason is a small oracle: it separates "well-formed but
 # mis-signed" from "expired" from "wrong credential type entirely", which is
 # exactly the discrimination a probe wants and a legitimate client does not
-# need. The operator still gets every reason, via auth_monitor and the log.
-#
-# Nothing is lost that callers had: the reason they received was already the
-# URL-token branch's "Invalid token format" for every initData rejection,
-# whatever the real cause.
+# need. The operator still gets every reason, via auth_monitor.
 AUTH_FAILURE_DETAIL = "Invalid authentication credentials"
 
 
@@ -42,7 +40,9 @@ def _validate_auth(init_data: str, request: Request | None = None) -> dict:
     Accepts either Telegram WebApp initData (from Mini App) or a signed
     URL token (from browser links). Returns user info dict on success.
 
-    Raises HTTPException(401) on auth failure.
+    Raises HTTPException(401) on auth failure. The 401 detail is deliberately
+    constant (``AUTH_FAILURE_DETAIL``); the specific reason goes to
+    ``auth_monitor``, not to the caller.
     """
     try:
         return validate_init_data(init_data)
@@ -51,24 +51,20 @@ def _validate_auth(init_data: str, request: Request | None = None) -> dict:
             return validate_url_token(init_data)
         except ValueError as urltoken_error:
             ip = _client_ip(request)
-            # BOTH reasons are recorded, never just one.
+            # Both reasons, attributed to their format.
             #
-            # The two formats are tried in a fixed order, so only the SECOND
-            # failure used to reach the monitor — and a real initData
-            # querystring URL-encodes its colons as %3A, so it always failed
-            # validate_url_token's four-part split with "Invalid token format"
-            # before any check could describe the real problem. Every initData
-            # rejection therefore arrived as that one string, whatever caused
-            # it. That defeats the signal exactly when it is most wanted: a
-            # Telegram clock-skew event and a leaked-token probe both look
-            # like ordinary scanner junk when they are all spelled the same.
+            # The urlToken reason is uninformative for an initData caller: a
+            # real initData querystring URL-encodes its colons as %3A, so it
+            # never presents four colon-separated parts and dies at
+            # validate_url_token's format check before any check can describe
+            # the real problem. Recording that one alone spells every initData
+            # rejection identically, whatever caused it.
             #
-            # Both are carried rather than choosing one by the shape of the
+            # Both are carried rather than picking one by the shape of the
             # input. Shape is a heuristic, and it would misread precisely the
-            # inputs worth reading correctly — a malformed initData that
+            # input worth reading correctly — a malformed initData that
             # happens to contain a literal colon. Carrying both never guesses.
             reason = f"initData: {initdata_error}; urlToken: {urltoken_error}"
-            logger.warning("Auth failed (ip=%s): %s", ip, reason)
             auth_monitor.record_failure(ip, reason)
             raise HTTPException(status_code=401, detail=AUTH_FAILURE_DETAIL)
 
