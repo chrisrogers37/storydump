@@ -1,11 +1,67 @@
 """Application settings and configuration management."""
 
+from pydantic import ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional
 
 
+class SettingsError(Exception):
+    """Settings failed to load. Carries field NAMES only, never their values."""
+
+
+def _redact(exc: ValidationError) -> str:
+    """Render a ValidationError as field names and error types, no values.
+
+    Built from ``loc`` and ``type`` ONLY. Deliberately not from ``msg``: some
+    pydantic messages interpolate the offending input, and the whole point here
+    is that no code path can put a value in this string. ``type`` ("missing",
+    "int_parsing") is a fixed vocabulary and is safe.
+    """
+    lines = []
+    for err in exc.errors():
+        field = ".".join(str(part) for part in err.get("loc", ())) or "<root>"
+        lines.append(f"  {field}: {err.get('type', 'invalid')}")
+    return "settings failed to load:\n" + "\n".join(lines)
+
+
 class Settings(BaseSettings):
     """Application configuration."""
+
+    def __init__(self, **kwargs):
+        """Load settings, converting any validation failure into SettingsError.
+
+        WHY THIS EXISTS (#775). Fields here are bare-named -- TELEGRAM_BOT_TOKEN
+        and friends -- so pydantic reads whatever the ambient environment holds
+        under those names, from a process this project does not control. On a
+        validation failure its ValidationError renders ``input_value=`` with a
+        truncated copy of the input, which printed part of an unrelated real
+        credential for four different operators in one evening.
+
+        WHY NOT SecretStr, which is the obvious tool and what the issue first
+        suggested: measured, it does not fix this shape. The observed error is
+        ``missing`` on a DIFFERENT field, and that error's ``input_value`` is
+        the whole RAW input mapping, assembled before field types apply -- so
+        the annotation never runs and the value still appears. Pinned by
+        tests/src/config/test_settings_never_echo_values.py.
+
+        THE RAISE HAPPENS OUTSIDE THE except BLOCK, and that is the subtle
+        half. ``raise ... from exc`` would chain the original ValidationError
+        and Python prints __cause__, putting input_value straight back on
+        screen under "The above exception was the direct cause" -- a redaction
+        that redacts nothing. But ``from None`` is not sufficient either: it
+        only sets __suppress_context__, so the original exception, message and
+        all, is still hanging off __context__ for any logger, debugger or
+        ``repr()`` to reach. Raising after the handler has exited means there
+        is no active exception to chain, so __context__ is genuinely None and
+        the value is unreachable rather than merely unprinted.
+        """
+        error: Optional[str] = None
+        try:
+            super().__init__(**kwargs)
+        except ValidationError as exc:
+            error = _redact(exc)
+        if error is not None:
+            raise SettingsError(error)
 
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore"
