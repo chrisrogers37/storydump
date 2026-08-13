@@ -83,19 +83,34 @@ class MediaSourceFactory:
 
                 gdrive_service = GoogleDriveService()
 
-                # Try per-tenant user OAuth first, then service account fallback
                 if telegram_chat_id:
-                    try:
-                        return gdrive_service.get_provider_for_chat(
-                            telegram_chat_id, root_folder_id
-                        )
-                    except Exception as e:  # noqa: BLE001 — service-account fallback is intentionally broad
-                        logger.warning(
-                            "User OAuth failed for chat %s: %s, falling back to service account",
-                            telegram_chat_id,
-                            e,
-                        )
+                    # A NAMED tenant resolves to its OWN credentials or to an
+                    # error — never to the deployment's service account.
+                    #
+                    # This was a broad `except Exception` falling through to
+                    # get_provider() below, and TWO distinct things crossed the
+                    # tenant boundary as a result. The service account's
+                    # credentials stood in for the tenant's; and because
+                    # get_provider() reads root_folder_id from the SERVICE
+                    # ACCOUNT's own stored metadata when passed none, a tenant
+                    # with no configured root was handed a provider rooted in
+                    # the operator's Drive folder — whose files would then be
+                    # indexed under that tenant. The auth error that caused
+                    # either was downgraded to a warning on the way past, so
+                    # the crossing was also silent.
+                    #
+                    # Per-tenant isolation is a product requirement here (the
+                    # operator and a tenant are different parties), and
+                    # onboarding refuses to store a media root until the
+                    # tenant's own OAuth has proven access to it. So "named
+                    # tenant, no working OAuth" is a broken state to surface,
+                    # not a configuration to substitute around.
+                    return gdrive_service.get_provider_for_chat(
+                        telegram_chat_id, root_folder_id
+                    )
 
+                # No tenant named: the deployment-wide service account is the
+                # only identity in play, so using it crosses nothing.
                 return gdrive_service.get_provider(root_folder_id)
 
             return provider_class(

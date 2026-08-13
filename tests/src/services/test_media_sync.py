@@ -515,17 +515,33 @@ class TestMediaSyncServiceProviderCreation:
 
     @patch("src.services.core.media_sync.settings")
     @patch("src.services.core.media_sync.MediaSourceFactory")
-    def test_create_provider_google_drive(
+    def test_an_untenanted_sync_does_not_borrow_the_channel_tenants_identity(
         self, mock_factory, mock_settings, sync_service
     ):
-        """Google Drive provider passes root_folder_id and telegram_chat_id."""
+        """#627, the same defect wearing a different hat.
+
+        This used to substitute settings.TELEGRAM_CHANNEL_ID for a missing
+        tenant, which NAMES a tenant this sync is not: the factory then
+        resolved — and the sync later refreshed — whichever tenant that env
+        var happens to point at's OAuth credentials, and used them against
+        THIS sync's folder.
+
+        None is the honest value. It means no tenant is claimed, which the
+        factory answers with the deployment's service account.
+
+        The assertion is deliberately against the channel id rather than
+        merely for None: a future edit reintroducing any tenant substitution
+        has to fail here, and the distinctive value makes the failure name
+        what happened.
+        """
         mock_settings.TELEGRAM_CHANNEL_ID = -100123456789
+
         sync_service._create_provider("google_drive", "folder_xyz")
 
         mock_factory.create.assert_called_once_with(
             "google_drive",
             root_folder_id="folder_xyz",
-            telegram_chat_id=-100123456789,
+            telegram_chat_id=None,
         )
 
     @patch("src.services.core.media_sync.settings")
@@ -793,10 +809,14 @@ class TestMediaSyncServiceSettingsResolution:
         # whenever either is None).
         sync_service.sync(source_type="google_drive", source_root="folder_id")
 
+        # telegram_chat_id is None because this caller named no tenant. It
+        # asserted TELEGRAM_CHANNEL_ID before #627 — an override that bypasses
+        # the per-chat lookup does not thereby become the channel tenant, and
+        # resolving that tenant's OAuth for it was the crossing.
         mock_factory.create.assert_called_once_with(
             "google_drive",
             root_folder_id="folder_id",
-            telegram_chat_id=-100123456789,
+            telegram_chat_id=None,
         )
 
     @patch("src.services.core.media_sync.settings")
