@@ -339,23 +339,71 @@ class TestF2PrefixReport:
 
 
 class TestF2AgainstReality:
-    def test_target_lineage_is_empty_today_disclosed(self):
-        """DISCLOSURE (#750 shape): F.2 is alex's active lane and carries no
-        files above the 051 move yet, so arm (b) is a VACUOUS prefix today.
-        The mechanism is wired now so the first F.2 file is diffed against the
-        advertised stream the moment it lands — update this disclosure
-        deliberately when it does."""
+    def test_the_target_lineage_head_is_the_two_shared_functions(self):
+        """ARM (b) IS LOAD-BEARING FROM HERE (#806, migration 052).
+
+        This replaces `test_target_lineage_is_empty_today_disclosed`, which
+        asserted the target lineage was empty and was written to go red the
+        moment a file landed. 052 is that file, so the disclosure is retired
+        by giving arm (b) the real assertion it was holding the place for.
+
+        The expectation is derived from the STREAM — the plan documents plus
+        the manifest — and not from the migration file, which is the artifact
+        under test. Deriving it from the file would make this pass for any
+        content whatsoever.
+        """
         files = target_lineage_files(MIGRATIONS_DIR_PATH)
-        assert files == [], (
-            f"target-lineage migrations now exist ({[f.name for f in files]});"
-            " arm (b) is load-bearing from here — give it real prefix"
-            " assertions and update this disclosure."
+        assert files, (
+            "the target lineage is empty — 052 is the head of the advertised"
+            " stream and must be the first file above the 051 move"
+        )
+
+        manifest = load_manifest(REAL_MANIFEST)
+        expected = normalize_statements(build_stream(REAL_DOCS, manifest))[:2]
+        head = normalize_statements(files[0].read_text())
+
+        assert head == expected, (
+            f"{files[0].name} is not the advertised stream's opening"
+            " statements — arm (b) requires an ordered prefix"
+        )
+
+    def test_the_head_is_the_shared_functions_and_carries_no_table(self):
+        """The plan-level fact the prefix diff cannot state on its own.
+
+        A prefix diff only says "these match the stream's opening". It stays
+        green if the plan and the migration are changed together. `02` §0 says
+        the head of the target lineage is the two SHARED FUNCTIONS — asserted
+        by name here, independently of the diff.
+
+        The no-table half is what makes this increment independent of the open
+        question about whether a table may land before its policy: that
+        question governs tables, and a file with none is not subject to it.
+        """
+        head = normalize_statements(
+            target_lineage_files(MIGRATIONS_DIR_PATH)[0].read_text()
+        )
+        joined = " ".join(head)
+
+        assert "CREATE FUNCTION trg_touch_updated_at()" in joined
+        assert "CREATE FUNCTION fn_safe_tz(p_tz text)" in joined
+        assert "CREATE TABLE" not in joined, (
+            "a table landed in the shared-functions increment — that puts it"
+            " under the table-before-policy question this file is exempt from"
         )
 
     def test_the_wired_prefix_holds_against_the_real_stream(self):
         """The wiring itself, exercised end-to-end against the real docs +
-        manifest: today it is the empty (vacuous) prefix, but the call path —
-        build the stream, normalize F.2, diff — runs for real."""
+        manifest: build the stream, normalize the target lineage, diff.
+
+        `ok is True` was the whole assertion while the lineage was empty, and
+        an empty prefix is vacuously ok — so this test passed without
+        comparing anything, by design and disclosed as such. Now that 052 has
+        landed, NON-VACUITY is asserted alongside it. Without that line,
+        deleting every target-lineage migration would turn this green again
+        rather than red, which is the failure the disclosure existed to
+        prevent and would otherwise have been reintroduced silently the moment
+        it was removed.
+        """
         manifest = load_manifest(REAL_MANIFEST)
         stream = build_stream(REAL_DOCS, manifest)
         f2 = [
@@ -365,3 +413,8 @@ class TestF2AgainstReality:
         ]
         report = f2_prefix_report(f2, normalize_statements(stream))
         assert report.ok is True
+        assert report.vacuous is False, (
+            "the prefix is vacuous — the target lineage carries no statements,"
+            " so this test compared nothing"
+        )
+        assert report.f2_count == len(f2) > 0

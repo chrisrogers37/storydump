@@ -83,6 +83,24 @@ def tables_in(dsn, schema):
     return _relnames(dsn, schema, kinds=["r", "p"])
 
 
+def functions_in(dsn, schema):
+    """Function names in a schema.
+
+    Deliberately NOT `relations_in`: functions live in `pg_proc`, not
+    `pg_class`, so no relation-based probe can see them. That is exactly why
+    migration 052 lands without moving any of the relation-shaped assertions
+    in this file, and why the lane needs its own eyes on the target leg.
+    """
+    row = fetch_one(
+        dsn,
+        "SELECT coalesce(array_agg(p.proname ORDER BY p.proname), '{}')"
+        " FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace"
+        " WHERE n.nspname = %(schema)s",
+        {"schema": schema},
+    )
+    return list(row[0])
+
+
 def legacy_declared_tables():
     """The inventory the running application declares, read off the models."""
     import src.models  # noqa: F401 - registers every legacy model on Base
@@ -148,16 +166,21 @@ class TestTheBoundaryIsDerivedAndLoud:
         assert bounded, "the bound emptied the legacy lineage"
         assert max(m.version for m in bounded) == move.version - 1
 
-    def test_the_target_lineage_is_currently_empty_and_says_so(self):
-        """DISCLOSURE, in the shape #750 used rather than passing silently.
-        Nothing is numbered above the move yet — the lane's 'then the F.2
-        target files' leg replays an empty set today, so its green says the
-        move replays and says nothing at all about target DDL.
+    def test_the_target_lineage_is_the_shared_functions_file(self):
+        """THE LANE'S TARGET LEG IS LOAD-BEARING FROM HERE (#806).
 
-        The expected next file is `02` §0's two shared trigger functions
-        (`trg_touch_updated_at`, `fn_safe_tz`) — F.2.1's one surviving item,
-        which did not ship with the bootstrap in #752. When something lands
-        here, update this deliberately instead of deleting it.
+        This replaces `test_the_target_lineage_is_currently_empty_and_says_so`,
+        which disclosed that the leg replayed an empty set and named what it
+        expected to arrive: `02` §0's two shared trigger functions, F.2.1's one
+        surviving item. Migration 052 is exactly that, so the disclosure is
+        retired on its own terms rather than deleted.
+
+        The other half of what it asked for — assertions about what those
+        files CREATE — is `test_the_lane_installs_the_shared_functions` below,
+        which needs a database and so cannot live in this class.
+
+        The boundary is still derived from the runner's own move-marker, not
+        from the number 51.
         """
         move = schema_move_migration(MIGRATIONS_DIR)
         above = [
@@ -165,10 +188,10 @@ class TestTheBoundaryIsDerivedAndLoud:
             for m in discover_migrations(MIGRATIONS_DIR)
             if m.version > move.version
         ]
-        assert above == [], (
-            f"{len(above)} target-lineage migrations now exist ({above}). The"
-            " lane's target leg is now load-bearing — update this disclosure,"
-            " and give the lane assertions about what those files create."
+        assert above == ["052_shared_trigger_functions.sql"], (
+            f"the target lineage is {above}, expected exactly the shared"
+            " functions file — 052 is the head of the advertised stream and"
+            " nothing may be numbered above the move before it"
         )
 
 
@@ -257,6 +280,38 @@ class TestTheLaneReplaysAcrossTheBoundary:
         )
         assert relations_in(second_scratch_db, "public") == []
 
+    def test_the_lane_installs_the_shared_functions(self, bootstrapped_db):
+        """WHAT THE TARGET LEG CREATES (#806) — the second half of what the
+        retired emptiness disclosure asked for.
+
+        The lane replays across the boundary in one run, so this asserts the
+        end state of that run rather than of `psql` against the file alone:
+        after the move re-creates an empty `public`, 052 lands its two shared
+        functions INTO it.
+
+        `fn_safe_tz` is exercised rather than merely counted. Its whole reason
+        for existing is the fallback — a zone the server does not recognize
+        degrades that row to UTC instead of raising — and a presence check
+        cannot tell a working function from a stub that returns its argument.
+        """
+        run_lane(bootstrapped_db)
+
+        assert functions_in(bootstrapped_db, "public") == [
+            "fn_safe_tz",
+            "trg_touch_updated_at",
+        ]
+
+        good, bad = fetch_one(
+            bootstrapped_db,
+            "SELECT fn_safe_tz('America/New_York'), fn_safe_tz('Not/AZone')",
+        )
+        assert (good, bad) == ("America/New_York", "UTC"), (
+            "fn_safe_tz does not both pass a real zone through and fall back"
+            " to UTC — asserted as a PAIR, because a function that always"
+            " returns its argument passes the first half alone, and one that"
+            " always returns 'UTC' passes the second"
+        )
+
     def test_lane_parity_holds_and_discloses_that_it_is_currently_empty(
         self, bootstrapped_db, second_scratch_db
     ):
@@ -264,11 +319,15 @@ class TestTheLaneReplaysAcrossTheBoundary:
         `create_all` on the TARGET base — the same comparator the legacy parity
         gate uses, pointed at the other lineage.
 
-        Both sides are empty today, so the green below is arithmetic on two
-        empty sets. That is disclosed rather than left implicit, exactly as
-        #750's non-vacuity disclosure did, and the mechanism is wired now so
-        F.2.2's first table is compared the moment it lands instead of landing
-        into a gate nobody has switched on.
+        STILL VACUOUS AFTER 052, and for a reason worth stating rather than
+        inferring from a green: the target leg is no longer empty — the lane
+        now installs two functions — but this comparator is relation-scoped on
+        both sides (`schema_signature` over `pg_class`, `create_all` over
+        declared tables), and a function is not a relation. So 052 moves
+        neither side and the arithmetic is still on two empty sets.
+
+        The disclosure therefore stands as written, and the assertions below
+        are unchanged. F.2.2's first table is what switches this on.
         """
         from sqlalchemy import create_engine
 
