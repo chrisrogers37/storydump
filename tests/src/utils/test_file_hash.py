@@ -20,6 +20,10 @@ _FILE_HASH_WRITERS = (
 
 _DIRECT_HASH_CALL = re.compile(r"hashlib\.(md5|sha1|sha256|sha384|sha512)\s*\(")
 
+#: `src/`, located from the module under test rather than from this file's own
+#: depth, so moving the test does not silently make the scan vacuous.
+_SRC_ROOT = Path(file_hash_module.__file__).parent.parent
+
 
 @pytest.mark.unit
 class TestFileHash:
@@ -123,12 +127,10 @@ class TestHashAlgorithmIsSingleSourced:
         reaches for `hashlib` directly re-opens it, and the failure is silent
         at runtime — so it is caught here instead.
         """
-        src_root = Path(file_hash_module.__file__).parent.parent
-
         offenders = [
             rel
             for rel in _FILE_HASH_WRITERS
-            if _DIRECT_HASH_CALL.search((src_root / rel).read_text())
+            if _DIRECT_HASH_CALL.search((_SRC_ROOT / rel).read_text())
         ]
 
         assert offenders == [], (
@@ -145,6 +147,5 @@ class TestHashAlgorithmIsSingleSourced:
         """
         assert _DIRECT_HASH_CALL.search("    x = hashlib.sha256(data).hexdigest()")
 
-        src_root = Path(file_hash_module.__file__).parent.parent
-        missing = [rel for rel in _FILE_HASH_WRITERS if not (src_root / rel).is_file()]
+        missing = [rel for rel in _FILE_HASH_WRITERS if not (_SRC_ROOT / rel).is_file()]
         assert missing == [], f"stale writer paths, scan is vacuous for: {missing}"
