@@ -86,12 +86,12 @@ class TestStaleKeyEviction:
     since a source seen once never approaches ``FAILURE_THRESHOLD``.
     """
 
-    def _record_at(self, when, sources, reason="bad token"):
+    def _record_at(self, when, sources):
         """Record one failure from each source, with the clock pinned."""
         with patch("src.utils.auth_monitor.time") as mock_time:
             mock_time.time.return_value = when
             for source in sources:
-                auth_monitor.record_failure(source, reason)
+                auth_monitor.record_failure(source, "bad token")
 
     def test_keys_whose_failures_all_aged_out_are_evicted(self):
         """THE REGRESSION, and the clock advance is what makes it discriminate:
@@ -110,18 +110,40 @@ class TestStaleKeyEviction:
         assert "10.9.9.9" in auth_monitor._failures
         assert len(auth_monitor._failures) == 1, sorted(auth_monitor._failures)
 
-    def test_a_source_still_inside_the_window_is_not_evicted(self):
-        """The counting window is what the map is FOR. Eviction that dropped a
-        live source would silently reset its count and defeat the alert."""
-        old = time.time() - auth_monitor.WINDOW_SECONDS - 1
+    def test_a_source_still_inside_the_window_survives_a_sweep(self):
+        """The counting window is what the map is FOR. A sweep that dropped a
+        live source would silently reset its count and defeat the alert.
 
-        with patch.object(auth_monitor, "_send_alert"):
-            self._record_at(old, [f"10.0.0.{i}" for i in range(10)])
+        The clock is stepped so that a sweep actually runs *while a live source
+        is in the map*. That is the whole difficulty: the sweep is gated to
+        WINDOW_SECONDS, so a source written at one sweep has aged out by the
+        next one, and a naive arrangement never presents the case it claims to
+        test — it passes because no live source is ever there to be dropped.
+        """
+        base = time.time()
+        window = auth_monitor.WINDOW_SECONDS
+
+        with (
+            patch.object(auth_monitor, "_send_alert"),
+            patch("src.utils.auth_monitor.time") as mock_time,
+        ):
+            # First write sweeps (gate open from a zeroed _last_sweep).
+            mock_time.time.return_value = base
+            auth_monitor.record_failure("10.0.0.1", "bad token")
+
+            # Late in the window, so it is still live at the NEXT sweep.
+            mock_time.time.return_value = base + window - 10
             auth_monitor.record_failure("10.5.5.5", "bad token")
+
+            # Trips the interval gate: a real sweep, with a live source present.
+            mock_time.time.return_value = base + window + 1
             auth_monitor.record_failure("10.9.9.9", "bad token")
 
-        assert "10.5.5.5" in auth_monitor._failures
+        assert "10.5.5.5" in auth_monitor._failures, "swept a source still in window"
         assert "10.9.9.9" in auth_monitor._failures
+        # The setup is asserted: without this the survival above could hold
+        # simply because the sweep did nothing at all.
+        assert "10.0.0.1" not in auth_monitor._failures, "the sweep never ran"
 
     def test_eviction_does_not_disarm_an_alert_in_progress(self):
         """A source partway to the threshold must still alert after a sweep has
@@ -200,7 +222,7 @@ class TestSourceCap:
 
             # Nothing aged out — everything above is inside WINDOW_SECONDS, so
             # this is the cap's doing and not the sweep's.
-            assert 106 < auth_monitor.WINDOW_SECONDS
+            assert mock_time.time.return_value - base < auth_monitor.WINDOW_SECONDS
 
         assert len(auth_monitor._failures) <= 10
         assert "10.9.9.9" in auth_monitor._failures, (

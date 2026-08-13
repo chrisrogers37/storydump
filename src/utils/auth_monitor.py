@@ -21,19 +21,24 @@ WINDOW_SECONDS = 600  # 10 minutes
 # a bound that a long-lived process cannot exceed, not a tuning knob.
 MAX_SOURCES = 10_000
 
+# Evict down to a low-water mark rather than to the ceiling. Landing exactly on
+# MAX_SOURCES means the next novel source trips the check again, so the O(n log
+# n) selection below would run on every request for as long as a burst lasts.
+# Undershooting amortises it over the headroom instead — the same sources are
+# evicted in aggregate, only the granularity changes.
+#
+# Derived at call time, not stored: a second constant computed from the first
+# is a second thing to keep in step with it.
+EVICT_HEADROOM = 0.9
+
 _lock = threading.Lock()
+
+#: source -> failure timestamps, ascending. Both the sweep and the eviction
+#: ordering read ``[-1]`` as the most recent failure, which holds because
+#: entries are only ever appended at the current clock and pruning preserves
+#: order. A source present in this map always has at least one timestamp.
 _failures: dict[str, list[float]] = {}
 _last_sweep = 0.0
-
-
-def _is_stale(timestamps: list[float], cutoff: float) -> bool:
-    """True when every failure for a source has aged out of the window.
-
-    Timestamps are appended in clock order and pruning preserves that order, so
-    the last element is the most recent — checking it alone settles the whole
-    list without walking it.
-    """
-    return not timestamps or timestamps[-1] <= cutoff
 
 
 def _sweep(now: float, force: bool = False) -> None:
@@ -49,13 +54,15 @@ def _sweep(now: float, force: bool = False) -> None:
     if not force and now - _last_sweep < WINDOW_SECONDS:
         return
     cutoff = now - WINDOW_SECONDS
-    for stale in [s for s, ts in _failures.items() if _is_stale(ts, cutoff)]:
+    for stale in [s for s, ts in _failures.items() if ts[-1] <= cutoff]:
         del _failures[stale]
     _last_sweep = now
 
 
 def _evict_to_cap() -> None:
-    """Force the map under MAX_SOURCES. Caller holds _lock.
+    """Force the map below MAX_SOURCES, down to the low-water mark.
+
+    Caller holds _lock.
 
     Ordered by LEAST RECENT failure, deliberately — not by when a source was
     first seen. The two invert on exactly the case that matters: a source that
@@ -68,7 +75,7 @@ def _evict_to_cap() -> None:
     victim is the least active one available, which is why the cap sits above
     any plausible legitimate population rather than being tuned close to it.
     """
-    excess = len(_failures) - MAX_SOURCES
+    excess = len(_failures) - int(MAX_SOURCES * EVICT_HEADROOM)
     if excess <= 0:
         return
     coldest = sorted(_failures, key=lambda s: _failures[s][-1])
