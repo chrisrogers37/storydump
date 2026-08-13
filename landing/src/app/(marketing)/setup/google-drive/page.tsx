@@ -14,6 +14,13 @@ export const metadata: Metadata = {
   title: "Google Drive Setup",
   description,
   alternates: { canonical: "/setup/google-drive" },
+  // Withheld from search on the same grounds as `/setup/meta-developer`: it
+  // walks the reader through creating their own Google Cloud project and OAuth
+  // credentials, and `GOOGLE_CLIENT_SECRET` is deployment-level with no surface
+  // accepting a tenant Client ID or Secret. Reachable by link, including from
+  // the blog article that cites it; only its search-arrival path is closed.
+  // See #802.
+  robots: { index: false, follow: true },
   ...ogMeta("Google Drive Setup", description),
 }
 
