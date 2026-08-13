@@ -447,3 +447,186 @@ class TestForwardedForAttribution:
         assert (
             self._attributed([self.EDGE], forged_chain, peer=self.EDGE) == self.CALLER
         )
+
+
+class TestForwardedForAmbiguity:
+    """Multiple X-Forwarded-For headers bypass the #726/#759 fix (#765).
+
+    ProxyHeadersMiddleware reads headers via ``dict(scope["headers"])``, which
+    keeps only the LAST of a repeated header name. A caller who sends
+    X-Forwarded-For as two separate header instances instead of one
+    comma-joined value can make an attacker-chosen value survive that dict
+    collapse regardless of TRUSTED_PROXY_HOSTS -- TestForwardedForAttribution
+    above only proves the single-header case is closed.
+
+    An early draft of the fix tried to merge every X-Forwarded-For instance
+    into one comma-joined value before ProxyHeadersMiddleware ran. It did not
+    work: whichever instance ends up last after concatenation still wins the
+    right-to-left trust walk, so an attacker who controls ordering still wins
+    -- the same bug, wearing a different mechanism. That draft failed its own
+    version of test_two_headers_real_then_forged_does_not_attribute_to_the_forgery
+    below before it ever reached this file.
+
+    DropAmbiguousForwardedForMiddleware (src/api/app.py) closes this
+    differently: it does not try to reconstruct which instance is "real" from
+    an inherently ambiguous wire shape. More than one X-Forwarded-For instance
+    drops the header entirely, and ProxyHeadersMiddleware falls back to the
+    raw connecting peer -- the same path test_a_direct_caller_cannot_forge_at_all
+    above already proves is safe.
+    """
+
+    EDGE = "10.0.0.5"
+    CALLER = "192.0.2.50"
+    FORGED = "198.51.100.7"
+
+    @staticmethod
+    def _attributed(headers, peer, trusted_hosts=None):
+        """Run the real two-middleware stack; return the attributed client host.
+
+        ``headers`` is a list of (name, value) str tuples, one entry per raw
+        header INSTANCE -- multiple x-forwarded-for entries model the
+        ambiguous wire shape this middleware exists for.
+        """
+        import asyncio
+
+        from src.api.app import DropAmbiguousForwardedForMiddleware
+        from src.config.settings import settings
+        from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+
+        seen = {}
+
+        async def app(scope, receive, send):
+            seen["host"] = scope["client"][0] if scope.get("client") else None
+
+        raw = [(k.encode(), v.encode()) for k, v in headers]
+        stack = DropAmbiguousForwardedForMiddleware(
+            ProxyHeadersMiddleware(
+                app, trusted_hosts=trusted_hosts or settings.trusted_proxy_hosts
+            )
+        )
+        asyncio.run(
+            stack(
+                {"type": "http", "client": (peer, 54321), "headers": raw}, None, None
+            )
+        )
+        return seen["host"]
+
+    @classmethod
+    def _xff(cls, values, peer, trusted_hosts=None):
+        """Convenience: one X-Forwarded-For header instance per value."""
+        return cls._attributed(
+            [("x-forwarded-for", v) for v in values], peer, trusted_hosts
+        )
+
+    def test_two_headers_real_then_forged_does_not_attribute_to_the_forgery(self):
+        """The exact #765 shape: edge's real header first, forged bare one second."""
+        got = self._xff(
+            [f"{self.FORGED}, {self.CALLER}", self.FORGED], peer=self.EDGE
+        )
+        assert got != self.FORGED, f"attributed to the forged value {self.FORGED!r}"
+
+    def test_two_headers_forged_then_real_does_not_attribute_to_the_forgery(self):
+        """Same shape, reversed -- the fix must not depend on arrival order."""
+        got = self._xff(
+            [self.FORGED, f"{self.FORGED}, {self.CALLER}"], peer=self.EDGE
+        )
+        assert got != self.FORGED
+
+    def test_ambiguous_xff_falls_back_to_the_raw_peer(self):
+        """Falls back exactly where "no X-Forwarded-For at all" already lands
+        -- not CALLER (unrecoverable from a flattened, ambiguous shape) and
+        never FORGED."""
+        got = self._xff(
+            [self.FORGED, f"{self.FORGED}, {self.CALLER}"], peer=self.EDGE
+        )
+        assert got == self.EDGE
+
+    def test_three_or_more_headers_still_drops(self):
+        """Not fooled by header count -- any count > 1 is ambiguous."""
+        got = self._xff(
+            [self.FORGED, self.CALLER, self.FORGED, self.FORGED], peer=self.EDGE
+        )
+        assert got == self.EDGE
+
+    def test_a_single_header_is_unaffected(self):
+        """The already-tested single-header path must not regress."""
+        got = self._xff([f"{self.FORGED}, {self.CALLER}"], peer=self.EDGE)
+        assert got == self.CALLER
+
+    def test_no_header_at_all_is_unaffected(self):
+        got = self._xff([], peer=self.EDGE)
+        assert got == self.EDGE
+
+    def test_mixed_case_header_name_is_still_counted(self):
+        """scope["headers"] names are lowercase per the ASGI spec, but the
+        count must not silently miss a non-conformant server/middleware."""
+        got = self._attributed(
+            [
+                ("X-Forwarded-For", f"{self.FORGED}, {self.CALLER}"),
+                ("x-forwarded-for", self.FORGED),
+            ],
+            peer=self.EDGE,
+        )
+        assert got == self.EDGE
+
+    def test_untrusted_peer_is_unaffected_by_the_drop(self):
+        """A direct, untrusted caller was never attributed from XFF anyway --
+        the drop must not change that outcome."""
+        got = self._xff(
+            [self.FORGED, f"{self.FORGED}, {self.CALLER}"], peer=self.CALLER
+        )
+        assert got == self.CALLER
+
+    def test_rate_limit_buckets_do_not_partition_on_rotating_multi_header_xff(self):
+        """End-to-end sibling of TestForwardedForAttribution's single-header
+        version: 60 requests, each carrying TWO raw X-Forwarded-For headers
+        with a rotating forged value. Correct behaviour is the same 30/60
+        ceiling as a single real IP -- not 0 blocked (a fresh bucket per
+        request) and not 60 blocked (the fallback peer wrongly rejected).
+        """
+        from fastapi import FastAPI, Request
+        from slowapi import Limiter, _rate_limit_exceeded_handler
+        from slowapi.errors import RateLimitExceeded
+        from slowapi.middleware import SlowAPIMiddleware
+        from slowapi.util import get_remote_address
+        from starlette.testclient import TestClient
+        from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+
+        from src.api.app import DropAmbiguousForwardedForMiddleware
+        from src.config.settings import settings
+
+        rate_limiter = Limiter(
+            key_func=get_remote_address,
+            default_limits=["30/minute"],
+            storage_uri="memory://",
+        )
+        api = FastAPI()
+        api.state.limiter = rate_limiter
+        api.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+        api.add_middleware(SlowAPIMiddleware)
+
+        @api.get("/probe")
+        def probe(request: Request):
+            return {"ok": True}
+
+        stack = DropAmbiguousForwardedForMiddleware(
+            ProxyHeadersMiddleware(api, trusted_hosts=settings.trusted_proxy_hosts)
+        )
+        client = TestClient(stack, client=(self.EDGE, 54321))
+
+        blocked = 0
+        for i in range(60):
+            resp = client.get(
+                "/probe",
+                headers=[
+                    ("X-Forwarded-For", f"198.51.100.{i}"),
+                    ("X-Forwarded-For", f"198.51.100.{i}, {self.CALLER}"),
+                ],
+            )
+            if resp.status_code == 429:
+                blocked += 1
+
+        assert blocked == 30, (
+            f"{blocked} of 60 rotating multi-header requests were limited; "
+            "expected 30 -- the shared fallback-peer bucket."
+        )
