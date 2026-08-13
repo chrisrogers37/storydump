@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The FC-8 zero-row gate, executable (#790 M.1)** — `04` L87 makes it a window-prep **halt**: live local/upload-origin `media_items` = 0, and `posting_history` rows resolving to such media = 0. `scripts/fc8_gate.py` computes both against the legacy schema and exits `0` CLEAR / `1` HALT / `2` ERROR.
+  - **Buildable now because it reads legacy only.** M.1's transform INSERTs cannot be authored yet — `src/models/target/` is an empty `Base` ("zero target tables exist today; F.2.2 onward registers them here") and no shipped migration creates a target table — but this gate never touches them.
+  - **A gate that cannot answer does not report CLEAR.** A missing table or an unreachable database exits `ERROR`, not zero — #758's false-PASS class, pinned by test and mutation-proven (swallowing the error and returning the safe answer reddens exactly that test).
+  - **The two counts are deliberately different predicates.** Count 2 does not filter on `is_active`: a posted row whose media was later deactivated still has no target destination for that media. A test would go red if the two queries were ever "tidied" into one.
+  - **It discloses what it has no authority to rule.** FC-8 names `local` and `upload`; the corpus also carries `instagram_backfill`, which the plan classifies nowhere, while the target's media-source CHECK is closed at exactly `gdrive` (`02` §2) — so such rows may have no destination and would not be counted. The gate reports them as `UNCLASSIFIED` and **does not** invent a third halt condition. Same for `is_active IS NULL`, which is neither live nor dead: counted in its own bucket rather than folded into either side by an `IS NOT FALSE`.
+  - **The disclosure is pinned where it is read, not only where it is computed.** `render()` is the default path (`--json` is opt-in), so deleting its `UNCLASSIFIED` or `is_active IS NULL` blocks would have left `census()`, the JSON payload, both halt counts and all of CI green while the unknowns silently vanished from what an operator sees — the same failure-produces-silence shape the buckets exist to prevent. Three mutations, each killed by the test that names it: dropping the reason block, dropping the inline row marker, and dropping the null bucket (which also kills the end-to-end wiring test).
+  - 20 tests against `replayed_db` — the real replayed legacy lineage, which is what caught a NOT NULL column reading the model had missed.
+
 ### Security
 
 - **F.4, first half: the premise behind `ENABLE`-without-`FORCE` is now executable instead of prose (#751)** — `02` §7-DDL rules the posture deliberately, on the ground that `svc_migration` owns every object and bypasses RLS as owner by design. **That ruling is sound and is not reopened.** What was missing is what makes it safe: the measurement it rests on — that an owner really does read straight through its own table's policies — lived only as three lines of prose in another module's docstring, taken by hand once and never asserted anywhere.
