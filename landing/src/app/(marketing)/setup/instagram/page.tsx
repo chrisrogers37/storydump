@@ -7,7 +7,7 @@ import { Screenshot } from "@/components/setup/screenshot"
 import { ogMeta } from "@/lib/og"
 
 const description =
-  "How to switch your Instagram account to Business or Creator and link it to a Facebook Page for API access and automated Story posting."
+  "How to switch your Instagram account to Business or Creator for API access and automated Story posting."
 
 export const metadata: Metadata = {
   title: "Instagram Business Account Setup",
@@ -24,15 +24,18 @@ export default function InstagramSetup() {
       </h1>
       <p className="mt-4 text-lg text-muted-foreground">
         Instagram&apos;s API only works with Business or Creator accounts. This
-        guide ensures your account is set up correctly and linked to a Facebook
-        Page.
+        guide ensures your account is set up correctly.
       </p>
 
       <div className="mt-10 space-y-10">
         <StepCard number={1} title="Why Business or Creator?">
           <p>
-            Instagram&apos;s Graph API requires a Professional account — either
-            Business or Creator. Personal accounts cannot be automated.
+            Instagram&apos;s API requires a Professional account — either
+            Business or Creator. Personal accounts cannot be automated. That is
+            the only change your account needs: Storydump connects through
+            Instagram directly, so you do{" "}
+            <span className="font-medium text-foreground">not</span> need a
+            Facebook Page.
           </p>
           <Callout type="tip" className="mt-3">
             Creator accounts get the same API access as Business accounts. Pick
@@ -49,7 +52,7 @@ export default function InstagramSetup() {
           <Screenshot caption="Instagram Settings showing account type" />
           <p>
             If you already see &quot;Business&quot; or &quot;Creator,&quot; skip
-            to Step 4 (Facebook Page).
+            to Step 4 (Verify it&apos;s working).
           </p>
         </StepCard>
 
@@ -79,47 +82,7 @@ export default function InstagramSetup() {
           </Callout>
         </StepCard>
 
-        <StepCard number={4} title="Create and link a Facebook Page">
-          <p>
-            Meta requires a Facebook Page linked to your Instagram account for
-            API access — even if you never use Facebook.
-          </p>
-
-          <h4 className="mt-4 font-medium text-foreground">
-            If you don&apos;t have a Facebook Page:
-          </h4>
-          <ol className="mt-2 list-inside list-decimal space-y-1">
-            <li>
-              Go to{" "}
-              <span className="font-medium text-foreground">
-                facebook.com &rarr; Create Page
-              </span>
-            </li>
-            <li>Name it after your brand or Instagram handle</li>
-            <li>Fill in the minimum required info and publish</li>
-          </ol>
-
-          <h4 className="mt-4 font-medium text-foreground">
-            Link the Page to Instagram:
-          </h4>
-          <ol className="mt-2 list-inside list-decimal space-y-1">
-            <li>
-              Open Instagram &rarr;{" "}
-              <span className="font-medium text-foreground">
-                Settings &rarr; Account &rarr; Linked Accounts &rarr; Facebook
-              </span>
-            </li>
-            <li>Select the Facebook Page you just created</li>
-            <li>Confirm the connection</li>
-          </ol>
-          <Screenshot caption="Linking Facebook Page to Instagram" />
-          <Callout type="warning" className="mt-3">
-            You MUST have a Facebook Page linked, even if you never post on
-            Facebook. The Instagram Graph API requires this connection.
-          </Callout>
-        </StepCard>
-
-        <StepCard number={5} title="Verify it's working">
+        <StepCard number={4} title="Verify it's working">
           <p>
             Open the Instagram app. You should now see a{" "}
             <span className="font-medium text-foreground">
@@ -130,7 +93,7 @@ export default function InstagramSetup() {
           <Screenshot caption="Professional dashboard in Instagram settings" />
           <p className="mt-2">
             If you don&apos;t see it, double-check that your account type is set
-            to Business or Creator and that a Facebook Page is linked.
+            to Business or Creator.
           </p>
         </StepCard>
       </div>

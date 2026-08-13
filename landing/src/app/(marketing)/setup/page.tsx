@@ -12,7 +12,6 @@ export const metadata: Metadata = {
 
 const prerequisites = [
   { label: "Instagram Business or Creator account" },
-  { label: "Facebook Page linked to your Instagram account" },
   { label: "Meta Developer account with an app configured" },
   { label: "Google Cloud project with Drive API enabled" },
   { label: "Google Drive folder with your media organized" },
