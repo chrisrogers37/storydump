@@ -16,6 +16,10 @@ These tests deliberately import from `tests.conftest` rather than re-deriving
 the rules — a check that re-implements the contract tests the re-implementation.
 """
 
+import socket
+from unittest.mock import Mock
+
+import psycopg2
 import pytest
 
 from tests.conftest import (
@@ -23,8 +27,94 @@ from tests.conftest import (
     REQUIRE_DB_ENV,
     database_is_required,
     integration_verdict,
+    server_answered,
+    server_is_listening,
     skip_ceiling_breach,
 )
+
+
+def _free_port() -> int:
+    """A port nothing is listening on: bind one, note it, release it."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+class TestTheListenerProbe:
+    """#769: an ``OperationalError`` does not mean "no server".
+
+    ``too many connections``, ``password authentication failed`` and ``database
+    does not exist`` are all the server ANSWERING and refusing. Measured on
+    psycopg2 2.9.12 / PostgreSQL 15.18, all of them — and a genuinely dead port
+    — carry ``pgcode = None``, so the exception cannot be the discriminator.
+    The address can.
+    """
+
+    def test_an_occupied_address_is_listening(self):
+        with socket.socket() as server:
+            server.bind(("127.0.0.1", 0))
+            server.listen(1)
+            port = server.getsockname()[1]
+
+            assert server_is_listening("127.0.0.1", port) is True
+
+    def test_an_empty_address_is_not(self):
+        assert server_is_listening("127.0.0.1", _free_port(), timeout=1) is False
+
+    def test_a_successful_connection_answers_without_consulting_the_probe(
+        self, monkeypatch
+    ):
+        """The happy path keeps its own evidence — a completed login is proof.
+
+        Pinned because the obvious refactor is to probe first and connect
+        after, which would ask the address a question the connection already
+        answered.
+        """
+        monkeypatch.setattr("tests.conftest.maintenance_connection", lambda: Mock())
+        monkeypatch.setattr(
+            "tests.conftest.server_is_listening",
+            Mock(side_effect=AssertionError("probe must not run on success")),
+        )
+
+        assert server_answered() is True
+
+    def test_a_refusal_from_a_live_server_is_not_an_absent_server(self, monkeypatch):
+        """THE BUG. Before #769 this returned False and every integration test
+        skipped at rc 0 — a run that reads as a pass having executed none."""
+        monkeypatch.setattr(
+            "tests.conftest.maintenance_connection",
+            Mock(side_effect=psycopg2.OperationalError("FATAL: too many connections")),
+        )
+        monkeypatch.setattr("tests.conftest.server_is_listening", lambda *a, **k: True)
+
+        assert server_answered() is True
+
+    def test_nothing_listening_is_still_an_honest_skip(self, monkeypatch):
+        """The widened fail branch must not swallow the one legitimate skip:
+        a contributor with no PostgreSQL at all."""
+        monkeypatch.setattr(
+            "tests.conftest.maintenance_connection",
+            Mock(side_effect=psycopg2.OperationalError("Connection refused")),
+        )
+        monkeypatch.setattr("tests.conftest.server_is_listening", lambda *a, **k: False)
+
+        assert server_answered() is False
+
+    def test_the_two_refusal_paths_reach_opposite_verdicts(self, monkeypatch):
+        """The pair, asserted together — the fix is a DISTINCTION, and either
+        half alone passes for a function that always returns one answer."""
+        monkeypatch.setattr(
+            "tests.conftest.maintenance_connection",
+            Mock(side_effect=psycopg2.OperationalError("connection failed")),
+        )
+
+        monkeypatch.setattr("tests.conftest.server_is_listening", lambda *a, **k: True)
+        listening = integration_verdict(server_answered(), required=False)
+
+        monkeypatch.setattr("tests.conftest.server_is_listening", lambda *a, **k: False)
+        silent = integration_verdict(server_answered(), required=False)
+
+        assert (listening, silent) == ("run", "skip")
 
 
 class TestTheVerdict:
