@@ -106,9 +106,7 @@ class DropAmbiguousForwardedForMiddleware:
                 count,
                 peer[0] if peer else "unknown",
             )
-            scope["headers"] = [
-                (k, v) for k, v in headers if k.lower() != self._XFF
-            ]
+            scope["headers"] = [(k, v) for k, v in headers if k.lower() != self._XFF]
 
         await self.app(scope, receive, send)
 
