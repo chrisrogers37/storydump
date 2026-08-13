@@ -154,3 +154,89 @@ class TestFormatLastPost:
         old = datetime.now(timezone.utc) - timedelta(days=3)
         result = format_last_post(old.isoformat())
         assert result == "3d ago"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestStartupNotificationSurvivesOneMalformedInstance:
+    """#783 site 2: the per-instance formatting loop sat inside the method's
+    single `try`, so one malformed row aborted the whole startup notification
+    and the admin was told nothing at all rather than told about the rest.
+
+    Lower stakes than the alert sweeps — one message at boot, and the loop
+    formats rather than does I/O, so it fails only on bad data. But the failure
+    mode is the same family: the loss is total and silent from the reader's
+    side, because "no startup message" looks identical to "the bot did not
+    start".
+    """
+
+    def _dash(self, instances):
+        dash = Mock()
+        dash.get_user_instances.return_value = {"instances": instances}
+        dash.__enter__ = Mock(return_value=dash)
+        dash.__exit__ = Mock(return_value=False)
+        return dash
+
+    def _good(self, name, chat_id):
+        return {
+            "display_name": name,
+            "telegram_chat_id": chat_id,
+            "media_count": 10,
+            "posts_per_day": 2,
+            "is_paused": False,
+            "last_post_at": None,
+            "chat_settings_id": "cs",
+        }
+
+    async def _run(self, handler, instances):
+        with (
+            patch(
+                "src.services.core.telegram_lifecycle.DashboardService",
+                return_value=self._dash(instances),
+            ),
+            patch("src.services.core.telegram_lifecycle.logger") as log,
+        ):
+            await handler.send_startup_notification()
+        return log
+
+    async def test_a_malformed_row_does_not_suppress_the_whole_notification(
+        self, handler
+    ):
+        """THE REGRESSION. A row missing `media_count` raised KeyError inside
+        the loop; before the fix the admin received no message at all."""
+        bad = self._good("Broken Ltd", -100002)
+        del bad["media_count"]
+        instances = [self._good("First Co", -100001), bad, self._good("Third Co", -3)]
+
+        await self._run(handler, instances)
+
+        handler.service.bot.send_message.assert_called_once()
+        text = handler.service.bot.send_message.call_args[1]["text"]
+        assert "First Co" in text
+        assert "Third Co" in text, (
+            "the instance AFTER the malformed row is missing — the loop still "
+            f"aborts early: {text}"
+        )
+
+    async def test_the_malformed_row_is_surfaced_not_silently_dropped(self, handler):
+        """Matching #781: the skipped row stays visible. Dropping it quietly
+        would trade a total loss for a partial one that nobody can see."""
+        bad = self._good("Broken Ltd", -100002)
+        del bad["media_count"]
+
+        log = await self._run(handler, [self._good("First Co", -1), bad])
+
+        lines = [str(c.args[0]) for c in log.warning.call_args_list]
+        assert any("-100002" in ln for ln in lines), (
+            f"the malformed instance is not named in any warning: {lines}"
+        )
+
+    async def test_all_good_rows_log_nothing(self, handler):
+        """The control: a clean boot stays quiet, so the warning above means
+        something."""
+        log = await self._run(
+            handler, [self._good("First Co", -1), self._good("Second Co", -2)]
+        )
+
+        handler.service.bot.send_message.assert_called_once()
+        assert log.warning.call_args_list == []

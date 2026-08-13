@@ -906,3 +906,190 @@ class TestHealthCheckService:
         result = token_service.format_token_alert(token_info)
 
         assert result is None
+
+
+@pytest.mark.unit
+class TestMediaPoolAggregateSurvivesOneUnreachableTenant:
+    """#783 site 1: `_check_media_pool` wrapped its whole per-tenant loop in one
+    `try`, so the first unreachable tenant aborted the sweep and every tenant
+    after it was never examined.
+
+    This one is worse than a silenced alert. The function's entire job is a
+    CROSS-TENANT AGGREGATE — the lowest runway anywhere — and an aggregate
+    computed over an arbitrary prefix is not a smaller answer, it is a WRONG
+    one. Nothing in the return value distinguished "worst of 12" from
+    "worst of 3", which is the same never-happened-versus-lost confusion #764
+    and #782 turned on. So isolation alone is not the fix: the population has
+    to be disclosed too.
+    """
+
+    @pytest.fixture
+    def pool_service(self):
+        service = HealthCheckService()
+        service.queue_repo = Mock()
+        service.history_repo = Mock()
+        service._media_repo = Mock()
+        service._settings_service = Mock()
+        return service
+
+    def _chats(self, n):
+        return [Mock(telegram_chat_id=-(i + 1)) for i in range(n)]
+
+    def _pool(self, runway):
+        return {
+            "categories": [
+                {"category": "memes", "runway_days": runway, "eligible": int(runway)}
+            ]
+        }
+
+    def _service(self, pool_service, failing_index):
+        chats = self._chats(3)
+        pool_service._settings_service.get_all_active_chats.return_value = chats
+
+        def side_effect(chat_id, chat_settings=None):
+            if chat_id == chats[failing_index].telegram_chat_id:
+                raise RuntimeError("tenant unreachable")
+            # the LAST tenant holds the critical runway, so a sweep that stops
+            # early cannot see it
+            return self._pool(1.0 if chat_id == chats[-1].telegram_chat_id else 99.0)
+
+        pool_service.check_media_pool_for_chat = Mock(side_effect=side_effect)
+        return pool_service
+
+    def test_a_failing_first_tenant_does_not_hide_a_critical_one_behind_it(
+        self, pool_service
+    ):
+        """THE REGRESSION. Tenant 1 raises; tenant 3 is critically low. Before
+        the fix the sweep aborted at tenant 1 and the critical pool was never
+        seen at all."""
+        svc = self._service(pool_service, failing_index=0)
+
+        with patch("src.services.core.health_check.logger"):
+            result = svc._check_media_pool()
+
+        assert svc.check_media_pool_for_chat.call_count == 3, (
+            "the sweep stopped early: "
+            f"{svc.check_media_pool_for_chat.call_count} of 3 tenants examined"
+        )
+        assert result.get("worst_category", {}).get("runway_days") == 1.0, (
+            f"the critical tenant behind the failure was never reported: {result}"
+        )
+
+    def test_the_aggregate_discloses_how_many_tenants_it_covers(self, pool_service):
+        """An aggregate over a silently narrowed population is misleading even
+        when it is computed correctly over what it saw. 'Worst of 2, 1
+        unreachable' is a different claim from 'worst of 3'."""
+        svc = self._service(pool_service, failing_index=0)
+
+        with patch("src.services.core.health_check.logger"):
+            result = svc._check_media_pool()
+
+        assert result.get("tenants_checked") == 2, result
+        assert result.get("tenants_unreachable") == 1, result
+
+    def test_full_coverage_reports_zero_unreachable(self, pool_service):
+        """The control. With every tenant reachable the disclosure must say so
+        rather than being present-but-meaningless."""
+        chats = self._chats(3)
+        pool_service._settings_service.get_all_active_chats.return_value = chats
+        pool_service.check_media_pool_for_chat = Mock(return_value=self._pool(99.0))
+
+        result = pool_service._check_media_pool()
+
+        assert result.get("tenants_checked") == 3
+        assert result.get("tenants_unreachable") == 0
+
+    def test_the_unreachable_tenant_is_surfaced_not_just_counted(self, pool_service):
+        """Matching #781's precedent: the failing tenant stays visible in the
+        log, named, so a permanently-unreachable one can be found. A count
+        alone says something is wrong without saying which."""
+        svc = self._service(pool_service, failing_index=0)
+
+        with patch("src.services.core.health_check.logger") as log:
+            svc._check_media_pool()
+
+        lines = [str(c.args[0]) for c in log.warning.call_args_list]
+        assert any("-1" in ln for ln in lines), (
+            f"the unreachable tenant is not named in any warning: {lines}"
+        )
+
+
+@pytest.mark.unit
+class TestIncompleteCoverageIsNotHealthy:
+    """#791 review, blocking: isolating each tenant stopped one failure ending
+    the sweep — and on its own turned a genuinely fatal condition into a
+    per-item shrug. With every tenant unreachable the endpoint reported
+    `healthy: True`, so a total pool outage read GREEN.
+
+    Before isolation, any failure reached the outer handler and reported
+    unhealthy. So the first version of the fix traded "one tenant hides the
+    rest" for "every tenant can fail and it still looks fine", which is the
+    worse of the two. This is the #764 distinction once more: a degraded state
+    must not be able to masquerade as a clean one, which means some failures
+    still have to fail the check rather than be counted and waved through.
+    """
+
+    @pytest.fixture
+    def svc(self):
+        service = HealthCheckService()
+        service.queue_repo = Mock()
+        service.history_repo = Mock()
+        service._media_repo = Mock()
+        service._settings_service = Mock()
+        return service
+
+    def _run(self, svc, n, failing, runway=99.0):
+        chats = [Mock(telegram_chat_id=-(i + 1)) for i in range(n)]
+        svc._settings_service.get_all_active_chats.return_value = chats
+
+        def side_effect(chat_id, chat_settings=None):
+            if chat_id in failing:
+                raise RuntimeError("tenant unreachable")
+            return {
+                "categories": [
+                    {"category": "memes", "runway_days": runway, "eligible": 9}
+                ]
+            }
+
+        svc.check_media_pool_for_chat = Mock(side_effect=side_effect)
+        with patch("src.services.core.health_check.logger"):
+            return svc._check_media_pool()
+
+    def test_a_total_outage_is_not_healthy(self, svc):
+        """THE BLOCKING REGRESSION. Every tenant unreachable used to return
+        healthy: True with nothing checked at all."""
+        result = self._run(svc, 3, {-1, -2, -3})
+
+        assert result["healthy"] is False, result
+        assert result["tenants_checked"] == 0
+        assert result["tenants_unreachable"] == 3
+
+    def test_a_PARTIAL_outage_is_not_healthy_either(self, svc):
+        """Broader than the report. The regression was not limited to the
+        total case: one unreachable tenant among reachable healthy ones also
+        returned healthy: True, because the verdict was computed from whoever
+        answered. A verdict over an incomplete population cannot be a healthy
+        one — the unknown tenants might be the critical ones."""
+        result = self._run(svc, 3, {-1})
+
+        assert result["healthy"] is False, result
+        assert result["tenants_checked"] == 2
+        assert result["tenants_unreachable"] == 1
+
+    def test_full_coverage_and_good_runway_is_still_healthy(self, svc):
+        """The control. Without it, 'healthy is False' could be satisfied by
+        never returning healthy at all."""
+        result = self._run(svc, 3, set())
+
+        assert result["healthy"] is True
+        assert result["tenants_unreachable"] == 0
+
+    def test_full_coverage_with_a_critical_pool_is_still_reported_critical(self, svc):
+        """The severity logic must survive the coverage gate. If the gate had
+        been layered in front of it, a real critical finding on a fully-covered
+        estate could have been masked by the completeness check passing."""
+        result = self._run(svc, 3, set(), runway=1.0)
+
+        assert result["healthy"] is False
+        assert "memes" in result["message"]
+        assert result["tenants_unreachable"] == 0
