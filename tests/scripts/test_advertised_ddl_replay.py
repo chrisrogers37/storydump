@@ -198,21 +198,42 @@ class TestTheFourBehavioralAssertions:
             )
             assert row is not None, f"p_user_plane missing on {table}"
 
-    def test_no_door_owner_carries_create_on_public(
+    def test_the_door_owner_create_bracket_was_exercised_then_closed(
         self, owner_window_db, owner_actor, admin_conn
     ):
-        """The stream's transient bracket closed behind itself: no system role
-        that owns a SECURITY DEFINER door is left holding CREATE on public. A
-        surviving grant would be standing privilege the door-model forbids."""
+        """The stream's transient bracket closed BEHIND ITSELF — proved as two
+        halves, because the negative alone cannot tell 'granted then revoked'
+        from 'never ran' (rajan, #784 review: with the stream stubbed out the
+        pure has_schema_privilege=False assertion passed vacuously).
+
+        EXERCISED: each door-owner system role owns the SECURITY DEFINER doors
+        the stream created for it — which required the transient CREATE on
+        public (`02` §7 / D40: PostgreSQL demands it for OWNER TO beyond
+        membership). This half requires a real replay: on an empty or unrun
+        public the role owns nothing and the assertion fails.
+        CLOSED: no door-owner is left holding that CREATE."""
         _replay_as_window_actor(owner_window_db, owner_actor, admin_conn)
 
         for role in DOOR_OWNER_ROLES:
-            row = fetch_one(
+            owned = fetch_one(
+                owner_window_db,
+                "SELECT count(*) FROM pg_proc p"
+                " JOIN pg_namespace n ON n.oid = p.pronamespace"
+                " JOIN pg_roles r ON r.oid = p.proowner"
+                " WHERE n.nspname = 'public' AND p.prosecdef AND r.rolname = %s",
+                (role,),
+            )
+            assert owned[0] > 0, (
+                f"{role} owns no SECURITY DEFINER door — the stream did not run"
+                " (so there was no bracket to close), or the door-owner model"
+                " changed"
+            )
+            priv = fetch_one(
                 owner_window_db,
                 "SELECT has_schema_privilege(%s, 'public', 'CREATE')",
                 (role,),
             )
-            assert row[0] is False, (
-                f"{role} still holds CREATE on public — the stream's transient"
+            assert priv[0] is False, (
+                f"{role} still holds CREATE on public — the transient"
                 " door-install bracket did not close"
             )
