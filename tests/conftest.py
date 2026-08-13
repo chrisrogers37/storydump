@@ -23,6 +23,7 @@ real failure and propagates.
 """
 
 import os
+import socket
 import uuid
 
 import pytest
@@ -145,6 +146,41 @@ def maintenance_connection():
     return conn
 
 
+#: How long the listener probe waits before concluding nothing is there. It runs
+#: at most once per session, and only where libpq has already failed.
+LISTENER_PROBE_TIMEOUT_S = 3
+
+
+def server_is_listening(
+    host: str, port: int, timeout: float = LISTENER_PROBE_TIMEOUT_S
+) -> bool:
+    """Is anything accepting TCP connections at this address?
+
+    A property check, which is the whole point (#769). libpq reports *every*
+    connection-phase failure as a connection error: measured on psycopg2 2.9.12
+    / PostgreSQL 15.18, ``pgcode`` is ``None`` for a dead port, a bad password,
+    an absent role, and a refused connection limit alike. Only the message text
+    differs, and matching on that is a locale-dependent string match — the shape
+    #758 rejected when it replaced the argv detector with a cwd check.
+
+    Two calls decided deliberately rather than inherited (#769 asked for both):
+
+    - A listener that is **not** PostgreSQL counts as answered. The question is
+      "was a database configured *here*", and an occupied address is a better
+      proxy for that than a completed login. If something else holds the port,
+      ``DB_HOST``/``DB_PORT`` is wrong and a loud failure is the right outcome.
+      Verifying the wire protocol instead was considered and rejected: it means
+      implementing a fragment of the startup handshake inside a conftest.
+    - A server that has *died* still reads as absent, because nothing listens.
+      That ambiguity predates this change and is unchanged by it.
+    """
+    try:
+        socket.create_connection((host, port), timeout=timeout).close()
+        return True
+    except OSError:
+        return False
+
+
 def server_answered() -> bool:
     """Did a PostgreSQL answer at the configured address?
 
@@ -155,15 +191,39 @@ def server_answered() -> bool:
     anything else here is a defect that must surface rather than be read as an
     absent server.
 
-    Bound, stated rather than glossed: at FIRST contact a server that has just
-    died is genuinely indistinguishable from one that was never there, so that
-    single case reads as not-configured. Every later failure is unambiguous and
-    is raised.
+    **An ``OperationalError`` is not itself evidence of an absent server
+    (#769).** ``too many connections``, ``password authentication failed`` and
+    ``database does not exist`` all mean the server answered and refused.
+    Reading those as not-configured skipped every integration test at ``rc 0``
+    — the #758 false PASS, reproduced inside the probe meant to prevent it. So
+    where libpq cannot say, the address is asked directly.
+
+    That deliberately widens the fail branch: a half-configured environment
+    (PostgreSQL up, test credentials wrong) now fails where it used to skip.
+    That is the honest answer, since such a run executed no integration tests
+    either way — so the cost is paid in the diagnosis printed below rather than
+    in silence.
+
+    Bound, stated rather than glossed: a server that has just died is still
+    indistinguishable from one that was never there, because neither leaves
+    anything listening. That single case reads as not-configured. Every later
+    failure is unambiguous and is raised.
     """
     try:
         maintenance_connection().close()
         return True
     except psycopg2.OperationalError as exc:
+        if server_is_listening(settings.DB_HOST, settings.DB_PORT):
+            print(
+                f"\n❌  A server IS listening at"
+                f" {settings.DB_HOST}:{settings.DB_PORT} and refused the"
+                f" connection — {exc}"
+                "\n   This is NOT an absent database, so the integration tests"
+                " will run and fail rather than skip (#769)."
+                "\n   Check DB_USER / DB_PASSWORD / DB_NAME in .env.test, and"
+                " that the role and database exist."
+            )
+            return True
         print(
             f"\n\u26a0\ufe0f  No PostgreSQL answered at"
             f" {settings.DB_HOST}:{settings.DB_PORT} — {exc}"
