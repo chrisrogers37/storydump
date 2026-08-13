@@ -2,6 +2,7 @@
 
 from typing import Optional
 
+from src.models.user import ROLE_ADMIN
 from src.repositories.chat_settings_repository import ChatSettingsRepository
 from src.repositories.membership_repository import MembershipRepository
 from src.repositories.user_repository import UserRepository
@@ -48,3 +49,24 @@ class MembershipService(BaseService):
             str(user.id), str(chat_settings.id)
         )
         return bool(membership and membership.is_active)
+
+    def is_system_admin(self, telegram_user_id: Optional[int]) -> bool:
+        """Return True iff the Telegram user holds the system-level admin role.
+
+        This resolves ``users.role``, the DEPLOYMENT-wide role — deliberately
+        not ``UserChatMembership.instance_role``, which is scoped to a single
+        instance. The two are separate columns so that the distinction
+        survives: an owner of their own instance is not an operator of the
+        deployment, and admitting instance owners to a deployment-wide view
+        would re-open that view one tenant at a time.
+
+        Fail-closed on the same terms as ``is_active_member``: an absent user
+        id, an unknown user, a deactivated user, or any non-admin role returns
+        False. A deactivated admin is refused because the role outlives the
+        account otherwise. Never raises — authorization is a boolean gate.
+        """
+        if telegram_user_id is None:
+            return False
+
+        user = self.user_repo.get_by_telegram_id(telegram_user_id)
+        return bool(user and user.is_active and user.role == ROLE_ADMIN)

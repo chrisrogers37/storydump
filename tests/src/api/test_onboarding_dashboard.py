@@ -1552,3 +1552,90 @@ class TestMediaThumbnailProxy:
         assert response.status_code == 401
         MR.assert_not_called()
         MH.assert_not_called()
+
+
+# =============================================================================
+# GET /api/onboarding/analytics/service-health
+# =============================================================================
+
+
+@pytest.mark.unit
+class TestServiceHealthIsAdminGated:
+    """#667. This route returns DEPLOYMENT-wide operational telemetry.
+
+    It carries no tenant rows, so this is an authorization gap rather than a
+    data leak — but authentication was the entire gate, which meant every
+    authenticated tenant user could read the whole system's health.
+
+    These are route-level on purpose. The helper can be perfectly correct and
+    the route still ungated; only calling the endpoint proves the gate is
+    actually attached to it.
+
+    Note the autouse ``_authorize_membership_by_default`` fixture hands back a
+    Mock whose every attribute is truthy, so ``is_system_admin`` is set
+    EXPLICITLY in both directions below. Left unset, the allow-case would pass
+    without a gate existing at all.
+    """
+
+    ROUTE = "/api/onboarding/analytics/service-health"
+
+    def _get(self, client):
+        return client.get(self.ROUTE, params={"init_data": "test"})
+
+    def test_an_authenticated_non_admin_is_refused(
+        self, client, _authorize_membership_by_default
+    ):
+        """THE REGRESSION. Authenticated is not authorized here."""
+        _authorize_membership_by_default.return_value.is_system_admin.return_value = (
+            False
+        )
+
+        with (
+            mock_validate(),
+            patch("src.api.routes.onboarding.dashboard.DashboardService") as MockSvc,
+        ):
+            service_ctx(MockSvc)
+            response = self._get(client)
+
+        assert response.status_code == 403, response.text
+        # The telemetry must not even be built before the gate runs.
+        MockSvc.assert_not_called()
+
+    def test_a_system_admin_is_allowed(self, client, _authorize_membership_by_default):
+        """The control. Without it, 'non-admins get 403' is equally satisfied
+        by a route that refuses everyone."""
+        _authorize_membership_by_default.return_value.is_system_admin.return_value = (
+            True
+        )
+
+        with (
+            mock_validate(),
+            patch("src.api.routes.onboarding.dashboard.DashboardService") as MockSvc,
+        ):
+            svc = service_ctx(MockSvc)
+            svc.get_service_health_stats.return_value = {"runs": []}
+            response = self._get(client)
+
+        assert response.status_code == 200, response.text
+        assert response.json() == {"runs": []}
+
+    def test_instance_membership_does_not_admit(
+        self, client, _authorize_membership_by_default
+    ):
+        """Being an active member — even an owner — of some instance is not
+        operator authority over the deployment. Pins which of the two role
+        columns this route reads; the assertions above pass either way.
+        """
+        membership = _authorize_membership_by_default.return_value
+        membership.is_active_member.return_value = True
+        membership.is_system_admin.return_value = False
+
+        with (
+            mock_validate(),
+            patch("src.api.routes.onboarding.dashboard.DashboardService") as MockSvc,
+        ):
+            service_ctx(MockSvc)
+            response = self._get(client)
+
+        assert response.status_code == 403, response.text
+        MockSvc.assert_not_called()

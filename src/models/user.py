@@ -15,6 +15,13 @@ import uuid
 
 from src.config.database import Base
 
+# The system-level roles, named once beside the schema that constrains them
+# (the check_user_role CHECK below admits exactly these two). Distinct from
+# UserChatMembership.instance_role, which scopes a user within ONE instance:
+# an owner of their own instance is not an operator of the deployment.
+ROLE_ADMIN = "admin"
+ROLE_MEMBER = "member"
+
 
 class User(Base):
     """
@@ -35,7 +42,7 @@ class User(Base):
     telegram_last_name = Column(String(255))
 
     # Role (manually assigned via CLI)
-    role = Column(String(50), default="member")  # 'admin', 'member'
+    role = Column(String(50), default=ROLE_MEMBER)
     is_active = Column(Boolean, default=True)
 
     # Auto-tracked stats

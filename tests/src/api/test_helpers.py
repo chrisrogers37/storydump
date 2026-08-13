@@ -5,7 +5,11 @@ from unittest.mock import patch
 import pytest
 from fastapi import HTTPException
 
-from src.api.routes.onboarding.helpers import _validate_request, service_error_handler
+from src.api.routes.onboarding.helpers import (
+    _validate_admin,
+    _validate_request,
+    service_error_handler,
+)
 from tests.src.api.conftest import CHAT_ID
 
 
@@ -31,6 +35,77 @@ class TestServiceErrorHandler:
         with pytest.raises(RuntimeError):
             with service_error_handler():
                 raise RuntimeError("Something else")
+
+
+@pytest.mark.unit
+class TestValidateAdminAuthorization:
+    """#667. ``_validate_admin`` — the system-operator gate.
+
+    Separate from ``_validate_request``: that one asks whether a caller may
+    act on ONE instance, this one whether they may see the deployment.
+    """
+
+    def _auth(self, user_info):
+        return patch(
+            "src.api.routes.onboarding.helpers._validate_auth",
+            return_value=user_info,
+        )
+
+    def test_a_system_admin_passes(self, _authorize_membership_by_default):
+        membership_cls = _authorize_membership_by_default
+        membership_cls.return_value.is_system_admin.return_value = True
+
+        with self._auth({"user_id": 1}):
+            result = _validate_admin("token")
+
+        assert result["user_id"] == 1
+        membership_cls.return_value.is_system_admin.assert_called_once_with(1)
+
+    def test_a_non_admin_is_refused_403(self, _authorize_membership_by_default):
+        """Authentication succeeded — this is authorization, so 403 not 401.
+        The distinction is what tells an operator reading the logs apart from
+        a bad credential."""
+        membership_cls = _authorize_membership_by_default
+        membership_cls.return_value.is_system_admin.return_value = False
+
+        with self._auth({"user_id": 1}):
+            with pytest.raises(HTTPException) as exc:
+                _validate_admin("token")
+
+        assert exc.value.status_code == 403
+
+    def test_the_refusal_is_recorded_for_monitoring(
+        self, _authorize_membership_by_default
+    ):
+        """A refused operator probe is exactly the traffic auth_monitor
+        exists to surface; a silent 403 is invisible to it."""
+        membership_cls = _authorize_membership_by_default
+        membership_cls.return_value.is_system_admin.return_value = False
+
+        with self._auth({"user_id": 1}):
+            with patch("src.api.routes.onboarding.helpers.auth_monitor") as monitor:
+                with pytest.raises(HTTPException):
+                    _validate_admin("token")
+
+        assert monitor.record_failure.called, "the refusal was not recorded"
+
+    def test_an_auth_failure_still_surfaces_as_401(
+        self, _authorize_membership_by_default
+    ):
+        """The role check must not convert a bad credential into a 403 — the
+        gate runs after authentication, not instead of it."""
+        membership_cls = _authorize_membership_by_default
+        membership_cls.return_value.is_system_admin.return_value = True
+
+        with patch(
+            "src.api.routes.onboarding.helpers._validate_auth",
+            side_effect=HTTPException(status_code=401, detail="bad token"),
+        ):
+            with pytest.raises(HTTPException) as exc:
+                _validate_admin("token")
+
+        assert exc.value.status_code == 401
+        membership_cls.return_value.is_system_admin.assert_not_called()
 
 
 @pytest.mark.unit
