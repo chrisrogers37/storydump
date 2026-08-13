@@ -6,7 +6,9 @@ import pytest
 from fastapi import HTTPException
 
 from src.api.routes.onboarding.helpers import (
+    AUTH_FAILURE_DETAIL,
     _validate_admin,
+    _validate_auth,
     _validate_request,
     service_error_handler,
 )
@@ -35,6 +37,125 @@ class TestServiceErrorHandler:
         with pytest.raises(RuntimeError):
             with service_error_handler():
                 raise RuntimeError("Something else")
+
+
+@pytest.mark.unit
+class TestValidateAuthRecordsTheRealReason:
+    """#737. ``_validate_auth`` is a fallback cascade: initData first, then a
+    signed URL token. Only the SECOND exception used to be recorded.
+
+    A real initData querystring URL-encodes its colons as ``%3A``, so it never
+    presents four colon-separated parts and dies at ``validate_url_token``'s
+    format check before any check could describe the real problem. Every
+    initData rejection therefore reached ``auth_monitor`` and the client as
+    ``"Invalid token format"`` — bad signature, expired, future-dated, wrong
+    bot token, all spelled identically.
+
+    That is a diagnosis defect, not a security hole: the credential is
+    correctly rejected either way. But it defeats the signal exactly where it
+    matters. A Telegram clock-skew event and a leaked-token probe both look
+    like ordinary scanner junk once every reason is the same string.
+    """
+
+    def _run(self, initdata_error, init_data="not-a-token"):
+        """Fail the initData branch and capture what the monitor was told.
+
+        ``validate_url_token`` is deliberately NOT patched — it runs for real,
+        so the second reason is whatever the real code produces rather than
+        one a mock was told to produce.
+        """
+        with (
+            patch(
+                "src.api.routes.onboarding.helpers.validate_init_data",
+                side_effect=ValueError(initdata_error),
+            ),
+            patch("src.api.routes.onboarding.helpers.auth_monitor") as monitor,
+        ):
+            with pytest.raises(HTTPException) as exc:
+                _validate_auth(init_data)
+
+        assert monitor.record_failure.called, "nothing was recorded at all"
+        return monitor.record_failure.call_args[0][1], exc.value
+
+    def test_the_initdata_reason_reaches_the_monitor(self):
+        """THE REGRESSION. Measured on the old code: initData raised
+        'auth_date is in the future' and the monitor recorded 'Invalid token
+        format'."""
+        recorded, _ = self._run("initData auth_date is in the future")
+
+        assert "auth_date is in the future" in recorded, recorded
+
+    def test_the_urltoken_reason_is_kept_as_well(self):
+        """Both reasons, not a swap. A fix that recorded only the initData
+        reason passes the test above while losing the other half — and the
+        URL-token branch is a real credential type (browser links), not a
+        formality."""
+        recorded, _ = self._run("initData expired")
+
+        assert "Invalid token format" in recorded, recorded
+
+    def test_the_two_reasons_are_attributed_to_their_formats(self):
+        """Labelled, not run together. An operator has to be able to tell
+        which credential type produced which reason; the two concatenated
+        into one sentence is a different and unreadable claim."""
+        recorded, _ = self._run("initData expired")
+
+        assert "initData:" in recorded, recorded
+        assert "urlToken:" in recorded, recorded
+
+    def test_a_real_initdata_querystring_dies_at_the_format_check(self):
+        """The mechanism the issue names, with the real validator running.
+
+        This is what makes the second reason uninformative for every initData
+        caller, and it is why recording only that one erased the cause.
+        """
+        real_initdata = (
+            "query_id=AAF&user=%7B%22id%22%3A123%7D&auth_date=1700000000&hash=abc"
+        )
+
+        recorded, _ = self._run("Invalid initData signature", init_data=real_initdata)
+
+        assert "urlToken: Invalid token format" in recorded, recorded
+        assert "initData: Invalid initData signature" in recorded, recorded
+
+    def test_the_client_is_not_told_which_check_failed(self):
+        """The diagnostic string and the client-facing string are decoupled.
+
+        The specific reason separates 'well-formed but mis-signed' from
+        'expired' from 'wrong credential type', which is the discrimination a
+        probe wants. The operator still gets all of it, through the monitor.
+        """
+        _, exc = self._run("Invalid initData signature")
+
+        assert exc.status_code == 401
+        assert exc.detail == AUTH_FAILURE_DETAIL
+        assert "signature" not in exc.detail, exc.detail
+        assert "initData" not in exc.detail, exc.detail
+
+    def test_valid_initdata_still_authenticates(self):
+        """Control. Without it every assertion above is satisfied by a
+        chokepoint that rejects everything."""
+        with patch(
+            "src.api.routes.onboarding.helpers.validate_init_data",
+            return_value={"user_id": 1},
+        ):
+            assert _validate_auth("good")["user_id"] == 1
+
+    def test_a_valid_url_token_still_authenticates_through_the_cascade(self):
+        """Control on the cascade itself. If a failing initData branch stopped
+        falling through, every browser-link caller would be rejected and every
+        assertion above would still pass."""
+        with (
+            patch(
+                "src.api.routes.onboarding.helpers.validate_init_data",
+                side_effect=ValueError("not initData"),
+            ),
+            patch(
+                "src.api.routes.onboarding.helpers.validate_url_token",
+                return_value={"user_id": 7, "chat_id": CHAT_ID},
+            ),
+        ):
+            assert _validate_auth("a:b:c:d")["user_id"] == 7
 
 
 @pytest.mark.unit

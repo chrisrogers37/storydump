@@ -16,6 +16,18 @@ GDRIVE_FOLDER_RE = re.compile(
     r"https?://drive\.google\.com/drive/folders/([a-zA-Z0-9_-]+)"
 )
 
+# What a rejected caller is told, decoupled from what the monitor records.
+#
+# The specific reason is a small oracle: it separates "well-formed but
+# mis-signed" from "expired" from "wrong credential type entirely", which is
+# exactly the discrimination a probe wants and a legitimate client does not
+# need. The operator still gets every reason, via auth_monitor and the log.
+#
+# Nothing is lost that callers had: the reason they received was already the
+# URL-token branch's "Invalid token format" for every initData rejection,
+# whatever the real cause.
+AUTH_FAILURE_DETAIL = "Invalid authentication credentials"
+
 
 def _client_ip(request: Request | None) -> str:
     """Extract client IP from a FastAPI request, or 'unknown'."""
@@ -34,13 +46,31 @@ def _validate_auth(init_data: str, request: Request | None = None) -> dict:
     """
     try:
         return validate_init_data(init_data)
-    except ValueError:
+    except ValueError as initdata_error:
         try:
             return validate_url_token(init_data)
-        except ValueError as e:
+        except ValueError as urltoken_error:
             ip = _client_ip(request)
-            auth_monitor.record_failure(ip, str(e))
-            raise HTTPException(status_code=401, detail=str(e))
+            # BOTH reasons are recorded, never just one.
+            #
+            # The two formats are tried in a fixed order, so only the SECOND
+            # failure used to reach the monitor — and a real initData
+            # querystring URL-encodes its colons as %3A, so it always failed
+            # validate_url_token's four-part split with "Invalid token format"
+            # before any check could describe the real problem. Every initData
+            # rejection therefore arrived as that one string, whatever caused
+            # it. That defeats the signal exactly when it is most wanted: a
+            # Telegram clock-skew event and a leaked-token probe both look
+            # like ordinary scanner junk when they are all spelled the same.
+            #
+            # Both are carried rather than choosing one by the shape of the
+            # input. Shape is a heuristic, and it would misread precisely the
+            # inputs worth reading correctly — a malformed initData that
+            # happens to contain a literal colon. Carrying both never guesses.
+            reason = f"initData: {initdata_error}; urlToken: {urltoken_error}"
+            logger.warning("Auth failed (ip=%s): %s", ip, reason)
+            auth_monitor.record_failure(ip, reason)
+            raise HTTPException(status_code=401, detail=AUTH_FAILURE_DETAIL)
 
 
 def _validate_request(
