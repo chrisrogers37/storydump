@@ -48,6 +48,7 @@ what is missing.
 """
 
 import uuid
+from contextlib import contextmanager
 
 import psycopg2
 import pytest
@@ -137,6 +138,34 @@ def confined(admin_conn, owner_db, owner_actor):
     execute(owner_dsn, "DROP TABLE IF EXISTS rls_probe")
     with admin_conn.cursor() as cur:
         cur.execute(f'DROP ROLE IF EXISTS "{login}"')
+
+
+@contextmanager
+def _session(dsn):
+    """One connection held open across several statements.
+
+    `_as` opens and closes a connection per call, which is right for every
+    other test here and makes this module's leakage case inexpressible: the
+    defect is a property of GUC lifetime meeting CONNECTION REUSE, and a fresh
+    connection per request cannot reuse anything. This is that missing seam —
+    a helper change, not an F.2 dependency, which is why this half was
+    buildable while the rest of F.4 waits on tables.
+
+    A pooled connection is exactly this: handed to one request, returned, then
+    handed to the next without being reset.
+    """
+    conn = psycopg2.connect(dsn)
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def _read(conn):
+    """One 'request' on an already-open connection."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT secret FROM rls_probe ORDER BY secret")
+        return [r[0] for r in cur.fetchall()]
 
 
 def _as(dsn, statements, tenant=None):
@@ -273,3 +302,111 @@ class TestTheSchemaGateIsStructurallyBlind:
             "the gate is green and the owner is reading every tenant — the two"
             " facts coexisting is the whole content of this test"
         )
+
+
+class TestTenantContextDoesNotSurviveConnectionReuse:
+    """F.4, transaction-reuse leakage — buildable without F.2's tables.
+
+    Every test here runs as the **runtime LOGIN**, never the owner. That is
+    load-bearing for this module: the whole premise of the ruling is that the
+    owner bypasses RLS by design, so a harness acting as the owner would prove
+    nothing. Here the policy is genuinely in force, and what leaks is the
+    *tenant context*, not the row filter.
+
+    **Measured on real PostgreSQL 15.18 before these tests were written**, and
+    the measurement corrected the specification twice — see each test.
+    """
+
+    def test_a_session_SET_survives_into_the_next_request_on_a_reused_connection(
+        self, confined
+    ):
+        """THE LEAK. `SET` is session-scoped, so on a pooled connection the
+        tenant context outlives the request that set it: the next request
+        reads the previous tenant's rows without setting anything at all.
+
+        This is what the harness exists to make executable. It is not a
+        PostgreSQL defect — it is the documented lifetime of `SET` — which is
+        exactly why it needs a test rather than a fix: nothing is broken, and
+        that is what makes it easy to write a pool that leaks.
+        """
+        with _session(confined["login_dsn"]) as conn:
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute("SET app.tenant_id = %s", (WS_A,))
+            assert _read(conn) == ["A-secret"]
+
+            # The next request. It sets NOTHING — a pool just handed it this
+            # connection.
+            assert _read(conn) == ["A-secret"], (
+                "expected the tenant context to persist; if this is empty the "
+                "GUC lifetime has changed and the pooling guidance built on it "
+                "needs revisiting"
+            )
+
+    def test_SET_LOCAL_on_a_clean_connection_fails_CLOSED_after_commit(self, confined):
+        """The remedy, and the SQLSTATE is measured rather than predicted.
+
+        The spec for this case predicted `42704` (undefined_object). Measured:
+        **22P02**, invalid_text_representation. Once a custom GUC has been set
+        even transaction-locally, the placeholder is registered, so after the
+        transaction it reads back as an EMPTY STRING rather than being
+        undefined — and it is the `::uuid` cast that fails, not the lookup.
+
+        Either way it fails closed, which is the property that matters. The
+        code is asserted because a reworded expectation is how a fail-closed
+        test quietly becomes a fail-open one.
+        """
+        with _session(confined["login_dsn"]) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SET LOCAL app.tenant_id = %s", (WS_B,))
+            assert _read(conn) == ["B-secret"]
+            conn.commit()
+
+            with pytest.raises(psycopg2.Error) as excinfo:
+                _read(conn)
+            assert excinfo.value.pgcode == "22P02", (
+                f"expected a closed failure, got pgcode={excinfo.value.pgcode}"
+            )
+            conn.rollback()
+
+    def test_SET_LOCAL_after_a_session_SET_reverts_to_the_PREVIOUS_TENANT(
+        self, confined
+    ):
+        """THE CASE THE SPECIFICATION MISSED, and the dangerous one.
+
+        `SET LOCAL` is described as the safe form, and on a clean connection it
+        is. But it does not *unset* — it restores whatever the session had.
+        So on a connection where any earlier request issued a plain `SET`,
+        the transaction-scoped value reverts on commit to the EARLIER
+        TENANT'S id, and the next read returns that tenant's rows with **no
+        error at all**.
+
+        That is strictly worse than the case that was specified: the specified
+        one fails closed and is loud, this one succeeds and is silent. A pool
+        that adopts `SET LOCAL` believing it is sufficient, without also
+        guaranteeing no session-level `SET` ever touched the connection, is
+        still cross-tenant leaky.
+        """
+        with _session(confined["login_dsn"]) as conn:
+            conn.autocommit = True
+            with conn.cursor() as cur:  # tenant A's request, session-scoped
+                cur.execute("SET app.tenant_id = %s", (WS_A,))
+
+            conn.autocommit = False
+            with conn.cursor() as cur:  # tenant B's request, transaction-scoped
+                cur.execute("SET LOCAL app.tenant_id = %s", (WS_B,))
+            assert _read(conn) == ["B-secret"]
+            conn.commit()
+
+            assert _read(conn) == ["A-secret"], (
+                "SET LOCAL reverted to something other than the session value; "
+                "the leak shape has changed and the guidance needs re-deriving"
+            )
+
+    def test_a_fresh_connection_carries_no_context_which_is_the_control(self, confined):
+        """The control. If a brand-new connection already saw rows, these tests
+        would be measuring something other than context reuse — and the two
+        leak assertions above would pass for the wrong reason."""
+        with _session(confined["login_dsn"]) as conn:
+            with pytest.raises(psycopg2.Error):
+                _read(conn)
