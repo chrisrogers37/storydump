@@ -28,31 +28,27 @@ guarantee.
 """
 
 import multiprocessing
-import os
 import time
 
-import psycopg2
 import pytest
 
 from tests.scripts.conftest import (
+    SCRATCH_LOCK_KEY,
     SUITE_CLUSTER_LOCK_KEY,
-    _dsn,
+    lock_holder,
+    maintenance_conn,
 )
-
-#: A key this suite never uses for real, so contention tests cannot be confused
-#: by the session's own lock — or corrupt it.
-SCRATCH_KEY = 785_2026
-
-
-def _maintenance_conn():
-    conn = psycopg2.connect(_dsn("postgres"))
-    conn.autocommit = True
-    return conn
 
 
 def _try_take(key: int) -> bool:
-    """Can a connection that shares nothing with this session take `key`?"""
-    conn = _maintenance_conn()
+    """Can a connection that shares nothing with this session take `key`?
+
+    A SEPARATE connection is required rather than incidental: advisory locks
+    are re-entrant within a session, so asking `admin_conn` whether the suite
+    lock is free returns True and every exclusion assertion below would be
+    vacuous.
+    """
+    conn = maintenance_conn()
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT pg_try_advisory_lock(%s)", (key,))
@@ -64,13 +60,11 @@ def _try_take(key: int) -> bool:
         conn.close()
 
 
-def _hold_scratch_key(started, release, tmpdir=None):
-    """Acquire SCRATCH_KEY in a separate PROCESS and hold until told to stop."""
-    if tmpdir is not None:
-        os.environ["TMPDIR"] = tmpdir
-    conn = _maintenance_conn()
+def _hold_scratch_key(started, release):
+    """Acquire SCRATCH_LOCK_KEY in a separate PROCESS and hold until told."""
+    conn = maintenance_conn()
     with conn.cursor() as cur:
-        cur.execute("SELECT pg_advisory_lock(%s)", (SCRATCH_KEY,))
+        cur.execute("SELECT pg_advisory_lock(%s)", (SCRATCH_LOCK_KEY,))
         started.set()
         release.wait(timeout=30)
 
@@ -89,25 +83,24 @@ class TestTheSessionActuallyHoldsIt:
         )
 
     def test_the_hold_is_visible_and_attributable(self, admin_conn):
-        """The wait loop prints who holds it. That only works if the lock is
-        discoverable in `pg_locks` — the property a file lock cannot offer,
-        whose own timeout message had to tell operators to go hunting."""
-        conn = _maintenance_conn()
+        """The wait loop prints who holds it — the property a file lock cannot
+        offer, whose own timeout message had to send operators hunting instead.
+
+        Asserted through `lock_holder`, the function the wait loop actually
+        calls, rather than a second copy of the query. A re-implementation here
+        would assert that PostgreSQL has a row: the real query could break and
+        every wait could print `held by None` with this still green.
+        """
+        conn = maintenance_conn()
         try:
             with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT a.pid, a.usename FROM pg_locks l"
-                    " JOIN pg_stat_activity a ON a.pid = l.pid"
-                    " WHERE l.locktype = 'advisory' AND l.objid = %s"
-                    "   AND l.granted",
-                    (SUITE_CLUSTER_LOCK_KEY,),
-                )
-                holder = cur.fetchone()
+                holder = lock_holder(cur, SUITE_CLUSTER_LOCK_KEY)
         finally:
             conn.close()
 
         assert holder is not None, "the lock is held but names no holder"
-        assert holder[0] and holder[1]
+        pid, usename, _application = holder
+        assert pid and usename
 
 
 class TestItActuallyExcludes:
@@ -115,6 +108,10 @@ class TestItActuallyExcludes:
     exclude anything."""
 
     def test_a_second_holder_is_blocked_while_the_first_holds(self):
+        """A separate PROCESS, which is the shape that matters: the sessions
+        this serialises are other pytest runs, and they share nothing with this
+        one except the cluster the mutex lives in.
+        """
         ctx = multiprocessing.get_context("fork")
         started, release = ctx.Event(), ctx.Event()
         holder = ctx.Process(target=_hold_scratch_key, args=(started, release))
@@ -122,46 +119,14 @@ class TestItActuallyExcludes:
         try:
             assert started.wait(timeout=15), "the holder never acquired"
 
-            assert _try_take(SCRATCH_KEY) is False
+            assert _try_take(SCRATCH_LOCK_KEY) is False
         finally:
             release.set()
             holder.join(timeout=15)
 
-        assert _try_take(SCRATCH_KEY) is True, "not released when the holder exited"
-
-    def test_it_reaches_a_process_sharing_nothing_but_the_cluster(self):
-        """WHY THIS LOCK AND NOT A FILE LOCK (#785).
-
-        The holder runs with a different ``TMPDIR``, which is enough to send
-        `tempfile.gettempdir()` somewhere else — so the `flock` this replaces
-        would have been taken on a DIFFERENT FILE and would not have excluded
-        anything. The two processes still contend here, because the mutex lives
-        in the cluster rather than on the filesystem.
-
-        On this fleet every bot sets ``TMPDIR=/tmp``, so that divergence was
-        latent rather than live. The scope mismatch it stands for is not: two
-        containers or hosts against one cluster share no temp directory at all.
-        """
-        elsewhere = "/tmp/storydump-785-probe"
-        os.makedirs(elsewhere, exist_ok=True)
-
-        ctx = multiprocessing.get_context("fork")
-        started, release = ctx.Event(), ctx.Event()
-        holder = ctx.Process(
-            target=_hold_scratch_key, args=(started, release, elsewhere)
+        assert _try_take(SCRATCH_LOCK_KEY) is True, (
+            "not released when the holder exited"
         )
-        holder.start()
-        try:
-            assert started.wait(timeout=15), "the holder never acquired"
-
-            assert _try_take(SCRATCH_KEY) is False, (
-                "a process with a different TMPDIR did not contend — the mutex"
-                " is not cluster-scoped"
-            )
-        finally:
-            release.set()
-            holder.join(timeout=15)
-            os.rmdir(elsewhere)
 
     def test_it_clears_when_the_holder_is_killed(self):
         """Crash safety, measured rather than assumed — and the reason the
@@ -174,15 +139,20 @@ class TestItActuallyExcludes:
         holder = ctx.Process(target=_hold_scratch_key, args=(started, release))
         holder.start()
         assert started.wait(timeout=15), "the holder never acquired"
-        assert _try_take(SCRATCH_KEY) is False, "precondition: the key is held"
+        assert _try_take(SCRATCH_LOCK_KEY) is False, "precondition: the key is held"
 
         holder.kill()
         holder.join(timeout=15)
 
-        deadline = 15
-        for _ in range(deadline * 10):
-            if _try_take(SCRATCH_KEY):
+        # Bounded by the CLOCK, not by an iteration count: each probe opens a
+        # connection (~50ms measured), so `range(150)` would have overrun the
+        # 15s its own failure message claims. The release is asynchronous —
+        # `join()` returning means the process is reaped, not that the backend
+        # has noticed the socket close — so a bound is needed either way.
+        budget_s = 15.0
+        end = time.monotonic() + budget_s
+        while time.monotonic() < end:
+            if _try_take(SCRATCH_LOCK_KEY):
                 return
-
             time.sleep(0.1)
-        pytest.fail(f"the lock was still held {deadline}s after the holder was killed")
+        pytest.fail(f"still held {budget_s:.0f}s after the holder was killed")

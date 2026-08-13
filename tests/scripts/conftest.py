@@ -71,6 +71,13 @@ SUITE_DB_PREFIXES = (TEST_DB_PREFIX, TPL_DB_PREFIX)
 SUITE_CLUSTER_LOCK_KEY = 753_2026
 SUITE_LOCK_WAIT_SECONDS = 1200
 
+#: A key nothing ever really takes, declared HERE rather than in the test that
+#: uses it so key allocation has one home — the next author adding a real key
+#: sees this one. The lock tests need a key they can contend over; the suite
+#: key is held session-wide by `admin_conn`, so testing exclusion against it
+#: would assert against the session's own hold.
+SCRATCH_LOCK_KEY = 785_2026
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SETUP_SQL = REPO_ROOT / "scripts" / "setup_database.sql"
 BOOTSTRAP_SQL = REPO_ROOT / "scripts" / "window" / "step0_bootstrap.sql"
@@ -139,6 +146,42 @@ def _is_mine(datname: str) -> bool:
     return _is_suite_db(datname) and SESSION_TOKEN in datname
 
 
+def maintenance_conn():
+    """A fresh autocommit connection to the maintenance database.
+
+    One spelling, so `admin_conn` and anything that has to reach the cluster
+    from OUTSIDE it — the lock tests, which need a connection that is not the
+    lock holder — cannot disagree about what "the server" means.
+    """
+    conn = psycopg2.connect(_dsn("postgres"))
+    conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+    return conn
+
+
+def lock_holder(cur, key: int):
+    """Who holds advisory lock ``key``: ``(pid, usename, application_name)``.
+
+    THE point of the advisory lock over a file lock is that this question has
+    an answer at all, so it lives in one place and the test asserts against
+    THIS function rather than re-typing the join — a second copy could drift
+    and leave the wait loop printing ``held by None`` with everything green.
+
+    Matched on the full identity, not on ``objid`` alone. Measured: a
+    two-argument ``pg_advisory_lock(0, 7532026)`` lands on the same ``objid``
+    as our one-argument bigint key and is distinguished only by
+    ``objsubid`` (1 for bigint, 2 for the int pair), so the loose form can
+    name an unrelated lock's holder.
+    """
+    cur.execute(
+        "SELECT a.pid, a.usename, a.application_name"
+        " FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid"
+        " WHERE l.locktype = 'advisory' AND l.granted"
+        "   AND l.classid = 0 AND l.objid = %s AND l.objsubid = 1",
+        (key,),
+    )
+    return cur.fetchone()
+
+
 @pytest.fixture(scope="session")
 def admin_conn():
     """One session-wide connection to the maintenance database.
@@ -151,8 +194,7 @@ def admin_conn():
     lock is released by the connection closing, which the ``finally``
     guarantees even if setup dies after acquisition.
     """
-    conn = psycopg2.connect(_dsn("postgres"))
-    conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+    conn = maintenance_conn()
     try:
         with conn.cursor() as cur:
             waited = 0
@@ -162,13 +204,7 @@ def admin_conn():
                 )
                 if cur.fetchone()[0]:
                     break
-                cur.execute(
-                    "SELECT a.pid, a.usename, a.application_name"
-                    " FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid"
-                    " WHERE l.locktype = 'advisory' AND l.objid = %s AND l.granted",
-                    (SUITE_CLUSTER_LOCK_KEY,),
-                )
-                holder = cur.fetchone()
+                holder = lock_holder(cur, SUITE_CLUSTER_LOCK_KEY)
                 print(
                     f"conftest: waiting for the suite cluster lock"
                     f" (held by {holder}) — queued, not corrupted"
