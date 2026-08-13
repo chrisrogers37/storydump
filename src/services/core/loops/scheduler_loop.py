@@ -8,7 +8,10 @@ import asyncio
 from datetime import datetime, timezone
 from time import time
 
+from telegram.error import ChatMigrated
+
 from src.exceptions.google_drive import GoogleDriveAuthError
+from src.exceptions.telegram import ChatMigratedError
 from src.repositories.queue_repository import QueueRepository
 from src.repositories.service_run_repository import ServiceRunRepository
 from src.services.core.health_check import HealthCheckService
@@ -217,6 +220,25 @@ async def _retention_cleanup_tick(
             )
 
 
+def _log_alert_failure(kind: str, chat_id: int, exc: Exception) -> None:
+    """Record one tenant's failed best-effort alert so the sweep can go on.
+
+    These alerts carry no queue item, so there is no posting_history row to
+    write a failure to and the log is the only channel available. A migration
+    is therefore rendered through ChatMigratedError, which puts the new chat
+    id in the one shape a recovery pass can parse (``parse_pair``) instead of
+    in prose. That class's docstring already names these sends as a hole in
+    the recovery corpus; a generic warning here would cement it.
+    """
+    if isinstance(exc, ChatMigrated):
+        detail = ChatMigratedError(
+            old_chat_id=chat_id, new_chat_id=exc.new_chat_id
+        ).durable_message()
+    else:
+        detail = str(exc)
+    logger.warning(f"[chat={chat_id}] {kind} alert failed: {detail}")
+
+
 async def _pool_health_tick(
     active_chats: list,
     scheduler_service: SchedulerService,
@@ -241,18 +263,30 @@ async def _pool_health_tick(
                 ):
                     continue
 
-                pool_info = health_check_service.check_media_pool_for_chat(
-                    chat_id, chat_settings=chat
-                )
-                alert_text = health_check_service.format_pool_alert(pool_info)
-                if alert_text:
-                    await bot.send_message(chat_id=chat_id, text=alert_text)
-                    pool_alert_last_sent[chat_id] = now
-                    logger.info(
-                        f"[chat={chat_id}] Sent pool depletion alert: "
-                        f"{len(pool_info['warnings'])} warning(s)"
+                # Per tenant, not per sweep: active chats come back ordered by
+                # created_at ASC, so a tenant that reliably raises would abort
+                # at the same position on every tick and permanently silence
+                # every tenant created after it. The failure is invisible from
+                # the outside -- those tenants look healthy, they are just
+                # never told their pool is draining (#767).
+                try:
+                    pool_info = health_check_service.check_media_pool_for_chat(
+                        chat_id, chat_settings=chat
                     )
+                    alert_text = health_check_service.format_pool_alert(pool_info)
+                    if alert_text:
+                        await bot.send_message(chat_id=chat_id, text=alert_text)
+                        pool_alert_last_sent[chat_id] = now
+                        logger.info(
+                            f"[chat={chat_id}] Sent pool depletion alert: "
+                            f"{len(pool_info['warnings'])} warning(s)"
+                        )
+                except Exception as e:
+                    _log_alert_failure("Pool depletion", chat_id, e)
     except Exception as e:
+        # Kept for the shared setup -- the telegram handle, the prune -- which
+        # fails for everyone at once and is worth exactly one warning. The
+        # per-tenant work no longer arrives here.
         logger.warning(f"Pool depletion check failed: {e}")
 
 
@@ -279,18 +313,23 @@ async def _token_health_tick(
                 ):
                     continue
 
-                token_info = health_check_service.check_gdrive_token_for_chat(
-                    chat_id, chat_settings=chat
-                )
-                alert_text = health_check_service.format_token_alert(token_info)
-                if alert_text:
-                    await bot.send_message(chat_id=chat_id, text=alert_text)
-                    token_alert_last_sent[chat_id] = now_t
-                    logger.info(
-                        f"[chat={chat_id}] Sent token health alert: "
-                        f"{token_info.get('message', '')}"
+                # Per tenant, for the same reason as the pool sweep above.
+                try:
+                    token_info = health_check_service.check_gdrive_token_for_chat(
+                        chat_id, chat_settings=chat
                     )
+                    alert_text = health_check_service.format_token_alert(token_info)
+                    if alert_text:
+                        await bot.send_message(chat_id=chat_id, text=alert_text)
+                        token_alert_last_sent[chat_id] = now_t
+                        logger.info(
+                            f"[chat={chat_id}] Sent token health alert: "
+                            f"{token_info.get('message', '')}"
+                        )
+                except Exception as e:
+                    _log_alert_failure("Drive token health", chat_id, e)
     except Exception as e:
+        # Kept for the shared setup, as above.
         logger.warning(f"Token health check failed: {e}")
 
 
