@@ -35,6 +35,68 @@ from src.config.settings import settings
 from src.utils.validators import MIGRATIONS_DIR
 from tests.conftest import SESSION_DB_SUFFIX as SESSION_TOKEN
 
+
+def pytest_configure(config):
+    """Refuse this directory under pytest-xdist (#809).
+
+    WHAT THIS IS AND IS NOT. It makes an unsafe invocation fail in under a
+    second instead of producing a twenty-minute silent queue; it does NOT make
+    this directory parallel-safe, and nothing here moves it toward that. The
+    seven ``svc_*`` roles are cluster-scoped spec names that cannot be
+    namespaced per session (#768), which is why the suite serializes on
+    ``SUITE_CLUSTER_LOCK_KEY`` in the first place. Under ``-n`` each worker is a
+    separate process with its own session, so workers 2..N queue on a lock the
+    first one holds until the session ends — they do not corrupt each other,
+    they simply wait out ``SUITE_LOCK_WAIT_SECONDS`` and then raise. Read this
+    as "the door is locked", never as "the room is now safe for a crowd".
+
+    WHY THE WAIT IS INVISIBLE, which is what makes the refusal worth having: the
+    wait loop reports by ``print`` from session-scoped fixture SETUP, and
+    ``pytest.ini`` sets no ``-s``/``--capture=no``, so the message is captured
+    and never reaches the terminal unless the fixture fails. The first thing a
+    developer sees is a `RuntimeError` twenty minutes in.
+
+    WHY ``hasattr(config, "workerinput")`` AND NOT ``is_xdist_worker()``: it is
+    not a workaround for the public helper, it *is* the public helper's own
+    implementation — xdist defines `is_xdist_worker` as exactly this hasattr
+    check. The helper takes a request/session wrapper, and this hook is handed
+    only ``config``, so the direct form is the correct spelling here rather than
+    a shortcut. Do not "fix" it into an import; xdist is deliberately not a
+    dependency of this project, and importing it would make the guard require
+    the very plugin it exists to refuse.
+
+    IT FIRES IN THE WORKER, NOT THE CONTROLLER. A run scoped away from here
+    (`pytest --ignore=tests/scripts -n auto`) never loads this file and sees
+    nothing. Refusing on the controller instead would make the second row below
+    tidy at the cost of the first: the controller also collects, so it would
+    abort the WHOLE run rather than just this directory.
+
+    HOW THE REFUSAL PRESENTS DEPENDS ON HOW THIS DIRECTORY IS REACHED, and both
+    forms are measured (pytest 9.0.3, pytest-xdist 3.8.0) because claiming only
+    the tidy one would be true of half the invocations:
+
+    - **Reached by DESCENT** — `pytest -n auto`, where `testpaths = tests` and
+      collection walks into this directory. `ERROR tests/scripts` in the short
+      summary, ~16s, no execnet noise, and **the rest of the suite still runs**.
+    - **Named as an INITIAL ARGUMENT** — `pytest tests/scripts -n auto`. A
+      conftest belonging to an initial arg is loaded at worker STARTUP rather
+      than during collection, so the same refusal surfaces as a worker-boot
+      failure: `no tests ran`, and one execnet traceback per worker. Still ~12s
+      with the whole message present, so it is loud rather than silent — just
+      ugly. Do not read the first row as a promise about the second.
+    """
+    if hasattr(config, "workerinput"):
+        raise pytest.UsageError(
+            "tests/scripts/ serializes every session on one cluster-wide"
+            " advisory lock (SUITE_CLUSTER_LOCK_KEY) because the seven svc_*"
+            " roles are cluster-scoped and cannot be namespaced per session, so"
+            " it is not safe under pytest-xdist. Refusing now rather than"
+            " queueing silently for SUITE_LOCK_WAIT_SECONDS. To keep"
+            " parallelism for the rest of the suite, run them separately:"
+            "  pytest --ignore=tests/scripts -n auto  &&  pytest tests/scripts"
+        )
+
+
 #: Scratch-database naming: ONE home for the convention every sweep predicate
 #: derives from. The session token is #763's — one pytest run, one identity,
 #: correlatable across the root suite's databases and these.
