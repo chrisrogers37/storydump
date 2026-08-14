@@ -385,13 +385,36 @@ class TestTheLaneReplaysAcrossTheBoundary:
     def test_the_lane_tenancy_check_discloses_that_it_is_currently_empty(
         self, bootstrapped_db
     ):
-        """NON-VACUITY DISCLOSURE for the check above, kept as its own test
-        because the two need OPPOSITE edits when F.2.2 lands: the check must go
-        on passing, this must be rewritten. A folded disclosure makes the
-        person who lands the first table disentangle which half went red.
+        """NON-VACUITY DISCLOSURE for the check above, and — unlike
+        `test_tenancy_gate.py`'s, which named a trip condition it could not
+        reach — this one's is reachable: F.2's tables land in the lineage this
+        replays.
 
-        Unlike `test_tenancy_gate.py`'s disclosure, this one's trip condition is
-        reachable — F.2's tables land in the lineage this replays.
+        Its own test, because the two need OPPOSITE edits when the first table
+        lands: the check above must go on passing, this must be rewritten. A
+        folded disclosure makes whoever lands that table disentangle which half
+        went red.
+
+        WHAT IT WILL COST, MEASURED, SO IT IS NOT REDISCOVERED AS A SURPRISE.
+        Under Fork 1 ruling (a) the increments are contiguous stream segments,
+        and the ratified stream creates all 23 of `02`'s tables (indices 2..92)
+        BEFORE it enables RLS on any of them (first at 126) or attaches any
+        policy (first at 149). So the moment the first table increment lands,
+        the absolute check above goes red — 23 tenant-keyed tables, RLS off —
+        and it will be red by the PLAN'S OWN ORDER, not by a defect.
+
+        That is ruling (a)'s stated cost arriving on schedule, and this
+        assertion is the mechanism that makes it arrive as a decision rather
+        than as a mysterious red. The decision is between making the check
+        prefix-aware (compare against the tenancy state the stream's own prefix
+        of the same length implies) and bounding it to a complete lineage. It
+        is NOT to delete the check: the window it would go quiet for is exactly
+        the 26-table stretch it exists to cover.
+
+        Worth knowing before choosing: `07`'s three auth-plane tables
+        (241..245) carry their own RLS (247..249) and policies (252..256) in
+        one contiguous run, so that increment keeps #746's original
+        table-with-its-policy property for free. Only `02`'s 23 are separated.
         """
         run_lane(bootstrapped_db)
         sig = tenancy_signature(bootstrapped_db)
@@ -400,7 +423,9 @@ class TestTheLaneReplaysAcrossTheBoundary:
         assert keyed == [], (
             f"{len(keyed)} tenant-keyed tables are now in the target-lineage"
             f" replay ({keyed}). The lane tenancy gate is load-bearing from"
-            f" here — update this disclosure deliberately."
+            f" here — read this test's docstring and choose between a"
+            f" prefix-aware check and one bounded to a complete lineage."
+            f" Deleting it silences the gate for the exact stretch it covers."
         )
 
     def test_lane_parity_holds_and_discloses_that_it_is_currently_empty(
