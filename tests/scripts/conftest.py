@@ -182,6 +182,61 @@ def lock_holder(cur, key: int):
     return cur.fetchone()
 
 
+def assert_holds_cluster_lock(admin_conn, door: str) -> None:
+    """Refuse a cluster-scoped door unless the connection handed in IS a holder
+    of ``SUITE_CLUSTER_LOCK_KEY``.
+
+    WHY THE PARAMETER IS CHECKED RATHER THAN DECORATIVE (#808). The cheap fix
+    for a door that does not declare its mutex is to put the connection in the
+    signature and never use it, so the fixture graph forces the dependency. That
+    is a marker: nothing goes red when a later author deletes an argument the
+    body ignores, which is the same convention-not-construction shape the door
+    had to begin with, moved one step along.
+
+    #808 filed the alternative as impossible, and it is right about both forms
+    available to a helper holding only a DSN. Measured on this cluster:
+
+    - ``pg_try_advisory_lock(SUITE_CLUSTER_LOCK_KEY)`` returns True when called
+      from the holding session. Advisory locks are RE-ENTRANT, so the obvious
+      probe detects nothing.
+    - The un-scoped ``pg_locks`` form answers "somebody holds it" — which is
+      True precisely when a foreign session holds it, i.e. in the collision.
+
+    What makes the question answerable is having the connection at all: run the
+    backend-scoped form ON THE HANDED CONNECTION and it reports on that backend
+    rather than on the cluster. Measured, same key, same cluster: 1 from the
+    holder, 0 from an equally valid non-holding connection to the same database.
+    So the argument is load-bearing, and a caller that reaches these roles from
+    outside the mutex fails HERE instead of corrupting a concurrent run.
+
+    Asked THROUGH ``lock_holder`` rather than as a second copy of its join, for
+    the reason that function's own docstring gives: the ``objsubid`` clause cost
+    a measurement to learn, and a divergent second spelling would go on matching
+    an unrelated two-argument lock in silence. Reusing it also means the refusal
+    can NAME who is inside the mutex — which the module header calls the whole
+    advantage of the advisory lock over a `flock`, and a ``count(*)`` of our own
+    backend would have thrown away.
+    """
+    with admin_conn.cursor() as cur:
+        cur.execute("SELECT pg_backend_pid()")
+        mine = cur.fetchone()[0]
+        holder = lock_holder(cur, SUITE_CLUSTER_LOCK_KEY)
+        if holder is None or holder[0] != mine:
+            whose = (
+                "nothing holds it"
+                if holder is None
+                else f"held by pid {holder[0]} ({holder[1]}/{holder[2]})"
+            )
+            raise RuntimeError(
+                f"{door}: the connection handed in does not hold"
+                f" SUITE_CLUSTER_LOCK_KEY ({SUITE_CLUSTER_LOCK_KEY}) — {whose}."
+                " The seven svc_* roles are CLUSTER-scoped, so reaching them"
+                " outside the suite mutex corrupts any concurrent run (#768)"
+                " rather than failing. Route this through a fixture that"
+                " depends on `admin_conn`."
+            )
+
+
 @pytest.fixture(scope="session")
 def admin_conn():
     """One session-wide connection to the maintenance database.
@@ -220,6 +275,23 @@ def admin_conn():
                 _sweep_leftovers(cur)
             except Exception as exc:  # noqa: BLE001 - hygiene must not fail the run
                 print(f"conftest: leftover sweep skipped on error: {exc}")
+        yield conn
+    finally:
+        conn.close()
+
+
+@pytest.fixture()
+def outsider_conn():
+    """A connection valid in every way EXCEPT that it does not hold the mutex.
+
+    Same cluster, database, user and process as ``admin_conn`` — both go
+    through `maintenance_conn`, whose docstring already names this consumer:
+    "anything that has to reach the cluster from OUTSIDE it". The single
+    difference is the advisory lock, which is what makes a refusal asserted
+    against this connection a controlled result rather than an unexplained one.
+    """
+    conn = maintenance_conn()
+    try:
         yield conn
     finally:
         conn.close()
@@ -409,7 +481,7 @@ def window_actor(db_dsn: str, owner_actor: str, admin_conn) -> str:
     """Stand the window up the way M.3 does: bootstrap as the owner, then
     act as ``svc_migration``. Returns the window actor's DSN. The canonical
     actor hand-off — suites call this, never inline the sequence."""
-    run_bootstrap(as_user(db_dsn, owner_actor))
+    run_bootstrap(admin_conn, as_user(db_dsn, owner_actor))
     set_test_passwords(admin_conn)
     return as_user(db_dsn, "svc_migration")
 
@@ -531,7 +603,17 @@ def _drop_roles_hardened(cur, roles: tuple) -> None:
     database it was legitimately run against carries these same grants and
     must never be touched by a test sweep, live backends or not. A non-suite
     blocker is therefore named and the failure re-raised, loudly.
+
+    THE MUTEX IS CHECKED HERE rather than at `drop_service_roles` (#808) because
+    this is the primitive all role dropping funnels through, and the other two
+    callers are the ones worth covering: `_sweep_leftovers`, which this file's
+    own header calls the most destructive thing here, and the `owner_actor`
+    teardown. Guarding the public door instead would cover one of three and
+    leave the destructive path on exactly the call-path coverage #808 is about.
+    Enumerating doors is the shape `SUITE_CLUSTER_LOCK_KEY`'s own docstring
+    warns against — coverage by container, not by enumeration.
     """
+    assert_holds_cluster_lock(cur.connection, "_drop_roles_hardened")
 
     def _drop_all():
         for role in roles:
@@ -588,18 +670,28 @@ def drop_service_roles(admin_conn, extra=()) -> None:
     Callers must not hand-roll this order; use the role-bracketed fixtures
     (`roleless_db`, `owner_window_db`, `at49_window_db`, ...), whose shared
     `_scratch` lifecycle sequences it correctly.
+
+    Having ``admin_conn`` in the signature made this door DECLARE the mutex, not
+    hold one; it is verified in `_drop_roles_hardened`, below (#808).
     """
     with admin_conn.cursor() as cur:
         _drop_roles_hardened(cur, tuple(extra) + SERVICE_ROLES)
 
 
-def run_bootstrap(dsn: str) -> None:
+def run_bootstrap(admin_conn, dsn: str) -> None:
     """Apply the step-0 artifact as the current (owner) actor.
 
     Executed through psycopg2 rather than `psql_apply` so a guard's RAISE
     surfaces as an exception the caller can assert the *message* of — the
     precondition is the point of the artifact, not an incidental failure mode.
+
+    ``admin_conn`` is the CREATE side of the mutex declaration `drop_service_roles`
+    has always had on the DROP side (#808), and it is checked rather than merely
+    named — see `assert_holds_cluster_lock`. It is deliberately not the
+    connection the bootstrap RUNS on: the artifact must execute as the owner
+    actor, which is what ``dsn`` carries.
     """
+    assert_holds_cluster_lock(admin_conn, "run_bootstrap")
     conn = psycopg2.connect(dsn)
     conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
     try:
@@ -607,6 +699,19 @@ def run_bootstrap(dsn: str) -> None:
             cur.execute(BOOTSTRAP_SQL.read_text())
     finally:
         conn.close()
+
+
+def bootstrap_via_psql(admin_conn, dsn: str) -> None:
+    """The same artifact through `psql -v ON_ERROR_STOP=1` — how a runbook step
+    actually invokes it.
+
+    A named door rather than a bare `psql_apply(dsn, [BOOTSTRAP_SQL])` call
+    because BOTH routes onto the seven cluster-scoped roles have to verify the
+    mutex or the one left bare is the whole hole (#808). This is the only route
+    that may apply that artifact through psql — `psql_apply` turns it away.
+    """
+    assert_holds_cluster_lock(admin_conn, "bootstrap_via_psql")
+    _psql_run(dsn, [BOOTSTRAP_SQL])
 
 
 @pytest.fixture()
@@ -638,7 +743,7 @@ def roleless_db(admin_conn):
 
 
 @pytest.fixture()
-def bootstrapped_db(roleless_db):
+def bootstrapped_db(admin_conn, roleless_db):
     """A fresh database with the seven service roles provisioned.
 
     What F.2.2 onward needs: a policy naming `svc_ingress` is uncreatable until
@@ -649,7 +754,7 @@ def bootstrapped_db(roleless_db):
     scratch fixtures above share `_scratch`.
     """
     dsn, _ = roleless_db
-    run_bootstrap(dsn)
+    run_bootstrap(admin_conn, dsn)
     return dsn
 
 
@@ -667,11 +772,37 @@ def migration_files(limit: int):
 def psql_apply(dsn: str, files) -> None:
     """Hand-apply SQL files the way production history was actually built.
 
+    REFUSES ``BOOTSTRAP_SQL`` (#808). That artifact provisions the seven
+    cluster-scoped ``svc_*`` roles, and this door cannot check the suite mutex
+    for the reason the door exists — it holds a DSN, not a connection, and a
+    DSN cannot be asked what locks anyone holds. Rather than guard it (12 of
+    its 13 callers apply `SETUP_SQL` or migration files INTO one scratch
+    database, which is per-database and needs no cluster mutex), the one
+    cluster-scoped file is turned away toward `bootstrap_via_psql`.
+
+    Keying the refusal on the ARTIFACT rather than on a door is what stops the
+    hole reopening: the inventory of ways to reach a file is unbounded and this
+    is the second one already, so the check belongs where the file is named.
+
     The subprocess gets a MINIMAL environment, not the inherited shell
     (fleet practice, 2026-08-13): external repo code under an ambient bot
     environment is how credential names collide into error output. psql
     needs PATH and its own options; everything else it needs is in the DSN.
     """
+    if any(Path(f) == BOOTSTRAP_SQL for f in files):
+        raise RuntimeError(
+            "psql_apply: BOOTSTRAP_SQL provisions the CLUSTER-scoped svc_*"
+            " roles, so it must go through `bootstrap_via_psql`, which verifies"
+            " SUITE_CLUSTER_LOCK_KEY (#808). This door only has a DSN, so it"
+            " cannot check the mutex itself."
+        )
+    _psql_run(dsn, files)
+
+
+def _psql_run(dsn: str, files) -> None:
+    """The subprocess invocation itself — the one spelling, shared by the public
+    `psql_apply` door and the guarded `bootstrap_via_psql` one, so the refusal
+    above cannot be sidestepped by rebuilding the command somewhere else."""
     cmd = ["psql", dsn, "-q", "-v", "ON_ERROR_STOP=1"]
     for f in files:
         cmd += ["-f", str(f)]
