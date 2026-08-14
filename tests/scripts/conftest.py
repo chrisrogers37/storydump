@@ -148,6 +148,21 @@ SCRATCH_LOCK_KEY = 785_2026
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SETUP_SQL = REPO_ROOT / "scripts" / "setup_database.sql"
+
+#: Advertised-stream boundaries for the F.2 increments (#806, ruling (a)), used
+#: by the lane tenancy control and the derivation's unit tests. Named because
+#: the same two numbers appear in two files, and the stream is generated from
+#: `02`/`07` plan text — one inserted statement moves both, and a bare literal
+#: lets the two files drift apart while each stays green.
+#:
+#: DELIBERATELY LITERAL, NOT DERIVED. `F2_6_END` is "the index of the first
+#: ENABLE ROW LEVEL SECURITY", and a test asserts exactly that property at that
+#: bound; deriving it from the stream would make that assertion true by
+#: construction. Re-derive them by hand when the plan changes — that is a review
+#: event, which is the point.
+F2_2_START = 2  # 052's two shared functions occupy 0..1
+F2_2_END = 22  # F.2.2 = stream[2:22]: 7 tables, 4 tenant-keyed, no RLS
+F2_6_END = 126  # end of F.2.6 — the last index before any RLS is enabled
 BOOTSTRAP_SQL = REPO_ROOT / "scripts" / "window" / "step0_bootstrap.sql"
 
 #: The last version of the LEGACY lineage — everything numbered below the 3c

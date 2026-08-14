@@ -314,3 +314,22 @@ def target_lineage_files(migrations_dir) -> list:
     return [
         m.path for m in discover_migrations(migrations_dir) if m.version > move.version
     ]
+
+
+def target_lineage_statements(migrations_dir) -> list:
+    """The target lineage's statements, in file order — the F.2 side of every
+    comparison against the stream.
+
+    One definition because two callers depend on the SAME list meaning the same
+    thing: `test_advertised_ddl` asserts this list is a positional prefix of the
+    stream, and the lane's tenancy check slices `stream[: len(this)]` on the
+    strength of that fact. Derived twice, the list that was validated and the
+    list that drives the slice can diverge the first time the lineage needs any
+    filtering — a data-only file, a marker-only file — and only one site would
+    get it.
+    """
+    return [
+        stmt
+        for path in target_lineage_files(migrations_dir)
+        for stmt in normalize_statements(path.read_text())
+    ]
