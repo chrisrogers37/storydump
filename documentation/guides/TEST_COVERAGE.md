@@ -497,8 +497,11 @@ pytest --cov=src --cov-report=xml --junitxml=test-results.xml
 # Check for test failures
 pytest --maxfail=1
 
-# Run with parallel execution (if pytest-xdist installed)
-pytest -n auto
+# Run with parallel execution (if pytest-xdist installed).
+# tests/scripts/ is excluded deliberately: it serializes every session on one
+# cluster-wide advisory lock and refuses to run under -n. Run it separately.
+pytest --ignore=tests/scripts -n auto
+pytest tests/scripts
 ```
 
 ---
