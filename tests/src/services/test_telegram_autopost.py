@@ -1872,3 +1872,75 @@ class TestAutopostMediaOffload:
                 f"— concurrent acks would fire past Telegram's validity window"
             )
             assert await transfer is True
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestTenantCredentialResolutionFailsClosed:
+    """A failure to RESOLVE this tenant's credentials must not be absorbed here.
+
+    ``_upload_to_cloudinary`` calls the tenant-credential path directly and has
+    no exception handling of its own; the guarantee is that it stays that way,
+    so the error reaches ``_handle_autopost_error`` and is shown to the tenant.
+
+    Injected at ``get_provider_for_media_item`` rather than at
+    ``download_file``: the existing tests exercise a provider that already
+    exists, which cannot reach either raise site inside
+    ``get_provider_for_chat`` (no stored credentials; no configured root
+    folder). Those two are what a tenant with broken OAuth actually hits.
+    """
+
+    async def test_a_resolution_auth_failure_is_not_absorbed_by_the_upload_helper(
+        self, mock_autopost_handler, make_autopost_ctx
+    ):
+        """The tenant's auth error escapes the helper rather than returning False.
+
+        ``_upload_to_cloudinary`` signals ordinary refusal by returning False,
+        which the caller treats as "stop quietly, the card is already updated".
+        An auth error absorbed into that return is indistinguishable from a
+        user-cancelled post, and the tenant is never told to reconnect Drive.
+        """
+        from src.exceptions.google_drive import GoogleDriveAuthError
+
+        handler = mock_autopost_handler
+        mock_cloud = Mock()
+        ctx = make_autopost_ctx(cloud_service=mock_cloud)
+
+        with patch(
+            "src.services.media_sources.factory.MediaSourceFactory.get_provider_for_media_item",
+            side_effect=GoogleDriveAuthError("No Google Drive OAuth credentials"),
+        ) as mock_resolve:
+            with pytest.raises(GoogleDriveAuthError, match="No Google Drive OAuth"):
+                await handler._upload_to_cloudinary(ctx)
+
+        # Anti-vacuity: prove the credential path was actually walked, and for
+        # THIS tenant. Without this the test also passes against a helper that
+        # bails out before ever resolving anything.
+        mock_resolve.assert_called_once()
+        assert mock_resolve.call_args.kwargs["telegram_chat_id"] == ctx.chat_id
+        # It failed AT resolution — nothing was uploaded on the tenant's behalf.
+        mock_cloud.upload_media.assert_not_called()
+
+    async def test_a_non_auth_resolution_failure_also_escapes(
+        self, mock_autopost_handler, make_autopost_ctx
+    ):
+        """Control: the helper absorbs NOTHING, rather than special-casing auth.
+
+        This caller's fail-closed property comes from having no handler at all,
+        which is a different mechanism from the notification path's explicit
+        re-raise. Asserting only the auth case would leave a future ``except
+        Exception: return False`` here green for every non-auth failure.
+        """
+        handler = mock_autopost_handler
+        mock_cloud = Mock()
+        ctx = make_autopost_ctx(cloud_service=mock_cloud)
+
+        with patch(
+            "src.services.media_sources.factory.MediaSourceFactory.get_provider_for_media_item",
+            side_effect=ValueError("malformed source config"),
+        ) as mock_resolve:
+            with pytest.raises(ValueError, match="malformed source config"):
+                await handler._upload_to_cloudinary(ctx)
+
+        mock_resolve.assert_called_once()
+        mock_cloud.upload_media.assert_not_called()
