@@ -379,9 +379,18 @@ make test-unit
 # Run only failed tests
 make test-failed
 
-# Parallel execution (requires pytest-xdist)
-pytest -v -n auto
+# Parallel execution (requires pytest-xdist).
+# tests/scripts/ MUST be excluded and run serially. It serializes every session
+# on one cluster-wide advisory lock — the seven svc_* roles are cluster-scoped
+# spec names that cannot be namespaced per session — so xdist workers would
+# queue on each other rather than share the work. It refuses under -n with an
+# explanatory error rather than hanging for 20 minutes.
+pytest --ignore=tests/scripts -v -n auto
+pytest tests/scripts
 ```
+
+Parallelism does not help `tests/scripts/` and cannot: the lock is the point.
+It is a small suite (~3 minutes) and the rest of the tree is what benefits.
 
 ### Want to inspect the test database?
 
