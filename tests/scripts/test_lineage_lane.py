@@ -462,10 +462,21 @@ class TestTheLaneReplaysAcrossTheBoundary:
         # `expected_tenancy`'s own non-degeneracy is a positive control in
         # `test_tenancy_gate.py`, against the full 257-statement stream.
         assert not expected, (
-            f"the target lineage now carries {len(expected)} tables, so the"
-            f" prefix comparison above is load-bearing rather than vacuous."
-            f" Delete this disclosure deliberately — it exists to make the"
-            f" transition visible, not to bound the check."
+            f"EXPECTED FAILURE — you have not broken anything. This assertion"
+            f" exists to fail exactly once, here, and this is that moment.\n\n"
+            f"The target lineage now carries {len(expected)} tables"
+            f" ({sorted(expected)}), so the prefix comparison above has stopped"
+            f" being vacuous and is now doing real work. Until this run both"
+            f" sides were `{{}}` and it compared nothing — this line is what"
+            f" made that visible instead of letting an empty comparison read as"
+            f" coverage.\n\n"
+            f"CORRECT RESPONSE: delete this assertion (and the comment above"
+            f" it) as part of the increment that landed the tables. Nothing"
+            f" else. Do NOT relax the `sig == expected` comparison above it,"
+            f" and do NOT bound it to a complete lineage — under #806 Fork 1"
+            f" ruling (a) the stream creates every table before enabling RLS on"
+            f" any of them, so tenant-keyed tables with no policy are CORRECT"
+            f" here and the comparison already accounts for that on both sides."
         )
 
         execute(
