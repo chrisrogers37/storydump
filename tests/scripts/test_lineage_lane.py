@@ -20,6 +20,10 @@ Three things are asserted here that no other suite can see:
 3. **The bound the legacy suites pass is load-bearing, not tidy.** Stated as an
    executable fact rather than a comment: bounded, `public` still holds the
    legacy schema; unbounded, it does not.
+4. **Tenancy over the TARGET lineage** (#806 Fork 1's paired obligation).
+   `test_tenancy_gate.py` replays bounded to the legacy lineage, so it cannot
+   see a file numbered above the move — measured, not inferred. This is the
+   only replay in the suite that can.
 
 Scope, named rather than implied: this lane runs as the **test actor**, not as
 `svc_migration` after an owner-actor bootstrap. The actor-faithful replay is a
@@ -39,6 +43,7 @@ from scripts.migration_runner import (
     schema_move_migration,
 )
 from scripts.schema_parity import schema_diff, schema_signature
+from scripts.tenancy_gate import tenancy_signature, tenancy_violations
 from src.utils.validators import MIGRATIONS_DIR
 from tests.scripts.conftest import (
     as_user,
@@ -310,6 +315,92 @@ class TestTheLaneReplaysAcrossTheBoundary:
             " to UTC — asserted as a PAIR, because a function that always"
             " returns its argument passes the first half alone, and one that"
             " always returns 'UTC' passes the second"
+        )
+
+    def test_the_tenancy_gate_runs_against_this_replay_and_can_see_into_it(
+        self, bootstrapped_db
+    ):
+        """FORK 1'S PAIRED OBLIGATION (#806): aim `tenancy_gate` at the lineage
+        F.2 actually lands in.
+
+        Ruling (a) lets policies leave the table increments, trading a
+        STRUCTURAL guarantee — a table and its policy in one PR — for a
+        DETECTED one. That trade is only honest if the detector is pointed at
+        the target lineage, and it was not. `test_tenancy_gate.py` replays
+        bounded to `LEGACY_LINEAGE_MAX`, which stops BELOW the move, so no file
+        numbered above it can ever appear in the schema it examines.
+
+        Measured before writing this, in an exported tree: a tenant-keyed table
+        with RLS off, landed as `053`, left that suite **fully green** while
+        this lane's own replay observed it in `public`. So the gap was
+        structural, not a matter of degree.
+
+        The check belongs here, beside lane parity, for the same reason lane
+        parity is here rather than in a parity suite: the lane owns the replay,
+        and imports the predicates that judge it.
+
+        THE PROBE IS NOT DECORATION. After the lane, `public` holds zero
+        tables, so the violation check alone passes on an empty set — and would
+        pass just as green if `tenancy_signature` were pointed at the wrong
+        database entirely. That is the SAME failure this test exists to fix,
+        one level down, so it must not be assertable by it. The probe is what
+        separates "the gate looked and found nothing" from "the gate is not
+        looking."
+
+        It is born the way `02` §7 prints a table, `TO svc_ingress` — a role
+        that does not exist without the bootstrap — so the probe also shows
+        this replay can carry the policy shape F.2.2 will need.
+        """
+        run_lane(bootstrapped_db)
+
+        assert tenancy_violations(tenancy_signature(bootstrapped_db)) == []
+
+        execute(
+            bootstrapped_db,
+            "CREATE TABLE lane_tenancy_probe ("
+            "  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),"
+            "  workspace_id UUID NOT NULL);"
+            "ALTER TABLE lane_tenancy_probe ENABLE ROW LEVEL SECURITY;"
+            "CREATE POLICY p_lane_probe ON lane_tenancy_probe FOR ALL"
+            "  TO svc_ingress USING (workspace_id IS NOT NULL)",
+        )
+        sig = tenancy_signature(bootstrapped_db)
+        assert sig.get("lane_tenancy_probe", {}).get("tenant_keyed") is True, (
+            "the gate cannot see this replay's catalog at all — the empty"
+            " violation list above was measuring some other database"
+        )
+        assert tenancy_violations(sig) == [], "a correctly born table was flagged"
+
+        # THE MUTATION, on the replayed database itself: same table, policy
+        # gone. `test_tenancy_gate.py` proves the predicate discriminates; what
+        # can only be proved HERE is that it discriminates on THIS schema.
+        execute(bootstrapped_db, "DROP POLICY p_lane_probe ON lane_tenancy_probe")
+        violations = tenancy_violations(tenancy_signature(bootstrapped_db))
+        assert any(
+            "lane_tenancy_probe" in v and "no policy" in v for v in violations
+        ), violations
+
+        execute(bootstrapped_db, "DROP TABLE lane_tenancy_probe")
+
+    def test_the_lane_tenancy_check_discloses_that_it_is_currently_empty(
+        self, bootstrapped_db
+    ):
+        """NON-VACUITY DISCLOSURE for the check above, kept as its own test
+        because the two need OPPOSITE edits when F.2.2 lands: the check must go
+        on passing, this must be rewritten. A folded disclosure makes the
+        person who lands the first table disentangle which half went red.
+
+        Unlike `test_tenancy_gate.py`'s disclosure, this one's trip condition is
+        reachable — F.2's tables land in the lineage this replays.
+        """
+        run_lane(bootstrapped_db)
+        sig = tenancy_signature(bootstrapped_db)
+
+        keyed = sorted(t for t, e in sig.items() if e["tenant_keyed"])
+        assert keyed == [], (
+            f"{len(keyed)} tenant-keyed tables are now in the target-lineage"
+            f" replay ({keyed}). The lane tenancy gate is load-bearing from"
+            f" here — update this disclosure deliberately."
         )
 
     def test_lane_parity_holds_and_discloses_that_it_is_currently_empty(
