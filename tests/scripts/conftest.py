@@ -65,11 +65,17 @@ def pytest_configure(config):
     dependency of this project, and importing it would make the guard require
     the very plugin it exists to refuse.
 
-    IT FIRES IN THE WORKER, NOT THE CONTROLLER. A run scoped away from here
+    IT FIRES IN THE WORKER, AND NOTHING ELSE COULD. A run scoped away from here
     (`pytest --ignore=tests/scripts -n auto`) never loads this file and sees
-    nothing. Refusing on the controller instead would make the second row below
-    tidy at the cost of the first: the controller also collects, so it would
-    abort the WHOLE run rather than just this directory.
+    nothing. Refusing on the CONTROLLER instead — keying on
+    `config.option.numprocesses` to fail before workers spawn — would make the
+    second row below tidy, and does not work. Measured rather than reasoned: in
+    the descent form this hook is called exactly TWICE, both times with
+    ``workerinput`` present. The controller never loads this conftest at all,
+    and on the workers ``numprocesses`` is ``None`` and ``dist`` is ``no``,
+    because xdist resets them for the worker's own serial run. A controller-side
+    check placed here would not trade one behaviour for another; it would be
+    dead code that never fires.
 
     HOW THE REFUSAL PRESENTS DEPENDS ON HOW THIS DIRECTORY IS REACHED, and both
     forms are measured (pytest 9.0.3, pytest-xdist 3.8.0) because claiming only
