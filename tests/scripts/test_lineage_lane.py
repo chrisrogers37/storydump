@@ -41,9 +41,19 @@ from scripts.migration_runner import (
     discover_migrations,
     legacy_lineage_max,
     schema_move_migration,
+    split_statements,
+)
+from scripts.advertised_ddl import (
+    DEFAULT_DOCS,
+    DEFAULT_MANIFEST,
+    build_stream,
+    load_manifest,
+    normalize_statements,
+    target_lineage_statements,
 )
 from scripts.schema_parity import schema_diff, schema_signature
 from scripts.tenancy_gate import (
+    expected_tenancy,
     tenancy_signature,
     tenancy_violations,
     tenant_keyed_tables,
@@ -51,6 +61,8 @@ from scripts.tenancy_gate import (
 from src.utils.validators import MIGRATIONS_DIR
 from tests.scripts.conftest import (
     as_user,
+    F2_2_END,
+    F2_2_START,
     LEGACY_LINEAGE_MAX,
     SETUP_SQL,
     execute,
@@ -62,12 +74,33 @@ from tests.scripts.conftest import (
 )
 
 
-def run_lane(dsn):
+def run_lane(dsn, migrations_dir=MIGRATIONS_DIR):
     """The §0.2 lineage run: legacy setup applied by hand the way production's
     actually was, then ONE unbounded runner invocation across the boundary —
-    001–050, the move, and the F.2 target files as they land."""
+    001–050, the move, and the F.2 target files as they land.
+
+    `migrations_dir` is overridable for ONE caller: the positive control that
+    stages a future F.2 increment into a throwaway tree. It takes the parameter
+    rather than re-implementing these two lines so that the control replays the
+    same lane it certifies — a hand-rolled copy would keep passing after the
+    real lane gained a step, which is the failure mode a control exists to
+    rule out.
+    """
     psql_apply(dsn, [SETUP_SQL])
-    return apply_pending(dsn, MIGRATIONS_DIR)
+    return apply_pending(dsn, migrations_dir)
+
+
+def real_stream(normalized=True):
+    """The advertised stream from the committed docs + manifest.
+
+    One spelling, because the raw and normalized lists are NOT interchangeable
+    and the difference has already bitten: normalized statements are a
+    comparison key (whitespace collapsed, full-line comments dropped), while
+    `02` prints an inline `--` inside `CREATE TABLE onboarding_sessions` — so a
+    normalized statement executed as SQL comments out its own tail.
+    """
+    raw = build_stream(DEFAULT_DOCS, load_manifest(DEFAULT_MANIFEST))
+    return normalize_statements(raw) if normalized else raw
 
 
 def _relnames(dsn, schema, kinds=None):
@@ -355,49 +388,113 @@ class TestTheLaneReplaysAcrossTheBoundary:
         that does not exist without the bootstrap — so the probe also shows
         this replay can carry the policy shape F.2.2 will need.
 
-        THE NON-VACUITY DISCLOSURE RIDES ALONG rather than living in its own
-        test, unlike lane parity's, and the reason is that here the two move
-        TOGETHER. At F.2.2 the disclosure trips and the violation check goes
-        red in the same run, because the ratified stream creates all 23 of
-        `02`'s tables before enabling RLS on any of them — so there is no edit
-        one needs and the other does not. Separating them would buy a second
-        full-corpus replay for an assertion read off a dict already in hand.
+        WHAT IS ASSERTED IS EQUALITY WITH THE STREAM'S OWN PREFIX, not the
+        tenancy invariant itself. The invariant — every tenant-keyed table
+        carries a policy — is FALSE mid-stream by the ratified order, so
+        asserting it from F.2.2 would be asserting the plan is wrong. What holds
+        at every increment, including the empty one, is that the replayed
+        lineage carries exactly the tenancy state a prefix of that length
+        implies. See the comment at the assertion for why the alternative —
+        bounding the check to a complete lineage — is the same quiet window as
+        deleting it.
         """
         run_lane(bootstrapped_db)
         sig = tenancy_signature(bootstrapped_db)
 
-        # NON-VACUITY DISCLOSURE, asserted BEFORE the gate below so that when
-        # both go red — which is what F.2.2 does — the message that prints is
-        # the one carrying the decision rather than a bare list of violations.
+        # THE CHECK IS PREFIX-AWARE — the decision the previous revision of this
+        # test deferred to whoever landed the first table, now taken.
         #
-        # Unlike `test_tenancy_gate.py`'s disclosure, which named a trip
-        # condition it could not reach, this one's is reachable: F.2's tables
-        # land in the lineage this replays.
+        # It used to assert `tenant_keyed_tables(sig) == []`, which is true only
+        # until F.2.2 and then false for five increments: under Fork 1 ruling (a)
+        # the increments are contiguous stream segments, and the stream creates
+        # `02`'s 23 tables before the first ENABLE ROW LEVEL SECURITY (index 126)
+        # or policy (149). A check written that way had two exits and both were
+        # bad — go red on schedule for five increments, or get switched off.
         #
-        # WHAT IT WILL COST, MEASURED, SO IT IS NOT REDISCOVERED AS A SURPRISE.
-        # Under Fork 1 ruling (a) the increments are contiguous stream
-        # segments, and the stream creates `02`'s 23 tables (indices 2..92)
-        # BEFORE the first ENABLE ROW LEVEL SECURITY (126) or policy (149). So
-        # from F.2.2 to F.2.7 this test is red BY THE PLAN'S OWN ORDER, not by
-        # a defect — ruling (a)'s stated cost arriving on schedule.
+        # The two candidates it named were a prefix-aware check and one bounded
+        # to a complete lineage. Bounding it is the quiet failure wearing a
+        # different word: the gate would say nothing until F.2.9, which is the
+        # same window as deleting it. So: compare against the tenancy state the
+        # stream's own prefix OF THE SAME LENGTH implies.
         #
-        # The decision then is between a prefix-aware check (compare against
-        # the tenancy state the stream's own prefix of the same length
-        # implies) and one bounded to a complete lineage. It is NOT to delete
-        # the check: the window it would go quiet for is exactly the 26-table
-        # stretch it exists to cover. Note also that the full target schema IS
-        # checked at full strength today, by
+        # This is strictly stronger than the `violations == []` it replaces, in
+        # both directions — it fails on a table that landed and should not have,
+        # on RLS enabled where the prefix does not call for it, and on a policy
+        # count that disagrees. And it needs no edit at F.2.7: the implied state
+        # simply grows 23 RLS-enabled tables and 53 policies, and the observed
+        # side has to match.
+        #
+        # NOT a tautology, because the two sides are different objects. `sig` is
+        # read off a live catalog after replaying real migration files; the
+        # expectation is parsed out of plan TEXT. A file that declares a table
+        # the stream declares but fails to install it diverges here.
+        #
+        # The full target schema is separately checked at full strength today by
         # `test_advertised_ddl_replay.py::test_the_completed_target_schema_has_no_tenancy_violations`
-        # — so this lane check is the file-lineage half, never the only half.
-        keyed = sorted(tenant_keyed_tables(sig))
-        assert keyed == [], (
-            f"{len(keyed)} tenant-keyed tables are now in the target-lineage"
-            f" replay ({keyed}). The lane tenancy gate is load-bearing from"
-            f" here — read the comment above and choose between a prefix-aware"
-            f" check and one bounded to a complete lineage. Deleting it"
-            f" silences the gate for the exact stretch it covers."
+        # — this lane check is the file-lineage half, never the only half.
+        f2 = target_lineage_statements(MIGRATIONS_DIR)
+        stream = real_stream()
+        expected = expected_tenancy(stream[: len(f2)])
+        assert sig == expected, (
+            f"the replayed target lineage does not carry the tenancy state its"
+            f" own stream prefix implies. Lineage is {len(f2)} statements;"
+            f" expected {len(expected)} tables"
+            f" ({sorted(tenant_keyed_tables(expected))} tenant-keyed), observed"
+            f" {len(sig)} ({sorted(tenant_keyed_tables(sig))} tenant-keyed)."
+            f" This is NOT the mid-stream RLS window — that is accounted for on"
+            f" both sides. It means a migration installed something the plan"
+            f" does not declare at this point, or failed to install something it"
+            f" does.\n  expected: {expected}\n  observed: {sig}"
         )
-        assert tenancy_violations(sig) == []
+
+        # NON-VACUITY DISCLOSURE, as an ASSERTION rather than a print.
+        #
+        # With an empty prefix both sides are `{}` and the equality above
+        # compared nothing — which is legitimate today, and is exactly the state
+        # a reader must not mistake for coverage. An earlier version of this
+        # said so with `print()`; pytest captures stdout and surfaces it ONLY on
+        # failure, so the message was invisible on precisely the green runs it
+        # was written for. A disclosure that cannot be observed is not one.
+        #
+        # It fires exactly once: at F.2.2, in the same run as the first real
+        # comparison, forcing someone to remove it deliberately.
+        # `expected_tenancy`'s own non-degeneracy is a positive control in
+        # `test_tenancy_gate.py`, against the full 257-statement stream.
+        #
+        # XFAIL RATHER THAN A PLAIN ASSERT, and the reason is the SUMMARY LINE,
+        # not the traceback. To a human reading a failure the two are identical
+        # — the message below prints either way. To anything reading counts they
+        # are not: a by-design `FAILED` is indistinguishable from a regression
+        # at count level, and this estate's own documented regression procedure
+        # is a count-line diff (`N failed, M passed`). One expected failure
+        # sitting in that number corrupts the comparison for everyone using it.
+        # `XFAIL` is reported in its own column by every tool that reads pytest.
+        #
+        # Called IMPERATIVELY rather than as `@pytest.mark.xfail`, for two
+        # reasons the decorator cannot satisfy: its condition is evaluated at
+        # COLLECTION time and cannot see `expected`, which only exists after the
+        # replay has run; and applied unconditionally it would turn today's
+        # genuinely-passing run into `XPASS` — reporting a problem where there
+        # is none, which is the same misinformation in the other direction.
+        if expected:
+            pytest.xfail(
+                f"EXPECTED FAILURE — you have not broken anything. This check"
+                f" exists to fire exactly once, here, and this is that moment."
+                f"\n\n"
+                f"The target lineage now carries {len(expected)} tables"
+                f" ({sorted(expected)}), so the prefix comparison above has stopped"
+                f" being vacuous and is now doing real work. Until this run both"
+                f" sides were `{{}}` and it compared nothing — this line is what"
+                f" made that visible instead of letting an empty comparison read as"
+                f" coverage.\n\n"
+                f"CORRECT RESPONSE: delete this xfail block (and the comment"
+                f" above it) as part of the increment that landed the tables. Nothing"
+                f" else. Do NOT relax the `sig == expected` comparison above it,"
+                f" and do NOT bound it to a complete lineage — under #806 Fork 1"
+                f" ruling (a) the stream creates every table before enabling RLS on"
+                f" any of them, so tenant-keyed tables with no policy are CORRECT"
+                f" here and the comparison already accounts for that on both sides."
+            )
 
         execute(
             bootstrapped_db,
@@ -423,6 +520,104 @@ class TestTheLaneReplaysAcrossTheBoundary:
         assert any(
             "lane_tenancy_probe" in v and "no policy" in v for v in violations
         ), violations
+
+    def test_the_prefix_comparison_holds_with_real_tables_and_fails_on_an_extra_one(
+        self, bootstrapped_db, tmp_path
+    ):
+        """POSITIVE CONTROL for the check above, which on today's lineage
+        compares `{}` to `{}` and says so.
+
+        An equality that has only ever been exercised on two empty dicts is not
+        evidence that it works — it is the same vacuous green this whole lane
+        exists to catch, one level up. So this replays a lineage that DOES carry
+        tables: the real F.2.2 segment (stream indices 2..21, seven tables, four
+        of them tenant-keyed) staged into a throwaway migrations directory, and
+        asserts the comparison holds against a populated catalog.
+
+        Then it mutates — one table the stream does not declare at that
+        position — and requires the comparison to go RED. Without that half this
+        would only prove the check passes, never that it can fail.
+
+        Staged in `tmp_path`, never the repo's migrations directory: this must
+        not become a way to land a file the ratified split has not approved.
+
+        NOTE the statements are taken RAW rather than normalized. Normalized
+        statements are a comparison key, not executable SQL — `02` prints an
+        inline `--` comment inside `CREATE TABLE onboarding_sessions`, and
+        collapsing that statement to one line comments out everything after it.
+
+        IT REPLAYS THE WHOLE CORPUS THROUGH `run_lane`, AND THAT COST IS A
+        DECISION. Measured: the corpus leg is ~5.6s of this test's ~6.5s, and
+        staging only `052` plus the segment into an empty tree reaches the same
+        seven tables — verified, not assumed, because 051 empties `public` and
+        052 creates functions rather than relations. It is kept anyway. This is
+        the control for a safety check, and its value is that it exercises the
+        SAME lane the check runs after; a shortcut equal today rests on the move
+        continuing to leave nothing behind, and would keep passing silently the
+        day that stopped being true. Fidelity over 5.6s, on a file that already
+        replays the corpus seven times.
+        """
+        import shutil
+
+        raw = real_stream(normalized=False)
+        stream = normalize_statements(raw)
+        segment = split_statements(raw)[F2_2_START:F2_2_END]
+
+        staged = tmp_path / "migrations"
+        shutil.copytree(MIGRATIONS_DIR, staged)
+        write_migration(
+            staged, 53, ";\n\n".join(s.strip() for s in segment) + ";", name="f2_2"
+        )
+
+        run_lane(bootstrapped_db, staged)
+
+        sig = tenancy_signature(bootstrapped_db)
+        expected = expected_tenancy(stream[:F2_2_END])
+        assert expected, "the control staged nothing — it is proving nothing"
+        assert len(tenant_keyed_tables(expected)) == 4, sorted(
+            tenant_keyed_tables(expected)
+        )
+        assert sig == expected, (
+            f"the comparison fails on a lineage it should accept.\n"
+            f"  expected: {expected}\n  observed: {sig}"
+        )
+
+        # THE COST OF THE OLD SHAPE, MEASURED HERE RATHER THAN ARGUED. On this
+        # exact catalog the invariant check this test replaced is RED: four
+        # tenant-keyed tables carry no RLS, because the ratified stream does not
+        # enable it until index 126. They are correct — `sig == expected` above
+        # just proved the lineage is exactly what the plan implies — and the old
+        # check calls them violations anyway. That is the five-increment window
+        # the prefix-aware form exists to survive, and asserting it non-empty
+        # pins the reason so nobody reverts the shape thinking it was cosmetic.
+        stale_shape = tenancy_violations(sig)
+        assert len(stale_shape) == len(tenant_keyed_tables(expected)), stale_shape
+        assert all("RLS is not enabled" in v for v in stale_shape), stale_shape
+
+        # THE MUTATION: a tenant-keyed table the stream does not declare at this
+        # position, born perfectly correctly. The invariant check cannot see it
+        # BY CONSTRUCTION — it has RLS and a policy, so it adds nothing to the
+        # list above. Only the prefix comparison can, and that is the direction
+        # the new form adds rather than merely preserves.
+        execute(
+            bootstrapped_db,
+            "CREATE TABLE undeclared_probe ("
+            "  id UUID PRIMARY KEY,"
+            "  workspace_id UUID NOT NULL);"
+            "ALTER TABLE undeclared_probe ENABLE ROW LEVEL SECURITY;"
+            "CREATE POLICY p_undeclared ON undeclared_probe FOR ALL"
+            "  TO svc_ingress USING (workspace_id IS NOT NULL)",
+        )
+        mutated = tenancy_signature(bootstrapped_db)
+        assert tenancy_violations(mutated) == stale_shape, (
+            "the undeclared table changed the invariant check's answer — it was "
+            "meant to be invisible to it, so this no longer isolates the "
+            "direction the prefix comparison uniquely covers"
+        )
+        assert mutated != expected, (
+            "a table the stream does not declare at this position left the "
+            "prefix comparison green"
+        )
 
     def test_lane_parity_holds_and_discloses_that_it_is_currently_empty(
         self, bootstrapped_db, second_scratch_db
