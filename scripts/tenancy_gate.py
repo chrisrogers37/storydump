@@ -215,6 +215,11 @@ def expected_tenancy(statements) -> dict:
     """
     sig: dict[str, dict] = {}
     for stmt in statements:
+        # ASSUMES a space between the table name and its opening paren, which
+        # holds for every `CREATE TABLE` the plan prints today. A future
+        # `CREATE TABLE foo(` would not match, fall through to the refusal
+        # below, and fail LOUDLY — but pointing at the wrong layer: it reads as
+        # a plan/migration mismatch when it is a blind spot in this line.
         m = re.match(r"CREATE TABLE (?:IF NOT EXISTS )?(?:public\.)?(\w+) \((.*)", stmt)
         if m:
             name, body = m.group(1), m.group(2)

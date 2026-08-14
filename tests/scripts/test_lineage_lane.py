@@ -456,28 +456,45 @@ class TestTheLaneReplaysAcrossTheBoundary:
         # failure, so the message was invisible on precisely the green runs it
         # was written for. A disclosure that cannot be observed is not one.
         #
-        # Asserted the way the sibling lane-parity disclosure asserts its own
-        # emptiness, and it trips exactly once: at F.2.2, in the same run as the
-        # first real comparison, forcing someone to delete it deliberately.
+        # It fires exactly once: at F.2.2, in the same run as the first real
+        # comparison, forcing someone to remove it deliberately.
         # `expected_tenancy`'s own non-degeneracy is a positive control in
         # `test_tenancy_gate.py`, against the full 257-statement stream.
-        assert not expected, (
-            f"EXPECTED FAILURE — you have not broken anything. This assertion"
-            f" exists to fail exactly once, here, and this is that moment.\n\n"
-            f"The target lineage now carries {len(expected)} tables"
-            f" ({sorted(expected)}), so the prefix comparison above has stopped"
-            f" being vacuous and is now doing real work. Until this run both"
-            f" sides were `{{}}` and it compared nothing — this line is what"
-            f" made that visible instead of letting an empty comparison read as"
-            f" coverage.\n\n"
-            f"CORRECT RESPONSE: delete this assertion (and the comment above"
-            f" it) as part of the increment that landed the tables. Nothing"
-            f" else. Do NOT relax the `sig == expected` comparison above it,"
-            f" and do NOT bound it to a complete lineage — under #806 Fork 1"
-            f" ruling (a) the stream creates every table before enabling RLS on"
-            f" any of them, so tenant-keyed tables with no policy are CORRECT"
-            f" here and the comparison already accounts for that on both sides."
-        )
+        #
+        # XFAIL RATHER THAN A PLAIN ASSERT, and the reason is the SUMMARY LINE,
+        # not the traceback. To a human reading a failure the two are identical
+        # — the message below prints either way. To anything reading counts they
+        # are not: a by-design `FAILED` is indistinguishable from a regression
+        # at count level, and this estate's own documented regression procedure
+        # is a count-line diff (`N failed, M passed`). One expected failure
+        # sitting in that number corrupts the comparison for everyone using it.
+        # `XFAIL` is reported in its own column by every tool that reads pytest.
+        #
+        # Called IMPERATIVELY rather than as `@pytest.mark.xfail`, for two
+        # reasons the decorator cannot satisfy: its condition is evaluated at
+        # COLLECTION time and cannot see `expected`, which only exists after the
+        # replay has run; and applied unconditionally it would turn today's
+        # genuinely-passing run into `XPASS` — reporting a problem where there
+        # is none, which is the same misinformation in the other direction.
+        if expected:
+            pytest.xfail(
+                f"EXPECTED FAILURE — you have not broken anything. This check"
+                f" exists to fire exactly once, here, and this is that moment."
+                f"\n\n"
+                f"The target lineage now carries {len(expected)} tables"
+                f" ({sorted(expected)}), so the prefix comparison above has stopped"
+                f" being vacuous and is now doing real work. Until this run both"
+                f" sides were `{{}}` and it compared nothing — this line is what"
+                f" made that visible instead of letting an empty comparison read as"
+                f" coverage.\n\n"
+                f"CORRECT RESPONSE: delete this xfail block (and the comment"
+                f" above it) as part of the increment that landed the tables. Nothing"
+                f" else. Do NOT relax the `sig == expected` comparison above it,"
+                f" and do NOT bound it to a complete lineage — under #806 Fork 1"
+                f" ruling (a) the stream creates every table before enabling RLS on"
+                f" any of them, so tenant-keyed tables with no policy are CORRECT"
+                f" here and the comparison already accounts for that on both sides."
+            )
 
         execute(
             bootstrapped_db,
