@@ -61,7 +61,16 @@ class TestTheGateCanFail:
         assert tenancy_violations(_sig(users=(False, False, 0))) == []
 
 
-class TestAgainstTheRealReplay:
+class TestAgainstTheLegacyReplay:
+    """THE LEGACY LINEAGE ONLY — named, because it used to read as "the real
+    replay" and there are two (#806).
+
+    Every replay below is bounded to `LEGACY_LINEAGE_MAX`, which stops BELOW
+    the 051 move. F.2's files are numbered ABOVE it, so nothing this class
+    examines can ever contain one. The target-lineage half is
+    `test_lineage_lane.py::test_the_tenancy_gate_runs_against_this_replay_and_can_see_into_it`.
+    """
+
     @pytest.mark.integration
     def test_replayed_corpus_has_no_tenancy_violations(self, scratch_db):
         from tests.scripts.test_migration_gate import (
@@ -79,12 +88,24 @@ class TestAgainstTheRealReplay:
 
     @pytest.mark.integration
     def test_states_its_own_coverage_rather_than_passing_silently(self, scratch_db):
-        """NON-VACUITY DISCLOSURE. Until F.2.2 lands the first workspace-keyed
-        table, the corpus check above has nothing to examine and passes on an
-        empty set. That is a true result and useless coverage, so the count is
-        asserted rather than left implicit: when it reaches zero-plus-one this
-        test is updated deliberately, and until then nobody can mistake the
-        green above for enforcement.
+        """NON-VACUITY DISCLOSURE, and a CORRECTION to the one it replaces
+        (#806).
+
+        This used to say the count would move "when F.2.2 lands the first
+        workspace-keyed table." It would not. F.2's tables are numbered above
+        the move and this replay stops below it, so every table F.2 ever lands
+        leaves this green — measured in an exported tree, where a tenant-keyed
+        RLS-less `053` left this whole class passing.
+
+        A disclosure that names a trip condition it cannot reach is worse than
+        none: it is read as coverage. What is actually disclosed is that the
+        LEGACY corpus carries no workspace-keyed table, and the condition that
+        moves this number is a LEGACY one gaining a tenant key — which would
+        mean the pre-move schema had grown a tenancy obligation nothing else
+        checks.
+
+        The F.2 tripwire lives where the F.2 replay is; see the class
+        docstring for the pointer.
         """
         from tests.scripts.test_migration_gate import (
             LEGACY_LINEAGE_MAX,

@@ -101,6 +101,19 @@ def tenancy_signature(dsn: str) -> dict:
     return sig
 
 
+def tenant_keyed_tables(sig: dict) -> set[str]:
+    """The tables this gate demands tenancy of — one definition, because the
+    callers that DISCLOSE coverage must scope it the same way the gate scopes
+    enforcement. Held apart from `tenancy_violations` so a disclosure can ask
+    "is there anything here to check yet" without re-deriving the answer and
+    drifting from it: a private copy that forgot `TENANT_KEY_EXEMPT` would go
+    red naming a table the gate is deliberately silent about.
+    """
+    return {
+        t for t, e in sig.items() if e["tenant_keyed"] and t not in TENANT_KEY_EXEMPT
+    }
+
+
 def tenancy_violations(sig: dict) -> list[str]:
     """Tables that are tenant-keyed but not born tenant-scoped.
 
@@ -113,9 +126,7 @@ def tenancy_violations(sig: dict) -> list[str]:
       way that looks like a bug elsewhere.
     """
     out: list[str] = []
-    keyed = {
-        t for t, e in sig.items() if e["tenant_keyed"] and t not in TENANT_KEY_EXEMPT
-    }
+    keyed = tenant_keyed_tables(sig)
 
     # THIRD INVARIANT — owner-bypass posture (rajan, #750 review). Policies do
     # not apply to a table's OWNER unless FORCE is set, so ENABLE + policies +
