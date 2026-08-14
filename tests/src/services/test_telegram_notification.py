@@ -1139,3 +1139,113 @@ class TestIsGoogleAuthError:
             "RefreshError", (Exception,), {"__module__": "some.other.module"}
         )
         assert _is_google_auth_error(FakeRefreshError("nope")) is False
+
+
+@pytest.mark.unit
+class TestTenantCredentialResolutionFailsClosed:
+    """A failure to RESOLVE a tenant's credentials surfaces as that tenant's error.
+
+    Distinct from the ``download_file`` tests above, which inject after
+    resolution already succeeded and a provider object exists. These inject at
+    ``get_provider_for_media_item`` — the tenant-credential path itself, and the
+    call whose broad ``except`` was removed so a named tenant can no longer fall
+    through to the deployment-wide service account.
+
+    The two are not interchangeable. Both raise sites inside
+    ``get_provider_for_chat`` (no stored credentials; no configured root folder)
+    fire *before* any provider is returned, so a test that can only inject on the
+    provider cannot reach either of them. Moving the resolution call out of the
+    guarded block is a refactor the ``download_file`` tests stay green through.
+    """
+
+    TENANT = -100777
+
+    def _queue_and_media(self, mock_telegram_service):
+        """Wire the repos so send_notification reaches credential resolution."""
+        queue_item = Mock(media_item_id=uuid4(), telegram_message_id=None)
+        media_item = Mock(
+            file_name="test.jpg",
+            title="Test",
+            caption=None,
+            generated_caption=None,
+            link_url=None,
+            tags=[],
+            source_identifier="test.jpg",
+        )
+        mock_telegram_service.queue_repo.get_by_id.return_value = queue_item
+        mock_telegram_service.media_repo.get_by_id.return_value = media_item
+        # Bind the tenant explicitly: the assertions below are about WHICH
+        # tenant the failure is attributed to, not merely that one failed.
+        tenant_settings = Mock(
+            telegram_chat_id=self.TENANT,
+            enable_instagram_api=False,
+            show_verbose_notifications=True,
+        )
+        mock_telegram_service.settings_service.get_settings_by_id.return_value = (
+            tenant_settings
+        )
+        mock_telegram_service.settings_service.get_settings.return_value = (
+            tenant_settings
+        )
+        mock_telegram_service._is_verbose.return_value = True
+        mock_telegram_service.ig_account_service.get_active_account.return_value = None
+
+    @pytest.mark.asyncio
+    async def test_a_resolution_auth_failure_is_raised_not_returned_as_false(
+        self, notification_service, mock_telegram_service
+    ):
+        """The tenant's own auth error propagates; it does not become ``False``.
+
+        ``False`` is the generic send failure. Narrowing an auth error into it
+        loses the one fact that distinguishes "this tenant must reconnect Drive"
+        from "Telegram was briefly unhappy", and it is the shape #627 shipped.
+        """
+        self._queue_and_media(mock_telegram_service)
+
+        with patch(
+            "src.services.media_sources.factory.MediaSourceFactory"
+        ) as mock_factory:
+            mock_factory.get_provider_for_media_item.side_effect = GoogleDriveAuthError(
+                "No Google Drive OAuth credentials found for this chat."
+            )
+
+            with pytest.raises(GoogleDriveAuthError, match="No Google Drive OAuth"):
+                await notification_service.send_notification("some-id")
+
+        # Anti-vacuity: a fail-closed assertion is worthless if the path was
+        # never walked. Prove resolution was actually attempted, and for THIS
+        # tenant — otherwise this test passes just as well against code that
+        # returns before ever reaching the credential lookup.
+        mock_factory.get_provider_for_media_item.assert_called_once()
+        assert (
+            mock_factory.get_provider_for_media_item.call_args.kwargs[
+                "telegram_chat_id"
+            ]
+            == self.TENANT
+        )
+        # And it failed AT resolution rather than somewhere downstream.
+        mock_telegram_service.bot.send_photo.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_non_auth_resolution_failure_still_returns_false(
+        self, notification_service, mock_telegram_service
+    ):
+        """Control: the guard is specific to auth, not "everything propagates".
+
+        Without this, the test above passes against a caller that has no
+        exception handling at all — every failure would escape and the auth
+        assertion would be measuring nothing about auth.
+        """
+        self._queue_and_media(mock_telegram_service)
+
+        with patch(
+            "src.services.media_sources.factory.MediaSourceFactory"
+        ) as mock_factory:
+            mock_factory.get_provider_for_media_item.side_effect = ValueError(
+                "malformed source config"
+            )
+
+            result = await notification_service.send_notification("some-id")
+
+        assert result is False
+        mock_factory.get_provider_for_media_item.assert_called_once()
