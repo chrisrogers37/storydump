@@ -17,9 +17,18 @@ is paired with a proof that it CAN fail.
 
 import pytest
 
+from scripts.advertised_ddl import (
+    DEFAULT_DOCS,
+    DEFAULT_MANIFEST,
+    build_stream,
+    load_manifest,
+    normalize_statements,
+)
 from scripts.tenancy_gate import (
+    expected_tenancy,
     tenancy_signature,
     tenancy_violations,
+    tenant_keyed_tables,
     TENANT_KEY,
 )
 
@@ -283,3 +292,127 @@ class TestPostureFiresOnRealPostgres:
         assert any("posture_probe" in x and "posture deviates" in x for x in v), v
 
         self._exec(scratch_db, "DROP TABLE posture_probe")
+
+
+class TestExpectedTenancyDerivation:
+    """`expected_tenancy` — the static half of the prefix-aware lane check.
+
+    The lane test compares a live catalog against this derivation, so a
+    derivation that quietly returned `{}` would make that comparison pass on
+    everything. These are the positive controls that stop it.
+    """
+
+    @staticmethod
+    def _stream():
+        return normalize_statements(
+            build_stream(DEFAULT_DOCS, load_manifest(DEFAULT_MANIFEST))
+        )
+
+    def test_the_full_stream_derives_the_counts_a_live_replay_measured(self):
+        """CALIBRATION, and the reason this is not circular reasoning.
+
+        `test_advertised_ddl_replay` executes the whole stream into a real
+        database and observes 26 tables, 19 of them tenant-keyed. This parses
+        the same stream as TEXT and must land on the same two numbers. Agreement
+        between a catalog read and a text parse is what licenses using the parse
+        as an expectation elsewhere; without it the derivation would only ever
+        be self-consistent.
+        """
+        sig = expected_tenancy(self._stream())
+        assert len(sig) == 26
+        assert len(tenant_keyed_tables(sig)) == 19
+
+    def test_the_completed_stream_satisfies_the_invariant_it_will_be_judged_by(self):
+        """At the end of the stream — and only there — the plan's own tenancy
+        invariant holds. If this ever fails, the PLAN is wrong, not a migration.
+        """
+        assert tenancy_violations(expected_tenancy(self._stream())) == []
+
+    def test_the_f2_2_boundary_implies_tables_without_rls_or_policies(self):
+        """The F.2.2 segment ends at stream index 22: seven tables land, four of
+        them tenant-keyed, and NOT ONE of them has RLS or a policy yet. This is
+        the state the old `tenant_keyed_tables(sig) == []` assertion could not
+        express without going red.
+        """
+        sig = expected_tenancy(self._stream()[:22])
+        assert len(sig) == 7
+        assert len(tenant_keyed_tables(sig)) == 4
+        assert all(not e["rls_enabled"] for e in sig.values())
+        assert all(e["policies"] == 0 for e in sig.values())
+
+    def test_the_mid_stream_window_is_represented_rather_than_assumed_away(self):
+        """THE LOAD-BEARING ONE. The derivation must faithfully describe a state
+        the tenancy invariant REJECTS — otherwise it would be smuggling the
+        invariant into the expectation, and the lane comparison could never
+        catch a migration that skipped a policy.
+
+        Measured at the F.2.6 boundary: tenant-keyed tables exist, none has a
+        policy, and `tenancy_violations` over the derived state is non-empty.
+        The lane test asserts EQUALITY with this, never that it is clean.
+        """
+        sig = expected_tenancy(self._stream()[:126])
+        assert tenant_keyed_tables(sig), "no tenant-keyed tables to be wrong about"
+        violations = tenancy_violations(sig)
+        assert violations, (
+            "the derived mid-stream state satisfies the tenancy invariant, which"
+            " means the derivation is asserting the invariant instead of"
+            " describing the prefix"
+        )
+
+    def test_it_emits_the_same_keys_tenancy_signature_does(self):
+        """The two producers are compared with `==`, so a shape drift on either
+        side would make every lane run red for a reason unrelated to tenancy.
+        """
+        entry = next(iter(expected_tenancy(self._stream()).values()))
+        assert set(entry) == {"tenant_keyed", "rls_enabled", "rls_forced", "policies"}
+
+    def test_an_empty_prefix_derives_nothing(self):
+        assert expected_tenancy([]) == {}
+
+    def test_the_tenant_key_column_is_what_marks_a_table(self):
+        keyed = expected_tenancy([f"CREATE TABLE t ( id UUID, {TENANT_KEY} UUID )"])
+        plain = expected_tenancy(["CREATE TABLE t ( id UUID, name TEXT )"])
+        assert keyed["t"]["tenant_keyed"] is True
+        assert plain["t"]["tenant_keyed"] is False
+
+    def test_the_tenant_root_is_keyed_without_carrying_the_column(self):
+        """`workspaces` IS the tenant — it keys on `id`. The catalog side has
+        the same special case, so the derivation must too or the two disagree on
+        the single most important table in the schema.
+        """
+        sig = expected_tenancy(["CREATE TABLE workspaces ( id UUID, name TEXT )"])
+        assert sig["workspaces"]["tenant_keyed"] is True
+
+    def test_rls_and_policies_accumulate_onto_the_table(self):
+        sig = expected_tenancy(
+            [
+                f"CREATE TABLE t ( id UUID, {TENANT_KEY} UUID )",
+                "ALTER TABLE t ENABLE ROW LEVEL SECURITY",
+                "CREATE POLICY p_one ON t FOR ALL TO svc_ingress USING (true)",
+                "CREATE POLICY p_two ON t FOR SELECT TO svc_ingress USING (true)",
+            ]
+        )
+        assert sig["t"]["rls_enabled"] is True
+        assert sig["t"]["policies"] == 2
+        assert tenancy_violations(sig) == []
+
+    def test_statements_about_a_table_the_prefix_has_not_created_are_ignored(self):
+        """A prefix can legitimately mention nothing about a later table. What it
+        must never do is invent one — a phantom entry would diverge from the
+        catalog and redden the lane for a table that does not exist yet.
+        """
+        assert (
+            expected_tenancy(["CREATE POLICY p ON not_yet FOR ALL USING (true)"]) == {}
+        )
+
+    def test_a_teardown_statement_fails_loudly_rather_than_deriving_a_wrong_state(self):
+        """The derivation is forward-only. A teardown would make it overstate
+        what is present — the quiet direction — so it refuses instead.
+        """
+        with pytest.raises(AssertionError, match="forward-only"):
+            expected_tenancy(
+                [
+                    f"CREATE TABLE t ( id UUID, {TENANT_KEY} UUID )",
+                    "DROP POLICY p_one ON t",
+                ]
+            )

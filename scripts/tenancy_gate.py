@@ -101,6 +101,91 @@ def tenancy_signature(dsn: str) -> dict:
     return sig
 
 
+def expected_tenancy(statements) -> dict:
+    """The tenancy state a PREFIX of the advertised stream implies, in the same
+    dict shape `tenancy_signature` reads off a live catalog.
+
+    The two producers sit together deliberately: one derives from plan TEXT,
+    the other observes a live CATALOG, and the whole value of comparing them is
+    that they are different objects. A test that built both from the same source
+    would be a tautology; this pair can disagree, and the disagreement is the
+    finding — a statement the plan declares that the migration did not actually
+    install shows up as a diff on one table rather than as a silent pass.
+
+    WHY A PREFIX AND NOT A COMPLETE LINEAGE. Under #806 Fork 1 ruling (a) every
+    F.2 increment is a contiguous segment of the stream, so the target lineage
+    is always a positional prefix of it (that is what `f2_prefix_report` gates).
+    The stream creates all 23 of `02`'s tables before the first ENABLE ROW LEVEL
+    SECURITY, so "no tenant-keyed tables have landed yet" stops being true at
+    F.2.2 and stays false until F.2.7 — a five-increment window in which a check
+    written that way must either go red on schedule or be switched off. "The
+    tenancy state matches what a prefix of this length implies" is true at EVERY
+    increment instead, including the empty one, and it tightens by itself: at
+    F.2.7 the implied state grows 23 RLS-enabled tables and 53 policies with no
+    edit here. That is the alternative to bounding the check to a complete
+    lineage, which buys green by going quiet for exactly the stretch the gate
+    exists to cover.
+
+    Note this is deliberately NOT `tenancy_violations` over a prefix. The
+    invariant "every tenant-keyed table carries a policy" is FALSE mid-stream by
+    the plan's own order, so asserting it early would be asserting the plan is
+    wrong. What holds mid-stream is equality with the plan's own implication.
+
+    Calibrated, not assumed: over the full 257-statement stream this derives 26
+    tables and 19 tenant-keyed — the same counts a live replay of that stream
+    observed (`test_advertised_ddl_replay`), with the other 7 carrying no
+    workspace key by design (`02` §7-DDL Class 3/4).
+
+    Takes normalized statements (`advertised_ddl.normalize_statements`) rather
+    than raw SQL, so the caller owns the parse and this stays a pure function of
+    a statement list. Dependency runs one way only — `advertised_ddl` declares
+    itself stdlib-only, so the derivation lives here where the tenancy
+    vocabulary and the signature shape already are, and that module never
+    imports psycopg2 through the back door.
+    """
+    import re
+
+    sig: dict[str, dict] = {}
+    for stmt in statements:
+        # Forward-only by construction: the stream builds, it never tears down.
+        # A teardown would make everything below wrong in the quiet direction
+        # (state derived as present that the replay has since dropped), so it
+        # fails loudly rather than deriving an expectation that is not true.
+        if re.match(r"DROP POLICY\b|ALTER TABLE .* DISABLE ROW LEVEL SECURITY", stmt):
+            raise AssertionError(
+                f"tenancy teardown in the advertised stream, which this "
+                f"forward-only derivation cannot represent: {stmt[:120]}"
+            )
+
+        m = re.match(r"CREATE TABLE (?:IF NOT EXISTS )?(?:public\.)?(\w+) \((.*)", stmt)
+        if m:
+            name, body = m.group(1), m.group(2)
+            sig[name] = {
+                "tenant_keyed": bool(re.search(rf"\b{TENANT_KEY}\b", body))
+                or name == TENANT_ROOT,
+                "rls_enabled": False,
+                "rls_forced": False,
+                "policies": 0,
+            }
+            continue
+
+        m = re.match(r"ALTER TABLE (?:public\.)?(\w+) ENABLE ROW LEVEL SECURITY", stmt)
+        if m and m.group(1) in sig:
+            sig[m.group(1)]["rls_enabled"] = True
+            continue
+
+        m = re.match(r"ALTER TABLE (?:public\.)?(\w+) FORCE ROW LEVEL SECURITY", stmt)
+        if m and m.group(1) in sig:
+            sig[m.group(1)]["rls_forced"] = True
+            continue
+
+        m = re.match(r"CREATE POLICY \S+ ON (?:public\.)?(\w+)", stmt)
+        if m and m.group(1) in sig:
+            sig[m.group(1)]["policies"] += 1
+
+    return sig
+
+
 def tenant_keyed_tables(sig: dict) -> set[str]:
     """The tables this gate demands tenancy of — one definition, because the
     callers that DISCLOSE coverage must scope it the same way the gate scopes
