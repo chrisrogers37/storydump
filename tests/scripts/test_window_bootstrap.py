@@ -22,10 +22,13 @@ import psycopg2
 import pytest
 
 from tests.scripts.conftest import (
-    BOOTSTRAP_SQL,
     LOGIN_ROLES,
     NOLOGIN_ROLES,
     SERVICE_ROLES,
+    BOOTSTRAP_SQL,
+    SUITE_CLUSTER_LOCK_KEY,
+    bootstrap_via_psql,
+    drop_service_roles,
     psql_apply,
     run_bootstrap,
 )
@@ -69,14 +72,14 @@ class TestRoleProvisioning:
         assert [present[r] for r in LOGIN_ROLES] == [True, True, True]
         assert [present[r] for r in NOLOGIN_ROLES] == [False, False, False, False]
 
-    def test_is_idempotent_across_reruns(self, bootstrapped_db):
+    def test_is_idempotent_across_reruns(self, admin_conn, bootstrapped_db):
         """The artifact is the one place guarded DDL is legal (`02` §0: it is
         not the byte-parity stream). A re-run is the M.3 retry path, and it must
         pass through pre-existing roles untouched rather than erroring."""
         before = _roles(bootstrapped_db)
 
-        run_bootstrap(bootstrapped_db)
-        run_bootstrap(bootstrapped_db)
+        run_bootstrap(admin_conn, bootstrapped_db)
+        run_bootstrap(admin_conn, bootstrapped_db)
 
         assert _roles(bootstrapped_db) == before
 
@@ -93,13 +96,15 @@ class TestRoleProvisioning:
             f"svc_migration missing door-owner memberships: {set(NOLOGIN_ROLES) - held}"
         )
 
-    def test_applies_through_psql_the_way_the_window_will_run_it(self, roleless_db):
+    def test_applies_through_psql_the_way_the_window_will_run_it(
+        self, admin_conn, roleless_db
+    ):
         """The other tests execute the file through psycopg2 to read RAISE
         messages. This one proves the same bytes apply through `psql
         -v ON_ERROR_STOP=1`, which is how a runbook step actually invokes it."""
         dsn, _ = roleless_db
 
-        psql_apply(dsn, [BOOTSTRAP_SQL])
+        bootstrap_via_psql(admin_conn, dsn)
 
         assert set(_roles(dsn)) == set(SERVICE_ROLES)
 
@@ -132,14 +137,16 @@ class TestPublicOwnerPrecondition:
         conn.close()
 
         with pytest.raises(psycopg2.errors.RaiseException) as caught:
-            run_bootstrap(dsn)
+            run_bootstrap(admin_conn, dsn)
 
         assert "probe_odd_owner" in str(caught.value)
         assert "not the pg_database_owner" in str(caught.value)
 
 
 class TestTheReasonThisPrLandsFirst:
-    def test_a_policy_naming_a_service_role_needs_the_bootstrap(self, roleless_db):
+    def test_a_policy_naming_a_service_role_needs_the_bootstrap(
+        self, admin_conn, roleless_db
+    ):
         """Two-sided, in one test, because either half alone proves nothing.
 
         The negative half is what makes this non-inert: without it, a test that
@@ -166,7 +173,7 @@ class TestTheReasonThisPrLandsFirst:
             assert 'role "svc_ingress" does not exist' in str(caught.value)
         conn.close()
 
-        run_bootstrap(dsn)
+        run_bootstrap(admin_conn, dsn)
 
         conn = psycopg2.connect(dsn)
         conn.autocommit = True
@@ -178,3 +185,88 @@ class TestTheReasonThisPrLandsFirst:
             )
             assert cur.fetchone()[0] == 1
         conn.close()
+
+
+class TestTheClusterMutexIsVerifiedNotDeclared:
+    """#808 — the CREATE side took a bare DSN, so it was covered by CALL PATH.
+
+    Coverage held: every DSN in the suite came from `_create_db(admin_conn, ...)`,
+    so every caller was already inside the mutex. A property held by call path
+    holds until someone adds a caller, and nothing goes red when they do.
+
+    Putting the connection in the signature only makes the dependency DECLARED.
+    These assert it is CHECKED, which is the difference between a marker
+    argument a later author can delete in silence and a door that refuses.
+    """
+
+    @pytest.mark.parametrize(
+        "door", [run_bootstrap, bootstrap_via_psql], ids=lambda f: f.__name__
+    )
+    def test_a_non_holding_connection_is_refused_at_the_create_doors(
+        self, outsider_conn, roleless_db, door
+    ):
+        """The failure #808 describes, reproduced: reach the cluster-scoped
+        roles with a connection that is outside the mutex.
+
+        Bound to the SPECIFIC failure, not to any failure. A bare `RuntimeError`
+        is equally raised by a typo, a closed connection or a bad DSN — and
+        `outsider_conn` is deliberately none of those — so the message must name
+        both the door and the key before this counts as the lock refusing.
+        """
+        dsn, _ = roleless_db
+
+        with pytest.raises(RuntimeError) as caught:
+            door(outsider_conn, dsn)
+
+        assert door.__name__ in str(caught.value)
+        assert str(SUITE_CLUSTER_LOCK_KEY) in str(caught.value)
+        present = _roles(dsn)
+        assert present == {}, (
+            f"{door.__name__} raised but still reached the cluster: {sorted(present)}"
+        )
+
+    def test_a_non_holding_connection_is_refused_at_the_drop_door(
+        self, outsider_conn, bootstrapped_db
+    ):
+        """The DROP side, on a database where the roles EXIST.
+
+        Deliberately not folded into the parametrize above: against
+        `roleless_db` the seven roles are already absent, so "they are still
+        absent afterwards" is true whatever the guard does — a vacuous
+        assertion, and this is a PR about vacuous assertions. Starting from
+        `bootstrapped_db` makes survival an observation.
+        """
+        before = _roles(bootstrapped_db)
+        assert set(before) == set(SERVICE_ROLES), "positive control: roles present"
+
+        with pytest.raises(RuntimeError) as caught:
+            drop_service_roles(outsider_conn)
+
+        assert "_drop_roles_hardened" in str(caught.value)
+        assert str(SUITE_CLUSTER_LOCK_KEY) in str(caught.value)
+        assert _roles(bootstrapped_db) == before, "the refusal did not hold"
+
+    def test_psql_apply_turns_the_cluster_scoped_artifact_away(self, roleless_db):
+        """The third transport. `psql_apply` holds a DSN, not a connection, so
+        it cannot check the mutex — it refuses the artifact by name instead,
+        which is what stops a future caller reopening the hole through it."""
+        dsn, _ = roleless_db
+
+        with pytest.raises(RuntimeError, match="bootstrap_via_psql"):
+            psql_apply(dsn, [BOOTSTRAP_SQL])
+
+        assert _roles(dsn) == {}
+
+    def test_the_holding_connection_is_admitted(self, admin_conn, roleless_db):
+        """The positive control, and it is not optional.
+
+        Without it, every assertion above is equally satisfied by a guard that
+        refuses EVERYTHING — including one that fires on `admin_conn` and takes
+        the whole suite down. This is what says the discriminator is the lock
+        rather than the parameter's existence.
+        """
+        dsn, _ = roleless_db
+
+        run_bootstrap(admin_conn, dsn)
+
+        assert set(_roles(dsn)) == set(SERVICE_ROLES)
