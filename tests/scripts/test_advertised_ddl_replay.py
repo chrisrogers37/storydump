@@ -23,6 +23,11 @@ from scripts.advertised_ddl import (
     build_stream,
     load_manifest,
 )
+from scripts.tenancy_gate import (
+    tenancy_signature,
+    tenancy_violations,
+    tenant_keyed_tables,
+)
 from tests.scripts.conftest import fetch_one, window_actor
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
@@ -123,6 +128,43 @@ class TestTheStreamReplays:
         )
         assert row is not None, "the stream did not create post_intents"
         assert row[0] == "svc_migration"
+
+    def test_the_completed_target_schema_has_no_tenancy_violations(
+        self, owner_window_db, owner_actor, admin_conn
+    ):
+        """#806's tenancy wiring, at the ONE place it is non-vacuous today.
+
+        Fork 1's ruling required aiming `tenancy_gate` at the target lineage,
+        and `test_lineage_lane.py` does that — at the migration FILES, which
+        carry no table yet and will not carry all 26 until F.2.9. This replay
+        carries the whole target schema NOW, so the invariant is checked at
+        full strength immediately instead of accruing increment by increment.
+
+        IT ALSO CHECKS A DIFFERENT CLAIM FROM ARM (b), which is why both exist
+        rather than one being redundant. Arm (b) says the migrations reproduce
+        the plan. This says THE PLAN IS CORRECT: a tenant-keyed table whose
+        policy `02` simply forgot would leave arm (b) green — the migrations
+        would faithfully reproduce the omission — and redden this.
+
+        The count assertion is a POSITIVE CONTROL, not a fact about the
+        schema. `tenancy_violations` returns `[]` just as readily for a schema
+        it never saw, so without a floor on what was examined this would pass
+        against an empty database. The floor is deliberately loose: the exact
+        number is the plan's to change, and pinning it here would make a
+        legitimate `02` edit fail in a file that is not about counting tables.
+        """
+        _replay_as_window_actor(owner_window_db, owner_actor, admin_conn)
+
+        sig = tenancy_signature(owner_window_db)
+        keyed = sorted(tenant_keyed_tables(sig))
+        assert len(keyed) >= 15, (
+            f"positive control: the replayed target schema carries only"
+            f" {len(keyed)} tenant-keyed tables ({keyed}). Too few to be the"
+            f" advertised stream's output — the assertion below would then be"
+            f" passing by having nothing to examine"
+        )
+
+        assert tenancy_violations(sig) == []
 
 
 class TestTheFourBehavioralAssertions:

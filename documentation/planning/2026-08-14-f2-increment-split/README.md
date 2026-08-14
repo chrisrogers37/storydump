@@ -133,13 +133,40 @@ sampled:
 **Not one of them replays the target lineage.** Every F.2 file is numbered above the move, so
 the only arm that replays anything real is bounded to a lineage that can never contain one.
 
+**And an enumeration of callers is the wrong shape to stop at**, which is worth stating because
+it nearly hid the better half of the fix: `test_advertised_ddl_replay.py` replays the *entire*
+advertised stream into a live database — all 26 tables, RLS enabled, policies attached — and was
+simply never a caller. A reader auditing the caller list would pass straight over a populated
+target schema sitting one file away. The list answers "where is the gate pointed"; the question
+that mattered was "what replayed schemas exist that nobody pointed it at".
+
 Measured in an exported tree: a tenant-keyed table with RLS off, landed as `053`, left the
 whole tenancy suite **green (2 passed)** while the lane's own replay observed it in `public`.
 
-The wiring lands in `test_lineage_lane.py` alongside this document. It carries an in-test probe
-because the replayed `public` holds no tables today, so the check alone would pass on an empty
-set — and would pass just as green if it were pointed at the wrong database, which is the same
-failure one level down.
+The wiring lands in **two** places, because the obligation has two halves and only one of them
+was in the ruling's line of sight.
+
+**The file-lineage half** — `test_lineage_lane.py`, which aims the gate at the migration files
+as the ruling asked. It carries an in-test probe because the replayed `public` holds no tables
+today, so the check alone would pass on an empty set — and would pass just as green pointed at
+the wrong database, which is the same failure one level down.
+
+**The completed-schema half** — `test_advertised_ddl_replay.py`, which already replayed the
+*full* advertised stream into a live database under the declared actors and simply never ran the
+gate on the result. Two lines fix that, and the difference is large: **the lineage half is
+vacuous until F.2.2 and does not reach full strength until F.2.9, while this one is at full
+strength now.** Measured: 19 tenant-keyed tables of the 26, zero violations. The other 7 carry
+no workspace key by design (`02` §7-DDL Class 3/4).
+
+**Three checks, three distinct claims, which is why none of them is redundant.** Arm (b) says
+the migrations reproduce the plan. The lineage half says what the migrations landed is
+tenant-scoped. The completed-schema half says **the plan itself is correct** — a tenant-keyed
+table whose policy `02` forgot would leave arm (b) green, since the migrations would faithfully
+reproduce the omission, and would redden only this one.
+
+Its count assertion is a positive control rather than a fact about the schema: `tenancy_violations`
+returns `[]` just as readily for a database it never saw. The floor is deliberately loose (15,
+against an observed 19) because the exact number is the plan's to change.
 
 ## 7. Bounds
 
@@ -160,6 +187,14 @@ failure one level down.
   F.2.7 a named milestone.
 - **Not re-derived here:** rajan's currency finding on the filed split, and mason's original
   object counts. Both stand.
+- **`tenancy_gate` has no operator door, and that half is still open.** `schema_parity` has one
+  — `runner parity --against <dsn>` — while `tenancy_gate` is a predicate library with no entry
+  point, despite a docstring claiming it "must be runnable in the same predeploy context." So at
+  M.3 step 3d, when the F.2 files first run against production, nobody can ask "did all 26 tables
+  land born tenant-scoped" without hand-writing Python. A sibling `runner tenancy` subcommand is
+  the shape. This is a pre-existing gap from #746 rather than one the reshape introduces, and it
+  is named here because this document is what claims the detector is now aimed properly: it is
+  aimed in **CI**, at both the file lineage and the completed schema, and not yet at production.
 - **Option B is not foreclosed.** It remains the best end-state — the only option that makes
   born-RLS-enabled machine-checked through adjacency — and (a) forecloses nothing. Its price is
   still unmeasured: nobody has executed the reorder, so the position-independence of the

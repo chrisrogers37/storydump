@@ -43,7 +43,11 @@ from scripts.migration_runner import (
     schema_move_migration,
 )
 from scripts.schema_parity import schema_diff, schema_signature
-from scripts.tenancy_gate import tenancy_signature, tenancy_violations
+from scripts.tenancy_gate import (
+    tenancy_signature,
+    tenancy_violations,
+    tenant_keyed_tables,
+)
 from src.utils.validators import MIGRATIONS_DIR
 from tests.scripts.conftest import (
     as_user,
@@ -350,15 +354,55 @@ class TestTheLaneReplaysAcrossTheBoundary:
         It is born the way `02` §7 prints a table, `TO svc_ingress` — a role
         that does not exist without the bootstrap — so the probe also shows
         this replay can carry the policy shape F.2.2 will need.
+
+        THE NON-VACUITY DISCLOSURE RIDES ALONG rather than living in its own
+        test, unlike lane parity's, and the reason is that here the two move
+        TOGETHER. At F.2.2 the disclosure trips and the violation check goes
+        red in the same run, because the ratified stream creates all 23 of
+        `02`'s tables before enabling RLS on any of them — so there is no edit
+        one needs and the other does not. Separating them would buy a second
+        full-corpus replay for an assertion read off a dict already in hand.
         """
         run_lane(bootstrapped_db)
+        sig = tenancy_signature(bootstrapped_db)
 
-        assert tenancy_violations(tenancy_signature(bootstrapped_db)) == []
+        # NON-VACUITY DISCLOSURE, asserted BEFORE the gate below so that when
+        # both go red — which is what F.2.2 does — the message that prints is
+        # the one carrying the decision rather than a bare list of violations.
+        #
+        # Unlike `test_tenancy_gate.py`'s disclosure, which named a trip
+        # condition it could not reach, this one's is reachable: F.2's tables
+        # land in the lineage this replays.
+        #
+        # WHAT IT WILL COST, MEASURED, SO IT IS NOT REDISCOVERED AS A SURPRISE.
+        # Under Fork 1 ruling (a) the increments are contiguous stream
+        # segments, and the stream creates `02`'s 23 tables (indices 2..92)
+        # BEFORE the first ENABLE ROW LEVEL SECURITY (126) or policy (149). So
+        # from F.2.2 to F.2.7 this test is red BY THE PLAN'S OWN ORDER, not by
+        # a defect — ruling (a)'s stated cost arriving on schedule.
+        #
+        # The decision then is between a prefix-aware check (compare against
+        # the tenancy state the stream's own prefix of the same length
+        # implies) and one bounded to a complete lineage. It is NOT to delete
+        # the check: the window it would go quiet for is exactly the 26-table
+        # stretch it exists to cover. Note also that the full target schema IS
+        # checked at full strength today, by
+        # `test_advertised_ddl_replay.py::test_the_completed_target_schema_has_no_tenancy_violations`
+        # — so this lane check is the file-lineage half, never the only half.
+        keyed = sorted(tenant_keyed_tables(sig))
+        assert keyed == [], (
+            f"{len(keyed)} tenant-keyed tables are now in the target-lineage"
+            f" replay ({keyed}). The lane tenancy gate is load-bearing from"
+            f" here — read the comment above and choose between a prefix-aware"
+            f" check and one bounded to a complete lineage. Deleting it"
+            f" silences the gate for the exact stretch it covers."
+        )
+        assert tenancy_violations(sig) == []
 
         execute(
             bootstrapped_db,
             "CREATE TABLE lane_tenancy_probe ("
-            "  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),"
+            "  id UUID PRIMARY KEY,"
             "  workspace_id UUID NOT NULL);"
             "ALTER TABLE lane_tenancy_probe ENABLE ROW LEVEL SECURITY;"
             "CREATE POLICY p_lane_probe ON lane_tenancy_probe FOR ALL"
@@ -379,54 +423,6 @@ class TestTheLaneReplaysAcrossTheBoundary:
         assert any(
             "lane_tenancy_probe" in v and "no policy" in v for v in violations
         ), violations
-
-        execute(bootstrapped_db, "DROP TABLE lane_tenancy_probe")
-
-    def test_the_lane_tenancy_check_discloses_that_it_is_currently_empty(
-        self, bootstrapped_db
-    ):
-        """NON-VACUITY DISCLOSURE for the check above, and — unlike
-        `test_tenancy_gate.py`'s, which named a trip condition it could not
-        reach — this one's is reachable: F.2's tables land in the lineage this
-        replays.
-
-        Its own test, because the two need OPPOSITE edits when the first table
-        lands: the check above must go on passing, this must be rewritten. A
-        folded disclosure makes whoever lands that table disentangle which half
-        went red.
-
-        WHAT IT WILL COST, MEASURED, SO IT IS NOT REDISCOVERED AS A SURPRISE.
-        Under Fork 1 ruling (a) the increments are contiguous stream segments,
-        and the ratified stream creates all 23 of `02`'s tables (indices 2..92)
-        BEFORE it enables RLS on any of them (first at 126) or attaches any
-        policy (first at 149). So the moment the first table increment lands,
-        the absolute check above goes red — 23 tenant-keyed tables, RLS off —
-        and it will be red by the PLAN'S OWN ORDER, not by a defect.
-
-        That is ruling (a)'s stated cost arriving on schedule, and this
-        assertion is the mechanism that makes it arrive as a decision rather
-        than as a mysterious red. The decision is between making the check
-        prefix-aware (compare against the tenancy state the stream's own prefix
-        of the same length implies) and bounding it to a complete lineage. It
-        is NOT to delete the check: the window it would go quiet for is exactly
-        the 26-table stretch it exists to cover.
-
-        Worth knowing before choosing: `07`'s three auth-plane tables
-        (241..245) carry their own RLS (247..249) and policies (252..256) in
-        one contiguous run, so that increment keeps #746's original
-        table-with-its-policy property for free. Only `02`'s 23 are separated.
-        """
-        run_lane(bootstrapped_db)
-        sig = tenancy_signature(bootstrapped_db)
-
-        keyed = sorted(t for t, e in sig.items() if e["tenant_keyed"])
-        assert keyed == [], (
-            f"{len(keyed)} tenant-keyed tables are now in the target-lineage"
-            f" replay ({keyed}). The lane tenancy gate is load-bearing from"
-            f" here — read this test's docstring and choose between a"
-            f" prefix-aware check and one bounded to a complete lineage."
-            f" Deleting it silences the gate for the exact stretch it covers."
-        )
 
     def test_lane_parity_holds_and_discloses_that_it_is_currently_empty(
         self, bootstrapped_db, second_scratch_db
