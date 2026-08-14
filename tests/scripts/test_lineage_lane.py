@@ -49,7 +49,7 @@ from scripts.advertised_ddl import (
     build_stream,
     load_manifest,
     normalize_statements,
-    target_lineage_files,
+    target_lineage_statements,
 )
 from scripts.schema_parity import schema_diff, schema_signature
 from scripts.tenancy_gate import (
@@ -61,6 +61,8 @@ from scripts.tenancy_gate import (
 from src.utils.validators import MIGRATIONS_DIR
 from tests.scripts.conftest import (
     as_user,
+    F2_2_END,
+    F2_2_START,
     LEGACY_LINEAGE_MAX,
     SETUP_SQL,
     execute,
@@ -72,12 +74,33 @@ from tests.scripts.conftest import (
 )
 
 
-def run_lane(dsn):
+def run_lane(dsn, migrations_dir=MIGRATIONS_DIR):
     """The §0.2 lineage run: legacy setup applied by hand the way production's
     actually was, then ONE unbounded runner invocation across the boundary —
-    001–050, the move, and the F.2 target files as they land."""
+    001–050, the move, and the F.2 target files as they land.
+
+    `migrations_dir` is overridable for ONE caller: the positive control that
+    stages a future F.2 increment into a throwaway tree. It takes the parameter
+    rather than re-implementing these two lines so that the control replays the
+    same lane it certifies — a hand-rolled copy would keep passing after the
+    real lane gained a step, which is the failure mode a control exists to
+    rule out.
+    """
     psql_apply(dsn, [SETUP_SQL])
-    return apply_pending(dsn, MIGRATIONS_DIR)
+    return apply_pending(dsn, migrations_dir)
+
+
+def real_stream(normalized=True):
+    """The advertised stream from the committed docs + manifest.
+
+    One spelling, because the raw and normalized lists are NOT interchangeable
+    and the difference has already bitten: normalized statements are a
+    comparison key (whitespace collapsed, full-line comments dropped), while
+    `02` prints an inline `--` inside `CREATE TABLE onboarding_sessions` — so a
+    normalized statement executed as SQL comments out its own tail.
+    """
+    raw = build_stream(DEFAULT_DOCS, load_manifest(DEFAULT_MANIFEST))
+    return normalize_statements(raw) if normalized else raw
 
 
 def _relnames(dsn, schema, kinds=None):
@@ -409,14 +432,8 @@ class TestTheLaneReplaysAcrossTheBoundary:
         # The full target schema is separately checked at full strength today by
         # `test_advertised_ddl_replay.py::test_the_completed_target_schema_has_no_tenancy_violations`
         # — this lane check is the file-lineage half, never the only half.
-        f2 = [
-            s
-            for f in target_lineage_files(MIGRATIONS_DIR)
-            for s in normalize_statements(f.read_text())
-        ]
-        stream = normalize_statements(
-            build_stream(DEFAULT_DOCS, load_manifest(DEFAULT_MANIFEST))
-        )
+        f2 = target_lineage_statements(MIGRATIONS_DIR)
+        stream = real_stream()
         expected = expected_tenancy(stream[: len(f2)])
         assert sig == expected, (
             f"the replayed target lineage does not carry the tenancy state its"
@@ -430,19 +447,26 @@ class TestTheLaneReplaysAcrossTheBoundary:
             f" does.\n  expected: {expected}\n  observed: {sig}"
         )
 
-        # DISCLOSURE, not an assertion: with an empty prefix both sides are `{}`
-        # and the equality above compares nothing. It is stated rather than
-        # asserted because emptiness is legitimate — it is what the lineage
-        # looks like before F.2.2 — and the probe below is what separates "the
-        # gate looked and found nothing" from "the gate is not looking."
+        # NON-VACUITY DISCLOSURE, as an ASSERTION rather than a print.
+        #
+        # With an empty prefix both sides are `{}` and the equality above
+        # compared nothing — which is legitimate today, and is exactly the state
+        # a reader must not mistake for coverage. An earlier version of this
+        # said so with `print()`; pytest captures stdout and surfaces it ONLY on
+        # failure, so the message was invisible on precisely the green runs it
+        # was written for. A disclosure that cannot be observed is not one.
+        #
+        # Asserted the way the sibling lane-parity disclosure asserts its own
+        # emptiness, and it trips exactly once: at F.2.2, in the same run as the
+        # first real comparison, forcing someone to delete it deliberately.
         # `expected_tenancy`'s own non-degeneracy is a positive control in
-        # `test_advertised_ddl.py`, against the full 257-statement stream.
-        if not expected:
-            print(
-                "\n  [lane tenancy] prefix is empty at"
-                f" {len(f2)} statements — equality compared nothing; the probe"
-                " below is carrying this test"
-            )
+        # `test_tenancy_gate.py`, against the full 257-statement stream.
+        assert not expected, (
+            f"the target lineage now carries {len(expected)} tables, so the"
+            f" prefix comparison above is load-bearing rather than vacuous."
+            f" Delete this disclosure deliberately — it exists to make the"
+            f" transition visible, not to bound the check."
+        )
 
         execute(
             bootstrapped_db,
@@ -469,7 +493,6 @@ class TestTheLaneReplaysAcrossTheBoundary:
             "lane_tenancy_probe" in v and "no policy" in v for v in violations
         ), violations
 
-    @pytest.mark.integration
     def test_the_prefix_comparison_holds_with_real_tables_and_fails_on_an_extra_one(
         self, bootstrapped_db, tmp_path
     ):
@@ -494,12 +517,23 @@ class TestTheLaneReplaysAcrossTheBoundary:
         statements are a comparison key, not executable SQL — `02` prints an
         inline `--` comment inside `CREATE TABLE onboarding_sessions`, and
         collapsing that statement to one line comments out everything after it.
+
+        IT REPLAYS THE WHOLE CORPUS THROUGH `run_lane`, AND THAT COST IS A
+        DECISION. Measured: the corpus leg is ~5.6s of this test's ~6.5s, and
+        staging only `052` plus the segment into an empty tree reaches the same
+        seven tables — verified, not assumed, because 051 empties `public` and
+        052 creates functions rather than relations. It is kept anyway. This is
+        the control for a safety check, and its value is that it exercises the
+        SAME lane the check runs after; a shortcut equal today rests on the move
+        continuing to leave nothing behind, and would keep passing silently the
+        day that stopped being true. Fidelity over 5.6s, on a file that already
+        replays the corpus seven times.
         """
         import shutil
 
-        raw = build_stream(DEFAULT_DOCS, load_manifest(DEFAULT_MANIFEST))
+        raw = real_stream(normalized=False)
         stream = normalize_statements(raw)
-        segment = split_statements(raw)[2:22]
+        segment = split_statements(raw)[F2_2_START:F2_2_END]
 
         staged = tmp_path / "migrations"
         shutil.copytree(MIGRATIONS_DIR, staged)
@@ -507,11 +541,10 @@ class TestTheLaneReplaysAcrossTheBoundary:
             staged, 53, ";\n\n".join(s.strip() for s in segment) + ";", name="f2_2"
         )
 
-        psql_apply(bootstrapped_db, [SETUP_SQL])
-        apply_pending(bootstrapped_db, staged)
+        run_lane(bootstrapped_db, staged)
 
         sig = tenancy_signature(bootstrapped_db)
-        expected = expected_tenancy(stream[:22])
+        expected = expected_tenancy(stream[:F2_2_END])
         assert expected, "the control staged nothing — it is proving nothing"
         assert len(tenant_keyed_tables(expected)) == 4, sorted(
             tenant_keyed_tables(expected)
@@ -530,7 +563,7 @@ class TestTheLaneReplaysAcrossTheBoundary:
         # the prefix-aware form exists to survive, and asserting it non-empty
         # pins the reason so nobody reverts the shape thinking it was cosmetic.
         stale_shape = tenancy_violations(sig)
-        assert len(stale_shape) == 4, stale_shape
+        assert len(stale_shape) == len(tenant_keyed_tables(expected)), stale_shape
         assert all("RLS is not enabled" in v for v in stale_shape), stale_shape
 
         # THE MUTATION: a tenant-keyed table the stream does not declare at this

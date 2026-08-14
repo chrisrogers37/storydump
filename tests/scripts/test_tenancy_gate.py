@@ -15,6 +15,8 @@ satisfy — *"A comparator that cannot fail proves nothing."* Every check below
 is paired with a proof that it CAN fail.
 """
 
+import functools
+
 import pytest
 
 from scripts.advertised_ddl import (
@@ -24,13 +26,29 @@ from scripts.advertised_ddl import (
     load_manifest,
     normalize_statements,
 )
+from tests.scripts.conftest import F2_2_END, F2_6_END
 from scripts.tenancy_gate import (
+    _tenancy_entry,
     expected_tenancy,
     tenancy_signature,
     tenancy_violations,
     tenant_keyed_tables,
     TENANT_KEY,
 )
+
+
+@functools.lru_cache(maxsize=1)
+def _real_stream():
+    """The advertised stream, built once per process.
+
+    Measured on this host: build + normalize is ~33 ms and the class below calls
+    it six times, so ~163 ms of every run was rebuilding the same immutable
+    list. Cached rather than passed around because callers only ever slice it,
+    and slicing copies. Same shape as `conftest.migration_files`.
+    """
+    return normalize_statements(
+        build_stream(DEFAULT_DOCS, load_manifest(DEFAULT_MANIFEST))
+    )
 
 
 def _sig(**tables):
@@ -304,9 +322,7 @@ class TestExpectedTenancyDerivation:
 
     @staticmethod
     def _stream():
-        return normalize_statements(
-            build_stream(DEFAULT_DOCS, load_manifest(DEFAULT_MANIFEST))
-        )
+        return _real_stream()
 
     def test_the_full_stream_derives_the_counts_a_live_replay_measured(self):
         """CALIBRATION, and the reason this is not circular reasoning.
@@ -334,7 +350,7 @@ class TestExpectedTenancyDerivation:
         the state the old `tenant_keyed_tables(sig) == []` assertion could not
         express without going red.
         """
-        sig = expected_tenancy(self._stream()[:22])
+        sig = expected_tenancy(self._stream()[:F2_2_END])
         assert len(sig) == 7
         assert len(tenant_keyed_tables(sig)) == 4
         assert all(not e["rls_enabled"] for e in sig.values())
@@ -350,7 +366,7 @@ class TestExpectedTenancyDerivation:
         policy, and `tenancy_violations` over the derived state is non-empty.
         The lane test asserts EQUALITY with this, never that it is clean.
         """
-        sig = expected_tenancy(self._stream()[:126])
+        sig = expected_tenancy(self._stream()[:F2_6_END])
         assert tenant_keyed_tables(sig), "no tenant-keyed tables to be wrong about"
         violations = tenancy_violations(sig)
         assert violations, (
@@ -362,9 +378,15 @@ class TestExpectedTenancyDerivation:
     def test_it_emits_the_same_keys_tenancy_signature_does(self):
         """The two producers are compared with `==`, so a shape drift on either
         side would make every lane run red for a reason unrelated to tenancy.
+
+        Pinned to `_tenancy_entry` rather than to a literal key set, and the
+        difference matters: a literal is a THIRD copy of the shape, so adding a
+        field to the catalog reader alone would leave this green while every
+        lane run went red. Both producers build through the constructor, so this
+        asserts the routing rather than re-spelling the answer.
         """
         entry = next(iter(expected_tenancy(self._stream()).values()))
-        assert set(entry) == {"tenant_keyed", "rls_enabled", "rls_forced", "policies"}
+        assert set(entry) == set(_tenancy_entry(tenant_keyed=False))
 
     def test_an_empty_prefix_derives_nothing(self):
         assert expected_tenancy([]) == {}
@@ -405,14 +427,48 @@ class TestExpectedTenancyDerivation:
             expected_tenancy(["CREATE POLICY p ON not_yet FOR ALL USING (true)"]) == {}
         )
 
-    def test_a_teardown_statement_fails_loudly_rather_than_deriving_a_wrong_state(self):
-        """The derivation is forward-only. A teardown would make it overstate
-        what is present — the quiet direction — so it refuses instead.
+    @pytest.mark.parametrize(
+        "reducing",
+        [
+            "DROP POLICY p_one ON t",
+            "DROP TABLE t",
+            f"ALTER TABLE t DROP COLUMN {TENANT_KEY}",
+            "ALTER TABLE t RENAME TO t_old",
+            "DROP SCHEMA public CASCADE",
+            "ALTER TABLE t DISABLE ROW LEVEL SECURITY",
+        ],
+    )
+    def test_a_state_reducing_statement_refuses_rather_than_deriving_a_wrong_state(
+        self, reducing
+    ):
+        """The derivation only ever ADDS. A statement that takes something away
+        would leave it claiming a table or policy is present that the replay has
+        since dropped — the quiet direction — so it refuses.
+
+        Parametrized deliberately: an earlier version named `DROP POLICY` and
+        `DISABLE ROW LEVEL SECURITY` by regex and let every other reducing form
+        fall through to a silent ignore, which is a claim about today's corpus
+        wearing the shape of an enforced rule. None of these six is special; they
+        are all just "not on the allowlist".
         """
-        with pytest.raises(AssertionError, match="forward-only"):
+        with pytest.raises(AssertionError, match="does not classify"):
             expected_tenancy(
-                [
-                    f"CREATE TABLE t ( id UUID, {TENANT_KEY} UUID )",
-                    "DROP POLICY p_one ON t",
-                ]
+                [f"CREATE TABLE t ( id UUID, {TENANT_KEY} UUID )", reducing]
             )
+
+    def test_the_real_stream_is_fully_classified(self):
+        """POSITIVE CONTROL for the refusal above. A gate that refuses everything
+        is as useless as one that refuses nothing — this asserts the allowlist
+        actually covers the corpus it has to run against, so the refusal is
+        discriminating rather than merely strict.
+        """
+        assert len(expected_tenancy(self._stream())) == 26
+
+    def test_an_unclassified_statement_kind_refuses(self):
+        """The allowlist's other direction: a statement kind nobody has judged
+        is a review event, not a silent skip. `CREATE SEQUENCE` cannot move the
+        four facts today — but that is a conclusion someone has to reach and
+        record, which is what adding it to `_TENANCY_IRRELEVANT` means.
+        """
+        with pytest.raises(AssertionError, match="does not classify"):
+            expected_tenancy(["CREATE SEQUENCE s START 1"])
