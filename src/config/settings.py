@@ -1,12 +1,89 @@
 """Application settings and configuration management."""
 
+import re
+from typing import Container
+
 from pydantic import ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# ALIASED ON PURPOSE, and the collision is not hypothetical: the class directly
+# below is also called SettingsError. An unqualified import would shadow one or
+# the other depending on import order, in the one module where the difference
+# between them IS the subject.
+from pydantic_settings.exceptions import SettingsError as SourceError
 from typing import Optional
 
 
 class SettingsError(Exception):
     """Settings failed to load. Carries field NAMES only, never their values."""
+
+
+#: The one error contract this module publishes. Spelled once because it is the
+#: string every redactor below must agree on and a test asserts.
+_PREFIX = "settings failed to load:"
+
+#: The field name in a `pydantic_settings` source-layer message. Never trusted
+#: on its own — see `_redact_source`.
+_SOURCE_FIELD = re.compile(r'field "([^"]+)"')
+
+
+def _redact_opaque(exc: ValueError) -> str:
+    """The tail rung: a load failure this module cannot describe field-by-field.
+
+    WHY A DEFAULT-DENY RUNG RATHER THAN A THIRD NAMED CLASS. The two clauses
+    above enumerate the two failures we know how to describe, and enumeration is
+    the wrong altitude for a boundary whose whole job is that nothing gets past
+    it. Measured: a single non-UTF-8 byte in `.env` — a latin-1 character in a
+    password, a pasted smart quote — raises ``UnicodeDecodeError`` from
+    ``DotEnvSettingsSource.__init__``. That is source CONSTRUCTION, which runs
+    before the source is ever called, so pydantic-settings' own
+    ``except Exception -> SettingsError`` funnel never sees it either, and
+    neither named class matches.
+
+    It is the same shape as the ``.doc`` leak and strictly worse on both axes:
+    the payload is ``UnicodeDecodeError.object``, the ENTIRE .env file, and it
+    fires on the shipped 42-field configuration at import — no subclass and no
+    complex field required. Measured on a 163-byte fixture: 163 bytes carried,
+    three of three synthetic credentials present, and ZERO of them in ``str()``
+    or the rendered traceback. A message-only redactor is blind to it.
+
+    ``ValueError`` IS THE RIGHT WIDTH, not ``Exception``. It is the library's
+    own altitude — ``SettingsError`` subclasses it and ``sources/base.py``
+    catches it — and every credential-carrying escape found here is one.
+    ``except Exception`` would also swallow genuine programming errors (a typo
+    in a property, a bad import) and report them with no traceback, because the
+    raise happens outside the handler; ``TypeError`` and ``AttributeError``
+    still propagate normally and keep their tracebacks.
+
+    The emitted class name is CODE-derived and therefore safe by the same
+    argument that lets `_redact` emit pydantic's ``type``: it is a fixed
+    vocabulary that no user-supplied value can enter.
+    """
+    return f"{_PREFIX}\n  <boundary>: {type(exc).__name__}"
+
+
+def _redact_source(exc: SourceError, known_fields: Container[str]) -> str:
+    """Render a source-layer failure as a field name and a fixed error token.
+
+    WHY THE NAME IS CHECKED AGAINST THE MODEL rather than simply extracted.
+    Reading anything out of a third-party exception message is exactly the
+    discipline `_redact` refuses for `msg`, and the refusal is justified here
+    too: `pydantic_settings` has a source that formats its message as
+    ``f'Parsing error encountered for {field_name}: {e}'`` — interpolating the
+    underlying exception, whose text may quote its input. That source is the CLI
+    one and this project does not use it, but "the message happens to be safe in
+    the sources we happen to use" is a property of the installed version, not of
+    the library.
+
+    So the extracted token is emitted ONLY if it is a field this model actually
+    declares. The output is then provably one of two things: a declared field
+    name, or ``<unknown>``. No value can reach it, whatever a future release
+    puts in the message.
+    """
+    match = _SOURCE_FIELD.search(str(exc))
+    name = match.group(1) if match else None
+    field = name if name in known_fields else "<unknown>"
+    return f"{_PREFIX}\n  {field}: source_error"
 
 
 def _redact(exc: ValidationError) -> str:
@@ -21,7 +98,7 @@ def _redact(exc: ValidationError) -> str:
     for err in exc.errors():
         field = ".".join(str(part) for part in err.get("loc", ())) or "<root>"
         lines.append(f"  {field}: {err.get('type', 'invalid')}")
-    return "settings failed to load:\n" + "\n".join(lines)
+    return _PREFIX + "\n" + "\n".join(lines)
 
 
 class Settings(BaseSettings):
@@ -54,12 +131,41 @@ class Settings(BaseSettings):
         ``repr()`` to reach. Raising after the handler has exited means there
         is no active exception to chain, so __context__ is genuinely None and
         the value is unreachable rather than merely unprinted.
+
+        BOTH EXITS ARE COVERED (#780), because construction can fail in two
+        phases that raise unrelated classes. pydantic-settings' SOURCE layer
+        resolves raw values from env/dotenv/secrets BEFORE pydantic's
+        VALIDATION layer runs, and raises its own ``SettingsError`` -- a
+        ``ValueError``, not a ``ValidationError``, so ``except ValidationError``
+        structurally cannot see it. Catching one class and calling the boundary
+        complete is the mistake this second clause exists to prevent.
+
+        THE SOURCE EXIT LEAKS MORE, NOT LESS, WHICH IS WHY IT IS NOT MERELY
+        TIDINESS. Its own message names a field and a source class and quotes no
+        value -- but it is chained ``from e``, and for a complex field that
+        ``e`` is a ``json.JSONDecodeError`` carrying the ENTIRE undecoded input
+        on ``.doc``, untruncated. Measured: a plain ``pytest --showlocals`` on
+        the escaping path printed a synthetic credential nine times, against
+        zero for the ValidationError path under the same invocation. Severing
+        the chain is therefore the load-bearing half here; redacting the message
+        alone would accomplish nothing, since the value was never in it.
+
+        DORMANT AS DECLARED, and measured: 42 fields, zero complex-typed, zero
+        aliases. The trigger is a REQUIRED list/dict/nested-model field (an
+        ``Optional``-wrapped one degrades safely to the redacted validation
+        path), which is an ordinary thing to add and carries no warning that it
+        opens a credential path -- so the boundary covers it now rather than
+        depending on whoever adds the first one noticing.
         """
         error: Optional[str] = None
         try:
             super().__init__(**kwargs)
         except ValidationError as exc:
             error = _redact(exc)
+        except SourceError as exc:
+            error = _redact_source(exc, type(self).model_fields)
+        except ValueError as exc:
+            error = _redact_opaque(exc)
         if error is not None:
             raise SettingsError(error)
 
