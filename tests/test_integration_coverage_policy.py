@@ -14,19 +14,34 @@ the environment where the old behaviour was least visible.
 
 These tests deliberately import from `tests.conftest` rather than re-deriving
 the rules — a check that re-implements the contract tests the re-implementation.
+
+**The mocked tests pin the branch; the last class pins its PREMISE (#804).**
+Every test in `TestTheListenerProbe` monkeypatches `server_is_listening` to a
+lambda, which is right for asserting a branch and blind to whether the branch's
+premise still holds — that a real refusal from a real PostgreSQL arrives as an
+`OperationalError` while the address is still answering TCP. That premise was
+established once, by a reproduction in a review comment and in one session, and
+nothing re-established it. `TestTheRefusalAgainstARealServer` does, with no
+mocks at all.
 """
 
 import socket
+import uuid
+from contextlib import closing
+from typing import NoReturn
 from unittest.mock import Mock
 
 import psycopg2
 import pytest
 
+from src.config.settings import settings
 from tests.conftest import (
     MAX_EXPECTED_SKIPS,
     REQUIRE_DB_ENV,
+    SESSION_DB_SUFFIX,
     database_is_required,
     integration_verdict,
+    maintenance_connection,
     server_answered,
     server_is_listening,
     skip_ceiling_breach,
@@ -38,6 +53,158 @@ def _free_port() -> int:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         return probe.getsockname()[1]
+
+
+#: Password for the probe role below. Not a credential for anything: the role
+#: exists only to be refused, and is dropped in the same fixture that made it.
+#: `CREATE ROLE ... LOGIN` needs one to produce a login role at all.
+PROBE_ROLE_PASSWORD = "probe_role_password"
+
+
+def _precondition_absent(reason: str) -> NoReturn:
+    """Skip — except where this environment declared integration coverage
+    mandatory, and a missing precondition is then a FAILURE.
+
+    `tests/scripts/` skips unconditionally on the same missing privilege, and
+    this deliberately diverges: that suite has no `REQUIRE_TEST_DATABASE`
+    notion, and this file's whole subject is that a guard which quietly does
+    not run cannot be told apart from one that ran and found nothing. #804
+    exists because the #801 reproduction lived only in a session — a version of
+    it that silently skips in CI is the same absence with a test file around it.
+
+    The three skips this produces do not breach `MAX_EXPECTED_SKIPS` either, so
+    the backstop one layer up would not catch them.
+
+    DELIBERATELY NOT ROUTED THROUGH `integration_verdict`, which encodes the
+    same two negative rows 40 lines up in the module this file imports from.
+    Calling it would mean writing `server_answered=False` for the CREATEROLE
+    case — where a server demonstrably DID answer and merely lacked a
+    privilege — inside the one file whose whole subject is that distinction. A
+    false argument to buy a shared spelling is the worse trade; the shared part
+    that matters, `database_is_required()`, is called rather than re-parsed.
+
+    WHICH CALLER THIS ACTUALLY BITES FOR, measured rather than assumed. Of the
+    two preconditions below, only the missing CREATEROLE reaches the `fail`
+    branch. With no server at all, `setup_test_database` raises its own
+    `RuntimeError` from session setup first, so the fail here is shadowed —
+    measured: no server + `REQUIRE_TEST_DATABASE=1` errors 4 tests from
+    `tests/conftest.py`, while no CREATEROLE + the same flag errors exactly the
+    3 that use the fixture, from this line.
+
+    The shadowed branch is kept deliberately. It is one `if` covering both
+    callers, and deleting it would encode "the session fixture will always get
+    there first" as a standing assumption — a fixture ordering this file does
+    not own, whose quiet change would remove the guard rather than break it.
+    """
+    if database_is_required():
+        pytest.fail(
+            f"{reason}\nIntegration coverage is mandatory here ({REQUIRE_DB_ENV}"
+            " is set), so a missing precondition fails rather than skips: the"
+            " CONNECTION LIMIT 0 guard (#804) would otherwise disappear in"
+            " exactly the environment it was written for."
+        )
+    pytest.skip(reason)
+
+
+@pytest.fixture
+def a_refusing_role():
+    """A real login role the server will refuse — `CONNECTION LIMIT 0` (#801).
+
+    The reproduction that established the #769 fix, pinned. It is cluster-scoped
+    state, so the footprint is kept to the minimum that still reproduces:
+
+    - **Uniquely named**, carrying #763's session token, so concurrent runs from
+      other checkouts on the same cluster cannot collide on it — unlike the
+      fixed-name `svc_*` roles that made `tests/scripts/` serialize on a mutex.
+    - **Owns nothing and is granted nothing**, so it writes no `pg_shdepend`
+      rows and its `DROP` cannot be blocked by a dependent object.
+    - **Dropped in a `finally`.** A leak from a hard kill is inert rather than
+      poisoning — a `probe804_*` role with no grants breaks no later run — so
+      there is no sweep here and no need for one.
+
+    The postcondition is asserted rather than assumed, because the failure it
+    guards against reads as success: a **superuser is exempt from
+    `rolconnlimit`** (documented PostgreSQL behaviour — not measured here, since
+    a CREATEROLE-only test role cannot create a superuser to check it against),
+    so a probe role that somehow gained that flag would connect happily, and
+    every test below would pass down `server_answered()`'s happy path.
+
+    Yields the credential as a PAIR for the same reason. The tests prove *a*
+    refusal happened, not which one, and a password mismatch raises the same
+    `OperationalError` — so a name travelling with the password by convention
+    rather than by contract is one hardening (a randomized password) away from
+    three green tests reproducing an auth failure instead of a connection limit.
+
+    The privilege probe duplicates `actor_lacks_createrole`
+    (`tests/scripts/conftest.py`). Left as two copies deliberately: hoisting it
+    into `tests/conftest.py` means editing the module under test plus a suite
+    outside this change, to share one catalog query over stable PostgreSQL
+    semantics. Worth doing the next time either copy is touched.
+    """
+    try:
+        conn = maintenance_connection()
+    except psycopg2.OperationalError as exc:
+        _precondition_absent(
+            f"no PostgreSQL answered at {settings.DB_HOST}:{settings.DB_PORT} — {exc}"
+        )
+
+    with closing(conn):
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT rolsuper, rolcreaterole FROM pg_roles"
+                " WHERE rolname = current_user"
+            )
+            row = cur.fetchone()
+            if not (row and (row[0] or row[1])):
+                _precondition_absent(
+                    f"{settings.DB_USER} cannot provision roles: needs SUPERUSER"
+                    " or CREATEROLE. Grant it with:"
+                    f" ALTER ROLE {settings.DB_USER} CREATEROLE;"
+                )
+
+            name = f"probe804_{SESSION_DB_SUFFIX}_{uuid.uuid4().hex[:8]}"
+            cur.execute(
+                f'CREATE ROLE "{name}" LOGIN PASSWORD %s CONNECTION LIMIT 0',
+                (PROBE_ROLE_PASSWORD,),
+            )
+            cur.execute(
+                "SELECT rolconnlimit, rolsuper FROM pg_roles WHERE rolname = %s",
+                (name,),
+            )
+            assert cur.fetchone() == (0, False), (
+                f"{name} is not actually refusable — the fixture would then"
+                " reproduce nothing and every test using it would pass down the"
+                " happy path"
+            )
+        try:
+            yield name, PROBE_ROLE_PASSWORD
+        finally:
+            with conn.cursor() as cur:
+                cur.execute(f'DROP ROLE IF EXISTS "{name}"')
+
+
+def _aim_settings_at_the_refused_role(monkeypatch, credential) -> None:
+    """Point `server_answered()` at the role the server will refuse.
+
+    The settings singleton is the ONLY seam that leaves every component real:
+    `server_answered` and `maintenance_connection` both take no arguments, so
+    the alternative is patching the module-global — which is exactly the
+    mocking this class exists to escape.
+    """
+    user, password = credential
+    monkeypatch.setattr(settings, "DB_USER", user)
+    monkeypatch.setattr(settings, "DB_PASSWORD", password)
+
+
+def _aim_settings_at_an_empty_address(monkeypatch) -> None:
+    """Point `server_answered()` at an address with nothing behind it.
+
+    The host is pinned to the literal rather than left as `localhost`, so the
+    port proven free on `127.0.0.1` is the one both libpq and the listener
+    probe actually reach — `localhost` may resolve to `::1` first.
+    """
+    monkeypatch.setattr(settings, "DB_HOST", "127.0.0.1")
+    monkeypatch.setattr(settings, "DB_PORT", _free_port())
 
 
 class TestTheListenerProbe:
@@ -191,3 +358,124 @@ class TestTheRequirementSwitch:
     def test_falsey_spellings_leave_it_off(self, monkeypatch, value):
         monkeypatch.setenv(REQUIRE_DB_ENV, value)
         assert database_is_required() is False
+
+
+class TestTheRefusalAgainstARealServer:
+    """#804: the #801 reproduction, pinned — no mocks, real refusal.
+
+    WHAT THIS COVERS THAT THE MOCKED TESTS CANNOT. `TestTheListenerProbe`
+    replaces `server_is_listening` with a lambda in every case that matters, so
+    it pins how `server_answered` COMBINES its two inputs and is blind to
+    whether either input is still what it was measured to be. The premise the
+    whole design rests on — a live server refusing a connection raises
+    `OperationalError` while the socket keeps answering — was established by a
+    reproduction in a review comment and in one session, and nothing in CI
+    re-established it. A `maintenance_connection` that grew a retry, a psycopg2
+    that raised a different class, a libpq that failed before the server was
+    reached: each restores the #769 ambiguity with every mocked test green.
+
+    THE REFUSAL IS NOT ASSUMED. Each test that needs one proves it happened
+    first, because the failure mode here reads as success — `server_answered()`
+    also returns True for a connection that SUCCEEDS, so a probe role that
+    stopped being refused would leave these green while reproducing nothing.
+    """
+
+    @pytest.mark.integration
+    def test_a_connection_limit_refusal_is_a_server_that_answered(
+        self, a_refusing_role, monkeypatch
+    ):
+        """THE REPRODUCTION. Measured on PostgreSQL 15.19 / psycopg2 2.9.12:
+        `OperationalError`, and the socket still accepting in the same instant.
+
+        Before #769 this exact condition returned False and every integration
+        test skipped at `rc 0` — a run that reads as a pass having executed
+        none of what it claims to cover. That is #758's false PASS, reproduced
+        one layer down inside the probe that exists to prevent it.
+
+        The `pytest.raises` is load-bearing and the only extra claim needed:
+        `server_answered()` is True for a connection that SUCCEEDS as well, so
+        without it a probe role that stopped being refused stays green. A third
+        assertion on `server_is_listening` was dropped as derivable — given a
+        raise, True is reachable only through the probe, with the same
+        arguments.
+        """
+        _aim_settings_at_the_refused_role(monkeypatch, a_refusing_role)
+
+        with pytest.raises(psycopg2.OperationalError):
+            maintenance_connection()
+
+        assert server_answered() is True
+
+    def test_a_genuinely_absent_listener_is_still_an_honest_skip(self, monkeypatch):
+        """The negative direction, also unmocked.
+
+        #804 asks for both sides because the defect was an INABILITY TO
+        SEPARATE them, and a test covering only the refusal is satisfied by a
+        `server_answered()` that always returns True — the same bug with the
+        opposite sign. Deliberately unmarked: it needs no PostgreSQL, only an
+        address with nothing behind it, so it guards the negative half even
+        where the positive half has to skip.
+
+        The `pytest.raises` here is diagnostic rather than load-bearing —
+        `False` is reachable only through the `except`, so it is entailed —
+        and is kept because the two ways this can fail need telling apart:
+        something answered at an address proven free, versus the verdict being
+        wrong. `assert True is False` says neither.
+        """
+        _aim_settings_at_an_empty_address(monkeypatch)
+
+        with pytest.raises(psycopg2.OperationalError):
+            maintenance_connection()
+
+        assert server_answered() is False
+
+    @pytest.mark.integration
+    def test_the_two_real_paths_reach_opposite_verdicts(
+        self, a_refusing_role, monkeypatch
+    ):
+        """The pair, asserted together and with real components throughout —
+        `test_the_two_refusal_paths_reach_opposite_verdicts` one layer down
+        does this against mocks, and this is the same claim about the world.
+
+        Either half alone is satisfied by a constant function. The fix is a
+        DISTINCTION, so only the pair states it as one claim.
+
+        DISCLOSED RATHER THAN OVERSOLD: across the three mutants run for #804
+        this reddens exactly when the two tests above already do, so it adds no
+        mutation-detected coverage on top of them today. It is kept because it
+        is the only assertion here whose SUBJECT is the distinction rather than
+        one side of it, and because it composes the two through
+        `integration_verdict` the way `setup_test_database` actually calls them
+        — which neither half does. Delete it knowing that, not instead of it.
+        """
+        _aim_settings_at_the_refused_role(monkeypatch, a_refusing_role)
+        refused = integration_verdict(server_answered(), required=False)
+
+        _aim_settings_at_an_empty_address(monkeypatch)
+        silent = integration_verdict(server_answered(), required=False)
+
+        assert (refused, silent) == ("run", "skip")
+
+    @pytest.mark.integration
+    def test_the_exception_still_cannot_discriminate(
+        self, a_refusing_role, monkeypatch
+    ):
+        """The premise the listener probe exists for, re-measured rather than
+        cited: a real refusal and a real absent server both arrive as
+        `OperationalError` carrying `pgcode = None`, so the exception holds
+        nothing to branch on and only the address can answer.
+
+        Its own test because it is an assertion about psycopg2, not about this
+        repo. If a future psycopg2 sets a code on either side, this goes red and
+        the probe could potentially be retired — a review event, not a breakage,
+        and the test name is what says so.
+        """
+        _aim_settings_at_the_refused_role(monkeypatch, a_refusing_role)
+        with pytest.raises(psycopg2.OperationalError) as refusal:
+            maintenance_connection()
+
+        _aim_settings_at_an_empty_address(monkeypatch)
+        with pytest.raises(psycopg2.OperationalError) as absence:
+            maintenance_connection()
+
+        assert (refusal.value.pgcode, absence.value.pgcode) == (None, None)
