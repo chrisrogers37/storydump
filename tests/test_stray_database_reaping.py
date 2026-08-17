@@ -427,6 +427,72 @@ class TestTheReaperIsDisarmedByDefault:
         finally:
             busy.close()
 
+    def test_armed_it_refuses_a_peer_locked_database_handed_to_it_directly(
+        self, cluster, a_stray_database, monkeypatch
+    ):
+        """NAVI'S FINDING (#832 review), pinned.
+
+        The drop-time guards checked the name and the ownership boundary and
+        nothing else — so an injected list holding a **peer-locked, idle,
+        convention-matching** database was dropped, bypassing the scan that
+        would have excluded it. Meanwhile the docstring claimed an injected
+        list could never widen the boundary.
+
+        That is the incident this file already documents, one layer along: a
+        safety claim wider than what the code checks. The harness version
+        authorised more than intended; the prose version asserts a guarantee
+        the guard does not implement, and is worse in one way — it is what the
+        next reader trusts *instead of* reading the guard.
+
+        Fixed by adding the check rather than narrowing the claim. Narrowing
+        would have been honest and would have left the hole, and the code
+        already knew how to probe the lock one function over — the asymmetry
+        was the defect.
+        """
+        monkeypatch.setenv(REAP_ARMED_ENV, "1")
+        peer = maintenance_connection()
+        try:
+            with peer.cursor() as cur:
+                cur.execute(
+                    "SELECT pg_try_advisory_lock(%s)",
+                    (session_database_lock_key(a_stray_database),),
+                )
+                assert cur.fetchone()[0] is True, "the peer never took the lock"
+
+            reaped = reap_stray_databases(
+                cluster, settings.TEST_DB_NAME, strays=[(a_stray_database, 0)]
+            )
+
+            assert a_stray_database not in reaped
+            with cluster.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM pg_database WHERE datname = %s", (a_stray_database,)
+                )
+                assert cur.fetchone() is not None, (
+                    "a peer's live database was destroyed via an injected list"
+                )
+        finally:
+            peer.close()
+
+    def test_armed_it_still_drops_an_unlocked_database_handed_to_it(
+        self, cluster, a_stray_database, monkeypatch
+    ):
+        """The positive control for the lock re-check, and it is what keeps the
+        new guard from being a door that refuses everything. Same call, same
+        injected list, one variable changed: nobody holds the lock."""
+        monkeypatch.setenv(REAP_ARMED_ENV, "1")
+
+        reaped = reap_stray_databases(
+            cluster, settings.TEST_DB_NAME, strays=[(a_stray_database, 0)]
+        )
+
+        assert a_stray_database in reaped
+        with cluster.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM pg_database WHERE datname = %s", (a_stray_database,)
+            )
+            assert cur.fetchone() is None
+
     def test_armed_it_refuses_its_own_database_even_when_handed_it(
         self, cluster, a_stray_database, monkeypatch
     ):

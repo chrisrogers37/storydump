@@ -578,10 +578,17 @@ def reap_stray_databases(conn, mine: str, strays) -> list:
     Anything that wants to arm this against one database passes that one
     database.
 
-    The ownership predicate is re-checked HERE rather than trusted from the
-    scan, so an injected list cannot widen the boundary — the drop is the
-    destructive step and it verifies its own precondition instead of inheriting
-    it from a caller.
+    EVERY precondition is re-checked HERE rather than trusted from the scan —
+    name, ownership boundary AND the ownership lock — because the drop is the
+    destructive step and must verify its own preconditions instead of
+    inheriting them from a caller.
+
+    The lock re-check was missing when this first shipped, and the docstring
+    claimed the boundary could not be widened by an injected list. It could:
+    review handed this an injected list holding a peer-locked, idle,
+    convention-matching database and it was dropped, because the guards
+    checked only the name. Stated precisely now, because the previous wording
+    was the thing a reader would have trusted instead of the guard.
 
     **The lock is the only ownership guarantee here, and nothing else pretends
     to be one.** A database being actively queried is protected, but by
@@ -602,6 +609,7 @@ def reap_stray_databases(conn, mine: str, strays) -> list:
         f"\n🧹 {len(strays)} orphaned test database(s) from crashed runs"
         f" — {verb} (arm with {REAP_ARMED_ENV}=1):"
     )
+    assert_maintenance_scoped(conn, "reap_stray_databases")
     acted = []
     for datname, backends in strays:
         if datname == mine or not is_own_convention(datname):
@@ -612,16 +620,33 @@ def reap_stray_databases(conn, mine: str, strays) -> list:
             acted.append(datname)
             continue
         try:
-            # No re-check that the database is still idle: PostgreSQL enforces
-            # that itself and does it atomically, which a check here cannot.
-            # Measured — DROP against a database with one live connection raises
-            # `ObjectInUse: database "..." is being accessed by other users`, and
-            # succeeds the moment that connection closes. An earlier version of
-            # this function did re-check, and removing it killed no test: an
-            # inert guard whose docstring claimed it "strictly narrows" when it
-            # narrowed nothing the server was not already refusing.
+            # No re-check that the database is still IDLE: PostgreSQL enforces
+            # that itself and atomically, which a check here cannot. Measured —
+            # DROP against a database with one live connection raises
+            # `ObjectInUse`, and succeeds the moment that connection closes. An
+            # earlier version did re-check and killed no mutant.
+            #
+            # The OWNERSHIP lock IS re-checked, and that is a different matter.
+            # Found in review: the guards above test the name and nothing else,
+            # so an injected list containing a peer-locked, idle,
+            # convention-matching database was dropped — while this function's
+            # docstring claimed an injected list could never widen the boundary.
+            # A safety claim wider than what the code checks is the same defect
+            # as a harness authorising more than intended, and worse in one way:
+            # it is what the next reader relies on instead of reading the guard.
             with conn.cursor() as cur:
-                cur.execute(f'DROP DATABASE IF EXISTS "{datname}"')
+                key = session_database_lock_key(datname)
+                cur.execute("SELECT pg_try_advisory_lock(%s)", (key,))
+                if not cur.fetchone()[0]:
+                    print(
+                        f"   REFUSING {datname} — a live session holds its"
+                        " ownership lock"
+                    )
+                    continue
+                try:
+                    cur.execute(f'DROP DATABASE IF EXISTS "{datname}"')
+                finally:
+                    cur.execute("SELECT pg_advisory_unlock(%s)", (key,))
             acted.append(datname)
         except Exception as exc:  # noqa: BLE001 - hygiene must never fail
             print(f"   ...could not drop {datname}: {exc}")
