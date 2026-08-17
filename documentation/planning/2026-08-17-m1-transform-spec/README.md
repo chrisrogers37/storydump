@@ -4,7 +4,7 @@
 
 **Scope:** the `02` §9 disposition index made executable — per-legacy-table transform statements as runner-migration files, the per-column mapping with the `02` §0 timestamp rule applied per column, machine-checkable postconditions (row-count reconciliation + per-table invariants), and the quarantine feeds. This is `04` Phase M step **3e**: files that read `legacy.<table>` and write the target tables, inside the single advisory-locked runner invocation, after 3d (the F.2 schema files) and before 3f (snapshots).
 
-**What this spec does NOT decide** (§3 is the register): Forks A–D from mason's menu; Fork E (surfaced here, same discipline); #793 (`instagram_backfill` disposition — open, unforced at the 2026-08-13 census); the one-PR-vs-two program-shape split proposed in #790 comment 5280282481. Two forks (C, D) collapse if production holds exactly one live group tenant — that measurement (mason's §0 query, reproduced in §3.3) is being chased separately; their sections are marked **conditional**, not blocked.
+**What this spec does NOT decide** (§3 is the register): Forks A–D from mason's menu; Fork E (surfaced here, same discipline); #793 (`instagram_backfill` disposition — open, unforced at the 2026-08-13 census); the one-PR-vs-two program-shape split proposed in #790 comment 5280282481. Two forks are conditional on mason's §0 measurement (two counts, reproduced in §3.3; being chased separately) — **and the two counts are not interchangeable**: C collapses at `group_chats = 1` (one live *group* tenant — 044's derivation keys on a single group chat), D only at `chats = 1` **total** (a single DM-rooted row already makes minting rule W and a collapse shape disagree). Their sections are marked **conditional**, not blocked. Two register entries are additionally **lifted to the plan author** (§3.8) and are likewise not decided here.
 
 **Sources of truth** (all at `origin/main` `c28066d`): `02-domain-model.md` §0/§1/§2/§3/§4/§9 · `04-execution-sequence.md` L76–160 (Phase M) · `03-decision-record.md` D39/D40/D41 · `documentation/planning/2026-08-14-f2-increment-split/README.md` (the 3d band this spec lands after) · `documentation/operations/migration-runner.md` + `scripts/migration_runner.py` (file contract) · `scripts/fc8_gate.py` (#792) · `src/models/*.py` (legacy column ground truth) · #790 + comments 5280282481 / 5286087397 / 5286618365 / 5318301047 · #787 (measured inert for the production world) · #793 (open).
 
@@ -53,7 +53,7 @@ Dependency order is FK-forced and matches the slot order: workspaces need users 
 
 ## §2. Global rules
 
-Applied by every mapping table in §4. Each rule cites its ratified source; the three marked **[SD-n]** are spec-introduced decisions registered in §3.5 for explicit review.
+Applied by every mapping table in §4. Each rule cites its ratified source; the two marked **[SD-n]** are spec-introduced decisions registered in §3.7 for explicit review.
 
 ### 2.1 G-TIME — the §0 timestamp rule, per column
 
@@ -111,9 +111,11 @@ One legacy value (`chat_settings.last_post_sent_at`, TIMESTAMPTZ, copies as-is) 
 
 Ruled for `media_items` only (the 044 sole-tenant rule, cited in `02` §9). Open for `category_post_case_mix`, `posting_history`, `audit_log` — their §4 workspace-derivation cells are marked **BLOCKED (C1/C2/C3) — conditional**. C3 couples into Fork A (quarantined NULL-tenant rows join its list).
 
-**Narrowing this spec contributes:** for `media_posting_locks` (mason's fourth table) the fork is structurally *almost* closed — `fk_locks_media (workspace_id, media_item_id)` is composite, so a lock's `workspace_id` **must** equal its media item's workspace, which is determined (044 covers media). The lock's own `chat_settings_id` is demoted to a cross-check; a mismatch is a profile/quarantine class, not a mapping input. C's residue for locks is only the discrepancy class. The same composite-FK argument fixes `post_intents.media_item_id` consistency but **not** `post_intents.workspace_id` itself for NULL-chat history rows — C stands there.
+**Narrowing this spec contributes (verified in the #827 review — three open C tables, not four):** for `media_posting_locks` the fork is structurally closed — `fk_locks_media (workspace_id, media_item_id)` is composite, so a lock's `workspace_id` **must** equal its media item's workspace, which is determined (044 covers media). The lock's own `chat_settings_id` is demoted to a cross-check; a mismatch is a profile/quarantine class, not a mapping input. C's residue for locks is only the discrepancy class. The same composite-FK argument fixes `post_intents.media_item_id` consistency but **not** `post_intents.workspace_id` itself for NULL-chat history rows — C stands there.
 
-**Conditional collapse:** if the measurement below returns one live group tenant (migration 044's standing assertion), C1/C2/C3 coincide for every affected row and C is a one-line ruling. ari is chasing it; this spec does not block on it:
+**Ratifier: the product owner.** Migration 044's own header sets that bar for this class of write ("DO NOT APPLY WITHOUT RATIFICATION… apply only on explicit sign-off, never via CI or on merge"). Named because C is the fork most likely to be resolved by a measurement and then quietly actioned by whoever ran the query — the measurement *sizes* it; only the owner ratifies it.
+
+**Conditional collapse:** if the measurement below returns **`group_chats = 1`** (one live group tenant — migration 044's standing assertion; the total `chats` count is Fork D's number, §3.4, not this one), C1/C2/C3 coincide for every affected row and C is a one-line ruling. ari is chasing it; this spec does not block on it:
 
 ```sql
 SELECT count(*) AS chats,
@@ -123,9 +125,9 @@ SELECT count(*) AS chats,
 
 ### 3.4 Fork D — workspace cardinality (conditional)
 
-Nothing states how many workspaces the transform mints. §4.2 is written against a **minting rule W** = "one workspace per `chat_settings` row, `workspace_id := chat_settings.id`" — labeled as Fork D's obvious reading, **not** a ruling. Under a measured single tenant every candidate shape degenerates to the same transform, so §4.2's mapping stands regardless; if the count returns > 1, W is D's ruling to make (product owner — merging minted workspaces afterwards is `06` §4 clone-and-retire per account, on live data).
+Nothing states how many workspaces the transform mints. §4.2 is written against a **minting rule W** = "one workspace per `chat_settings` row, `workspace_id := chat_settings.id`" — labeled as Fork D's obvious reading, **not** a ruling. At **`chats = 1` total** — the first count of §3.3's query, deliberately not `group_chats` — every candidate shape degenerates to the same transform, so §4.2's mapping stands regardless. The distinction is live, not theoretical: `.claude/rules/database.md` gives each Telegram chat its own settings row, so `chats > 1, group_chats = 1` is an ordinary state — and there a single DM-rooted row makes W mint two workspaces where a collapse shape mints one, so D does **not** collapse even though C does. If `chats` returns > 1, W is D's ruling to make (product owner — merging minted workspaces afterwards is `06` §4 clone-and-retire per account, on live data).
 
-**Addendum this spec surfaces (C-adjacent, for the C ruling to also cover):** `user_interactions` has **no tenant column at all** — only a raw, nullable `telegram_chat_id`. M1-09 resolves it via `legacy.chat_settings.telegram_chat_id`; rows with NULL or unresolvable chat ids have no workspace under any C option as written. Same class, one table further out; named here so the C ruling can say whether it covers them (until then they are a §5.2 feed). Also profiled: `chat_settings` rows with `telegram_chat_id > 0` (a DM-rooted tenant would be product-shaped — Fork D's territory).
+**Addendum this spec surfaces (C-adjacent, for the C ruling to also cover; confirmed as a genuine menu addition in the #827 review):** `user_interactions` has **no tenant column at all** — only a raw, nullable `telegram_chat_id`. M1-09 resolves it via `legacy.chat_settings.telegram_chat_id`; rows with NULL or unresolvable chat ids have no workspace under any C option as written. Same class, one table further out; named here so the C ruling can say whether it covers them (until then they are a §5.2 feed). Also profiled: `chat_settings` rows with `telegram_chat_id > 0` (a DM-rooted tenant would be product-shaped — Fork D's territory, and the reason D's collapse keys on `chats`, not `group_chats`).
 
 ### 3.5 Fork E — live `recent` locks have no account (surfaced by this spec; menu, no pick)
 
@@ -147,12 +149,12 @@ Not a fork of this spec's making and not decided here. The transform **cannot** 
 
 ### 3.7 [SD-n] register — spec-tier decisions (proposals, explicitly reviewable)
 
-These are **not forks**: no privilege/actor gap, no cross-artifact contradiction, each reversible before the window, each with an obvious-but-unratified answer that a transform spec must state to be executable. Review of this PR is their approval mechanism (the same review gate item 2 puts on the reconciliation queries). Silence would be the failure mode; here they are in one place.
+These are **not forks**: no privilege/actor gap, no cross-artifact contradiction, each reversible before the window, each with an obvious-but-unratified answer that a transform spec must state to be executable. Review of this PR is their approval mechanism (the same review gate item 2 puts on the reconciliation queries). Silence would be the failure mode; here they are in one place. **Two entries originally filed here failed this test on review** (#827 verdict, Finding 4) — SD-2 is a contradiction between two ratified texts and SD-11 deviates from a ratified text — so both are **lifted to §3.8** and routed to the plan author; their ids stay reserved so §4's references hold.
 
 | id | Site | Proposal | Alternative considered |
 |---|---|---|---|
 | SD-1 | §4.2 `caption_style` | value outside `('enhanced','simple')` → `NULL` (= app default) + G-LOG `caption_style_discarded` | copy verbatim and let `ck_ws_caption_style` halt the file (A3-shaped; rejected for the same reason the ruled tz rule exists) |
-| SD-2 | §4.3 `media_sources.state` | `media_sync_enabled = false` → `'paused'`; else → `'error'` (pending reconnect). Precedence between two printed texts: `04` L83 "born `'error'`" and `02` §1 L155 "`media_sync_enabled` → state (false = `'paused'`)". Pause preserves user intent; an unpaused source finds `'error'` organically at first sync | `'error'` unconditionally (loses the pause fact) |
+| SD-2 | §4.3 `media_sources.state` | **LIFTED to §3.8-A** — a precedence call between two ratified texts is not register-tier | — |
 | SD-3 | §4.8 `approval_mode` | `posting_method = 'auto_reapproval'` → `'auto'`; else → `'manual'` (legacy approval was human via cards; auto-reapproval was the one auto path) | `'manual'` unconditionally |
 | SD-4 | §4.8 `ig_media_id` | `COALESCE(instagram_media_id, instagram_story_id)` (a story's id *is* its published-media id); both verbatim in the companion detail row | story id to detail only |
 | SD-5 | §2.3 | G-IDS as stated | fresh UUIDs everywhere (kills id-join reconciliation) |
@@ -161,7 +163,7 @@ These are **not forks**: no privilege/actor gap, no cross-artifact contradiction
 | SD-8 | §4.9 `entity_kind` | `setting`→`'workspace'`, `membership`→`'member'`, `lock`→`'post_lock'`, interactions→`'interaction'` (open vocabulary, `02` L734) | carry legacy names verbatim |
 | SD-9 | §4.1 `user_identities.display_name` | `NULLIF(trim(concat_ws(' ', telegram_first_name, telegram_last_name)), '')`, fallback `telegram_username` | username-first |
 | SD-10 | §4.5 `content_hash` | carry `file_hash` **verbatim** (SQL cannot rehash bytes). Named open edge: the `02` L540 comment says SHA256; legacy values are MD5 (`src/utils` file-hash). Dedup (`uq_media_dedup`) only needs consistency, but post-cutover sync computing SHA256 against MD5 rows would re-mint rows — **adapter-side concern, out of M.1 scope, flagged to #790 so it is not silent** | none viable at SQL level |
-| SD-11 | §4.4 `ig_accounts.state` | legacy `is_active = false` → `'disabled'`; else `'reauth_required'` (a user-disabled account must not re-enable via reconnect). The ruled text's blanket "born `reauth_required`" is the alternative | blanket `'reauth_required'` |
+| SD-11 | §4.4 `ig_accounts.state` | **LIFTED to §3.8-B** — the ruled text answers this the other way; a deviation is a plan amendment, not a register entry. The ruled blanket stands in §4.4 until #731 rules | — |
 | SD-12 | §4.2 `workspaces.name` | `COALESCE(display_name, 'Workspace ' || left(id::text, 8))` + G-LOG when defaulted (target `NOT NULL`; legacy nullable) | halt on NULL name |
 | SD-13 | §4.1 `users.role` | dissolves (ruled) — plus one G-LOG row per legacy system-admin so the fact survives in audit | silent drop |
 | SD-14 | §4.6 | rows with `locked_until <= ` transform instant are **not carried** (equivalent to the runtime reap sweep's steady state; 3f snapshot preserves them). Also shrinks Fork E to live rows only | carry expired rows (noise; `ix_locks_expiry` sweeps them immediately) |
@@ -174,6 +176,13 @@ These are **not forks**: no privilege/actor gap, no cross-artifact contradiction
 | SD-21 | §4.2 binding settings | carry `show_verbose_notifications` / `send_lifecycle_notifications` into `channel_bindings.settings` keys only when legacy non-NULL (absent key = app default, materialization contract `02` L318) | always-write (freezes env defaults as per-binding overrides) |
 
 **INT-1 (interpretation, not decision):** the owner-derivation ladder (`04` L81) is evaluated over `is_active = true` memberships at every rung. Rung 3 says "earliest **active**"; rungs 1–2 are silent — but a derived owner whose membership is dropped as inactive (`04` L82) would leave the workspace ownerless, which `ct_workspaces_owner_at_insert` refuses at commit. The active-only reading is the only one that composes with the ratified DDL; an inactive owner-row's existence is recorded in its drop audit record.
+
+### 3.8 Lifted to the plan author (#731) — two items the register cannot hold
+
+Both were filed as [SD-n] entries and failed the register's own entry test on review (#827 verdict, Finding 4). **Neither is resolved here**; both route to the plan author on #731. Until ruled, the affected §4 cells read exactly as marked.
+
+- **§3.8-A (was SD-2) — `media_sources.state` at birth: two ratified texts disagree.** `04` L83: sources "born `state='error'` pending reconnect". `02` §1 L155: "`media_sync_enabled` → `media_sources.state` (false = `'paused'`)". For a sync-disabled chat these conflict, and either can be cited as authority — worse than a silence. Candidate precedences, stated without a pick: (i) `'paused'` wins at `media_sync_enabled = false`, `'error'` otherwise — preserves user intent, and an unpaused source finds `'error'` organically at first sync; (ii) `'error'` unconditionally — FC-7.2's reconnect posture wins, the pause fact surviving only in the 3f snapshot. Needs a one-line precedence ruling; §4.3's cell is **PENDING** until it lands.
+- **§3.8-B (was SD-11) — `ig_accounts.state` for legacy-inactive accounts: the ruled text answers it; this spec proposes amending it.** `04` L83 and `02` §9 rule blanket `'reauth_required'`. The proposal: `is_active = false` → `'disabled'`, because a user-disabled account should not come back reconnectable. **Until #731 rules, the ruled blanket stands and §4.4 maps accordingly** — following the ratified text pending the amendment decision is the only non-picking interim; the reverse default would be exactly the silent deviation this lift exists to prevent.
 
 ---
 
@@ -197,7 +206,7 @@ Format per table: disposition (from `02` §9) · per-column mapping (every legac
 
 ### 4.2 `legacy.chat_settings` → `workspaces` + `channel_bindings` (M1-02, with 4.3's members) — **Fork D conditional**
 
-Minting rule **W** (§3.4): one workspace per chat row, `workspaces.id := chat_settings.id`. Every cell below survives any D outcome at a measured single tenant.
+Minting rule **W** (§3.4): one workspace per chat row, `workspaces.id := chat_settings.id`. Every cell below survives any D outcome at **`chats = 1`** (D's collapse count — the query's total, deliberately not `group_chats`; §3.4).
 
 | Legacy | → `workspaces` | Rule |
 |---|---|---|
@@ -225,18 +234,18 @@ Auto-audit: one trigger-minted `workspace` row + one `channel_binding` row per i
 
 ### 4.3 `legacy.chat_settings` (Drive config) → `media_sources` (M1-03)
 
-One row **only** where `media_source_type = 'google_drive'` — the only value `ck_sources_provider` admits; `'local'`/NULL chats mint no source (their workspace has zero sources until the owner connects one — consistent with FC-8's zero-local/upload world). New ids. `provider='gdrive'`; `config := jsonb_build_object('v',1,'folder_ref', media_source_root)`; `state` per **SD-2**; `alerted_at := gdrive_alerted_at` (**as-is**); `sync_checkpoint`/`next_sync_at`/`last_sync_success_at` := NULL (checkpoint restarts post-reconnect). Zero `oauth_credentials` rows (FC-7.2, ruled). Profile: gdrive chats with NULL `media_source_root` (config would be invalid — `folder_ref` required); nonzero routes to owner at prep.
+One row **only** where `media_source_type = 'google_drive'` — the only value `ck_sources_provider` admits; `'local'`/NULL chats mint no source (their workspace has zero sources until the owner connects one — consistent with FC-8's zero-local/upload world). New ids. `provider='gdrive'`; `config := jsonb_build_object('v',1,'folder_ref', media_source_root)`; `state`: **PENDING the §3.8-A precedence ruling** (two ratified texts conflict for sync-disabled chats — not this spec's call); `alerted_at := gdrive_alerted_at` (**as-is**); `sync_checkpoint`/`next_sync_at`/`last_sync_success_at` := NULL (checkpoint restarts post-reconnect). Zero `oauth_credentials` rows (FC-7.2, ruled). Profile: gdrive chats with NULL `media_source_root` (config would be invalid — `folder_ref` required); nonzero routes to owner at prep.
 
 ### 4.4 `legacy.instagram_accounts` × `legacy.api_tokens` → `ig_accounts` (M1-04) — **Fork B; Fork C conditional**
 
-**Fan-out (ruled, `02` §9):** one target row per distinct (workspace, legacy account) pair **derived from `api_tokens` ownership**: pairs = `SELECT DISTINCT t.chat_settings_id, t.instagram_account_id FROM legacy.api_tokens t WHERE t.instagram_account_id IS NOT NULL AND t.chat_settings_id IS NOT NULL`. NULL-`chat_settings_id` tokens are the **Fork C conditional** here (under a measured single tenant they resolve to it; otherwise C's ruling applies). `api_tokens` itself: snapshotted + dropped, never transformed; no ciphertext carried (FC-7.2, ruled) — it contributes ownership *facts* only.
+**Fan-out (ruled, `02` §9):** one target row per distinct (workspace, legacy account) pair **derived from `api_tokens` ownership**: pairs = `SELECT DISTINCT t.chat_settings_id, t.instagram_account_id FROM legacy.api_tokens t WHERE t.instagram_account_id IS NOT NULL AND t.chat_settings_id IS NOT NULL`. NULL-`chat_settings_id` tokens are the **Fork C conditional** here (at `group_chats = 1` they resolve to the sole group tenant — C's collapse count; otherwise C's ruling applies). `api_tokens` itself: snapshotted + dropped, never transformed; no ciphertext carried (FC-7.2, ruled) — it contributes ownership *facts* only.
 
 | Source | → | Rule |
 |---|---|---|
 | `instagram_accounts.instagram_account_id` | `provider_account_ref` | verbatim (the real Meta account id) |
 | `instagram_accounts.instagram_username` | `handle` | verbatim |
 | `instagram_accounts.display_name` | `display_name` | verbatim |
-| `instagram_accounts.is_active` | `state` | **SD-11** (`false`→`'disabled'`, else `'reauth_required'`); zero rows born `'active'` (FC-7.2) |
+| `instagram_accounts.is_active` | `state` | `'reauth_required'` blanket — **the ruled text** (`04` L83, `02` §9); the `is_active=false`→`'disabled'` amendment is lifted to the plan author (**§3.8-B**) and applies only if ruled; zero rows born `'active'` (FC-7.2) |
 | — | `posts_per_day`, `posting_hours_start/end`, `tz` | NULL (inherit workspace, `02` L355) |
 | `chat_settings.last_post_sent_at` | `next_slot_at` | **BLOCKED PENDING RULING — Fork B** (§3.2; the only blocked cell in this file) |
 | — | `last_posted_at` | NULL (advisory; derivable post-hoc from terminal intents) |
@@ -297,7 +306,7 @@ Auto-audit: one trigger-minted `ig_account` row per insert. **Profiles:** (a) le
 
 ### 4.8 `legacy.posting_history` → `post_intents` + companion `audit_events` (M1-08) — **attribution; Fork A feed; Fork C conditional**
 
-**Attribution (ruled mechanism, `04` L85):** the account-switch timeline reconstructed from `legacy.service_runs` — `service_name = 'InstagramAccountService'`, `method_name IN ('switch_account','add_account')`, completed rows; the switched-to account is `input_params->>'account_id'` (a legacy `instagram_accounts.id`), ordered by `started_at` (conv). A history row attributes to the account active at `posted_at`; **±6h tolerance at boundaries, nearest-timestamp tie-break** (ruled). Feeds to quarantine (§5.2): rows in a timeline gap; rows matching nothing; ambiguous-boundary rows beyond the tie-break; the two auto-set paths that write no `service_runs` record (the pass-4-named known gap). **Degenerate short-circuit:** a workspace whose pair-set (4.4) holds exactly one account attributes every row to it trivially — no timeline consulted; at the current census this is the expected world, and the profile sizes it. `service_runs` carries **no tenant column**: under a measured single tenant the global timeline is exact; under N > 1 tenants per-workspace timelines need `user_id`-membership inference — that residue is named as C/D-conditional, not silently absorbed. `service_runs` itself: consumed here, snapshotted at 3f, never lands in target (ruled).
+**Attribution (ruled mechanism, `04` L85):** the account-switch timeline reconstructed from `legacy.service_runs` — `service_name = 'InstagramAccountService'`, `method_name IN ('switch_account','add_account')`, completed rows; the switched-to account is `input_params->>'account_id'` (a legacy `instagram_accounts.id`), ordered by `started_at` (conv). A history row attributes to the account active at `posted_at`; **±6h tolerance at boundaries, nearest-timestamp tie-break** (ruled). Feeds to quarantine (§5.2): rows in a timeline gap; rows matching nothing; ambiguous-boundary rows beyond the tie-break; the two auto-set paths that write no `service_runs` record (the pass-4-named known gap). **Degenerate short-circuit:** a workspace whose pair-set (4.4) holds exactly one account attributes every row to it trivially — no timeline consulted; at the current census this is the expected world, and the profile sizes it. `service_runs` carries **no tenant column**: at `chats = 1` the global timeline is trivially exact; at `group_chats = 1` with DM rows present it is exact iff no attributable history resolves outside the sole group tenant (the §5.1 battery profiles exactly that); under N > 1 group tenants per-workspace timelines need `user_id`-membership inference — that residue is named as C/D-conditional, not silently absorbed. `service_runs` itself: consumed here, snapshotted at 3f, never lands in target (ruled).
 
 | Legacy | → `post_intents` | Rule |
 |---|---|---|
@@ -389,13 +398,12 @@ Per file, the verbatim `-- runner:postcondition` lines (each a single-boolean SE
 
 **M1-02** (workspaces + members + bindings; owner invariant is *also* enforced by the deferred triggers at this file's commit — these make the arithmetic visible)
 ```
--- runner:postcondition SELECT (SELECT count(*) FROM workspaces) = (SELECT count(*) FROM legacy.chat_settings)
--- runner:postcondition SELECT (SELECT count(*) FROM channel_bindings WHERE channel='telegram_group') = (SELECT count(*) FROM legacy.chat_settings)
+-- runner:postcondition SELECT (SELECT count(*) FROM workspaces) + (SELECT count(*) FROM <quarantine: rung-4 chats>) = (SELECT count(*) FROM legacy.chat_settings)   -- the master identity, M1-08's shape-general form (A1: term = 0; A2: term > 0 and the file completes green; A3: the halt). #827 Finding 3: the earlier hard-zero arm was the A1 instance only
+-- runner:postcondition SELECT (SELECT count(*) FROM channel_bindings WHERE channel='telegram_group') = (SELECT count(*) FROM workspaces)   -- bindings track MINTED workspaces, so this holds under every A shape
 -- runner:postcondition SELECT NOT EXISTS (SELECT 1 FROM workspaces w WHERE NOT EXISTS (SELECT 1 FROM workspace_members m WHERE m.workspace_id = w.id AND m.role='owner'))
--- runner:postcondition SELECT (SELECT count(*) FROM workspace_members) = (SELECT count(*) FROM legacy.user_chat_memberships WHERE is_active IS TRUE)
--- runner:postcondition SELECT (SELECT count(*) FROM audit_events WHERE actor_kind='migration' AND entity_kind='member' AND detail->>'transform_log'='membership_dropped_inactive') = (SELECT count(*) FROM legacy.user_chat_memberships WHERE is_active IS NOT TRUE)
--- runner:postcondition SELECT (SELECT count(*) FROM workspaces WHERE tz='UTC' AND id IN (SELECT id FROM legacy.chat_settings WHERE posting_timezone IS NOT NULL AND fn_safe_tz(posting_timezone) <> posting_timezone)) = (SELECT count(*) FROM audit_events WHERE detail->>'transform_log'='tz_discarded')
--- [Fork A arm] SELECT (SELECT count(*) FROM <quarantine feed 1>) = 0   -- shape per A ruling; A1: hard zero here
+-- runner:postcondition SELECT (SELECT count(*) FROM workspace_members) = (SELECT count(*) FROM legacy.user_chat_memberships WHERE is_active IS TRUE)   -- + deferred-chat term under A2 (a deferred chat defers its members with it)
+-- runner:postcondition SELECT (SELECT count(*) FROM audit_events WHERE actor_kind='migration' AND entity_kind='member' AND detail->>'transform_log'='membership_dropped_inactive') = (SELECT count(*) FROM legacy.user_chat_memberships WHERE is_active IS NOT TRUE)   -- + deferred-chat term under A2
+-- runner:postcondition SELECT (SELECT count(*) FROM workspaces WHERE tz='UTC' AND id IN (SELECT id FROM legacy.chat_settings WHERE posting_timezone IS NOT NULL AND fn_safe_tz(posting_timezone) <> posting_timezone)) = (SELECT count(*) FROM audit_events WHERE detail->>'transform_log'='tz_discarded')   -- both sides defer together under A2; holds under every A shape
 ```
 
 **M1-03**
@@ -462,7 +470,7 @@ Per file, the verbatim `-- runner:postcondition` lines (each a single-boolean SE
 -- runner:postcondition SELECT (SELECT count(*) FROM audit_events WHERE actor_kind='migration' AND detail->>'op'='INSERT') = (SELECT count(*) FROM workspaces) + (SELECT count(*) FROM workspace_members) + (SELECT count(*) FROM ig_accounts) + (SELECT count(*) FROM channel_bindings)   -- G-ACCOUNTING closes
 ```
 
-*(The `<quarantine …>` terms are the one notation this file cannot make concrete: their table/expression is Fork A's output. Under A1 each collapses to a literal `0`.)*
+*(The `<quarantine …>` terms are the one notation this file cannot make concrete: their table/expression is Fork A's output. Under A1 each collapses to a literal `0`. Under A2 note the subtree consequence: a deferred **chat** defers its whole subtree — workspace, members, bindings, sources, accounts, media, history — so every downstream count identity gains the same deferred term, all closed by the resolution file; the `-- + deferred-chat term under A2` markers name the sites.)*
 
 ---
 
@@ -480,6 +488,6 @@ Per file, the verbatim `-- runner:postcondition` lines (each a single-boolean SE
 | Per-table reconciliation queries review-approved | **Met at this PR's approval** — the queries are in §6 in full; review of this document *is* the approval mechanism; fork-conditional terms are approved as marked, and their concretization re-enters review with the ruling | §6 |
 | The quarantine procedure is written | **SHORT — deliberately.** Feeds and detection are written (§5.1–5.2); the procedure's home, shape, and actor are Fork A's output and are **not invented here** (per the dispatch: a spec that says so beats one that quietly picks A3) | §5.3, §3.1 |
 
-**Executable now vs awaiting a ruling:** M1-01, M1-03, M1-05 (modulo its ruled preconditions), M1-07 (C-conditional cell aside), M1-10, M1-11 are fully determined. M1-02/M1-08 are determined except their Fork A arm (and C cells); M1-04 except Fork B's one cell (and C's token residue); M1-06 except Fork E's live-`recent` rows. **No file lands before Fork A is ruled** (contract rule 8) — but under the F.2 constraint none *can* land yet anyway (the 3e band opens when F.2.9 closes), so the fork-ruling window is exactly the F.2 build window, and it costs nothing on the critical path **if** the rulings land within it.
+**Executable now vs awaiting a ruling:** M1-01, M1-05 (modulo its ruled preconditions), M1-07 (C-conditional cell aside), M1-10, M1-11 are fully determined. M1-03 is determined except its `state` cell (§3.8-A — two ratified texts conflict, so no interim default exists). M1-02/M1-08 are determined except their Fork A quarantine terms (and C cells); M1-04 except Fork B's one cell (and C's token residue — §3.8-B's interim is the ruled blanket, so that cell IS determined); M1-06 except Fork E's live-`recent` rows. **No file lands before Fork A is ruled** (contract rule 8) — but under the F.2 constraint none *can* land yet anyway (the 3e band opens when F.2.9 closes), so the fork-ruling window is exactly the F.2 build window, and it costs nothing on the critical path **if** the rulings land within it.
 
 **Program-shape note (not this spec's call):** #790 comment 5280282481 proposes splitting M.1 into derivations-now / INSERTs-after-F.2. This document is deliberately structured so either shape works: §4's derivations (owner ladder, role map, attribution timeline, tz classification) are testable against seeded legacy fixtures without any target table; §6's INSERT-side postconditions bind only when the files land.
