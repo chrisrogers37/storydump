@@ -15,18 +15,9 @@ satisfy — *"A comparator that cannot fail proves nothing."* Every check below
 is paired with a proof that it CAN fail.
 """
 
-import functools
-
 import pytest
 
-from scripts.advertised_ddl import (
-    DEFAULT_DOCS,
-    DEFAULT_MANIFEST,
-    build_stream,
-    load_manifest,
-    normalize_statements,
-)
-from tests.scripts.conftest import F2_2_END, F2_6_END
+from tests.scripts.conftest import F2_2_END, F2_6_END, advertised_stream
 from scripts.tenancy_gate import (
     _tenancy_entry,
     expected_tenancy,
@@ -37,18 +28,13 @@ from scripts.tenancy_gate import (
 )
 
 
-@functools.lru_cache(maxsize=1)
-def _real_stream():
-    """The advertised stream, built once per process.
-
-    Measured on this host: build + normalize is ~33 ms and the class below calls
-    it six times, so ~163 ms of every run was rebuilding the same immutable
-    list. Cached rather than passed around because callers only ever slice it,
-    and slicing copies. Same shape as `conftest.migration_files`.
-    """
-    return normalize_statements(
-        build_stream(DEFAULT_DOCS, load_manifest(DEFAULT_MANIFEST))
-    )
+#: The advertised stream, built once per process — now `conftest`'s, not this
+#: file's. It was defined here with the measurement that justified caching it
+#: (~33 ms a build, six calls in the class below); `test_lineage_lane.py` then
+#: grew a byte-identical copy WITHOUT the cache, which is the ordinary end of
+#: two files owning one derivation. Promoted rather than re-copied, so the next
+#: suite that needs it finds a cached spelling instead of writing a third.
+_real_stream = advertised_stream
 
 
 def _sig(**tables):
