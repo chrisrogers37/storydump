@@ -122,7 +122,7 @@ build.
 
 | # | Bar item | What the enumeration found |
 |---|---|---|
-| C1 | `cancel` | No per-intent cancel. The three `cancel`-shaped callbacks — `batch_approve_cancel`, `settings_edit_cancel`, `cancel_reject` — are all **dialog dismissals**, not cancellation of a queued intent. Never present, not retired. |
+| C1 | `cancel` | No per-intent cancel. The four `cancel`-shaped paths — `batch_approve_cancel`, `settings_edit_cancel`, `cancel_reject`, and the `action == "cancel"` branch of `handle_reset_callback` (`telegram_callbacks_admin.py:323`, registered as the `clear` callback, "Legacy name for reset" — replies *"Cancelled — Queue was not cleared"*) — are all **dialog dismissals**, not cancellation of a queued intent. Never present, not retired. |
 | C2 | `sync_now` | **Retired, not absent** (§5). `/sync` is registered and answers *"has been retired… Sync from the dashboard."* The underlying capability runs as a background loop (`loops/media_sync_loop.py`, `core/media_sync.py:179`); the user-facing command was deliberately removed. |
 | C3 | `pause` / `resume` | **Retired, not absent** (§5). `/pause` and `/resume` are registered and answer *"has been retired… Use Quick Controls in the dashboard."* State lives on `chat_settings.is_paused` (`src/models/chat_settings.py:41-43`), toggled from the dashboard (`src/api/routes/onboarding/settings.py:41-47`). |
 
