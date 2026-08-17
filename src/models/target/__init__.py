@@ -19,16 +19,45 @@ later point nobody can predict. ``create_all`` on a base whose only members
 there is no list, so there is nothing to drift. The check that requires no
 invented input beats the check that requires a correct one.
 
-**It is empty right now, and that is a real state rather than a stub.** Zero
-target tables exist today; F.2.2 onward registers them here. The lane parity
-test asserts the emptiness explicitly rather than passing silently on it, so
-the first model to land forces a deliberate update instead of quietly
-converting a vacuous green into a load-bearing one.
+**Lane parity is LOAD-BEARING from F.2.2 on.** It was vacuous while both sides
+were empty and said so; migration 053 landed 02 §1's seven tables and this
+module registers their models in the same increment, so the comparison now runs
+on two populated schemas. That coupling is not a convention to remember — the
+gate enforces it, because tables on only one side is exactly the drift it
+reports.
+
+**Models land per increment, not in one pass.** The alternative was considered
+and the gate settled it rather than taste: deferring every model to one late
+pass means running lane parity knowingly red from F.2.2 through F.2.7, which is
+the "red and known" cost #806 Fork 1 declined when it declined option D.
+
+**Importing a model module is what registers it**, so every increment's module
+is imported here rather than only where it is used. Nothing below is
+decoration: drop an import and its table silently leaves ``create_all``'s
+output, which reads as a parity failure against the migration that installed it.
 
 At M.3 the application is flipped over to this base — a visible switch, not a
 rewrite.
 """
 
 from src.models.target.base import TargetBase
+from src.models.target.identity_and_tenancy import (
+    ChannelBinding,
+    OnboardingSession,
+    User,
+    UserIdentity,
+    Workspace,
+    WorkspaceInvitation,
+    WorkspaceMember,
+)
 
-__all__ = ["TargetBase"]
+__all__ = [
+    "TargetBase",
+    "ChannelBinding",
+    "OnboardingSession",
+    "User",
+    "UserIdentity",
+    "Workspace",
+    "WorkspaceInvitation",
+    "WorkspaceMember",
+]
