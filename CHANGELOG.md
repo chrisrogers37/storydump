@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`_auto_approve_instagram` is now the third and final tenant-credential caller pinned by a resolution-injection test, closing #797** — #796 removed the broad `except` that let a named tenant's OAuth failure fall through to the deployment-wide service account; the review stated its bound rather than implying it: fail-closed confirmed at 1 of 3 callers by inspection, the other two left open. #819 covered two (`telegram_autopost.py`, `telegram_notification.py`). This is the third.
+  - **Tests only. No source change — the property already held.** `_auto_approve_instagram` has no `except` around its body at all; the `finally` guards only its own Cloudinary cleanup (`except Exception: pass`, scoped to that one call). A credential-resolution failure from `get_provider_for_media_item` was never inside that guard, so it already propagated. That is the expected outcome of closing a verification gap, not a defect narrowly avoided — reported as a finding rather than framed as a fix.
+  - **Confirmed, not assumed.** Written against current `main` first: both new tests pass unmutated. Then mutation-checked — reintroducing a generic `except Exception: return None` around the body reddens both with the exact `DID NOT RAISE` signature, and a third, added positive-control test (a legitimate call, full success path) stays green under the same mutation, proving the tests discriminate rather than merely being strict.
+  - **Injected at the same seam #819 used, for the same reason.** `get_provider_for_media_item` is patched with a `side_effect` — the point a tenant with broken OAuth actually reaches before any provider exists, not `provider.download_file`, which fires only after resolution already succeeded.
+  - **Anti-vacuity, matching #819's pattern.** Every test asserts the mock was actually called, and with this tenant's `telegram_chat_id` — a fail-closed assertion that never reaches resolution passes for free against a method that bails out earlier (e.g. at the safety check).
+  - **Both directions, same reason #819 gave.** A non-auth `ValueError` also escapes, unmarked as a control — this caller's fail-closed property comes from having no handler at all, not from special-casing auth, and asserting only the auth case would leave a narrower future catch green.
+  - **Closes #797 this time.** #819 deliberately stripped the `Closes` keyword because one caller remained uncovered. All three are now pinned — `scheduler.py` verified by inspection in the #796 review and now executably tested, the other two by #819 — so the issue's own suggested work is complete.
+
 ### Fixed
 
 - **`tests/scripts/` now REFUSES pytest-xdist instead of queueing silently for twenty minutes, and the two guides that recommended `-n auto` now print a command that works (#809)** — the directory serializes every session on `SUITE_CLUSTER_LOCK_KEY` because the seven `svc_*` roles are cluster-scoped spec names that cannot be namespaced per session (#768). Under `-n` each worker is a separate process with its own session, so workers 2..N queue on a lock the first holds until the session ends.
