@@ -150,17 +150,22 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SETUP_SQL = REPO_ROOT / "scripts" / "setup_database.sql"
 
 #: Advertised-stream boundaries for the F.2 increments (#806, ruling (a)), used
-#: by the lane tenancy control and the derivation's unit tests. Named because
-#: the same two numbers appear in two files, and the stream is generated from
-#: `02`/`07` plan text — one inserted statement moves both, and a bare literal
-#: lets the two files drift apart while each stays green.
+#: by the derivation's unit tests. Held here because the stream is generated
+#: from `02`/`07` plan text — one inserted statement moves every boundary, and a
+#: bare literal at each use site lets consumers drift apart while each stays
+#: green.
 #:
 #: DELIBERATELY LITERAL, NOT DERIVED. `F2_6_END` is "the index of the first
 #: ENABLE ROW LEVEL SECURITY", and a test asserts exactly that property at that
 #: bound; deriving it from the stream would make that assertion true by
 #: construction. Re-derive them by hand when the plan changes — that is a review
 #: event, which is the point.
-F2_2_START = 2  # 052's two shared functions occupy 0..1
+#:
+#: `F2_2_START` lived here too and went with migration 053: it existed to slice
+#: the F.2.2 segment out of the stream for a control that STAGED that segment
+#: while the target lineage was empty. The lineage carries it for real now, so
+#: the slice has no consumer — and an unconsumed literal is the drift this
+#: comment block exists to prevent, not an example of preventing it.
 F2_2_END = 22  # F.2.2 = stream[2:22]: 7 tables, 4 tenant-keyed, no RLS
 F2_6_END = 126  # end of F.2.6 — the last index before any RLS is enabled
 BOOTSTRAP_SQL = REPO_ROOT / "scripts" / "window" / "step0_bootstrap.sql"
@@ -839,6 +844,38 @@ def bootstrapped_db(admin_conn, roleless_db):
     dsn, _ = roleless_db
     run_bootstrap(admin_conn, dsn)
     return dsn
+
+
+@functools.lru_cache(maxsize=1)
+def advertised_stream():
+    """The expanded 02+07 advertised stream, NORMALIZED, built once per process.
+
+    ONE SPELLING for the whole suite. Two files had grown identical copies of
+    this and only one of them was cached; the other rebuilt the 257-statement
+    stream on every call. Measured on this host: ~36 ms per build, and the two
+    suites between them ask for it roughly ten times a run.
+
+    Cached because callers only ever slice it, and slicing copies — nothing in
+    the suite writes to the plan docs or the manifest (every fixture that
+    rewrites either targets `tmp_path`), so there is no invalidation to miss.
+
+    NORMALIZED IS A COMPARISON KEY AND NOT EXECUTABLE SQL, which matters when
+    writing the next increment's migration: normalization collapses whitespace
+    and drops full-line comments, and `02` prints an inline `--` inside
+    `CREATE TABLE onboarding_sessions`, so a normalized statement run as SQL
+    comments out its own tail.
+    """
+    from scripts.advertised_ddl import (
+        DEFAULT_DOCS,
+        DEFAULT_MANIFEST,
+        build_stream,
+        load_manifest,
+        normalize_statements,
+    )
+
+    return normalize_statements(
+        build_stream(DEFAULT_DOCS, load_manifest(DEFAULT_MANIFEST))
+    )
 
 
 @functools.lru_cache(maxsize=None)

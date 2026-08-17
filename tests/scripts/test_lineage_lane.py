@@ -9,10 +9,15 @@ state the F.2 target files will land into.
 
 Three things are asserted here that no other suite can see:
 
-1. **The move happened, and `public` came back empty.** That emptiness is the
-   F.2 files' stated precondition — in CI by replay-from-empty, in production
-   by this same file at M.3 step 3c, so the gate and the window are the same
-   act against the same precondition.
+1. **The move happened, and what is in `public` afterwards came from the TARGET
+   lineage.** The move leaves `public` empty and that emptiness is the F.2
+   files' stated precondition — in CI by replay-from-empty, in production by
+   this same file at M.3 step 3c, so the gate and the window are the same act
+   against the same precondition. From migration 053 the emptiness is no longer
+   observable at the END of the lane, because F.2 builds into it; what is
+   asserted instead is that `public` holds exactly the tables the target
+   lineage implies, which fails on a legacy leftover the same way and on an
+   undeclared target table as well.
 2. **`legacy` holds the inventory the running application declares.** Derived
    from the legacy models rather than from a written-down table list — the
    assertion the migration's own postconditions deliberately do not make,
@@ -32,6 +37,9 @@ suite does not close it and must not widen it — it proves the SQL replays, not
 that it replays under the declared actor.
 """
 
+import functools
+import re
+
 import pytest
 
 from scripts.migration_runner import (
@@ -41,14 +49,10 @@ from scripts.migration_runner import (
     discover_migrations,
     legacy_lineage_max,
     schema_move_migration,
-    split_statements,
 )
 from scripts.advertised_ddl import (
-    DEFAULT_DOCS,
-    DEFAULT_MANIFEST,
-    build_stream,
-    load_manifest,
     normalize_statements,
+    target_lineage_files,
     target_lineage_statements,
 )
 from scripts.schema_parity import schema_diff, schema_signature
@@ -60,9 +64,8 @@ from scripts.tenancy_gate import (
 )
 from src.utils.validators import MIGRATIONS_DIR
 from tests.scripts.conftest import (
+    advertised_stream,
     as_user,
-    F2_2_END,
-    F2_2_START,
     LEGACY_LINEAGE_MAX,
     SETUP_SQL,
     execute,
@@ -74,33 +77,90 @@ from tests.scripts.conftest import (
 )
 
 
-def run_lane(dsn, migrations_dir=MIGRATIONS_DIR):
+def run_lane(dsn):
     """The §0.2 lineage run: legacy setup applied by hand the way production's
     actually was, then ONE unbounded runner invocation across the boundary —
     001–050, the move, and the F.2 target files as they land.
 
-    `migrations_dir` is overridable for ONE caller: the positive control that
-    stages a future F.2 increment into a throwaway tree. It takes the parameter
-    rather than re-implementing these two lines so that the control replays the
-    same lane it certifies — a hand-rolled copy would keep passing after the
-    real lane gained a step, which is the failure mode a control exists to
-    rule out.
+    It took an overridable `migrations_dir` while the target lineage was empty,
+    for the one control that staged a future increment into a throwaway tree.
+    053 landed that increment for real, so the control and the parameter went
+    with it — the lane now replays the thing itself.
     """
     psql_apply(dsn, [SETUP_SQL])
-    return apply_pending(dsn, migrations_dir)
+    return apply_pending(dsn, MIGRATIONS_DIR)
 
 
-def real_stream(normalized=True):
-    """The advertised stream from the committed docs + manifest.
+@functools.lru_cache(maxsize=1)
+def _lineage_length():
+    """How many statements the target lineage carries — the length that decides
+    which prefix of the advertised stream it is supposed to equal.
 
-    One spelling, because the raw and normalized lists are NOT interchangeable
-    and the difference has already bitten: normalized statements are a
-    comparison key (whitespace collapsed, full-line comments dropped), while
-    `02` prints an inline `--` inside `CREATE TABLE onboarding_sessions` — so a
-    normalized statement executed as SQL comments out its own tail.
+    Cached alongside the stream itself: nothing in the suite writes to the real
+    migrations directory (every `write_migration` call targets `tmp_path`), so
+    there is no invalidation to miss.
     """
-    raw = build_stream(DEFAULT_DOCS, load_manifest(DEFAULT_MANIFEST))
-    return normalize_statements(raw) if normalized else raw
+    return len(target_lineage_statements(MIGRATIONS_DIR))
+
+
+@functools.lru_cache(maxsize=1)
+def implied_tenancy():
+    """The tenancy state the target lineage IMPLIES — `expected_tenancy` over
+    the advertised stream's prefix of the lineage's own statement length.
+
+    ONE HOME FOR THE PREFIX RULE. `target_lineage_statements`' own docstring
+    warns that deriving the lineage twice lets the validated list and the list
+    driving the slice diverge the first time the lineage needs any filtering,
+    with only one site updated. This is that one site.
+
+    It is the plan's answer, not the database's, so a test comparing a replayed
+    catalog against it is comparing two independent objects rather than
+    restating one.
+    """
+    return expected_tenancy(advertised_stream()[: _lineage_length()])
+
+
+def implied_target_tables():
+    """The table names `implied_tenancy` implies.
+
+    DERIVED, never a written-down list, and that is the whole point: a list of
+    F.2.2's seven tables would be a second enumeration of the increment, right
+    on the day it is typed and silently wrong the first time an increment lands
+    without someone remembering to edit it. Read this way, the next increment
+    updates every caller by existing.
+
+    A `frozenset` because the source is memoized — handing callers a shared
+    mutable set would let one test's set arithmetic land in another's.
+    """
+    return frozenset(implied_tenancy())
+
+
+#: `CREATE FUNCTION`, with the `OR REPLACE` the plan does not currently use but
+#: is not forbidden from using. Anchored at the start, because these are whole
+#: normalized statements and so a match can only be the statement's own name.
+_CREATE_FUNCTION = re.compile(r"CREATE (?:OR REPLACE )?FUNCTION (\w+)")
+
+
+def implied_target_functions():
+    """The functions the target lineage implies, sorted the way `pg_proc`
+    reports them.
+
+    DERIVED FOR THE SAME REASON THE TABLES ARE, and not doing so costs more
+    here than it looks. The stream holds 18 `CREATE FUNCTION`s and four have
+    landed; the remaining 14 are not appends but INSERTIONS INTO A SORTED LIST,
+    since the assertion compares against `proname` order — so a literal list
+    would need re-sorting by hand at each of the five remaining increments.
+
+    This does not make the assertion vacuous. The two sides are plan TEXT and a
+    live `pg_proc`, the same independent-objects shape as the tenancy
+    comparison; what it stops being is a transcription exercise.
+    """
+    names = {
+        match.group(1)
+        for statement in advertised_stream()[: _lineage_length()]
+        if (match := _CREATE_FUNCTION.match(statement))
+    }
+    return sorted(names)
 
 
 def _relnames(dsn, schema, kinds=None):
@@ -208,18 +268,23 @@ class TestTheBoundaryIsDerivedAndLoud:
         assert bounded, "the bound emptied the legacy lineage"
         assert max(m.version for m in bounded) == move.version - 1
 
-    def test_the_target_lineage_is_the_shared_functions_file(self):
-        """THE LANE'S TARGET LEG IS LOAD-BEARING FROM HERE (#806).
+    def test_the_target_lineage_is_the_increments_that_have_been_ratified(self):
+        """THE TARGET LINEAGE'S FILE LIST, enumerated deliberately.
 
-        This replaces `test_the_target_lineage_is_currently_empty_and_says_so`,
-        which disclosed that the leg replayed an empty set and named what it
-        expected to arrive: `02` §0's two shared trigger functions, F.2.1's one
-        surviving item. Migration 052 is exactly that, so the disclosure is
-        retired on its own terms rather than deleted.
+        An explicit list rather than a rule, and it is meant to need editing:
+        adding a file above the move is how F.2 advances, so each increment
+        should have to say so here once. That is the same shape as the
+        disclosure this replaced — `..._is_the_shared_functions_file`, retired
+        by 053 the way 052 retired the emptiness disclosure before it.
 
-        The other half of what it asked for — assertions about what those
-        files CREATE — is `test_the_lane_installs_the_shared_functions` below,
-        which needs a database and so cannot live in this class.
+        WHAT THIS SEES THAT ARM (b) CANNOT. The prefix diff in
+        `test_advertised_ddl.py` compares STATEMENTS, so a file above the move
+        carrying only comments contributes nothing and leaves it green. Only a
+        file-level assertion can see that file at all.
+
+        ORDER IS THE POINT, not membership: arm (b) is an ordered prefix, so
+        052's shared functions must precede 053's tables — every touch trigger
+        and `ck_ws_tz_valid` calls a function 052 creates.
 
         The boundary is still derived from the runner's own move-marker, not
         from the number 51.
@@ -230,26 +295,60 @@ class TestTheBoundaryIsDerivedAndLoud:
             for m in discover_migrations(MIGRATIONS_DIR)
             if m.version > move.version
         ]
-        assert above == ["052_shared_trigger_functions.sql"], (
-            f"the target lineage is {above}, expected exactly the shared"
-            " functions file — 052 is the head of the advertised stream and"
-            " nothing may be numbered above the move before it"
+        assert above == [
+            "052_shared_trigger_functions.sql",
+            "053_identity_and_tenancy_tables.sql",
+        ], (
+            f"the target lineage is {above}. If you are landing the next F.2"
+            " increment, add it here — deliberately, and at the end: arm (b)"
+            " is an ordered prefix of the advertised stream, so a file may"
+            " only ever be appended."
         )
+
+        # The hole the list exists for, closed mechanically rather than by
+        # enumeration: a lineage file contributing zero statements is invisible
+        # to arm (b) AND to every length-derived expectation in this file.
+        empty = [
+            f.name
+            for f in target_lineage_files(MIGRATIONS_DIR)
+            if not normalize_statements(f.read_text())
+        ]
+        assert empty == [], f"lineage files contributing no statements: {empty}"
 
 
 @pytest.mark.integration
 @pytest.mark.slow
 class TestTheLaneReplaysAcrossTheBoundary:
-    def test_one_run_applies_the_whole_corpus_and_leaves_public_empty(
+    def test_one_run_applies_the_whole_corpus_and_public_holds_only_the_target(
         self, bootstrapped_db
     ):
+        """The lane's end state, restated now that the target lineage builds
+        into `public` rather than leaving it empty.
+
+        THE PRECONDITION DID NOT CHANGE AND THE ASSERTION DID. "Public is
+        empty" is what the MOVE establishes and what the F.2 files then consume
+        — it was only ever observable at the end of the lane because nothing
+        above the move created a relation. 053 does, so an emptiness assertion
+        here would now be asserting that F.2 has not started.
+
+        What survives, and is the part that was always load-bearing: whatever is
+        in `public` at the end got there from the TARGET lineage. A legacy
+        leftover would still fail this, which is the failure the emptiness check
+        was really guarding — it is now expressed against the target's own
+        implied table set rather than against zero.
+        """
         report = run_lane(bootstrapped_db)
 
         applied = [m.version for m in report.applied]
         assert applied == [m.version for m in discover_migrations(MIGRATIONS_DIR)]
-        assert relations_in(bootstrapped_db, "public") == [], (
-            "the F.2 files' stated precondition is an EMPTY public — the move"
-            " is what makes it true, here and at M.3 step 3c alike"
+
+        implied = sorted(implied_target_tables())
+        assert sorted(tables_in(bootstrapped_db, "public")) == implied, (
+            "public does not hold exactly the target lineage's tables — either"
+            " the move left legacy relations behind (the precondition the F.2"
+            " files consume, and what this assertion has always been for), or"
+            " a target file installed something the advertised stream does not"
+            " declare at this point"
         )
 
     def test_legacy_holds_the_inventory_the_running_application_declares(
@@ -259,14 +358,33 @@ class TestTheLaneReplaysAcrossTheBoundary:
         grow. `ALTER SCHEMA … RENAME` moves the namespace and not the objects
         in it, so an in-file before/after inventory comparison cannot fail; the
         assertion that CAN fail is against an independent source of truth, and
-        the models are one — derived, so there is no list to drift."""
+        the models are one — derived, so there is no list to drift.
+
+        THE PUBLIC-SIDE HALF IS SCOPED TO NAMES THE TARGET DOES NOT REUSE, and
+        that scoping is forced rather than convenient. The target schema
+        deliberately re-uses `users` and `onboarding_sessions` — same concepts,
+        rebuilt — so from F.2.2 on those names exist in BOTH schemas and a bare
+        `declared & public == set()` reports a legacy leftover where there is
+        none. Comparing by name cannot distinguish a legacy table that failed to
+        move from a target table that was just created, so the assertion is
+        narrowed to the legacy-only names, where a hit still means exactly one
+        thing. The tables it can no longer speak for are covered by identity
+        rather than name in the parity gate, which compares their columns.
+        """
         run_lane(bootstrapped_db)
         declared = legacy_declared_tables()
 
         assert declared, "positive control: the legacy models registered nothing"
         missing = sorted(declared - set(tables_in(bootstrapped_db, "legacy")))
         assert missing == [], f"legacy is missing declared tables: {missing}"
-        assert declared & set(tables_in(bootstrapped_db, "public")) == set()
+
+        legacy_only = declared - implied_target_tables()
+        assert legacy_only, (
+            "every legacy table name is also a target table name — this check"
+            " has nothing left to discriminate on and needs rethinking"
+        )
+        stranded = sorted(legacy_only & set(tables_in(bootstrapped_db, "public")))
+        assert stranded == [], f"legacy tables stranded in public: {stranded}"
 
         # THE MUTATION, in the same test on the same database — the shape
         # `test_tenancy_gate.py` uses, and the reason it uses it: a comparator
@@ -316,20 +434,37 @@ class TestTheLaneReplaysAcrossTheBoundary:
         apply_pending(as_owner, MIGRATIONS_DIR, LEGACY_LINEAGE_MAX)
         run_lane(second_scratch_db)
 
-        assert tables_in(owner_db, "public"), (
+        # The contrast is drawn on LEGACY-ONLY table names, not on emptiness:
+        # from 053 the unbounded arm's `public` is populated — by the target
+        # schema — so "public is empty" no longer separates the two arms, while
+        # "the legacy schema is in public" still separates them exactly.
+        legacy_only = legacy_declared_tables() - implied_target_tables()
+        assert legacy_only, "no legacy-only name left to draw the contrast on"
+
+        assert legacy_only & set(tables_in(owner_db, "public")), (
             "bounded: the legacy schema is still in public, which is what the"
             " legacy-lineage suites assert against"
         )
-        assert relations_in(second_scratch_db, "public") == []
+        assert legacy_only & set(tables_in(second_scratch_db, "public")) == set(), (
+            "unbounded: the move ran, so the legacy schema must be out of"
+            " public — what is there instead is the target lineage"
+        )
 
-    def test_the_lane_installs_the_shared_functions(self, bootstrapped_db):
+    def test_the_lane_installs_the_target_functions(self, bootstrapped_db):
         """WHAT THE TARGET LEG CREATES (#806) — the second half of what the
         retired emptiness disclosure asked for.
 
         The lane replays across the boundary in one run, so this asserts the
         end state of that run rather than of `psql` against the file alone:
         after the move re-creates an empty `public`, 052 lands its two shared
-        functions INTO it.
+        functions INTO it and 053 adds the two owner-invariant ones.
+
+        FUNCTIONS ARE THE LANE'S OWN EYES HERE. The parity gate is
+        relation-scoped and reads `pg_class`, so it cannot see a function at
+        all; 053's constraint triggers are the "at least one owner" half of an
+        invariant whose "at most one" half is an index, and only the index side
+        is visible to any other check in the suite. Losing a trigger function
+        would leave every other assertion in this file green.
 
         `fn_safe_tz` is exercised rather than merely counted. Its whole reason
         for existing is the fallback — a zone the server does not recognize
@@ -338,10 +473,9 @@ class TestTheLaneReplaysAcrossTheBoundary:
         """
         run_lane(bootstrapped_db)
 
-        assert functions_in(bootstrapped_db, "public") == [
-            "fn_safe_tz",
-            "trg_touch_updated_at",
-        ]
+        implied = implied_target_functions()
+        assert implied, "positive control: the stream prefix implies no functions"
+        assert functions_in(bootstrapped_db, "public") == implied
 
         good, bad = fetch_one(
             bootstrapped_db,
@@ -432,12 +566,10 @@ class TestTheLaneReplaysAcrossTheBoundary:
         # The full target schema is separately checked at full strength today by
         # `test_advertised_ddl_replay.py::test_the_completed_target_schema_has_no_tenancy_violations`
         # — this lane check is the file-lineage half, never the only half.
-        f2 = target_lineage_statements(MIGRATIONS_DIR)
-        stream = real_stream()
-        expected = expected_tenancy(stream[: len(f2)])
+        expected = implied_tenancy()
         assert sig == expected, (
             f"the replayed target lineage does not carry the tenancy state its"
-            f" own stream prefix implies. Lineage is {len(f2)} statements;"
+            f" own stream prefix implies. Lineage is {_lineage_length()} statements;"
             f" expected {len(expected)} tables"
             f" ({sorted(tenant_keyed_tables(expected))} tenant-keyed), observed"
             f" {len(sig)} ({sorted(tenant_keyed_tables(sig))} tenant-keyed)."
@@ -447,54 +579,41 @@ class TestTheLaneReplaysAcrossTheBoundary:
             f" does.\n  expected: {expected}\n  observed: {sig}"
         )
 
-        # NON-VACUITY DISCLOSURE, as an ASSERTION rather than a print.
+        # THE COMPARISON IS NO LONGER VACUOUS, and that is asserted rather than
+        # assumed. The xfail tripwire that used to sit here fired on this
+        # increment exactly as designed and was removed with it (#806); what it
+        # was protecting — that nobody reads an empty comparison as coverage —
+        # is now a live requirement instead of a warning about a future one.
+        assert expected, (
+            "the prefix comparison is vacuous again — the target lineage"
+            " reports zero tables, so `sig == expected` above compared `{}` to"
+            " `{}` and passed without looking at anything"
+        )
+
+        # THE COST OF THE OLD SHAPE, MEASURED ON THE REAL LINEAGE RATHER THAN
+        # ARGUED. The invariant check this comparison replaced is RED on this
+        # exact catalog: F.2.2's four tenant-keyed tables carry no RLS, because
+        # the ratified stream does not enable it until index 126. They are
+        # correct — `sig == expected` just proved the lineage is precisely what
+        # the plan implies — and the old check calls them violations anyway.
+        # That is the five-increment window the prefix-aware form exists to
+        # survive, pinned here so nobody reverts the shape thinking it cosmetic.
         #
-        # With an empty prefix both sides are `{}` and the equality above
-        # compared nothing — which is legitimate today, and is exactly the state
-        # a reader must not mistake for coverage. An earlier version of this
-        # said so with `print()`; pytest captures stdout and surfaces it ONLY on
-        # failure, so the message was invisible on precisely the green runs it
-        # was written for. A disclosure that cannot be observed is not one.
-        #
-        # It fires exactly once: at F.2.2, in the same run as the first real
-        # comparison, forcing someone to remove it deliberately.
-        # `expected_tenancy`'s own non-degeneracy is a positive control in
-        # `test_tenancy_gate.py`, against the full 257-statement stream.
-        #
-        # XFAIL RATHER THAN A PLAIN ASSERT, and the reason is the SUMMARY LINE,
-        # not the traceback. To a human reading a failure the two are identical
-        # — the message below prints either way. To anything reading counts they
-        # are not: a by-design `FAILED` is indistinguishable from a regression
-        # at count level, and this estate's own documented regression procedure
-        # is a count-line diff (`N failed, M passed`). One expected failure
-        # sitting in that number corrupts the comparison for everyone using it.
-        # `XFAIL` is reported in its own column by every tool that reads pytest.
-        #
-        # Called IMPERATIVELY rather than as `@pytest.mark.xfail`, for two
-        # reasons the decorator cannot satisfy: its condition is evaluated at
-        # COLLECTION time and cannot see `expected`, which only exists after the
-        # replay has run; and applied unconditionally it would turn today's
-        # genuinely-passing run into `XPASS` — reporting a problem where there
-        # is none, which is the same misinformation in the other direction.
-        if expected:
-            pytest.xfail(
-                f"EXPECTED FAILURE — you have not broken anything. This check"
-                f" exists to fire exactly once, here, and this is that moment."
-                f"\n\n"
-                f"The target lineage now carries {len(expected)} tables"
-                f" ({sorted(expected)}), so the prefix comparison above has stopped"
-                f" being vacuous and is now doing real work. Until this run both"
-                f" sides were `{{}}` and it compared nothing — this line is what"
-                f" made that visible instead of letting an empty comparison read as"
-                f" coverage.\n\n"
-                f"CORRECT RESPONSE: delete this xfail block (and the comment"
-                f" above it) as part of the increment that landed the tables. Nothing"
-                f" else. Do NOT relax the `sig == expected` comparison above it,"
-                f" and do NOT bound it to a complete lineage — under #806 Fork 1"
-                f" ruling (a) the stream creates every table before enabling RLS on"
-                f" any of them, so tenant-keyed tables with no policy are CORRECT"
-                f" here and the comparison already accounts for that on both sides."
-            )
+        # THIS PIN EXPIRES, DELIBERATELY AND LOUDLY. It holds for every
+        # increment up to the first ENABLE ROW LEVEL SECURITY (stream index 126,
+        # `conftest.F2_6_END`); the increment that crosses that index turns these
+        # messages from "RLS is not enabled" to "no policy" and reddens this.
+        # That is the window CLOSING, not the gate breaking — the message says so
+        # rather than leaving a bare violations list to be misread.
+        expiry = "expires at the first ENABLE ROW LEVEL SECURITY (stream index 126)"
+        stale_shape = tenancy_violations(sig)
+        assert len(stale_shape) == len(tenant_keyed_tables(expected)) > 0, (
+            f"{stale_shape}\n  this pin {expiry}"
+        )
+        assert all("RLS is not enabled" in v for v in stale_shape), (
+            f"{stale_shape}\n  this pin {expiry} — if RLS has now landed, the"
+            " mid-stream window has closed and this pin should go with it"
+        )
 
         execute(
             bootstrapped_db,
@@ -505,12 +624,28 @@ class TestTheLaneReplaysAcrossTheBoundary:
             "CREATE POLICY p_lane_probe ON lane_tenancy_probe FOR ALL"
             "  TO svc_ingress USING (workspace_id IS NOT NULL)",
         )
-        sig = tenancy_signature(bootstrapped_db)
-        assert sig.get("lane_tenancy_probe", {}).get("tenant_keyed") is True, (
-            "the gate cannot see this replay's catalog at all — the empty"
-            " violation list above was measuring some other database"
+        probed = tenancy_signature(bootstrapped_db)
+        assert probed.get("lane_tenancy_probe", {}).get("tenant_keyed") is True, (
+            "the gate cannot see this replay's catalog at all — the signature"
+            " above was measuring some other database"
         )
-        assert tenancy_violations(sig) == [], "a correctly born table was flagged"
+
+        # THE DIRECTION THE PREFIX FORM UNIQUELY ADDS, on one object so the
+        # contrast is legible: the probe is a tenant-keyed table the stream does
+        # not declare at this position, born PERFECTLY CORRECTLY. The invariant
+        # check is blind to it by construction — it has RLS and a policy, so it
+        # adds nothing to the list — while the prefix comparison sees it at
+        # once. An undeclared table is exactly what a detector-based guarantee
+        # has to catch now that grouping no longer carries it (#806 Fork 1).
+        assert tenancy_violations(probed) == stale_shape, (
+            "the probe changed the invariant check's answer — it was meant to"
+            " be invisible to it, so this no longer isolates the direction the"
+            " prefix comparison uniquely covers"
+        )
+        assert probed != expected, (
+            "a correctly-born table the stream does not declare at this"
+            " position left the prefix comparison green"
+        )
 
         # THE MUTATION, on the replayed database itself: same table, policy
         # gone. `test_tenancy_gate.py` proves the predicate discriminates; what
@@ -521,126 +656,49 @@ class TestTheLaneReplaysAcrossTheBoundary:
             "lane_tenancy_probe" in v and "no policy" in v for v in violations
         ), violations
 
-    def test_the_prefix_comparison_holds_with_real_tables_and_fails_on_an_extra_one(
-        self, bootstrapped_db, tmp_path
-    ):
-        """POSITIVE CONTROL for the check above, which on today's lineage
-        compares `{}` to `{}` and says so.
-
-        An equality that has only ever been exercised on two empty dicts is not
-        evidence that it works — it is the same vacuous green this whole lane
-        exists to catch, one level up. So this replays a lineage that DOES carry
-        tables: the real F.2.2 segment (stream indices 2..21, seven tables, four
-        of them tenant-keyed) staged into a throwaway migrations directory, and
-        asserts the comparison holds against a populated catalog.
-
-        Then it mutates — one table the stream does not declare at that
-        position — and requires the comparison to go RED. Without that half this
-        would only prove the check passes, never that it can fail.
-
-        Staged in `tmp_path`, never the repo's migrations directory: this must
-        not become a way to land a file the ratified split has not approved.
-
-        NOTE the statements are taken RAW rather than normalized. Normalized
-        statements are a comparison key, not executable SQL — `02` prints an
-        inline `--` comment inside `CREATE TABLE onboarding_sessions`, and
-        collapsing that statement to one line comments out everything after it.
-
-        IT REPLAYS THE WHOLE CORPUS THROUGH `run_lane`, AND THAT COST IS A
-        DECISION. Measured: the corpus leg is ~5.6s of this test's ~6.5s, and
-        staging only `052` plus the segment into an empty tree reaches the same
-        seven tables — verified, not assumed, because 051 empties `public` and
-        052 creates functions rather than relations. It is kept anyway. This is
-        the control for a safety check, and its value is that it exercises the
-        SAME lane the check runs after; a shortcut equal today rests on the move
-        continuing to leave nothing behind, and would keep passing silently the
-        day that stopped being true. Fidelity over 5.6s, on a file that already
-        replays the corpus seven times.
-        """
-        import shutil
-
-        raw = real_stream(normalized=False)
-        stream = normalize_statements(raw)
-        segment = split_statements(raw)[F2_2_START:F2_2_END]
-
-        staged = tmp_path / "migrations"
-        shutil.copytree(MIGRATIONS_DIR, staged)
-        write_migration(
-            staged, 53, ";\n\n".join(s.strip() for s in segment) + ";", name="f2_2"
-        )
-
-        run_lane(bootstrapped_db, staged)
-
-        sig = tenancy_signature(bootstrapped_db)
-        expected = expected_tenancy(stream[:F2_2_END])
-        assert expected, "the control staged nothing — it is proving nothing"
-        assert len(tenant_keyed_tables(expected)) == 4, sorted(
-            tenant_keyed_tables(expected)
-        )
-        assert sig == expected, (
-            f"the comparison fails on a lineage it should accept.\n"
-            f"  expected: {expected}\n  observed: {sig}"
-        )
-
-        # THE COST OF THE OLD SHAPE, MEASURED HERE RATHER THAN ARGUED. On this
-        # exact catalog the invariant check this test replaced is RED: four
-        # tenant-keyed tables carry no RLS, because the ratified stream does not
-        # enable it until index 126. They are correct — `sig == expected` above
-        # just proved the lineage is exactly what the plan implies — and the old
-        # check calls them violations anyway. That is the five-increment window
-        # the prefix-aware form exists to survive, and asserting it non-empty
-        # pins the reason so nobody reverts the shape thinking it was cosmetic.
-        stale_shape = tenancy_violations(sig)
-        assert len(stale_shape) == len(tenant_keyed_tables(expected)), stale_shape
-        assert all("RLS is not enabled" in v for v in stale_shape), stale_shape
-
-        # THE MUTATION: a tenant-keyed table the stream does not declare at this
-        # position, born perfectly correctly. The invariant check cannot see it
-        # BY CONSTRUCTION — it has RLS and a policy, so it adds nothing to the
-        # list above. Only the prefix comparison can, and that is the direction
-        # the new form adds rather than merely preserves.
-        execute(
-            bootstrapped_db,
-            "CREATE TABLE undeclared_probe ("
-            "  id UUID PRIMARY KEY,"
-            "  workspace_id UUID NOT NULL);"
-            "ALTER TABLE undeclared_probe ENABLE ROW LEVEL SECURITY;"
-            "CREATE POLICY p_undeclared ON undeclared_probe FOR ALL"
-            "  TO svc_ingress USING (workspace_id IS NOT NULL)",
-        )
-        mutated = tenancy_signature(bootstrapped_db)
-        assert tenancy_violations(mutated) == stale_shape, (
-            "the undeclared table changed the invariant check's answer — it was "
-            "meant to be invisible to it, so this no longer isolates the "
-            "direction the prefix comparison uniquely covers"
-        )
-        assert mutated != expected, (
-            "a table the stream does not declare at this position left the "
-            "prefix comparison green"
-        )
-
-    def test_lane_parity_holds_and_discloses_that_it_is_currently_empty(
+    def test_lane_parity_holds_against_the_target_models(
         self, bootstrapped_db, second_scratch_db
     ):
-        """Lane parity under fork (a): the replayed `public` compared against
-        `create_all` on the TARGET base — the same comparator the legacy parity
-        gate uses, pointed at the other lineage.
+        """LANE PARITY IS LOAD-BEARING FROM HERE (#806, migration 053).
 
-        STILL VACUOUS AFTER 052, and for a reason worth stating rather than
-        inferring from a green: the target leg is no longer empty — the lane
-        now installs two functions — but this comparator is relation-scoped on
-        both sides (`schema_signature` over `pg_class`, `create_all` over
-        declared tables), and a function is not a relation. So 052 moves
-        neither side and the arithmetic is still on two empty sets.
+        `04` §0.2's parity arm: the replayed `public` compared against
+        `create_all` on the TARGET base — the same comparator the legacy gate
+        uses, pointed at the other lineage. It was vacuous through 052 and said
+        so in its own name, because the comparator is relation-scoped on both
+        sides and 052 creates only functions. 053's seven tables are what switch
+        it on, so that disclosure is retired the way it asked to be: by becoming
+        a real comparison rather than by being deleted.
 
-        The disclosure therefore stands as written, and the assertions below
-        are unchanged. F.2.2's first table is what switches this on.
+        This is also what settles "do target models land per increment or in one
+        pass" — the question left open at scoping. It is not a preference:
+        tables on the migration side with no models behind them IS the drift
+        this gate reports, so a one-pass reading means running it knowingly red
+        for five increments.
+
+        THE MODELS SIDE NEEDS 052 FIRST, and that is a real dependency rather
+        than a convenience. `ck_ws_tz_valid` calls `fn_safe_tz`, so `create_all`
+        cannot execute at all against a database lacking it — a CHECK naming a
+        missing function is a hard error, not a skipped constraint. Applying the
+        head of the target lineage supplies exactly that, and that it cannot
+        contaminate the comparison is asserted below rather than argued: it
+        creates no relations, so it moves neither side of a relation-scoped
+        diff.
         """
         from sqlalchemy import create_engine
 
         from src.models.target import TargetBase
 
         run_lane(bootstrapped_db)
+
+        # The function prerequisite, taken from the lineage's OWN HEAD rather
+        # than named by filename — `test_advertised_ddl.py` independently pins
+        # that head to the two shared functions and to carrying no table.
+        psql_apply(second_scratch_db, [target_lineage_files(MIGRATIONS_DIR)[0]])
+        assert relations_in(second_scratch_db, "public") == [], (
+            "the prerequisite created a relation — it is meant to supply"
+            " functions only, and anything else it creates lands on the models"
+            " side of a comparison that must be `create_all` alone"
+        )
 
         engine = create_engine(second_scratch_db)
         TargetBase.metadata.create_all(engine)
@@ -651,16 +709,31 @@ class TestTheLaneReplaysAcrossTheBoundary:
         )
         assert diffs == [], "lane parity drift:\n" + "\n".join(diffs)
 
-        # NON-VACUITY DISCLOSURE — both halves, because either one becoming
-        # non-empty alone is the drift this gate exists to catch.
-        assert list(TargetBase.metadata.tables) == [], (
-            "target models now exist. Lane parity is load-bearing from here —"
-            " update this disclosure deliberately."
+        # NON-VACUITY, both halves — what the retired disclosure was holding the
+        # place for. Either side going empty makes the diff above pass by
+        # comparing nothing, which is the failure it named.
+        #
+        # DERIVED FROM THE STREAM, never a written-down table list. The list
+        # would be a second enumeration of the increment — right the day it is
+        # typed, and silently wrong the first time an increment lands without
+        # someone remembering to edit it. Reading it off the advertised stream's
+        # prefix of the lineage's own length means the next increment updates
+        # this assertion by existing, and a models module that fails to keep up
+        # is what goes red.
+        implied = sorted(implied_target_tables())
+        assert implied, "positive control: the stream prefix implies no tables"
+
+        declared = sorted(TargetBase.metadata.tables)
+        assert declared == implied, (
+            f"the target models declare {declared}, the target lineage implies"
+            f" {implied}. Landing an increment's migration without its models —"
+            " or the reverse — is exactly the drift this gate reports."
         )
-        assert relations_in(bootstrapped_db, "public") == [], (
-            "the lane now creates relations in public. Lane parity is"
-            " load-bearing from here — update this disclosure deliberately."
-        )
+        # The replayed side needs no assertion of its own here: `diffs == []`
+        # reports table-set differences in BOTH directions, so an empty diff plus
+        # a models side pinned to `implied` pins the replayed side too. It is
+        # asserted directly, once, in
+        # `test_one_run_applies_the_whole_corpus_and_public_holds_only_the_target`.
 
     def test_the_moves_probe_refuses_every_shape_of_unmoved_database(
         self, scratch_db, second_scratch_db
