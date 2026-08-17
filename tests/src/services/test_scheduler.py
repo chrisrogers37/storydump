@@ -1996,3 +1996,179 @@ class TestAutoApproveClaimBeforePublish:
         )
         service.queue_repo.delete.assert_not_called()  # stuck, not released
         service.history_repo.create_idempotent.assert_not_called()
+
+
+# ------------------------------------------------------------------
+# Credential resolution must fail closed here too (#797 — the third
+# tenant-credential caller #796/#819 left open)
+# ------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestAutoApproveInstagramCredentialResolutionFailsClosed:
+    """`_auto_approve_instagram` holds the #796 property by a THIRD mechanism:
+    no `except` around the body at all. The `finally` only guards its own
+    Cloudinary cleanup (`except Exception: pass`, scoped to that one call) —
+    a resolution failure from `get_provider_for_media_item` is never inside
+    that guard, so it should already propagate to the caller unmolested.
+
+    Every existing test in this file replaces `_auto_approve_instagram`
+    wholesale (`service._auto_approve_instagram = AsyncMock(...)`), so none
+    of them can reach a failure injected AT resolution, inside the real
+    method body. This is the resolution-injection test #819 left uncovered
+    for #797, calling the real method.
+    """
+
+    @pytest.fixture
+    def scheduler_service(self):
+        with patch.object(SchedulerService, "__init__", lambda self: None):
+            return SchedulerService()
+
+    def _media(self):
+        return Mock(
+            id=uuid4(),
+            source_type="google_drive",
+            source_identifier="abc123",
+            file_name="meme.jpg",
+            file_path="meme.jpg",
+        )
+
+    @staticmethod
+    def _mocked_dependencies():
+        """`_auto_approve_instagram` constructs InstagramAPIService and
+        CloudStorageService itself (local imports, no injection point on the
+        service instance), so their defining classes are the only seam."""
+        mock_instagram = Mock()
+        mock_instagram.safety_check_before_post.return_value = {
+            "safe_to_post": True,
+            "errors": [],
+        }
+        mock_cloud = Mock()
+        return mock_instagram, mock_cloud
+
+    async def test_a_credential_resolution_auth_failure_is_not_absorbed(
+        self, scheduler_service
+    ):
+        """The tenant's auth error escapes `_auto_approve_instagram` rather
+        than being swallowed into a `None` (safe-to-retry) return. `None`
+        here reads as "nothing published, safe to retry" — an absorbed auth
+        error is not that: the tenant needs to reconnect Drive, not have the
+        scheduler quietly retry the same failure forever.
+
+        Injected at `get_provider_for_media_item`, the same seam #819 used
+        for the other two callers and for the same reason: it is what a
+        tenant with broken OAuth actually hits, before any provider exists.
+        """
+        service = scheduler_service
+        media_item = self._media()
+        cs = _make_chat_settings()
+        mock_instagram, mock_cloud = self._mocked_dependencies()
+
+        with (
+            patch(
+                "src.services.integrations.instagram_api.InstagramAPIService",
+                return_value=mock_instagram,
+            ),
+            patch(
+                "src.services.integrations.cloud_storage.CloudStorageService",
+                return_value=mock_cloud,
+            ),
+            patch(
+                "src.services.media_sources.factory.MediaSourceFactory"
+                ".get_provider_for_media_item",
+                side_effect=GoogleDriveAuthError("No Google Drive OAuth credentials"),
+            ) as mock_resolve,
+        ):
+            with pytest.raises(GoogleDriveAuthError, match="No Google Drive OAuth"):
+                await service._auto_approve_instagram(media_item, cs)
+
+        # Anti-vacuity: prove the credential path was actually walked, and for
+        # THIS tenant — without this the test also passes against a method
+        # that bails out (e.g. at the safety check) before resolving anything.
+        mock_resolve.assert_called_once()
+        assert mock_resolve.call_args.kwargs["telegram_chat_id"] == cs.telegram_chat_id
+        # It failed AT resolution — nothing was uploaded or posted on the
+        # tenant's behalf.
+        mock_cloud.upload_media.assert_not_called()
+        mock_instagram.post_story.assert_not_called()
+
+    async def test_a_non_auth_resolution_failure_also_escapes(self, scheduler_service):
+        """Control: the method absorbs NOTHING at resolution, rather than
+        special-casing auth errors specifically.
+
+        This caller's fail-closed property comes from having no handler at
+        all around the body — a different mechanism from the notification
+        path's explicit re-raise and the autopost path's unguarded call
+        (#819). Asserting only the auth case would leave a future `except
+        GoogleDriveAuthError: raise` here — narrower than "no except at
+        all" — green for every non-auth resolution failure.
+        """
+        service = scheduler_service
+        media_item = self._media()
+        cs = _make_chat_settings()
+        mock_instagram, mock_cloud = self._mocked_dependencies()
+
+        with (
+            patch(
+                "src.services.integrations.instagram_api.InstagramAPIService",
+                return_value=mock_instagram,
+            ),
+            patch(
+                "src.services.integrations.cloud_storage.CloudStorageService",
+                return_value=mock_cloud,
+            ),
+            patch(
+                "src.services.media_sources.factory.MediaSourceFactory"
+                ".get_provider_for_media_item",
+                side_effect=ValueError("malformed source config"),
+            ) as mock_resolve,
+        ):
+            with pytest.raises(ValueError, match="malformed source config"):
+                await service._auto_approve_instagram(media_item, cs)
+
+        mock_resolve.assert_called_once()
+        mock_cloud.upload_media.assert_not_called()
+        mock_instagram.post_story.assert_not_called()
+
+    async def test_a_legitimate_call_still_succeeds(self, scheduler_service):
+        """Positive control. Everything above proves a failure escapes; this
+        proves the method still does its actual job when nothing fails —
+        a guard that broke the happy path would be strict, not discriminating.
+        """
+        service = scheduler_service
+        media_item = self._media()
+        cs = _make_chat_settings()
+        mock_instagram, mock_cloud = self._mocked_dependencies()
+        mock_provider = Mock()
+        mock_provider.download_file.return_value = b"fake-bytes"
+        mock_cloud.upload_media.return_value = {
+            "url": "https://cloud.example/img.jpg",
+            "public_id": "pub123",
+        }
+        mock_cloud.get_story_optimized_url.return_value = (
+            "https://cloud.example/img.jpg"
+        )
+        mock_instagram.post_story = AsyncMock(return_value={"story_id": "story-42"})
+
+        with (
+            patch(
+                "src.services.integrations.instagram_api.InstagramAPIService",
+                return_value=mock_instagram,
+            ),
+            patch(
+                "src.services.integrations.cloud_storage.CloudStorageService",
+                return_value=mock_cloud,
+            ),
+            patch(
+                "src.services.media_sources.factory.MediaSourceFactory"
+                ".get_provider_for_media_item",
+                return_value=mock_provider,
+            ) as mock_resolve,
+        ):
+            result = await service._auto_approve_instagram(media_item, cs)
+
+        assert result == "story-42"
+        mock_resolve.assert_called_once()
+        mock_cloud.upload_media.assert_called_once()
+        mock_instagram.post_story.assert_called_once()
