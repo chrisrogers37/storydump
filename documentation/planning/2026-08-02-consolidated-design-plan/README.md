@@ -10,7 +10,7 @@
 - **Position:** pass 9 delivered; awaiting re-review. No work in flight on this document.
 - **Ratified:** FC-0..FC-9 (rulings, incl. the FC-3.2 amendment); D1–D41 per `03`, including D28 (conditional on clean delivery), D38 (scoped to launch scale with its stated revisit trigger), and D40/D41 (the window privilege split and the rollback ledger boundary — pass 7; amended pass 8 with the both-exits closure rule, pass 9 with subject-identity gating and the version-aware membership property).
 - **Open (product owner):** PA-1 — implementers build default (a) until ruled; email-provider ack — Resend as swappable default until acked; Google consent-screen publishing status (console fact); the three M.1 proposed drops, served as one batch (`03` pass-5 items — none load-bearing).
-- **Schedule gate:** the M.3 window cannot open before 0.1 App Review approval (FC-7.5) — submitting 0.1 is the program's long pole.
+- **Schedule gate — lifted (owner ruling 2026-08-18):** the M.3 window no longer waits for 0.1 App Review approval; FC-7.5's ordering constraint is removed while 0.1 itself **remains required** — it gates the owner's post-cutover reconnect, the app staying in its current integration state until approval lands (`00` FC-7 §5 carries the ruling verbatim). The long pole moves to the build itself (F/L → M.1 → M.2 → M.3) and its human gates (0.3 + media-dedup sign-off; #787; M.2's Neon provisioning; and **Fork A**, which blocks M.1 file-landing and therefore M.2 execution outright — M.1 spec §3.1/§5.3, file-contract rule 8).
 - **Next:** re-review; findings are dispositioned against the pass-9 record; the author does not merge.
 
 ## Codebase anchor (pass 4 — `main` @ `2e13f97`, 2026-08-03)
