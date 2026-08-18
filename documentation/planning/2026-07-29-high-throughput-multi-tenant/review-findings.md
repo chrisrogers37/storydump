@@ -346,7 +346,10 @@ and is not duplicated here. In summary:
   a constant budget.
 - **App Review is mandatory** and runs approximately 2–4 weeks per permission. This is a
   schedule dependency on the critical path, not a technical barrier — it needs to start
-  early because it cannot be compressed later.
+  early because it cannot be compressed later. *(Schedule status 2026-08-18: the mandatory
+  half stands unchanged; the critical-path coupling was lifted by owner ruling — the M.3
+  window no longer waits on approval, which now gates the post-cutover reconnect.
+  `../2026-08-02-consolidated-design-plan/00-fixed-constraints.md` FC-7 §5, PR #838.)*
 - **Only Professional accounts can be posted to.** A user on a personal account must
   convert to Professional and link a Facebook Page. This is onboarding friction that lands
   on the user, and it belongs in product planning rather than architecture.
