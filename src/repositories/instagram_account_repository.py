@@ -3,15 +3,65 @@
 from typing import Optional, List
 from datetime import datetime
 
+from sqlalchemy import and_, exists, or_
+
 from src.repositories.base_repository import BaseRepository
+from src.models.api_token import ApiToken
 from src.models.instagram_account import InstagramAccount
 
 
 class InstagramAccountRepository(BaseRepository):
     """Repository for InstagramAccount CRUD operations."""
 
+    def get_owned(
+        self,
+        chat_settings_id: str,
+        active_account_id: Optional[str],
+        include_unstamped_legacy: bool,
+        include_inactive: bool = False,
+    ) -> List[InstagramAccount]:
+        """Accounts the tenant OWNS — the same derivation the mutation door
+        enforces (#891): the chat's active pointer, any account holding a
+        token stamped with this chat_settings_id, and — for the deployment's
+        env chat only (`include_unstamped_legacy`) — accounts with no
+        chat-stamped tokens at all (legacy single-tenant data).
+
+        `instagram_accounts` carries no tenant column, so ownership is set
+        membership under this derivation rather than a WHERE on a column;
+        the read and the write sides must answer it identically or the list
+        becomes the existence oracle the mutation door refuses to be. The
+        agreement test pins the two together.
+        """
+        stamped_for_chat = exists().where(
+            and_(
+                ApiToken.instagram_account_id == InstagramAccount.id,
+                ApiToken.chat_settings_id == chat_settings_id,
+            )
+        )
+        stamped_for_anyone = exists().where(
+            and_(
+                ApiToken.instagram_account_id == InstagramAccount.id,
+                ApiToken.chat_settings_id.isnot(None),
+            )
+        )
+        ownership = [stamped_for_chat]
+        if active_account_id is not None:
+            ownership.append(InstagramAccount.id == active_account_id)
+        predicate = or_(*ownership)
+        if include_unstamped_legacy:
+            predicate = or_(predicate, ~stamped_for_anyone)
+
+        query = self.db.query(InstagramAccount).filter(predicate)
+        if not include_inactive:
+            query = query.filter(InstagramAccount.is_active)
+        result = query.order_by(InstagramAccount.display_name).all()
+        self.end_read_transaction()
+        return result
+
     def get_all_active(self) -> List[InstagramAccount]:
-        """Get all active Instagram accounts."""
+        """Get all active Instagram accounts — DEPLOYMENT-WIDE, no tenant
+        scope. Operator surfaces only (#891): a tenant-facing caller wants
+        `get_owned`."""
         result = (
             self.db.query(InstagramAccount)
             .filter(InstagramAccount.is_active)
