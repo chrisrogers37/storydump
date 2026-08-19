@@ -17,6 +17,7 @@ from src.services.core.telegram_utils import (
 )
 from src.utils.logger import logger
 from src.utils.resilience import telegram_edit_with_retry
+from src.repositories.tenant_scope import SYSTEM_SCOPE
 
 if TYPE_CHECKING:
     from src.services.core.telegram_callbacks_core import TelegramCallbackCore
@@ -110,11 +111,14 @@ class TelegramCallbackQueueHandlers:
                 )
                 self.service.queue_repo.delete(queue_id)
                 media_item = self.service.media_repo.get_by_id(
-                    str(queue_item.media_item_id)
+                    str(queue_item.media_item_id),
+                    chat_settings_id=SYSTEM_SCOPE,
                 )
             else:
                 # Re-fetch — may have been deleted by concurrent operation
-                queue_item = self.service.queue_repo.get_by_id(queue_id)
+                queue_item = self.service.queue_repo.get_by_id(
+                    queue_id, chat_settings_id=SYSTEM_SCOPE
+                )
                 if not queue_item:
                     logger.info(f"Queue item {queue_id[:8]} gone after session refresh")
                     await telegram_edit_with_retry(
@@ -295,7 +299,9 @@ class TelegramCallbackQueueHandlers:
             return
 
         # Re-fetch media_item to pick up the persisted generated_caption
-        media_item = self.service.media_repo.get_by_id(str(queue_item.media_item_id))
+        media_item = self.service.media_repo.get_by_id(
+            str(queue_item.media_item_id), chat_settings_id=SYSTEM_SCOPE
+        )
 
         # Rebuild caption and keyboard with the new generated caption
         active_account = self.service.ig_account_service.get_active_account(chat_id)
@@ -334,7 +340,9 @@ class TelegramCallbackQueueHandlers:
             return
 
         # Get media item for filename
-        media_item = self.service.media_repo.get_by_id(str(queue_item.media_item_id))
+        media_item = self.service.media_repo.get_by_id(
+            str(queue_item.media_item_id), chat_settings_id=SYSTEM_SCOPE
+        )
         file_name = _escape_markdown(media_item.file_name) if media_item else "Unknown"
 
         # Build confirmation keyboard (short labels - details in message above)
@@ -481,10 +489,13 @@ class TelegramCallbackQueueHandlers:
                 )
                 self.service.queue_repo.delete(queue_id)
                 media_item = self.service.media_repo.get_by_id(
-                    str(queue_item.media_item_id)
+                    str(queue_item.media_item_id),
+                    chat_settings_id=SYSTEM_SCOPE,
                 )
             else:
-                queue_item = self.service.queue_repo.get_by_id(queue_id)
+                queue_item = self.service.queue_repo.get_by_id(
+                    queue_id, chat_settings_id=SYSTEM_SCOPE
+                )
                 if not queue_item:
                     logger.info(f"Queue item {queue_id[:8]} gone after session refresh")
                     await telegram_edit_with_retry(

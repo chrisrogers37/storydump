@@ -380,7 +380,9 @@ class MediaSyncService(BaseService):
     def _handle_reactivation(self, file_info: MediaFileInfo, ctx: SyncContext) -> bool:
         """Case 3: Inactive record with same identifier — reactivate."""
         inactive = self.media_repo.get_inactive_by_source_identifier(
-            ctx.source_type, file_info.identifier, ctx.chat_settings_id
+            ctx.source_type,
+            file_info.identifier,
+            ctx.chat_settings_id,
         )
         if not inactive:
             return False

@@ -13,6 +13,7 @@ from src.repositories.history_repository import HistoryCreateParams
 from src.utils.logger import logger
 from src.utils.resilience import telegram_edit_with_retry
 from datetime import datetime, timezone
+from src.repositories.tenant_scope import SYSTEM_SCOPE
 
 if TYPE_CHECKING:
     from src.services.core.telegram_service import TelegramService
@@ -143,7 +144,8 @@ class TelegramCallbackCore:
         """
         with self._shared_session():
             media_item = self.service.media_repo.get_by_id(
-                str(queue_item.media_item_id)
+                str(queue_item.media_item_id),
+                chat_settings_id=SYSTEM_SCOPE,
             )
 
             # Idempotent on queue_item_id: a lingering 'processing' row can be
@@ -186,7 +188,8 @@ class TelegramCallbackCore:
         """
         with self._shared_session():
             media_item = self.service.media_repo.get_by_id(
-                str(queue_item.media_item_id)
+                str(queue_item.media_item_id),
+                chat_settings_id=SYSTEM_SCOPE,
             )
 
             self.service.history_repo.create_idempotent(

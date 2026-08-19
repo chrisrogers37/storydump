@@ -12,6 +12,7 @@ from src.repositories.category_mix_repository import CategoryMixRepository
 from src.utils.file_hash import calculate_file_hash
 from src.utils.image_processing import ImageProcessor
 from src.utils.logger import logger
+from src.repositories.tenant_scope import SYSTEM_SCOPE
 
 
 class MediaIngestionService(BaseService):
@@ -143,7 +144,9 @@ class MediaIngestionService(BaseService):
             category: Category extracted from folder structure
         """
         # Check if already indexed
-        existing = self.media_repo.get_by_path(str(file_path))
+        existing = self.media_repo.get_by_path(
+            str(file_path), chat_settings_id=SYSTEM_SCOPE
+        )
         if existing:
             logger.debug(f"Skipping already indexed file: {file_path}")
             return
@@ -152,7 +155,7 @@ class MediaIngestionService(BaseService):
         file_hash = calculate_file_hash(file_path)
 
         # Check for duplicate content — skip if an active item with same hash exists
-        if self.media_repo.get_active_by_hash(file_hash):
+        if self.media_repo.get_active_by_hash(file_hash, chat_settings_id=SYSTEM_SCOPE):
             logger.info(
                 f"Skipping duplicate content: {file_path.name} (hash: {file_hash[:8]}...)"
             )
@@ -183,6 +186,7 @@ class MediaIngestionService(BaseService):
             indexed_by_user_id=user_id,
             source_type="local",
             source_identifier=str(file_path),
+            chat_settings_id=SYSTEM_SCOPE,
         )
 
         category_info = f" [{category}]" if category else ""
@@ -196,7 +200,7 @@ class MediaIngestionService(BaseService):
             List of tuples (file_hash, count, paths)
         """
         with self.track_execution("detect_duplicates") as run_id:
-            duplicates = self.media_repo.get_duplicates()
+            duplicates = self.media_repo.get_duplicates(chat_settings_id=SYSTEM_SCOPE)
 
             self.set_result_summary(run_id, {"duplicates_found": len(duplicates)})
 
@@ -223,11 +227,11 @@ class MediaIngestionService(BaseService):
 
     def get_categories(self) -> list[str]:
         """Return all distinct category names in the library."""
-        return self.media_repo.get_categories()
+        return self.media_repo.get_categories(chat_settings_id=SYSTEM_SCOPE)
 
     def get_category_counts(self) -> dict:
         """Return count of active media per category."""
-        return self.media_repo.count_by_category()
+        return self.media_repo.count_by_category(chat_settings_id=SYSTEM_SCOPE)
 
     # ------------------------------------------------------------------
     # Category mix operations (wrapping CategoryMixRepository)
@@ -235,24 +239,30 @@ class MediaIngestionService(BaseService):
 
     def get_current_mix(self) -> list:
         """Return the currently active category mix records."""
-        return self.category_mix_repo.get_current_mix()
+        return self.category_mix_repo.get_current_mix(chat_settings_id=SYSTEM_SCOPE)
 
     def get_current_mix_as_dict(self) -> dict:
         """Return current mix as ``{category: ratio}`` dict."""
-        return self.category_mix_repo.get_current_mix_as_dict()
+        return self.category_mix_repo.get_current_mix_as_dict(
+            chat_settings_id=SYSTEM_SCOPE
+        )
 
     def has_current_mix(self) -> bool:
         """Check whether a category mix has been configured."""
-        return self.category_mix_repo.has_current_mix()
+        return self.category_mix_repo.has_current_mix(chat_settings_id=SYSTEM_SCOPE)
 
     def get_categories_without_ratio(self, categories: list[str]) -> list[str]:
         """Return categories that don't have a ratio set."""
-        return self.category_mix_repo.get_categories_without_ratio(categories)
+        return self.category_mix_repo.get_categories_without_ratio(
+            categories, chat_settings_id=SYSTEM_SCOPE
+        )
 
     def set_category_mix(self, ratios: dict) -> None:
         """Save a new category mix (deactivates the previous one)."""
-        self.category_mix_repo.set_mix(ratios)
+        self.category_mix_repo.set_mix(ratios, chat_settings_id=SYSTEM_SCOPE)
 
     def get_mix_history(self, category: Optional[str] = None) -> list:
         """Return category mix change history."""
-        return self.category_mix_repo.get_history(category=category)
+        return self.category_mix_repo.get_history(
+            category=category, chat_settings_id=SYSTEM_SCOPE
+        )

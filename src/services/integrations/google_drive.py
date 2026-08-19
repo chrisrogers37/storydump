@@ -9,6 +9,7 @@ from src.services.base_service import BaseService
 from src.services.media_sources.google_drive_provider import GoogleDriveProvider
 from src.utils.encryption import TokenEncryption
 from src.utils.logger import logger
+from src.repositories.tenant_scope import SYSTEM_SCOPE
 
 
 class GoogleDriveService(BaseService):
@@ -93,6 +94,7 @@ class GoogleDriveService(BaseService):
                     "credential_type": cred_type,
                     "service_account_email": creds_dict.get("client_email", "unknown"),
                 },
+                chat_settings_id=SYSTEM_SCOPE,
             )
 
             logger.info(

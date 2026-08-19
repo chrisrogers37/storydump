@@ -3,6 +3,7 @@
 import pytest
 from unittest.mock import MagicMock, patch
 
+from src.repositories.tenant_scope import SYSTEM_SCOPE, TenantContextError
 from src.repositories.base_repository import BaseRepository
 
 
@@ -157,13 +158,18 @@ class TestBaseRepository:
         mock_query.filter.assert_called_once()
         assert result is mock_query.filter.return_value
 
-    def test_apply_tenant_filter_without_id(self, repo):
-        """Test _apply_tenant_filter is no-op when chat_settings_id is None."""
+    def test_apply_tenant_filter_refuses_absent_context(self, repo):
+        """F.1 contract flip (#841): None used to mean "no filter" — the
+        fail-open default. Absent context now raises at the boundary; the
+        deliberate cross-tenant form is the explicit SYSTEM_SCOPE marker."""
         mock_query = MagicMock()
         mock_model = MagicMock()
 
-        result = repo._apply_tenant_filter(mock_query, mock_model, None)
+        with pytest.raises(TenantContextError):
+            repo._apply_tenant_filter(mock_query, mock_model, None)
+        mock_query.filter.assert_not_called()
 
+        result = repo._apply_tenant_filter(mock_query, mock_model, SYSTEM_SCOPE)
         mock_query.filter.assert_not_called()
         assert result is mock_query
 
@@ -183,21 +189,16 @@ class TestBaseRepository:
         mock_filter.assert_called_once_with(mock_query, mock_model, "tenant-1")
         assert result is mock_query
 
-    def test_tenant_query_without_chat_settings_id(self, repo, mock_db):
-        """Test _tenant_query passes None to _apply_tenant_filter when no tenant."""
+    def test_tenant_query_requires_context(self, repo, mock_db):
+        """F.1 contract flip (#841): omitting tenant context is now a
+        TypeError at the call, and explicit None raises in the chokepoint."""
         mock_db.is_active = True
         mock_model = MagicMock()
-        mock_query = MagicMock()
-        mock_db.query.return_value = mock_query
 
-        with patch.object(
-            repo, "_apply_tenant_filter", return_value=mock_query
-        ) as mock_filter:
-            result = repo._tenant_query(mock_model)
-
-        mock_db.query.assert_called_once_with(mock_model)
-        mock_filter.assert_called_once_with(mock_query, mock_model, None)
-        assert result is mock_query
+        with pytest.raises(TypeError):
+            repo._tenant_query(mock_model)
+        with pytest.raises(TenantContextError):
+            repo._tenant_query(mock_model, None)
 
     def test_tenant_query_returns_chainable_query(self, repo, mock_db):
         """Test _tenant_query returns a query object that supports chaining."""

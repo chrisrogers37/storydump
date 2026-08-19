@@ -8,6 +8,7 @@ from pathlib import Path
 from decimal import Decimal, InvalidOperation
 
 from src.services.core.media_ingestion import MediaIngestionService
+from src.repositories.tenant_scope import SYSTEM_SCOPE
 
 console = Console()
 
@@ -453,29 +454,35 @@ def pool_health():
 
     try:
         # Overall counts
-        posting_status = media_repo.count_by_posting_status()
+        posting_status = media_repo.count_by_posting_status(
+            chat_settings_id=SYSTEM_SCOPE
+        )
         total_active = (
             posting_status["never_posted"]
             + posting_status["posted_once"]
             + posting_status["posted_multiple"]
         )
-        total_inactive = media_repo.count_inactive()
-        eligible = media_repo.count_eligible()
+        total_inactive = media_repo.count_inactive(chat_settings_id=SYSTEM_SCOPE)
+        eligible = media_repo.count_eligible(chat_settings_id=SYSTEM_SCOPE)
 
         # Lock breakdown
-        locks_by_reason = lock_repo.count_by_reason()
+        locks_by_reason = lock_repo.count_by_reason(chat_settings_id=SYSTEM_SCOPE)
         total_locks = sum(locks_by_reason.values())
 
         # Queue
-        queued = queue_repo.count_pending()
+        queued = queue_repo.count_pending(chat_settings_id=SYSTEM_SCOPE)
 
         # Duplicates
-        dupe_groups = media_repo.get_duplicate_hash_groups()
+        dupe_groups = media_repo.get_duplicate_hash_groups(
+            chat_settings_id=SYSTEM_SCOPE
+        )
         dupe_extras = sum(len(g["items"]) - 1 for g in dupe_groups)
 
         # Per-category
-        category_counts = media_repo.count_by_category()
-        eligible_by_cat = media_repo.count_eligible_by_category()
+        category_counts = media_repo.count_by_category(chat_settings_id=SYSTEM_SCOPE)
+        eligible_by_cat = media_repo.count_eligible_by_category(
+            chat_settings_id=SYSTEM_SCOPE
+        )
     finally:
         media_repo.close()
         lock_repo.close()

@@ -6,6 +6,11 @@ from decimal import Decimal
 from sqlalchemy import func
 
 from src.repositories.base_repository import BaseRepository
+from src.repositories.tenant_scope import (
+    TenantScope,
+    require_tenant_context,
+    tenant_value,
+)
 from src.models.category_mix import CategoryPostCaseMix
 
 
@@ -16,7 +21,7 @@ class CategoryMixRepository(BaseRepository):
         super().__init__()
 
     def get_current_mix(
-        self, chat_settings_id: Optional[str] = None
+        self, chat_settings_id: TenantScope
     ) -> List[CategoryPostCaseMix]:
         """Get all current (active) category ratios."""
         result = (
@@ -29,14 +34,14 @@ class CategoryMixRepository(BaseRepository):
         return result
 
     def get_current_mix_as_dict(
-        self, chat_settings_id: Optional[str] = None
+        self, chat_settings_id: TenantScope
     ) -> Dict[str, Decimal]:
         """Get current mix as {category: ratio} dictionary."""
         current = self.get_current_mix(chat_settings_id=chat_settings_id)
         return {mix.category: mix.ratio for mix in current}
 
     def get_history(
-        self, category: Optional[str] = None, chat_settings_id: Optional[str] = None
+        self, *, category: Optional[str] = None, chat_settings_id: TenantScope
     ) -> List[CategoryPostCaseMix]:
         """Get full history, optionally filtered by category."""
         query = self._tenant_query(CategoryPostCaseMix, chat_settings_id)
@@ -55,7 +60,8 @@ class CategoryMixRepository(BaseRepository):
         self,
         ratios: Dict[str, Decimal],
         user_id: Optional[str] = None,
-        chat_settings_id: Optional[str] = None,
+        *,
+        chat_settings_id: TenantScope,
     ) -> List[CategoryPostCaseMix]:
         """
         Set new category mix ratios (Type 2 SCD update).
@@ -74,6 +80,7 @@ class CategoryMixRepository(BaseRepository):
         Raises:
             ValueError: If ratios don't sum to 1.0 or are invalid
         """
+        require_tenant_context(chat_settings_id, where="category_mix.set_mix")
         # Validate ratios
         self._validate_ratios(ratios)
 
@@ -95,7 +102,7 @@ class CategoryMixRepository(BaseRepository):
                 effective_to=None,
                 is_current=True,
                 created_by_user_id=user_id,
-                chat_settings_id=chat_settings_id,
+                chat_settings_id=tenant_value(chat_settings_id),
             )
             self.db.add(new_record)
             new_records.append(new_record)
@@ -108,7 +115,7 @@ class CategoryMixRepository(BaseRepository):
 
         return new_records
 
-    def has_current_mix(self, chat_settings_id: Optional[str] = None) -> bool:
+    def has_current_mix(self, chat_settings_id: TenantScope) -> bool:
         """Check if any current mix ratios exist."""
         count = (
             self._tenant_query(CategoryPostCaseMix, chat_settings_id)
@@ -120,7 +127,7 @@ class CategoryMixRepository(BaseRepository):
         return count > 0
 
     def get_categories_without_ratio(
-        self, categories: List[str], chat_settings_id: Optional[str] = None
+        self, categories: List[str], chat_settings_id: TenantScope
     ) -> List[str]:
         """Find categories that don't have a current ratio defined."""
         current_mix = self.get_current_mix_as_dict(chat_settings_id=chat_settings_id)

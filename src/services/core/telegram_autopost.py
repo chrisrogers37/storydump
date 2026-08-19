@@ -30,6 +30,7 @@ from src.services.core.telegram_utils import (
 from src.utils.logger import logger
 from src.utils.resilience import telegram_edit_with_retry
 from datetime import datetime, timezone
+from src.repositories.tenant_scope import SYSTEM_SCOPE
 
 if TYPE_CHECKING:
     from src.services.core.telegram_service import TelegramService
@@ -159,7 +160,8 @@ class TelegramAutopostHandler:
             await reconcile_card_messages(self.service, queue_id, queue_item, query)
 
             media_item = self.service.media_repo.get_by_id(
-                str(queue_item.media_item_id)
+                str(queue_item.media_item_id),
+                chat_settings_id=SYSTEM_SCOPE,
             )
             if not media_item:
                 await query.edit_message_caption(caption="⚠️ Media item not found")

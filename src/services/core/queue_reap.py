@@ -131,7 +131,7 @@ def record_expiry_and_delete(row, *, history_repo, queue_repo) -> bool:
                     chat_settings_id=str(row.chat_settings_id)
                     if row.chat_settings_id
                     else None,
-                )
+                ),
             )
         queue_repo.delete(row_id)
     except SQLAlchemyError:

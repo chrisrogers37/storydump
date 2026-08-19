@@ -10,6 +10,7 @@ from src.repositories.base_repository import BaseRepository
 from src.services.core.telegram_utils import GDRIVE_RECONNECT_GUIDANCE
 from src.config.settings import settings
 from src.utils.logger import logger
+from src.repositories.tenant_scope import SYSTEM_SCOPE
 
 
 class HealthCheckService(BaseService):
@@ -188,8 +189,10 @@ class HealthCheckService(BaseService):
     def _check_queue(self) -> dict:
         """Check posting queue health."""
         try:
-            pending_count = self.queue_repo.count_pending()
-            oldest_pending = self.queue_repo.get_oldest_pending()
+            pending_count = self.queue_repo.count_pending(chat_settings_id=SYSTEM_SCOPE)
+            oldest_pending = self.queue_repo.get_oldest_pending(
+                chat_settings_id=SYSTEM_SCOPE
+            )
 
             # Alert if queue is backing up
             if pending_count > self.QUEUE_BACKLOG_THRESHOLD:
@@ -223,7 +226,8 @@ class HealthCheckService(BaseService):
         """Check if posts have been made recently."""
         try:
             recent_posts = self.history_repo.get_recent_posts(
-                hours=self.RECENT_POSTS_WINDOW_HOURS
+                hours=self.RECENT_POSTS_WINDOW_HOURS,
+                chat_settings_id=SYSTEM_SCOPE,
             )
 
             if not recent_posts:
@@ -279,11 +283,13 @@ class HealthCheckService(BaseService):
             try:
                 if source_type == "local":
                     provider = MediaSourceFactory.create(
-                        source_type, base_path=source_root
+                        source_type,
+                        base_path=source_root,
                     )
                 elif source_type == "google_drive":
                     provider = MediaSourceFactory.create(
-                        source_type, root_folder_id=source_root
+                        source_type,
+                        root_folder_id=source_root,
                     )
                 else:
                     provider = MediaSourceFactory.create(source_type)

@@ -18,6 +18,7 @@ from sqlalchemy.orm import sessionmaker
 from src.repositories.chat_settings_repository import ChatSettingsRepository
 from src.repositories.history_repository import HistoryCreateParams, HistoryRepository
 from src.repositories.media_repository import MediaRepository
+from src.repositories.tenant_scope import SYSTEM_SCOPE
 
 
 @pytest.fixture(autouse=True)
@@ -84,6 +85,7 @@ def _post(
             file_hash=uuid4().hex,
             file_size_bytes=1024,
             mime_type="image/jpeg",
+            chat_settings_id=SYSTEM_SCOPE,
         )
         media_id = media.id
     finally:

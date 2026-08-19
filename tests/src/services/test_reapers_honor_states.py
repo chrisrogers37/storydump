@@ -21,6 +21,7 @@ from src.repositories.history_repository import HistoryRepository
 from src.repositories.media_repository import MediaRepository
 from src.repositories.queue_repository import QueueRepository
 from src.services.core.loops.scheduler_loop import _scheduler_tick
+from src.repositories.tenant_scope import SYSTEM_SCOPE
 
 
 @pytest.fixture(autouse=True)
@@ -61,6 +62,7 @@ def _create_queue_row(
             file_hash=uuid4().hex,
             file_size_bytes=1024,
             mime_type="image/jpeg",
+            chat_settings_id=SYSTEM_SCOPE,
         )
         media_id = media.id
     finally:
@@ -71,6 +73,7 @@ def _create_queue_row(
         item = queue_repo.create(
             media_item_id=media_id,
             scheduled_for=datetime.utcnow() - timedelta(hours=scheduled_age_hours),
+            chat_settings_id=SYSTEM_SCOPE,
         )
         queue_id = item.id
         item.status = status
@@ -104,7 +107,7 @@ def _delete_rows(pair) -> None:
         queue_repo.close()
     media_repo = MediaRepository()
     try:
-        media_repo.delete(str(media_id))
+        media_repo.delete(str(media_id), chat_settings_id=SYSTEM_SCOPE)
     finally:
         media_repo.close()
 
@@ -112,7 +115,7 @@ def _delete_rows(pair) -> None:
 def _get_row(queue_id):
     repo = QueueRepository()
     try:
-        return repo.get_by_id(str(queue_id))
+        return repo.get_by_id(str(queue_id), chat_settings_id=SYSTEM_SCOPE)
     finally:
         repo.close()
 

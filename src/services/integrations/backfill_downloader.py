@@ -16,6 +16,7 @@ from src.exceptions import (
 )
 from src.utils.file_hash import calculate_bytes_hash
 from src.utils.logger import logger
+from src.repositories.tenant_scope import SYSTEM_SCOPE
 
 if False:  # TYPE_CHECKING without import overhead
     from src.services.integrations.instagram_backfill import (
@@ -120,6 +121,7 @@ class BackfillDownloader:
             category=self.service.BACKFILL_CATEGORY,
             source_type="instagram_backfill",
             source_identifier=ig_media_id,
+            chat_settings_id=SYSTEM_SCOPE,
         )
 
         # Set backfill tracking fields directly on the returned object

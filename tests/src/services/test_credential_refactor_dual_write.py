@@ -7,6 +7,7 @@ import pytest
 
 from src.models.api_token import ApiToken
 from src.repositories.token_repository import TokenRepository
+from src.repositories.tenant_scope import SYSTEM_SCOPE
 
 
 @pytest.mark.unit
@@ -35,6 +36,7 @@ class TestTokenRepoMetaAccountId:
             token_value="encrypted",
             instagram_account_id="uuid-1",
             meta_account_id="17841400123456789",
+            chat_settings_id=SYSTEM_SCOPE,
         )
 
         added = mock_db.add.call_args[0][0]
@@ -49,6 +51,7 @@ class TestTokenRepoMetaAccountId:
             service_name="instagram",
             token_type="access_token",
             token_value="encrypted",
+            chat_settings_id=SYSTEM_SCOPE,
         )
 
         added = mock_db.add.call_args[0][0]
@@ -65,6 +68,7 @@ class TestTokenRepoMetaAccountId:
             token_type="access_token",
             token_value="new_encrypted",
             meta_account_id="17841400123456789",
+            chat_settings_id=SYSTEM_SCOPE,
         )
 
         assert existing.meta_account_id == "17841400123456789"
@@ -79,7 +83,8 @@ class TestTokenRepoMetaAccountId:
             service_name="instagram",
             token_type="access_token",
             token_value="refreshed_encrypted",
-            # meta_account_id intentionally omitted
+            # meta_account_id intentionally omitted,
+            chat_settings_id=SYSTEM_SCOPE,
         )
 
         # Should preserve the existing value, not overwrite with None
@@ -96,6 +101,7 @@ class TestTokenRepoMetaAccountId:
             token_type="access_token",
             token_value="new_encrypted",
             meta_account_id="new_id_222",
+            chat_settings_id=SYSTEM_SCOPE,
         )
 
         assert existing.meta_account_id == "new_id_222"

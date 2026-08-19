@@ -4,6 +4,7 @@ import pytest
 from unittest.mock import Mock, patch
 
 from src.services.core.media_lifecycle import MediaLifecycleService
+from src.repositories.tenant_scope import SYSTEM_SCOPE
 
 
 @pytest.fixture
@@ -36,7 +37,9 @@ class TestDeleteMediaItem:
         lifecycle_service.cloud_service.delete_media.assert_called_once_with(
             "instagram_stories/abc123"
         )
-        lifecycle_service.media_repo.delete.assert_called_once_with("media-uuid")
+        lifecycle_service.media_repo.delete.assert_called_once_with(
+            "media-uuid", chat_settings_id=SYSTEM_SCOPE
+        )
 
     def test_deletes_without_cloud_resource(self, lifecycle_service):
         """Delete media item that has no Cloudinary resource."""
@@ -49,7 +52,9 @@ class TestDeleteMediaItem:
 
         assert result is True
         lifecycle_service.cloud_service.delete_media.assert_not_called()
-        lifecycle_service.media_repo.delete.assert_called_once_with("media-uuid")
+        lifecycle_service.media_repo.delete.assert_called_once_with(
+            "media-uuid", chat_settings_id=SYSTEM_SCOPE
+        )
 
     def test_cloud_failure_still_deletes_db(self, lifecycle_service):
         """Cloudinary failure should not prevent DB deletion."""
@@ -64,7 +69,9 @@ class TestDeleteMediaItem:
         result = lifecycle_service.delete_media_item("media-uuid")
 
         assert result is True
-        lifecycle_service.media_repo.delete.assert_called_once_with("media-uuid")
+        lifecycle_service.media_repo.delete.assert_called_once_with(
+            "media-uuid", chat_settings_id=SYSTEM_SCOPE
+        )
 
     def test_not_found_returns_false(self, lifecycle_service):
         """Return False when media item does not exist."""

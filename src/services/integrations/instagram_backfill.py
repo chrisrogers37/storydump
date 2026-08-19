@@ -16,6 +16,7 @@ from src.services.base_service import BaseService
 from src.services.integrations.backfill_downloader import BackfillDownloader
 from src.services.integrations.instagram_api import InstagramAPIService
 from src.utils.logger import logger
+from src.repositories.tenant_scope import SYSTEM_SCOPE
 
 
 @dataclass
@@ -170,7 +171,9 @@ class InstagramBackfillService(BaseService):
                 f"(type={media_type}, limit={limit}, dry_run={dry_run})"
             )
 
-            known_ig_ids = self.media_repo.get_backfilled_instagram_media_ids()
+            known_ig_ids = self.media_repo.get_backfilled_instagram_media_ids(
+                chat_settings_id=SYSTEM_SCOPE
+            )
             logger.info(
                 f"[InstagramBackfillService] {len(known_ig_ids)} existing backfilled items in DB"
             )
@@ -469,7 +472,11 @@ class InstagramBackfillService(BaseService):
             service_name="InstagramBackfillService", limit=5
         )
 
-        backfilled_count = len(self.media_repo.get_backfilled_instagram_media_ids())
+        backfilled_count = len(
+            self.media_repo.get_backfilled_instagram_media_ids(
+                chat_settings_id=SYSTEM_SCOPE
+            )
+        )
 
         last_run = None
         if runs:

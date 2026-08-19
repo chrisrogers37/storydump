@@ -50,6 +50,7 @@ from src.utils.logger import logger
 
 # Re-export for any remaining external imports
 from src.services.core.telegram_utils import escape_markdown as _escape_markdown  # noqa: F401
+from src.repositories.tenant_scope import SYSTEM_SCOPE
 
 # Handler classes are imported inside initialize() to avoid circular imports.
 
@@ -501,7 +502,7 @@ class TelegramService(BaseService):
         if data:
             caller_settings = self.settings_service.get_settings_if_exists(chat_id)
             caller_cs_id = str(caller_settings.id) if caller_settings else None
-            row = self.queue_repo.get_by_id(data)
+            row = self.queue_repo.get_by_id(data, chat_settings_id=SYSTEM_SCOPE)
             if (
                 row is not None
                 and row.chat_settings_id is not None

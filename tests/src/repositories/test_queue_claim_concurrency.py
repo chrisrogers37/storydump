@@ -52,6 +52,7 @@ from sqlalchemy.orm import sessionmaker
 
 from src.repositories.media_repository import MediaRepository
 from src.repositories.queue_repository import QueueRepository
+from src.repositories.tenant_scope import SYSTEM_SCOPE
 
 N_CLAIMERS = 5
 
@@ -100,6 +101,7 @@ def _create_pending_queue_row() -> tuple:
             file_hash=uuid4().hex,
             file_size_bytes=2048,
             mime_type="image/jpeg",
+            chat_settings_id=SYSTEM_SCOPE,
         )
         media_id = media.id
     finally:
@@ -110,6 +112,7 @@ def _create_pending_queue_row() -> tuple:
         item = queue_repo.create(
             media_item_id=media_id,
             scheduled_for=datetime.utcnow() - timedelta(minutes=1),
+            chat_settings_id=SYSTEM_SCOPE,
         )
         queue_id = item.id
     finally:
@@ -128,7 +131,7 @@ def _delete_rows(media_id, queue_id) -> None:
 
     media_repo = MediaRepository()
     try:
-        media_repo.delete(str(media_id))
+        media_repo.delete(str(media_id), chat_settings_id=SYSTEM_SCOPE)
     finally:
         media_repo.close()
 
@@ -254,7 +257,7 @@ async def test_concurrent_claim_yields_exactly_one_winner():
         # session to confirm the row settled there.
         verify_repo = QueueRepository()
         try:
-            row = verify_repo.get_by_id(qid)
+            row = verify_repo.get_by_id(qid, chat_settings_id=SYSTEM_SCOPE)
             assert row is not None, "claimed row vanished"
             assert row.status == "processing", (
                 f"expected status 'processing' after claim, got {row.status!r}"
@@ -450,7 +453,7 @@ async def test_transition_concurrent_loser_fails():
 
         verify_repo = QueueRepository()
         try:
-            row = verify_repo.get_by_id(qid)
+            row = verify_repo.get_by_id(qid, chat_settings_id=SYSTEM_SCOPE)
             assert row is not None and row.status == expected_status, (
                 f"row must settle in the winner's target {expected_status!r}, "
                 f"got {row.status!r}"
@@ -489,7 +492,7 @@ def test_transition_allowed_from_mismatch_is_noop():
             assert (
                 repo.transition(qid, "delivered", allowed_from={"processing"}) is None
             )
-            assert repo.get_by_id(qid).status == "failed"
+            assert repo.get_by_id(qid, chat_settings_id=SYSTEM_SCOPE).status == "failed"
         finally:
             repo.close()
     finally:

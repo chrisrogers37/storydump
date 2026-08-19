@@ -5,6 +5,12 @@ from typing import Optional, List
 from datetime import datetime, timedelta
 
 from src.repositories.base_repository import BaseRepository
+from src.repositories.tenant_scope import (
+    require_tenant_id,
+    TenantScope,
+    require_tenant_context,
+    tenant_value,
+)
 from src.models.audit_log import AuditLog
 
 
@@ -17,18 +23,20 @@ class AuditRepository(BaseRepository):
         entity_id: Optional[str],
         action: str,
         changed_by_user_id: Optional[str] = None,
-        chat_settings_id: Optional[str] = None,
+        *,
+        chat_settings_id: TenantScope,
         field_changed: Optional[str] = None,
         old_value=None,
         new_value=None,
     ) -> AuditLog:
         """Create an audit log entry."""
+        require_tenant_context(chat_settings_id, where="audit.log")
         entry = AuditLog(
             entity_type=entity_type,
             entity_id=entity_id,
             action=action,
             changed_by_user_id=changed_by_user_id,
-            chat_settings_id=chat_settings_id,
+            chat_settings_id=tenant_value(chat_settings_id),
             field_changed=field_changed,
             old_value=json.dumps(old_value) if old_value is not None else None,
             new_value=json.dumps(new_value) if new_value is not None else None,
@@ -44,6 +52,7 @@ class AuditRepository(BaseRepository):
         offset: int = 0,
     ) -> List[AuditLog]:
         """Get audit log entries for a chat instance, most recent first."""
+        require_tenant_id(chat_settings_id, where="audit.get_for_instance")
         result = (
             self.db.query(AuditLog)
             .filter(AuditLog.chat_settings_id == chat_settings_id)

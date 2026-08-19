@@ -16,6 +16,7 @@ from src.services.core.telegram_utils import (
     validate_queue_item,
 )
 from src.utils.logger import logger
+from src.repositories.tenant_scope import SYSTEM_SCOPE
 
 if TYPE_CHECKING:
     from src.services.core.telegram_service import TelegramService
@@ -335,7 +336,9 @@ class TelegramAccountHandlers:
         chat_id = query.message.chat_id
 
         # Find full queue_id by prefix match
-        queue_item = self.service.queue_repo.get_by_id_prefix(short_queue_id)
+        queue_item = self.service.queue_repo.get_by_id_prefix(
+            short_queue_id, chat_settings_id=SYSTEM_SCOPE
+        )
         if not queue_item:
             await query.edit_message_caption(caption="⚠️ Queue item not found")
             return
@@ -408,7 +411,9 @@ class TelegramAccountHandlers:
     async def handle_back_to_post(self, short_queue_id: str, user, query):
         """Return to posting workflow without changing account."""
         # Find full queue_id by prefix match
-        queue_item = self.service.queue_repo.get_by_id_prefix(short_queue_id)
+        queue_item = self.service.queue_repo.get_by_id_prefix(
+            short_queue_id, chat_settings_id=SYSTEM_SCOPE
+        )
         if not queue_item:
             await query.edit_message_caption(caption="⚠️ Queue item not found")
             return
@@ -574,7 +579,8 @@ class TelegramAccountHandlers:
 
             try:
                 media_item = self.service.media_repo.get_by_id(
-                    str(queue_item.media_item_id)
+                    str(queue_item.media_item_id),
+                    chat_settings_id=SYSTEM_SCOPE,
                 )
                 if not media_item:
                     continue

@@ -32,6 +32,7 @@ from src.repositories.history_repository import HistoryRepository
 from src.repositories.media_repository import MediaRepository
 from src.repositories.queue_repository import QueueRepository
 from src.services.core.queue_reap import reconcile_aged_unconfirmed
+from src.repositories.tenant_scope import SYSTEM_SCOPE
 
 STALE_MINUTES = 10
 
@@ -79,6 +80,7 @@ def _create_queue_row(
             file_hash=uuid4().hex,
             file_size_bytes=1024,
             mime_type="image/jpeg",
+            chat_settings_id=SYSTEM_SCOPE,
         )
         media_id = media.id
     finally:
@@ -89,6 +91,7 @@ def _create_queue_row(
         item = queue_repo.create(
             media_item_id=media_id,
             scheduled_for=datetime.utcnow() - timedelta(hours=scheduled_age_hours),
+            chat_settings_id=SYSTEM_SCOPE,
         )
         queue_id = item.id
         row = queue_repo.db.query(type(item)).filter(type(item).id == queue_id).one()
@@ -114,7 +117,7 @@ def _delete_rows(*pairs) -> None:
             queue_repo.close()
         media_repo = MediaRepository()
         try:
-            media_repo.delete(str(media_id))
+            media_repo.delete(str(media_id), chat_settings_id=SYSTEM_SCOPE)
         finally:
             media_repo.close()
 
@@ -122,7 +125,7 @@ def _delete_rows(*pairs) -> None:
 def _status_of(queue_id) -> str:
     repo = QueueRepository()
     try:
-        return repo.get_by_id(str(queue_id)).status
+        return repo.get_by_id(str(queue_id), chat_settings_id=SYSTEM_SCOPE).status
     finally:
         repo.close()
 
@@ -131,7 +134,7 @@ def _get_row(queue_id):
     """Return the queue row, or None if it has been reaped."""
     repo = QueueRepository()
     try:
-        return repo.get_by_id(str(queue_id))
+        return repo.get_by_id(str(queue_id), chat_settings_id=SYSTEM_SCOPE)
     finally:
         repo.close()
 
@@ -316,7 +319,7 @@ class TestDeliveredOnStamp:
                 repo.close()
             row_repo = QueueRepository()
             try:
-                row = row_repo.get_by_id(str(pair[1]))
+                row = row_repo.get_by_id(str(pair[1]), chat_settings_id=SYSTEM_SCOPE)
                 assert row.status == "publishing"
                 assert row.telegram_message_id == 555003
             finally:
