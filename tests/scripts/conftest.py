@@ -170,6 +170,26 @@ F2_2_END = 22  # F.2.2 = stream[2:22]: 7 tables, 4 tenant-keyed, no RLS
 F2_6_END = 126  # end of F.2.6 — the last index before any RLS is enabled
 BOOTSTRAP_SQL = REPO_ROOT / "scripts" / "window" / "step0_bootstrap.sql"
 
+#: The step-0 companion artifact (#787): the window's legacy-DDL definer
+#: door. Applied by the owner actor immediately after the bootstrap, and by
+#: any owner-world stand-up that will replay 050 — 050 calls the door rather
+#: than issuing owner DDL itself, so a world without it cannot apply 050 at
+#: all. Deliberately a SECOND file rather than more of the bootstrap: the
+#: bootstrap is cluster-scoped (it provisions the seven svc_* roles and so
+#: needs the suite mutex), this is per-database and needs none, which is what
+#: lets the owner-world sites apply it through `psql_apply`.
+DOOR_SQL = REPO_ROOT / "scripts" / "window" / "step0_legacy_ddl_door.sql"
+
+#: THE LEGACY LINEAGE'S STAND-UP IS TWO FILES SINCE #787, and this constant is
+#: the one place that says so. 050 routes its owner-DDL through the step-0
+#: definer door, so any world that will REPLAY 050 — not merely one that applies
+#: `SETUP_SQL` — has to carry the door first. Window worlds get it from
+#: `run_bootstrap`; owner worlds get it from here. Named rather than inlined
+#: because the failure mode of forgetting it is a bare `schema "window_ddl" does
+#: not exist` at migration 050, which reads as a corpus defect rather than as a
+#: missing fixture file.
+LEGACY_STANDUP = [SETUP_SQL, DOOR_SQL]
+
 #: The last version of the LEGACY lineage — everything numbered below the 3c
 #: schema move. **Derived from the move file's own marker, never written down
 #: here**: a bound stated as a literal is a second enumeration of the corpus,
@@ -675,7 +695,7 @@ def at45_template(admin_conn, owner_actor):
     every TEMPLATE copy."""
     name = _scratch_name(TPL_DB_PREFIX, "at45_")
     _create_db(admin_conn, name, owner=owner_actor)
-    psql_apply(as_user(_dsn(name), owner_actor), [SETUP_SQL] + migration_files(45))
+    psql_apply(as_user(_dsn(name), owner_actor), LEGACY_STANDUP + migration_files(45))
     yield name
     _drop_db(admin_conn, name)
 
@@ -703,7 +723,7 @@ def replayed_template(admin_conn, owner_actor):
     name = _scratch_name(TPL_DB_PREFIX, "replayed_")
     _create_db(admin_conn, name, owner=owner_actor)
     as_owner = as_user(_dsn(name), owner_actor)
-    psql_apply(as_owner, [SETUP_SQL])
+    psql_apply(as_owner, LEGACY_STANDUP)
     apply_pending(as_owner, MIGRATIONS_DIR, LEGACY_LINEAGE_MAX)
     yield name
     _drop_db(admin_conn, name)
@@ -874,6 +894,12 @@ def run_bootstrap(admin_conn, dsn: str) -> None:
     try:
         with conn.cursor() as cur:
             cur.execute(BOOTSTRAP_SQL.read_text())
+            # The step-0 COMPANION (#787), in the order the runbook prints it:
+            # the door's EXECUTE grant names svc_migration, which the bootstrap
+            # above is what creates. Applied here rather than left to callers so
+            # every window fixture stands the window up whole — a bootstrap
+            # without its door is a window that still dies at 3b.
+            cur.execute(DOOR_SQL.read_text())
     finally:
         conn.close()
 

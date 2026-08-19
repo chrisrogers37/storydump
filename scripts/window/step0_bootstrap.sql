@@ -23,7 +23,14 @@
 --
 -- Passwords and connection strings are deployment env, never DDL.
 --
--- Closure: legs 2, 3 and 4 below are WINDOW TRANSIENTS. They are revoked by
+-- COMPANION ARTIFACT, applied immediately after this one by the same actor:
+-- step0_legacy_ddl_door.sql. Step 0 is TWO files. The door's EXECUTE grant names
+-- svc_migration, which this file is what creates, so the order is fixed; and the
+-- split is deliberate rather than cosmetic -- this file provisions CLUSTER-scoped
+-- roles and the door file is entirely per-database, so only this one needs the
+-- suite mutex. A window opened with the bootstrap alone still dies at 3b.
+--
+-- Closure: legs 2, 3, 4 and 5 below are WINDOW TRANSIENTS. They are revoked by
 -- plan 04 step 8, which has two variants (success and abandon) because on the
 -- abandon path the objects survive the un-rename. Neither variant is
 -- transcribed yet -- they belong with the M.3 filing, not with F.2.
@@ -78,4 +85,15 @@ BEGIN
     ALTER SCHEMA public OWNER TO svc_migration;
   END IF;
   EXECUTE format('GRANT CREATE ON DATABASE %I TO svc_migration', current_database());
+  -- 5. The GRANTABLE half of the window's legacy writes (#787). Every legacy
+  --    migration self-stamps into schema_version, so 3b's INSERT needs a grant
+  --    the SELECT-only leg 3 does not give -- and unlike ALTER, INSERT IS
+  --    grantable, so it needs no door and confers nothing beyond the one table.
+  --    Keeping the two apart is the point: bundling them would make the definer
+  --    door look necessary for work that needs one ordinary GRANT. Revoked at
+  --    step 8's abandon variant; on the success path it dies with the table at
+  --    3g. Guarded because a first-contact database may predate the table.
+  IF to_regclass('public.schema_version') IS NOT NULL THEN
+    GRANT INSERT ON public.schema_version TO svc_migration;
+  END IF;
 END $$;

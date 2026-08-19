@@ -86,15 +86,20 @@ class TestAgainstTheLegacyReplay:
 
     @pytest.mark.integration
     def test_replayed_corpus_has_no_tenancy_violations(self, scratch_db):
+        from tests.scripts.conftest import LEGACY_STANDUP
         from tests.scripts.test_migration_gate import (
             LEGACY_LINEAGE_MAX,
             MIGRATIONS_DIR,
-            SETUP_SQL,
             apply_pending,
             psql_apply,
         )
 
-        psql_apply(scratch_db, [SETUP_SQL])
+        # LEGACY_STANDUP, not SETUP_SQL: this replay reaches 050, which routes
+        # its owner-DDL through the step-0 door (#787). Imported from conftest
+        # rather than re-exported through test_migration_gate — the symbol has
+        # one home, and leaning on another test module to forward it is what
+        # broke here when that module's import list changed.
+        psql_apply(scratch_db, LEGACY_STANDUP)
         apply_pending(scratch_db, MIGRATIONS_DIR, LEGACY_LINEAGE_MAX)
         sig = tenancy_signature(scratch_db)
         assert tenancy_violations(sig) == []
@@ -120,15 +125,20 @@ class TestAgainstTheLegacyReplay:
         The F.2 tripwire lives where the F.2 replay is; see the class
         docstring for the pointer.
         """
+        from tests.scripts.conftest import LEGACY_STANDUP
         from tests.scripts.test_migration_gate import (
             LEGACY_LINEAGE_MAX,
             MIGRATIONS_DIR,
-            SETUP_SQL,
             apply_pending,
             psql_apply,
         )
 
-        psql_apply(scratch_db, [SETUP_SQL])
+        # LEGACY_STANDUP, not SETUP_SQL: this replay reaches 050, which routes
+        # its owner-DDL through the step-0 door (#787). Imported from conftest
+        # rather than re-exported through test_migration_gate — the symbol has
+        # one home, and leaning on another test module to forward it is what
+        # broke here when that module's import list changed.
+        psql_apply(scratch_db, LEGACY_STANDUP)
         apply_pending(scratch_db, MIGRATIONS_DIR, LEGACY_LINEAGE_MAX)
         sig = tenancy_signature(scratch_db)
         keyed = [t for t, e in sig.items() if e["tenant_keyed"]]

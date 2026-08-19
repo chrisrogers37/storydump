@@ -138,12 +138,55 @@ BEGIN
     ALTER SCHEMA public OWNER TO svc_migration;
   END IF;
   EXECUTE format('GRANT CREATE ON DATABASE %I TO svc_migration', current_database());
+  -- 5. The GRANTABLE half of the window's legacy writes (#787). Every legacy migration
+  --    self-stamps into schema_version, so 3b's INSERT needs a grant leg 3's SELECT-only
+  --    leg does not give — and unlike ALTER, INSERT IS grantable, so it needs no door and
+  --    confers nothing beyond the one table. Keeping the two apart is the point: bundling
+  --    them makes the definer door look necessary for work one ordinary GRANT covers.
+  --    Revoked by step 8's abandon variant; on the success path it dies with the table at 3g.
+  IF to_regclass('public.schema_version') IS NOT NULL THEN
+    GRANT INSERT ON public.schema_version TO svc_migration;
+  END IF;
 END $$;
 ```
 
+**Step 0 is TWO artifacts, and the second is the #787 ruling.** Applied immediately after the block above, by the same actor, from `scripts/window/step0_legacy_ddl_door.sql`. The order is fixed — the door's `EXECUTE` grant names `svc_migration`, which the bootstrap is what creates — and the split is deliberate rather than cosmetic: the bootstrap provisions **cluster**-scoped roles, this file is entirely **per-database**. A window opened with the bootstrap alone still dies at 3b.
+
+*Why a door at all (D40 follow-on; ruled 2026-08-19).* Step 3b applies 050 as `svc_migration`. 050 `ALTER`s two owner-owned legacy tables; `ALTER` requires table ownership or membership in the owning role and **is not a grantable privilege**, so no bootstrap `GRANT` can make the raw statements legal for that actor. Postgres also checks ownership **before** it decides a statement is a no-op, so 050's idempotency buys nothing at the privilege layer — as `svc_migration` both statements fail `must be owner of table` even against an already-normalized database. Options weighed and rejected: the owner running 3b (**per-step actor map, recurring per legacy-touching step**), `GRANT <owner> TO svc_migration` (**refused by PostgreSQL — role membership cannot be circular, and leg 4 already grants the reverse**; also the widest possible blast radius on a credential that lives in the runner's deploy context), and transferring legacy-table ownership (**permanent inversion, and the abandon path must restore every table**). The door is the only mechanism that scopes the elevation to **statements** rather than to a **role**, and it is the estate's existing idiom — `02` §7's runtime plane is definer doors throughout.
+
+```sql
+BEGIN;
+CREATE SCHEMA IF NOT EXISTS window_ddl;             -- its own schema: keeps the door out of
+REVOKE ALL ON SCHEMA window_ddl FROM PUBLIC;        -- public's runtime door census (a drift
+                                                    -- detector that should stay one), survives
+                                                    -- the 3c rename the way `runner` does, and
+                                                    -- makes stand-down ONE statement
+CREATE OR REPLACE FUNCTION window_ddl.fn_050_chain_reconciliation()
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $fn$
+BEGIN
+  ALTER TABLE public.api_tokens                     -- 050's two statements, verbatim and
+    DROP CONSTRAINT IF EXISTS api_tokens_service_name_token_type_key;   -- fully qualified
+  ALTER TABLE public.chat_settings ALTER COLUMN caption_style TYPE TEXT;
+END $fn$;
+REVOKE ALL ON FUNCTION window_ddl.fn_050_chain_reconciliation() FROM PUBLIC;
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'svc_migration') THEN
+    GRANT USAGE ON SCHEMA window_ddl TO svc_migration;
+    GRANT EXECUTE ON FUNCTION window_ddl.fn_050_chain_reconciliation() TO svc_migration;
+  END IF;
+END $$;
+COMMIT;
+```
+
+**The three ruling conditions, all measured, all binding — not commentary.**
+
+1. **`REVOKE … FROM PUBLIC` is the ENTIRE access control.** A new definer function has `proacl IS NULL`, which *is* `EXECUTE` to `PUBLIC`; a role holding no grant of any kind was demonstrated performing owner DDL through an unrevoked one. It runs in the **same transaction** as the `CREATE`, so no window exists between them, and it is asserted directly rather than assumed (`tests/scripts/test_window_legacy_ddl_door.py`, with the unrevoked door as the positive control).
+2. **Static body only — gated, not intended.** The bound is the fixed statement list and nothing else: one `EXECUTE format(...)` was demonstrated letting a no-privilege role alter a table the author never named. Two invariants hold it because either alone leaves a route open — every door in `window_ddl` is **parameterless** (nothing to inject into) and **free of dynamic SQL** (nothing it can build itself) — asserted as a census over `pg_proc`, so it covers the door added next rather than only the one shipped today. A comment saying *do not do this* is not a gate; the widening edit is an ordinary-looking refactor.
+3. **It survives an aborted window — and the choice made here is DROP at stand-down, deliberately.** Both step-8 variants below drop the schema. The success path must do so explicitly: `window_ddl` is not `legacy`, so 3g does not take it. The abandon path *must*, because that exit restores the very tables the door alters — it is the exit on which the residue is fully live. **What is accepted:** an abort that reaches neither variant leaves the door standing. That residue is bounded (two named statements, refused everywhere else), enumerable from the live catalog (`pg_proc` joined to `pg_namespace` returns it with its ACL), and removed by one statement — which is why it is affordable, and it is the reason the door lives in its own schema rather than in `public`. **Not claimed: that the residue cannot happen.** The alternative — accepting a permanent enumerable surface — was rejected because the door has no post-window caller, so keeping it would be standing owner-privileged DDL that nothing uses.
+
 (1) Announce; stop the legacy worker and poller (posting stops — FC-7.1). (2) Final Neon PITR marker. (Snapshots run at 3f — after the F.2 files create `archive`, before anything is dropped.) (3) **One runner invocation, advisory-locked, in file order — the sequencing strategy R5's P0 demanded, stated exactly (rationale and rejected alternatives: D39):**
 - **3a `runner adopt`** — postconditions probe the legacy tables, still in `public`; ledger rows land in `runner.schema_migrations` (0.2's home, immune to 3c).
-- **3b 050** — the 0.2 fix-forward, against the legacy tables in place.
+- **3b 050** — the 0.2 fix-forward, against the legacy tables in place. Its two `ALTER`s execute inside the step-0 definer door (#787), so this step runs as `svc_migration` like every other one; the actor does not change here.
 - **3c the schema move** — `ALTER SCHEMA public RENAME TO legacy; CREATE SCHEMA public;` as one numbered migration (why this shape and what lost: D39). Postconditions: `public` holds zero relations; `legacy` holds the full legacy inventory by count and name. *Privileges: established in full by the step-0 bootstrap* (pass 7 — R6: the pass-6 two-statement prep left the stream's role DDL, legacy reads, and `OWNER TO` memberships unprovided, so the window failed under its own declared actor). (`uuid-ossp` rides into `legacy` and drops with it at 3g — the target uses `gen_random_uuid()` only, `02` §0.)
 - **3d the F.2 schema files** — into the empty `public`, byte-identical to what CI replays from empty (the F.2 precondition, true by construction; the `02` §7-DDL grant baseline re-establishes the schema grants).
 - **3e the M.1 transforms** — reading `legacy.<table>` (schema-qualified legacy reads are part of the M.1 file contract), writing the target tables, postconditions per table.
@@ -174,6 +217,10 @@ DO $$ BEGIN
       EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'legacy');
   END IF;
 END $$;
+DROP SCHEMA IF EXISTS window_ddl CASCADE;          -- the #787 door and its EXECUTE grant.
+                                                  -- NOT taken by 3g: window_ddl is not
+                                                  -- `legacy`, so the success path drops it
+                                                  -- explicitly or it stands forever
 REVOKE svc_claim, svc_clock, svc_maintenance, svc_membership FROM svc_migration;
 DO $$ BEGIN EXECUTE format('REVOKE svc_migration FROM %I', current_user); END $$;
 DO $$ BEGIN EXECUTE format('REVOKE CREATE ON DATABASE %I FROM svc_migration',
@@ -200,6 +247,11 @@ DO $$ BEGIN EXECUTE format('REVOKE CREATE ON DATABASE %I FROM svc_migration',
 --     FROM unnest(ARRAY['svc_claim','svc_clock','svc_maintenance','svc_membership']) r;
 --   SELECT nspowner::regrole::text = 'svc_migration'      -- the steady-state design fact
 --     FROM pg_namespace WHERE nspname = 'public';
+--   SELECT count(*) = 0 FROM pg_namespace WHERE nspname = 'window_ddl';  -- #787: the door
+--   -- and the property rather than the mechanism — no definer door anywhere outside the
+--   -- target's own, which is what a leftover window door would violate:
+--   SELECT count(*) = 0 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+--    WHERE p.prosecdef AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'public');
 ```
 
 Abandon path — instead of the block above, on top of the four rollback legs. `public` now holds the RESTORED legacy tables, so the property to restore is the **pre-window** shape. Order is load-bearing: the first two legs consume the bootstrap's still-live self-grant and the actor's table ownership, so they run before the membership revokes:
@@ -218,6 +270,10 @@ DO $$ BEGIN
       to_regclass('public.jobs') IS NOT NULL;
   END IF;
 END $$;
+DROP SCHEMA IF EXISTS window_ddl CASCADE;         -- the #787 door. THIS is the exit on which
+                                                 -- it matters most: the four legs restore the
+                                                 -- very tables its body alters, so on this path
+                                                 -- the residue is fully live rather than inert
 ALTER SCHEMA public OWNER TO pg_database_owner;   -- the pre-window owner (the PG15 default);
                                                   -- legal here because the executor is the
                                                   -- database owner (implicitly a member of
@@ -225,6 +281,7 @@ ALTER SCHEMA public OWNER TO pg_database_owner;   -- the pre-window owner (the P
                                                   -- svc_migration at this point
 REVOKE SELECT ON ALL TABLES IN SCHEMA public FROM svc_migration;  -- the bootstrap's legacy
                                                   -- grants, alive again on the restored tables
+REVOKE INSERT ON public.schema_version FROM svc_migration;       -- leg 5's grant, same reason
 REVOKE svc_claim, svc_clock, svc_maintenance, svc_membership FROM svc_migration;
 DO $$ BEGIN EXECUTE format('REVOKE svc_migration FROM %I', current_user); END $$;
 DO $$ BEGIN EXECUTE format('REVOKE CREATE ON DATABASE %I FROM svc_migration',
@@ -257,6 +314,9 @@ DO $$ BEGIN EXECUTE format('REVOKE CREATE ON DATABASE %I FROM svc_migration',
 --               -- pinned to the creator, the declared executor (0.2 Login) — a
 --               -- non-creator's run fails this line, never passes it
 --   SELECT NOT has_database_privilege('svc_migration', current_database(), 'CREATE');
+--   SELECT count(*) = 0 FROM pg_namespace WHERE nspname = 'window_ddl';  -- #787: the door
+--   SELECT count(*) = 0 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+--    WHERE p.prosecdef AND n.nspname NOT IN ('pg_catalog', 'information_schema');
 ```
 
 **Parity bar (FC-7.3), explicit:** before the window opens, the target must serve the command vocabulary in production use — approve · skip · reject · mark_posted · cancel · sync_now · settings_change · pause/resume — plus prompts, notifications, media sync, scheduling, manual mode, and the API publish path. **Rollback lever:** the days budget makes retry the plan — fix-forward inside the window first; the hard lever is the PITR branch + legacy service redeploy (rehearsed in M.2), losing only window-time work. *Gate:* smoke green; owner confirms Telegram works in his chats; the window log (timings, quarantine adjudications, snapshot inventory) is committed.

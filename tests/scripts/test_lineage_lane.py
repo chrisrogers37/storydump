@@ -67,6 +67,7 @@ from tests.scripts.conftest import (
     advertised_stream,
     as_user,
     LEGACY_LINEAGE_MAX,
+    LEGACY_STANDUP,
     SETUP_SQL,
     execute,
     fetch_ledger,
@@ -450,7 +451,12 @@ class TestTheLaneReplaysAcrossTheBoundary:
         # replay's declared seed identity, so no superuser replay path
         # survives anywhere in these suites.
         as_owner = as_user(owner_db, owner_actor)
-        psql_apply(as_owner, [SETUP_SQL])
+        # The bounded arm replays through 050, which routes its owner-DDL
+        # through the step-0 door (#787). The unbounded arm below gets the door
+        # from `bootstrapped_db`'s own bootstrap, so `run_lane` must NOT apply
+        # it a second time — a re-apply as a different actor would fail on
+        # `must be owner of function`.
+        psql_apply(as_owner, LEGACY_STANDUP)
         apply_pending(as_owner, MIGRATIONS_DIR, LEGACY_LINEAGE_MAX)
         run_lane(bootstrapped_db)
 

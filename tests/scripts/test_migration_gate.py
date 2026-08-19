@@ -23,13 +23,21 @@ here names a version.
 **Every replay here also runs under the declared actors (#753, `04` §0.2):
 the lineage seeds and replays as the database-owner-shaped actor — legacy
 tables carry real legacy ownership — and window-actor arms act as
-``svc_migration`` after the step-0 bootstrap. Where the printed window
-sequence cannot succeed as declared (D1: no mechanism gives ``svc_migration``
-ALTER rights on owner-owned legacy tables, and no GRANT can), the gate
-asserts that failure BY NAME rather than hiding it — those arms flip to green
-paths when D1 is ruled.**
+``svc_migration`` after the step-0 bootstrap.**
+
+**Green here now means the window sequence WORKS, which is a change (#787).**
+It previously meant something weaker and easy to misread: two of these arms
+passed by asserting the printed sequence FAILED under its own declared actor,
+because no mechanism gave ``svc_migration`` ALTER on the owner-owned legacy
+tables and no GRANT could produce one. That was the honest way to hold a known
+refusal, but a CI badge cannot distinguish *"the window works"* from *"the
+window's failure is pinned where we put it."* Chris's ruling on #787 supplied
+the mechanism — a SECURITY DEFINER door owned by the database-owner actor,
+stood up at step 0 — so both arms now assert the apply SUCCEEDS, and a
+regression in the door surfaces as a red gate rather than as a green one.
 """
 
+import psycopg2
 import pytest
 
 from scripts.migration_runner import (
@@ -42,7 +50,7 @@ from scripts.schema_parity import schema_diff, schema_signature
 from src.utils.validators import MIGRATIONS_DIR
 from tests.scripts.conftest import (
     LEGACY_LINEAGE_MAX,
-    SETUP_SQL,
+    LEGACY_STANDUP,
     as_user,
     execute,
     fetch_ledger,
@@ -54,11 +62,6 @@ from tests.scripts.conftest import (
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
 MANIFEST = MIGRATIONS_DIR / "adoption_manifest.json"
-
-# The D1 seam (#753): what the declared window actor's refusal looks like
-# today. Chris's ruling flips THIS STRING's tests to green paths — one
-# constant, not scattered regexes.
-D1_REFUSAL = "permission denied|must be owner"
 
 
 def corpus_versions():
@@ -73,7 +76,7 @@ class TestReplayFromEmpty:
         owner. This is also the retroactive-tightening battery for the whole
         legacy corpus — a file that silently required superuser fails here."""
         as_owner = as_user(owner_db, owner_actor)
-        psql_apply(as_owner, [SETUP_SQL])
+        psql_apply(as_owner, LEGACY_STANDUP)
 
         report = apply_pending(as_owner, MIGRATIONS_DIR, LEGACY_LINEAGE_MAX)
 
@@ -112,14 +115,40 @@ class TestAdoptProductionShaped:
         assert [m.version for m in report.asserted] == [18, 22, 24, 27, 36, 39, 44]
         assert [m.version for m in report.pending] == [50]
 
-        # D1, asserted as current truth on the SAME adopted state (#753):
-        # 050 ALTERs legacy tables, ALTER requires ownership or membership
-        # in the owning role, and the printed bootstrap grants neither — the
-        # printed window sequence fails at 3b as declared. R6-P0's class,
-        # held in CI. THIS ASSERTION FLIPS to a green tail-apply when Chris
-        # rules D1; D1_REFUSAL is the seam, deliberately loud.
-        with pytest.raises(MigrationRunnerError, match=D1_REFUSAL):
-            apply_pending(as_svc, MIGRATIONS_DIR, LEGACY_LINEAGE_MAX)
+        # STEP 3b, GREEN, AS THE DECLARED ACTOR (#787). This assertion used to
+        # be `pytest.raises(... "must be owner")`. 050's two ALTERs now run
+        # inside the step-0 definer door, owned by the database-owner actor, so
+        # svc_migration completes 3b holding neither ownership nor membership.
+        after = apply_pending(as_svc, MIGRATIONS_DIR, LEGACY_LINEAGE_MAX)
+        assert [m.version for m in after.applied] == [50]
+
+        # ...and the file did its WORK, not merely its exit status: the door
+        # could have been a no-op and the apply would still be green.
+        assert fetch_one(
+            at49_window_db,
+            "SELECT NOT EXISTS (SELECT 1 FROM pg_constraint"
+            " WHERE conname = 'api_tokens_service_name_token_type_key')",
+        )[0]
+        assert (
+            fetch_one(
+                at49_window_db,
+                "SELECT data_type FROM information_schema.columns"
+                " WHERE table_schema = 'public' AND table_name = 'chat_settings'"
+                " AND column_name = 'caption_style'",
+            )[0]
+            == "text"
+        )
+
+        # The elevation was scoped to the door's two statements and did not
+        # leak to the caller — the property the whole ruling turns on. Asserted
+        # on a legacy table the door's body does not name, as the same actor,
+        # immediately after the successful call.
+        with pytest.raises(psycopg2.errors.InsufficientPrivilege):
+            execute(
+                as_svc,
+                "ALTER TABLE public.posting_queue"
+                " DROP CONSTRAINT IF EXISTS check_status",
+            )
 
         owners = fetch_one(
             at49_window_db,
@@ -162,17 +191,48 @@ class TestAdoptProductionShaped:
         assert [m.version for m in after.applied] == [46, 47, 48, 49, 50]
         assert len(fetch_ledger(at45_db)) == len(corpus_versions())
 
-    def test_at_45_the_printed_window_actor_refuses_the_tail_pending_d1(
+    def test_at_45_the_gated_apply_makes_the_world_window_ready_then_3b_is_green(
         self, owner_actor, at45_window_db, admin_conn
     ):
-        """D1's other end: at-45 the pending tail opens with 046's ALTER, so
-        the declared window actor refuses at the first file. Same seam as the
-        at-49 arm; flips with the ruling."""
+        """D1's other end (#787), and the shape of the answer is the finding.
+
+        At-45 the pending tail is 046–050, and 046/047/049 carry their own
+        legacy `ALTER TABLE`s. **The ruling's door covers 050 and only 050** —
+        050 is the window's one legacy-DDL step (`04`: "3b 050"), and 046–049
+        are pre-window work. So a database that arrives at the window still at
+        45 is not window-ready: the plan's own gated apply, run by the owner
+        actor at first contact, clears the pre-050 tail, and the WINDOW step is
+        then green under the declared actor through the door.
+
+        **Bound, stated rather than implied:** this arm no longer asserts that
+        the window actor can apply an arbitrary pending tail. It cannot, by
+        design — every legacy-DDL file that a door does not cover is another
+        owner-privileged surface, and building three of them for migrations the
+        printed window never runs would buy coverage of a world the plan does
+        not execute at the price of three more standing doors.
+        """
         as_svc = window_actor(at45_window_db, owner_actor, admin_conn)
+        as_owner = as_user(at45_window_db, owner_actor)
         adopt(as_svc, MIGRATIONS_DIR, MANIFEST, LEGACY_LINEAGE_MAX)
 
-        with pytest.raises(MigrationRunnerError, match=D1_REFUSAL):
+        # The window actor is still refused on the PRE-050 tail, and that is
+        # correct rather than a gap — it is what makes the gated apply a real
+        # step instead of a formality.
+        with pytest.raises(MigrationRunnerError, match="must be owner"):
             apply_pending(as_svc, MIGRATIONS_DIR, LEGACY_LINEAGE_MAX)
+
+        # The plan's pre-window gated apply, as the owner actor, bounded BELOW
+        # the window's own step so the assertion that follows is a real apply
+        # and not an empty report. The bound is derived from the lineage max,
+        # never a literal — nothing in this file names a version.
+        gated = apply_pending(as_owner, MIGRATIONS_DIR, LEGACY_LINEAGE_MAX - 1)
+        assert [m.version for m in gated.applied] == [46, 47, 48, 49]
+
+        # STEP 3b, GREEN, AS THE DECLARED ACTOR — the same flip as the at-49
+        # arm, reached from the other end of the uncertainty.
+        after = apply_pending(as_svc, MIGRATIONS_DIR, LEGACY_LINEAGE_MAX)
+        assert [m.version for m in after.applied] == [50]
+        assert len(fetch_ledger(at45_window_db)) == len(corpus_versions())
 
     def test_adoption_probes_are_privilege_sensitive_so_the_grants_are_load_bearing(
         self, at49_window_db, owner_actor, admin_conn
