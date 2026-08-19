@@ -1207,6 +1207,8 @@ Transitions: `ready → leased` (claim above) · `leased → succeeded | failed 
 
 **Transaction discipline (normative, the L.0 gate tests it): a database transaction never spans a provider call.** Pipelines run transaction-per-checkpoint — open, write the checkpoint/permit, commit, *then* talk to the provider. This is both the correctness seam (the §6 permit protocol depends on permit-commit-before-call) and the connection-budget arithmetic's premise (`05` tasks-vs-connections).
 
+**A same-state write is refused, and the guard for it is declared in `07` §8 (#883).** `trg_intent_guard` compares only under `NEW.state IS DISTINCT FROM OLD.state`, so `A -> A` skipped every check and succeeded as a no-op. That is inert in the ledger and not inert to the caller: under READ COMMITTED the loser of a concurrent transition re-evaluates against the winner's committed row and is told it succeeded with `rowcount = 1`, identical to the winner. The fix is a second trigger — `BEFORE UPDATE OF state`, which fires on the column being *named in the SET list* and is therefore the one form that can tell a same-state write from an update that never touched `state`. It is declared in `07` because the advertised stream requires new statements at the end of the last doc, not because it is a security object.
+
 ## §6. Outbound effects: `channel_outbox`, `provider_operations`, and the permit protocol
 
 ```sql

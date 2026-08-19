@@ -267,7 +267,8 @@ class TestAgainstTheRealDocs:
         manifest = load_manifest(DEFAULT_MANIFEST)
         classes = [e.class_ for e in manifest.blocks]
 
-        assert classes.count("normative") == 18
+        # 19, not 18: `07` §8 adds the #883 self-transition guard (migration 061).
+        assert classes.count("normative") == 19
         assert classes.count("illustrative") == 4
 
     def test_real_stream_expands_the_fifteen_policies(self):
