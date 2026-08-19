@@ -16,7 +16,7 @@ from src.services.core.settings_service import SettingsService
 from src.utils.file_hash import calculate_bytes_hash
 from src.utils.logger import logger
 
-from .helpers import _validate_request
+from .helpers import _validate_admin, _validate_request
 
 # Browser cache TTL for proxied thumbnails. Long enough to keep dashboard
 # scrolling fast; short enough that rotated Drive URLs aren't pinned past
@@ -261,11 +261,30 @@ async def onboarding_analytics(
 
 @router.get("/system-status")
 async def onboarding_system_status(
+    request: Request,
     init_data: str,
     chat_id: int,
 ) -> dict:
-    """Return system health checks for the dashboard status card."""
-    _validate_request(init_data, chat_id)
+    """Return system health checks — DEPLOYMENT-WIDE, so administrators only.
+
+    SECURITY (#898): every check here is fleet-scoped, and `media_pool` names
+    a media CATEGORY and item count belonging to whichever tenant owns them —
+    tenant content metadata, rendered into any authenticated tenant's
+    dashboard. `_validate_request` proves who the caller is and which chat
+    they may act for; it does not make them an operator.
+
+    `/analytics/service-health` in this same file was already gated with
+    `_validate_admin` for exactly this reason. This endpoint was missed when
+    that gate was applied — the sibling's docstring states the intent, and
+    this is that intent applied consistently.
+
+    Consequence, named rather than discovered: the System Status card is one
+    tap from the home screen, so non-admin tenants now receive 403 there. A
+    tenant-scoped subset of these checks would keep the card and is the better
+    product answer, but it is a product decision rather than a security fix
+    and is deliberately not made here.
+    """
+    _validate_admin(init_data, request)
 
     with HealthCheckService() as health_service:
         return health_service.check_all()

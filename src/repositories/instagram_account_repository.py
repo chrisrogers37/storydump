@@ -13,24 +13,20 @@ from src.models.instagram_account import InstagramAccount
 class InstagramAccountRepository(BaseRepository):
     """Repository for InstagramAccount CRUD operations."""
 
-    def get_owned(
+    def _ownership_predicate(
         self,
         chat_settings_id: str,
         active_account_id: Optional[str],
         include_unstamped_legacy: bool,
-        include_inactive: bool = False,
-    ) -> List[InstagramAccount]:
-        """Accounts the tenant OWNS — the same derivation the mutation door
-        enforces (#891): the chat's active pointer, any account holding a
-        token stamped with this chat_settings_id, and — for the deployment's
-        env chat only (`include_unstamped_legacy`) — accounts with no
-        chat-stamped tokens at all (legacy single-tenant data).
+    ):
+        """The ONE derivation of "this tenant owns this account" (#891/#900).
 
-        `instagram_accounts` carries no tenant column, so ownership is set
-        membership under this derivation rather than a WHERE on a column;
-        the read and the write sides must answer it identically or the list
-        becomes the existence oracle the mutation door refuses to be. The
-        agreement test pins the two together.
+        Extracted so the listing and the per-account check cannot answer it
+        differently. `get_owned`'s own docstring says the read and write sides
+        must agree or the list becomes an existence oracle — two copies of this
+        predicate is exactly how that agreement rots, and #900 exists because a
+        write reached the account by a route that consulted no derivation at
+        all.
         """
         stamped_for_chat = exists().where(
             and_(
@@ -50,7 +46,30 @@ class InstagramAccountRepository(BaseRepository):
         predicate = or_(*ownership)
         if include_unstamped_legacy:
             predicate = or_(predicate, ~stamped_for_anyone)
+        return predicate
 
+    def get_owned(
+        self,
+        chat_settings_id: str,
+        active_account_id: Optional[str],
+        include_unstamped_legacy: bool,
+        include_inactive: bool = False,
+    ) -> List[InstagramAccount]:
+        """Accounts the tenant OWNS — the same derivation the mutation door
+        enforces (#891): the chat's active pointer, any account holding a
+        token stamped with this chat_settings_id, and — for the deployment's
+        env chat only (`include_unstamped_legacy`) — accounts with no
+        chat-stamped tokens at all (legacy single-tenant data).
+
+        `instagram_accounts` carries no tenant column, so ownership is set
+        membership under this derivation rather than a WHERE on a column;
+        the read and the write sides must answer it identically or the list
+        becomes the existence oracle the mutation door refuses to be. The
+        agreement test pins the two together.
+        """
+        predicate = self._ownership_predicate(
+            chat_settings_id, active_account_id, include_unstamped_legacy
+        )
         query = self.db.query(InstagramAccount).filter(predicate)
         if not include_inactive:
             query = query.filter(InstagramAccount.is_active)

@@ -366,7 +366,7 @@ class TelegramAccountHandlers:
 
         # Find full account_id by prefix match
         account = self.service.ig_account_service.get_account_by_id_prefix(
-            short_account_id
+            short_account_id, chat_id
         )
         if not account:
             await query.answer("Account not found", show_alert=True)
@@ -546,7 +546,9 @@ class TelegramAccountHandlers:
 
         # Rebuild keyboard with account selector
         if account_count is None:
-            account_count = self.service.ig_account_service.count_active_accounts()
+            account_count = self.service.ig_account_service.count_active_accounts(
+                chat_id
+            )
         reply_markup = build_queue_action_keyboard(
             queue_id,
             enable_instagram_api=chat_settings.enable_instagram_api,
@@ -583,7 +585,9 @@ class TelegramAccountHandlers:
         if not chat_settings:
             return
         if account_count is None:
-            account_count = self.service.ig_account_service.count_active_accounts()
+            account_count = self.service.ig_account_service.count_active_accounts(
+                chat_id
+            )
         verbose = self.service._is_verbose(chat_id, chat_settings=chat_settings)
         updated = 0
 

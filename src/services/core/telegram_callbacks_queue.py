@@ -232,7 +232,9 @@ class TelegramCallbackQueueHandlers:
             queue_id,
             enable_instagram_api=chat_settings.enable_instagram_api,
             active_account=active_account,
-            account_count=self.service.ig_account_service.count_active_accounts(),
+            account_count=self.service.ig_account_service.count_active_accounts(
+                chat_id
+            ),
         )
 
         await telegram_edit_with_retry(
@@ -309,7 +311,9 @@ class TelegramCallbackQueueHandlers:
             queue_id,
             enable_instagram_api=chat_settings.enable_instagram_api,
             active_account=active_account,
-            account_count=self.service.ig_account_service.count_active_accounts(),
+            account_count=self.service.ig_account_service.count_active_accounts(
+                chat_id
+            ),
             has_generated_caption=bool(
                 media_item.generated_caption and not media_item.caption
             ),
@@ -409,7 +413,9 @@ class TelegramCallbackQueueHandlers:
             queue_id,
             enable_instagram_api=chat_settings.enable_instagram_api,
             active_account=active_account,
-            account_count=self.service.ig_account_service.count_active_accounts(),
+            account_count=self.service.ig_account_service.count_active_accounts(
+                chat_id
+            ),
         )
 
         await telegram_edit_with_retry(
