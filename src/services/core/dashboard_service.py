@@ -145,13 +145,17 @@ class DashboardService(BaseService):
         stats = self.service_run_repo.get_health_stats(hours=hours)
         total_calls = sum(s["call_count"] for s in stats)
         total_failures = sum(s["failure_count"] for s in stats)
+        total_unresolved = sum(s["unresolved_count"] for s in stats)
+        total_resolved = sum(s["resolved_count"] for s in stats)
 
         return {
             "services": stats,
             "total_calls": total_calls,
             "total_failures": total_failures,
-            "overall_error_rate": round(total_failures / total_calls, 2)
-            if total_calls
+            "total_unresolved": total_unresolved,
+            "total_resolved": total_resolved,
+            "overall_error_rate": round(total_failures / total_resolved, 2)
+            if total_resolved
             else 0,
             "hours": hours,
         }
