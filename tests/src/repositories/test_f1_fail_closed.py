@@ -138,7 +138,10 @@ class TestObligation1AbsentContextFailsAtTheBoundary:
             # former mid-defaults signatures are keyword-only-required now;
             # explicit None still reaches the entry guard:
             (HistoryRepository, lambda r: r.get_all(chat_settings_id=None)),
-            (AuditRepository, lambda r: r.log("t", "i", "update", chat_settings_id=None)),
+            (
+                AuditRepository,
+                lambda r: r.log("t", "i", "update", chat_settings_id=None),
+            ),
             (
                 TokenRepository,
                 lambda r: r.revoke_tokens_for_service("svc", chat_settings_id=None),

@@ -14,7 +14,6 @@ from src.services.core.dashboard_queue_queries import QueueDashboardQueries
 from src.services.core.dashboard_media_queries import MediaDashboardQueries
 from src.services.core.dashboard_history_queries import HistoryDashboardQueries
 from src.services.core.dashboard_instance_queries import InstanceDashboardQueries
-from src.repositories.tenant_scope import SYSTEM_SCOPE
 
 
 class DashboardService(BaseService):
@@ -123,9 +122,7 @@ class DashboardService(BaseService):
 
     def get_approval_latency(self, telegram_chat_id: int, days: int = 30) -> dict:
 
-        return self.history_queries.get_approval_latency(
-            telegram_chat_id, days, chat_settings_id=SYSTEM_SCOPE
-        )
+        return self.history_queries.get_approval_latency(telegram_chat_id, days)
 
     def get_team_performance(self, telegram_chat_id: int, days: int = 30) -> dict:
 

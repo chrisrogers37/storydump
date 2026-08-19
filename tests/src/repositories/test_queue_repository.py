@@ -292,7 +292,9 @@ class TestGetAllWithMedia:
         mock_query.order_by.return_value = mock_query
         mock_query.all.return_value = [(mock_item, "story.jpg", "memes")]
 
-        result = queue_repo.get_all_with_media(status="pending", chat_settings_id=SYSTEM_SCOPE)
+        result = queue_repo.get_all_with_media(
+            status="pending", chat_settings_id=SYSTEM_SCOPE
+        )
 
         assert len(result) == 1
         item, file_name, category = result[0]
@@ -309,7 +311,9 @@ class TestGetAllWithMedia:
         mock_query.order_by.return_value = mock_query
         mock_query.all.return_value = []
 
-        queue_repo.get_all_with_media(status="processing", chat_settings_id=SYSTEM_SCOPE)
+        queue_repo.get_all_with_media(
+            status="processing", chat_settings_id=SYSTEM_SCOPE
+        )
 
         mock_query.filter.assert_called()
 

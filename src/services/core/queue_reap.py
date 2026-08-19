@@ -36,7 +36,6 @@ from src.repositories.history_repository import (
 from src.repositories.queue_repository import QueueRepository
 from src.services.core.telegram_utils import EXPIRED_CAPTION
 from src.utils.logger import logger
-from src.repositories.tenant_scope import SYSTEM_SCOPE
 
 
 async def expire_sent_row(row, *, bot, history_repo, queue_repo) -> str:

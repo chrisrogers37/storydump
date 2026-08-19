@@ -67,7 +67,9 @@ class TestMediaRepository:
         mock_item = MagicMock(file_path="/test/unique.jpg")
         mock_db.query.return_value.filter.return_value.first.return_value = mock_item
 
-        result = media_repo.get_by_path("/test/unique.jpg", chat_settings_id=SYSTEM_SCOPE)
+        result = media_repo.get_by_path(
+            "/test/unique.jpg", chat_settings_id=SYSTEM_SCOPE
+        )
 
         assert result is mock_item
         mock_db.query.assert_called_with(MediaItem)
@@ -76,7 +78,9 @@ class TestMediaRepository:
         """Test retrieving non-existent media by path returns None."""
         mock_db.query.return_value.filter.return_value.first.return_value = None
 
-        result = media_repo.get_by_path("/test/nonexistent.jpg", chat_settings_id=SYSTEM_SCOPE)
+        result = media_repo.get_by_path(
+            "/test/nonexistent.jpg", chat_settings_id=SYSTEM_SCOPE
+        )
 
         assert result is None
 
@@ -125,7 +129,9 @@ class TestMediaRepository:
         """Test incrementing post count for non-existent item."""
         mock_db.query.return_value.filter.return_value.first.return_value = None
 
-        result = media_repo.increment_times_posted("nonexistent-id", chat_settings_id=SYSTEM_SCOPE)
+        result = media_repo.increment_times_posted(
+            "nonexistent-id", chat_settings_id=SYSTEM_SCOPE
+        )
 
         assert result is None
         # commit called once by get_by_id's end_read_transaction (no write commit)
@@ -137,7 +143,9 @@ class TestMediaRepository:
         mock_items = [MagicMock(), MagicMock()]
         mock_query.all.return_value = mock_items
 
-        result = media_repo.get_all(is_active=True, category="memes", limit=10, chat_settings_id=SYSTEM_SCOPE)
+        result = media_repo.get_all(
+            is_active=True, category="memes", limit=10, chat_settings_id=SYSTEM_SCOPE
+        )
 
         assert len(result) == 2
         mock_db.query.assert_called_with(MediaItem)
@@ -152,7 +160,9 @@ class TestMediaRepositorySyncMethods:
         mock_items = [MagicMock(source_type="local", is_active=True)]
         mock_db.query.return_value.filter.return_value.all.return_value = mock_items
 
-        result = media_repo.get_active_by_source_type("local", chat_settings_id=SYSTEM_SCOPE)
+        result = media_repo.get_active_by_source_type(
+            "local", chat_settings_id=SYSTEM_SCOPE
+        )
 
         assert len(result) == 1
         mock_db.query.assert_called_with(MediaItem)
@@ -166,7 +176,9 @@ class TestMediaRepositorySyncMethods:
         )
         mock_db.query.return_value.filter.return_value.first.return_value = mock_item
 
-        result = media_repo.get_inactive_by_source_identifier("local", "/media/old.jpg", chat_settings_id=SYSTEM_SCOPE)
+        result = media_repo.get_inactive_by_source_identifier(
+            "local", "/media/old.jpg", chat_settings_id=SYSTEM_SCOPE
+        )
 
         assert result is mock_item
 
@@ -174,7 +186,9 @@ class TestMediaRepositorySyncMethods:
         """Returns None when no inactive match found."""
         mock_db.query.return_value.filter.return_value.first.return_value = None
 
-        result = media_repo.get_inactive_by_source_identifier("local", "/nonexistent", chat_settings_id=SYSTEM_SCOPE)
+        result = media_repo.get_inactive_by_source_identifier(
+            "local", "/nonexistent", chat_settings_id=SYSTEM_SCOPE
+        )
 
         assert result is None
 
@@ -242,7 +256,9 @@ class TestMediaRepositoryBackfillMethods:
         mock_item = MagicMock(instagram_media_id="17841405793087218")
         mock_db.query.return_value.filter.return_value.first.return_value = mock_item
 
-        result = media_repo.get_by_instagram_media_id("17841405793087218", chat_settings_id=SYSTEM_SCOPE)
+        result = media_repo.get_by_instagram_media_id(
+            "17841405793087218", chat_settings_id=SYSTEM_SCOPE
+        )
 
         assert result is mock_item
         mock_db.query.assert_called_with(MediaItem)
@@ -251,7 +267,9 @@ class TestMediaRepositoryBackfillMethods:
         """Returns None when no item with given Instagram media ID."""
         mock_db.query.return_value.filter.return_value.first.return_value = None
 
-        result = media_repo.get_by_instagram_media_id("nonexistent", chat_settings_id=SYSTEM_SCOPE)
+        result = media_repo.get_by_instagram_media_id(
+            "nonexistent", chat_settings_id=SYSTEM_SCOPE
+        )
 
         assert result is None
 
@@ -263,7 +281,9 @@ class TestMediaRepositoryBackfillMethods:
             ("id_3",),
         ]
 
-        result = media_repo.get_backfilled_instagram_media_ids(chat_settings_id=SYSTEM_SCOPE)
+        result = media_repo.get_backfilled_instagram_media_ids(
+            chat_settings_id=SYSTEM_SCOPE
+        )
 
         assert result == {"id_1", "id_2", "id_3"}
 
@@ -271,7 +291,9 @@ class TestMediaRepositoryBackfillMethods:
         """Returns empty set when no backfilled items."""
         mock_db.query.return_value.filter.return_value.all.return_value = []
 
-        result = media_repo.get_backfilled_instagram_media_ids(chat_settings_id=SYSTEM_SCOPE)
+        result = media_repo.get_backfilled_instagram_media_ids(
+            chat_settings_id=SYSTEM_SCOPE
+        )
 
         assert result == set()
 
@@ -784,7 +806,9 @@ class TestCountDeadContentByCategory:
         q.order_by.return_value = q
         q.all.return_value = [("memes", 15), ("merch", 5)]
 
-        result = media_repo.count_dead_content_by_category(min_age_days=30, chat_settings_id=SYSTEM_SCOPE)
+        result = media_repo.count_dead_content_by_category(
+            min_age_days=30, chat_settings_id=SYSTEM_SCOPE
+        )
 
         assert len(result) == 2
         assert result[0] == {"category": "memes", "dead_count": 15}
@@ -799,6 +823,8 @@ class TestCountDeadContentByCategory:
         q.order_by.return_value = q
         q.all.return_value = []
 
-        result = media_repo.count_dead_content_by_category(chat_settings_id=SYSTEM_SCOPE)
+        result = media_repo.count_dead_content_by_category(
+            chat_settings_id=SYSTEM_SCOPE
+        )
 
         assert result == []

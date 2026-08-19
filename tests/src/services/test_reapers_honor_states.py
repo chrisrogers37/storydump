@@ -115,7 +115,7 @@ def _delete_rows(pair) -> None:
 def _get_row(queue_id):
     repo = QueueRepository()
     try:
-        return repo.get_by_id(str(queue_id))
+        return repo.get_by_id(str(queue_id), chat_settings_id=SYSTEM_SCOPE)
     finally:
         repo.close()
 

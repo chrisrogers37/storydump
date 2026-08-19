@@ -133,7 +133,9 @@ class TestCategoryMixRepository:
         mock_records = [Mock(category="memes", ratio=Decimal("1.0"))]
         mock_db.query.return_value.filter.return_value.order_by.return_value.all.return_value = mock_records
 
-        result = mix_repo.get_categories_without_ratio(["memes", "merch", "misc"], chat_settings_id=SYSTEM_SCOPE)
+        result = mix_repo.get_categories_without_ratio(
+            ["memes", "merch", "misc"], chat_settings_id=SYSTEM_SCOPE
+        )
 
         assert "merch" in result
         assert "misc" in result
