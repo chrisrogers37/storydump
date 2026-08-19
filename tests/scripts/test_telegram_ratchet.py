@@ -73,9 +73,34 @@ class TestItCountsTheThingNotTheString:
             "src/services/core/telegram_state.py"
         ]
 
-    def test_importing_the_sdk_counts_even_with_no_other_mention(self, tmp_path):
+    def test_a_telegram_named_module_counts_even_with_no_other_mention(self, tmp_path):
+        """Adapter-hood is declared by the module's own name, so a
+        ``telegram_*.py`` that imports nothing and never spells the word in its
+        body still counts. Before #868 this spot asserted the mirror claim —
+        that importing the SDK was itself enough — which is the exemption bug:
+        eleven non-adapter modules imported a Telegram name for unrelated
+        reasons and vanished from the chat-id axis. See
+        ``test_a_chat_id_function_is_counted_even_when_its_module_imports_
+        telegram_for_an_unrelated_reason``."""
+        _tree(tmp_path, {"src/telegram_z.py": "VALUE = 1\n"})
+        assert measure(tmp_path)["telegram_modules"] == ["src/telegram_z.py"]
+
+    def test_a_non_adapter_importing_the_sdk_does_NOT_count(self, tmp_path):
+        """The direct inverse of what this spot used to assert (#868)."""
         _tree(tmp_path, {"src/z.py": "from telegram.ext import Application\n"})
-        assert measure(tmp_path)["telegram_modules"] == ["src/z.py"]
+        assert measure(tmp_path)["telegram_modules"] == []
+
+    def test_telegram_must_be_the_stem_not_a_substring_of_it(self, tmp_path):
+        """The docstring claims a stem check closes a collision class a raw
+        path-substring would admit. On the present tree the two forms agree, so
+        that claim has no natural witness — this supplies one rather than
+        leaving it unpinned prose."""
+        _tree(tmp_path, {"src/nontelegram_helper.py": "def f(chat_id):\n    pass\n"})
+        out = measure(tmp_path)
+        assert out["telegram_modules"] == []
+        assert out["chat_id_functions_outside_adapters"] == [
+            "src/nontelegram_helper.py::f"
+        ]
 
     def test_a_word_containing_telegram_in_a_docstring_is_not_an_import(self, tmp_path):
         _tree(
@@ -88,18 +113,18 @@ class TestTheRatchetGoesRed:
     """Falsifiability, one axis at a time."""
 
     def test_a_new_telegram_module_reddens_it(self, tmp_path):
-        _tree(tmp_path, {"src/new_adapter.py": "import telegram\n"})
+        _tree(tmp_path, {"src/telegram_new_adapter.py": '"""An adapter."""\n'})
         added, removed = compare(measure(tmp_path), _empty_baseline())[
             "telegram_modules"
         ]
-        assert added == ["src/new_adapter.py"] and removed == []
+        assert added == ["src/telegram_new_adapter.py"] and removed == []
 
     def test_a_new_core_telegram_module_reddens_the_core_axis(self, tmp_path):
-        _tree(tmp_path, {"src/services/core/thing.py": "import telegram\n"})
+        _tree(tmp_path, {"src/services/core/telegram_thing.py": '"""Adapter."""\n'})
         added, _ = compare(measure(tmp_path), _empty_baseline())[
             "core_telegram_modules"
         ]
-        assert added == ["src/services/core/thing.py"]
+        assert added == ["src/services/core/telegram_thing.py"]
 
     def test_a_chat_id_parameter_outside_an_adapter_reddens_it(self, tmp_path):
         _tree(
@@ -140,31 +165,57 @@ class TestEqualityNotCeiling:
         """The ruling this follows. Under a ceiling the retired module would
         pass silently and leave a slot of unreviewed headroom behind it; under
         equality it lands in the same reviewable diff as an addition."""
-        _tree(tmp_path, {"src/keep.py": "import telegram\n"})
+        _tree(tmp_path, {"src/telegram_keep.py": '"""Adapter."""\n'})
         baseline = {
             **_empty_baseline(),
-            "telegram_modules": ["src/keep.py", "src/gone.py"],
+            "telegram_modules": ["src/telegram_keep.py", "src/telegram_gone.py"],
         }
         added, removed = compare(measure(tmp_path), baseline)["telegram_modules"]
-        assert added == [] and removed == ["src/gone.py"]
+        assert added == [] and removed == ["src/telegram_gone.py"]
 
     def test_a_shrink_exits_nonzero_through_the_cli(self, tmp_path, capsys):
-        _tree(tmp_path, {"src/keep.py": "import telegram\n"})
+        _tree(tmp_path, {"src/telegram_keep.py": '"""Adapter."""\n'})
         bl = tmp_path / "bl.json"
         bl.write_text(
             json.dumps(
                 {
                     **_empty_baseline(),
-                    "telegram_modules": ["src/keep.py", "src/gone.py"],
+                    "telegram_modules": [
+                        "src/telegram_keep.py",
+                        "src/telegram_gone.py",
+                    ],
                 }
             )
         )
         rc = main(["--repo", str(tmp_path), "--baseline", str(bl)])
         assert rc == 1
-        assert "- src/gone.py" in capsys.readouterr().out
+        assert "- src/telegram_gone.py" in capsys.readouterr().out
 
 
 class TestTheAdapterExemptionIsRealAndBounded:
+    def test_a_chat_id_function_is_counted_even_when_its_module_imports_telegram_for_an_unrelated_reason(
+        self, tmp_path
+    ):
+        """#868: importing something Telegram-flavored is not the same fact as
+        being an edge adapter — an SDK type used for outbound sending, or an
+        internal exception type caught for error handling, are the real shape
+        (scheduler.py, google_drive_oauth.py, 9 others). Fails under the old
+        single-hop is_telegram_coupled(), which read any telegram-ish import as
+        adapter-hood regardless of why the import exists."""
+        _tree(
+            tmp_path,
+            {
+                "src/services/core/not_an_adapter.py": (
+                    "from telegram import Bot\ndef notify(chat_id):\n    pass\n"
+                )
+            },
+        )
+        out = measure(tmp_path)
+        assert out["chat_id_functions_outside_adapters"] == [
+            "src/services/core/not_an_adapter.py::notify"
+        ]
+        assert out["telegram_modules"] == []
+
     def test_a_chat_id_INSIDE_an_allowlisted_adapter_is_not_a_violation(self, tmp_path):
         """FC-2 puts adapters at the edges, so a Telegram adapter taking a chat
         id is the design working. Counting it would make the rule fire on
@@ -263,6 +314,11 @@ class TestTheRealBaselineIsHonest:
 
         repo = pathlib.Path(__file__).resolve().parents[2]
         out = measure(repo)
-        assert len(out["telegram_modules"]) > 20
-        assert len(out["core_telegram_modules"]) > 10
+        # Floors, not equalities — the committed baseline is what pins exact
+        # membership. They moved with #868 (27->16, 22->15, 89->114) because
+        # eleven modules stopped being wrongly exempt; the slack below each is
+        # deliberately kept wide enough that "the gate found nothing" still
+        # trips it.
+        assert len(out["telegram_modules"]) > 10
+        assert len(out["core_telegram_modules"]) > 5
         assert len(out["chat_id_functions_outside_adapters"]) > 50
