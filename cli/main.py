@@ -9,7 +9,7 @@ from cli.commands.google_drive import (
     disconnect_google_drive,
     google_drive_status,
 )
-from cli.commands.health import check_health
+from cli.commands.health import check_health, service_health
 from cli.commands.instagram import (
     add_instagram_account,
     deactivate_instagram_account,
@@ -59,6 +59,7 @@ cli.add_command(usage_report)
 cli.add_command(list_users)
 cli.add_command(promote_user)
 cli.add_command(check_health)
+cli.add_command(service_health)
 cli.add_command(instagram_auth)
 cli.add_command(instagram_status)
 cli.add_command(add_instagram_account)
