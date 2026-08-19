@@ -95,10 +95,10 @@ async def onboarding_accounts(
         InstagramAccountService() as account_service,
         SettingsService() as settings_service,
     ):
-        accounts = account_service.list_accounts(include_inactive=False)
         chat_settings = settings_service.require_settings_by_id(
             auth["chat_settings_id"]
         )
+        accounts = account_service.list_accounts(chat_settings, include_inactive=False)
         active_account_id = (
             str(chat_settings.active_instagram_account_id)
             if chat_settings.active_instagram_account_id
