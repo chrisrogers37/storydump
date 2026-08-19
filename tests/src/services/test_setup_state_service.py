@@ -58,6 +58,7 @@ class TestGetSetupState:
         self.service.ig_account_service.get_active_account.return_value = None
         self.service.token_repo.get_token_for_chat.return_value = None
         self.service.media_repo.get_active_by_source_type.return_value = []
+        self.service.media_repo.count_active.return_value = 0
         self.service.queue_repo.get_all.return_value = []
         self.service.history_repo.get_recent_posts.return_value = []
 
@@ -114,16 +115,44 @@ class TestGetSetupState:
         assert state["gdrive_connected"] is True
         assert state["gdrive_needs_reconnect"] is True
 
+    def test_media_count_is_source_agnostic(self):
+        """#877: the library count is the tenant's ACTIVE media regardless of
+        source type — the same universe the dashboard card's body renders.
+        The old code asked the repository for one hardcoded source
+        ("google_drive"), so a local or upload library showed an "Empty"
+        badge directly above its own category list."""
+        self.service.settings_service.require_settings.return_value = (
+            self._make_chat_settings(media_source_root="/media/root")
+        )
+        # Rows exist, but none of them are google_drive: the legacy
+        # source-scoped query finds nothing; the tenant-wide count is truth.
+        self.service.media_repo.get_active_by_source_type.return_value = []
+        self.service.media_repo.count_active.return_value = 3
+
+        state = self.service.get_setup_state(-1001234567890)
+
+        assert state["media_count"] == 3
+        assert state["media_indexed"] is True
+        self.service.media_repo.count_active.assert_called_once_with("uuid-123")
+
+    def test_uploads_count_without_a_configured_folder(self):
+        """#877: an upload-only tenant has media and no folder — the card
+        must not call a populated library Empty. folder_configured remains
+        its own independent fact; the count is not gated on it."""
+        self.service.media_repo.count_active.return_value = 2
+
+        state = self.service.get_setup_state(-1001234567890)
+
+        assert state["media_folder_configured"] is False
+        assert state["media_count"] == 2
+        assert state["media_indexed"] is True
+
     def test_media_indexed(self):
         """Configured folder with media items shows indexed."""
         self.service.settings_service.require_settings.return_value = (
             self._make_chat_settings(media_source_root="folder123")
         )
-        self.service.media_repo.get_active_by_source_type.return_value = [
-            Mock(),
-            Mock(),
-            Mock(),
-        ]
+        self.service.media_repo.count_active.return_value = 3
 
         state = self.service.get_setup_state(-1001234567890)
 
