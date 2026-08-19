@@ -1,10 +1,11 @@
 """Tests for HealthCheckService."""
 
 import pytest
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 from datetime import datetime, timedelta, timezone
 
 from src.services.core.health_check import HealthCheckService
+from src.models.posting_queue import PostingQueue
 
 
 @pytest.mark.unit
@@ -1270,3 +1271,147 @@ class TestMediaPoolFailClosedGapsFromThe791Merge:
         assert (empty["healthy"], aborted["healthy"]) == (True, False), (
             "an aborted sweep is indistinguishable from an empty population"
         )
+
+
+@pytest.mark.unit
+class TestQueueAgeAcrossTheBacklogThreshold:
+    """#899 — the age check ran against a NAIVE column and raised TypeError.
+
+    Why the pre-existing coverage could not see it: `test_check_queue_healthy`
+    sets `get_oldest_pending` to None, so the age branch never executes, and
+    `test_check_queue_stale_items` builds its item with
+    `datetime.now(timezone.utc) - timedelta(hours=8)` — an **aware** value.
+    Production writes `PostingQueue.created_at` from `default=datetime.utcnow`,
+    which is **naive**. The mock was more correct than the database, so the
+    branch was green on a code path that raised for every real caller.
+
+    These tests therefore build a real `PostingQueue`, letting the model's own
+    default supply the timestamp, and drive `_check_queue` across the whole
+    0..>threshold range — because the defect was reachable only in the band
+    BETWEEN those two ends, which is the band the constant calls normal
+    ("JIT queue is 0-5 items; 10+ indicates a problem").
+    """
+
+    def _service_with_pending(self, count, age_hours=0):
+        """A health service whose oldest pending item is production-shaped."""
+        service = HealthCheckService()
+        service.queue_repo = Mock()
+        service.history_repo = Mock()
+        service.queue_repo.count_pending.return_value = count
+
+        if count:
+            item = PostingQueue()
+            # No explicit created_at: the column default is what production
+            # stores, and its naive-ness is the whole defect.
+            item.created_at = datetime.utcnow() - timedelta(hours=age_hours)
+            assert item.created_at.tzinfo is None, (
+                "fixture must stay naive — an aware value here is what hid #899"
+            )
+            service.queue_repo.get_oldest_pending.return_value = item
+        else:
+            service.queue_repo.get_oldest_pending.return_value = None
+        return service
+
+    def test_the_model_default_is_naive_which_is_the_premise_of_this_bug(self):
+        """If this ever fails the column gained tzinfo and the rest is moot."""
+        assert PostingQueue.__table__.c.created_at.default is not None
+        produced = PostingQueue.__table__.c.created_at.default.arg(None)
+        assert produced.tzinfo is None
+
+    @pytest.mark.parametrize("pending", [1, 2, 5, 9, 10])
+    def test_the_normal_band_does_not_raise(self, pending):
+        """1..threshold is where #899 lived — every one of these raised."""
+        service = self._service_with_pending(pending)
+        result = service._check_queue()
+
+        assert "error" not in result["message"].lower(), result["message"]
+        assert result["healthy"] is True
+        assert result["pending_count"] == pending
+
+    def test_zero_pending_still_works(self):
+        """The lower boundary always worked: no item, so no subtraction."""
+        result = self._service_with_pending(0)._check_queue()
+        assert result["healthy"] is True
+        assert result["pending_count"] == 0
+
+    @pytest.mark.parametrize("pending", [11, 62])
+    def test_above_threshold_still_returns_the_backlog_verdict(self, pending):
+        """The upper boundary always worked: it returns before the age check."""
+        result = self._service_with_pending(pending)._check_queue()
+        assert result["healthy"] is False
+        assert "backlog" in result["message"].lower()
+
+    def test_a_genuinely_stale_naive_item_is_still_detected(self):
+        """The fix must not cost the behaviour the branch exists for."""
+        service = self._service_with_pending(3, age_hours=8)
+        result = service._check_queue()
+
+        assert result["healthy"] is False
+        assert "hours" in result["message"].lower()
+
+
+@pytest.mark.unit
+class TestMediaSyncStalenessAcceptsANaiveTimestamp:
+    """#899 sibling — same mismatch, reached through an isoformat round-trip.
+
+    `get_last_sync_info` serialises `ServiceRun.completed_at` (a naive column)
+    with `.isoformat()`; `datetime.fromisoformat` parses it back naive, and the
+    staleness comparison subtracted it from an aware now. Confirmed live before
+    the fix by driving the real method:
+    "Sync check error: can't subtract offset-naive and offset-aware datetimes".
+
+    These drive `_check_media_sync` itself rather than the helper, so they fail
+    when the fix is reverted. A test that called `ensure_utc` directly would
+    pass either way and would be coverage in name only.
+    """
+
+    def _drive(self, completed_naive):
+        """Run the real _check_media_sync with a naive completed_at."""
+        service = HealthCheckService()
+        service.queue_repo = Mock()
+        service.history_repo = Mock()
+
+        admin_chat = Mock(
+            media_sync_enabled=True,
+            media_source_type="local",
+            media_source_root="/tmp",
+        )
+        settings_ctx = MagicMock()
+        settings_ctx.__enter__.return_value.get_settings.return_value = admin_chat
+
+        sync_info = {
+            "success": True,
+            "status": "completed",
+            "started_at": completed_naive.isoformat(),
+            "completed_at": completed_naive.isoformat(),
+        }
+        assert datetime.fromisoformat(sync_info["completed_at"]).tzinfo is None
+
+        provider = Mock()
+        provider.is_configured.return_value = True
+        with (
+            patch(
+                "src.services.core.health_check.SettingsService",
+                return_value=settings_ctx,
+            ),
+            patch(
+                "src.services.media_sources.factory.MediaSourceFactory.create",
+                return_value=provider,
+            ),
+            patch(
+                "src.services.core.media_sync.MediaSyncService.get_last_sync_info",
+                return_value=sync_info,
+            ),
+        ):
+            return service._check_media_sync()
+
+    def test_a_fresh_naive_completed_at_does_not_raise(self):
+        result = self._drive(datetime.utcnow())
+        assert "error" not in result["message"].lower(), result["message"]
+        assert result["healthy"] is True
+
+    def test_a_stale_naive_completed_at_is_flagged_stale_not_errored(self):
+        result = self._drive(datetime.utcnow() - timedelta(days=2))
+        assert "error" not in result["message"].lower(), result["message"]
+        assert result["healthy"] is False
+        assert "stale" in result["message"].lower()
