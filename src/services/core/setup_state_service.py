@@ -155,15 +155,15 @@ class SetupStateService(BaseService):
         count = 0
         indexed = False
 
-        if folder_configured:
-            try:
-                active_items = self.media_repo.get_active_by_source_type(
-                    "google_drive", chat_settings_id=chat_settings_id
-                )
-                count = len(active_items)
-                indexed = count > 0
-            except Exception as e:  # noqa: BLE001 — best-effort status check
-                logger.debug(f"Media setup check failed: {e}")
+        try:
+            # The library count is the tenant's active media across ALL
+            # source types (#877) — the same universe the dashboard card's
+            # body renders, so badge and body cannot disagree. It is also
+            # not gated on a configured folder: uploads exist without one.
+            count = self.media_repo.count_active(chat_settings_id)
+            indexed = count > 0
+        except Exception as e:  # noqa: BLE001 — best-effort status check
+            logger.debug(f"Media setup check failed: {e}")
 
         return {
             "folder_configured": folder_configured,
