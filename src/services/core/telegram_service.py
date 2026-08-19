@@ -44,6 +44,7 @@ from src.services.core.telegram_notification import TelegramNotificationService
 from src.services.core.telegram_operation_state import OperationStateManager
 from src.services.core.telegram_user_manager import TelegramUserManager
 from src.repositories.membership_repository import MembershipRepository
+from src.exceptions.tenancy import TenantResolutionError
 from src.services.core.membership_service import MembershipService
 from src.config.settings import settings
 from src.utils.logger import logger
@@ -163,9 +164,11 @@ class TelegramService(BaseService):
         """Check if verbose notifications are enabled for a chat."""
         if chat_settings is None:
             chat_settings = self.settings_service.get_settings(chat_id)
-        if chat_settings.show_verbose_notifications is not None:
-            return chat_settings.show_verbose_notifications
-        return True
+        # Preference read, not tenant resolution (#842): an absent row gets
+        # the same documented default as an unset column — never a mint.
+        if chat_settings is None or chat_settings.show_verbose_notifications is None:
+            return True
+        return chat_settings.show_verbose_notifications
 
     # ------------------------------------------------------------------
     # Lifecycle overrides (BaseService)
@@ -480,15 +483,25 @@ class TelegramService(BaseService):
         if action not in self._QUEUE_ID_ACTIONS:
             return True
 
+        # Resolve the caller's tenant ONCE (#842): a message-less callback or
+        # a chat with no instance is refused here, before membership is asked
+        # — the same observable reject as before, decided at one door.
         try:
-            chat_id = int(query.message.chat_id) if query.message else None
-        except (TypeError, ValueError):
-            chat_id = None
+            chat_id = int(query.message.chat_id)
+            caller_cs_id = self.settings_service.resolve_chat_settings_id(chat_id)
+        except (AttributeError, TypeError, ValueError, TenantResolutionError):
+            logger.warning(
+                "Callback '%s' refused: no tenant resolvable for user %s",
+                action,
+                getattr(query.from_user, "id", None),
+            )
+            await self._reject_callback(query)
+            return False
 
         # Membership: the caller must be an active member of the chat the card
         # lives in — the same server-side authorization the web layer requires.
         with MembershipService() as membership:
-            if not membership.is_active_member(query.from_user.id, chat_id):
+            if not membership.is_active_member(query.from_user.id, caller_cs_id):
                 logger.warning(
                     "Callback '%s' refused: user %s is not a member of chat %s",
                     action,
@@ -500,8 +513,6 @@ class TelegramService(BaseService):
 
         # Ownership: the queue id must belong to the caller's own instance.
         if data:
-            caller_settings = self.settings_service.get_settings_if_exists(chat_id)
-            caller_cs_id = str(caller_settings.id) if caller_settings else None
             row = self.queue_repo.get_by_id(data, chat_settings_id=SYSTEM_SCOPE)
             if (
                 row is not None

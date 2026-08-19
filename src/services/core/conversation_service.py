@@ -87,7 +87,9 @@ class ConversationService(BaseService):
         from src.services.core.settings_service import SettingsService
 
         with SettingsService() as settings_service:
-            chat_settings = settings_service.get_settings(chat_id)
+            # Group linking: a sanctioned provisioning door (#842) — this flow
+            # exists to create the instance, so the mint is its purpose.
+            chat_settings = settings_service.provision(chat_id)
             if session.pending_instance_name:
                 settings_service.update_setting(
                     chat_id, "display_name", session.pending_instance_name

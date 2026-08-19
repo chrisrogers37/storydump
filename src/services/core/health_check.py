@@ -262,7 +262,7 @@ class HealthCheckService(BaseService):
             from src.services.media_sources.factory import MediaSourceFactory
 
             with SettingsService() as settings_service:
-                admin_chat = settings_service.get_settings_if_exists(
+                admin_chat = settings_service.get_settings(
                     settings.ADMIN_TELEGRAM_CHAT_ID
                 )
 
@@ -594,7 +594,7 @@ class HealthCheckService(BaseService):
             posts_per_day_share, runway_days.
         """
         if chat_settings is None:
-            chat_settings = self.settings_service.get_settings(telegram_chat_id)
+            chat_settings = self.settings_service.require_settings(telegram_chat_id)
 
         chat_settings_id = str(chat_settings.id)
         posts_per_day = chat_settings.posts_per_day or 1
@@ -680,7 +680,7 @@ class HealthCheckService(BaseService):
             Dict with healthy, expires_in_days, needs_refresh, message.
         """
         if chat_settings is None:
-            chat_settings = self.settings_service.get_settings(telegram_chat_id)
+            chat_settings = self.settings_service.require_settings(telegram_chat_id)
 
         chat_settings_id = str(chat_settings.id)
 

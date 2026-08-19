@@ -17,7 +17,7 @@ def mock_service():
     # Default: lifecycle notifications enabled (admin chat row says so).
     # Individual tests override `send_lifecycle_notifications=False` to
     # exercise the skip path.
-    service.settings_service.get_settings_if_exists.return_value = Mock(
+    service.settings_service.get_settings.return_value = Mock(
         send_lifecycle_notifications=True
     )
     return service
@@ -37,7 +37,7 @@ def handler(mock_service):
 @pytest.mark.asyncio
 class TestSendStartupNotification:
     async def test_skips_when_notifications_disabled(self, handler):
-        handler.service.settings_service.get_settings_if_exists.return_value = Mock(
+        handler.service.settings_service.get_settings.return_value = Mock(
             send_lifecycle_notifications=False
         )
         await handler.send_startup_notification()

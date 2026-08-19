@@ -141,7 +141,7 @@ class TestLinkGroupToInstance:
         )
         mock_chat_settings = Mock(id="cs-1")
         mock_settings_service = Mock()
-        mock_settings_service.get_settings.return_value = mock_chat_settings
+        mock_settings_service.provision.return_value = mock_chat_settings
         mock_settings_service.__enter__ = Mock(return_value=mock_settings_service)
         mock_settings_service.__exit__ = Mock(return_value=False)
 
@@ -178,7 +178,7 @@ class TestLinkGroupToInstance:
         session = Mock(id="sess-1", pending_instance_name=None)
         mock_chat_settings = Mock(id="cs-1")
         mock_settings_service = Mock()
-        mock_settings_service.get_settings.return_value = mock_chat_settings
+        mock_settings_service.provision.return_value = mock_chat_settings
         mock_settings_service.__enter__ = Mock(return_value=mock_settings_service)
         mock_settings_service.__exit__ = Mock(return_value=False)
 

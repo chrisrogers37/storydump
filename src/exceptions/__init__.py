@@ -17,6 +17,7 @@ from src.exceptions.instagram import (
     MediaUnsupportedError,
     is_container_confirmed_failed,
 )
+from src.exceptions.tenancy import TenantResolutionError
 from src.exceptions.backfill import (
     BackfillError,
     BackfillMediaExpiredError,
@@ -40,4 +41,5 @@ __all__ = [
     "BackfillError",
     "BackfillMediaExpiredError",
     "BackfillMediaNotFoundError",
+    "TenantResolutionError",
 ]

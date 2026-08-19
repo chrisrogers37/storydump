@@ -3,7 +3,6 @@
 from typing import Optional
 
 from src.models.user import ROLE_ADMIN
-from src.repositories.chat_settings_repository import ChatSettingsRepository
 from src.repositories.membership_repository import MembershipRepository
 from src.repositories.user_repository import UserRepository
 from src.services.base_service import BaseService
@@ -22,31 +21,29 @@ class MembershipService(BaseService):
     def __init__(self):
         super().__init__()
         self.user_repo = UserRepository()
-        self.chat_settings_repo = ChatSettingsRepository()
         self.membership_repo = MembershipRepository()
 
     def is_active_member(
-        self, telegram_user_id: Optional[int], telegram_chat_id: Optional[int]
+        self, telegram_user_id: Optional[int], chat_settings_id: Optional[str]
     ) -> bool:
-        """Return True iff the Telegram user is an active member of the chat.
+        """Return True iff the Telegram user is an active member of the tenant.
 
-        Fail-closed: an absent user id or chat id, an unknown user, a chat
-        with no settings row, a missing membership, or an inactive membership
-        all return False. Never raises — authorization is a boolean gate.
+        Keyed by the RESOLVED tenant id (#842): chat -> tenant resolution
+        happens once at the caller's boundary, so the unknown-chat case is
+        decided there and never reaches this predicate. What remains boolean
+        here is the predicate's own question — fail-closed: an absent user id
+        or tenant id, an unknown user, a missing membership, or an inactive
+        membership all return False. Never raises.
         """
-        if telegram_user_id is None or telegram_chat_id is None:
+        if telegram_user_id is None or chat_settings_id is None:
             return False
 
         user = self.user_repo.get_by_telegram_id(telegram_user_id)
         if not user:
             return False
 
-        chat_settings = self.chat_settings_repo.get_by_chat_id(telegram_chat_id)
-        if not chat_settings:
-            return False
-
         membership = self.membership_repo.get_membership(
-            str(user.id), str(chat_settings.id)
+            str(user.id), str(chat_settings_id)
         )
         return bool(membership and membership.is_active)
 

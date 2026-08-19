@@ -44,7 +44,7 @@ class PostingService(BaseService):
         if not chat_id:
             return
 
-        chat_settings = self.settings_service.get_settings_if_exists(chat_id)
+        chat_settings = self.settings_service.get_settings(chat_id)
         if chat_settings is None:
             logger.debug(
                 f"Skipping Google Drive auth alert: no chat_settings for {chat_id}"

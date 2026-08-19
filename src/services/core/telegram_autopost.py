@@ -250,9 +250,7 @@ class TelegramAutopostHandler:
         Orchestrates: safety check → upload → dry-run check → post → record.
         """
         chat_id = query.message.chat_id
-        chat_settings = self.service.settings_service.get_settings(
-            chat_id, create_if_missing=False
-        )
+        chat_settings = self.service.settings_service.get_settings(chat_id)
         if not chat_settings:
             await query.edit_message_caption(
                 caption="⚠️ Chat settings not found.",

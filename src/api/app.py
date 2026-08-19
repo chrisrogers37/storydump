@@ -5,7 +5,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -15,6 +15,8 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from src.api.rate_limit import limiter
+from src.api.routes.onboarding.helpers import MEMBERSHIP_DENIED_DETAIL
+from src.exceptions.tenancy import TenantResolutionError
 from src.api.routes.oauth import router as oauth_router
 from src.api.routes.onboarding import router as onboarding_router
 from src.config.settings import settings
@@ -118,6 +120,18 @@ app = FastAPI(
     description="OAuth and API endpoints for Storydump",
     version="0.1.0",
 )
+
+
+@app.exception_handler(TenantResolutionError)
+async def _tenant_resolution_refused(request: Request, exc: TenantResolutionError):
+    """A tenant refusal that escapes a route maps like a membership denial.
+
+    Routes normally refuse at `_validate_request` before any service runs;
+    this handler is defense in depth for a refusal raised deeper (#842), so
+    a service never needs to speak HTTP and no refusal can 500.
+    """
+    return JSONResponse(status_code=403, content={"detail": MEMBERSHIP_DENIED_DETAIL})
+
 
 # Security headers — HSTS, CSP, X-Frame-Options, X-Content-Type-Options
 app.add_middleware(SecurityHeadersMiddleware)

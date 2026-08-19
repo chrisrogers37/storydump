@@ -860,6 +860,7 @@ class TestMediaSyncServiceSettingsResolution:
             "src.services.core.settings_service.SettingsService"
         ) as MockSettingsSvc:
             mock_svc_instance = MockSettingsSvc.return_value
+            mock_svc_instance.resolve_chat_settings_id.return_value = "tenant-X"
             mock_svc_instance.get_media_source_config.return_value = (
                 "google_drive",
                 "per_chat_folder",
@@ -867,7 +868,7 @@ class TestMediaSyncServiceSettingsResolution:
 
             sync_service.sync(triggered_by="scheduler", telegram_chat_id=-100999)
 
-        mock_svc_instance.get_media_source_config.assert_called_once_with(-100999)
+        mock_svc_instance.get_media_source_config.assert_called_once_with("tenant-X")
         mock_svc_instance.close.assert_called_once()
 
     @patch("src.services.core.media_sync.settings")
@@ -935,8 +936,8 @@ class TestMediaSyncTenantStamping:
             "src.services.core.settings_service.SettingsService"
         ) as MockSettingsSvc:
             svc = MockSettingsSvc.return_value
+            svc.resolve_chat_settings_id.return_value = "tenant-A"
             svc.get_media_source_config.return_value = ("local", "/media")
-            svc.get_settings_if_exists.return_value = Mock(id="tenant-A")
 
             sync_service.sync(triggered_by="scheduler", telegram_chat_id=-100)
 

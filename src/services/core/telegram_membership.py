@@ -120,7 +120,9 @@ class TelegramMembershipHandler:
 
     def _handle_bot_removed_from_group(self, chat):
         """Bot was kicked from a group — deactivate all memberships."""
-        chat_settings = self.service.settings_service.get_settings_if_exists(chat.id)
+        # Deliberate #842 exception: teardown is idempotent — being removed
+        # from a never-provisioned group has nothing to deactivate.
+        chat_settings = self.service.settings_service.get_settings(chat.id)
         if not chat_settings:
             return
 

@@ -45,8 +45,8 @@ class TestSendGdriveAuthAlert:
         """First auth error in a disconnect event sends the alert and persists."""
         mock_settings.ADMIN_TELEGRAM_CHAT_ID = -100123
         mock_settings.OAUTH_REDIRECT_BASE_URL = "https://example.com"
-        posting_service.settings_service.get_settings_if_exists.return_value = (
-            _chat_settings(alerted_at=None)
+        posting_service.settings_service.get_settings.return_value = _chat_settings(
+            alerted_at=None
         )
 
         bot = AsyncMock()
@@ -70,8 +70,8 @@ class TestSendGdriveAuthAlert:
         """Second auth error within the same disconnect event is suppressed."""
         mock_settings.ADMIN_TELEGRAM_CHAT_ID = -100123
         mock_settings.OAUTH_REDIRECT_BASE_URL = "https://example.com"
-        posting_service.settings_service.get_settings_if_exists.return_value = (
-            _chat_settings(alerted_at=datetime(2026, 5, 14, tzinfo=timezone.utc))
+        posting_service.settings_service.get_settings.return_value = _chat_settings(
+            alerted_at=datetime(2026, 5, 14, tzinfo=timezone.utc)
         )
 
         bot = AsyncMock()
@@ -88,7 +88,7 @@ class TestSendGdriveAuthAlert:
         """Unknown chat (no chat_settings row) is silently skipped."""
         mock_settings.ADMIN_TELEGRAM_CHAT_ID = -100123
         mock_settings.OAUTH_REDIRECT_BASE_URL = "https://example.com"
-        posting_service.settings_service.get_settings_if_exists.return_value = None
+        posting_service.settings_service.get_settings.return_value = None
 
         bot = AsyncMock()
         await posting_service.send_gdrive_auth_alert(-100123, bot=bot)
@@ -102,8 +102,8 @@ class TestSendGdriveAuthAlert:
         """Uses ADMIN_TELEGRAM_CHAT_ID when no chat_id provided."""
         mock_settings.ADMIN_TELEGRAM_CHAT_ID = -100999
         mock_settings.OAUTH_REDIRECT_BASE_URL = "https://example.com"
-        posting_service.settings_service.get_settings_if_exists.return_value = (
-            _chat_settings(alerted_at=None)
+        posting_service.settings_service.get_settings.return_value = _chat_settings(
+            alerted_at=None
         )
 
         bot = AsyncMock()
@@ -111,9 +111,7 @@ class TestSendGdriveAuthAlert:
 
         call_kwargs = bot.send_message.call_args.kwargs
         assert call_kwargs["chat_id"] == -100999
-        posting_service.settings_service.get_settings_if_exists.assert_called_once_with(
-            -100999
-        )
+        posting_service.settings_service.get_settings.assert_called_once_with(-100999)
 
     @pytest.mark.asyncio
     @patch("src.services.core.posting.settings")
@@ -128,8 +126,8 @@ class TestSendGdriveAuthAlert:
         """
         mock_settings.ADMIN_TELEGRAM_CHAT_ID = -100123
         mock_settings.OAUTH_REDIRECT_BASE_URL = "https://example.com"
-        posting_service.settings_service.get_settings_if_exists.return_value = (
-            _chat_settings(alerted_at=None)
+        posting_service.settings_service.get_settings.return_value = _chat_settings(
+            alerted_at=None
         )
 
         bot = AsyncMock()
@@ -151,7 +149,7 @@ class TestSendGdriveAuthAlert:
         await posting_service.send_gdrive_auth_alert(bot=bot)
 
         bot.send_message.assert_not_called()
-        posting_service.settings_service.get_settings_if_exists.assert_not_called()
+        posting_service.settings_service.get_settings.assert_not_called()
 
     @pytest.mark.asyncio
     @patch("src.services.core.posting.settings")
@@ -161,8 +159,8 @@ class TestSendGdriveAuthAlert:
         """If the Telegram send fails, the flag is NOT set — allow retry next tick."""
         mock_settings.ADMIN_TELEGRAM_CHAT_ID = -100123
         mock_settings.OAUTH_REDIRECT_BASE_URL = "https://example.com"
-        posting_service.settings_service.get_settings_if_exists.return_value = (
-            _chat_settings(alerted_at=None)
+        posting_service.settings_service.get_settings.return_value = _chat_settings(
+            alerted_at=None
         )
 
         bot = AsyncMock()

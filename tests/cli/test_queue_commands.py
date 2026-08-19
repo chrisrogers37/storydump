@@ -96,6 +96,7 @@ class TestQueuePreviewCommand:
         mock_service = MagicMock()
         mock_service_class.return_value.__enter__ = Mock(return_value=mock_service)
         mock_service_class.return_value.__exit__ = Mock(return_value=False)
+        mock_service.settings_service.resolve_chat_settings_id.return_value = "cs-admin"
         mock_service.get_queue_preview.return_value = [
             {"media_id": "id-1", "file_name": "preview1.jpg", "category": "memes"},
             {"media_id": "id-2", "file_name": "preview2.jpg", "category": "merch"},
@@ -114,6 +115,7 @@ class TestQueuePreviewCommand:
         mock_service = MagicMock()
         mock_service_class.return_value.__enter__ = Mock(return_value=mock_service)
         mock_service_class.return_value.__exit__ = Mock(return_value=False)
+        mock_service.settings_service.resolve_chat_settings_id.return_value = "cs-admin"
         mock_service.get_queue_preview.return_value = []
 
         runner = CliRunner()

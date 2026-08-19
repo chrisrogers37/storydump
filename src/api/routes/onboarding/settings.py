@@ -191,14 +191,13 @@ async def onboarding_sync_media(request: Request, body: InitRequest) -> dict:
     Calls MediaSyncService.sync() with the chat's per-tenant config.
     Returns sync result counts (new, updated, deactivated, etc).
     """
-    _validate_request(body.init_data, body.chat_id)
+    auth = _validate_request(body.init_data, body.chat_id)
+    chat_settings_id = auth["chat_settings_id"]
 
     with SettingsService() as settings_service:
         source_type, source_root = settings_service.get_media_source_config(
-            body.chat_id
+            chat_settings_id
         )
-        chat_settings = settings_service.get_settings_if_exists(body.chat_id)
-        chat_settings_id = str(chat_settings.id) if chat_settings else None
 
     if not source_root:
         raise HTTPException(
@@ -247,11 +246,11 @@ async def onboarding_queue_preview(request: InitRequest) -> dict:
     Computes JIT selections without persisting — shows what the
     scheduler would pick next.
     """
-    _validate_request(request.init_data, request.chat_id)
+    auth = _validate_request(request.init_data, request.chat_id)
 
     with SchedulerService() as scheduler:
         previews = scheduler.get_queue_preview(
-            telegram_chat_id=request.chat_id, count=5
+            chat_settings_id=auth["chat_settings_id"], count=5
         )
         return {"items": previews}
 
@@ -356,11 +355,8 @@ async def onboarding_get_category_mix(request: InitRequest) -> dict:
     `category_post_case_mix` — the UI uses that to distinguish "no mix
     set, scheduler is unfiltered random" from "explicit 0%".
     """
-    _validate_request(request.init_data, request.chat_id)
-
-    with SettingsService() as settings_service, service_error_handler():
-        chat_settings = settings_service.get_settings(request.chat_id)
-        chat_settings_id = str(chat_settings.id)
+    auth = _validate_request(request.init_data, request.chat_id)
+    chat_settings_id = auth["chat_settings_id"]
 
     with MediaRepository() as media_repo:
         library_counts = media_repo.count_by_category(chat_settings_id=chat_settings_id)
@@ -392,14 +388,11 @@ async def onboarding_update_category_mix(request: UpdateCategoryMixRequest) -> d
     refreshed mix in the same shape as the GET endpoint so the UI can
     update in place.
     """
-    _validate_request(request.init_data, request.chat_id)
+    auth = _validate_request(request.init_data, request.chat_id)
+    chat_settings_id = auth["chat_settings_id"]
 
     if not request.ratios:
         raise HTTPException(status_code=400, detail="ratios must be non-empty")
-
-    with SettingsService() as settings_service, service_error_handler():
-        chat_settings = settings_service.get_settings(request.chat_id)
-        chat_settings_id = str(chat_settings.id)
 
     with MediaRepository() as media_repo:
         library_counts = media_repo.count_by_category(chat_settings_id=chat_settings_id)
