@@ -305,6 +305,10 @@ class TestTheBoundaryIsDerivedAndLoud:
             "058_rls_and_policies.sql",
             "059_security_definer_doors.sql",
             "060_auth_plane_tables.sql",
+            # 061 is the first file PAST F.2: 060 completed the lineage, and
+            # this one extends the advertised stream rather than consuming a
+            # remaining prefix of it (#883).
+            "061_intent_self_transition_guard.sql",
         ], (
             f"the target lineage is {above}. If you are landing the next F.2"
             " increment, add it here — deliberately, and at the end: arm (b)"

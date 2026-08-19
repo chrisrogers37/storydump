@@ -280,12 +280,18 @@ class TestDoubleTransition:
     same-state write is a NO-OP rather than a refusal — so this asserts the
     property that actually holds, not the phrasing."""
 
-    def test_a_same_state_write_succeeds_but_forges_no_second_ledger_entry(
-        self, ledger
-    ):
+    def test_a_same_state_write_is_REFUSED_and_moves_nothing(self, ledger):
+        """#883 closed this. Before `061` a same-state write SUCCEEDED as a
+        no-op, and this test asserted that — correctly, because asserting the
+        gate's wording would have asserted something false at the time.
+
+        The ledger-integrity half is unchanged and still asserted: no audit
+        row, `entered_state_at` unmoved. What changed is that those now hold
+        because the write was REFUSED rather than because it was inert, which
+        is the stronger property and the one a caller can act on.
+        """
         intent = _new_intent(ledger, "scheduled")
         with ledger["conn"].cursor() as cur:
-            cur.execute("SET app.actor_kind = 'system'")
             cur.execute(
                 "SELECT entered_state_at FROM post_intents WHERE id=%s", (intent,)
             )
@@ -300,7 +306,8 @@ class TestDoubleTransition:
             "UPDATE post_intents SET state='scheduled' WHERE id=%s",
             (intent,),
         )
-        assert ok, f"same-state write raised: {msg}"
+        assert not ok, "a same-state write was accepted — #883 has regressed"
+        assert "same-state" in msg, f"refused, but not by the #883 guard: {msg}"
 
         with ledger["conn"].cursor() as cur:
             cur.execute(
@@ -311,11 +318,25 @@ class TestDoubleTransition:
                 "SELECT count(*) FROM audit_events WHERE entity_id=%s", (intent,)
             )
             audits_after = cur.fetchone()[0]
-        assert after == before, "a same-state write advanced entered_state_at"
-        assert audits_after == audits_before, (
-            "a same-state write produced an audit row — a repeated transition "
-            "could then forge a second ledger entry"
+        assert after == before, (
+            "a refused same-state write still advanced entered_state_at"
         )
+        assert audits_after == audits_before, (
+            "a refused same-state write wrote an audit row"
+        )
+
+    def test_a_NON_state_update_is_untouched_by_the_self_transition_guard(self, ledger):
+        """The other half of `061`, and the reason it is `UPDATE OF state`.
+
+        A checkpoint update does not name `state`, so the guard must never
+        fire on it. Without this, the fix for #883 would silently forbid every
+        checkpoint write — a far worse defect than the one it closes.
+        """
+        intent = _new_intent(ledger, "scheduled")
+        ok, msg, rows = _attempt(
+            ledger, "UPDATE post_intents SET ig_permalink='x' WHERE id=%s", (intent,)
+        )
+        assert ok and rows == 1, f"the #883 guard fired on a checkpoint update: {msg}"
 
     def test_replaying_a_COMPLETED_transition_is_refused(self, ledger):
         """The structural half: after A->B you are no longer in A, so the same
@@ -331,6 +352,100 @@ class TestDoubleTransition:
             ledger, "UPDATE post_intents SET state='scheduled' WHERE id=%s", (intent,)
         )
         assert not ok2 and "illegal transition" in msg2, msg2
+
+    def test_the_LOSER_of_a_concurrent_transition_is_REFUSED_not_told_it_won(
+        self, ledger
+    ):
+        """#883. The test that would have caught the self-transition defect.
+
+        Two writers take the same edge on the same intent. The loser blocks on
+        the row lock, and when the winner commits it re-evaluates against the
+        winner's row — so a BEFORE trigger sees ``OLD.state = NEW.state`` and,
+        before `061`, skipped every check and wrote a no-op. Both callers were
+        told they had transitioned; one had. `transition()` raising or not is
+        the caller's only success signal, and ``rowcount`` does not separate
+        them either: the loser got 1, identical to the winner.
+
+        Born red against the pre-`061` trigger, asserting the defect verbatim
+        (`the LOSER ... was told it succeeded (rowcount=1)`). It is here so the
+        next person to touch these triggers cannot reintroduce it quietly.
+
+        READ COMMITTED is asserted rather than assumed. At REPEATABLE READ and
+        above the loser already gets a serialization error, so a suite that
+        silently ran at a higher level would pass without reaching the guard
+        at all — the vacuity this file exists to refuse.
+        """
+        import threading
+
+        intent = _new_intent(ledger, "scheduled")
+        winner = psycopg2.connect(ledger["dsn"])
+        loser = psycopg2.connect(ledger["dsn"])
+        try:
+            for conn in (winner, loser):
+                conn.autocommit = False
+                with conn.cursor() as cur:
+                    cur.execute("SET app.actor_kind = 'system'")
+            with loser.cursor() as cur:
+                cur.execute("SHOW transaction_isolation")
+                assert cur.fetchone()[0] == "read committed", (
+                    "this gate is only meaningful at READ COMMITTED — at a "
+                    "higher level the loser gets a serialization error and the "
+                    "trigger is never reached"
+                )
+
+            wc, lc = winner.cursor(), loser.cursor()
+            wc.execute(
+                "UPDATE post_intents SET state='prompt_pending' WHERE id=%s", (intent,)
+            )
+
+            outcome = {}
+
+            def race():
+                try:
+                    lc.execute(
+                        "UPDATE post_intents SET state='prompt_pending' WHERE id=%s",
+                        (intent,),
+                    )
+                    outcome["ok"], outcome["rows"] = True, lc.rowcount
+                except Exception as exc:  # noqa: BLE001 — the message is the assertion
+                    outcome["ok"] = False
+                    outcome["msg"] = str(exc).strip()
+
+            t = threading.Thread(target=race)
+            t.start()
+            t.join(timeout=2.0)
+            assert t.is_alive(), (
+                "the second writer did not block — it never contended for the "
+                "row, so this test is not exercising the race it names"
+            )
+
+            winner.commit()
+            t.join(timeout=30)
+            assert not t.is_alive(), "the losing writer never returned"
+
+            assert not outcome["ok"], (
+                "the LOSER of a concurrent transition was told it succeeded "
+                f"(rowcount={outcome.get('rows')}) — it did not transition "
+                "anything, and rowcount cannot tell it apart from the winner "
+                "(#883)"
+            )
+            assert "same-state" in outcome["msg"], (
+                f"refused, but not by the #883 guard: {outcome['msg']}"
+            )
+            loser.rollback()
+
+            with ledger["conn"].cursor() as cur:
+                cur.execute("SELECT state FROM post_intents WHERE id=%s", (intent,))
+                assert cur.fetchone()[0] == "prompt_pending"
+                cur.execute(
+                    "SELECT count(*) FROM audit_events WHERE entity_id=%s", (intent,)
+                )
+                assert cur.fetchone()[0] == 1, (
+                    "exactly one transition happened, so exactly one audit row"
+                )
+        finally:
+            winner.close()
+            loser.close()
 
 
 class TestTerminalRowsRejectEveryUpdate:
@@ -545,6 +660,24 @@ class TestTheGuardsAreLoadBearing:
             ledger, "UPDATE post_intents SET ig_permalink='x' WHERE id=%s", (intent2,)
         )
         assert ok2 and rows2 == 1, f"still refused without the guard: {msg2}"
+
+    def test_the_self_transition_guard_is_what_refuses_a_same_state_write(self, ledger):
+        """#883's trigger, held to the same standard as the other four."""
+        intent = _new_intent(ledger, "scheduled")
+        ok, msg, _ = _attempt(
+            ledger, "UPDATE post_intents SET state='scheduled' WHERE id=%s", (intent,)
+        )
+        assert not ok and "same-state" in msg, msg
+
+        self._drop(ledger, "tg_intent_no_self_transition", "post_intents")
+        intent2 = _new_intent(ledger, "scheduled")
+        ok2, msg2, rows2 = _attempt(
+            ledger, "UPDATE post_intents SET state='scheduled' WHERE id=%s", (intent2,)
+        )
+        assert ok2 and rows2 == 1, (
+            f"the same-state write was still refused after dropping "
+            f"tg_intent_no_self_transition, so the refusal above was NOT it: {msg2}"
+        )
 
     def test_the_audit_trigger_is_what_refuses_an_actor_less_state_change(self, ledger):
         intent = _new_intent(ledger, "scheduled")
