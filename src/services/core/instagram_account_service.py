@@ -77,19 +77,36 @@ class InstagramAccountService(BaseService):
         """Get account by UUID."""
         return self.account_repo.get_by_id(account_id)
 
-    def get_account_by_id_prefix(self, id_prefix: str) -> Optional[InstagramAccount]:
-        """Get account by ID prefix (for shortened callback data).
+    def get_account_by_id_prefix(
+        self, id_prefix: str, telegram_chat_id: int
+    ) -> Optional[InstagramAccount]:
+        """Get an account the CALLER OWNS by ID prefix.
 
-        Used when Telegram callback data is too long and we need to use
-        shortened UUIDs. Returns the first matching account.
+        SECURITY (#901): the unscoped version resolved any tenant's account
+        from 8 hex characters, ahead of a mutation door that would correctly
+        refuse. Two things leaked from that ordering — the existence of a
+        foreign account id (an enumeration oracle over a 32-bit space), and,
+        because callers render what they find, the foreign account's display
+        name and handle in a confirm dialog for an action that was going to be
+        refused anyway.
 
-        Args:
-            id_prefix: First N characters of a UUID (typically 8)
+        The enforcement downstream was never missing; it simply was not the
+        only thing that spoke. Scoping the LOOKUP is what makes the refusal
+        the only thing that speaks.
 
-        Returns:
-            InstagramAccount or None if not found
+        Ownership is `list_accounts`'s derivation, not a second one — accounts
+        carry no tenant column, so this is set membership. A prefix that
+        matches nothing the caller owns returns None, which is the same answer
+        an invented prefix gets.
         """
-        return self.account_repo.get_by_id_prefix(id_prefix)
+        chat_settings = self.settings_repo.get_by_chat_id(telegram_chat_id)
+        if chat_settings is None:
+            return None
+        prefix = str(id_prefix)
+        for account in self.list_accounts(chat_settings, include_inactive=True):
+            if str(account.id).startswith(prefix):
+                return account
+        return None
 
     def get_account_by_username(self, username: str) -> Optional[InstagramAccount]:
         """Get account by Instagram username."""
@@ -271,17 +288,16 @@ class InstagramAccountService(BaseService):
         """
         existing = self.get_account_by_meta_id(instagram_account_id)
         if existing:
-            raise ValueError(
-                f"Account with ID {instagram_account_id} already exists "
-                f"as '{existing.display_name}'"
-            )
+            # SECURITY (#901): the display_name here belongs to whoever owns
+            # the account, which need not be the caller — error text is a
+            # disclosure surface and is routinely exempted from review
+            # attention. The id the caller supplied is theirs to see; the
+            # name attached to it is not.
+            raise ValueError(f"Account with ID {instagram_account_id} already exists")
 
         existing_by_username = self.account_repo.get_by_username(instagram_username)
         if existing_by_username:
-            raise ValueError(
-                f"Account @{instagram_username} already exists "
-                f"as '{existing_by_username.display_name}'"
-            )
+            raise ValueError(f"Account @{instagram_username} already exists")
 
     def _create_account_with_token(
         self,
@@ -667,9 +683,19 @@ class InstagramAccountService(BaseService):
 
             return account
 
-    def count_active_accounts(self) -> int:
-        """Count active Instagram accounts (lightweight, single COUNT query)."""
-        return self.account_repo.count_active()
+    def count_active_accounts(self, telegram_chat_id: int) -> int:
+        """Count active accounts THIS TENANT OWNS.
+
+        SECURITY (#901): the deployment-wide count shaped tenant-facing UI, so
+        a tenant with one account could infer that others existed. Same
+        ownership derivation as `list_accounts` — one definition, and a count
+        that disagrees with the list the caller can see would be its own small
+        oracle.
+        """
+        chat_settings = self.settings_repo.get_by_chat_id(telegram_chat_id)
+        if chat_settings is None:
+            return 0
+        return len(self.list_accounts(chat_settings))
 
     def get_accounts_for_display(self, telegram_chat_id: int) -> Dict[str, Any]:
         """
