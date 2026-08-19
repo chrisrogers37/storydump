@@ -94,8 +94,7 @@ class LockRepository(BaseRepository):
             chat_settings_id=tenant_value(chat_settings_id),
         )
         self.db.add(lock)
-        self.db.commit()
-        self.db.refresh(lock)
+        self.commit_and_refresh(lock)
         return lock
 
     def delete(self, lock_id: str) -> bool:

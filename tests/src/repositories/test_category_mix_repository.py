@@ -155,8 +155,8 @@ class TestCategoryMixRepository:
 
         # Should add 2 new records
         assert mock_db.add.call_count == 2
-        # commit called twice: once by get_current_mix's end_read_transaction, once by the write
-        assert mock_db.commit.call_count == 2
+        # 3 commits (#908): get_current_mix's read-close, the write, and set_mix's post-loop read-close
+        assert mock_db.commit.call_count == 3
 
     def test_set_mix_expires_old_records(self, mix_repo, mock_db):
         """Test that set_mix expires existing records."""

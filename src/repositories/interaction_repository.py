@@ -31,8 +31,7 @@ class InteractionRepository(BaseRepository):
             telegram_message_id=telegram_message_id,
         )
         self.db.add(interaction)
-        self.db.commit()
-        self.db.refresh(interaction)
+        self.commit_and_refresh(interaction)
         return interaction
 
     def get_by_id(self, interaction_id: str) -> Optional[UserInteraction]:

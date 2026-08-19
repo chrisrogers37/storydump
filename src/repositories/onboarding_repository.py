@@ -58,8 +58,7 @@ class OnboardingRepository(BaseRepository):
             expires_at=expires_at,
         )
         self.db.add(session)
-        self.db.commit()
-        self.db.refresh(session)
+        self.commit_and_refresh(session)
         return session
 
     def update_step(
@@ -79,8 +78,7 @@ class OnboardingRepository(BaseRepository):
             session.pending_instance_name = pending_instance_name
         if pending_chat_settings_id is not None:
             session.pending_chat_settings_id = pending_chat_settings_id
-        self.db.commit()
-        self.db.refresh(session)
+        self.commit_and_refresh(session)
         return session
 
     def get_expired(self) -> list[OnboardingSession]:

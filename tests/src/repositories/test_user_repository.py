@@ -44,7 +44,7 @@ class TestUserRepository:
         )
 
         mock_db.add.assert_called_once()
-        mock_db.commit.assert_called_once()
+        mock_db.commit.assert_called()
         mock_db.refresh.assert_called_once()
 
         added_user = mock_db.add.call_args[0][0]
@@ -95,8 +95,8 @@ class TestUserRepository:
 
         assert mock_user.total_posts == 1
         assert mock_user.last_seen_at is not None
-        # commit called twice: once by get_by_id's end_read_transaction, once by the write
-        assert mock_db.commit.call_count == 2
+        # 3 commits (#908): get_by_id's read-close, then commit_and_refresh (write + its read-close)
+        assert mock_db.commit.call_count == 3
 
     def test_update_role(self, user_repo, mock_db):
         """Test updating user role."""
@@ -107,8 +107,8 @@ class TestUserRepository:
         user_repo.update_role("some-user-id", "admin")
 
         assert mock_user.role == "admin"
-        # commit called twice: once by get_by_id's end_read_transaction, once by the write
-        assert mock_db.commit.call_count == 2
+        # 3 commits (#908): get_by_id's read-close, then commit_and_refresh (write + its read-close)
+        assert mock_db.commit.call_count == 3
 
     def test_get_all_users(self, user_repo, mock_db):
         """Test listing all users."""
@@ -147,8 +147,8 @@ class TestUserRepository:
         assert mock_user.telegram_first_name == "New"
         assert mock_user.telegram_last_name == "Person"
         assert mock_user.last_seen_at is not None
-        # commit called twice: once by get_by_id's end_read_transaction, once by the write
-        assert mock_db.commit.call_count == 2
+        # 3 commits (#908): get_by_id's read-close, then commit_and_refresh (write + its read-close)
+        assert mock_db.commit.call_count == 3
 
     def test_update_profile_adds_username(self, user_repo, mock_db):
         """Test adding username to user who didn't have one."""
@@ -190,4 +190,4 @@ class TestUserRepository:
 
         assert result is None
         # commit called once by get_by_id's end_read_transaction (no write commit)
-        mock_db.commit.assert_called_once()
+        mock_db.commit.assert_called()

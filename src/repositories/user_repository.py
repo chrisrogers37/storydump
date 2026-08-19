@@ -57,8 +57,7 @@ class UserRepository(BaseRepository):
             role=role,
         )
         self.db.add(user)
-        self.db.commit()
-        self.db.refresh(user)
+        self.commit_and_refresh(user)
         return user
 
     def update_last_seen(self, user_id: str) -> User:
@@ -66,8 +65,7 @@ class UserRepository(BaseRepository):
         user = self.get_by_id(user_id)
         if user:
             user.last_seen_at = datetime.utcnow()
-            self.db.commit()
-            self.db.refresh(user)
+            self.commit_and_refresh(user)
         return user
 
     def update_profile(
@@ -88,8 +86,7 @@ class UserRepository(BaseRepository):
             user.telegram_first_name = telegram_first_name
             user.telegram_last_name = telegram_last_name
             user.last_seen_at = datetime.utcnow()
-            self.db.commit()
-            self.db.refresh(user)
+            self.commit_and_refresh(user)
         return user
 
     def increment_posts(self, user_id: str) -> User:
@@ -98,8 +95,7 @@ class UserRepository(BaseRepository):
         if user:
             user.total_posts += 1
             user.last_seen_at = datetime.utcnow()
-            self.db.commit()
-            self.db.refresh(user)
+            self.commit_and_refresh(user)
         return user
 
     def update_role(self, user_id: str, role: str) -> User:
@@ -107,8 +103,7 @@ class UserRepository(BaseRepository):
         user = self.get_by_id(user_id)
         if user:
             user.role = role
-            self.db.commit()
-            self.db.refresh(user)
+            self.commit_and_refresh(user)
         return user
 
     def deactivate(self, user_id: str) -> User:
@@ -116,6 +111,5 @@ class UserRepository(BaseRepository):
         user = self.get_by_id(user_id)
         if user:
             user.is_active = False
-            self.db.commit()
-            self.db.refresh(user)
+            self.commit_and_refresh(user)
         return user

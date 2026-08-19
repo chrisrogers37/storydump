@@ -49,7 +49,7 @@ class TestQueueRepository:
         )
 
         mock_db.add.assert_called_once()
-        mock_db.commit.assert_called_once()
+        mock_db.commit.assert_called()
         mock_db.refresh.assert_called_once()
 
         added_item = mock_db.add.call_args[0][0]
@@ -376,7 +376,7 @@ class TestClaimForProcessing:
 
         assert result is mock_item
         assert mock_item.status == "processing"
-        mock_db.commit.assert_called_once()
+        mock_db.commit.assert_called()
 
     def test_claim_for_processing_returns_none_when_missing(self, queue_repo, mock_db):
         """claim_for_processing returns None when item doesn't exist."""

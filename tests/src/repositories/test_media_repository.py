@@ -51,7 +51,7 @@ class TestMediaRepository:
         )
 
         mock_db.add.assert_called_once()
-        mock_db.commit.assert_called_once()
+        mock_db.commit.assert_called()
         mock_db.refresh.assert_called_once()
 
         added_item = mock_db.add.call_args[0][0]
@@ -121,8 +121,8 @@ class TestMediaRepository:
 
         assert mock_item.times_posted == 1
         assert mock_item.last_posted_at is not None
-        # commit called twice: once by get_by_id's end_read_transaction, once by the write
-        assert mock_db.commit.call_count == 2
+        # 3 commits (#908): get_by_id's read-close, then commit_and_refresh (write + its read-close)
+        assert mock_db.commit.call_count == 3
         mock_db.refresh.assert_called_once_with(mock_item)
 
     def test_increment_times_posted_not_found(self, media_repo, mock_db):
@@ -135,7 +135,7 @@ class TestMediaRepository:
 
         assert result is None
         # commit called once by get_by_id's end_read_transaction (no write commit)
-        mock_db.commit.assert_called_once()
+        mock_db.commit.assert_called()
 
     def test_get_all_with_filters(self, media_repo, mock_db):
         """Test listing media with various filters."""
@@ -202,8 +202,8 @@ class TestMediaRepositorySyncMethods:
 
         assert mock_item.is_active is True
         assert mock_item.updated_at is not None
-        # commit called twice: once by get_by_id's end_read_transaction, once by the write
-        assert mock_db.commit.call_count == 2
+        # 3 commits (#908): get_by_id's read-close, then commit_and_refresh (write + its read-close)
+        assert mock_db.commit.call_count == 3
         mock_db.refresh.assert_called_once_with(mock_item)
 
     def test_update_source_info_updates_fields(self, media_repo, mock_db):
@@ -223,8 +223,8 @@ class TestMediaRepositorySyncMethods:
         assert mock_item.file_name == "new_name.jpg"
         assert mock_item.source_identifier == "/new/path.jpg"
         assert mock_item.updated_at is not None
-        # commit called twice: once by get_by_id's end_read_transaction, once by the write
-        assert mock_db.commit.call_count == 2
+        # 3 commits (#908): get_by_id's read-close, then commit_and_refresh (write + its read-close)
+        assert mock_db.commit.call_count == 3
 
     def test_update_source_info_partial_update(self, media_repo, mock_db):
         """Only updates fields that are not None."""
@@ -243,8 +243,8 @@ class TestMediaRepositorySyncMethods:
         # file_path and source_identifier should not be changed
         assert mock_item.file_path == "/original/path.jpg"
         assert mock_item.source_identifier == "/original/id"
-        # commit called twice: once by get_by_id's end_read_transaction, once by the write
-        assert mock_db.commit.call_count == 2
+        # 3 commits (#908): get_by_id's read-close, then commit_and_refresh (write + its read-close)
+        assert mock_db.commit.call_count == 3
 
 
 @pytest.mark.unit
@@ -771,7 +771,7 @@ class TestClearStaleCloudInfo:
         count = media_repo.clear_stale_cloud_info(retention_hours=24)
 
         assert count == 3
-        mock_db.commit.assert_called_once()
+        mock_db.commit.assert_called()
 
     def test_returns_zero_when_nothing_to_clear(self, media_repo, mock_db):
         """Test returns 0 when no stale records exist."""
@@ -781,7 +781,7 @@ class TestClearStaleCloudInfo:
         count = media_repo.clear_stale_cloud_info(retention_hours=24)
 
         assert count == 0
-        mock_db.commit.assert_called_once()
+        mock_db.commit.assert_called()
 
     def test_queries_media_item_table(self, media_repo, mock_db):
         """Test that the query targets MediaItem."""

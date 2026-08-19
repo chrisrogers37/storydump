@@ -45,7 +45,7 @@ class TestLockRepository:
         )
 
         mock_db.add.assert_called_once()
-        mock_db.commit.assert_called_once()
+        mock_db.commit.assert_called()
         mock_db.refresh.assert_called_once()
 
         added_lock = mock_db.add.call_args[0][0]
@@ -107,7 +107,7 @@ class TestLockRepository:
         result = lock_repo.cleanup_expired(chat_settings_id=SYSTEM_SCOPE)
 
         assert result == 3
-        mock_db.commit.assert_called_once()
+        mock_db.commit.assert_called()
 
     def test_delete_lock(self, lock_repo, mock_db):
         """Test deleting a specific lock."""

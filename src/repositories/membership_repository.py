@@ -83,8 +83,7 @@ class MembershipRepository(BaseRepository):
         if existing:
             if not existing.is_active:
                 existing.is_active = True
-                self.db.commit()
-                self.db.refresh(existing)
+                self.commit_and_refresh(existing)
                 try:
                     self.audit_repo.log(
                         entity_type="membership",
@@ -116,6 +115,14 @@ class MembershipRepository(BaseRepository):
             self.db.rollback()
             return self.get_membership(user_id, chat_settings_id)
         self.db.refresh(membership)
+        # commit_and_refresh is deliberately NOT used here (#908). It routes
+        # through the wrapper commit(), which records a circuit-breaker FAILURE
+        # and logs on ANY commit error — but a duplicate membership is an
+        # EXPECTED conflict this branch handles by returning the existing row,
+        # so the commit stays raw inside the recovery try above and does not
+        # fault the breaker on a normal dedup. refresh runs only on success;
+        # close the read transaction it opens directly.
+        self.end_read_transaction()
         try:
             self.audit_repo.log(
                 entity_type="membership",
@@ -157,8 +164,7 @@ class MembershipRepository(BaseRepository):
         membership = self.get_membership(user_id, chat_settings_id)
         if membership and membership.is_active:
             membership.is_active = False
-            self.db.commit()
-            self.db.refresh(membership)
+            self.commit_and_refresh(membership)
             try:
                 self.audit_repo.log(
                     entity_type="membership",

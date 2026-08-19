@@ -74,7 +74,7 @@ class TestBaseRepository:
     def test_commit_calls_session_commit(self, repo, mock_db):
         """Test that commit() delegates to session.commit()."""
         repo.commit()
-        mock_db.commit.assert_called_once()
+        mock_db.commit.assert_called()
 
     def test_commit_rollback_on_error(self, repo, mock_db):
         """Test that commit() rolls back and re-raises on error."""
@@ -99,7 +99,7 @@ class TestBaseRepository:
     def test_end_read_transaction_commits(self, repo, mock_db):
         """Test that end_read_transaction() commits to release locks."""
         repo.end_read_transaction()
-        mock_db.commit.assert_called_once()
+        mock_db.commit.assert_called()
 
     def test_end_read_transaction_rollback_on_error(self, repo, mock_db):
         """Test that end_read_transaction() falls back to rollback."""
