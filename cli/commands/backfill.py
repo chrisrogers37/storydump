@@ -43,12 +43,22 @@ console = Console()
     default=None,
     help="Instagram account UUID to backfill from (default: active account)",
 )
+@click.option(
+    "--chat-id",
+    type=int,
+    default=None,
+    help=(
+        "Telegram chat to backfill for. Defaults to ADMIN_TELEGRAM_CHAT_ID, "
+        "named explicitly here rather than implied inside the service (#867)."
+    ),
+)
 def backfill_instagram(
     limit: Optional[int],
     media_type: str,
     since: Optional[datetime],
     dry_run: bool,
     account_id: Optional[str],
+    chat_id: Optional[int],
 ):
     """Backfill media from Instagram into the local media library.
 
@@ -82,7 +92,8 @@ def backfill_instagram(
             f"Media type: {media_type}\n"
             f"Limit: {limit or 'all'}\n"
             f"Since: {since.strftime('%Y-%m-%d') if since else 'all time'}\n"
-            f"Account: {account_id or 'active account'}",
+            f"Account: {account_id or 'active account'}\n"
+            f"Chat: {chat_id if chat_id is not None else 'ADMIN_TELEGRAM_CHAT_ID'}",
             title="Storydump",
         )
     )
@@ -94,11 +105,26 @@ def backfill_instagram(
             "cannot be retrieved.\n"
         )
 
+    # #867: the tenant is named HERE, at the operator edge, instead of being
+    # defaulted inside the service. Same effective behaviour for an operator
+    # who passes no flag, but the admin grant is now visible in the diff and
+    # overridable with --chat-id.
+    from src.config.settings import settings
+
+    # Operator-only CLI edge: visible in --help, overridable with --chat-id,
+    # and unreachable from inbound Telegram or webhook data. The marker below
+    # is what declares it to the #867 gate; grepping for that marker gives
+    # the full inventory of deliberate admin grants.
+    target_chat_id = (  # admin-grant-ok: operator edge, reasoned above
+        chat_id if chat_id is not None else settings.ADMIN_TELEGRAM_CHAT_ID
+    )
+
     service = InstagramBackfillService()
 
     try:
         result = asyncio.run(
             service.backfill(
+                telegram_chat_id=target_chat_id,
                 limit=limit,
                 media_type=media_type,
                 since=since,

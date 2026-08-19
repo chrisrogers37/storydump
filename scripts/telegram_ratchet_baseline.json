@@ -1,5 +1,6 @@
 {
   "chat_id_functions_outside_adapters": [
+    "cli/commands/backfill.py::backfill_instagram",
     "cli/commands/tokens.py::revoke_tokens",
     "src/api/routes/oauth.py::google_drive_oauth_start",
     "src/api/routes/oauth.py::instagram_oauth_start",
@@ -101,6 +102,7 @@
     "src/services/integrations/instagram_api.py::is_configured",
     "src/services/integrations/instagram_api.py::post_story",
     "src/services/integrations/instagram_api.py::safety_check_before_post",
+    "src/services/integrations/instagram_api.py::validate_instagram_account_id",
     "src/services/integrations/instagram_backfill.py::_get_credentials",
     "src/services/integrations/instagram_backfill.py::backfill",
     "src/services/integrations/instagram_credentials.py::get_account_info",

@@ -100,7 +100,7 @@ class InstagramCredentialManager:
 
         return (None, None, None)
 
-    def is_configured(self, telegram_chat_id: Optional[int] = None) -> bool:
+    def is_configured(self, telegram_chat_id: int) -> bool:
         """
         Check if Instagram API is properly configured for a given chat.
 
@@ -111,13 +111,11 @@ class InstagramCredentialManager:
           (via `chat_settings.active_instagram_account_id`).
 
         Args:
-            telegram_chat_id: Chat to check (uses ADMIN chat if not specified)
+            telegram_chat_id: Chat to check. Required (#867) — an absent id is
+                a caller bug, never a grant of the admin tenant.
         """
         if not settings.FACEBOOK_APP_ID:
             return False
-
-        if telegram_chat_id is None:
-            telegram_chat_id = settings.ADMIN_TELEGRAM_CHAT_ID
 
         chat_settings = self.service.settings_service.get_settings(telegram_chat_id)
         if chat_settings is None or not chat_settings.enable_instagram_api:
@@ -128,9 +126,7 @@ class InstagramCredentialManager:
             is not None
         )
 
-    def validate_instagram_account_id(
-        self, telegram_chat_id: Optional[int] = None
-    ) -> dict:
+    def validate_instagram_account_id(self, telegram_chat_id: int) -> dict:
         """
         Validate that the active account's Instagram ID looks well-formed.
 
@@ -142,9 +138,6 @@ class InstagramCredentialManager:
         Returns:
             dict with 'valid', 'account_id', 'reason'
         """
-        if telegram_chat_id is None:
-            telegram_chat_id = settings.ADMIN_TELEGRAM_CHAT_ID
-
         active_account = self.service.account_service.get_active_account(
             telegram_chat_id
         )
@@ -177,7 +170,7 @@ class InstagramCredentialManager:
             "reason": "Account ID format is valid",
         }
 
-    async def get_account_info(self, telegram_chat_id: Optional[int] = None) -> dict:
+    async def get_account_info(self, telegram_chat_id: int) -> dict:
         """
         Fetch Instagram account info (username, name, etc.) from the API.
 
@@ -185,14 +178,12 @@ class InstagramCredentialManager:
         Results are cached to avoid repeated API calls.
 
         Args:
-            telegram_chat_id: Chat to get active account for (uses ADMIN chat if not specified)
+            telegram_chat_id: Chat to get the active account for. Required (#867)
+                — an absent id is a caller bug, never an admin grant.
 
         Returns:
             dict with 'username', 'name', 'id', or 'error' if failed
         """
-        if telegram_chat_id is None:
-            telegram_chat_id = settings.ADMIN_TELEGRAM_CHAT_ID
-
         # Get active account credentials
         token, account_id, username = self.get_active_account_credentials(
             telegram_chat_id
@@ -290,7 +281,7 @@ class InstagramCredentialManager:
                 "error": str(e),
             }
 
-    def safety_check_before_post(self, telegram_chat_id: Optional[int] = None) -> dict:
+    def safety_check_before_post(self, telegram_chat_id: int) -> dict:
         """
         CRITICAL SAFETY GATE: Run all safety checks before posting.
 
@@ -300,14 +291,12 @@ class InstagramCredentialManager:
         Supports both multi-account mode (database) and legacy .env mode.
 
         Args:
-            telegram_chat_id: Chat to check (uses ADMIN chat if not specified)
+            telegram_chat_id: Chat to check. Required (#867) — an absent id is
+                a caller bug, never a grant of the admin tenant.
 
         Returns:
             dict with 'safe_to_post', 'checks', 'errors'
         """
-        if telegram_chat_id is None:
-            telegram_chat_id = settings.ADMIN_TELEGRAM_CHAT_ID
-
         # Get settings from database (not .env)
         chat_settings = self.service.settings_service.get_settings(telegram_chat_id)
 

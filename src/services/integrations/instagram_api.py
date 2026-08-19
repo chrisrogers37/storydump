@@ -81,7 +81,8 @@ class InstagramAPIService(BaseService):
         self,
         media_url: str,
         media_type: str = "IMAGE",
-        telegram_chat_id: Optional[int] = None,
+        *,
+        telegram_chat_id: int,
         on_container_created: Optional[Callable[[str], None]] = None,
     ) -> dict:
         """
@@ -117,10 +118,6 @@ class InstagramAPIService(BaseService):
             RateLimitError: When rate limited
             TokenExpiredError: When token needs refresh
         """
-        # Default to admin chat if not specified (for backward compatibility)
-        if telegram_chat_id is None:
-            telegram_chat_id = settings.ADMIN_TELEGRAM_CHAT_ID
-
         with self.track_execution(
             method_name="post_story",
             input_params={
@@ -457,7 +454,7 @@ class InstagramAPIService(BaseService):
 
     async def get_content_publishing_limit(
         self,
-        telegram_chat_id: Optional[int] = None,
+        telegram_chat_id: int,
         token: Optional[str] = None,
         account_id: Optional[str] = None,
     ) -> dict:
@@ -494,8 +491,9 @@ class InstagramAPIService(BaseService):
             }
 
         if token is None or account_id is None:
-            chat_id = telegram_chat_id or settings.ADMIN_TELEGRAM_CHAT_ID
-            token, account_id, _ = self._get_active_account_credentials(chat_id)
+            token, account_id, _ = self._get_active_account_credentials(
+                telegram_chat_id
+            )
         if not token or not account_id:
             logger.warning(
                 "content_publishing_limit: no active Instagram credentials; "
@@ -547,18 +545,18 @@ class InstagramAPIService(BaseService):
         """Validate that a media URL is accessible. Delegates to credentials."""
         return await self.credentials.validate_media_url(url)
 
-    def is_configured(self, telegram_chat_id: Optional[int] = None) -> bool:
+    def is_configured(self, telegram_chat_id: int) -> bool:
         """Check if Instagram API is properly configured. Delegates to credentials."""
         return self.credentials.is_configured(telegram_chat_id)
 
-    def validate_instagram_account_id(self) -> dict:
+    def validate_instagram_account_id(self, telegram_chat_id: int) -> dict:
         """Validate that the account ID is configured. Delegates to credentials."""
-        return self.credentials.validate_instagram_account_id()
+        return self.credentials.validate_instagram_account_id(telegram_chat_id)
 
-    async def get_account_info(self, telegram_chat_id: Optional[int] = None) -> dict:
+    async def get_account_info(self, telegram_chat_id: int) -> dict:
         """Fetch Instagram account info. Delegates to credentials."""
         return await self.credentials.get_account_info(telegram_chat_id)
 
-    def safety_check_before_post(self, telegram_chat_id: Optional[int] = None) -> dict:
+    def safety_check_before_post(self, telegram_chat_id: int) -> dict:
         """CRITICAL SAFETY GATE: Run all safety checks. Delegates to credentials."""
         return self.credentials.safety_check_before_post(telegram_chat_id)
