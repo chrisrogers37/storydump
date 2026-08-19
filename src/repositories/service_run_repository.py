@@ -222,16 +222,38 @@ class ServiceRunRepository(BaseRepository):
         )
         self.end_read_transaction()
 
-        return [
-            {
-                "service_name": r.service_name,
-                "call_count": r.call_count,
-                "success_count": r.success_count or 0,
-                "failure_count": r.failure_count or 0,
-                "error_rate": round((r.failure_count or 0) / r.call_count, 2)
-                if r.call_count
-                else 0,
-                "avg_duration_ms": round(r.avg_duration_ms) if r.avg_duration_ms else 0,
-            }
-            for r in rows
-        ]
+        return [self._health_row(r) for r in rows]
+
+    @staticmethod
+    def _health_row(r) -> dict:
+        """One service's health, with unresolved runs as a FIRST-CLASS term.
+
+        ``unresolved_count`` is every run this service never resolved to
+        ``completed`` or ``failed`` — a process killed by OOM or a restart
+        leaves its row at ``running`` forever, and an in-flight run looks the
+        same until it finishes.
+
+        ``error_rate`` is failures over **resolved** runs, not over
+        ``call_count``. Dividing outcomes by attempts-including-unfinished is a
+        category error and it fails in the worst available direction: an
+        unresolved run landed in the denominator and never the numerator, so a
+        crash **lowered** the rate. Measured before this changed: one honest
+        failure read 1.00 and a single stuck run alongside it took the same
+        service to 0.50 — the detector reporting healthier under exactly the
+        condition it exists for. Over resolved runs a stuck row moves the rate
+        neither way, because it is not yet evidence about success or failure;
+        it is reported on its own axis instead.
+        """
+        success = r.success_count or 0
+        failure = r.failure_count or 0
+        resolved = success + failure
+        return {
+            "service_name": r.service_name,
+            "call_count": r.call_count,
+            "success_count": success,
+            "failure_count": failure,
+            "unresolved_count": max(0, r.call_count - resolved),
+            "resolved_count": resolved,
+            "error_rate": round(failure / resolved, 2) if resolved else 0,
+            "avg_duration_ms": round(r.avg_duration_ms) if r.avg_duration_ms else 0,
+        }
