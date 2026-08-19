@@ -298,6 +298,7 @@ class TestTheBoundaryIsDerivedAndLoud:
         assert above == [
             "052_shared_trigger_functions.sql",
             "053_identity_and_tenancy_tables.sql",
+            "054_accounts_sources_media_tables.sql",
         ], (
             f"the target lineage is {above}. If you are landing the next F.2"
             " increment, add it here — deliberately, and at the end: arm (b)"
