@@ -7,6 +7,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from src.services.base_service import BaseService
 from src.repositories.audit_repository import AuditRepository
+from src.exceptions.tenancy import TenantResolutionError
 from src.repositories.chat_settings_repository import ChatSettingsRepository
 from src.config.constants import (
     MAX_POSTING_HOUR,
@@ -103,6 +104,24 @@ class SettingsService(BaseService):
         Returns None if the referenced tenant no longer exists.
         """
         return self.settings_repo.get_by_id(chat_settings_id)
+
+    def resolve_chat_settings_id(self, telegram_chat_id: int) -> str:
+        """THE legacy resolution door (`04` F.3, #842): chat -> tenant key.
+
+        Returns the tenant primary key (``chat_settings.id``) for a chat that
+        has one; raises ``TenantResolutionError("unknown_binding")`` for a
+        chat that does not. It NEVER creates — minting is an explicit act at
+        the provisioning doors (``get_or_create`` spelled out loud), never a
+        side effect of resolving. At M.3 this door's internals swap to the
+        target resolver; the exception type and reason string are already the
+        target contract, so edges that catch it do not change.
+        """
+        chat_settings = self.settings_repo.get_by_chat_id(telegram_chat_id)
+        if chat_settings is None:
+            raise TenantResolutionError(
+                "unknown_binding", f"no tenant for chat {telegram_chat_id}"
+            )
+        return str(chat_settings.id)
 
     def set_paused(
         self, telegram_chat_id: int, paused: bool, user: Optional[User] = None

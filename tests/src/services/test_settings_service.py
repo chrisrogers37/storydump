@@ -19,6 +19,7 @@ from src.services.core.settings_service import (
     NUMERIC_SETTINGS,
     TEXT_SETTINGS,
 )
+from src.exceptions.tenancy import TenantResolutionError
 from src.repositories.chat_settings_repository import ChatSettingsRepository
 from src.models.chat_settings import ChatSettings
 
@@ -1025,3 +1026,60 @@ class TestSettingsServiceMediaSource:
 
         assert display["media_source_type"] == "google_drive"
         assert display["media_source_root"] == "folder_123"
+
+
+@pytest.mark.unit
+class TestResolveChatSettingsIdDoor:
+    """The legacy resolution door (`04` F.3, #842).
+
+    The policy under test: a chat that cannot be resolved to a tenant is a
+    typed refusal at this one door — never a default, never None, never a
+    mint."""
+
+    @pytest.fixture(autouse=True)
+    def _mock_audit(self):
+        with patch("src.services.core.settings_service.AuditRepository"):
+            yield
+
+    def _service_with_repo(self):
+        service = SettingsService()
+        service.settings_repo = Mock(spec=ChatSettingsRepository)
+        return service
+
+    def test_resolves_to_the_tenant_key(self):
+        service = self._service_with_repo()
+        row = Mock(spec=ChatSettings)
+        row.id = uuid4()
+        service.settings_repo.get_by_chat_id.return_value = row
+
+        assert service.resolve_chat_settings_id(123) == str(row.id)
+        service.settings_repo.get_by_chat_id.assert_called_once_with(123)
+
+    def test_unknown_chat_is_a_typed_refusal(self):
+        service = self._service_with_repo()
+        service.settings_repo.get_by_chat_id.return_value = None
+
+        with pytest.raises(TenantResolutionError) as exc:
+            service.resolve_chat_settings_id(123)
+        assert exc.value.reason == "unknown_binding"
+
+    def test_the_door_never_mints(self):
+        """Resolution is a read. A refusal must not have created anything on
+        its way out — minting stays at the explicit provisioning doors."""
+        service = self._service_with_repo()
+        service.settings_repo.get_by_chat_id.return_value = None
+
+        with pytest.raises(TenantResolutionError):
+            service.resolve_chat_settings_id(123)
+        service.settings_repo.get_or_create.assert_not_called()
+
+    def test_the_refusal_is_the_shared_contract_type(self):
+        """The exception is the target resolver's own type, from the neutral
+        home — what makes the M.3 internals swap invisible to every edge."""
+        from src.exceptions import TenantResolutionError as from_package
+        from src.exceptions.base import StorydumpError
+        from src.services.target import tenant_resolution
+
+        assert from_package is TenantResolutionError
+        assert tenant_resolution.TenantResolutionError is TenantResolutionError
+        assert issubclass(TenantResolutionError, StorydumpError)
