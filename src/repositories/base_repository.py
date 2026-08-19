@@ -12,6 +12,15 @@ from src.utils.logger import logger
 from src.utils.resilience import db_circuit_breaker
 
 
+#: The one task-local home for every repository's session state: an immutable
+#: copy-on-write mapping {(instance sentinel, slot): value}. One ContextVar for
+#: the process, whatever the test or repo churn — see
+#: BaseRepository._ensure_session_vars for why per-instance vars are forbidden.
+_REPO_SESSIONS: contextvars.ContextVar = contextvars.ContextVar(
+    "repo_sessions", default=None
+)
+
+
 class BaseRepository:
     """
     Base class for all repositories.
@@ -32,48 +41,69 @@ class BaseRepository:
         self._ensure_session_vars()
 
     def _ensure_session_vars(self):
-        """Create the per-instance, task-local session ContextVars if absent.
+        """Mint this instance's session key if absent.
 
-        Session state is held in ContextVars so it is task-local: each asyncio
-        Task (every PTB ``concurrent_updates`` callback) and each
-        ``asyncio.to_thread`` offload copies the current context, so each opens
-        and owns its OWN Session instead of sharing this singleton repo's one
-        Session — a SQLAlchemy Session is not safe for concurrent use.
+        Session state is task-local: each asyncio Task (every PTB
+        ``concurrent_updates`` callback) and each ``asyncio.to_thread``
+        offload copies the current context, so each opens and owns its OWN
+        Session instead of sharing this singleton repo's one Session — a
+        SQLAlchemy Session is not safe for concurrent use.
 
-        Guarded (not created inline in ``__init__``) so the vars still exist for
-        code paths that bypass ``__init__`` — notably tests that patch
-        ``__init__`` to a no-op and then assign ``_db`` directly. Repos are
-        process-lifetime singletons, so in real use these are created once, in
-        the startup context, before any concurrency; ``id(self)`` only
-        disambiguates the debug name.
+        The state lives in ONE module-level ContextVar holding an immutable
+        copy-on-write mapping, never in per-instance ContextVars: a thread's
+        Context strongly references every var ever set in it, so per-instance
+        vars accumulated forever (two per repo construction — a test session
+        mints thousands) and that growth trips CPython 3.10's HAMT collision
+        bug as ``TypeError: unhashable type: 'hamt_bitmap_node'`` — the exact
+        signature that turned CI red while 3.11 (fixed HAMT) stayed green.
+        Task-copy semantics are identical: a task's first write replaces the
+        mapping in ITS context only; the mapping itself is never mutated in
+        place.
+
+        The key is a per-instance sentinel OBJECT (not ``id(self)``): the
+        mapping keeps the sentinel alive, so a recycled ``id`` can never read
+        a dead instance's session. Guarded (not inline in ``__init__``) so
+        the key still exists for code paths that bypass ``__init__`` —
+        notably tests that patch ``__init__`` to a no-op and then assign
+        ``_db`` directly.
         """
-        if getattr(self, "_db_var", None) is None:
-            self._db_var: contextvars.ContextVar = contextvars.ContextVar(
-                f"repo_db_{id(self)}", default=None
-            )
-            self._db_generator_var: contextvars.ContextVar = contextvars.ContextVar(
-                f"repo_db_generator_{id(self)}", default=None
-            )
+        if getattr(self, "_session_key", None) is None:
+            self._session_key = object()
+
+    def _ctx_get(self, slot: str):
+        mapping = _REPO_SESSIONS.get()
+        if mapping is None:
+            return None
+        return mapping.get((self._session_key, slot))
+
+    def _ctx_set(self, slot: str, value) -> None:
+        mapping = _REPO_SESSIONS.get()
+        new = dict(mapping) if mapping else {}
+        if value is None:
+            new.pop((self._session_key, slot), None)
+        else:
+            new[(self._session_key, slot)] = value
+        _REPO_SESSIONS.set(new)
 
     @property
     def _db(self) -> Optional[Session]:
         self._ensure_session_vars()
-        return self._db_var.get()
+        return self._ctx_get("db")
 
     @_db.setter
     def _db(self, value: Optional[Session]) -> None:
         self._ensure_session_vars()
-        self._db_var.set(value)
+        self._ctx_set("db", value)
 
     @property
     def _db_generator(self):
         self._ensure_session_vars()
-        return self._db_generator_var.get()
+        return self._ctx_get("gen")
 
     @_db_generator.setter
     def _db_generator(self, value) -> None:
         self._ensure_session_vars()
-        self._db_generator_var.set(value)
+        self._ctx_set("gen", value)
 
     def _open_session(self):
         """Open a new database session. Called lazily on first .db access."""
