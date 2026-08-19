@@ -382,16 +382,32 @@ class TestTheGateCatchesWhatTheOldOneMissed:
 #: `telegram_utils.py`) — verified against the fix commits — which is why the
 #: repository still reads unscoped. Pinning by equality means a THIRTEENTH
 #: arrives as a red test rather than as headroom. Tracked as #923.
+#:
+#: **#923 took it from 12 to 10 and the two that left were DELETED, not
+#: scoped** — `get_by_id_prefix` and `count_active` had zero production
+#: callers (the hits that looked like callers were `queue_repo` and
+#: `media_repo`, different classes with the same method names).
+#:
+#: **The remaining 10 are classified, not merely outstanding.** #923 examined
+#: every one: `get_all`/`get_all_active`/`get_by_username` are
+#: deployment-wide by design (operator surfaces, and the duplicate check that
+#: can only work unscoped); `get_by_instagram_id`/`get_by_meta_account_id` are
+#: OAuth identification, which runs before a tenant is known; the rest are
+#: reached only through doors that guard. Each says so in its own docstring.
+#:
+#: **THIS GATE CANNOT SEE ANY OF THAT, and that is the honest limit.** It
+#: evaluates the repository SIGNATURE, so a door-level guard — which is where
+#: #923 fixed the one live defect — clears nothing here. An entry leaves this
+#: list only when the METHOD takes a tenant. Reading a stable count as "no
+#: progress" would be wrong, and reading it as "10 defects" would be wronger.
 KNOWN_UNSCOPED_DERIVED_ACCESS = {
     "instagram_account_repository.py": [
         "activate::InstagramAccount",
-        "count_active::InstagramAccount",
         "create::InstagramAccount",
         "deactivate::InstagramAccount",
         "get_all::InstagramAccount",
         "get_all_active::InstagramAccount",
         "get_by_id::InstagramAccount",
-        "get_by_id_prefix::InstagramAccount",
         "get_by_instagram_id::InstagramAccount",
         "get_by_meta_account_id::InstagramAccount",
         "get_by_username::InstagramAccount",
@@ -441,7 +457,7 @@ class TestTheStandingSweep:
         what the others cannot."""
         assert len(list(REPO_DIR.glob("*.py"))) > 5, "no repositories scanned"
         assert _derived_model_names(metadata, tenancy) == {"InstagramAccount"}
-        assert sum(len(v) for v in sweep(metadata, tenancy).values()) == 12
+        assert sum(len(v) for v in sweep(metadata, tenancy).values()) == 10
 
     def test_the_three_named_repositories_are_OUT_OF_THIS_GATES_SCOPE(
         self, metadata, tenancy

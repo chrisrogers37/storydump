@@ -129,20 +129,3 @@ class TestInstagramAccountRepository:
         account_repo.activate("acc-uuid-1")
 
         assert mock_account.is_active is True
-
-    def test_count_active(self, account_repo, mock_db):
-        """Test counting active accounts."""
-        mock_db.query.return_value.filter.return_value.count.return_value = 3
-
-        result = account_repo.count_active()
-
-        assert result == 3
-
-    def test_get_by_id_prefix(self, account_repo, mock_db):
-        """Test getting account by ID prefix (shortened UUID)."""
-        mock_account = Mock(id="abcdef12-3456-7890-abcd-ef1234567890")
-        mock_db.query.return_value.filter.return_value.first.return_value = mock_account
-
-        result = account_repo.get_by_id_prefix("abcdef12")
-
-        assert result is mock_account
