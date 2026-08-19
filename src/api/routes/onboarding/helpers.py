@@ -28,6 +28,11 @@ GDRIVE_FOLDER_RE = re.compile(
 # need. The operator still gets every reason, via auth_monitor.
 AUTH_FAILURE_DETAIL = "Invalid authentication credentials"
 
+# One string for BOTH an unknown chat and a denied membership — the deliberate
+# indistinguishability (#842: no chat-existence oracle) is enforced by this
+# name, not by four literals staying in sync.
+MEMBERSHIP_DENIED_DETAIL = "Not a member of this instance"
+
 
 def _client_ip(request: Request | None) -> str:
     """Extract client IP from a FastAPI request, or 'unknown'."""
@@ -134,7 +139,7 @@ def _validate_request(
                 ip,
             )
             auth_monitor.record_failure(ip, "unknown chat")
-            raise HTTPException(status_code=403, detail="Not a member of this instance")
+            raise HTTPException(status_code=403, detail=MEMBERSHIP_DENIED_DETAIL)
 
     # Every path requires a server-side active membership for chat_id. A bound
     # token proves the user once belonged to this chat, not that they still do;
@@ -152,7 +157,7 @@ def _validate_request(
             ip,
         )
         auth_monitor.record_failure(ip, "membership denied")
-        raise HTTPException(status_code=403, detail="Not a member of this instance")
+        raise HTTPException(status_code=403, detail=MEMBERSHIP_DENIED_DETAIL)
 
     user_info["chat_settings_id"] = chat_settings_id
     return user_info

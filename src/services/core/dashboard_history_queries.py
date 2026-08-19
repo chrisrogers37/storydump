@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from src.exceptions.tenancy import TenantResolutionError
 
 if TYPE_CHECKING:
     from src.services.core.dashboard_service import DashboardService
@@ -265,13 +264,9 @@ class HistoryDashboardQueries:
             "get_schedule_preview",
             input_params={"chat_settings_id": chat_settings_id, "slots": slots},
         ) as run_id:
-            chat_settings = self.service.settings_service.get_settings_by_id(
+            chat_settings = self.service.settings_service.require_settings_by_id(
                 chat_settings_id
             )
-            if chat_settings is None:
-                raise TenantResolutionError(
-                    "unknown_binding", f"no tenant {chat_settings_id}"
-                )
 
             if chat_settings.is_paused:
                 self.service.set_result_summary(run_id, {"status": "paused"})

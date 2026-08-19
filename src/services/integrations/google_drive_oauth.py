@@ -11,7 +11,6 @@ from cryptography.fernet import InvalidToken
 from telegram import Bot
 
 from src.config.settings import settings
-from src.exceptions.tenancy import TenantResolutionError
 from src.repositories.chat_settings_repository import ChatSettingsRepository
 from src.repositories.token_repository import TokenRepository
 from src.services.base_service import BaseService
@@ -188,11 +187,7 @@ class GoogleDriveOAuthService(BaseService):
             # Step 3: Resolve chat_settings_id — resolution, never a mint
             # (#842): the OAuth flow was launched from a live chat, so a
             # missing row here is a forged/stale state param, refused typed.
-            chat_settings = self.settings_repo.get_by_chat_id(telegram_chat_id)
-            if chat_settings is None:
-                raise TenantResolutionError(
-                    "unknown_binding", f"no tenant for chat {telegram_chat_id}"
-                )
+            chat_settings = self.settings_repo.require_by_chat_id(telegram_chat_id)
             chat_settings_id = str(chat_settings.id)
 
             # Step 4: Encrypt and store tokens
@@ -311,18 +306,14 @@ class GoogleDriveOAuthService(BaseService):
             dict with disconnected status and tokens_deleted count
 
         Raises:
-            ValueError: If chat not found
+            TenantResolutionError: if the chat has no tenant (#842)
         """
         with self.track_execution(
             method_name="disconnect_for_chat",
             triggered_by="user",
             input_params={"chat_id": telegram_chat_id},
         ) as run_id:
-            chat_settings = self.settings_repo.get_by_chat_id(telegram_chat_id)
-            if not chat_settings:
-                raise TenantResolutionError(
-                    "unknown_binding", f"no tenant for chat {telegram_chat_id}"
-                )
+            chat_settings = self.settings_repo.require_by_chat_id(telegram_chat_id)
 
             chat_settings_id = str(chat_settings.id)
             tokens_deleted = self.token_repo.delete_tokens_for_chat(

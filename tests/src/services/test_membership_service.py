@@ -12,7 +12,6 @@ def service():
     """MembershipService with all repositories mocked (no DB)."""
     with (
         patch("src.services.core.membership_service.UserRepository"),
-        patch("src.services.core.membership_service.ChatSettingsRepository"),
         patch("src.services.core.membership_service.MembershipRepository"),
         patch("src.services.base_service.ServiceRunRepository"),
     ):

@@ -265,9 +265,8 @@ class SchedulerService(BaseService):
     ) -> list:
         """Compute the next N selections without persisting.
 
-        Keyed by the resolved tenant id (#842) — the old chat-keyed form
-        silently previewed across every tenant when the chat was unknown
-        (a None scope means unfiltered at the repository).
+        Keyed by the resolved tenant id (#842): a None scope would mean
+        unfiltered at the repository, so no None can enter here.
 
         Passes previously-selected IDs as exclude_ids so each iteration
         returns a different item.
@@ -302,10 +301,8 @@ class SchedulerService(BaseService):
     def clear_pending_queue(self, telegram_chat_id: int) -> int:
         """Delete all pending queue items for a chat.
 
-        The chat is required and resolved through the one door (#842): the
-        old optional form silently substituted the ADMIN chat — and minted
-        it — when no chat was passed. A caller that means the admin chat
-        says so at its own call site.
+        The chat is required and resolved through the one door (#842); a
+        caller that means the admin chat says so at its own call site.
         """
         chat_settings_id = self.settings_service.resolve_chat_settings_id(
             telegram_chat_id

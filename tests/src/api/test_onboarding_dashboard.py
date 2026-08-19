@@ -229,6 +229,30 @@ class TestHistoryDetail:
         assert response.json()["items"] == []
 
 
+@pytest.mark.unit
+class TestMediaLibrary:
+    """Regression cover for the #842 straggler: this route had no test, which
+    is how a raw chat id kept flowing into the re-keyed service call."""
+
+    def test_media_library_passes_the_resolved_tenant_id(self, client):
+        with (
+            mock_validate(),
+            patch(
+                "src.api.routes.onboarding.dashboard.DashboardService"
+            ) as MockDashboard,
+        ):
+            mock_svc = service_ctx(MockDashboard)
+            mock_svc.get_media_library.return_value = {"items": [], "total": 0}
+
+            response = client.get(
+                "/api/onboarding/media-library",
+                params={"init_data": "test", "chat_id": CHAT_ID},
+            )
+
+        assert response.status_code == 200
+        assert mock_svc.get_media_library.call_args[0][0] == TENANT_ID
+
+
 # =============================================================================
 # GET /api/onboarding/media-stats
 # =============================================================================
@@ -1023,7 +1047,7 @@ class TestAccounts:
             mock_ig_svc = service_ctx(MockIGService)
             mock_ig_svc.list_accounts.return_value = [acct_1, acct_2]
             mock_settings_svc = service_ctx(MockSettingsService)
-            mock_settings_svc.get_settings_by_id.return_value = mock_settings
+            mock_settings_svc.require_settings_by_id.return_value = mock_settings
 
             response = client.get(
                 "/api/onboarding/accounts",
@@ -1055,7 +1079,7 @@ class TestAccounts:
             mock_ig_svc = service_ctx(MockIGService)
             mock_ig_svc.list_accounts.return_value = []
             mock_settings_svc = service_ctx(MockSettingsService)
-            mock_settings_svc.get_settings_by_id.return_value = mock_settings
+            mock_settings_svc.require_settings_by_id.return_value = mock_settings
 
             response = client.get(
                 "/api/onboarding/accounts",

@@ -268,7 +268,7 @@ class TelegramNotificationService:
             # per-item send error handling contains it) rather than minting a
             # row from inside a delivery path (#842).
             raise TenantResolutionError(
-                "unknown_binding",
+                "unprovisioned_channel",
                 f"global channel {self.service.channel_id} has no settings row",
             )
         return channel_settings

@@ -284,7 +284,7 @@ class TestAddAccount:
         mock_account_repo.get_by_instagram_id.return_value = None
         mock_account_repo.get_by_username.return_value = None
         mock_account_repo.create.return_value = sample_account
-        mock_settings_repo.get_by_chat_id.return_value = sample_settings
+        mock_settings_repo.require_by_chat_id.return_value = sample_settings
 
         service.add_account(
             display_name="Main Brand",
@@ -389,7 +389,7 @@ class TestUpdateAccountToken:
     ):
         """#675 — re-issued tokens carry the connecting chat's stamp."""
         mock_account_repo.get_by_meta_account_id.return_value = sample_account
-        mock_settings_repo.get_by_chat_id.return_value = sample_settings
+        mock_settings_repo.require_by_chat_id.return_value = sample_settings
 
         service.update_account_token(
             instagram_account_id="17841234567890",

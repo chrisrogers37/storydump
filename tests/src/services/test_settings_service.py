@@ -112,7 +112,7 @@ class TestSettingsServiceUnit:
         mock_settings.dry_run_mode = True  # Initial value
 
         mock_repo = Mock()
-        mock_repo.get_by_chat_id.return_value = mock_settings
+        mock_repo.require_by_chat_id.return_value = mock_settings
         mock_repo.update.return_value = mock_settings
         service.settings_repo = mock_repo
 
@@ -136,7 +136,7 @@ class TestSettingsServiceUnit:
         mock_settings.is_paused = False
 
         mock_repo = Mock()
-        mock_repo.get_by_chat_id.return_value = mock_settings
+        mock_repo.require_by_chat_id.return_value = mock_settings
         service.settings_repo = mock_repo
 
         service.service_run_repo = Mock()
@@ -160,7 +160,7 @@ class TestSettingsServiceUnit:
         mock_settings.is_paused = True
 
         mock_repo = Mock()
-        mock_repo.get_by_chat_id.return_value = mock_settings
+        mock_repo.require_by_chat_id.return_value = mock_settings
         service.settings_repo = mock_repo
 
         service.service_run_repo = Mock()
@@ -184,7 +184,7 @@ class TestSettingsServiceUnit:
         mock_settings.is_paused = False
 
         mock_repo = Mock()
-        mock_repo.get_by_chat_id.return_value = mock_settings
+        mock_repo.require_by_chat_id.return_value = mock_settings
         service.settings_repo = mock_repo
 
         service.service_run_repo = Mock()
@@ -201,7 +201,7 @@ class TestSettingsServiceUnit:
         mock_settings.posts_per_day = 5
 
         mock_repo = Mock()
-        mock_repo.get_by_chat_id.return_value = mock_settings
+        mock_repo.require_by_chat_id.return_value = mock_settings
         service.settings_repo = mock_repo
 
         service.service_run_repo = Mock()
@@ -217,7 +217,7 @@ class TestSettingsServiceUnit:
         mock_settings.posts_per_day = 5
 
         mock_repo = Mock()
-        mock_repo.get_by_chat_id.return_value = mock_settings
+        mock_repo.require_by_chat_id.return_value = mock_settings
         service.settings_repo = mock_repo
 
         service.service_run_repo = Mock()
@@ -233,7 +233,7 @@ class TestSettingsServiceUnit:
         mock_settings.posting_hours_start = 14
 
         mock_repo = Mock()
-        mock_repo.get_by_chat_id.return_value = mock_settings
+        mock_repo.require_by_chat_id.return_value = mock_settings
         service.settings_repo = mock_repo
 
         service.service_run_repo = Mock()
@@ -265,7 +265,7 @@ class TestSettingsServiceUnit:
         mock_settings.updated_at = datetime.utcnow()
 
         mock_repo = Mock()
-        mock_repo.get_by_chat_id.return_value = mock_settings
+        mock_repo.require_by_chat_id.return_value = mock_settings
         service.settings_repo = mock_repo
 
         display = service.get_settings_display(-100)
@@ -312,7 +312,7 @@ class TestSettingsServiceUnit:
         mock_settings.updated_at = datetime.utcnow()
 
         mock_repo = Mock()
-        mock_repo.get_by_chat_id.return_value = mock_settings
+        mock_repo.require_by_chat_id.return_value = mock_settings
         service.settings_repo = mock_repo
 
         display = service.get_settings_display(-100)
@@ -530,7 +530,7 @@ class TestMultiChatIsolation:
         mock_settings.dry_run_mode = True
 
         mock_repo = Mock()
-        mock_repo.get_by_chat_id.return_value = mock_settings
+        mock_repo.require_by_chat_id.return_value = mock_settings
         mock_repo.update.side_effect = mock_update
         service.settings_repo = mock_repo
 
@@ -901,7 +901,7 @@ class TestSettingsServiceMediaSource:
         mock_settings = Mock(spec=ChatSettings)
         mock_settings.media_source_type = None
         mock_repo = Mock()
-        mock_repo.get_by_chat_id.return_value = mock_settings
+        mock_repo.require_by_chat_id.return_value = mock_settings
         mock_repo.update.return_value = mock_settings
         service.settings_repo = mock_repo
         service.service_run_repo = Mock()
@@ -919,7 +919,7 @@ class TestSettingsServiceMediaSource:
         mock_settings = Mock(spec=ChatSettings)
         mock_settings.media_source_type = None
         mock_repo = Mock()
-        mock_repo.get_by_chat_id.return_value = mock_settings
+        mock_repo.require_by_chat_id.return_value = mock_settings
         service.settings_repo = mock_repo
         service.service_run_repo = Mock()
         service.service_run_repo.create_run.return_value = str(uuid4())
@@ -933,7 +933,7 @@ class TestSettingsServiceMediaSource:
         mock_settings = Mock(spec=ChatSettings)
         mock_settings.media_source_type = "google_drive"
         mock_repo = Mock()
-        mock_repo.get_by_chat_id.return_value = mock_settings
+        mock_repo.require_by_chat_id.return_value = mock_settings
         mock_repo.update.return_value = mock_settings
         service.settings_repo = mock_repo
         service.service_run_repo = Mock()
@@ -949,7 +949,7 @@ class TestSettingsServiceMediaSource:
         mock_settings = Mock(spec=ChatSettings)
         mock_settings.media_source_root = None
         mock_repo = Mock()
-        mock_repo.get_by_chat_id.return_value = mock_settings
+        mock_repo.require_by_chat_id.return_value = mock_settings
         mock_repo.update.return_value = mock_settings
         service.settings_repo = mock_repo
         service.service_run_repo = Mock()
@@ -1024,7 +1024,7 @@ class TestSettingsServiceMediaSource:
         mock_settings.media_source_root = "folder_123"
         mock_settings.updated_at = datetime.utcnow()
 
-        settings_service.settings_repo.get_by_chat_id.return_value = mock_settings
+        settings_service.settings_repo.require_by_chat_id.return_value = mock_settings
 
         display = settings_service.get_settings_display(-100)
 
@@ -1054,28 +1054,46 @@ class TestResolveChatSettingsIdDoor:
         service = self._service_with_repo()
         row = Mock(spec=ChatSettings)
         row.id = uuid4()
-        service.settings_repo.get_by_chat_id.return_value = row
+        service.settings_repo.require_by_chat_id.return_value = row
 
         assert service.resolve_chat_settings_id(123) == str(row.id)
-        service.settings_repo.get_by_chat_id.assert_called_once_with(123)
+        service.settings_repo.require_by_chat_id.assert_called_once_with(123)
 
-    def test_unknown_chat_is_a_typed_refusal(self):
+    def test_unknown_chat_is_a_typed_refusal_and_never_mints(self):
+        """A refusal is typed AND creates nothing on its way out — minting
+        stays at the explicit provisioning doors. The raise itself lives in
+        the repo primitive; its semantics are pinned below unbound, so this
+        test only wires the delegation."""
         service = self._service_with_repo()
-        service.settings_repo.get_by_chat_id.return_value = None
+        service.settings_repo.require_by_chat_id.side_effect = TenantResolutionError(
+            "unknown_binding"
+        )
 
         with pytest.raises(TenantResolutionError) as exc:
             service.resolve_chat_settings_id(123)
         assert exc.value.reason == "unknown_binding"
-
-    def test_the_door_never_mints(self):
-        """Resolution is a read. A refusal must not have created anything on
-        its way out — minting stays at the explicit provisioning doors."""
-        service = self._service_with_repo()
-        service.settings_repo.get_by_chat_id.return_value = None
-
-        with pytest.raises(TenantResolutionError):
-            service.resolve_chat_settings_id(123)
         service.settings_repo.get_or_create.assert_not_called()
+
+    def test_the_repo_primitive_refuses_typed_and_never_mints(self):
+        """The ONE raise site (#842): row-None -> unknown_binding, no mint.
+
+        Called unbound with a mocked self so no database is anywhere near
+        the policy — the same trick integration_verdict uses in conftest."""
+        from src.repositories.chat_settings_repository import (
+            ChatSettingsRepository,
+        )
+
+        repo_self = Mock()
+        repo_self.get_by_chat_id.return_value = None
+
+        with pytest.raises(TenantResolutionError) as exc:
+            ChatSettingsRepository.require_by_chat_id(repo_self, 123)
+        assert exc.value.reason == "unknown_binding"
+        repo_self.get_or_create.assert_not_called()
+
+        row = Mock(spec=ChatSettings)
+        repo_self.get_by_chat_id.return_value = row
+        assert ChatSettingsRepository.require_by_chat_id(repo_self, 123) is row
 
     def test_the_refusal_is_the_shared_contract_type(self):
         """The exception is the target resolver's own type, from the neutral

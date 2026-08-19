@@ -3,7 +3,6 @@
 from typing import Optional
 
 from src.models.user import ROLE_ADMIN
-from src.repositories.chat_settings_repository import ChatSettingsRepository
 from src.repositories.membership_repository import MembershipRepository
 from src.repositories.user_repository import UserRepository
 from src.services.base_service import BaseService
@@ -22,7 +21,6 @@ class MembershipService(BaseService):
     def __init__(self):
         super().__init__()
         self.user_repo = UserRepository()
-        self.chat_settings_repo = ChatSettingsRepository()
         self.membership_repo = MembershipRepository()
 
     def is_active_member(

@@ -17,7 +17,10 @@ class TenantResolutionError(StorydumpError):
     ``reason`` is a closed vocabulary so callers can route without parsing
     prose: unknown_binding | revoked_binding | invalid_session |
     expired_session | revoked_session | not_a_member | insufficient_role |
-    unknown_channel.
+    unknown_channel | unprovisioned_channel (legacy-era: the deployment's
+    global notification channel has no settings row — an operator condition,
+    deliberately distinct from unknown_binding so no edge tells an operator
+    to run /start).
     """
 
     def __init__(self, reason: str, detail: str = ""):

@@ -96,7 +96,9 @@ async def onboarding_accounts(
         SettingsService() as settings_service,
     ):
         accounts = account_service.list_accounts(include_inactive=False)
-        chat_settings = settings_service.get_settings_by_id(auth["chat_settings_id"])
+        chat_settings = settings_service.require_settings_by_id(
+            auth["chat_settings_id"]
+        )
         active_account_id = (
             str(chat_settings.active_instagram_account_id)
             if chat_settings.active_instagram_account_id
@@ -279,11 +281,11 @@ async def onboarding_media_library(
     posting_status: str | None = Query(default=None),
 ) -> dict:
     """Return paginated media library with pool health stats."""
-    _validate_request(init_data, chat_id)
+    auth = _validate_request(init_data, chat_id)
 
     with DashboardService() as service:
         return service.get_media_library(
-            chat_id,
+            auth["chat_settings_id"],
             page=page,
             page_size=page_size,
             category=category,

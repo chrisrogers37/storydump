@@ -28,6 +28,7 @@
     "src/repositories/chat_settings_repository.py::get_by_chat_id",
     "src/repositories/chat_settings_repository.py::get_or_create",
     "src/repositories/chat_settings_repository.py::migrate_chat_id",
+    "src/repositories/chat_settings_repository.py::require_by_chat_id",
     "src/repositories/chat_settings_repository.py::set_paused",
     "src/repositories/chat_settings_repository.py::update",
     "src/repositories/interaction_repository.py::create",

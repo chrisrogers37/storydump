@@ -57,13 +57,7 @@ class SettingsService(BaseService):
         self.audit_repo = AuditRepository()
 
     def get_settings(self, telegram_chat_id: int) -> Optional[ChatSettings]:
-        """Read a chat's settings row. Never creates (#842 policy).
-
-        Returns None for a chat with no row. A read that sometimes minted
-        (the old ``create_if_missing=True`` default) is how phantom tenants
-        were born; minting is now only ever ``provision()``, and resolution
-        that must not fail open is ``resolve_chat_settings_id()``.
-        """
+        """Read a chat's settings row, or None. Never creates (#842)."""
         return self.settings_repo.get_by_chat_id(telegram_chat_id)
 
     def migrate_chat_id(
@@ -100,26 +94,23 @@ class SettingsService(BaseService):
         return str(self.require_settings(telegram_chat_id).id)
 
     def require_settings(self, telegram_chat_id: int) -> ChatSettings:
-        """Row-or-refuse: the door's policy for methods that need the row.
+        """Row-or-refuse (#842): delegates to the repo's one raise site."""
+        return self.settings_repo.require_by_chat_id(telegram_chat_id)
 
-        Same refusal as ``resolve_chat_settings_id`` — a write or a row-read
-        against an unknown chat is refused typed, never satisfied by minting
-        a phantom row on the way.
-        """
-        chat_settings = self.settings_repo.get_by_chat_id(telegram_chat_id)
+    def require_settings_by_id(self, chat_settings_id: str) -> ChatSettings:
+        """Row-or-refuse by tenant key — the by-id twin of require_settings."""
+        chat_settings = self.settings_repo.get_by_id(chat_settings_id)
         if chat_settings is None:
             raise TenantResolutionError(
-                "unknown_binding", f"no tenant for chat {telegram_chat_id}"
+                "unknown_binding", f"no tenant {chat_settings_id}"
             )
         return chat_settings
 
     def provision(self, telegram_chat_id: int) -> ChatSettings:
-        """THE named provisioning door: create-or-return the chat's tenant row.
+        """The one sanctioned mint (#842): create-or-return the tenant row.
 
-        Minting a tenant is an explicit act of the onboarding flows (group
-        /start first contact, group linking) — never a side effect of a read
-        or a resolution (#842 policy). If you are not implementing first
-        contact, you want ``get_settings`` or ``resolve_chat_settings_id``.
+        An explicit act of the onboarding flows (group /start first contact,
+        group linking) — never a side effect of a read or a resolution.
         """
         return self.settings_repo.get_or_create(telegram_chat_id)
 
@@ -365,11 +356,7 @@ class SettingsService(BaseService):
         """
         from src.config import defaults
 
-        chat_settings = self.get_settings_by_id(chat_settings_id)
-        if chat_settings is None:
-            raise TenantResolutionError(
-                "unknown_binding", f"no tenant {chat_settings_id}"
-            )
+        chat_settings = self.require_settings_by_id(chat_settings_id)
 
         source_type = (
             chat_settings.media_source_type or defaults.DEFAULT_MEDIA_SOURCE_TYPE

@@ -483,26 +483,16 @@ class TelegramService(BaseService):
         if action not in self._QUEUE_ID_ACTIONS:
             return True
 
+        # Resolve the caller's tenant ONCE (#842): a message-less callback or
+        # a chat with no instance is refused here, before membership is asked
+        # — the same observable reject as before, decided at one door.
         try:
-            chat_id = int(query.message.chat_id) if query.message else None
-        except (TypeError, ValueError):
-            chat_id = None
-
-        # Resolve the caller's tenant ONCE (#842): a message-less callback or a
-        # chat with no instance is refused here, before membership is asked —
-        # the same observable reject as before, decided at one door instead of
-        # falling out of a None flowing through the checks below.
-        caller_cs_id = None
-        if chat_id is not None:
-            try:
-                caller_cs_id = self.settings_service.resolve_chat_settings_id(chat_id)
-            except TenantResolutionError:
-                caller_cs_id = None
-        if caller_cs_id is None:
+            chat_id = int(query.message.chat_id)
+            caller_cs_id = self.settings_service.resolve_chat_settings_id(chat_id)
+        except (AttributeError, TypeError, ValueError, TenantResolutionError):
             logger.warning(
-                "Callback '%s' refused: no tenant for chat %s (user %s)",
+                "Callback '%s' refused: no tenant resolvable for user %s",
                 action,
-                chat_id,
                 getattr(query.from_user, "id", None),
             )
             await self._reject_callback(query)

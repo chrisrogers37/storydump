@@ -1622,7 +1622,7 @@ class TestBatchApprove:
         service = handlers.service
 
         cs_id = str(uuid4())
-        service.settings_service.resolve_chat_settings_id.return_value = cs_id
+        service.settings_service.get_settings.return_value = Mock(id=cs_id)
         queue_id_1 = uuid4()
         queue_id_2 = uuid4()
 
@@ -1679,7 +1679,7 @@ class TestBatchApprove:
         handlers = mock_callback_handlers
         service = handlers.service
 
-        service.settings_service.resolve_chat_settings_id.return_value = "cs-id"
+        service.settings_service.get_settings.return_value = Mock(id="cs-id")
         service.queue_repo.get_all_with_media.return_value = []
 
         mock_query = AsyncMock()
@@ -1696,7 +1696,7 @@ class TestBatchApprove:
         handlers = mock_callback_handlers
         service = handlers.service
 
-        service.settings_service.resolve_chat_settings_id.return_value = "cs-id"
+        service.settings_service.get_settings.return_value = Mock(id="cs-id")
         item1 = Mock(
             id=uuid4(),
             media_item_id=uuid4(),

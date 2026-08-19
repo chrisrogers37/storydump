@@ -31,7 +31,7 @@ def dashboard_service():
 
         # Default: _resolve_chat_settings_id returns a tenant ID
         mock_settings = Mock(id="tenant-uuid-1")
-        service.settings_service.get_settings_by_id.return_value = mock_settings
+        service.settings_service.require_settings_by_id.return_value = mock_settings
 
         _init_query_classes(service)
         return service
@@ -290,7 +290,7 @@ class TestGetAnalytics:
             service.service_name = "DashboardService"
 
             mock_settings = Mock(id="tenant-uuid-1")
-            service.settings_service.get_settings_by_id.return_value = mock_settings
+            service.settings_service.require_settings_by_id.return_value = mock_settings
 
             _init_query_classes(service)
             return service
@@ -453,7 +453,7 @@ class TestGetCategoryAnalytics:
             service.service_name = "DashboardService"
 
             mock_settings = Mock(id="tenant-uuid-1")
-            service.settings_service.get_settings_by_id.return_value = mock_settings
+            service.settings_service.require_settings_by_id.return_value = mock_settings
             _init_query_classes(service)
             return service
 
@@ -548,7 +548,7 @@ class TestGetScheduleRecommendations:
             service.service_name = "DashboardService"
 
             mock_settings = Mock(id="tenant-uuid-1")
-            service.settings_service.get_settings_by_id.return_value = mock_settings
+            service.settings_service.require_settings_by_id.return_value = mock_settings
             _init_query_classes(service)
             return service
 
@@ -707,7 +707,7 @@ class TestGetSchedulePreview:
             posting_hours_end=2,
             last_post_sent_at=None,
         )
-        service.settings_service.get_settings_by_id.return_value = mock_settings
+        service.settings_service.require_settings_by_id.return_value = mock_settings
         service.category_mix_repo.get_current_mix_as_dict.return_value = {
             "memes": Decimal("0.50"),
             "merch": Decimal("0.50"),
@@ -726,7 +726,7 @@ class TestGetSchedulePreview:
         """Preview returns paused status when posting is paused."""
         service = self._setup_service()
         mock_settings = Mock(is_paused=True)
-        service.settings_service.get_settings_by_id.return_value = mock_settings
+        service.settings_service.require_settings_by_id.return_value = mock_settings
 
         result = service.get_schedule_preview(chat_settings_id="tenant-uuid-1")
 
@@ -748,7 +748,7 @@ class TestGetSchedulePreview:
             posting_hours_end=2,
             last_post_sent_at=last_post,
         )
-        service.settings_service.get_settings_by_id.return_value = mock_settings
+        service.settings_service.require_settings_by_id.return_value = mock_settings
         service.category_mix_repo.get_current_mix_as_dict.return_value = {
             "memes": Decimal("1.0"),
         }
@@ -774,7 +774,7 @@ class TestGetCategoryMixDrift:
             service.service_run_repo = MagicMock()
             service.service_name = "DashboardService"
             mock_settings = Mock(id="tenant-uuid-1")
-            service.settings_service.get_settings_by_id.return_value = mock_settings
+            service.settings_service.require_settings_by_id.return_value = mock_settings
             _init_query_classes(service)
             return service
 
@@ -850,7 +850,7 @@ class TestGetApprovalLatency:
             service.service_run_repo = MagicMock()
             service.service_name = "DashboardService"
             mock_settings = Mock(id="tenant-uuid-1")
-            service.settings_service.get_settings_by_id.return_value = mock_settings
+            service.settings_service.require_settings_by_id.return_value = mock_settings
             _init_query_classes(service)
             return service
 
@@ -908,7 +908,7 @@ class TestGetContentReuseInsights:
             service.service_run_repo = MagicMock()
             service.service_name = "DashboardService"
             mock_settings = Mock(id="tenant-uuid-1")
-            service.settings_service.get_settings_by_id.return_value = mock_settings
+            service.settings_service.require_settings_by_id.return_value = mock_settings
             _init_query_classes(service)
             return service
 
@@ -963,7 +963,7 @@ class TestGetDeadContentReport:
             service.service_run_repo = MagicMock()
             service.service_name = "DashboardService"
             mock_settings = Mock(id="tenant-uuid-1")
-            service.settings_service.get_settings_by_id.return_value = mock_settings
+            service.settings_service.require_settings_by_id.return_value = mock_settings
             _init_query_classes(service)
             return service
 
@@ -1007,7 +1007,7 @@ class TestGetTeamPerformance:
             service.service_run_repo = MagicMock()
             service.service_name = "DashboardService"
             mock_settings = Mock(id="tenant-uuid-1")
-            service.settings_service.get_settings_by_id.return_value = mock_settings
+            service.settings_service.require_settings_by_id.return_value = mock_settings
             _init_query_classes(service)
             return service
 

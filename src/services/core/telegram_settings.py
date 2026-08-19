@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TelegramError
 
-from src.exceptions.tenancy import TenantResolutionError
 from src.config.constants import (
     MAX_POSTING_HOUR,
     MAX_POSTS_PER_DAY,
@@ -20,6 +19,7 @@ from src.services.core.telegram_utils import (
     CANCEL_KEYBOARD,
     build_webapp_button,
     clear_settings_edit_state,
+    require_tenant_for_callback,
 )
 from src.utils.logger import logger
 
@@ -436,7 +436,6 @@ class TelegramSettingsHandlers:
         With the JIT scheduler, there is no pre-populated schedule to
         extend.  The only action is clearing in-flight queue items.
         """
-        chat_id = query.message.chat_id
 
         if action == "clear_queue":
             # Confirm before clearing (destructive action)
@@ -452,14 +451,8 @@ class TelegramSettingsHandlers:
                 ]
             ]
 
-            try:
-                chat_settings_id = (
-                    self.service.settings_service.resolve_chat_settings_id(chat_id)
-                )
-            except TenantResolutionError:
-                await query.answer(
-                    "❌ No instance is configured for this chat.", show_alert=True
-                )
+            chat_settings_id = await require_tenant_for_callback(self.service, query)
+            if chat_settings_id is None:
                 return
             pending_count = self.service.queue_repo.count_pending(
                 chat_settings_id=chat_settings_id
@@ -495,14 +488,8 @@ class TelegramSettingsHandlers:
         if action == "clear_queue":
             await query.answer("Clearing queue...")
 
-            try:
-                chat_settings_id = (
-                    self.service.settings_service.resolve_chat_settings_id(chat_id)
-                )
-            except TenantResolutionError:
-                await query.answer(
-                    "❌ No instance is configured for this chat.", show_alert=True
-                )
+            chat_settings_id = await require_tenant_for_callback(self.service, query)
+            if chat_settings_id is None:
                 return
             # Route button-bearing rows through the shared reap so live cards are
             # expired (buttons stripped + terminal history) rather than orphaned;

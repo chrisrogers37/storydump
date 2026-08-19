@@ -6,7 +6,6 @@ from datetime import datetime
 from src.config.settings import settings
 from src.services.base_service import BaseService
 from src.repositories.instagram_account_repository import InstagramAccountRepository
-from src.exceptions.tenancy import TenantResolutionError
 from src.repositories.chat_settings_repository import ChatSettingsRepository
 from src.repositories.token_repository import TokenRepository
 from src.models.chat_settings import ChatSettings
@@ -520,15 +519,10 @@ class InstagramAccountService(BaseService):
         is in scope (CLI/operator paths; see the column doc on ApiToken)."""
         if telegram_chat_id is None:
             return None
-        settings = self.settings_repo.get_by_chat_id(telegram_chat_id)
-        if settings is None:
-            # A chat that is IN scope but unknown is refused (#842) — the
-            # None above is the documented operator/CLI stampless path, not
-            # a fallback for a chat that failed to resolve.
-            raise TenantResolutionError(
-                "unknown_binding", f"no tenant for chat {telegram_chat_id}"
-            )
-        return str(settings.id)
+        # A chat that is IN scope but unknown is refused (#842) — the None
+        # above is the documented operator/CLI stampless path, not a fallback
+        # for a chat that failed to resolve.
+        return str(self.settings_repo.require_by_chat_id(telegram_chat_id).id)
 
     def _account_owned_by_chat(self, account_id: str, chat_settings) -> bool:
         """Whether a chat owns an account.

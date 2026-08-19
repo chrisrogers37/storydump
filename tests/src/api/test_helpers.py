@@ -6,6 +6,7 @@ import pytest
 from fastapi import HTTPException
 
 from src.api.routes.onboarding.helpers import (
+    MEMBERSHIP_DENIED_DETAIL,
     AUTH_FAILURE_DETAIL,
     _validate_admin,
     _validate_auth,
@@ -347,7 +348,7 @@ class TestValidateRequestAuthorization:
                     with pytest.raises(HTTPException) as exc:
                         _validate_request("token", CHAT_ID)
         assert exc.value.status_code == 403
-        assert exc.value.detail == "Not a member of this instance"
+        assert exc.value.detail == MEMBERSHIP_DENIED_DETAIL
         membership_cls.return_value.is_active_member.assert_not_called()
 
     def test_unbound_token_unknown_user_fails_closed(

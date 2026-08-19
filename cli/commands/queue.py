@@ -11,6 +11,10 @@ from src.services.core.dashboard_service import DashboardService
 
 console = Console()
 
+NO_ADMIN_INSTANCE_MESSAGE = (
+    "[yellow]Admin chat has no instance yet — run /start there first[/yellow]"
+)
+
 
 @click.command(name="list-queue")
 def list_queue():
@@ -55,9 +59,7 @@ def reset_queue(yes):
         try:
             count = scheduler.count_pending(settings.ADMIN_TELEGRAM_CHAT_ID)
         except TenantResolutionError:
-            console.print(
-                "[yellow]Admin chat has no instance yet — run /start there first[/yellow]"
-            )
+            console.print(NO_ADMIN_INSTANCE_MESSAGE)
             return
 
         if count == 0:
@@ -92,20 +94,14 @@ def queue_preview(count):
 
     Shows what the JIT scheduler would pick without actually posting.
     """
-    from src.services.core.settings_service import SettingsService
-
-    with SettingsService() as settings_service:
+    with SchedulerService() as scheduler:
         try:
-            chat_settings_id = settings_service.resolve_chat_settings_id(
+            chat_settings_id = scheduler.settings_service.resolve_chat_settings_id(
                 settings.ADMIN_TELEGRAM_CHAT_ID
             )
         except TenantResolutionError:
-            console.print(
-                "[yellow]Admin chat has no instance yet — run /start there first[/yellow]"
-            )
+            console.print(NO_ADMIN_INSTANCE_MESSAGE)
             return
-
-    with SchedulerService() as scheduler:
         previews = scheduler.get_queue_preview(
             chat_settings_id=chat_settings_id,
             count=count,

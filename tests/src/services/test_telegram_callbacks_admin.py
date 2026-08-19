@@ -390,7 +390,7 @@ class TestCrossTenantIsolation:
         self, mock_retry, handlers
     ):
         """A button carrying another tenant's chat_settings_id is refused."""
-        handlers.service.settings_service.resolve_chat_settings_id.return_value = "cs-A"
+        handlers.service.settings_service.get_settings.return_value = Mock(id="cs-A")
 
         await handlers.handle_batch_approve("cs-VICTIM", _make_user(), _make_query())
 
@@ -403,7 +403,7 @@ class TestCrossTenantIsolation:
         self, mock_retry, handlers
     ):
         """A button carrying the caller's own chat_settings_id proceeds."""
-        handlers.service.settings_service.resolve_chat_settings_id.return_value = "cs-A"
+        handlers.service.settings_service.get_settings.return_value = Mock(id="cs-A")
         handlers.service.queue_repo.get_all_with_media.return_value = []
 
         await handlers.handle_batch_approve("cs-A", _make_user(), _make_query())
