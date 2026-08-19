@@ -302,6 +302,7 @@ class TestTheBoundaryIsDerivedAndLoud:
             "055_intent_ledger_tables.sql",
             "056_machinery_tables.sql",
             "057_grant_matrix_and_archive_schema.sql",
+            "058_rls_and_policies.sql",
         ], (
             f"the target lineage is {above}. If you are landing the next F.2"
             " increment, add it here — deliberately, and at the end: arm (b)"
@@ -603,29 +604,37 @@ class TestTheLaneReplaysAcrossTheBoundary:
             " `{}` and passed without looking at anything"
         )
 
-        # THE COST OF THE OLD SHAPE, MEASURED ON THE REAL LINEAGE RATHER THAN
-        # ARGUED. The invariant check this comparison replaced is RED on this
-        # exact catalog: F.2.2's four tenant-keyed tables carry no RLS, because
-        # the ratified stream does not enable it until index 126. They are
-        # correct — `sig == expected` just proved the lineage is precisely what
-        # the plan implies — and the old check calls them violations anyway.
-        # That is the five-increment window the prefix-aware form exists to
-        # survive, pinned here so nobody reverts the shape thinking it cosmetic.
+        # THE MID-STREAM WINDOW HAS CLOSED, AND THE INVARIANT IS NOW LIVE.
+        # A pin sat here through F.2.2-F.2.6 asserting the OLD invariant shape
+        # was red on this exact catalog — every tenant-keyed table reported as
+        # a violation because the stream does not enable RLS until index 126.
+        # It carried its own expiry ("if RLS has now landed, the mid-stream
+        # window has closed and this pin should go with it") and F.2.7 landed
+        # statements 126..201, so it went with it.
         #
-        # THIS PIN EXPIRES, DELIBERATELY AND LOUDLY. It holds for every
-        # increment up to the first ENABLE ROW LEVEL SECURITY (stream index 126,
-        # `conftest.F2_6_END`); the increment that crosses that index turns these
-        # messages from "RLS is not enabled" to "no policy" and reddens this.
-        # That is the window CLOSING, not the gate breaking — the message says so
-        # rather than leaving a bare violations list to be misread.
-        expiry = "expires at the first ENABLE ROW LEVEL SECURITY (stream index 126)"
-        stale_shape = tenancy_violations(sig)
-        assert len(stale_shape) == len(tenant_keyed_tables(expected)) > 0, (
-            f"{stale_shape}\n  this pin {expiry}"
+        # Replaced by the invariant itself rather than by nothing. This is the
+        # first increment at which "every tenant-keyed table carries RLS and a
+        # policy" is TRUE of the target lineage, which is the whole point of
+        # Fork 1 ruling (a)'s trade: the structural guarantee was given up for a
+        # detected one, and this is the detector finally reading clean. Deleting
+        # the pin without asserting what replaced it would leave the closing
+        # unobserved.
+        #
+        # ONE CORRECTION TO THE RETIRED PIN, recorded because the next tripwire
+        # will be read the same way: its INSTRUCTION was right and its SIDE
+        # PREDICTION was not. It said the crossing increment "turns these
+        # messages from 'RLS is not enabled' to 'no policy'". It does not —
+        # F.2.7 lands the 23 ENABLE and the 53 CREATE POLICY together, so no
+        # table is ever left enabled-but-unpolicied and the list goes straight
+        # to empty. Observed 0 violations, not 17 reworded ones.
+        baseline_violations = tenancy_violations(sig)
+        assert baseline_violations == [], (
+            f"the tenancy invariant is live from F.2.7 and does not hold:"
+            f" {baseline_violations}"
         )
-        assert all("RLS is not enabled" in v for v in stale_shape), (
-            f"{stale_shape}\n  this pin {expiry} — if RLS has now landed, the"
-            " mid-stream window has closed and this pin should go with it"
+        assert tenant_keyed_tables(sig), (
+            "positive control: no tenant-keyed table in the replayed lineage,"
+            " so the assertion above passed by having nothing to examine"
         )
 
         execute(
@@ -650,7 +659,7 @@ class TestTheLaneReplaysAcrossTheBoundary:
         # adds nothing to the list — while the prefix comparison sees it at
         # once. An undeclared table is exactly what a detector-based guarantee
         # has to catch now that grouping no longer carries it (#806 Fork 1).
-        assert tenancy_violations(probed) == stale_shape, (
+        assert tenancy_violations(probed) == baseline_violations, (
             "the probe changed the invariant check's answer — it was meant to"
             " be invisible to it, so this no longer isolates the direction the"
             " prefix comparison uniquely covers"
