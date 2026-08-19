@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **#874: the #873 route test now exercises the real `sync()` — or rather, its replacement does; the no-op is gone.** The predecessor asserted `sync`'s call arguments into a wholesale mock of the very service #872's bug lived in, so reverting the bug left it green — a test named for behavior it never exercised, reading as protection. The replacement runs the route against the REAL `MediaSyncService` (the service suite's own stubbed-`__init__` idiom supplies the mock floor one layer BELOW the defect, never above it) and asserts the boundary-resolved tenant at the repository seam. Demonstrated, not asserted: with the #872 discard reverted locally the test fails at exactly that assertion (`Expected: ('local', 'cs-test-1') / Actual: ('local', None)`), then greens with the fix restored — the evidence the wholesale-mock version structurally could not produce, and the check mutation testing cannot substitute for (a test with no coupling to the mutated layer never moves).
+
+### Fixed
+
 - **#872: `MediaSyncService.sync()` no longer discards its own `chat_settings_id` — "Sync Media Now" and onboarding indexing work again.** The tuple-unpack from `_resolve_source_config` rebound the parameter, so the tenant every route explicitly passed was silently replaced by the resolver's owner — `None` whenever source overrides were given, which is exactly how the routes call. Under the fail-closed repositories an explicit `None` scope raises, so every dashboard/onboarding sync 500'd. Pre-existing shape (present at the F.3 base; found by review on #866). The durable half is the test: the new service-level test asserts the property at the repository seam — the explicitly-passed tenant is the id every media mutation runs under, in the exact argument shape the routes use — and the route test now asserts `sync`'s call **arguments**, not merely its invocation, because a wholesale service mock sat exactly on top of the discard and made "2864 passed" structurally silent about it.
 
 ### Changed
