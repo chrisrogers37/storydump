@@ -1,5 +1,6 @@
 """Tests for health CLI commands."""
 
+import json
 from contextlib import contextmanager
 from unittest.mock import patch
 
@@ -47,12 +48,18 @@ class TestHealthCommands:
 
 
 def _row(name="MediaSyncService", calls=4, ok=3, failed=1, avg=120):
+    """Mirrors ServiceRunRepository._health_row: the rate is over RESOLVED
+    runs, and unresolved is a real field rather than a rendering-time
+    subtraction."""
+    resolved = ok + failed
     return {
         "service_name": name,
         "call_count": calls,
         "success_count": ok,
         "failure_count": failed,
-        "error_rate": round(failed / calls, 2) if calls else 0,
+        "unresolved_count": max(0, calls - resolved),
+        "resolved_count": resolved,
+        "error_rate": round(failed / resolved, 2) if resolved else 0,
         "avg_duration_ms": avg,
     }
 
@@ -60,11 +67,15 @@ def _row(name="MediaSyncService", calls=4, ok=3, failed=1, avg=120):
 def _payload(rows, hours=24):
     calls = sum(r["call_count"] for r in rows)
     fails = sum(r["failure_count"] for r in rows)
+    unres = sum(r["unresolved_count"] for r in rows)
+    resolved = sum(r["resolved_count"] for r in rows)
     return {
         "services": rows,
         "total_calls": calls,
         "total_failures": fails,
-        "overall_error_rate": round(fails / calls, 2) if calls else 0,
+        "total_unresolved": unres,
+        "total_resolved": resolved,
+        "overall_error_rate": round(fails / resolved, 2) if resolved else 0,
         "hours": hours,
     }
 
@@ -128,7 +139,7 @@ class TestUnresolvedRunsAreVisibleRatherThanFolded:
     single stuck run takes the same service to 0.50. The column exists so a
     crash cannot read as an improvement."""
 
-    def test_unresolved_is_calls_minus_ok_minus_failed(self):
+    def test_unresolved_is_read_from_the_payload_not_derived_in_the_renderer(self):
         assert _unresolved(_row(calls=5, ok=3, failed=1)) == 1
 
     def test_a_stuck_run_is_shown_in_its_own_column(self):
@@ -137,14 +148,14 @@ class TestUnresolvedRunsAreVisibleRatherThanFolded:
             result = CliRunner().invoke(service_health, [])
         assert result.exit_code == 0
         assert "Unresolved" in result.output
-        assert "pull the error rate down" in _flat(result.output)
+        assert "the rate will never show it" in _flat(result.output)
 
     def test_no_unresolved_runs_means_no_warning(self):
         """Paired negative: the caveat must not print when it does not apply,
         or it becomes wallpaper."""
         with _service_returning(_payload([_row(calls=4, ok=3, failed=1)])):
             result = CliRunner().invoke(service_health, [])
-        assert "pull the error rate down" not in _flat(result.output)
+        assert "the rate will never show it" not in _flat(result.output)
 
 
 @pytest.mark.unit
@@ -180,7 +191,7 @@ class TestFailOverIsTheOnlyNonZeroExit:
         with _service_returning(_payload(rows)):
             result = CliRunner().invoke(service_health, ["--fail-over", "0.9"])
         assert result.exit_code == 1
-        tail = _flat(result.output).split("service(s) at or above")[-1]
+        tail = _flat(result.output).split("threshold breach(es):")[-1]
         assert "Broken" in tail and "Healthy" not in tail
 
 
@@ -214,6 +225,14 @@ class TestTheDetectorSeesARealInstrumentedFailure:
             session.close()
         yield
 
+    def _start_but_never_resolve(self, name):
+        """A process killed mid-flight: the row is created and never updated."""
+        from src.repositories.service_run_repository import ServiceRunRepository
+
+        ServiceRunRepository().create_run(
+            service_name=name, method_name="sync", triggered_by="user"
+        )
+
     def _run(self, name, *, fail):
         from src.repositories.service_run_repository import ServiceRunRepository
 
@@ -240,6 +259,41 @@ class TestTheDetectorSeesARealInstrumentedFailure:
         assert result.exit_code == 0, result.output
         assert "ControlService" in result.output
 
+    def test_rajans_reproduction_a_real_crash_is_caught_at_a_realistic_threshold(
+        self, route_repos_to_test_db
+    ):
+        """The #882 review case, end to end through the REAL repository.
+
+        One honest failure plus one crashed run. Before this fix the rate was
+        failures/call_count = 0.50, so --fail-over caught it only at 0.5 and
+        missed at 0.6 and 0.99 — thresholds an operator would reasonably pick
+        to avoid noise — while a real crash sat in the data. Over resolved runs
+        the rate is 1.00 and every threshold catches it.
+        """
+        self._run("MediaSyncService", fail=True)
+        self._start_but_never_resolve("MediaSyncService")
+
+        for threshold in ("0.5", "0.6", "0.75", "0.99", "1.0"):
+            result = CliRunner().invoke(service_health, ["--fail-over", threshold])
+            assert result.exit_code == 1, f"{threshold} missed it: {result.output}"
+
+    @pytest.mark.integration
+    def test_unresolved_reaches_the_json_consumer_from_the_real_repository(
+        self, route_repos_to_test_db
+    ):
+        """The review's minimum ask, checked at the real data path rather than
+        against a mocked payload: the number has to survive the repository and
+        the service, not just the renderer."""
+        self._run("MediaSyncService", fail=True)
+        self._start_but_never_resolve("MediaSyncService")
+
+        result = CliRunner().invoke(service_health, ["--json"])
+        assert result.exit_code == 0, result.output
+        row = json.loads(result.output)["services"][0]
+        assert row["unresolved_count"] == 1
+        assert row["resolved_count"] == 1
+        assert row["error_rate"] == 1.0
+
     def test_a_service_failing_every_call_is_caught(self, route_repos_to_test_db):
         for _ in range(3):
             self._run("MediaSyncService", fail=True)
@@ -247,3 +301,73 @@ class TestTheDetectorSeesARealInstrumentedFailure:
         assert result.exit_code == 1, result.output
         assert "MediaSyncService" in _flat(result.output)
         assert "1.00" in result.output
+
+
+@pytest.mark.unit
+class TestACrashCannotMakeTheCronDetectorLookHealthy:
+    """Review finding on #882, reproduced against a live database before the
+    fix: with 1 real failure and 1 crashed run, --fail-over MISSED at 0.6 and
+    at 0.99, and --json carried no unresolved field at all. So the blind spot
+    was visible in the table and invisible to both machine consumers — the
+    detector reporting healthier under exactly the condition it exists for.
+    """
+
+    def _one_failure_and_one_crash(self):
+        # call_count=2, success=0, failure=1, unresolved=1
+        return _payload([_row("MediaSyncService", calls=2, ok=0, failed=1)])
+
+    @pytest.mark.parametrize("threshold", ["0.5", "0.6", "0.75", "0.99", "1.0"])
+    def test_fail_over_catches_it_at_every_threshold_not_just_a_lucky_one(
+        self, threshold
+    ):
+        """Over resolved runs the rate is 1.00, so the crash cannot dilute it.
+        Over call_count it was 0.50 and everything above that read clean."""
+        with _service_returning(self._one_failure_and_one_crash()):
+            result = CliRunner().invoke(service_health, ["--fail-over", threshold])
+        assert result.exit_code == 1, f"{threshold}: {result.output}"
+
+    def test_the_rate_does_not_improve_when_a_run_dies(self):
+        one = _payload([_row("S", calls=1, ok=0, failed=1)])
+        plus_crash = _payload([_row("S", calls=2, ok=0, failed=1)])
+        assert one["services"][0]["error_rate"] == 1.0
+        assert plus_crash["services"][0]["error_rate"] == 1.0
+
+    def test_json_carries_unresolved_as_a_first_class_field(self):
+        """The minimum the review asked for: a machine consumer must be able to
+        build its own check, which it could not when the number existed only in
+        the rendering layer."""
+        with _service_returning(self._one_failure_and_one_crash()):
+            result = CliRunner().invoke(service_health, ["--json"])
+        assert result.exit_code == 0
+        payload = json.loads(result.output)
+        assert payload["services"][0]["unresolved_count"] == 1
+        assert payload["total_unresolved"] == 1
+
+    def test_a_crash_with_no_failures_is_invisible_to_the_rate_and_needs_its_own_gate(
+        self,
+    ):
+        """The residual the rate genuinely cannot carry: 5 successes and one
+        crashed run is an error rate of 0.00 and a broken service."""
+        payload = _payload([_row("S", calls=6, ok=5, failed=0)])
+        assert payload["services"][0]["error_rate"] == 0.0
+        assert payload["services"][0]["unresolved_count"] == 1
+
+        with _service_returning(payload):
+            missed = CliRunner().invoke(service_health, ["--fail-over", "0.01"])
+        assert missed.exit_code == 0
+
+        with _service_returning(payload):
+            caught = CliRunner().invoke(service_health, ["--fail-unresolved", "1"])
+        assert caught.exit_code == 1
+        assert "unresolved" in _flat(caught.output)
+
+    def test_fail_unresolved_does_not_fire_below_its_threshold(self):
+        payload = _payload([_row("S", calls=6, ok=5, failed=0)])
+        with _service_returning(payload):
+            result = CliRunner().invoke(service_health, ["--fail-unresolved", "2"])
+        assert result.exit_code == 0
+
+    def test_neither_flag_still_means_exit_zero(self):
+        with _service_returning(self._one_failure_and_one_crash()):
+            result = CliRunner().invoke(service_health, [])
+        assert result.exit_code == 0

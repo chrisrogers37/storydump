@@ -15,11 +15,17 @@ trusted past its evidence is worse than none:
   So a request that fails before entering the service — in the route handler,
   in auth, in request parsing — writes nothing, and is silence here rather than
   a failure.
-- **A run killed mid-flight is not a failure.** ``failure_count`` counts only
-  rows the service itself resolved to ``failed``; a process killed by OOM or a
-  restart leaves its row at ``running`` forever. Those still count as calls, so
-  they *lower* the error rate. They are reported in their own ``Unresolved``
-  column rather than folded into either side.
+- **A run killed mid-flight is not a failure, and it is not a success either.**
+  ``failure_count`` counts only rows the service itself resolved to ``failed``;
+  a process killed by OOM or a restart leaves its row at ``running`` forever.
+  ``error_rate`` is therefore computed over **resolved** runs — an unresolved
+  row moves it neither way, because it is not yet evidence about success or
+  failure. It was previously computed over ``call_count``, which put unresolved
+  runs in the denominator and never the numerator, so a crash *lowered* the
+  rate: one honest failure read 1.00 and a single stuck run alongside it took
+  the same service to 0.50. ``unresolved_count`` is a first-class field of the
+  payload — in ``--json``, not derived for the table — so ``--fail-unresolved``
+  and any consumer's own policy can act on it.
 - **A service with no calls in the window does not appear.** Absence is not
   health; nothing distinguishes "ran clean" from "was never invoked".
 """
@@ -91,11 +97,24 @@ def check_health():
         "noise or stay silent through an outage."
     ),
 )
-def service_health(hours, as_json, fail_over):
+@click.option(
+    "--fail-unresolved",
+    "fail_unresolved",
+    type=click.IntRange(min=1),
+    default=None,
+    help=(
+        "Exit non-zero if any service has N or more unresolved runs. The rate "
+        "cannot carry this on its own: a service with only successes and one "
+        "crashed run has an error rate of 0.00 and is genuinely broken. Also "
+        "no default — an in-flight run is unresolved too, so how many is too "
+        "many depends on how long this service's work takes."
+    ),
+)
+def service_health(hours, as_json, fail_over, fail_unresolved):
     """Show per-service call counts and error rates from service_runs.
 
-    Read-only. Suitable for cron with --fail-over, which is the only way this
-    command reports anything other than exit 0.
+    Read-only. Suitable for cron with --fail-over and/or --fail-unresolved,
+    which are the only ways this command reports anything other than exit 0.
     """
     with DashboardService() as service:
         stats = service.get_service_health_stats(hours=hours)
@@ -105,28 +124,40 @@ def service_health(hours, as_json, fail_over):
     else:
         _render_service_health(stats, hours)
 
-    if fail_over is None:
-        return
+    reasons = []
+    if fail_over is not None:
+        for row in stats["services"]:
+            if row["error_rate"] >= fail_over:
+                reasons.append(
+                    f"{row['service_name']} error rate {row['error_rate']:.2f}"
+                )
+    if fail_unresolved is not None:
+        for row in stats["services"]:
+            if row["unresolved_count"] >= fail_unresolved:
+                reasons.append(
+                    f"{row['service_name']} {row['unresolved_count']} unresolved"
+                )
 
-    breached = [s for s in stats["services"] if s["error_rate"] >= fail_over]
-    if breached:
+    if reasons:
         if not as_json:
             console.print(
-                f"\n[bold red]✗ {len(breached)} service(s) at or above "
-                f"an error rate of {fail_over}:[/bold red] "
-                + ", ".join(s["service_name"] for s in breached)
+                f"\n[bold red]✗ {len(reasons)} threshold breach(es):[/bold red] "
+                + ", ".join(reasons)
             )
         raise SystemExit(1)
 
 
 def _unresolved(row: dict) -> int:
-    """Runs that never reached a terminal status.
+    """Unresolved runs, read from the payload rather than re-derived here.
 
-    Derived rather than queried: the aggregate reports calls, successes and
-    failures, and a row that is none of the latter two is still running or was
-    killed before it could say otherwise.
+    This was once ``call_count - success_count - failure_count`` computed in
+    the rendering layer, which meant the number existed only for a human
+    looking at the table — ``--json`` had no such field, so no machine consumer
+    could see it and no threshold could act on it. The derivation moved into
+    ``ServiceRunRepository._health_row``; this accessor stays only so the
+    renderer has one name for it.
     """
-    return row["call_count"] - row["success_count"] - row["failure_count"]
+    return row["unresolved_count"]
 
 
 def _render_service_health(stats: dict, hours: int) -> None:
@@ -164,10 +195,14 @@ def _render_service_health(stats: dict, hours: int) -> None:
     console.print(
         f"\nTotals: {stats['total_calls']} calls, "
         f"{stats['total_failures']} failed, "
-        f"overall error rate {stats['overall_error_rate']:.2f}"
+        f"{stats['total_unresolved']} unresolved, "
+        f"overall error rate {stats['overall_error_rate']:.2f} "
+        f"(over {stats['total_resolved']} resolved)"
     )
     if any(_unresolved(r) for r in services):
         console.print(
-            "[dim]Unresolved runs count as calls but not as failures, so they "
-            "pull the error rate down. Investigate them as suspected crashes.[/dim]"
+            "[bold yellow]! Unresolved runs are excluded from the error rate — "
+            "they are neither a success nor a failure yet. A stuck one is a "
+            "suspected crash and the rate will never show it; gate on it with "
+            "--fail-unresolved.[/bold yellow]"
         )
