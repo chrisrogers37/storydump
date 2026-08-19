@@ -318,7 +318,7 @@ class HistoryDashboardQueries:
                 )
                 result_slots.append(
                     {
-                        "slot_time": next_time.isoformat() + "Z",
+                        "slot_time": next_time.isoformat(),
                         "predicted_category": predicted_cat,
                     }
                 )
