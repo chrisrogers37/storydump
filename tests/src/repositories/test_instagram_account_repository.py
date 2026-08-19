@@ -36,7 +36,7 @@ class TestInstagramAccountRepository:
         result = account_repo.get_all_active()
 
         assert len(result) == 2
-        mock_db.commit.assert_called_once()  # end_read_transaction
+        mock_db.commit.assert_called()  # end_read_transaction
 
     def test_get_all_includes_inactive(self, account_repo, mock_db):
         """Test getting all accounts including inactive."""

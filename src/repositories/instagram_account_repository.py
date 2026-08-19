@@ -205,8 +205,7 @@ class InstagramAccountRepository(BaseRepository):
             instagram_username=instagram_username,
         )
         self.db.add(account)
-        self.db.commit()
-        self.db.refresh(account)
+        self.commit_and_refresh(account)
         return account
 
     def update(self, account_id: str, **kwargs) -> InstagramAccount:
@@ -228,8 +227,7 @@ class InstagramAccountRepository(BaseRepository):
                 setattr(account, key, value)
 
         account.updated_at = datetime.utcnow()
-        self.db.commit()
-        self.db.refresh(account)
+        self.commit_and_refresh(account)
         return account
 
     def deactivate(self, account_id: str) -> InstagramAccount:

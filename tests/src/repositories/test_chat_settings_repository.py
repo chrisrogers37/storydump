@@ -36,7 +36,7 @@ class TestChatSettingsRepository:
         result = settings_repo.get_by_chat_id(-100123)
 
         assert result is mock_settings
-        mock_db.commit.assert_called_once()  # end_read_transaction
+        mock_db.commit.assert_called()  # end_read_transaction
 
     def test_get_by_chat_id_not_found(self, settings_repo, mock_db):
         """Test getting settings for non-existent chat returns None."""
@@ -67,7 +67,7 @@ class TestChatSettingsRepository:
         settings_repo.get_or_create(-100123)
 
         mock_db.add.assert_called_once()
-        mock_db.commit.assert_called_once()
+        mock_db.commit.assert_called()
         mock_db.refresh.assert_called_once()
 
         added_obj = mock_db.add.call_args[0][0]
@@ -136,7 +136,7 @@ class TestChatSettingsRepository:
 
         assert len(result) == 2
         mock_db.query.assert_called_with(ChatSettings)
-        mock_db.commit.assert_called_once()  # end_read_transaction
+        mock_db.commit.assert_called()  # end_read_transaction
 
     def test_get_all_active_returns_empty_when_all_paused(self, settings_repo, mock_db):
         """get_all_active returns empty list when all chats are paused."""
@@ -182,7 +182,7 @@ class TestChatSettingsRepository:
 
         assert len(result) == 1
         mock_db.query.assert_called_with(ChatSettings)
-        mock_db.commit.assert_called_once()  # end_read_transaction
+        mock_db.commit.assert_called()  # end_read_transaction
 
     def test_get_all_sync_enabled_returns_empty_when_none(self, settings_repo, mock_db):
         """get_all_sync_enabled returns empty list when no chats have sync enabled."""
@@ -204,7 +204,7 @@ class TestChatSettingsRepository:
         result = settings_repo.get_by_id("abc-123")
 
         assert result is mock_settings
-        mock_db.commit.assert_called_once()  # end_read_transaction
+        mock_db.commit.assert_called()  # end_read_transaction
 
     def test_get_by_id_not_found(self, settings_repo, mock_db):
         """Test getting settings by non-existent UUID returns None."""

@@ -112,6 +112,9 @@ class CategoryMixRepository(BaseRepository):
         # Refresh to get IDs
         for record in new_records:
             self.db.refresh(record)
+        # One commit, N refreshes, one read transaction to end (#908):
+        # commit_and_refresh is per-object and would re-commit per record.
+        self.end_read_transaction()
 
         return new_records
 

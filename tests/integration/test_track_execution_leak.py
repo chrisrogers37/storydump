@@ -15,69 +15,21 @@ the whole defect is that the connection's transaction state OUTLIVES the call.
 Born RED against main: `create_run` leaves an idle-in-transaction backend whose
 last statement touched `service_runs`.
 
-The production `SessionLocal` is rebound at the current-schema test DB (the
-`_route_repos_to_test_db` pattern), so `create_run` runs its real path; the
-`pg_stat_activity` probe runs on a SEPARATE connection of the same engine, a
-different backend, so it can see the leaked one.
+The `routed_engine` fixture (rebinds production `SessionLocal` at the test DB so
+`create_run` runs its real path) and the `idle_in_transaction_touching` probe
+(runs on a SEPARATE connection, so it sees the leaked backend) are shared from
+`conftest.py`.
 """
 
 from __future__ import annotations
 
 
 import pytest
-from sqlalchemy import text
-from sqlalchemy.orm import sessionmaker
 
 from src.repositories.service_run_repository import ServiceRunRepository
 from src.services.base_service import BaseService
 
 pytestmark = [pytest.mark.integration]
-
-
-@pytest.fixture
-def routed_engine(setup_test_database, monkeypatch):
-    """Rebind production `SessionLocal` at the test engine; yield the engine.
-
-    Every repo constructed under this fixture opens its session on the test
-    DB, so `create_run` exercises its real code against a database we can
-    also inspect via `pg_stat_activity`.
-    """
-    if setup_test_database is None:
-        pytest.skip("Integration test requires a database")
-
-    import src.config.database as db_module
-
-    monkeypatch.setattr(
-        db_module,
-        "SessionLocal",
-        sessionmaker(
-            autocommit=False,
-            autoflush=False,
-            bind=setup_test_database,
-            expire_on_commit=False,
-        ),
-    )
-    yield setup_test_database
-
-
-def _idle_in_transaction_on_service_runs(engine) -> set[int]:
-    """Backend PIDs on this DB that are idle-in-transaction with a last
-    statement touching `service_runs` — the leaked-refresh signature.
-
-    Runs on its own connection (a different backend), so it never reports
-    itself.
-    """
-    with engine.connect() as conn:
-        rows = conn.execute(
-            text(
-                "SELECT pid FROM pg_stat_activity"
-                " WHERE datname = current_database()"
-                "   AND pid <> pg_backend_pid()"
-                "   AND state = 'idle in transaction'"
-                "   AND query ILIKE '%service_runs%'"
-            )
-        ).fetchall()
-    return {r[0] for r in rows}
 
 
 class _TrackedService(BaseService):
@@ -90,13 +42,17 @@ class _TrackedService(BaseService):
 
 
 class TestCreateRunEndsItsReadTransaction:
-    def test_create_run_leaves_no_idle_in_transaction_backend(self, routed_engine):
+    def test_create_run_leaves_no_idle_in_transaction_backend(
+        self, routed_engine, idle_in_transaction_touching
+    ):
         """The subject defect, at the single highest-value site."""
-        before = _idle_in_transaction_on_service_runs(routed_engine)
+        before = idle_in_transaction_touching(routed_engine, "service_runs")
         repo = ServiceRunRepository()
         try:
             repo.create_run(service_name="leak_probe", method_name="unit")
-            leaked = _idle_in_transaction_on_service_runs(routed_engine) - before
+            leaked = (
+                idle_in_transaction_touching(routed_engine, "service_runs") - before
+            )
             assert not leaked, (
                 f"create_run left {len(leaked)} backend(s) idle-in-transaction"
                 f" on service_runs (#907): {leaked}"
@@ -105,7 +61,7 @@ class TestCreateRunEndsItsReadTransaction:
             repo.close()
 
     def test_no_backend_is_parked_for_the_full_duration_of_a_tracked_call(
-        self, routed_engine
+        self, routed_engine, idle_in_transaction_touching
     ):
         """The universal-wrapper impact, measured WHERE it bites: INSIDE the
         tracked body. create_run's leaked read transaction is held from
@@ -113,13 +69,15 @@ class TestCreateRunEndsItsReadTransaction:
         concurrent caller under L.0's `max_overflow=0` pool is starved for
         that entire window. complete_run happens to close it at exit, so the
         honest proof checks mid-call, not after."""
-        before = _idle_in_transaction_on_service_runs(routed_engine)
+        before = idle_in_transaction_touching(routed_engine, "service_runs")
         service = _TrackedService()
         try:
             with service.track_execution("do_work", triggered_by="test") as run_id:
                 assert run_id
                 # Mid-call: the exact window a concurrent request contends for.
-                leaked = _idle_in_transaction_on_service_runs(routed_engine) - before
+                leaked = (
+                    idle_in_transaction_touching(routed_engine, "service_runs") - before
+                )
             assert not leaked, (
                 f"a tracked call parked {len(leaked)} backend(s)"
                 f" idle-in-transaction on service_runs for its full duration"

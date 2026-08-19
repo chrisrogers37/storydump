@@ -191,8 +191,7 @@ class ChatSettingsRepository(BaseRepository):
             onboarding_completed=True,
         )
         self.db.add(chat_settings)
-        self.db.commit()
-        self.db.refresh(chat_settings)
+        self.commit_and_refresh(chat_settings)
         return chat_settings
 
     def update(self, telegram_chat_id: int, **kwargs) -> ChatSettings:
@@ -213,8 +212,7 @@ class ChatSettingsRepository(BaseRepository):
                 setattr(chat_settings, key, value)
 
         chat_settings.updated_at = datetime.utcnow()
-        self.db.commit()
-        self.db.refresh(chat_settings)
+        self.commit_and_refresh(chat_settings)
         return chat_settings
 
     def set_paused(
