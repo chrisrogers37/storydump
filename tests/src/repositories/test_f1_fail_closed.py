@@ -10,20 +10,19 @@ The four obligations of the merged interface spec
 4. the fail-open signature pattern is extinct in the repository layer, via a
    gate that is itself shown able to fail on a reintroduced instance.
 
-Real DB for obligation 2 (an isolation claim proven against mocks would be
-the shape of test that cannot fail); pure-call for the boundary obligations.
+Only obligation 2 needs a database (an isolation claim proven against mocks
+would be the shape of test that cannot fail); everything else here runs in
+any environment, deliberately — the durable gates must not silently skip
+where Postgres is absent.
 """
 
-import random
 import re
 from pathlib import Path
 
 import pytest
-from sqlalchemy.orm import sessionmaker
 
 from src.repositories.audit_repository import AuditRepository
 from src.repositories.category_mix_repository import CategoryMixRepository
-from src.repositories.chat_settings_repository import ChatSettingsRepository
 from src.repositories.history_repository import HistoryRepository
 from src.repositories.lock_repository import LockRepository
 from src.repositories.media_repository import MediaRepository
@@ -33,76 +32,49 @@ from src.repositories.tenant_scope import (
     SYSTEM_SCOPE,
     TenantContextError,
     require_tenant_context,
+    require_tenant_id,
     tenant_value,
 )
 from src.repositories.token_repository import TokenRepository
 from src.repositories.user_repository import UserRepository
+from tests.conftest import delete_tenants, make_tenant
 
-pytestmark = pytest.mark.integration
-
-REPO_DIR = Path(__file__).resolve().parents[3] / "src" / "repositories"
+REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_DIR = REPO_ROOT / "src" / "repositories"
 
 # The fail-open default: a tenant parameter that silently means "everything"
-# when omitted. Signature-level, so history_repository's row-value ternary and
-# the legitimate SYSTEM-vs-tenant branches never false-positive.
+# when omitted. Signature-level on purpose — history_repository's row-value
+# ternary and the legitimate SYSTEM-vs-tenant branches can never match.
 FAIL_OPEN_SIGNATURE = re.compile(
     r"chat_settings_id\s*:\s*Optional\[[^\]]+\]\s*=\s*None"
     r"|chat_settings_id\s*:\s*[^,)=]*\|\s*None\s*=\s*None"
     r"|chat_settings_id\s*=\s*None"
 )
 
-# Two sanctioned matches, both DATA FIELDS being written rather than tenant
-# filters: onboarding's pending_chat_settings_id (Class 3 — which chat a
-# pending onboarding will bind to) and HistoryCreateParams.chat_settings_id
-# (a params-object ownership stamp; None = legacy unowned row, part of the
-# #841 burn-down, not a query widener).
-ALLOWED = {("onboarding_repository.py", "pending_chat_settings_id")}
-ALLOWED_LINE_CONTEXT = {"history_repository.py": "class HistoryCreateParams"}
+# Sanctioned matches, both DATA FIELDS being written rather than tenant
+# filters. Exemption mechanics: onboarding's `pending_chat_settings_id` is
+# excluded by the prefix window below; HistoryCreateParams.chat_settings_id
+# (a params-object ownership stamp; None = legacy unowned row, tracked on the
+# #841 burn-down) is excluded by its dataclass block span.
+_EXEMPT_BLOCK = {"history_repository.py": "class HistoryCreateParams"}
 
 
-@pytest.fixture(autouse=True)
-def _route_repos_to_test_db(setup_test_database, monkeypatch):
-    if setup_test_database is None:
-        pytest.skip("Database not available - skipping integration test")
+def _scan_for_fail_open(text: str, filename: str):
+    exempt_start = exempt_end = -1
+    marker = _EXEMPT_BLOCK.get(filename)
+    if marker and marker in text:
+        exempt_start = text.find(marker)
+        nxt = text.find("\nclass ", exempt_start + 1)
+        exempt_end = nxt if nxt != -1 else len(text)
 
-    import src.config.database as db_module
-
-    monkeypatch.setattr(
-        db_module,
-        "SessionLocal",
-        sessionmaker(
-            autocommit=False,
-            autoflush=False,
-            bind=setup_test_database,
-            expire_on_commit=False,
-        ),
-    )
-    yield
-
-
-def _tenant() -> tuple:
-    """Create a real chat_settings row — chat_settings_id is a live FK."""
-    telegram_chat_id = -random.randint(10**11, 10**12)
-    repo = ChatSettingsRepository()
-    try:
-        settings = repo.get_or_create(telegram_chat_id)
-        return str(settings.id), telegram_chat_id
-    finally:
-        repo.close()
-
-
-def _delete_tenants(tenant_ids):
-    from sqlalchemy import text
-
-    repo = ChatSettingsRepository()
-    try:
-        for tid in tenant_ids:
-            repo.db.execute(
-                text("DELETE FROM chat_settings WHERE id = :tid"), {"tid": tid}
-            )
-        repo.db.commit()
-    finally:
-        repo.close()
+    hits = []
+    for m in FAIL_OPEN_SIGNATURE.finditer(text):
+        if text[max(0, m.start() - 8) : m.start()].endswith("pending_"):
+            continue
+        if exempt_start != -1 and exempt_start < m.start() < exempt_end:
+            continue
+        hits.append(m.group(0))
+    return hits
 
 
 class TestObligation1AbsentContextFailsAtTheBoundary:
@@ -135,8 +107,6 @@ class TestObligation1AbsentContextFailsAtTheBoundary:
             (LockRepository, lambda r: r.get_by_id("x", None)),
             (QueueRepository, lambda r: r.get_by_id("x", None)),
             (CategoryMixRepository, lambda r: r.get_current_mix(None)),
-            # former mid-defaults signatures are keyword-only-required now;
-            # explicit None still reaches the entry guard:
             (HistoryRepository, lambda r: r.get_all(chat_settings_id=None)),
             (
                 AuditRepository,
@@ -158,16 +128,14 @@ class TestObligation1AbsentContextFailsAtTheBoundary:
             "token-kwonly-none",
         ],
     )
-    def test_explicit_or_defaulted_none_raises_before_any_query(
-        self, repo_cls, call, monkeypatch
-    ):
+    def test_explicit_none_raises_before_any_query(self, repo_cls, call, monkeypatch):
         repo = repo_cls()
-        # Prove "before any SQL": a session that cannot be opened would fail
-        # loudly if the method reached the DB. The guard must fire first.
+        # Prove "before any SQL" AND before any session checkout: a .db
+        # access would fail the test, so the refusal must come first.
         monkeypatch.setattr(
             type(repo),
             "db",
-            property(lambda self: pytest.fail("query ran before the guard")),
+            property(lambda self: pytest.fail("session touched before the guard")),
         )
         try:
             with pytest.raises(TenantContextError):
@@ -175,11 +143,34 @@ class TestObligation1AbsentContextFailsAtTheBoundary:
         finally:
             repo._db = None  # nothing to close; bypass the poisoned property
 
+    def test_mandatory_tenant_methods_refuse_system_scope(self, monkeypatch):
+        """The *_for_chat family has no cross-tenant door: SYSTEM_SCOPE would
+        bind the marker object into SQL, so it is refused alongside None."""
+        repo = TokenRepository()
+        monkeypatch.setattr(
+            type(repo),
+            "db",
+            property(lambda self: pytest.fail("session touched before the guard")),
+        )
+        try:
+            with pytest.raises(TenantContextError):
+                repo.get_token_for_chat("svc", "access", chat_settings_id=SYSTEM_SCOPE)
+        finally:
+            repo._db = None
+
 
 class TestObligation2CrossTenantReadsReturnZeroRows:
+    pytestmark = [pytest.mark.integration]
+
+    @pytest.fixture(autouse=True)
+    def _db(self, route_repos_to_test_db):
+        yield
+
     def test_media_history_lock_queue_mix_isolation(self):
-        tenant_a, _ = _tenant()
-        tenant_b, _ = _tenant()
+        from datetime import datetime, timedelta
+
+        tenant_a, _ = make_tenant()
+        tenant_b, _ = make_tenant()
         media_repo = MediaRepository()
         queue_repo = QueueRepository()
         lock_repo = LockRepository()
@@ -194,8 +185,6 @@ class TestObligation2CrossTenantReadsReturnZeroRows:
                 chat_settings_id=tenant_a,
             )
             created["media"] = str(item.id)
-            from datetime import datetime, timedelta
-
             q = queue_repo.create(
                 media_item_id=str(item.id),
                 scheduled_for=datetime.utcnow() + timedelta(days=1),
@@ -221,26 +210,21 @@ class TestObligation2CrossTenantReadsReturnZeroRows:
             from sqlalchemy import text
 
             db = media_repo.db
+            db.execute(
+                text("DELETE FROM category_post_case_mix WHERE chat_settings_id = :t"),
+                {"t": tenant_a},
+            )
             for table, key in (
-                ("category_post_case_mix", None),
                 ("media_posting_locks", created.get("lock")),
                 ("posting_queue", created.get("queue")),
                 ("media_items", created.get("media")),
             ):
-                if table == "category_post_case_mix":
-                    db.execute(
-                        text(
-                            "DELETE FROM category_post_case_mix"
-                            " WHERE chat_settings_id = :t"
-                        ),
-                        {"t": tenant_a},
-                    )
-                elif key:
+                if key:
                     db.execute(text(f"DELETE FROM {table} WHERE id = :k"), {"k": key})
             db.commit()
             for r in (media_repo, queue_repo, lock_repo, mix_repo):
                 r.close()
-            _delete_tenants([tenant_a, tenant_b])
+            delete_tenants([tenant_a, tenant_b])
 
 
 class TestObligation3ClassThreeRejectsTenantContext:
@@ -265,26 +249,6 @@ class TestObligation3ClassThreeRejectsTenantContext:
             repo.close()
 
 
-def _scan_for_fail_open(text: str, filename: str):
-    hits = []
-    for m in FAIL_OPEN_SIGNATURE.finditer(text):
-        if any(a[0] == filename and a[1] in m.group(0) for a in ALLOWED):
-            continue
-        if "pending_chat_settings_id" in text[max(0, m.start() - 8) : m.start() + 24]:
-            continue
-        marker = ALLOWED_LINE_CONTEXT.get(filename)
-        if marker:
-            # allowed only inside the named dataclass block, nowhere else
-            block_start = text.find(marker)
-            block_end = text.find("\nclass ", block_start + 1)
-            if block_start != -1 and block_start < m.start() < (
-                block_end if block_end != -1 else len(text)
-            ):
-                continue
-        hits.append(m.group(0))
-    return hits
-
-
 class TestObligation4TheFailOpenSignatureIsExtinct:
     def test_no_repository_signature_defaults_tenant_to_none(self):
         offenders = {}
@@ -299,6 +263,29 @@ class TestObligation4TheFailOpenSignatureIsExtinct:
         reintroduced = "def get_all(self, chat_settings_id: Optional[str] = None):"
         assert _scan_for_fail_open(reintroduced, "synthetic.py")
 
+    def test_system_scope_inventory_only_shrinks(self):
+        """`grep SYSTEM_SCOPE src/ cli/` is the #841 burn-down inventory of
+        deliberate cross-tenant access. Shrink-only ratchet: converting a
+        site to real tenant scoping lowers the ceiling (update the constant
+        DOWN); a new cross-tenant call site above the ceiling needs its own
+        review, not a silent ride on the default."""
+        ceiling = 88
+        count = 0
+        for d in ("src", "cli"):
+            for path in (REPO_ROOT / d).rglob("*.py"):
+                if path.name == "tenant_scope.py":
+                    continue
+                count += path.read_text().count("SYSTEM_SCOPE")
+        assert count <= ceiling, (
+            f"SYSTEM_SCOPE sites grew: {count} > {ceiling} — a new deliberate "
+            "cross-tenant access needs review; if ratified, raise the ceiling "
+            "in the same PR that adds it"
+        )
+        assert count >= ceiling - 20, (
+            f"SYSTEM_SCOPE count dropped far below the ceiling ({count} vs "
+            f"{ceiling}) — lower the ceiling to match the burn-down progress"
+        )
+
     def test_helpers_hold_their_contract(self):
         require_tenant_context("42", where="gate")
         require_tenant_context(SYSTEM_SCOPE, where="gate")
@@ -306,6 +293,11 @@ class TestObligation4TheFailOpenSignatureIsExtinct:
             require_tenant_context(None, where="gate")
         with pytest.raises(TenantContextError):
             require_tenant_context("", where="gate")
+        with pytest.raises(TenantContextError):
+            require_tenant_id(SYSTEM_SCOPE, where="gate")
+        with pytest.raises(TenantContextError):
+            require_tenant_id(None, where="gate")
+        require_tenant_id("42", where="gate")
         assert tenant_value(SYSTEM_SCOPE) is None
         assert tenant_value("42") == "42"
         assert not SYSTEM_SCOPE, "SYSTEM_SCOPE must stay falsy (behavior-preserving)"

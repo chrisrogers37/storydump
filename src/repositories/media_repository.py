@@ -31,7 +31,7 @@ class MediaRepository(BaseRepository):
         The tenant boundary is ``chat_settings``; media belongs to a tenant via
         ``MediaItem.chat_settings_id``. Rules:
 
-        - No caller tenant (internal/worker path, e.g. the dedup CLI): permitted —
+        - SYSTEM_SCOPE caller (internal/worker path, e.g. the dedup CLI): permitted —
           behavior is unchanged from before scoping existed.
         - Row owned by a DIFFERENT tenant: refused. This is the hole #597 closes —
           a caller cannot mutate another tenant's media by knowing its UUID.
@@ -48,7 +48,7 @@ class MediaRepository(BaseRepository):
         return str(owner_chat_settings_id) == str(chat_settings_id)
 
     def _get_for_write(
-        self, media_id: str, chat_settings_id: Optional[str]
+        self, media_id: str, chat_settings_id: TenantScope
     ) -> Optional[MediaItem]:
         """Resolve a media item for a tenant-scoped mutation, or None if the
         caller may not write it.
@@ -83,7 +83,6 @@ class MediaRepository(BaseRepository):
         self, media_id: str, chat_settings_id: TenantScope
     ) -> Optional[MediaItem]:
         """Get media item by ID."""
-        require_tenant_context(chat_settings_id, where="media.get_by_id")
         result = (
             self._tenant_query(MediaItem, chat_settings_id)
             .filter(MediaItem.id == media_id)
@@ -96,7 +95,6 @@ class MediaRepository(BaseRepository):
         self, file_path: str, chat_settings_id: TenantScope
     ) -> Optional[MediaItem]:
         """Get media item by file path."""
-        require_tenant_context(chat_settings_id, where="media.get_by_path")
         result = (
             self._tenant_query(MediaItem, chat_settings_id)
             .filter(MediaItem.file_path == file_path)
@@ -109,7 +107,6 @@ class MediaRepository(BaseRepository):
         self, file_hash: str, chat_settings_id: TenantScope
     ) -> List[MediaItem]:
         """Get all media items with the same hash (duplicate content)."""
-        require_tenant_context(chat_settings_id, where="media.get_by_hash")
         result = (
             self._tenant_query(MediaItem, chat_settings_id)
             .filter(MediaItem.file_hash == file_hash)
@@ -126,9 +123,6 @@ class MediaRepository(BaseRepository):
         Used by InstagramBackfillService to check if an Instagram media item
         has already been backfilled into the system.
         """
-        require_tenant_context(
-            chat_settings_id, where="media.get_by_instagram_media_id"
-        )
         result = (
             self._tenant_query(MediaItem, chat_settings_id)
             .filter(MediaItem.instagram_media_id == instagram_media_id)
@@ -143,9 +137,6 @@ class MediaRepository(BaseRepository):
         Returns a set for O(1) lookup during backfill operations.
         This avoids N+1 queries when checking each item during batch backfill.
         """
-        require_tenant_context(
-            chat_settings_id, where="media.get_backfilled_instagram_media_ids"
-        )
         results = (
             self._tenant_query(MediaItem, chat_settings_id)
             .with_entities(MediaItem.instagram_media_id)
@@ -171,7 +162,6 @@ class MediaRepository(BaseRepository):
         Returns:
             MediaItem if found, None otherwise
         """
-        require_tenant_context(chat_settings_id, where="media.get_by_source_identifier")
         result = (
             self._tenant_query(MediaItem, chat_settings_id)
             .filter(
@@ -198,9 +188,6 @@ class MediaRepository(BaseRepository):
         Returns:
             List of active MediaItem instances for the given source type
         """
-        require_tenant_context(
-            chat_settings_id, where="media.get_active_by_source_type"
-        )
         result = (
             self._tenant_query(MediaItem, chat_settings_id)
             .filter(
@@ -231,9 +218,6 @@ class MediaRepository(BaseRepository):
         Returns:
             Inactive MediaItem if found, None otherwise
         """
-        require_tenant_context(
-            chat_settings_id, where="media.get_inactive_by_source_identifier"
-        )
         result = (
             self._tenant_query(MediaItem, chat_settings_id)
             .filter(
@@ -259,7 +243,6 @@ class MediaRepository(BaseRepository):
         Returns:
             Reactivated MediaItem
         """
-        require_tenant_context(chat_settings_id, where="media.reactivate")
         media_item = self._get_for_write(media_id, chat_settings_id)
         if media_item:
             media_item.is_active = True
@@ -294,7 +277,6 @@ class MediaRepository(BaseRepository):
         Returns:
             Updated MediaItem
         """
-        require_tenant_context(chat_settings_id, where="media.update_source_info")
         media_item = self._get_for_write(media_id, chat_settings_id)
         if media_item:
             if file_path is not None:
@@ -319,7 +301,6 @@ class MediaRepository(BaseRepository):
         chat_settings_id: TenantScope,
     ) -> List[MediaItem]:
         """Get all media items with optional filters."""
-        require_tenant_context(chat_settings_id, where="media.get_all")
         query = self._tenant_query(MediaItem, chat_settings_id)
 
         if is_active is not None:
@@ -360,7 +341,6 @@ class MediaRepository(BaseRepository):
         Returns:
             Tuple of (items list, total count matching filters)
         """
-        require_tenant_context(chat_settings_id, where="media.get_paginated")
         query = self._tenant_query(MediaItem, chat_settings_id).filter(
             MediaItem.is_active == is_active
         )
@@ -389,7 +369,6 @@ class MediaRepository(BaseRepository):
 
     def get_categories(self, chat_settings_id: TenantScope) -> List[str]:
         """Get all unique categories."""
-        require_tenant_context(chat_settings_id, where="media.get_categories")
         result = (
             self._tenant_query(MediaItem, chat_settings_id)
             .with_entities(MediaItem.category)
@@ -460,7 +439,6 @@ class MediaRepository(BaseRepository):
         chat_settings_id: TenantScope,
     ) -> MediaItem:
         """Update media item metadata (tenant-scoped write, #597)."""
-        require_tenant_context(chat_settings_id, where="media.update_metadata")
         media_item = self._get_for_write(media_id, chat_settings_id)
         if media_item:
             if title is not None:
@@ -489,7 +467,6 @@ class MediaRepository(BaseRepository):
         Tenant-scoped so a posting callback cannot mark another tenant's media
         as posted (#597).
         """
-        require_tenant_context(chat_settings_id, where="media.increment_times_posted")
         media_item = self._get_for_write(media_id, chat_settings_id)
         if media_item:
             media_item.times_posted += 1
@@ -525,7 +502,6 @@ class MediaRepository(BaseRepository):
         Returns:
             Updated MediaItem
         """
-        require_tenant_context(chat_settings_id, where="media.update_cloud_info")
         media_item = self._get_for_write(media_id, chat_settings_id)
         if media_item:
             media_item.cloud_url = cloud_url
@@ -572,7 +548,6 @@ class MediaRepository(BaseRepository):
 
     def deactivate(self, media_id: str, chat_settings_id: TenantScope) -> MediaItem:
         """Deactivate a media item (tenant-scoped write, #597)."""
-        require_tenant_context(chat_settings_id, where="media.deactivate")
         media_item = self._get_for_write(media_id, chat_settings_id)
         if media_item:
             media_item.is_active = False
@@ -587,7 +562,6 @@ class MediaRepository(BaseRepository):
         WARNING: Does not clean up Cloudinary resources. Use
         MediaLifecycleService.delete_media_item() for full cleanup.
         """
-        require_tenant_context(chat_settings_id, where="media.delete")
         media_item = self._get_for_write(media_id, chat_settings_id)
         if media_item:
             self.db.delete(media_item)
@@ -602,7 +576,6 @@ class MediaRepository(BaseRepository):
         Returns:
             List of tuples (file_hash, count, paths)
         """
-        require_tenant_context(chat_settings_id, where="media.get_duplicates")
         duplicates = (
             self._tenant_query(MediaItem, chat_settings_id)
             .with_entities(
@@ -620,7 +593,6 @@ class MediaRepository(BaseRepository):
 
     def count_active(self, chat_settings_id: TenantScope) -> int:
         """Count active media items."""
-        require_tenant_context(chat_settings_id, where="media.count_active")
         result = (
             self._tenant_query(MediaItem, chat_settings_id)
             .with_entities(func.count(MediaItem.id))
@@ -632,7 +604,6 @@ class MediaRepository(BaseRepository):
 
     def count_inactive(self, chat_settings_id: TenantScope) -> int:
         """Count inactive media items."""
-        require_tenant_context(chat_settings_id, where="media.count_inactive")
         result = (
             self._tenant_query(MediaItem, chat_settings_id)
             .with_entities(func.count(MediaItem.id))
@@ -644,7 +615,6 @@ class MediaRepository(BaseRepository):
 
     def count_by_posting_status(self, chat_settings_id: TenantScope) -> dict:
         """Count active media grouped by posting status."""
-        require_tenant_context(chat_settings_id, where="media.count_by_posting_status")
         from sqlalchemy import case
 
         query = (
@@ -677,9 +647,6 @@ class MediaRepository(BaseRepository):
         "Dead content" = is_active=True, times_posted=0, and older than min_age_days.
         Returns list of {"category": str, "dead_count": int}.
         """
-        require_tenant_context(
-            chat_settings_id, where="media.count_dead_content_by_category"
-        )
         from datetime import timezone
 
         cutoff = datetime.now(timezone.utc) - timedelta(days=min_age_days)
@@ -701,7 +668,6 @@ class MediaRepository(BaseRepository):
 
     def count_by_category(self, chat_settings_id: TenantScope) -> dict:
         """Count active media grouped by category."""
-        require_tenant_context(chat_settings_id, where="media.count_by_category")
         rows = (
             self._tenant_query(MediaItem, chat_settings_id)
             .with_entities(MediaItem.category, func.count(MediaItem.id))
@@ -722,7 +688,7 @@ class MediaRepository(BaseRepository):
 
         Args:
             query: SQLAlchemy query to filter
-            chat_settings_id: Optional tenant filter for subqueries
+            chat_settings_id: tenant scope for subqueries (SYSTEM_SCOPE widens)
 
         Returns:
             Filtered query with all three exclusion filters applied
@@ -799,9 +765,6 @@ class MediaRepository(BaseRepository):
         Returns:
             The highest-priority eligible MediaItem, or None if no eligible media exists
         """
-        require_tenant_context(
-            chat_settings_id, where="media.get_next_eligible_for_posting"
-        )
         query = self._tenant_query(MediaItem, chat_settings_id).filter(
             MediaItem.is_active
         )
@@ -835,7 +798,6 @@ class MediaRepository(BaseRepository):
         self, file_hash: str, chat_settings_id: TenantScope
     ) -> Optional[MediaItem]:
         """Get an active media item by file hash."""
-        require_tenant_context(chat_settings_id, where="media.get_active_by_hash")
         result = (
             self._tenant_query(MediaItem, chat_settings_id)
             .filter(MediaItem.is_active.is_(True), MediaItem.file_hash == file_hash)
@@ -849,7 +811,6 @@ class MediaRepository(BaseRepository):
 
         Excludes inactive, locked, queued, and hash-duplicates of locked items.
         """
-        require_tenant_context(chat_settings_id, where="media.count_eligible")
         query = (
             self._tenant_query(MediaItem, chat_settings_id)
             .with_entities(func.count(MediaItem.id))
@@ -864,9 +825,6 @@ class MediaRepository(BaseRepository):
 
     def count_eligible_by_category(self, chat_settings_id: TenantScope) -> dict:
         """Count eligible media per category (not locked, not queued, not hash-duped)."""
-        require_tenant_context(
-            chat_settings_id, where="media.count_eligible_by_category"
-        )
         query = (
             self._tenant_query(MediaItem, chat_settings_id)
             .with_entities(MediaItem.category, func.count(MediaItem.id))
@@ -884,9 +842,6 @@ class MediaRepository(BaseRepository):
 
         Returns list of dicts: {hash, count, file_names, ids}.
         """
-        require_tenant_context(
-            chat_settings_id, where="media.get_duplicate_hash_groups"
-        )
         subq = (
             self._tenant_query(MediaItem, chat_settings_id)
             .with_entities(

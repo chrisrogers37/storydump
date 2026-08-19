@@ -375,3 +375,62 @@ def sample_media_item():
         "file_size_bytes": 1024000,
         "mime_type": "image/jpeg",
     }
+
+
+@pytest.fixture()
+def route_repos_to_test_db(setup_test_database, monkeypatch):
+    """Route the production session factory at the test DB (shared home —
+    the per-file copies of this fixture predate it and can migrate here)."""
+    if setup_test_database is None:
+        pytest.skip("Database not available - skipping integration test")
+
+    from sqlalchemy.orm import sessionmaker
+
+    import src.config.database as db_module
+
+    monkeypatch.setattr(
+        db_module,
+        "SessionLocal",
+        sessionmaker(
+            autocommit=False,
+            autoflush=False,
+            bind=setup_test_database,
+            expire_on_commit=False,
+        ),
+    )
+    yield
+
+
+def make_tenant():
+    """Create a real chat_settings row — chat_settings_id is a live FK.
+
+    Returns (chat_settings_id, telegram_chat_id); caller cleans up via
+    delete_tenants().
+    """
+    import random
+
+    from src.repositories.chat_settings_repository import ChatSettingsRepository
+
+    telegram_chat_id = -random.randint(10**11, 10**12)
+    repo = ChatSettingsRepository()
+    try:
+        settings = repo.get_or_create(telegram_chat_id)
+        return str(settings.id), telegram_chat_id
+    finally:
+        repo.close()
+
+
+def delete_tenants(tenant_ids):
+    from sqlalchemy import text
+
+    from src.repositories.chat_settings_repository import ChatSettingsRepository
+
+    repo = ChatSettingsRepository()
+    try:
+        for tid in tenant_ids:
+            repo.db.execute(
+                text("DELETE FROM chat_settings WHERE id = :tid"), {"tid": tid}
+            )
+        repo.db.commit()
+    finally:
+        repo.close()

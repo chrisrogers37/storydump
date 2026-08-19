@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 from src.repositories.base_repository import BaseRepository
 from src.repositories.tenant_scope import (
+    require_tenant_id,
     TenantScope,
     require_tenant_context,
     tenant_value,
@@ -321,7 +322,7 @@ class TokenRepository(BaseRepository):
         Returns:
             ApiToken or None if not found
         """
-        require_tenant_context(chat_settings_id, where="token.get_token_for_chat")
+        require_tenant_id(chat_settings_id, where="token.get_token_for_chat")
         result = (
             self.db.query(ApiToken)
             .filter(
@@ -364,9 +365,7 @@ class TokenRepository(BaseRepository):
         Returns:
             Created or updated ApiToken
         """
-        require_tenant_context(
-            chat_settings_id, where="token.create_or_update_for_chat"
-        )
+        require_tenant_id(chat_settings_id, where="token.create_or_update_for_chat")
         if issued_at is None:
             issued_at = datetime.utcnow()
 
@@ -420,7 +419,7 @@ class TokenRepository(BaseRepository):
         Returns:
             Number of tokens deleted
         """
-        require_tenant_context(chat_settings_id, where="token.delete_tokens_for_chat")
+        require_tenant_id(chat_settings_id, where="token.delete_tokens_for_chat")
         count = (
             self.db.query(ApiToken)
             .filter(

@@ -285,18 +285,14 @@ class HealthCheckService(BaseService):
                     provider = MediaSourceFactory.create(
                         source_type,
                         base_path=source_root,
-                        chat_settings_id=SYSTEM_SCOPE,
                     )
                 elif source_type == "google_drive":
                     provider = MediaSourceFactory.create(
                         source_type,
                         root_folder_id=source_root,
-                        chat_settings_id=SYSTEM_SCOPE,
                     )
                 else:
-                    provider = MediaSourceFactory.create(
-                        source_type, chat_settings_id=SYSTEM_SCOPE
-                    )
+                    provider = MediaSourceFactory.create(source_type)
 
                 provider_healthy = provider.is_configured()
                 if not provider_healthy:

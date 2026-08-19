@@ -25,7 +25,6 @@ class LockRepository(BaseRepository):
         self, lock_id: str, chat_settings_id: TenantScope
     ) -> Optional[MediaPostingLock]:
         """Get lock by ID."""
-        require_tenant_context(chat_settings_id, where="lock.get_by_id")
         result = (
             self._tenant_query(MediaPostingLock, chat_settings_id)
             .filter(MediaPostingLock.id == lock_id)
@@ -38,7 +37,6 @@ class LockRepository(BaseRepository):
         self, media_id: str, chat_settings_id: TenantScope
     ) -> Optional[MediaPostingLock]:
         """Get active lock for media item (if any)."""
-        require_tenant_context(chat_settings_id, where="lock.get_active_lock")
         now = datetime.utcnow()
         result = (
             self._tenant_query(MediaPostingLock, chat_settings_id)
@@ -55,12 +53,10 @@ class LockRepository(BaseRepository):
 
     def is_locked(self, media_id: str, chat_settings_id: TenantScope) -> bool:
         """Check if media item is currently locked."""
-        require_tenant_context(chat_settings_id, where="lock.is_locked")
         return self.get_active_lock(media_id, chat_settings_id) is not None
 
     def get_all_active(self, chat_settings_id: TenantScope) -> List[MediaPostingLock]:
         """Get all active locks."""
-        require_tenant_context(chat_settings_id, where="lock.get_all_active")
         now = datetime.utcnow()
         result = (
             self._tenant_query(MediaPostingLock, chat_settings_id)
@@ -115,7 +111,6 @@ class LockRepository(BaseRepository):
         self, chat_settings_id: TenantScope
     ) -> List[MediaPostingLock]:
         """Get all permanent locks (locked_until IS NULL)."""
-        require_tenant_context(chat_settings_id, where="lock.get_permanent_locks")
         result = (
             self._tenant_query(MediaPostingLock, chat_settings_id)
             .filter(MediaPostingLock.locked_until.is_(None))
@@ -127,7 +122,6 @@ class LockRepository(BaseRepository):
 
     def count_permanent_locks(self, chat_settings_id: TenantScope) -> int:
         """Count permanent locks (locked_until IS NULL)."""
-        require_tenant_context(chat_settings_id, where="lock.count_permanent_locks")
         result = (
             self._tenant_query(MediaPostingLock, chat_settings_id)
             .with_entities(func.count(MediaPostingLock.id))
@@ -139,7 +133,6 @@ class LockRepository(BaseRepository):
 
     def count_by_reason(self, chat_settings_id: TenantScope) -> dict:
         """Count active locks grouped by lock_reason."""
-        require_tenant_context(chat_settings_id, where="lock.count_by_reason")
         now = datetime.utcnow()
         rows = (
             self._tenant_query(MediaPostingLock, chat_settings_id)
@@ -159,7 +152,6 @@ class LockRepository(BaseRepository):
 
     def cleanup_expired(self, chat_settings_id: TenantScope) -> int:
         """Delete all expired locks. Returns count of deleted locks."""
-        require_tenant_context(chat_settings_id, where="lock.cleanup_expired")
         now = datetime.utcnow()
         count = (
             self._tenant_query(MediaPostingLock, chat_settings_id)

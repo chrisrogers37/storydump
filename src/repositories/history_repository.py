@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func, and_, case
 
 from src.repositories.base_repository import BaseRepository
-from src.repositories.tenant_scope import TenantScope, require_tenant_context
+from src.repositories.tenant_scope import TenantScope
 from src.models.enums import PostingMethod
 from src.models.posting_history import PostingHistory
 
@@ -49,7 +49,6 @@ class HistoryRepository(BaseRepository):
         self, history_id: str, chat_settings_id: TenantScope
     ) -> Optional[PostingHistory]:
         """Get history record by ID."""
-        require_tenant_context(chat_settings_id, where="history.get_by_id")
         result = (
             self._tenant_query(PostingHistory, chat_settings_id)
             .filter(PostingHistory.id == history_id)
@@ -67,7 +66,6 @@ class HistoryRepository(BaseRepository):
         chat_settings_id: TenantScope,
     ) -> List[PostingHistory]:
         """Get all history records with optional filters."""
-        require_tenant_context(chat_settings_id, where="history.get_all")
         query = self._tenant_query(PostingHistory, chat_settings_id)
 
         if status:
@@ -96,7 +94,6 @@ class HistoryRepository(BaseRepository):
 
         Returns list of (PostingHistory, file_name, category) tuples.
         """
-        require_tenant_context(chat_settings_id, where="history.get_all_with_media")
         from src.models.media_item import MediaItem
 
         query = (
@@ -121,7 +118,6 @@ class HistoryRepository(BaseRepository):
         chat_settings_id: TenantScope,
     ) -> List[PostingHistory]:
         """Get all history records for a specific media item."""
-        require_tenant_context(chat_settings_id, where="history.get_by_media_id")
         query = (
             self._tenant_query(PostingHistory, chat_settings_id)
             .filter(PostingHistory.media_item_id == media_id)
@@ -166,7 +162,6 @@ class HistoryRepository(BaseRepository):
         limit: Optional[int] = None,
     ) -> List[PostingHistory]:
         """Get posts from the last N hours."""
-        require_tenant_context(chat_settings_id, where="history.get_recent_posts")
         since = datetime.now(timezone.utc) - timedelta(hours=hours)
         query = (
             self._tenant_query(PostingHistory, chat_settings_id)
@@ -195,7 +190,6 @@ class HistoryRepository(BaseRepository):
         Returns:
             Count of posts matching criteria
         """
-        require_tenant_context(chat_settings_id, where="history.count_by_method")
         result = (
             self._tenant_query(PostingHistory, chat_settings_id)
             .with_entities(func.count(PostingHistory.id))
@@ -238,7 +232,6 @@ class HistoryRepository(BaseRepository):
 
         Returns: {"posted": N, "skipped": N, "rejected": N, "failed": N}
         """
-        require_tenant_context(chat_settings_id, where="history.get_stats_by_status")
         since = datetime.now(timezone.utc) - timedelta(days=days)
         rows = (
             self._tenant_query(PostingHistory, chat_settings_id)
@@ -257,7 +250,6 @@ class HistoryRepository(BaseRepository):
 
         Returns: {"instagram_api": N, "telegram_manual": N}
         """
-        require_tenant_context(chat_settings_id, where="history.get_stats_by_method")
         since = datetime.now(timezone.utc) - timedelta(days=days)
         rows = (
             self._tenant_query(PostingHistory, chat_settings_id)
@@ -284,9 +276,6 @@ class HistoryRepository(BaseRepository):
         Returns: ``{"instagram_api": {"posted": N, "failed": M, ...},
                    "telegram_manual": {...}}``
         """
-        require_tenant_context(
-            chat_settings_id, where="history.get_stats_by_method_and_status"
-        )
         since = datetime.now(timezone.utc) - timedelta(days=days)
         rows = (
             self._tenant_query(PostingHistory, chat_settings_id)
@@ -316,7 +305,6 @@ class HistoryRepository(BaseRepository):
 
         Returns list of {"date": "YYYY-MM-DD", "posted": N, "skipped": N, ...}
         """
-        require_tenant_context(chat_settings_id, where="history.get_daily_counts")
         from sqlalchemy import cast, Date
 
         since = datetime.now(timezone.utc) - timedelta(days=days)
@@ -351,9 +339,6 @@ class HistoryRepository(BaseRepository):
 
         Returns list of {"hour": 0-23, "count": N}
         """
-        require_tenant_context(
-            chat_settings_id, where="history.get_hourly_distribution"
-        )
         from sqlalchemy import extract
 
         since = datetime.now(timezone.utc) - timedelta(days=days)
@@ -379,7 +364,6 @@ class HistoryRepository(BaseRepository):
         Joins with media_items to get category.
         Returns list of {"category": str, "posted": N, "skipped": N, ...}
         """
-        require_tenant_context(chat_settings_id, where="history.get_stats_by_category")
         from src.models.media_item import MediaItem
 
         since = datetime.now(timezone.utc) - timedelta(days=days)
@@ -422,9 +406,6 @@ class HistoryRepository(BaseRepository):
 
         Returns list of {"hour": 0-23, "posted": N, "skipped": N, ..., "total": N, "approval_rate": float}
         """
-        require_tenant_context(
-            chat_settings_id, where="history.get_hourly_approval_rates"
-        )
         from sqlalchemy import extract
 
         since = datetime.now(timezone.utc) - timedelta(days=days)
@@ -466,7 +447,6 @@ class HistoryRepository(BaseRepository):
         Latency = posted_at - queue_created_at, in seconds.
         Only includes items with status 'posted' (approvals).
         """
-        require_tenant_context(chat_settings_id, where="history.get_approval_latency")
         from sqlalchemy import extract
 
         since = datetime.now(timezone.utc) - timedelta(days=days)
@@ -568,9 +548,6 @@ class HistoryRepository(BaseRepository):
         Returns list of per-user dicts: posted, skipped, rejected counts,
         approval_rate, and avg_latency_minutes.
         """
-        require_tenant_context(
-            chat_settings_id, where="history.get_user_approval_stats"
-        )
         from src.models.user import User
 
         since = datetime.now(timezone.utc) - timedelta(days=days)
@@ -649,7 +626,6 @@ class HistoryRepository(BaseRepository):
         Uses extract('dow') which returns 0=Sunday through 6=Saturday.
         Returns list of {"dow": 0-6, "day_name": str, "posted": N, ..., "approval_rate": float}
         """
-        require_tenant_context(chat_settings_id, where="history.get_dow_approval_rates")
         from sqlalchemy import extract
 
         day_names = [

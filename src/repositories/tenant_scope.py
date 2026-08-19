@@ -21,6 +21,8 @@ standing inventory of tenant-less access — the burn-down list #841 tracks.
 
 from typing import Union
 
+from src.exceptions.base import StorydumpError
+
 
 class SystemScope:
     """Singleton marker: deliberate cross-tenant (system/maintenance) access.
@@ -30,13 +32,6 @@ class SystemScope:
     converting a call site from silent omission to explicit SYSTEM_SCOPE is
     behavior-preserving by construction.
     """
-
-    _instance = None
-
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
 
     def __bool__(self) -> bool:
         return False
@@ -52,7 +47,7 @@ SYSTEM_SCOPE = SystemScope()
 TenantScope = Union[str, SystemScope]
 
 
-class TenantContextError(RuntimeError):
+class TenantContextError(StorydumpError):
     """Tenant context was absent where a tenant-scoped query needed one.
 
     Raised at the call boundary (before any SQL executes) when a
@@ -60,6 +55,21 @@ class TenantContextError(RuntimeError):
     or the explicit SYSTEM_SCOPE marker. Absent context must never widen a
     query.
     """
+
+
+def require_tenant_id(chat_settings_id, *, where: str) -> None:
+    """Refuse everything but a real tenant id — no cross-tenant door.
+
+    For mandatory-tenant methods (the ``*_for_chat`` family, per-instance
+    audit reads): SYSTEM_SCOPE would bind the marker object into SQL, so it
+    is refused alongside None. Absence of a system door is a statement, not
+    an accident of the body.
+    """
+    if isinstance(chat_settings_id, SystemScope) or not chat_settings_id:
+        raise TenantContextError(
+            f"{where}: a real tenant id is required — this method has no "
+            "cross-tenant door (F.1/#841)"
+        )
 
 
 def tenant_value(chat_settings_id):

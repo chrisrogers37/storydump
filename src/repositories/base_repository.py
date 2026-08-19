@@ -255,17 +255,21 @@ class BaseRepository:
 
         A tenant id filters; the explicit SYSTEM_SCOPE marker widens
         deliberately; None/empty raises — absent context never widens a
-        query.
+        query. This is the enforcing chokepoint: methods that query through
+        it need no guard of their own.
         """
-        require_tenant_context(
-            chat_settings_id, where=f"{type(self).__name__}._apply_tenant_filter"
-        )
+        require_tenant_context(chat_settings_id, where="_apply_tenant_filter")
         if chat_settings_id:
             query = query.filter(model_class.chat_settings_id == chat_settings_id)
         return query
 
     def _tenant_query(self, model_class, chat_settings_id: TenantScope):
-        """Start a query with fail-closed tenant filtering applied."""
+        """Start a query with fail-closed tenant filtering applied.
+
+        Context is validated BEFORE the session is touched, so a refused
+        call never checks out a connection.
+        """
+        require_tenant_context(chat_settings_id, where="_tenant_query")
         query = self.db.query(model_class)
         return self._apply_tenant_filter(query, model_class, chat_settings_id)
 

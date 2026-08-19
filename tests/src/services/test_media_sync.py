@@ -6,7 +6,6 @@ from datetime import datetime
 
 from src.services.core.media_sync import MediaSyncService, SyncResult
 from src.services.media_sources.base_provider import MediaFileInfo
-from src.repositories.tenant_scope import SYSTEM_SCOPE
 
 
 # ==================== SyncResult Tests ====================
@@ -512,9 +511,7 @@ class TestMediaSyncServiceProviderCreation:
         """Local provider passes base_path."""
         sync_service._create_provider("local", "/media/stories")
 
-        mock_factory.create.assert_called_once_with(
-            "local", base_path="/media/stories", chat_settings_id=SYSTEM_SCOPE
-        )
+        mock_factory.create.assert_called_once_with("local", base_path="/media/stories")
 
     @patch("src.services.core.media_sync.settings")
     @patch("src.services.core.media_sync.MediaSourceFactory")
@@ -545,7 +542,6 @@ class TestMediaSyncServiceProviderCreation:
             "google_drive",
             root_folder_id="folder_xyz",
             telegram_chat_id=None,
-            chat_settings_id=SYSTEM_SCOPE,
         )
 
     @patch("src.services.core.media_sync.settings")
@@ -563,7 +559,6 @@ class TestMediaSyncServiceProviderCreation:
             "google_drive",
             root_folder_id="folder_xyz",
             telegram_chat_id=-100999,
-            chat_settings_id=SYSTEM_SCOPE,
         )
 
     @patch("src.services.core.media_sync.settings")
@@ -584,9 +579,7 @@ class TestMediaSyncServiceProviderCreation:
 
         sync_service.sync()
 
-        mock_factory.create.assert_called_once_with(
-            "local", base_path="/tmp/media", chat_settings_id=SYSTEM_SCOPE
-        )
+        mock_factory.create.assert_called_once_with("local", base_path="/tmp/media")
 
 
 # ==================== Credential Persistence Tests ====================
@@ -824,7 +817,6 @@ class TestMediaSyncServiceSettingsResolution:
             "google_drive",
             root_folder_id="folder_id",
             telegram_chat_id=None,
-            chat_settings_id=SYSTEM_SCOPE,
         )
 
     @patch("src.services.core.media_sync.settings")
@@ -845,9 +837,7 @@ class TestMediaSyncServiceSettingsResolution:
 
         sync_service.sync(source_root="/custom/path")
 
-        mock_factory.create.assert_called_once_with(
-            "local", base_path="/custom/path", chat_settings_id=SYSTEM_SCOPE
-        )
+        mock_factory.create.assert_called_once_with("local", base_path="/custom/path")
 
     @patch("src.services.core.media_sync.settings")
     @patch("src.services.core.media_sync.MediaSourceFactory")
@@ -902,9 +892,7 @@ class TestMediaSyncServiceSettingsResolution:
             telegram_chat_id=-100999,
         )
 
-        mock_factory.create.assert_called_once_with(
-            "local", base_path="/explicit/path", chat_settings_id=SYSTEM_SCOPE
-        )
+        mock_factory.create.assert_called_once_with("local", base_path="/explicit/path")
 
 
 # ==================== Tenant Ownership Stamping (#412) ====================

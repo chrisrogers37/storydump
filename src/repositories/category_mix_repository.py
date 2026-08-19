@@ -24,7 +24,6 @@ class CategoryMixRepository(BaseRepository):
         self, chat_settings_id: TenantScope
     ) -> List[CategoryPostCaseMix]:
         """Get all current (active) category ratios."""
-        require_tenant_context(chat_settings_id, where="category_mix.get_current_mix")
         result = (
             self._tenant_query(CategoryPostCaseMix, chat_settings_id)
             .filter(CategoryPostCaseMix.is_current)
@@ -38,9 +37,6 @@ class CategoryMixRepository(BaseRepository):
         self, chat_settings_id: TenantScope
     ) -> Dict[str, Decimal]:
         """Get current mix as {category: ratio} dictionary."""
-        require_tenant_context(
-            chat_settings_id, where="category_mix.get_current_mix_as_dict"
-        )
         current = self.get_current_mix(chat_settings_id=chat_settings_id)
         return {mix.category: mix.ratio for mix in current}
 
@@ -48,7 +44,6 @@ class CategoryMixRepository(BaseRepository):
         self, *, category: Optional[str] = None, chat_settings_id: TenantScope
     ) -> List[CategoryPostCaseMix]:
         """Get full history, optionally filtered by category."""
-        require_tenant_context(chat_settings_id, where="category_mix.get_history")
         query = self._tenant_query(CategoryPostCaseMix, chat_settings_id)
 
         if category:
@@ -122,7 +117,6 @@ class CategoryMixRepository(BaseRepository):
 
     def has_current_mix(self, chat_settings_id: TenantScope) -> bool:
         """Check if any current mix ratios exist."""
-        require_tenant_context(chat_settings_id, where="category_mix.has_current_mix")
         count = (
             self._tenant_query(CategoryPostCaseMix, chat_settings_id)
             .with_entities(func.count(CategoryPostCaseMix.id))
@@ -136,9 +130,6 @@ class CategoryMixRepository(BaseRepository):
         self, categories: List[str], chat_settings_id: TenantScope
     ) -> List[str]:
         """Find categories that don't have a current ratio defined."""
-        require_tenant_context(
-            chat_settings_id, where="category_mix.get_categories_without_ratio"
-        )
         current_mix = self.get_current_mix_as_dict(chat_settings_id=chat_settings_id)
         return [cat for cat in categories if cat not in current_mix]
 

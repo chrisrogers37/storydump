@@ -14,7 +14,6 @@ from src.services.media_sources.base_provider import (
 )
 from src.services.media_sources.factory import MediaSourceFactory
 from src.utils.logger import logger
-from src.repositories.tenant_scope import SYSTEM_SCOPE
 
 
 @dataclass
@@ -358,9 +357,7 @@ class MediaSyncService(BaseService):
 
         # Skip if another item already holds this file_path to avoid
         # unique constraint violation.
-        if self.media_repo.get_by_path(
-            file_path, ctx.chat_settings_id, chat_settings_id=SYSTEM_SCOPE
-        ):
+        if self.media_repo.get_by_path(file_path, ctx.chat_settings_id):
             ctx.result.unchanged += 1
             return True
 
@@ -386,7 +383,6 @@ class MediaSyncService(BaseService):
             ctx.source_type,
             file_info.identifier,
             ctx.chat_settings_id,
-            chat_settings_id=SYSTEM_SCOPE,
         )
         if not inactive:
             return False
@@ -406,9 +402,7 @@ class MediaSyncService(BaseService):
         # The DB query catches cross-source-type duplicates not in ctx.db_by_hash.
         if file_hash and (
             file_hash in ctx.db_by_hash
-            or self.media_repo.get_active_by_hash(
-                file_hash, ctx.chat_settings_id, chat_settings_id=SYSTEM_SCOPE
-            )
+            or self.media_repo.get_active_by_hash(file_hash, ctx.chat_settings_id)
         ):
             ctx.result.unchanged += 1
             logger.info(
@@ -441,9 +435,7 @@ class MediaSyncService(BaseService):
     ):
         """Create a MediaSourceProvider based on source type and root."""
         if source_type == "local":
-            return MediaSourceFactory.create(
-                source_type, base_path=source_root, chat_settings_id=SYSTEM_SCOPE
-            )
+            return MediaSourceFactory.create(source_type, base_path=source_root)
         elif source_type == "google_drive":
             # The tenant is passed through as-is, including None. Substituting
             # the deployment-wide TELEGRAM_CHANNEL_ID here named a tenant this
@@ -456,10 +448,9 @@ class MediaSyncService(BaseService):
                 source_type,
                 root_folder_id=source_root,
                 telegram_chat_id=telegram_chat_id,
-                chat_settings_id=SYSTEM_SCOPE,
             )
         else:
-            return MediaSourceFactory.create(source_type, chat_settings_id=SYSTEM_SCOPE)
+            return MediaSourceFactory.create(source_type)
 
     def _persist_refreshed_gdrive_credentials(
         self, provider, telegram_chat_id: int

@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 
 from src.repositories.base_repository import BaseRepository
 from src.repositories.tenant_scope import (
+    require_tenant_id,
     TenantScope,
     require_tenant_context,
     tenant_value,
@@ -51,7 +52,7 @@ class AuditRepository(BaseRepository):
         offset: int = 0,
     ) -> List[AuditLog]:
         """Get audit log entries for a chat instance, most recent first."""
-        require_tenant_context(chat_settings_id, where="audit.get_for_instance")
+        require_tenant_id(chat_settings_id, where="audit.get_for_instance")
         result = (
             self.db.query(AuditLog)
             .filter(AuditLog.chat_settings_id == chat_settings_id)
