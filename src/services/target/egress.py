@@ -103,6 +103,9 @@ TIMEOUT_CLASSES = {
 }
 
 #: The closed set of provider hosts. Additions are deliberate and reviewable.
+#: Widening this before #871 lands moves the SSRF TOCTOU gap (module
+#: docstring, above) from theoretical to reachable — this allowlist is the
+#: load-bearing control until then.
 DEFAULT_ALLOWED_HOSTS = frozenset(
     {
         "graph.instagram.com",
