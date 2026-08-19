@@ -343,7 +343,6 @@ class TestAtMostOnePublishCallAtEveryKillBoundary:
         intent = _new_intent(ops_db)
         job, token = _leased_job(ops_db)
         engine = _engine(ops_db)
-        calls = []
 
         async def go():
             async with engine.connect() as conn:
@@ -355,7 +354,6 @@ class TestAtMostOnePublishCallAtEveryKillBoundary:
 
         with pytest.raises(RuntimeError):
             _run(go())
-        assert calls == []
         assert (
             _exec(
                 ops_db,
@@ -407,6 +405,51 @@ class TestAtMostOnePublishCallAtEveryKillBoundary:
         second = self._permit(ops_db, intent, kind="container_create", generation=2)
         assert second["business_key"] == f"ig:container:{intent}:2"
 
+    def test_the_call_is_never_made_when_the_permit_is_refused(self, ops_db):
+        """The class docstring for TestAtMostOnePublishCallAtEveryKillBoundary
+        promises 'counted, not argued, by a stub that records every
+        invocation' -- but no test in this file actually wires one up (grep
+        confirms 'calls' appears only as an unpopulated list). This wires a
+        REAL stub around a caller pattern: acquire the permit, and only if it
+        returns successfully, invoke the (stubbed) provider call."""
+        intent_ok = _new_intent(ops_db)
+        job_ok, token_ok = _leased_job(ops_db)
+        intent_fenced = _new_intent(ops_db)
+        job_fenced, token_fenced = _leased_job(ops_db, live=False)
+        engine = _engine(ops_db)
+        provider_calls = []
+
+        async def caller(intent, job, token):
+            """The contract from acquire_permit's own docstring: the caller
+            may issue the provider call only after acquire_permit returns --
+            i.e. only after its transaction has committed."""
+            async with engine.connect() as conn:
+                try:
+                    permit = await provider_ops.acquire_permit(
+                        conn,
+                        workspace_id=ops_db["ws"],
+                        intent_id=intent,
+                        job_id=job,
+                        lease_token=token,
+                        op_kind="publish",
+                    )
+                except PermitRefused:
+                    return "refused"
+                # Only reached if acquire_permit returned -- i.e. committed.
+                assert permit is not None
+                provider_calls.append(intent)
+                return "called"
+
+        result_ok = _run(caller(intent_ok, job_ok, token_ok))
+        result_fenced = _run(caller(intent_fenced, job_fenced, token_fenced))
+
+        assert result_ok == "called"
+        assert result_fenced == "refused"
+        assert provider_calls == [intent_ok], (
+            "the stub must fire exactly once, for the permit that actually "
+            "committed, and never for the fenced/refused one"
+        )
+
 
 class TestKillBetweenPermitAndCall:
     """The named case in the gate, and the sharpest one: the permit committed,
@@ -433,7 +476,6 @@ class TestKillBetweenPermitAndCall:
     def test_it_lands_in_publishing_ambiguous_with_ZERO_retries(self, ops_db):
         intent, op = self._permitted_publish(ops_db)
         engine = _engine(ops_db)
-        calls = []
 
         async def go():
             async with engine.connect() as conn:
@@ -444,7 +486,6 @@ class TestKillBetweenPermitAndCall:
                 return verdict
 
         assert _run(go()) == "parked"
-        assert calls == [], "the resumed pipeline must NOT re-call, ever"
         assert (
             _exec(
                 ops_db,
@@ -790,3 +831,56 @@ class TestTheCASIsTheOnlyGuardOnResolutionAndItDiscriminates:
 
         with pytest.raises(PermitRefused, match="was not in state"):
             _run(same_destination_again())
+
+    def test_GENUINE_concurrent_resolvers_via_asyncio_gather(self, ops_db):
+        """The committed 'second resolver' test is SEQUENTIAL (resolve, then
+        resolve again) -- a real but weaker property than a true race. This
+        drives two resolvers via asyncio.gather, separate connections, both
+        targeting the SAME op from the SAME source state, genuinely
+        concurrent rather than one-after-another."""
+        intent = _new_intent(ops_db)
+        job, token = _leased_job(ops_db)
+        engine = _engine(ops_db)
+
+        async def setup_permit():
+            async with engine.connect() as conn:
+                op = await provider_ops.acquire_permit(
+                    conn,
+                    workspace_id=ops_db["ws"],
+                    intent_id=intent,
+                    job_id=job,
+                    lease_token=token,
+                    op_kind="publish",
+                )
+                await conn.commit()
+                return op["id"]
+
+        op_id = _run(setup_permit())
+
+        results = {"a": None, "b": None}
+
+        async def resolver(name, outcome):
+            async with engine.connect() as conn:
+                try:
+                    await provider_ops.resolve_permit(
+                        conn,
+                        op_id=op_id,
+                        outcome=outcome,
+                        response_ref={"v": 1, "who": name},
+                    )
+                    await conn.commit()
+                    results[name] = "won"
+                except PermitRefused:
+                    results[name] = "refused"
+
+        async def race():
+            await asyncio.gather(
+                resolver("a", "succeeded"),
+                resolver("b", "failed"),
+            )
+
+        _run(race())
+        winners = [v for v in results.values() if v == "won"]
+        refused = [v for v in results.values() if v == "refused"]
+        assert len(winners) == 1, f"expected exactly one winner, got {results}"
+        assert len(refused) == 1, f"expected exactly one refusal, got {results}"
