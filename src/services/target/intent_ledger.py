@@ -97,18 +97,21 @@ async def transition(session, intent_id: str, to_state: str) -> None:
     )
     from sqlalchemy.exc import DBAPIError
 
+    from src.services.target._dbapi import driver_candidates
+
     try:
         await session.execute(
             text("UPDATE post_intents SET state = :s WHERE id = :i"),
             {"s": to_state, "i": intent_id},
         )
     except DBAPIError as exc:
-        orig = getattr(exc, "orig", None)
-        cause = getattr(orig, "__cause__", None)
-        if isinstance(orig, (RaiseError, CheckViolationError)) or isinstance(
-            cause, (RaiseError, CheckViolationError)
-        ):
-            raise IntentTransitionRefused(str(cause or orig)) from exc
+        refusals = [
+            c
+            for c in driver_candidates(exc)
+            if isinstance(c, (RaiseError, CheckViolationError))
+        ]
+        if refusals:
+            raise IntentTransitionRefused(str(refusals[0])) from exc
         raise
 
 
