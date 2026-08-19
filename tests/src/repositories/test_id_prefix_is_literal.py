@@ -30,7 +30,6 @@ from sqlalchemy import text
 from sqlalchemy.orm import sessionmaker
 
 from src.repositories.chat_settings_repository import ChatSettingsRepository
-from src.repositories.instagram_account_repository import InstagramAccountRepository
 
 #: Two ids differing at the LAST character of the 8-hex prefix, so a `_` in
 #: that position matches both under LIKE and neither literally.
@@ -58,58 +57,94 @@ def _route_repos_to_test_db(setup_test_database, monkeypatch):
     yield
 
 
+def _prefix(two_queue_items, value):
+    """The live door, which requires a tenant — unlike the deleted account
+    copy. Passing the fixture's own tenant keeps these tests about the PATTERN
+    LANGUAGE rather than about scoping, which is #923's subject, not #905's."""
+    repo, cs_id = two_queue_items
+    return repo.get_by_id_prefix(value, chat_settings_id=cs_id)
+
+
 @pytest.fixture
-def two_accounts():
-    """Two real rows with CONTROLLED ids, cleaned up afterwards."""
+def two_queue_items():
+    """Two real queue rows with CONTROLLED ids, on one tenant.
+
+    Retargeted from `instagram_accounts` in #927: that copy of
+    `get_by_id_prefix` was deleted (zero production callers, superseded by
+    #901's Python-side `startswith`), and `queue_repository` is — by this
+    file's own class docstring — "the one reachable today". The behavioural
+    proof of #905 therefore moves onto the live path rather than being
+    deleted with its old subject.
+    """
     import random
 
+    from src.repositories.queue_repository import QueueRepository
+
     settings = ChatSettingsRepository().get_or_create(-random.randint(10**11, 10**12))
-    repo = InstagramAccountRepository()
+    cs_id = str(settings.id)
+    repo = QueueRepository()
     try:
-        for account_id, name in ((ID_A, "Account A"), (ID_B, "Account B")):
+        media_id = str(uuid.uuid4())
+        repo.db.execute(
+            text(
+                "INSERT INTO media_items (id, chat_settings_id, file_path,"
+                " file_name, file_size, file_hash, source_type)"
+                " VALUES (CAST(:i AS uuid), CAST(:c AS uuid), :p, 'f.jpg', 1,"
+                " :h, 'local')"
+            ),
+            {"i": media_id, "c": cs_id, "p": f"/tmp/{media_id}", "h": media_id},
+        )
+        for queue_id in (ID_A, ID_B):
             repo.db.execute(
                 text(
-                    "INSERT INTO instagram_accounts"
-                    " (id, display_name, instagram_account_id, is_active)"
-                    " VALUES (CAST(:i AS uuid), :n, :m, true)"
+                    "INSERT INTO posting_queue (id, media_item_id,"
+                    " chat_settings_id, scheduled_for, status)"
+                    " VALUES (CAST(:i AS uuid), CAST(:m AS uuid),"
+                    " CAST(:c AS uuid), now(), 'pending')"
                     " ON CONFLICT (id) DO NOTHING"
                 ),
-                {"i": account_id, "n": name, "m": str(uuid.uuid4().int)[:15]},
+                {"i": queue_id, "m": media_id, "c": cs_id},
             )
         repo.db.commit()
-        yield repo
+        yield repo, cs_id
     finally:
-        cleanup = InstagramAccountRepository()
+        cleanup = QueueRepository()
         try:
             cleanup.db.execute(
                 text(
-                    "DELETE FROM instagram_accounts WHERE id IN"
+                    "DELETE FROM posting_queue WHERE id IN"
                     " (CAST(:a AS uuid), CAST(:b AS uuid))"
                 ),
                 {"a": ID_A, "b": ID_B},
             )
             cleanup.db.execute(
-                text("DELETE FROM chat_settings WHERE id = CAST(:i AS uuid)"),
-                {"i": str(settings.id)},
+                text(
+                    "DELETE FROM media_items WHERE chat_settings_id = CAST(:c AS uuid)"
+                ),
+                {"c": cs_id},
+            )
+            cleanup.db.execute(
+                text("DELETE FROM chat_settings WHERE id = CAST(:c AS uuid)"),
+                {"c": cs_id},
             )
             cleanup.db.commit()
         finally:
             cleanup.close()
-            repo.close()
+        repo.close()
 
 
 @pytest.mark.integration
 class TestAnIdPrefixIsMatchedLiterally:
-    def test_a_plain_prefix_still_resolves_its_own_row(self, two_accounts):
+    def test_a_plain_prefix_still_resolves_its_own_row(self, two_queue_items):
         """Positive control. Without it, a lookup that returned None for
         everything would satisfy every wildcard assertion below."""
-        found = two_accounts.get_by_id_prefix("aaaaaaaa")
+        found = _prefix(two_queue_items, "aaaaaaaa")
         assert found is not None and str(found.id) == ID_A
-        other = two_accounts.get_by_id_prefix("aaaaaaab")
+        other = _prefix(two_queue_items, "aaaaaaab")
         assert other is not None and str(other.id) == ID_B
 
     def test_an_underscore_is_a_literal_not_a_single_character_wildcard(
-        self, two_accounts
+        self, two_queue_items
     ):
         """`aaaaaaa_` matches BOTH rows under LIKE and NEITHER literally.
 
@@ -117,43 +152,43 @@ class TestAnIdPrefixIsMatchedLiterally:
         caller receives whichever row the database happened to order first —
         a row it did not ask for.
         """
-        found = two_accounts.get_by_id_prefix("aaaaaaa_")
+        found = _prefix(two_queue_items, "aaaaaaa_")
         assert found is None, (
             f"'aaaaaaa_' resolved {getattr(found, 'id', None)} — `_` was"
             " interpreted as a single-character wildcard, so the prefix"
             " matched a row the caller did not name (#905)"
         )
 
-    def test_a_percent_is_a_literal_not_a_run_wildcard(self, two_accounts):
+    def test_a_percent_is_a_literal_not_a_run_wildcard(self, two_queue_items):
         """`a%` matches every row beginning with `a` under LIKE — here, both."""
-        found = two_accounts.get_by_id_prefix("a%")
+        found = _prefix(two_queue_items, "a%")
         assert found is None, (
             f"'a%' resolved {getattr(found, 'id', None)} — `%` was interpreted"
             " as a wildcard, so a two-character prefix reached rows whose ids"
             " share only their first character (#905)"
         )
 
-    def test_a_bare_percent_does_not_match_everything(self, two_accounts):
+    def test_a_bare_percent_does_not_match_everything(self, two_queue_items):
         """The widest form of the same defect: one metacharacter reaching the
         entire table, which is what makes this worth fixing ahead of a caller
         that is not behind an ownership gate."""
-        assert two_accounts.get_by_id_prefix("%") is None
+        assert _prefix(two_queue_items, "%") is None
 
-    def test_the_escape_character_is_also_a_literal(self, two_accounts):
+    def test_the_escape_character_is_also_a_literal(self, two_queue_items):
         """A backslash is the trap in the *fix* rather than the defect: an
         escaping implementation that forgot to escape its own escape character
         would pass the two tests above and fail here. This expression has no
         escape character to forget, and this pins that."""
-        assert two_accounts.get_by_id_prefix("\\") is None
-        assert two_accounts.get_by_id_prefix("aaaaaaaa\\") is None
+        assert _prefix(two_queue_items, "\\") is None
+        assert _prefix(two_queue_items, "aaaaaaaa\\") is None
 
-    def test_an_empty_prefix_still_matches_as_it_always_did(self, two_accounts):
+    def test_an_empty_prefix_still_matches_as_it_always_did(self, two_queue_items):
         """Stated rather than changed. An empty prefix matched everything
         before and still does — this fix closes a metacharacter hole, not a
         missing-input check, and quietly turning empty into "match nothing"
         would be a behaviour change hiding inside a security fix.
         """
-        assert two_accounts.get_by_id_prefix("") is not None
+        assert _prefix(two_queue_items, "") is not None
 
 
 @pytest.mark.integration
@@ -176,10 +211,23 @@ class TestTheOtherPrefixLookupIsFixedToo:
 
         for module in (instagram_account_repository, queue_repository):
             source = inspect.getsource(module)
+            # The SAFETY property, and it holds universally: no repository may
+            # build a LIKE pattern from caller input, whether or not it does a
+            # prefix lookup at all.
             assert 'like(f"' not in source, (
                 f"{module.__name__} builds a LIKE pattern from an f-string —"
                 " a caller-supplied metacharacter is interpreted again (#905)"
             )
+            # The MECHANISM check is scoped to modules that actually perform a
+            # prefix lookup (#927). It was written as an unconditional presence
+            # assertion, which reads as the invariant above but is narrower: it
+            # also fails when a module legitimately STOPS having the lookup,
+            # which is what happened when `instagram_account_repository`'s
+            # unreachable copy was deleted. Deleting the lookup satisfies the
+            # safety property maximally — there is no query left to escape —
+            # so a check that reddens on it was measuring the wrong thing.
+            if "def get_by_id_prefix(" not in source:
+                continue
             assert "id_prefix_matches(" in source, (
                 f"{module.__name__} no longer routes through the one helper"
             )

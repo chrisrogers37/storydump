@@ -163,7 +163,33 @@ class TelegramAccountHandlers:
         await query.answer()
 
     async def handle_account_remove_confirm(self, account_id: str, user, query):
-        """Show confirmation before removing account."""
+        """Show confirmation before removing account.
+
+        SECURITY (#923): `account_id` arrives in CALLBACK DATA, so it is chosen
+        by whoever taps — `telegram_service` routes the `account_remove` prefix
+        straight here. This read used to run unscoped and then render the
+        account's display name and username into the card, which disclosed an
+        account the very next step would refuse to touch: `..._execute` passes
+        `chat_id` into `deactivate_account`, which enforces ownership.
+
+        A guarded write behind an unguarded read is the existence oracle
+        `get_owned`'s docstring warns about — the read side must not answer a
+        question the write side declines. So the ownership check moves to the
+        CONFIRM step, using the same `_require_account_ownership` derivation
+        and therefore the same not-found shape for a foreign id as for an
+        invented one.
+        """
+        chat_id = query.message.chat_id
+        try:
+            self.service.ig_account_service._require_account_ownership(
+                account_id, chat_id, "view-remove-confirmation"
+            )
+        except ValueError:
+            # Same shape as a genuinely absent account, deliberately: a
+            # distinct message here would be the oracle this closes.
+            await query.answer("Account not found", show_alert=True)
+            return
+
         account = self.service.ig_account_service.get_account_by_id(account_id)
 
         if not account:

@@ -6,7 +6,6 @@ from datetime import datetime
 from sqlalchemy import and_, exists, or_
 
 from src.repositories.base_repository import BaseRepository
-from src.repositories.id_prefix import id_prefix_matches
 from src.models.api_token import ApiToken
 from src.models.instagram_account import InstagramAccount
 
@@ -79,6 +78,18 @@ class InstagramAccountRepository(BaseRepository):
         return result
 
     def get_all_active(self) -> List[InstagramAccount]:
+        """DEPLOYMENT-WIDE by design — operator surfaces only (#923).
+
+        `instagram_accounts` has no tenant column, so this returns every
+        tenant's accounts. Correct for its one caller,
+        `list_all_accounts_unscoped`, which is CLI-only and says so in its
+        name. A tenant-facing caller reaching for this is the cross-tenant
+        disclosure bug by construction — use `get_owned`.
+
+        Stated here rather than only in review, per navi's #919 finding:
+        "intentionally global" was legible to a developer reading the PR and
+        invisible to the next person reading the method.
+        """
         """Get all active Instagram accounts — DEPLOYMENT-WIDE, no tenant
         scope. Operator surfaces only (#891): a tenant-facing caller wants
         `get_owned`."""
@@ -92,6 +103,8 @@ class InstagramAccountRepository(BaseRepository):
         return result
 
     def get_all(self) -> List[InstagramAccount]:
+        """DEPLOYMENT-WIDE by design — see `get_all_active` (#923). Operator
+        surfaces only, via `list_all_accounts_unscoped`."""
         """Get all Instagram accounts (including inactive)."""
         result = (
             self.db.query(InstagramAccount)
@@ -106,27 +119,6 @@ class InstagramAccountRepository(BaseRepository):
         result = (
             self.db.query(InstagramAccount)
             .filter(InstagramAccount.id == account_id)
-            .first()
-        )
-        self.end_read_transaction()
-        return result
-
-    def get_by_id_prefix(self, id_prefix: str) -> Optional[InstagramAccount]:
-        """Get account by ID prefix (for shortened callback data).
-
-        Used when Telegram callback data is too long and we need to use
-        shortened UUIDs. Returns the first matching account.
-
-        Args:
-            id_prefix: First N characters of a UUID (typically 8).
-                Matched LITERALLY — `%` and `_` are not wildcards (#905).
-
-        Returns:
-            InstagramAccount or None if not found
-        """
-        result = (
-            self.db.query(InstagramAccount)
-            .filter(id_prefix_matches(InstagramAccount.id, id_prefix))
             .first()
         )
         self.end_read_transaction()
@@ -239,11 +231,3 @@ class InstagramAccountRepository(BaseRepository):
     def activate(self, account_id: str) -> InstagramAccount:
         """Re-activate a previously deactivated account."""
         return self.update(account_id, is_active=True)
-
-    def count_active(self) -> int:
-        """Count active Instagram accounts."""
-        result = (
-            self.db.query(InstagramAccount).filter(InstagramAccount.is_active).count()
-        )
-        self.end_read_transaction()
-        return result

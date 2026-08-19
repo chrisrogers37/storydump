@@ -102,6 +102,7 @@ class _Seed:
         self.memberships: list[tuple[str, str]] = []
         self.media: list[str] = []
         self.queue: list[str] = []
+        self.accounts: list[str] = []
 
     def instance(self, telegram_chat_id: int | None = None) -> str:
         if telegram_chat_id is None:
@@ -138,6 +139,54 @@ class _Seed:
         finally:
             repo.close()
         self.memberships.append((user_id, cs_id))
+
+    def instagram_account(self, cs_id: str) -> str:
+        """An account this chat OWNS, via a token stamped with its id.
+
+        `instagram_accounts` carries no tenant column — ownership is DERIVED
+        (`_ownership_predicate`), and an ApiToken carrying both the account id
+        and the chat id is one of the two routes that derivation recognises.
+        Built that way rather than by poking the chat's active pointer, so the
+        fixture exercises how ownership actually works rather than the easiest
+        route to make a test pass. The token needs BOTH columns set, which no
+        single repository method does, so it is inserted directly.
+        """
+        from src.repositories.instagram_account_repository import (
+            InstagramAccountRepository,
+        )
+
+        repo = InstagramAccountRepository()
+        try:
+            acct_id = str(
+                repo.create(
+                    display_name=f"acct-{uuid4().hex[:8]}",
+                    instagram_account_id=f"ig-{uuid4().hex[:10]}",
+                    instagram_username=f"handle_{uuid4().hex[:6]}",
+                ).id
+            )
+        finally:
+            repo.close()
+
+        import src.config.database as db_module
+
+        session = db_module.SessionLocal()
+        try:
+            session.execute(
+                text(
+                    "INSERT INTO api_tokens (id, service_name, token_type,"
+                    " token_value, issued_at, instagram_account_id,"
+                    " chat_settings_id)"
+                    " VALUES (gen_random_uuid(), 'instagram', 'access_token',"
+                    " 'tok', now(), :acct, :cs)"
+                ),
+                {"acct": acct_id, "cs": cs_id},
+            )
+            session.commit()
+        finally:
+            session.close()
+
+        self.accounts.append(acct_id)
+        return acct_id
 
     def queue_item(self, cs_id: str | None) -> tuple[str, str]:
         media_repo = MediaRepository()
@@ -192,6 +241,29 @@ class _Seed:
                 session.execute(
                     text("DELETE FROM audit_log WHERE chat_settings_id = :i"),
                     {"i": cs_id},
+                )
+            # api_tokens FK-references both instagram_accounts and
+            # chat_settings, so it clears before either parent.
+            for acct in self.accounts:
+                session.execute(
+                    text("DELETE FROM api_tokens WHERE instagram_account_id = :a"),
+                    {"a": acct},
+                )
+            for cs_id in self.instances:
+                session.execute(
+                    text("DELETE FROM api_tokens WHERE chat_settings_id = :i"),
+                    {"i": cs_id},
+                )
+            for acct in self.accounts:
+                session.execute(
+                    text(
+                        "UPDATE chat_settings SET active_instagram_account_id = NULL"
+                        " WHERE active_instagram_account_id = :a"
+                    ),
+                    {"a": acct},
+                )
+                session.execute(
+                    text("DELETE FROM instagram_accounts WHERE id = :a"), {"a": acct}
                 )
             for uid in self.users:
                 session.execute(
@@ -540,3 +612,75 @@ class TestShortPrefixCallbacksAreTenantScoped:
 
         assert allowed is False
         query.answer.assert_awaited()
+
+
+class TestAccountRemoveConfirmDoesNotDiscloseAForeignAccount:
+    """#923 — a guarded write behind an unguarded read is still a disclosure.
+
+    `handle_account_remove_execute` passes `chat_id` into `deactivate_account`,
+    which enforces ownership and refuses. The CONFIRM step that precedes it read
+    the account unscoped and rendered its display name and username into the
+    card, so a tenant could see an account the very next step would decline to
+    touch. Two tenants, one account, and the assertion is on the DISCLOSURE
+    rather than on the refusal — a test asserting only "it answered not found"
+    would pass even while the card leaked.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_foreign_account_is_not_disclosed_in_the_confirmation_card(
+        self, accounts, seed
+    ):
+        owner_cs = seed.instance()
+        intruder_chat = _unique_chat_id()
+        seed.instance(intruder_chat)
+        account_id = seed.instagram_account(owner_cs)
+
+        query = _make_query(
+            _unique_user_id(), intruder_chat, f"account_remove:{account_id}"
+        )
+        await accounts.handle_account_remove_confirm(account_id, None, query)
+
+        query.edit_message_text.assert_not_called()
+        rendered = " ".join(str(c) for c in query.edit_message_text.call_args_list)
+        assert "handle_" not in rendered and "acct-" not in rendered, (
+            "the card must not carry the foreign account's username or display "
+            "name — that disclosure is the defect, not the refusal"
+        )
+        query.answer.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_the_OWNER_still_sees_their_own_confirmation_card(
+        self, accounts, seed
+    ):
+        """Paired positive control. Without it, a handler that refused
+        EVERYTHING would pass the test above while breaking the feature — and
+        a gate that blocks the legitimate path gets reverted, not fixed."""
+        owner_chat = _unique_chat_id()
+        owner_cs = seed.instance(owner_chat)
+        account_id = seed.instagram_account(owner_cs)
+
+        query = _make_query(
+            _unique_user_id(), owner_chat, f"account_remove:{account_id}"
+        )
+        await accounts.handle_account_remove_confirm(account_id, None, query)
+
+        query.edit_message_text.assert_called_once()
+        rendered = str(query.edit_message_text.call_args)
+        assert "Confirm Remove Account" in rendered
+        assert "acct-" in rendered, "the owner must see their own account named"
+
+    @pytest.mark.asyncio
+    async def test_an_INVENTED_id_is_refused_the_same_way_as_a_foreign_one(
+        self, accounts, seed
+    ):
+        """The refusals must be indistinguishable, or the guard becomes the
+        existence oracle it closes — `_require_account_ownership`'s own rule."""
+        chat = _unique_chat_id()
+        seed.instance(chat)
+        invented = str(uuid4())
+
+        query = _make_query(_unique_user_id(), chat, f"account_remove:{invented}")
+        await accounts.handle_account_remove_confirm(invented, None, query)
+
+        query.edit_message_text.assert_not_called()
+        query.answer.assert_awaited_with("Account not found", show_alert=True)
