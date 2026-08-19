@@ -168,6 +168,23 @@ class BaseRepository:
         except Exception as e:
             logger.warning(f"Error during rollback: {e}")
 
+    def commit_and_refresh(self, obj):
+        """Commit, reload *obj*'s server-set fields, and END the read
+        transaction the refresh opens (#907).
+
+        `session.refresh()` emits a SELECT, which begins a fresh transaction
+        after the preceding commit; without ending it the connection sits
+        idle-in-transaction until GC returns it — universal-wrapper scale
+        through `BaseService.track_execution`, and an outage risk under L.0's
+        `max_overflow=0` pool. This is the one primitive for the
+        add → commit → refresh pattern; use it wherever a caller needs the
+        persisted row's generated fields back.
+        """
+        self.commit()
+        if self._db is not None:
+            self._db.refresh(obj)
+        self.end_read_transaction()
+
     def end_read_transaction(self):
         """
         End a read-only transaction by committing (releases locks).

@@ -46,8 +46,7 @@ class ServiceRunRepository(BaseRepository):
             context_metadata=context_metadata,
         )
         self.db.add(run)
-        self.db.commit()
-        self.db.refresh(run)
+        self.commit_and_refresh(run)
         return str(run.id)
 
     def record_run(

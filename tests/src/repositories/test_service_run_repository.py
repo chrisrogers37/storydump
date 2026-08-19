@@ -55,8 +55,12 @@ class TestServiceRunRepository:
         )
 
         mock_db.add.assert_called_once()
-        mock_db.commit.assert_called_once()
         mock_db.refresh.assert_called_once()
+        # commit_and_refresh commits for the write AND again to END the read
+        # transaction the refresh opens (#907) — the leak fix. Exact count is
+        # the primitive's business (proven on real backend state in
+        # tests/integration/test_track_execution_leak.py); here: it committed.
+        mock_db.commit.assert_called()
 
         added_run = mock_db.add.call_args[0][0]
         assert isinstance(added_run, ServiceRun)
