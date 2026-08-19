@@ -217,6 +217,17 @@ class PostIntent(TargetBase):
             "entered_state_at",
             postgresql_where=text("state IN ('awaiting_approval','approved')"),
         ),
+        # Created by migration 056 (F.2.5), not 055 — the plan groups it under
+        # §6 with the outbox rather than with the ledger. It lives here because
+        # `create_all` renders a table's indexes from its own `__table_args__`,
+        # so this is the only place the model side can produce it.
+        Index(
+            "ix_intents_parked",
+            "entered_state_at",
+            postgresql_where=text(
+                "state IN ('publishing_ambiguous','review_required')"
+            ),
+        ),
     )
 
 
