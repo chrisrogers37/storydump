@@ -953,6 +953,43 @@ class TestMediaSyncTenantStamping:
 
     @patch("src.services.core.media_sync.settings")
     @patch("src.services.core.media_sync.MediaSourceFactory")
+    def test_sync_scopes_to_the_explicitly_passed_tenant(
+        self, mock_factory, mock_settings, sync_service
+    ):
+        """#872: the chat_settings_id a caller passes IS the tenant every
+        media mutation runs under — asserted at the repository seam, in the
+        exact shape the routes call with (source overrides + chat key +
+        explicit tenant). sync() used to rebind the parameter from the
+        resolver's return tuple, silently discarding it; a wholesale service
+        mock above this seam can never see that, which is how it shipped."""
+        mock_settings.MEDIA_DIR = "/media"
+        self._one_new_file(mock_factory)
+        sync_service.media_repo.get_active_by_source_type.return_value = []
+        sync_service.media_repo.get_inactive_by_source_identifier.return_value = None
+
+        sync_service.sync(
+            source_type="local",
+            source_root="/media",
+            triggered_by="dashboard",
+            telegram_chat_id=-100999,
+            chat_settings_id="tenant-EXPLICIT",
+        )
+
+        assert (
+            sync_service.media_repo.create.call_args[1]["chat_settings_id"]
+            == "tenant-EXPLICIT"
+        )
+        assert (
+            sync_service.media_repo.get_active_by_source_type.call_args[0][1]
+            == "tenant-EXPLICIT"
+        )
+        assert (
+            sync_service.media_repo.get_active_by_hash.call_args[0][1]
+            == "tenant-EXPLICIT"
+        )
+
+    @patch("src.services.core.media_sync.settings")
+    @patch("src.services.core.media_sync.MediaSourceFactory")
     def test_sync_leaves_owner_null_without_tenant(
         self, mock_factory, mock_settings, sync_service
     ):
