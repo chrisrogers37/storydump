@@ -1,9 +1,10 @@
 """Tests for onboarding Mini App API endpoints."""
 
 import pytest
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 from tests.src.api.conftest import TENANT_ID, CHAT_ID, mock_validate, service_ctx
+from src.services.core.media_sync import MediaSyncService
 
 
 def _default_setup_state(**overrides):
@@ -436,26 +437,39 @@ class TestOnboardingMediaFolder:
 class TestOnboardingStartIndexing:
     """Test POST /api/onboarding/start-indexing."""
 
-    def test_indexing_runs_sync(self, client):
-        """Start indexing triggers MediaSyncService.sync() with chat config."""
-        mock_sync_result = Mock(
-            new=42, updated=0, unchanged=0, deactivated=0, errors=0, total_processed=42
-        )
+    def test_indexing_flows_the_tenant_through_the_real_sync(self, client):
+        """#874: the REAL ``sync()`` runs under this route — nothing mocks it
+        away — and the boundary's resolved tenant is asserted where it lands,
+        at the repository seam. The predecessor asserted call arguments into a
+        wholesale mock of the service, which stayed green with the #872 bug
+        reverted; this one goes red there (None reaches the seam), which is
+        the only evidence that separates a real test from that one. The mock
+        floor is the service suite's own idiom (stubbed ``__init__`` with
+        mocked repos), one layer BELOW the defect's layer, never above it."""
+        media_repo = Mock()
+        media_repo.get_active_by_source_type.return_value = []
+
+        def _stub_init(self):
+            self.media_repo = media_repo
+            self.set_result_summary = Mock()
+            self.track_execution = MagicMock()
+            self.track_execution.return_value.__enter__ = Mock(return_value="run-1")
+            self.track_execution.return_value.__exit__ = Mock(return_value=False)
+            self.close = Mock()
+
+        provider = Mock()
+        provider.is_configured.return_value = True
+        provider.list_files.return_value = []
 
         with (
             mock_validate(),
             patch("src.api.routes.onboarding.setup.SettingsService") as MockSettings,
-            patch("src.api.routes.onboarding.setup.MediaSyncService") as MockSync,
+            patch("src.services.core.media_sync.MediaSourceFactory") as MockFactory,
+            patch.object(MediaSyncService, "__init__", _stub_init),
         ):
-            # First SettingsService context: get_media_source_config
             settings_svc = service_ctx(MockSettings)
-            settings_svc.get_media_source_config.return_value = (
-                "google_drive",
-                "abc123",
-            )
-            # Second SettingsService context reuses same mock
-            sync_svc = service_ctx(MockSync)
-            sync_svc.sync.return_value = mock_sync_result
+            settings_svc.get_media_source_config.return_value = ("local", "/media")
+            MockFactory.create.return_value = provider
 
             response = client.post(
                 "/api/onboarding/start-indexing",
@@ -465,19 +479,12 @@ class TestOnboardingStartIndexing:
         assert response.status_code == 200
         data = response.json()
         assert data["indexed"] is True
-        assert data["new"] == 42
-        assert data["total_processed"] == 42
+        assert data["new"] == 0
         settings_svc.set_onboarding_step.assert_called_once_with(CHAT_ID, "indexing")
-        # Call ARGUMENTS, not just invocation (#872): this mock sits exactly
-        # on top of where sync() discarded its tenant — an invocation-only
-        # assertion was structurally silent about that.
-        sync_svc.sync.assert_called_once_with(
-            source_type="google_drive",
-            source_root="abc123",
-            triggered_by="onboarding",
-            telegram_chat_id=CHAT_ID,
-            chat_settings_id=TENANT_ID,
-        )
+        # The seam assertion — #872's property, entered through the route:
+        # the tenant the boundary resolved is the scope the real sync
+        # actually queried under.
+        media_repo.get_active_by_source_type.assert_called_once_with("local", TENANT_ID)
 
     def test_indexing_without_folder_returns_400(self, client):
         """Start indexing without a configured folder returns 400."""
