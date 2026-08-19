@@ -263,27 +263,61 @@ class TestObligation4TheFailOpenSignatureIsExtinct:
         reintroduced = "def get_all(self, chat_settings_id: Optional[str] = None):"
         assert _scan_for_fail_open(reintroduced, "synthetic.py")
 
-    def test_system_scope_inventory_only_shrinks(self):
-        """`grep SYSTEM_SCOPE src/ cli/` is the #841 burn-down inventory of
-        deliberate cross-tenant access. Shrink-only ratchet: converting a
-        site to real tenant scoping lowers the ceiling (update the constant
-        DOWN); a new cross-tenant call site above the ceiling needs its own
-        review, not a silent ride on the default."""
-        ceiling = 88
+    def test_system_scope_inventory_is_pinned_exactly(self):
+        """The #841 burn-down census: SYSTEM_SCOPE passed as a call argument
+        in src/ + cli/ — the one shape that grants cross-tenant access.
+
+        Counted by AST (call arguments only), never by substring: imports,
+        docstrings and comments are not access sites, and a raw text count
+        gave a security number three unrelated things could move (#846
+        review — 24 of its 88 were imports and prose, and retiring a file's
+        last site dropped the count by 2).
+
+        Pinned by EQUALITY, not a ceiling: a ceiling accrues headroom as the
+        burn-down retires sites, and a new cross-tenant call could ride in
+        on headroom it did not create. With equality, any delta in either
+        direction is red until this constant moves in the same PR — so a new
+        site always appears in review next to the +1 that admits it, and
+        burn-down progress always lowers the pin in the diff that earns it.
+
+        Stated blind spot: an alias (`S = SYSTEM_SCOPE`) or an attribute
+        re-export would evade the Name match. No such form exists today;
+        introducing one moves this count DOWN, which the equality pin also
+        refuses — the evasion is loud, not silent.
+        """
+        import ast as _ast
+
+        pinned = 64
         count = 0
+        offenders = {}
         for d in ("src", "cli"):
             for path in (REPO_ROOT / d).rglob("*.py"):
                 if path.name == "tenant_scope.py":
                     continue
-                count += path.read_text().count("SYSTEM_SCOPE")
-        assert count <= ceiling, (
-            f"SYSTEM_SCOPE sites grew: {count} > {ceiling} — a new deliberate "
-            "cross-tenant access needs review; if ratified, raise the ceiling "
-            "in the same PR that adds it"
-        )
-        assert count >= ceiling - 20, (
-            f"SYSTEM_SCOPE count dropped far below the ceiling ({count} vs "
-            f"{ceiling}) — lower the ceiling to match the burn-down progress"
+                tree = _ast.parse(path.read_text())
+                n = 0
+                for node in _ast.walk(tree):
+                    if isinstance(node, _ast.Call):
+                        n += sum(
+                            1
+                            for kw in node.keywords
+                            if isinstance(kw.value, _ast.Name)
+                            and kw.value.id == "SYSTEM_SCOPE"
+                        )
+                        n += sum(
+                            1
+                            for a in node.args
+                            if isinstance(a, _ast.Name) and a.id == "SYSTEM_SCOPE"
+                        )
+                if n:
+                    offenders[str(path.relative_to(REPO_ROOT))] = n
+                    count += n
+        assert count == pinned, (
+            f"SYSTEM_SCOPE call-argument census is {count}, pin is {pinned}. "
+            f"A new deliberate cross-tenant site must move the pin UP in its "
+            f"own PR (reviewed, next to the site that admits it); burn-down "
+            f"progress moves it DOWN in the diff that earns it. Census: "
+            f"{offenders}"
         )
 
     def test_helpers_hold_their_contract(self):
