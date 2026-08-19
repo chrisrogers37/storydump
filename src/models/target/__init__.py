@@ -40,7 +40,22 @@ At M.3 the application is flipped over to this base — a visible switch, not a
 rewrite.
 """
 
+from src.models.target.accounts_sources_media import (
+    IgAccount,
+    MediaItem,
+    MediaSource,
+    OAuthCredential,
+    PostLock,
+    ProviderQuarantine,
+)
 from src.models.target.base import TargetBase
+from src.models.target.intent_ledger import (
+    AuditEvent,
+    CategoryPostCaseMix,
+    DailyPostCount,
+    PostIntent,
+    PostIntentTransition,
+)
 from src.models.target.identity_and_tenancy import (
     ChannelBinding,
     OnboardingSession,
@@ -53,8 +68,19 @@ from src.models.target.identity_and_tenancy import (
 
 __all__ = [
     "TargetBase",
+    "AuditEvent",
+    "CategoryPostCaseMix",
     "ChannelBinding",
+    "DailyPostCount",
+    "IgAccount",
+    "MediaItem",
+    "MediaSource",
+    "OAuthCredential",
     "OnboardingSession",
+    "PostIntent",
+    "PostIntentTransition",
+    "PostLock",
+    "ProviderQuarantine",
     "User",
     "UserIdentity",
     "Workspace",
