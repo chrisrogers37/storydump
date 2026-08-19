@@ -38,16 +38,37 @@ class InstagramAccountService(BaseService):
         self.token_repo = TokenRepository()
         self.encryption = TokenEncryption()
 
-    def list_accounts(self, include_inactive: bool = False) -> List[InstagramAccount]:
-        """
-        Get Instagram accounts.
+    def list_accounts(
+        self, chat_settings, include_inactive: bool = False
+    ) -> List[InstagramAccount]:
+        """Accounts OWNED by *chat_settings*'s tenant (#891).
 
-        Args:
-            include_inactive: If True, include deactivated accounts
-
-        Returns:
-            List of InstagramAccount objects
+        The same derivation ``_require_account_ownership`` enforces on
+        Switch/Remove — one ownership definition, two consumers, so the read
+        side can never disclose an account the write side would refuse.
+        Takes the settings ROW: the derivation needs the active pointer and
+        the env-chat legacy clause, not just the id.
         """
+        return self.account_repo.get_owned(
+            chat_settings_id=str(chat_settings.id),
+            active_account_id=(
+                str(chat_settings.active_instagram_account_id)
+                if chat_settings.active_instagram_account_id
+                else None
+            ),
+            include_unstamped_legacy=(
+                chat_settings.telegram_chat_id == settings.TELEGRAM_CHANNEL_ID
+            ),
+            include_inactive=include_inactive,
+        )
+
+    def list_all_accounts_unscoped(
+        self, include_inactive: bool = False
+    ) -> List[InstagramAccount]:
+        """Every account on the deployment — NO tenant scope, and the name
+        says so (#891). Operator surfaces only (the CLI); a tenant-facing
+        caller reaching for this is the cross-tenant disclosure bug by
+        construction."""
         if include_inactive:
             return self.account_repo.get_all()
         return self.account_repo.get_all_active()
@@ -660,7 +681,8 @@ class InstagramAccountService(BaseService):
         Returns:
             Dict with accounts list and active account info
         """
-        accounts = self.list_accounts()
+        chat_settings = self.settings_repo.require_by_chat_id(telegram_chat_id)
+        accounts = self.list_accounts(chat_settings)
         active = self.get_active_account(telegram_chat_id)
 
         return {
@@ -716,7 +738,15 @@ class InstagramAccountService(BaseService):
         if current:
             return None  # Already has an account selected
 
-        accounts = self.list_accounts()
+        # OWNED accounts only (#891): the unscoped form let a brand-new
+        # tenant auto-select a FOREIGN account — an unscoped read feeding a
+        # write, which then made the pointer "ownership" under the
+        # derivation. A new tenant owns nothing, so this now correctly does
+        # nothing for it; the deployment's env chat still auto-selects its
+        # single unstamped legacy account, which is the case this
+        # convenience was built for.
+        chat_settings = self.settings_repo.require_by_chat_id(telegram_chat_id)
+        accounts = self.list_accounts(chat_settings)
         if len(accounts) == 1:
             # Auto-select the only account
             self.settings_repo.update(

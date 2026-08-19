@@ -83,31 +83,52 @@ def sample_settings():
 
 
 class TestListAccounts:
-    """Tests for list_accounts method."""
+    """Tests for the tenant-scoped list door and the loud operator door (#891)."""
 
-    def test_list_active_accounts_only(
+    def test_list_accounts_is_tenant_scoped_via_the_owned_derivation(
+        self, service, mock_account_repo, sample_account, sample_settings
+    ):
+        """list_accounts passes the FULL ownership derivation to the repo:
+        the tenant key, the active pointer, and the env-chat legacy clause."""
+        from src.config.settings import settings as app_settings
+
+        sample_settings.active_instagram_account_id = sample_account.id
+        sample_settings.telegram_chat_id = -999000111  # not the env chat
+        mock_account_repo.get_owned.return_value = [sample_account]
+
+        result = service.list_accounts(sample_settings)
+
+        assert result == [sample_account]
+        mock_account_repo.get_owned.assert_called_once_with(
+            chat_settings_id=str(sample_settings.id),
+            active_account_id=str(sample_account.id),
+            include_unstamped_legacy=False,
+            include_inactive=False,
+        )
+        mock_account_repo.get_all_active.assert_not_called()
+
+        # Both arms of the legacy clause, pinned: the deployment's env chat
+        # — and only it — also owns the unstamped legacy accounts.
+        mock_account_repo.get_owned.reset_mock()
+        sample_settings.telegram_chat_id = app_settings.TELEGRAM_CHANNEL_ID
+        service.list_accounts(sample_settings)
+        assert (
+            mock_account_repo.get_owned.call_args.kwargs["include_unstamped_legacy"]
+            is True
+        )
+
+    def test_the_operator_door_is_unscoped_and_says_so(
         self, service, mock_account_repo, sample_account
     ):
-        """Should return only active accounts by default."""
+        """list_all_accounts_unscoped keeps the deployment-wide semantics
+        under a name a tenant-path reviewer trips on."""
         mock_account_repo.get_all_active.return_value = [sample_account]
+        assert service.list_all_accounts_unscoped() == [sample_account]
 
-        result = service.list_accounts()
-
-        assert len(result) == 1
-        assert result[0] == sample_account
-        mock_account_repo.get_all_active.assert_called_once()
-
-    def test_list_all_accounts_including_inactive(
-        self, service, mock_account_repo, sample_account
-    ):
-        """Should return all accounts when include_inactive=True."""
         inactive_account = Mock()
         inactive_account.is_active = False
         mock_account_repo.get_all.return_value = [sample_account, inactive_account]
-
-        result = service.list_accounts(include_inactive=True)
-
-        assert len(result) == 2
+        assert len(service.list_all_accounts_unscoped(include_inactive=True)) == 2
         mock_account_repo.get_all.assert_called_once()
 
 
@@ -620,9 +641,11 @@ class TestGetAccountsForDisplay:
         sample_settings,
     ):
         """Should return properly formatted account data for Telegram UI."""
-        mock_account_repo.get_all_active.return_value = [sample_account]
         sample_settings.active_instagram_account_id = sample_account.id
+        sample_settings.telegram_chat_id = -1001234567890
+        mock_settings_repo.require_by_chat_id.return_value = sample_settings
         mock_settings_repo.get_by_chat_id.return_value = sample_settings
+        mock_account_repo.get_owned.return_value = [sample_account]
         mock_account_repo.get_by_id.return_value = sample_account
 
         result = service.get_accounts_for_display(-1001234567890)
@@ -644,9 +667,11 @@ class TestGetAccountsForDisplay:
         sample_settings,
     ):
         """Should handle case when no account is selected."""
-        mock_account_repo.get_all_active.return_value = [sample_account]
         sample_settings.active_instagram_account_id = None
+        sample_settings.telegram_chat_id = -1001234567890
+        mock_settings_repo.require_by_chat_id.return_value = sample_settings
         mock_settings_repo.get_by_chat_id.return_value = sample_settings
+        mock_account_repo.get_owned.return_value = [sample_account]
 
         result = service.get_accounts_for_display(-1001234567890)
 
@@ -705,8 +730,10 @@ class TestAutoSelectAccount:
     ):
         """Should auto-select when exactly one account exists and none is selected."""
         sample_settings.active_instagram_account_id = None
+        sample_settings.telegram_chat_id = -1001234567890
         mock_settings_repo.get_by_chat_id.return_value = sample_settings
-        mock_account_repo.get_all_active.return_value = [sample_account]
+        mock_settings_repo.require_by_chat_id.return_value = sample_settings
+        mock_account_repo.get_owned.return_value = [sample_account]
         mock_settings_repo.update.return_value = sample_settings
 
         result = service.auto_select_account_if_single(-1001234567890)
@@ -741,15 +768,39 @@ class TestAutoSelectAccount:
     ):
         """Should not auto-select when multiple accounts exist."""
         sample_settings.active_instagram_account_id = None
+        sample_settings.telegram_chat_id = -1001234567890
         mock_settings_repo.get_by_chat_id.return_value = sample_settings
+        mock_settings_repo.require_by_chat_id.return_value = sample_settings
 
         second_account = Mock()
         second_account.id = uuid.uuid4()
-        mock_account_repo.get_all_active.return_value = [sample_account, second_account]
+        mock_account_repo.get_owned.return_value = [sample_account, second_account]
 
         result = service.auto_select_account_if_single(-1001234567890)
 
         assert result is None
+
+    def test_does_not_auto_select_a_foreign_account(
+        self,
+        service,
+        mock_account_repo,
+        mock_settings_repo,
+        sample_settings,
+    ):
+        """#891's write half: the deployment holds exactly one account, but
+        this tenant OWNS nothing — the old unscoped list auto-selected the
+        foreign account, and the pointer then counted as ownership. Owned-set
+        empty must mean no selection and no write."""
+        sample_settings.active_instagram_account_id = None
+        sample_settings.telegram_chat_id = -1001234567890
+        mock_settings_repo.get_by_chat_id.return_value = sample_settings
+        mock_settings_repo.require_by_chat_id.return_value = sample_settings
+        mock_account_repo.get_owned.return_value = []
+
+        result = service.auto_select_account_if_single(-1001234567890)
+
+        assert result is None
+        mock_settings_repo.update.assert_not_called()
 
 
 class TestSeparationOfConcerns:
@@ -812,7 +863,7 @@ class TestMultiAccountScenarios:
 
         mock_account_repo.get_all_active.return_value = [account1, account2]
 
-        result = service.list_accounts()
+        result = service.list_all_accounts_unscoped()
 
         assert len(result) == 2
 

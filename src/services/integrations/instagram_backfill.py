@@ -5,7 +5,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from src.config.settings import settings
 from src.exceptions import (
     BackfillError,
     InstagramAPIError,
@@ -112,7 +111,7 @@ class InstagramBackfillService(BaseService):
 
     async def backfill(
         self,
-        telegram_chat_id: Optional[int] = None,
+        telegram_chat_id: int,
         limit: Optional[int] = None,
         media_type: str = "feed",
         since: Optional[datetime] = None,
@@ -127,8 +126,10 @@ class InstagramBackfillService(BaseService):
         the database.
 
         Args:
-            telegram_chat_id: Chat to get active account for.
-                Defaults to ADMIN_TELEGRAM_CHAT_ID.
+            telegram_chat_id: Chat to get the active account for. Required
+                (#867): the CLI names settings.ADMIN_TELEGRAM_CHAT_ID at its
+                own call site, so the grant is visible at the edge instead
+                of implied here.
             limit: Maximum number of items to backfill (None = all available).
             media_type: Type of media to backfill:
                 'feed' = feed posts only (default, most useful)
@@ -146,9 +147,6 @@ class InstagramBackfillService(BaseService):
             BackfillError: If backfill cannot proceed (no credentials, etc.)
             TokenExpiredError: If Instagram token is invalid.
         """
-        if telegram_chat_id is None:
-            telegram_chat_id = settings.ADMIN_TELEGRAM_CHAT_ID
-
         with self.track_execution(
             method_name="backfill",
             triggered_by=triggered_by,
