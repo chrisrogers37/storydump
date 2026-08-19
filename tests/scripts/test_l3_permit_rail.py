@@ -181,7 +181,18 @@ def _leased_job(ops_db, *, live=True):
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    """A fresh loop per call.
+
+    NOT ``asyncio.get_event_loop()``: on Python 3.10 that RAISES
+    ``RuntimeError: There is no current event loop`` when none is set, while on
+    3.11 it still returns one with a DeprecationWarning. Local is 3.11 and CI is
+    3.10, so the first version passed 43/43 here and failed 13 tests there —
+    the case where local-green is structurally incapable of being evidence.
+
+    Safe with NullPool: every checkout opens its own asyncpg connection and
+    closes it on release, so no connection outlives the loop that created it.
+    """
+    return asyncio.run(coro)
 
 
 class TestTheIsolationLevelIsWhatProductionRuns:
