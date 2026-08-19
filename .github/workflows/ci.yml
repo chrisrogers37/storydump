@@ -36,6 +36,29 @@ jobs:
       - name: Run ruff format check
         run: ruff format src/ cli/ tests/ --check
 
+  fc2-ratchet:
+    name: FC-2 Telegram ratchet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      # No install step, deliberately: the ratchet is stdlib-only (the
+      # fc8_gate.py precedent), so it runs before and independently of the
+      # application's dependency tree. A gate that needs the app installed to
+      # tell you the app is coupled is a gate that goes dark exactly when the
+      # dependency tree is what broke.
+      #
+      # Its own job rather than a step inside Lint, because a ratchet's whole
+      # purpose is visibility: "FC-2 Telegram ratchet" names the failure on the
+      # PR page, where a red step buried in Lint would read as a formatting nit.
+      - name: Run the FC-2 ratchet
+        run: python scripts/telegram_ratchet.py
+
   test:
     name: Test
     runs-on: ubuntu-latest
