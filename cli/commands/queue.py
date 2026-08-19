@@ -4,10 +4,16 @@ import click
 from rich.console import Console
 from rich.table import Table
 
+from src.config.settings import settings
+from src.exceptions.tenancy import TenantResolutionError
 from src.services.core.scheduler import SchedulerService
 from src.services.core.dashboard_service import DashboardService
 
 console = Console()
+
+NO_ADMIN_INSTANCE_MESSAGE = (
+    "[yellow]Admin chat has no instance yet — run /start there first[/yellow]"
+)
 
 
 @click.command(name="list-queue")
@@ -50,7 +56,11 @@ def reset_queue(yes):
     Use --yes to skip the confirmation prompt.
     """
     with SchedulerService() as scheduler:
-        count = scheduler.count_pending()
+        try:
+            count = scheduler.count_pending(settings.ADMIN_TELEGRAM_CHAT_ID)
+        except TenantResolutionError:
+            console.print(NO_ADMIN_INSTANCE_MESSAGE)
+            return
 
         if count == 0:
             console.print("[yellow]Queue is already empty[/yellow]")
@@ -68,7 +78,7 @@ def reset_queue(yes):
                 return
 
         try:
-            deleted = scheduler.clear_pending_queue()
+            deleted = scheduler.clear_pending_queue(settings.ADMIN_TELEGRAM_CHAT_ID)
             console.print(
                 f"[bold green]✓ Cleared {deleted} items from queue[/bold green]"
             )
@@ -85,8 +95,15 @@ def queue_preview(count):
     Shows what the JIT scheduler would pick without actually posting.
     """
     with SchedulerService() as scheduler:
+        try:
+            chat_settings_id = scheduler.settings_service.resolve_chat_settings_id(
+                settings.ADMIN_TELEGRAM_CHAT_ID
+            )
+        except TenantResolutionError:
+            console.print(NO_ADMIN_INSTANCE_MESSAGE)
+            return
         previews = scheduler.get_queue_preview(
-            telegram_chat_id=None,  # Uses admin chat fallback
+            chat_settings_id=chat_settings_id,
             count=count,
         )
 

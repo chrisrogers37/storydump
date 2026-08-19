@@ -84,8 +84,10 @@ class InstagramAccountService(BaseService):
         Returns:
             Active InstagramAccount or None if not set
         """
-        settings = self.settings_repo.get_or_create(telegram_chat_id)
-        if settings.active_instagram_account_id:
+        # #842 edge contract, stated: an unknown chat has no active account —
+        # None is this function's documented answer, and reading never mints.
+        settings = self.settings_repo.get_by_chat_id(telegram_chat_id)
+        if settings and settings.active_instagram_account_id:
             return self.account_repo.get_by_id(
                 str(settings.active_instagram_account_id)
             )
@@ -517,7 +519,10 @@ class InstagramAccountService(BaseService):
         is in scope (CLI/operator paths; see the column doc on ApiToken)."""
         if telegram_chat_id is None:
             return None
-        return str(self.settings_repo.get_or_create(telegram_chat_id).id)
+        # A chat that is IN scope but unknown is refused (#842) — the None
+        # above is the documented operator/CLI stampless path, not a fallback
+        # for a chat that failed to resolve.
+        return str(self.settings_repo.require_by_chat_id(telegram_chat_id).id)
 
     def _account_owned_by_chat(self, account_id: str, chat_settings) -> bool:
         """Whether a chat owns an account.
@@ -552,11 +557,17 @@ class InstagramAccountService(BaseService):
         ordering can't drift apart. Returns the caller's ChatSettings so
         gated methods don't re-fetch it.
         """
-        chat_settings = self.settings_repo.get_or_create(telegram_chat_id)
-        if not self._account_owned_by_chat(account_id, chat_settings):
+        # Unknown chat deliberately takes the SAME not-found shape as a
+        # non-owner (#842 exception, named): this method's contract is that a
+        # foreign probe cannot distinguish real account ids from invented
+        # ones, and a distinct refusal type here would be that oracle.
+        chat_settings = self.settings_repo.get_by_chat_id(telegram_chat_id)
+        if chat_settings is None or not self._account_owned_by_chat(
+            account_id, chat_settings
+        ):
             logger.warning(
                 f"Chat {telegram_chat_id} attempted to {action} account "
-                f"{account_id} it does not own"
+                f"{account_id} it does not own or that has no tenant"
             )
             raise ValueError(f"Account {account_id} not found for this chat")
         return chat_settings

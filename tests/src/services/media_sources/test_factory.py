@@ -127,9 +127,7 @@ class TestMediaSourceFactory:
             ) as MockSettingsService,
             patch.object(MediaSourceFactory, "create") as mock_create,
         ):
-            MockSettingsService.return_value.get_settings_if_exists.return_value = (
-                chat_settings
-            )
+            MockSettingsService.return_value.get_settings.return_value = chat_settings
 
             MediaSourceFactory.get_provider_for_media_item(
                 media_item, telegram_chat_id=-100123
@@ -151,7 +149,7 @@ class TestMediaSourceFactory:
             ) as MockSettingsService,
             patch.object(MediaSourceFactory, "create") as mock_create,
         ):
-            MockSettingsService.return_value.get_settings_if_exists.return_value = None
+            MockSettingsService.return_value.get_settings.return_value = None
 
             MediaSourceFactory.get_provider_for_media_item(
                 media_item, telegram_chat_id=-100123

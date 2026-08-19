@@ -860,6 +860,7 @@ class TestMediaSyncServiceSettingsResolution:
             "src.services.core.settings_service.SettingsService"
         ) as MockSettingsSvc:
             mock_svc_instance = MockSettingsSvc.return_value
+            mock_svc_instance.resolve_chat_settings_id.return_value = "tenant-X"
             mock_svc_instance.get_media_source_config.return_value = (
                 "google_drive",
                 "per_chat_folder",
@@ -867,7 +868,7 @@ class TestMediaSyncServiceSettingsResolution:
 
             sync_service.sync(triggered_by="scheduler", telegram_chat_id=-100999)
 
-        mock_svc_instance.get_media_source_config.assert_called_once_with(-100999)
+        mock_svc_instance.get_media_source_config.assert_called_once_with("tenant-X")
         mock_svc_instance.close.assert_called_once()
 
     @patch("src.services.core.media_sync.settings")
@@ -935,8 +936,8 @@ class TestMediaSyncTenantStamping:
             "src.services.core.settings_service.SettingsService"
         ) as MockSettingsSvc:
             svc = MockSettingsSvc.return_value
+            svc.resolve_chat_settings_id.return_value = "tenant-A"
             svc.get_media_source_config.return_value = ("local", "/media")
-            svc.get_settings_if_exists.return_value = Mock(id="tenant-A")
 
             sync_service.sync(triggered_by="scheduler", telegram_chat_id=-100)
 
@@ -949,6 +950,43 @@ class TestMediaSyncTenantStamping:
             == "tenant-A"
         )
         assert sync_service.media_repo.get_active_by_hash.call_args[0][1] == "tenant-A"
+
+    @patch("src.services.core.media_sync.settings")
+    @patch("src.services.core.media_sync.MediaSourceFactory")
+    def test_sync_scopes_to_the_explicitly_passed_tenant(
+        self, mock_factory, mock_settings, sync_service
+    ):
+        """#872: the chat_settings_id a caller passes IS the tenant every
+        media mutation runs under — asserted at the repository seam, in the
+        exact shape the routes call with (source overrides + chat key +
+        explicit tenant). sync() used to rebind the parameter from the
+        resolver's return tuple, silently discarding it; a wholesale service
+        mock above this seam can never see that, which is how it shipped."""
+        mock_settings.MEDIA_DIR = "/media"
+        self._one_new_file(mock_factory)
+        sync_service.media_repo.get_active_by_source_type.return_value = []
+        sync_service.media_repo.get_inactive_by_source_identifier.return_value = None
+
+        sync_service.sync(
+            source_type="local",
+            source_root="/media",
+            triggered_by="dashboard",
+            telegram_chat_id=-100999,
+            chat_settings_id="tenant-EXPLICIT",
+        )
+
+        assert (
+            sync_service.media_repo.create.call_args[1]["chat_settings_id"]
+            == "tenant-EXPLICIT"
+        )
+        assert (
+            sync_service.media_repo.get_active_by_source_type.call_args[0][1]
+            == "tenant-EXPLICIT"
+        )
+        assert (
+            sync_service.media_repo.get_active_by_hash.call_args[0][1]
+            == "tenant-EXPLICIT"
+        )
 
     @patch("src.services.core.media_sync.settings")
     @patch("src.services.core.media_sync.MediaSourceFactory")

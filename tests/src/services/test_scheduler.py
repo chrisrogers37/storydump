@@ -217,7 +217,7 @@ class TestProcessSlot:
         """Returns paused result when chat is paused."""
         service = scheduler_service_mocked
         cs = _make_chat_settings(is_paused=True)
-        service.settings_service.get_settings.return_value = cs
+        service.settings_service.require_settings.return_value = cs
 
         result = await service.process_slot(telegram_chat_id=-100123)
 
@@ -229,7 +229,7 @@ class TestProcessSlot:
         """Returns not_due when is_slot_due returns False."""
         service = scheduler_service_mocked
         cs = _make_chat_settings(is_paused=False)
-        service.settings_service.get_settings.return_value = cs
+        service.settings_service.require_settings.return_value = cs
         service.is_slot_due = Mock(return_value=False)
 
         result = await service.process_slot(telegram_chat_id=-100123)
@@ -242,7 +242,7 @@ class TestProcessSlot:
         """Delegates to _select_and_send when slot is due."""
         service = scheduler_service_mocked
         cs = _make_chat_settings(is_paused=False)
-        service.settings_service.get_settings.return_value = cs
+        service.settings_service.require_settings.return_value = cs
         service.is_slot_due = Mock(return_value=None)
 
         expected_result = {
@@ -265,7 +265,7 @@ class TestProcessSlot:
         """Passes category string from is_slot_due to _select_and_send."""
         service = scheduler_service_mocked
         cs = _make_chat_settings(is_paused=False)
-        service.settings_service.get_settings.return_value = cs
+        service.settings_service.require_settings.return_value = cs
         service.is_slot_due = Mock(return_value="memes")
         service._select_and_send = AsyncMock(return_value={"posted": True})
 
@@ -279,7 +279,7 @@ class TestProcessSlot:
         """Returns no_eligible_media when _select_media returns None."""
         service = scheduler_service_mocked
         cs = _make_chat_settings(is_paused=False)
-        service.settings_service.get_settings.return_value = cs
+        service.settings_service.require_settings.return_value = cs
         service.is_slot_due = Mock(return_value=None)
 
         # Let _select_and_send flow through to real implementation
@@ -305,7 +305,7 @@ class TestForceSendNext:
         """Sends immediately regardless of is_slot_due."""
         service = scheduler_service_mocked
         cs = _make_chat_settings()
-        service.settings_service.get_settings.return_value = cs
+        service.settings_service.require_settings.return_value = cs
 
         mock_media = Mock(
             id=uuid4(), file_name="force.jpg", category="memes", times_posted=0
@@ -329,7 +329,7 @@ class TestForceSendNext:
         """Returns error when no eligible media exists."""
         service = scheduler_service_mocked
         cs = _make_chat_settings()
-        service.settings_service.get_settings.return_value = cs
+        service.settings_service.require_settings.return_value = cs
         service.media_repo.get_next_eligible_for_posting.return_value = None
 
         result = await service.force_send_next(telegram_chat_id=-100123)
@@ -342,7 +342,7 @@ class TestForceSendNext:
         """force_sent_indicator is threaded to _send_to_telegram."""
         service = scheduler_service_mocked
         cs = _make_chat_settings()
-        service.settings_service.get_settings.return_value = cs
+        service.settings_service.require_settings.return_value = cs
 
         mock_media = Mock(
             id=uuid4(),
@@ -1458,7 +1458,7 @@ class TestCatchupAfterRestart:
             posts_per_day=3,
             last_post_sent_at=last_sent,
         )
-        service.settings_service.get_settings.return_value = cs
+        service.settings_service.require_settings.return_value = cs
         service._select_and_send = AsyncMock(return_value={"posted": True})
 
         with patch("src.services.core.scheduler.datetime") as mock_dt:
@@ -1483,7 +1483,7 @@ class TestCatchupAfterRestart:
             posts_per_day=3,
             last_post_sent_at=last_sent,
         )
-        service.settings_service.get_settings.return_value = cs
+        service.settings_service.require_settings.return_value = cs
         service._select_and_send = AsyncMock(return_value={"posted": True})
 
         with patch("src.services.core.scheduler.datetime") as mock_dt:
@@ -1622,7 +1622,7 @@ class TestFirstTickImmediatePost:
             posts_per_day=3,
             last_post_sent_at=last_sent,
         )
-        service.settings_service.get_settings.return_value = cs
+        service.settings_service.require_settings.return_value = cs
         service._select_and_send = AsyncMock(return_value={"posted": True})
 
         with patch("src.services.core.scheduler.datetime") as mock_dt:
@@ -1649,7 +1649,7 @@ class TestFirstTickImmediatePost:
             posts_per_day=3,
             last_post_sent_at=last_sent,
         )
-        service.settings_service.get_settings.return_value = cs
+        service.settings_service.require_settings.return_value = cs
         service._select_and_send = AsyncMock(return_value={"posted": True})
 
         with patch("src.services.core.scheduler.datetime") as mock_dt:
@@ -1740,7 +1740,7 @@ class TestCatchupHerdCap:
             posts_per_day=3,
             last_post_sent_at=datetime(2026, 3, 21, 9, 0, tzinfo=timezone.utc),
         )
-        service.settings_service.get_settings.return_value = cs
+        service.settings_service.require_settings.return_value = cs
         service._select_and_send = AsyncMock(return_value={"posted": True})
 
         with patch("src.services.core.scheduler.datetime") as mock_dt:
@@ -1769,7 +1769,7 @@ class TestCatchupHerdCap:
             posts_per_day=3,
             last_post_sent_at=datetime(2026, 3, 21, 9, 0, tzinfo=timezone.utc),
         )
-        service.settings_service.get_settings.return_value = cs
+        service.settings_service.require_settings.return_value = cs
         service._select_and_send = AsyncMock(return_value={"posted": True})
 
         with patch("src.services.core.scheduler.datetime") as mock_dt:
@@ -1794,7 +1794,7 @@ class TestCatchupHerdCap:
             posts_per_day=3,
             last_post_sent_at=datetime(2026, 3, 21, 9, 0, tzinfo=timezone.utc),
         )
-        service.settings_service.get_settings.return_value = cs
+        service.settings_service.require_settings.return_value = cs
         service._select_and_send = AsyncMock(return_value={"posted": True})
 
         with patch("src.services.core.scheduler.datetime") as mock_dt:

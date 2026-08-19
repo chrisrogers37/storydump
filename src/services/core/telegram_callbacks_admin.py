@@ -8,6 +8,7 @@ from telegram import InlineKeyboardMarkup
 from telegram.error import TelegramError
 
 from src.services.core.queue_reap import reap_pending_rows
+from src.services.core.telegram_utils import NO_INSTANCE_CONFIGURED_MESSAGE
 from src.utils.logger import logger
 from src.utils.resilience import telegram_edit_with_retry
 from datetime import datetime, timedelta, timezone
@@ -37,10 +38,8 @@ class TelegramCallbackAdminHandlers:
         None as "no tenant scope" and refuse to operate — never fall back to
         an unscoped query, which would reach across every tenant's rows.
         """
-        chat_settings = self.service.settings_service.get_settings_if_exists(
-            query.message.chat_id
-        )
-        return str(chat_settings.id) if chat_settings else None
+        cs = self.service.settings_service.get_settings(query.message.chat_id)
+        return str(cs.id) if cs else None
 
     async def _require_caller_tenant(self, query) -> ChatSettings | None:
         """Resolve the caller's ChatSettings row, or warn and return None.
@@ -49,13 +48,13 @@ class TelegramCallbackAdminHandlers:
         resume/reset handlers use, so that bail message lives in one place.
         Returns the full row (not just the id) so callers don't re-fetch it.
         """
-        chat_settings = self.service.settings_service.get_settings_if_exists(
+        chat_settings = self.service.settings_service.get_settings(
             query.message.chat_id
         )
         if chat_settings is None:
             await telegram_edit_with_retry(
                 query.edit_message_text,
-                "❌ No instance is configured for this chat.",
+                NO_INSTANCE_CONFIGURED_MESSAGE,
                 parse_mode="Markdown",
             )
         return chat_settings

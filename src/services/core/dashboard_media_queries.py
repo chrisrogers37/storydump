@@ -16,7 +16,7 @@ class MediaDashboardQueries:
 
     def get_media_library(
         self,
-        telegram_chat_id: int,
+        chat_settings_id: str,
         page: int = 1,
         page_size: int = 20,
         category: Optional[str] = None,
@@ -29,13 +29,11 @@ class MediaDashboardQueries:
         with self.service.track_execution(
             "get_media_library",
             input_params={
-                "telegram_chat_id": telegram_chat_id,
+                "chat_settings_id": chat_settings_id,
                 "page": page,
                 "category": category,
             },
         ) as run_id:
-            chat_settings_id = self.service.resolve_chat_settings_id(telegram_chat_id)
-
             items, total = self.service.media_repo.get_paginated(
                 page=page,
                 page_size=page_size,
@@ -111,9 +109,8 @@ class MediaDashboardQueries:
                 "pool_health": pool_health,
             }
 
-    def get_media_stats(self, telegram_chat_id: int) -> dict:
+    def get_media_stats(self, chat_settings_id: str) -> dict:
         """Return media library breakdown by category."""
-        chat_settings_id = self.service.resolve_chat_settings_id(telegram_chat_id)
 
         total_active = self.service.media_repo.count_active(
             chat_settings_id=chat_settings_id
@@ -134,7 +131,7 @@ class MediaDashboardQueries:
             "categories": categories,
         }
 
-    def get_category_analytics(self, telegram_chat_id: int, days: int = 30) -> dict:
+    def get_category_analytics(self, chat_settings_id: str, days: int = 30) -> dict:
         """Return per-category performance with configured vs actual ratios.
 
         Enriches posting history stats with the configured category mix
@@ -142,10 +139,8 @@ class MediaDashboardQueries:
         """
         with self.service.track_execution(
             "get_category_analytics",
-            input_params={"telegram_chat_id": telegram_chat_id, "days": days},
+            input_params={"chat_settings_id": chat_settings_id, "days": days},
         ) as run_id:
-            chat_settings_id = self.service.resolve_chat_settings_id(telegram_chat_id)
-
             # Posting performance by category
             category_stats = self.service.history_repo.get_stats_by_category(
                 days=days, chat_settings_id=chat_settings_id
@@ -187,7 +182,7 @@ class MediaDashboardQueries:
                 "days": days,
             }
 
-    def get_category_mix_drift(self, telegram_chat_id: int, days: int = 7) -> dict:
+    def get_category_mix_drift(self, chat_settings_id: str, days: int = 7) -> dict:
         """Compare actual posting ratios against configured targets.
 
         Returns per-category drift (absolute difference between actual
@@ -195,10 +190,8 @@ class MediaDashboardQueries:
         """
         with self.service.track_execution(
             "get_category_mix_drift",
-            input_params={"telegram_chat_id": telegram_chat_id, "days": days},
+            input_params={"chat_settings_id": chat_settings_id, "days": days},
         ) as run_id:
-            chat_settings_id = self.service.resolve_chat_settings_id(telegram_chat_id)
-
             configured = self.service.category_mix_repo.get_current_mix_as_dict(
                 chat_settings_id=chat_settings_id
             )
@@ -256,7 +249,7 @@ class MediaDashboardQueries:
             }
 
     def get_dead_content_report(
-        self, telegram_chat_id: int, min_age_days: int = 30
+        self, chat_settings_id: str, min_age_days: int = 30
     ) -> dict:
         """Surface media items that have never been posted.
 
@@ -266,12 +259,10 @@ class MediaDashboardQueries:
         with self.service.track_execution(
             "get_dead_content_report",
             input_params={
-                "telegram_chat_id": telegram_chat_id,
+                "chat_settings_id": chat_settings_id,
                 "min_age_days": min_age_days,
             },
         ) as run_id:
-            chat_settings_id = self.service.resolve_chat_settings_id(telegram_chat_id)
-
             total_active = self.service.media_repo.count_active(
                 chat_settings_id=chat_settings_id
             )
@@ -293,7 +284,7 @@ class MediaDashboardQueries:
                 "min_age_days": min_age_days,
             }
 
-    def get_content_reuse_insights(self, telegram_chat_id: int) -> dict:
+    def get_content_reuse_insights(self, chat_settings_id: str) -> dict:
         """Classify media pool into reuse tiers.
 
         Uses existing count_by_posting_status() which buckets items
@@ -303,10 +294,8 @@ class MediaDashboardQueries:
         """
         with self.service.track_execution(
             "get_content_reuse_insights",
-            input_params={"telegram_chat_id": telegram_chat_id},
+            input_params={"chat_settings_id": chat_settings_id},
         ) as run_id:
-            chat_settings_id = self.service.resolve_chat_settings_id(telegram_chat_id)
-
             posting_status = self.service.media_repo.count_by_posting_status(
                 chat_settings_id=chat_settings_id
             )

@@ -1278,7 +1278,7 @@ class TestStartCommand:
             mock_settings_instance.__enter__ = Mock(return_value=mock_settings_instance)
             mock_settings_instance.__exit__ = Mock(return_value=False)
             mock_chat_settings = Mock(onboarding_completed=False)
-            mock_settings_instance.get_settings.return_value = mock_chat_settings
+            mock_settings_instance.provision.return_value = mock_chat_settings
 
             with patch(
                 "src.services.core.start_command_router.settings"  # app settings

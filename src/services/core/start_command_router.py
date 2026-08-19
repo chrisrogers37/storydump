@@ -139,7 +139,8 @@ class StartCommandRouter:
         from src.services.core.settings_service import SettingsService
 
         with SettingsService() as settings_service:
-            chat_settings = settings_service.get_settings(chat_id)
+            # First contact: THE sanctioned Telegram provisioning door (#842).
+            chat_settings = settings_service.provision(chat_id)
             onboarding_done = chat_settings.onboarding_completed
 
         if settings.OAUTH_REDIRECT_BASE_URL:

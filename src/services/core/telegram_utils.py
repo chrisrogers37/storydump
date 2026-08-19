@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
+from src.exceptions.tenancy import TenantResolutionError
 from src.config import defaults
 from src.utils.logger import logger
 from src.utils.resilience import telegram_edit_with_retry
@@ -553,3 +554,35 @@ def build_webapp_button(
     token = generate_url_token(chat_id, user_id)
     signed_url = f"{webapp_url}&token={token}"
     return InlineKeyboardButton(text, url=signed_url)
+
+
+#: The two user-facing refusals for an unresolvable chat (#842). One spelling
+#: each; the edge helpers below are the only senders.
+CHAT_NOT_SET_UP_MESSAGE = "⚠️ This group isn't set up yet. Run /start first."
+NO_INSTANCE_CONFIGURED_MESSAGE = "❌ No instance is configured for this chat."
+
+
+async def require_tenant_for_message(service, update, chat_id):
+    """Resolve chat -> tenant id for a message handler, or bail (#842).
+
+    Returns the tenant id, or None after replying the standard not-set-up
+    message. The refusal copy lives here, once, for every command handler.
+    """
+    try:
+        return service.settings_service.resolve_chat_settings_id(chat_id)
+    except TenantResolutionError:
+        await update.message.reply_text(CHAT_NOT_SET_UP_MESSAGE)
+        return None
+
+
+async def require_tenant_for_callback(service, query):
+    """Resolve the callback chat -> tenant id, or bail (#842).
+
+    Returns the tenant id, or None after answering the standard no-instance
+    alert. The callback-side twin of ``require_tenant_for_message``.
+    """
+    try:
+        return service.settings_service.resolve_chat_settings_id(query.message.chat_id)
+    except TenantResolutionError:
+        await query.answer(NO_INSTANCE_CONFIGURED_MESSAGE, show_alert=True)
+        return None

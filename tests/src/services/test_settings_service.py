@@ -19,6 +19,7 @@ from src.services.core.settings_service import (
     NUMERIC_SETTINGS,
     TEXT_SETTINGS,
 )
+from src.exceptions.tenancy import TenantResolutionError
 from src.repositories.chat_settings_repository import ChatSettingsRepository
 from src.models.chat_settings import ChatSettings
 
@@ -89,16 +90,17 @@ class TestSettingsServiceUnit:
         service.settings_repo.get_or_create.assert_not_called()
 
     def test_get_settings_calls_repository(self):
-        """get_settings should delegate to repository."""
+        """get_settings delegates to the non-minting read (#842)."""
         service = SettingsService()
         mock_repo = Mock()
         mock_settings = Mock(spec=ChatSettings)
-        mock_repo.get_or_create.return_value = mock_settings
+        mock_repo.get_by_chat_id.return_value = mock_settings
         service.settings_repo = mock_repo
 
         result = service.get_settings(-1001234567890)
 
-        mock_repo.get_or_create.assert_called_once_with(-1001234567890)
+        mock_repo.get_by_chat_id.assert_called_once_with(-1001234567890)
+        mock_repo.get_or_create.assert_not_called()
         assert result == mock_settings
 
     def test_toggle_setting_flips_value(self):
@@ -110,7 +112,7 @@ class TestSettingsServiceUnit:
         mock_settings.dry_run_mode = True  # Initial value
 
         mock_repo = Mock()
-        mock_repo.get_or_create.return_value = mock_settings
+        mock_repo.require_by_chat_id.return_value = mock_settings
         mock_repo.update.return_value = mock_settings
         service.settings_repo = mock_repo
 
@@ -134,7 +136,7 @@ class TestSettingsServiceUnit:
         mock_settings.is_paused = False
 
         mock_repo = Mock()
-        mock_repo.get_or_create.return_value = mock_settings
+        mock_repo.require_by_chat_id.return_value = mock_settings
         service.settings_repo = mock_repo
 
         service.service_run_repo = Mock()
@@ -158,7 +160,7 @@ class TestSettingsServiceUnit:
         mock_settings.is_paused = True
 
         mock_repo = Mock()
-        mock_repo.get_or_create.return_value = mock_settings
+        mock_repo.require_by_chat_id.return_value = mock_settings
         service.settings_repo = mock_repo
 
         service.service_run_repo = Mock()
@@ -182,7 +184,7 @@ class TestSettingsServiceUnit:
         mock_settings.is_paused = False
 
         mock_repo = Mock()
-        mock_repo.get_or_create.return_value = mock_settings
+        mock_repo.require_by_chat_id.return_value = mock_settings
         service.settings_repo = mock_repo
 
         service.service_run_repo = Mock()
@@ -199,7 +201,7 @@ class TestSettingsServiceUnit:
         mock_settings.posts_per_day = 5
 
         mock_repo = Mock()
-        mock_repo.get_or_create.return_value = mock_settings
+        mock_repo.require_by_chat_id.return_value = mock_settings
         service.settings_repo = mock_repo
 
         service.service_run_repo = Mock()
@@ -215,7 +217,7 @@ class TestSettingsServiceUnit:
         mock_settings.posts_per_day = 5
 
         mock_repo = Mock()
-        mock_repo.get_or_create.return_value = mock_settings
+        mock_repo.require_by_chat_id.return_value = mock_settings
         service.settings_repo = mock_repo
 
         service.service_run_repo = Mock()
@@ -231,7 +233,7 @@ class TestSettingsServiceUnit:
         mock_settings.posting_hours_start = 14
 
         mock_repo = Mock()
-        mock_repo.get_or_create.return_value = mock_settings
+        mock_repo.require_by_chat_id.return_value = mock_settings
         service.settings_repo = mock_repo
 
         service.service_run_repo = Mock()
@@ -263,7 +265,7 @@ class TestSettingsServiceUnit:
         mock_settings.updated_at = datetime.utcnow()
 
         mock_repo = Mock()
-        mock_repo.get_or_create.return_value = mock_settings
+        mock_repo.require_by_chat_id.return_value = mock_settings
         service.settings_repo = mock_repo
 
         display = service.get_settings_display(-100)
@@ -310,7 +312,7 @@ class TestSettingsServiceUnit:
         mock_settings.updated_at = datetime.utcnow()
 
         mock_repo = Mock()
-        mock_repo.get_or_create.return_value = mock_settings
+        mock_repo.require_by_chat_id.return_value = mock_settings
         service.settings_repo = mock_repo
 
         display = service.get_settings_display(-100)
@@ -493,7 +495,7 @@ class TestMultiChatIsolation:
         # Track which chat_id is requested
         requested_ids = []
 
-        def mock_get_or_create(chat_id):
+        def mock_get_by_chat_id(chat_id):
             requested_ids.append(chat_id)
             settings = Mock(spec=ChatSettings)
             settings.telegram_chat_id = chat_id
@@ -501,7 +503,7 @@ class TestMultiChatIsolation:
             return settings
 
         mock_repo = Mock()
-        mock_repo.get_or_create.side_effect = mock_get_or_create
+        mock_repo.get_by_chat_id.side_effect = mock_get_by_chat_id
         service.settings_repo = mock_repo
 
         # Get settings for two different chats
@@ -528,7 +530,7 @@ class TestMultiChatIsolation:
         mock_settings.dry_run_mode = True
 
         mock_repo = Mock()
-        mock_repo.get_or_create.return_value = mock_settings
+        mock_repo.require_by_chat_id.return_value = mock_settings
         mock_repo.update.side_effect = mock_update
         service.settings_repo = mock_repo
 
@@ -552,15 +554,18 @@ class TestMultiChatIsolation:
 class TestSettingsServiceIntegration:
     """Integration tests requiring database connection."""
 
-    def test_get_settings_creates_from_env_on_first_access(self, test_db):
-        """First access should bootstrap settings from .env values."""
+    def test_provision_creates_from_env_and_reads_never_do(self, test_db):
+        """Minting is only ever provision() (#842): a read of an unknown chat
+        returns None, and provisioning bootstraps from .env values."""
         service = SettingsService()
         service.settings_repo = ChatSettingsRepository()
         service.settings_repo._db = test_db
 
         chat_id = -1001234567890
 
-        settings = service.get_settings(chat_id)
+        assert service.get_settings(chat_id) is None
+
+        settings = service.provision(chat_id)
 
         assert settings is not None
         assert settings.telegram_chat_id == chat_id
@@ -568,17 +573,17 @@ class TestSettingsServiceIntegration:
         assert isinstance(settings.posts_per_day, int)
 
     def test_get_settings_returns_existing(self, test_db):
-        """Subsequent access should return existing record."""
+        """Access after provisioning returns the existing record."""
         service = SettingsService()
         service.settings_repo = ChatSettingsRepository()
         service.settings_repo._db = test_db
 
         chat_id = -1001234567891
 
-        settings1 = service.get_settings(chat_id)
+        provisioned = service.provision(chat_id)
         settings2 = service.get_settings(chat_id)
 
-        assert settings1.id == settings2.id
+        assert provisioned.id == settings2.id
 
     def test_toggle_setting_persists(self, test_db):
         """Toggled value should be persisted to database."""
@@ -589,7 +594,7 @@ class TestSettingsServiceIntegration:
 
         chat_id = -1001234567892
 
-        settings = service.get_settings(chat_id)
+        settings = service.provision(chat_id)
         initial_value = settings.dry_run_mode
 
         service.toggle_setting(chat_id, "dry_run_mode", None)
@@ -619,7 +624,7 @@ class TestSettingsServiceIntegration:
         )
 
         # Ensure not paused initially
-        settings = service.get_settings(chat_id)
+        settings = service.provision(chat_id)
         if settings.is_paused:
             service.toggle_setting(chat_id, "is_paused", user)
 
@@ -652,7 +657,7 @@ class TestSettingsServiceIntegration:
         )
 
         # Ensure paused
-        settings = service.get_settings(chat_id)
+        settings = service.provision(chat_id)
         if not settings.is_paused:
             service.toggle_setting(chat_id, "is_paused", user)
 
@@ -673,9 +678,9 @@ class TestSettingsServiceIntegration:
         chat_id_1 = -1001111111111
         chat_id_2 = -1002222222222
 
-        # Get settings for both
-        settings1 = service.get_settings(chat_id_1)
-        settings2 = service.get_settings(chat_id_2)
+        # Provision both (reads never mint, #842)
+        settings1 = service.provision(chat_id_1)
+        settings2 = service.provision(chat_id_2)
 
         # They should be different records
         assert settings1.id != settings2.id
@@ -896,7 +901,7 @@ class TestSettingsServiceMediaSource:
         mock_settings = Mock(spec=ChatSettings)
         mock_settings.media_source_type = None
         mock_repo = Mock()
-        mock_repo.get_or_create.return_value = mock_settings
+        mock_repo.require_by_chat_id.return_value = mock_settings
         mock_repo.update.return_value = mock_settings
         service.settings_repo = mock_repo
         service.service_run_repo = Mock()
@@ -914,7 +919,7 @@ class TestSettingsServiceMediaSource:
         mock_settings = Mock(spec=ChatSettings)
         mock_settings.media_source_type = None
         mock_repo = Mock()
-        mock_repo.get_or_create.return_value = mock_settings
+        mock_repo.require_by_chat_id.return_value = mock_settings
         service.settings_repo = mock_repo
         service.service_run_repo = Mock()
         service.service_run_repo.create_run.return_value = str(uuid4())
@@ -928,7 +933,7 @@ class TestSettingsServiceMediaSource:
         mock_settings = Mock(spec=ChatSettings)
         mock_settings.media_source_type = "google_drive"
         mock_repo = Mock()
-        mock_repo.get_or_create.return_value = mock_settings
+        mock_repo.require_by_chat_id.return_value = mock_settings
         mock_repo.update.return_value = mock_settings
         service.settings_repo = mock_repo
         service.service_run_repo = Mock()
@@ -944,7 +949,7 @@ class TestSettingsServiceMediaSource:
         mock_settings = Mock(spec=ChatSettings)
         mock_settings.media_source_root = None
         mock_repo = Mock()
-        mock_repo.get_or_create.return_value = mock_settings
+        mock_repo.require_by_chat_id.return_value = mock_settings
         mock_repo.update.return_value = mock_settings
         service.settings_repo = mock_repo
         service.service_run_repo = Mock()
@@ -967,9 +972,9 @@ class TestSettingsServiceMediaSource:
         mock_settings = Mock(spec=ChatSettings)
         mock_settings.media_source_type = "google_drive"
         mock_settings.media_source_root = "folder_abc"
-        settings_service.settings_repo.get_or_create.return_value = mock_settings
+        settings_service.settings_repo.get_by_id.return_value = mock_settings
 
-        source_type, source_root = settings_service.get_media_source_config(-100)
+        source_type, source_root = settings_service.get_media_source_config("cs-100")
 
         assert source_type == "google_drive"
         assert source_root == "folder_abc"
@@ -983,9 +988,9 @@ class TestSettingsServiceMediaSource:
         mock_settings = Mock(spec=ChatSettings)
         mock_settings.media_source_type = None
         mock_settings.media_source_root = None
-        settings_service.settings_repo.get_or_create.return_value = mock_settings
+        settings_service.settings_repo.get_by_id.return_value = mock_settings
 
-        source_type, source_root = settings_service.get_media_source_config(-100)
+        source_type, source_root = settings_service.get_media_source_config("cs-100")
 
         assert source_type == defaults.DEFAULT_MEDIA_SOURCE_TYPE
         assert source_root is None
@@ -995,9 +1000,9 @@ class TestSettingsServiceMediaSource:
         mock_settings = Mock(spec=ChatSettings)
         mock_settings.media_source_type = "google_drive"
         mock_settings.media_source_root = None
-        settings_service.settings_repo.get_or_create.return_value = mock_settings
+        settings_service.settings_repo.get_by_id.return_value = mock_settings
 
-        source_type, source_root = settings_service.get_media_source_config(-100)
+        source_type, source_root = settings_service.get_media_source_config("cs-100")
 
         assert source_type == "google_drive"
         assert source_root is None
@@ -1019,9 +1024,84 @@ class TestSettingsServiceMediaSource:
         mock_settings.media_source_root = "folder_123"
         mock_settings.updated_at = datetime.utcnow()
 
-        settings_service.settings_repo.get_or_create.return_value = mock_settings
+        settings_service.settings_repo.require_by_chat_id.return_value = mock_settings
 
         display = settings_service.get_settings_display(-100)
 
         assert display["media_source_type"] == "google_drive"
         assert display["media_source_root"] == "folder_123"
+
+
+@pytest.mark.unit
+class TestResolveChatSettingsIdDoor:
+    """The legacy resolution door (`04` F.3, #842).
+
+    The policy under test: a chat that cannot be resolved to a tenant is a
+    typed refusal at this one door — never a default, never None, never a
+    mint."""
+
+    @pytest.fixture(autouse=True)
+    def _mock_audit(self):
+        with patch("src.services.core.settings_service.AuditRepository"):
+            yield
+
+    def _service_with_repo(self):
+        service = SettingsService()
+        service.settings_repo = Mock(spec=ChatSettingsRepository)
+        return service
+
+    def test_resolves_to_the_tenant_key(self):
+        service = self._service_with_repo()
+        row = Mock(spec=ChatSettings)
+        row.id = uuid4()
+        service.settings_repo.require_by_chat_id.return_value = row
+
+        assert service.resolve_chat_settings_id(123) == str(row.id)
+        service.settings_repo.require_by_chat_id.assert_called_once_with(123)
+
+    def test_unknown_chat_is_a_typed_refusal_and_never_mints(self):
+        """A refusal is typed AND creates nothing on its way out — minting
+        stays at the explicit provisioning doors. The raise itself lives in
+        the repo primitive; its semantics are pinned below unbound, so this
+        test only wires the delegation."""
+        service = self._service_with_repo()
+        service.settings_repo.require_by_chat_id.side_effect = TenantResolutionError(
+            "unknown_binding"
+        )
+
+        with pytest.raises(TenantResolutionError) as exc:
+            service.resolve_chat_settings_id(123)
+        assert exc.value.reason == "unknown_binding"
+        service.settings_repo.get_or_create.assert_not_called()
+
+    def test_the_repo_primitive_refuses_typed_and_never_mints(self):
+        """The ONE raise site (#842): row-None -> unknown_binding, no mint.
+
+        Called unbound with a mocked self so no database is anywhere near
+        the policy — the same trick integration_verdict uses in conftest."""
+        from src.repositories.chat_settings_repository import (
+            ChatSettingsRepository,
+        )
+
+        repo_self = Mock()
+        repo_self.get_by_chat_id.return_value = None
+
+        with pytest.raises(TenantResolutionError) as exc:
+            ChatSettingsRepository.require_by_chat_id(repo_self, 123)
+        assert exc.value.reason == "unknown_binding"
+        repo_self.get_or_create.assert_not_called()
+
+        row = Mock(spec=ChatSettings)
+        repo_self.get_by_chat_id.return_value = row
+        assert ChatSettingsRepository.require_by_chat_id(repo_self, 123) is row
+
+    def test_the_refusal_is_the_shared_contract_type(self):
+        """The exception is the target resolver's own type, from the neutral
+        home — what makes the M.3 internals swap invisible to every edge."""
+        from src.exceptions import TenantResolutionError as from_package
+        from src.exceptions.base import StorydumpError
+        from src.services.target import tenant_resolution
+
+        assert from_package is TenantResolutionError
+        assert tenant_resolution.TenantResolutionError is TenantResolutionError
+        assert issubclass(TenantResolutionError, StorydumpError)
