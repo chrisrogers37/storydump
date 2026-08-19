@@ -9,6 +9,7 @@ from src.exceptions.google_drive import GoogleDriveAuthError
 from src.exceptions.telegram import AmbiguousDeliveryError, ChatMigratedError
 from src.services.core.telegram_utils import escape_markdown as _escape_md
 from src.utils.logger import logger
+from src.repositories.tenant_scope import SYSTEM_SCOPE
 
 
 def _is_google_auth_error(exc: Exception) -> bool:
@@ -77,7 +78,9 @@ class TelegramNotificationService:
             self.service.bot = Bot(token=self.service.bot_token)
             logger.debug("Telegram bot initialized for one-time use")
 
-        queue_item = self.service.queue_repo.get_by_id(queue_item_id)
+        queue_item = self.service.queue_repo.get_by_id(
+            queue_item_id, chat_settings_id=SYSTEM_SCOPE
+        )
         if not queue_item:
             logger.error(f"Queue item not found: {queue_item_id}")
             return False
@@ -93,7 +96,9 @@ class TelegramNotificationService:
             )
             return True
 
-        media_item = self.service.media_repo.get_by_id(str(queue_item.media_item_id))
+        media_item = self.service.media_repo.get_by_id(
+            str(queue_item.media_item_id), chat_settings_id=SYSTEM_SCOPE
+        )
         if not media_item:
             logger.error(f"Media item not found: {queue_item.media_item_id}")
             return False

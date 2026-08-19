@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from src.services.core.media_lock import MediaLockService
 from tests.src.services.conftest import mock_track_execution
+from src.repositories.tenant_scope import SYSTEM_SCOPE
 
 
 @pytest.fixture
@@ -79,7 +80,9 @@ class TestMediaLockService:
         result = lock_service.get_active_lock(media_id)
 
         assert result == mock_lock
-        lock_service.lock_repo.get_active_lock.assert_called_once_with(media_id)
+        lock_service.lock_repo.get_active_lock.assert_called_once_with(
+            media_id, chat_settings_id=SYSTEM_SCOPE
+        )
 
     def test_lock_after_posting(self, lock_service):
         """Test creating lock after posting media."""

@@ -4,6 +4,7 @@ from src.repositories.media_repository import MediaRepository
 from src.services.base_service import BaseService
 from src.services.integrations.cloud_storage import CloudStorageService
 from src.utils.logger import logger
+from src.repositories.tenant_scope import SYSTEM_SCOPE
 
 
 class MediaLifecycleService(BaseService):
@@ -33,7 +34,9 @@ class MediaLifecycleService(BaseService):
         with self.track_execution(
             "delete_media_item", input_params={"media_id": media_id}
         ) as run_id:
-            media_item = self.media_repo.get_by_id(media_id)
+            media_item = self.media_repo.get_by_id(
+                media_id, chat_settings_id=SYSTEM_SCOPE
+            )
             if not media_item:
                 self.set_result_summary(run_id, {"found": False})
                 return False
@@ -55,6 +58,6 @@ class MediaLifecycleService(BaseService):
                         f"{media_item.cloud_public_id}: {e}"
                     )
 
-            deleted = self.media_repo.delete(media_id)
+            deleted = self.media_repo.delete(media_id, chat_settings_id=SYSTEM_SCOPE)
             self.set_result_summary(run_id, {"found": True, "deleted": deleted})
             return deleted

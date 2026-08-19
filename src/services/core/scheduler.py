@@ -20,6 +20,7 @@ from src.repositories.category_mix_repository import CategoryMixRepository
 from src.config.settings import settings
 from src.utils.datetime_utils import ensure_utc
 from src.utils.logger import logger
+from src.repositories.tenant_scope import SYSTEM_SCOPE
 
 
 class SchedulerService(BaseService):
@@ -319,9 +320,9 @@ class SchedulerService(BaseService):
 
     def check_availability(self, media_id: str) -> bool:
         """Check if media item is available for scheduling."""
-        if self.lock_repo.is_locked(media_id):
+        if self.lock_repo.is_locked(media_id, chat_settings_id=SYSTEM_SCOPE):
             return False
-        if self.queue_repo.get_by_media_id(media_id):
+        if self.queue_repo.get_by_media_id(media_id, chat_settings_id=SYSTEM_SCOPE):
             return False
         return True
 
@@ -384,7 +385,9 @@ class SchedulerService(BaseService):
                     with CaptionService(media_repo=self.media_repo) as caption_service:
                         generated = await caption_service.generate_caption(media_item)
                     if generated:
-                        media_item = self.media_repo.get_by_id(str(media_item.id))
+                        media_item = self.media_repo.get_by_id(
+                            str(media_item.id), chat_settings_id=SYSTEM_SCOPE
+                        )
                 except Exception as e:  # noqa: BLE001 — caption failures must never block posting
                     logger.warning(f"AI caption generation failed, continuing: {e}")
 
@@ -585,7 +588,7 @@ class SchedulerService(BaseService):
                         else None
                     ),
                     error_message=error_message,
-                )
+                ),
             )
         except Exception as e:  # noqa: BLE001 — best-effort
             logger.error(f"Failed to record posting_history for {queue_item_id}: {e}")
@@ -962,7 +965,9 @@ class SchedulerService(BaseService):
 
         Kept for queue_preview and backwards compatibility.
         """
-        current_mix = self.category_mix_repo.get_current_mix_as_dict()
+        current_mix = self.category_mix_repo.get_current_mix_as_dict(
+            chat_settings_id=SYSTEM_SCOPE
+        )
 
         if not current_mix:
             return []

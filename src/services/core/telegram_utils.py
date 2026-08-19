@@ -18,6 +18,7 @@ from src.config import defaults
 from src.utils.logger import logger
 from src.utils.resilience import telegram_edit_with_retry
 from src.utils.webapp_auth import generate_url_token
+from src.repositories.tenant_scope import SYSTEM_SCOPE
 
 if TYPE_CHECKING:
     from src.services.core.telegram_service import TelegramService
@@ -138,7 +139,7 @@ async def validate_queue_item(service: TelegramService, queue_id: str, query):
     Returns:
         The queue item if found, or None if not found (message already updated)
     """
-    queue_item = service.queue_repo.get_by_id(queue_id)
+    queue_item = service.queue_repo.get_by_id(queue_id, chat_settings_id=SYSTEM_SCOPE)
     if not queue_item:
         # Check posting_history for what happened to this queue item
         history = service.history_repo.get_by_queue_item_id(queue_id)
@@ -182,7 +183,9 @@ async def validate_queue_and_media(service: TelegramService, queue_id: str, quer
     if not queue_item:
         return None, None
 
-    media_item = service.media_repo.get_by_id(str(queue_item.media_item_id))
+    media_item = service.media_repo.get_by_id(
+        str(queue_item.media_item_id), chat_settings_id=SYSTEM_SCOPE
+    )
     if not media_item:
         await query.edit_message_caption(caption="⚠️ Media item not found")
         return None, None

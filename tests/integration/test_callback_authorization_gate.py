@@ -40,6 +40,7 @@ from src.repositories.membership_repository import MembershipRepository
 from src.repositories.queue_repository import QueueRepository
 from src.repositories.user_repository import UserRepository
 from src.services.core.telegram_service import TelegramService
+from src.repositories.tenant_scope import SYSTEM_SCOPE
 
 
 @pytest.fixture(autouse=True)
@@ -147,6 +148,7 @@ class _Seed:
                     file_hash=uuid4().hex,
                     file_size_bytes=2048,
                     mime_type="image/jpeg",
+                    chat_settings_id=SYSTEM_SCOPE,
                 ).id
             )
         finally:
@@ -158,7 +160,7 @@ class _Seed:
                 queue_repo.create(
                     media_item_id=media_id,
                     scheduled_for=datetime.now(timezone.utc) - timedelta(minutes=1),
-                    chat_settings_id=cs_id,
+                    chat_settings_id=cs_id if cs_id is not None else SYSTEM_SCOPE,
                 ).id
             )
         finally:
@@ -261,7 +263,7 @@ def _make_query(from_user_id: int, chat_id: int, data: str) -> AsyncMock:
 def _queue_status(queue_id: str) -> str | None:
     repo = QueueRepository()
     try:
-        row = repo.get_by_id(queue_id)
+        row = repo.get_by_id(queue_id, chat_settings_id=SYSTEM_SCOPE)
         return row.status if row else None
     finally:
         repo.close()

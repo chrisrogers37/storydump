@@ -4,6 +4,12 @@ from typing import Optional, List, Set
 from datetime import datetime, timedelta, timezone
 
 from src.repositories.base_repository import BaseRepository
+from src.repositories.tenant_scope import (
+    require_tenant_id,
+    TenantScope,
+    require_tenant_context,
+    tenant_value,
+)
 from src.models.api_token import ApiToken
 
 
@@ -182,7 +188,8 @@ class TokenRepository(BaseRepository):
         meta_account_id: Optional[str] = None,
         auth_method: Optional[str] = None,
         issuing_app_id: Optional[str] = None,
-        chat_settings_id: Optional[str] = None,
+        *,
+        chat_settings_id: TenantScope,
     ) -> ApiToken:
         """
         Create or update a token (UPSERT pattern).
@@ -218,6 +225,7 @@ class TokenRepository(BaseRepository):
         Returns:
             Created or updated ApiToken
         """
+        require_tenant_context(chat_settings_id, where="token.create_or_update")
         if issued_at is None:
             issued_at = datetime.utcnow()
 
@@ -250,7 +258,7 @@ class TokenRepository(BaseRepository):
                 existing.auth_method = auth_method
             if issuing_app_id is not None:
                 existing.issuing_app_id = issuing_app_id
-            if chat_settings_id is not None:
+            if chat_settings_id:
                 existing.chat_settings_id = chat_settings_id
             self.db.commit()
             self.db.refresh(existing)
@@ -269,7 +277,7 @@ class TokenRepository(BaseRepository):
                 meta_account_id=meta_account_id,
                 auth_method=auth_method,
                 issuing_app_id=issuing_app_id,
-                chat_settings_id=chat_settings_id,
+                chat_settings_id=tenant_value(chat_settings_id),
             )
             self.db.add(token)
             self.db.commit()
@@ -314,6 +322,7 @@ class TokenRepository(BaseRepository):
         Returns:
             ApiToken or None if not found
         """
+        require_tenant_id(chat_settings_id, where="token.get_token_for_chat")
         result = (
             self.db.query(ApiToken)
             .filter(
@@ -356,6 +365,7 @@ class TokenRepository(BaseRepository):
         Returns:
             Created or updated ApiToken
         """
+        require_tenant_id(chat_settings_id, where="token.create_or_update_for_chat")
         if issued_at is None:
             issued_at = datetime.utcnow()
 
@@ -409,6 +419,7 @@ class TokenRepository(BaseRepository):
         Returns:
             Number of tokens deleted
         """
+        require_tenant_id(chat_settings_id, where="token.delete_tokens_for_chat")
         count = (
             self.db.query(ApiToken)
             .filter(
@@ -424,7 +435,8 @@ class TokenRepository(BaseRepository):
         self,
         service_name: str,
         instagram_account_id: Optional[str] = None,
-        chat_settings_id: Optional[str] = None,
+        *,
+        chat_settings_id: TenantScope,
     ) -> List[ApiToken]:
         """Set revoked_at on all active tokens for a service.
 
@@ -440,6 +452,9 @@ class TokenRepository(BaseRepository):
         Returns:
             List of tokens that were revoked
         """
+        require_tenant_context(
+            chat_settings_id, where="token.revoke_tokens_for_service"
+        )
         query = self.db.query(ApiToken).filter(
             ApiToken.service_name == service_name,
             ApiToken.revoked_at.is_(None),
