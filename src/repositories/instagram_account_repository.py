@@ -6,6 +6,7 @@ from datetime import datetime
 from sqlalchemy import and_, exists, or_
 
 from src.repositories.base_repository import BaseRepository
+from src.repositories.id_prefix import id_prefix_matches
 from src.models.api_token import ApiToken
 from src.models.instagram_account import InstagramAccount
 
@@ -117,16 +118,15 @@ class InstagramAccountRepository(BaseRepository):
         shortened UUIDs. Returns the first matching account.
 
         Args:
-            id_prefix: First N characters of a UUID (typically 8)
+            id_prefix: First N characters of a UUID (typically 8).
+                Matched LITERALLY — `%` and `_` are not wildcards (#905).
 
         Returns:
             InstagramAccount or None if not found
         """
-        from sqlalchemy import cast, String
-
         result = (
             self.db.query(InstagramAccount)
-            .filter(cast(InstagramAccount.id, String).like(f"{id_prefix}%"))
+            .filter(id_prefix_matches(InstagramAccount.id, id_prefix))
             .first()
         )
         self.end_read_transaction()

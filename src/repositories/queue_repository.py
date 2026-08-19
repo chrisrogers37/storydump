@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import and_
 
 from src.repositories.base_repository import BaseRepository
+from src.repositories.id_prefix import id_prefix_matches
 from src.repositories.tenant_scope import (
     SYSTEM_SCOPE,
     TenantScope,
@@ -78,17 +79,16 @@ class QueueRepository(BaseRepository):
         shortened UUIDs. Returns the first matching item.
 
         Args:
-            id_prefix: First N characters of a UUID (typically 8)
+            id_prefix: First N characters of a UUID (typically 8).
+                Matched LITERALLY — `%` and `_` are not wildcards (#905).
             chat_settings_id: Optional tenant filter
 
         Returns:
             PostingQueue item or None if not found
         """
-        from sqlalchemy import cast, String
-
         result = (
             self._tenant_query(PostingQueue, chat_settings_id)
-            .filter(cast(PostingQueue.id, String).like(f"{id_prefix}%"))
+            .filter(id_prefix_matches(PostingQueue.id, id_prefix))
             .first()
         )
         self.end_read_transaction()
