@@ -16,6 +16,7 @@ the extracted handler modules:
 - telegram_accounts.py         — account management handlers
 """
 
+import uuid
 import asyncio
 import logging
 
@@ -50,8 +51,24 @@ from src.config.settings import settings
 from src.utils.logger import logger
 
 # Re-export for any remaining external imports
+from src.services.core.telegram_utils import caller_may_act_on_queue_row
 from src.services.core.telegram_utils import escape_markdown as _escape_markdown  # noqa: F401
 from src.repositories.tenant_scope import SYSTEM_SCOPE
+
+
+def _is_full_uuid(value: str) -> bool:
+    """Is *value* a full canonical UUID the queue-id column can be queried by?
+
+    The gate's ownership resolution is guarded by this so a short prefix or a
+    compound `sap` payload defers to the in-handler check instead of raising a
+    DataError on the UUID column (#895 review).
+    """
+    try:
+        uuid.UUID(str(value))
+        return True
+    except (ValueError, TypeError, AttributeError):
+        return False
+
 
 # Handler classes are imported inside initialize() to avoid circular imports.
 
@@ -452,6 +469,16 @@ class TelegramService(BaseService):
             "autopost",
             "select_account",
             "cycle_account",
+            # sap/btp carry a SHORT queue-id PREFIX, not a full UUID (#895).
+            # The gate cannot resolve a prefix, so its ownership half no-ops
+            # for these — they are gated HERE for MEMBERSHIP, and their queue
+            # ownership is enforced in-handler by the same owned-OR-NULL rule
+            # (caller_may_act_on_queue_row), scoped at the door that reads the
+            # content. Before this, they were absent from the set entirely:
+            # neither membership nor ownership ran, and the handler read the
+            # prefix cross-tenant with SYSTEM_SCOPE.
+            "sap",
+            "btp",
         }
     )
 
@@ -512,13 +539,17 @@ class TelegramService(BaseService):
                 return False
 
         # Ownership: the queue id must belong to the caller's own instance.
-        if data:
+        # The gate resolves ownership ONLY for a payload it can actually look
+        # up — a full UUID. sap/btp carry an 8-char PREFIX (and a compound
+        # `q:a` for sap), which is not a UUID: `get_by_id` would raise a
+        # DataError on the UUID column (#895 review), not return None. So a
+        # non-UUID payload DEFERS here and its ownership is enforced in-handler
+        # by the SAME owned-OR-NULL rule (`caller_may_act_on_queue_row`),
+        # scoped to the caller at the door that reads the content. This also
+        # makes any malformed id defer cleanly instead of erroring.
+        if data and _is_full_uuid(data):
             row = self.queue_repo.get_by_id(data, chat_settings_id=SYSTEM_SCOPE)
-            if (
-                row is not None
-                and row.chat_settings_id is not None
-                and str(row.chat_settings_id) != caller_cs_id
-            ):
+            if row is not None and not caller_may_act_on_queue_row(row, caller_cs_id):
                 logger.warning(
                     "Callback '%s' refused: chat %s (instance %s) does not own "
                     "queue item %s (instance %s)",

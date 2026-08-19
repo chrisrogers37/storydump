@@ -40,6 +40,7 @@ from src.repositories.membership_repository import MembershipRepository
 from src.repositories.queue_repository import QueueRepository
 from src.repositories.user_repository import UserRepository
 from src.services.core.telegram_service import TelegramService
+from src.services.core.telegram_accounts import TelegramAccountHandlers
 from src.repositories.tenant_scope import SYSTEM_SCOPE
 
 
@@ -239,6 +240,16 @@ def service():
         svc.close()
 
 
+@pytest.fixture
+def accounts(service):
+    """The account-callback handler, built directly.
+
+    ``TelegramService.__init__`` wires repos but sub-handlers are created in
+    ``initialize()`` (which needs a live bot), so the gate tests never touch
+    ``service.accounts``. The handler only needs the service — construct it."""
+    return TelegramAccountHandlers(service)
+
+
 def _make_query(from_user_id: int, chat_id: int, data: str) -> AsyncMock:
     """A stand-in Telegram callback query.
 
@@ -391,3 +402,141 @@ class TestCallbackDispatchGating:
         await service._handle_callback(update, Mock())
 
         spy.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# #895 — the sap:/btp: short-prefix bypass
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+class TestShortPrefixCallbacksAreTenantScoped:
+    """The `sap:`/`btp:` callbacks carry a SHORT queue-id prefix, which the
+    gate's exact-UUID ownership resolution cannot match — so before #895 they
+    were absent from `_QUEUE_ID_ACTIONS` entirely (no membership, no ownership)
+    and the handler read the prefix cross-tenant with SYSTEM_SCOPE, rebuilding
+    a FOREIGN tenant's post content into the caller's chat.
+
+    Born RED against that: the handler must refuse a foreign prefix exactly as
+    the mutation door would, and the gate must now enforce membership on these.
+    """
+
+    async def test_back_to_post_refuses_a_foreign_tenants_queue_prefix(
+        self, service, accounts, seed
+    ):
+        """The subject bypass: a member of chat C taps `btp:` on chat A's card.
+
+        Positive control first — the OWNER's prefix rebuilds — so a refusal for
+        C is not a refusal for everyone."""
+        # Tenant A owns the queue item; tenant C is unrelated, owns nothing.
+        chat_a = _unique_chat_id()
+        cs_a = seed.instance(chat_a)
+        a_tid, a_uid = seed.user()
+        seed.membership(a_uid, cs_a)
+        _, a_queue_id = seed.queue_item(cs_a)
+
+        chat_c = _unique_chat_id()
+        cs_c = seed.instance(chat_c)
+        c_tid, c_uid = seed.user()
+        seed.membership(c_uid, cs_c)
+
+        prefix = a_queue_id[:8]
+
+        # Owner (A) in chat A: the prefix resolves and the workflow rebuilds.
+        rebuilt: list[str] = []
+        accounts.rebuild_posting_workflow = AsyncMock(
+            side_effect=lambda qid, *a, **k: rebuilt.append(qid)
+        )
+        owner_q = _make_query(a_tid, chat_a, f"btp:{prefix}")
+        await accounts.handle_back_to_post(prefix, Mock(), owner_q)
+        assert rebuilt == [a_queue_id], "positive control: the owner still rebuilds"
+
+        # Unrelated tenant C in chat C tapping A's prefix: REFUSED, no rebuild,
+        # neutral "not found" — A's content never reaches C's chat.
+        rebuilt.clear()
+        foreign_q = _make_query(c_tid, chat_c, f"btp:{prefix}")
+        await accounts.handle_back_to_post(prefix, Mock(), foreign_q)
+
+        assert rebuilt == [], (
+            "cross-tenant disclosure: chat C rebuilt chat A's post content"
+            f" from prefix {prefix}"
+        )
+        foreign_q.edit_message_caption.assert_awaited()
+        caption = foreign_q.edit_message_caption.call_args.kwargs.get("caption", "")
+        assert "not found" in caption.lower()
+
+    async def test_the_handler_ownership_equals_the_gates_ruling(
+        self, service, accounts, seed
+    ):
+        """Agreement invariant (the #891 shape): what the prefix handler grants
+        must equal the owned-OR-NULL rule — for the owner (own stamp), the
+        unrelated tenant (foreign stamp), and a legacy NULL-stamped row (which
+        owned-OR-NULL deliberately still permits, so this fix does not break
+        single-tenant cards)."""
+        chat_a = _unique_chat_id()
+        cs_a = seed.instance(chat_a)
+        _, a_queue_id = seed.queue_item(cs_a)
+        _, legacy_queue_id = seed.queue_item(None)  # no instance stamp
+
+        chat_c = _unique_chat_id()
+        seed.instance(chat_c)
+
+        owned = service.queue_repo.get_by_id(a_queue_id, chat_settings_id=SYSTEM_SCOPE)
+        legacy = service.queue_repo.get_by_id(
+            legacy_queue_id, chat_settings_id=SYSTEM_SCOPE
+        )
+
+        # Owner's chat: owns its row, and the legacy NULL row (owned-OR-NULL).
+        assert accounts._caller_owns_queue_item(owned, chat_a) is True
+        assert accounts._caller_owns_queue_item(legacy, chat_a) is True
+        # Unrelated chat: refused the foreign row, still permitted the legacy one.
+        assert accounts._caller_owns_queue_item(owned, chat_c) is False
+        assert accounts._caller_owns_queue_item(legacy, chat_c) is True
+        # Nothing to act on is refused.
+        assert accounts._caller_owns_queue_item(None, chat_a) is False
+
+    async def test_a_member_through_the_gate_on_a_prefix_does_not_raise(
+        self, service, seed
+    ):
+        """The regression the first cut shipped (#895 review): a MEMBER passes
+        membership and then reaches the gate's ownership branch, which resolved
+        `get_by_id(<8-char prefix>)` on a UUID column — a DataError, not a
+        clean pass, breaking sap/btp for the OWNER. The non-member case below
+        short-circuits before this branch, so only a member exercises it. The
+        gate must DEFER a non-UUID payload to the handler, never error."""
+        chat_id = _unique_chat_id()
+        cs_id = seed.instance(chat_id)
+        caller_tid, caller_uid = seed.user()
+        seed.membership(caller_uid, cs_id)
+        _, queue_id = seed.queue_item(cs_id)
+
+        prefix = queue_id[:8]
+        query = _make_query(caller_tid, chat_id, f"btp:{prefix}")
+        # Must return a decision, not raise. (Ownership for prefixes is the
+        # handler's; the gate only enforces membership here.)
+        allowed = await service._authorize_callback("btp", prefix, query)
+        assert allowed is True
+
+        # The compound sap payload (`q:a`) is likewise not a UUID.
+        sap_query = _make_query(caller_tid, chat_id, f"sap:{prefix}:abcd1234")
+        allowed_sap = await service._authorize_callback(
+            "sap", f"{prefix}:abcd1234", sap_query
+        )
+        assert allowed_sap is True
+
+    async def test_a_non_member_is_refused_at_the_gate_for_btp(self, service, seed):
+        """sap/btp are now in the gated set (#895): a non-member of the card's
+        chat is refused BEFORE any handler resolves the prefix — the hole that
+        let a non-member trigger these at all."""
+        chat_id = _unique_chat_id()
+        cs_id = seed.instance(chat_id)
+        _, queue_id = seed.queue_item(cs_id)
+        caller_tid, _ = seed.user()  # exists, but no membership in chat_id
+
+        prefix = queue_id[:8]
+        query = _make_query(caller_tid, chat_id, f"btp:{prefix}")
+        allowed = await service._authorize_callback("btp", prefix, query)
+
+        assert allowed is False
+        query.answer.assert_awaited()

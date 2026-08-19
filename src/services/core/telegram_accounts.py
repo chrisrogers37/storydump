@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TelegramError
 
+from src.exceptions.tenancy import TenantResolutionError
 from src.config.settings import settings as app_settings
 from src.services.core.telegram_utils import (
     build_account_management_keyboard,
@@ -14,6 +15,7 @@ from src.services.core.telegram_utils import (
     build_webapp_button,
     validate_queue_and_media,
     validate_queue_item,
+    caller_may_act_on_queue_row,
 )
 from src.utils.logger import logger
 from src.repositories.tenant_scope import SYSTEM_SCOPE
@@ -320,6 +322,22 @@ class TelegramAccountHandlers:
             telegram_message_id=query.message.message_id,
         )
 
+    def _caller_owns_queue_item(self, queue_item, chat_id) -> bool:
+        """Owned-OR-NULL for a prefix-resolved queue row, scoped to the chat
+        the callback fired in (#895). Resolves the caller's tenant from the
+        one un-forgeable field (chat_id), then defers to the shared rule the
+        gate uses — one ownership definition, two consumers (gate + handler).
+        An unresolvable tenant refuses."""
+        if queue_item is None:
+            return False
+        try:
+            caller_cs_id = self.service.settings_service.resolve_chat_settings_id(
+                int(chat_id)
+            )
+        except (TypeError, ValueError, TenantResolutionError):
+            return False
+        return caller_may_act_on_queue_row(queue_item, caller_cs_id)
+
     async def handle_post_account_switch(self, data: str, user, query):
         """Handle account switch from posting workflow.
 
@@ -335,11 +353,14 @@ class TelegramAccountHandlers:
         short_account_id = parts[1]
         chat_id = query.message.chat_id
 
-        # Find full queue_id by prefix match
+        # Resolve the prefix cross-tenant, then apply the owned-OR-NULL rule
+        # scoped to the CALLER's tenant (#895): the gate cannot resolve a
+        # prefix, so this handler is the ownership door. A foreign row shows
+        # the same "not found" as a genuinely-absent one — no disclosure.
         queue_item = self.service.queue_repo.get_by_id_prefix(
             short_queue_id, chat_settings_id=SYSTEM_SCOPE
         )
-        if not queue_item:
+        if not self._caller_owns_queue_item(queue_item, chat_id):
             await query.edit_message_caption(caption="⚠️ Queue item not found")
             return
 
@@ -410,11 +431,11 @@ class TelegramAccountHandlers:
 
     async def handle_back_to_post(self, short_queue_id: str, user, query):
         """Return to posting workflow without changing account."""
-        # Find full queue_id by prefix match
+        # Owned-OR-NULL, scoped to the caller (#895) — see handle_post_account_switch.
         queue_item = self.service.queue_repo.get_by_id_prefix(
             short_queue_id, chat_settings_id=SYSTEM_SCOPE
         )
-        if not queue_item:
+        if not self._caller_owns_queue_item(queue_item, query.message.chat_id):
             await query.edit_message_caption(caption="⚠️ Queue item not found")
             return
 
