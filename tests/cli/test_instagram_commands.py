@@ -188,7 +188,7 @@ class TestListInstagramAccountsCommand:
         mock_account.instagram_account_id = "17841234567890"
         mock_account.is_active = True
 
-        mock_service.list_accounts.return_value = [mock_account]
+        mock_service.list_all_accounts_unscoped.return_value = [mock_account]
         mock_service.get_active_account.return_value = mock_account
         mock_settings.ADMIN_TELEGRAM_CHAT_ID = -100123
 
@@ -212,7 +212,7 @@ class TestListInstagramAccountsCommand:
     ):
         """Test listing accounts when no accounts configured."""
         mock_service = mock_service_class.return_value
-        mock_service.list_accounts.return_value = []
+        mock_service.list_all_accounts_unscoped.return_value = []
         mock_service.get_active_account.return_value = None
         mock_settings.ADMIN_TELEGRAM_CHAT_ID = -100123
 

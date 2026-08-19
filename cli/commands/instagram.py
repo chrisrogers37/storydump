@@ -510,7 +510,7 @@ def list_instagram_accounts(include_inactive):
     service = InstagramAccountService()
     token_repo = TokenRepository()
 
-    accounts = service.list_accounts(include_inactive=include_inactive)
+    accounts = service.list_all_accounts_unscoped(include_inactive=include_inactive)
     active_account = service.get_active_account(settings.ADMIN_TELEGRAM_CHAT_ID)
 
     if not accounts:
