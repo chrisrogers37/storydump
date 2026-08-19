@@ -128,7 +128,9 @@ class TelegramNotificationService:
         )
 
         # Get account count for keyboard cycle behavior
-        account_count = self.service.ig_account_service.count_active_accounts()
+        account_count = self.service.ig_account_service.count_active_accounts(
+            tenant_chat_id
+        )
 
         # Build inline keyboard
         from src.services.core.telegram_utils import build_queue_action_keyboard

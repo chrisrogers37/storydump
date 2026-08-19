@@ -317,6 +317,27 @@ async def onboarding_add_account(request: Request, body: AddAccountRequest) -> d
         existing = account_service.get_account_by_meta_id(body.instagram_account_id)
 
         if existing:
+            # SECURITY (#900): the lookup above is deployment-wide — accounts
+            # carry no tenant column, so a meta id resolves ACROSS tenants.
+            # Without this gate a caller holding valid Meta credentials for
+            # someone else's account could re-stamp that row to their own
+            # chat: a cross-tenant WRITE, not a disclosure. The refusal reuses
+            # `_require_account_ownership`, which is the same derivation the
+            # Switch/Remove doors enforce and which deliberately raises the
+            # same "not found" shape whether the account exists or not — so
+            # this gate does not become the existence oracle it is closing.
+            try:
+                account_service._require_account_ownership(
+                    str(existing.id), body.chat_id, "add-account"
+                )
+            except ValueError:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Invalid credentials. Please verify your account ID "
+                        "and access token, then try again."
+                    ),
+                )
             account = account_service.update_account_token(
                 instagram_account_id=body.instagram_account_id,
                 access_token=body.access_token,
