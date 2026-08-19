@@ -158,6 +158,13 @@
       "label": "\u00a76b auth-plane RLS DDL (enable + grants + 6 policies)",
       "doc": "07-security-model.md",
       "ordinal": 4
+    },
+    {
+      "sha256": "c1b319d0a35114c9663a1163a9f93ff9ee27a4e50f6c4876a582e05c54af264b",
+      "class": "normative",
+      "label": "\u00a78 intent self-transition guard (#883) \u2014 function + BEFORE UPDATE OF state trigger",
+      "doc": "07-security-model.md",
+      "ordinal": 5
     }
   ],
   "policy_expansion": {

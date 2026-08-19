@@ -158,3 +158,44 @@ CREATE POLICY p_auth_sweep_states   ON oauth_states   FOR ALL TO svc_maintenance
 | `archive` schema (audit exports + M.3 snapshots) | created by the `02` §7-DDL block (F.2 schema landing); M.3 snapshot tables ALTER OWNER to svc_maintenance; exports live from S.4; access rules §4 |
 | service_tokens + CLI routing | X.2 (pass 5 — relocated from the deleted W.6) |
 | hygiene ratchet patterns (provider_account_ref out of logs) | F.6 (second pattern list on the same ratchet) |
+
+## §8. Intent self-transition guard (integrity, not auth — #883)
+
+**This block is not a security-model object, and its placement here is mechanical.** The advertised
+stream is the normative blocks of `02` then `07` in file order, and the target lineage must remain an
+*ordered positional prefix* of it. `060` completed F.2 and made the two equal, so the only place a new
+statement can land without displacing every `07` statement relative to its migration file is the end of
+the last doc. `02` §5 carries the pointer; this is where the SQL lives. If a later increment adds a
+third normative doc, this belongs in it.
+
+**What it fixes.** `trg_intent_guard` compares only under `NEW.state IS DISTINCT FROM OLD.state`, so a
+same-state write skips every check and succeeds as a no-op. That is inert in the ledger — no audit row,
+`entered_state_at` unmoved — and *not* inert to the caller. Under READ COMMITTED the loser of a
+concurrent transition blocks on the row lock, re-evaluates against the winner's committed row, and is
+told it succeeded with `rowcount = 1`, identical to the winner. Two callers believe they transitioned;
+one did. `rowcount` cannot separate them, so no service-side check recovers the distinction.
+
+**Why a second trigger.** A `BEFORE UPDATE FOR EACH ROW` trigger cannot distinguish "SET state to the
+same value" from "did not touch state" — both present as `NEW.state = OLD.state`, which is exactly why
+the existing guard is written with `IS DISTINCT FROM`. `UPDATE OF state` fires on the column being
+**named in the SET list** whatever its value; that is the discriminator, and checkpoint updates
+(`SET ig_permalink = …`) never name `state` and so never fire it.
+
+Postgres fires `BEFORE` row triggers in name order, and `tg_intent_guard` sorts first, so a terminal
+row still reports terminal immutability rather than this rule.
+
+```sql
+CREATE FUNCTION trg_intent_no_self_transition() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION 'same-state write to post_intent % (state %) — a transition that did not happen', OLD.id, OLD.state
+    USING ERRCODE = 'check_violation';
+END $$;
+
+CREATE TRIGGER tg_intent_no_self_transition BEFORE UPDATE OF state ON post_intents
+  FOR EACH ROW WHEN (NEW.state IS NOT DISTINCT FROM OLD.state)
+  EXECUTE FUNCTION trg_intent_no_self_transition();
+```
+
+Raising the transaction isolation level would also close this — at REPEATABLE READ and above the loser
+gets a serialization error — and is deliberately **not** the fix here: it is a fleet-wide change to
+every transaction L.0 opens, with its own retry semantics, and wants its own decision.
