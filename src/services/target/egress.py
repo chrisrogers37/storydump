@@ -31,7 +31,8 @@ stop when the budget is spent even if retries remain.
 Three independent refusals, because each catches what the others cannot:
 
 * **Host allowlist** — the host must be named. A denylist cannot enumerate the
-  internet, and provider egress is a closed set.
+  internet, and provider egress is a closed set. **This is the load-bearing
+  control**, for the reason in the next paragraph.
 * **Address class** — every resolved address is checked, and a hostname
   resolving to several addresses is refused if ANY is private. Checking only
   the first is the DNS-rebinding shape.
@@ -39,6 +40,33 @@ Three independent refusals, because each catches what the others cannot:
   followed, and each hop is re-validated from scratch: a redirect is an
   attacker-controlled URL, so validating only the original target would make
   the allowlist decorative.
+
+**KNOWN GAP, DEFERRED TO S.3 AND NAMED HERE RATHER THAN IMPLIED AWAY:
+validation and connection resolve independently.** :func:`validate_target`
+resolves the host and checks every address; ``httpx`` then performs its **own**
+resolution when it opens the connection, and nothing pins the validated
+addresses to that connection. So the address-class check proves *"this hostname
+resolved to a public address at that moment"*, **not** *"this connection went
+to a public address"* — a TOCTOU / DNS-rebind window. Verified against httpx
+0.28.1: the transport passes ``host=request.url.raw_host`` to the pool and
+exposes no resolver hook, so closing this needs a custom transport that
+resolves, pins, and still gets TLS SNI and verification right.
+
+Two consequences, both stated so no reader infers more than is true:
+
+1. **The host allowlist is the control actually holding here**, not the address
+   check. Six closed, high-reputation provider hostnames means an attacker
+   would need DNS control over Meta, Telegram or Google — not an injectable
+   target. That is why this is deferred rather than blocking, and it is also
+   why the allowlist must not be widened casually: admitting anything less
+   trusted moves this from theoretical to reachable.
+2. **It is scoped to S.3 and tracked as #871**, which `04` already charters
+   with *"SSRF-safe streaming"* and *"the full hostile-fake battery"* — the
+   plan doc names this specific carried item, so it is deferred visibly rather
+   than forgotten.
+
+The address-class check is kept regardless: it is real defence in depth against
+a misconfigured or compromised-at-rest allowlist entry, and it costs nothing.
 
 ## Transaction discipline is enforced from here
 
@@ -86,7 +114,15 @@ DEFAULT_ALLOWED_HOSTS = frozenset(
     }
 )
 
-#: Cap on a provider response body. An unbounded read is a memory DoS.
+#: Cap on a provider response body, enforced DURING the read.
+#:
+#: An unbounded read is a memory DoS, and a post-hoc length check does not
+#: prevent one — it reports it after the fact. The first version of this floor
+#: called `client.request()` and compared `len(response.content)`, but httpx
+#: materialises the whole body before returning (`Client.send`: `if not
+#: stream: response.read()`), so a gigabyte arrived in memory before the cap
+#: ever fired. `_read_capped` streams and abandons the read past the cap
+#: instead, which is what makes the rationale above true rather than aspirational.
 DEFAULT_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 
 
@@ -182,6 +218,27 @@ def validate_target(url: str, policy: EgressPolicy, *, resolver=_resolve_address
     return host
 
 
+async def _read_capped(response: httpx.Response, policy: EgressPolicy) -> bytes:
+    """Accumulate the body, abandoning the read past the cap.
+
+    The abort happens DURING iteration, so an oversized body is never fully
+    held: leaving the `client.stream(...)` block closes the connection. That is
+    the difference between BOUNDING memory and merely reporting afterwards that
+    it was exceeded — the distinction the previous post-hoc check missed.
+    """
+    chunks = []
+    total = 0
+    async for chunk in response.aiter_bytes():
+        total += len(chunk)
+        if policy.enforce_byte_cap and total > policy.max_response_bytes:
+            raise ResponseTooLarge(
+                f"response exceeded the {policy.max_response_bytes}-byte cap "
+                f"after {total} bytes — read abandoned (L.0/#857)"
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 async def request(
     client: httpx.AsyncClient,
     method: str,
@@ -223,37 +280,44 @@ async def request(
             else policy.timeout_s
         )
         try:
-            response = await client.request(
+            # STREAMED, not buffered. `client.request()` reads the whole body
+            # before returning (httpx 0.28.1 `Client.send`: `if not stream:
+            # response.read()`), so a post-hoc length check rejects an
+            # oversized body only AFTER materialising it — no memory bound at
+            # all, which is the very threat the cap names. Streaming lets the
+            # read be abandoned mid-body. `httpx.Limits` carries no
+            # response-size concept to lean on instead; checked.
+            async with client.stream(
                 method, url, timeout=timeout, follow_redirects=False, **kwargs
-            )
+            ) as response:
+                if response.is_redirect:
+                    # Headers arrive before the body; a redirect's body is
+                    # never read.
+                    location = response.headers.get("location", "")
+                    target = httpx.URL(url).join(location)
+                    if (
+                        policy.enforce_cross_host_redirect_block
+                        and target.host != httpx.URL(url).host
+                    ):
+                        raise EgressRefused(
+                            f"cross-host redirect {httpx.URL(url).host!r} -> "
+                            f"{target.host!r} refused (L.0/#857)"
+                        )
+                    # Same-host hop: re-validate, never inherit approval.
+                    validate_target(str(target), policy, resolver=resolver)
+                    url = str(target)
+                    continue
+
+                body = await _read_capped(response, policy)
+                return httpx.Response(
+                    response.status_code,
+                    headers=response.headers,
+                    content=body,
+                    request=response.request,
+                )
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             last_exc = exc
             continue
-
-        if response.is_redirect:
-            location = response.headers.get("location", "")
-            target = httpx.URL(url).join(location)
-            if (
-                policy.enforce_cross_host_redirect_block
-                and target.host != httpx.URL(url).host
-            ):
-                raise EgressRefused(
-                    f"cross-host redirect {httpx.URL(url).host!r} -> "
-                    f"{target.host!r} refused (L.0/#857)"
-                )
-            # Same-host hop: re-validate from scratch, never inherit approval.
-            validate_target(str(target), policy, resolver=resolver)
-            url = str(target)
-            continue
-
-        if policy.enforce_byte_cap:
-            body = response.content
-            if len(body) > policy.max_response_bytes:
-                raise ResponseTooLarge(
-                    f"response of {len(body)} bytes exceeds the "
-                    f"{policy.max_response_bytes}-byte cap — cut (L.0/#857)"
-                )
-        return response
 
     raise EgressBudgetExhausted(
         f"all {policy.max_attempts} attempts failed within the absolute budget "

@@ -338,3 +338,112 @@ class TestTransactionDisciplineIsEnforcedAtTheEgressPoint:
                 resolver=lambda h: ["93.184.216.34"],
             )
         assert resp.status_code == 200
+
+
+class CountingStream(httpx.AsyncByteStream):
+    """A body delivered in chunks, counting how many were actually pulled.
+
+    This is what makes the cap's mechanism testable at all. navi's review noted
+    — correctly, of the previous implementation — that `MockTransport` hands
+    back an already-materialised `Response`, so no test could distinguish
+    "capped during the read" from "capped after". Streaming changes that: the
+    chunk counter is the observable that separates the two.
+    """
+
+    def __init__(self, chunk: bytes, count: int):
+        self.chunk = chunk
+        self.count = count
+        self.pulled = 0
+
+    async def __aiter__(self):
+        for _ in range(self.count):
+            self.pulled += 1
+            yield self.chunk
+
+
+class StreamingTransport(httpx.AsyncBaseTransport):
+    def __init__(self, stream):
+        self.stream = stream
+
+    async def handle_async_request(self, request):
+        return httpx.Response(200, stream=self.stream)
+
+
+class TestTheByteCapBoundsMemoryRatherThanReportingAfterwards:
+    """navi's finding, closed. The cap must ABANDON the read, not measure it.
+
+    A post-hoc `len(response.content)` check rejects an oversized body only
+    after httpx has materialised the whole thing — which is the very DoS the
+    cap names. These tests assert on the chunk counter, so they fail if the
+    implementation ever reverts to buffering.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_read_STOPS_EARLY_rather_than_draining_the_body(self):
+        # 100 chunks of 1 KiB available; cap at 4 KiB.
+        stream = CountingStream(b"x" * 1024, 100)
+        async with httpx.AsyncClient(transport=StreamingTransport(stream)) as client:
+            with pytest.raises(ResponseTooLarge):
+                await request(
+                    client,
+                    "GET",
+                    ALLOWED,
+                    policy=EgressPolicy(max_response_bytes=4096),
+                    resolver=lambda h: ["93.184.216.34"],
+                )
+        assert stream.pulled <= 6, (
+            f"the body was drained to {stream.pulled} of 100 chunks before the cap "
+            "fired — the read is being measured, not bounded, which is the "
+            "post-hoc shape this test exists to prevent"
+        )
+        assert stream.pulled >= 5, "the cap fired before reaching its own limit"
+
+    @pytest.mark.asyncio
+    async def test_a_body_under_the_cap_is_fully_read(self):
+        """Positive control: early abort above, complete delivery below."""
+        stream = CountingStream(b"y" * 1024, 3)
+        async with httpx.AsyncClient(transport=StreamingTransport(stream)) as client:
+            resp = await request(
+                client,
+                "GET",
+                ALLOWED,
+                policy=EgressPolicy(max_response_bytes=4096),
+                resolver=lambda h: ["93.184.216.34"],
+            )
+        assert len(resp.content) == 3072 and stream.pulled == 3
+
+
+class TestTheRedirectRefusalSurvivesAChain:
+    """navi verified a 3-hop chain by hand and noted no shipped test asserts
+    it, so a refactor of the loop could silently lose it. This is that test."""
+
+    @pytest.mark.asyncio
+    async def test_a_cross_host_hop_is_refused_at_the_END_of_a_same_host_chain(self):
+        hops = []
+
+        async def chain(request):
+            hops.append(str(request.url))
+            n = len(hops)
+            if n == 1:
+                return httpx.Response(
+                    302, headers={"location": "https://graph.instagram.com/hop2"}
+                )
+            if n == 2:
+                return httpx.Response(
+                    302, headers={"location": "https://evil.example/hop3"}
+                )
+            return httpx.Response(200, text="should never be reached")
+
+        async with httpx.AsyncClient(transport=_transport(chain)) as client:
+            with pytest.raises(EgressRefused, match="cross-host redirect"):
+                await request(
+                    client,
+                    "GET",
+                    ALLOWED,
+                    policy=EgressPolicy(max_attempts=5),
+                    resolver=lambda h: ["93.184.216.34"],
+                )
+        assert len(hops) == 2, (
+            f"expected refusal at hop 2, saw {len(hops)} hops — the loop either "
+            "stopped early or followed the cross-host hop"
+        )

@@ -15,6 +15,9 @@ from sqlalchemy import text
 from src.config.settings import settings
 from src.services.target.unit_of_work import (
     MAX_OVERFLOW_SEAM,
+    POOL_RECYCLE_SEAM,
+    POOL_SIZE_SEAM,
+    POOL_TIMEOUT_SEAM,
     TenantContextRequired,
     UnitOfWork,
     async_database_url,
@@ -37,22 +40,70 @@ class TestTheEngineConfigAssertsTheSeam:
         engine = create_engine("postgresql+asyncpg://u:p@localhost:5432/none")
         assert engine.pool._max_overflow == MAX_OVERFLOW_SEAM
 
-    def test_the_seam_is_NOT_read_from_settings(self):
-        """R4's finding, pinned. `settings.DB_MAX_OVERFLOW` is 20 on this repo,
-        which silently makes the true ceiling (10+20)×5 = 150 rather than 50.
-        The async engine must ignore it — if this ever starts matching, someone
-        has wired the seam to the config and re-opened the defect."""
-        assert settings.DB_MAX_OVERFLOW != MAX_OVERFLOW_SEAM, (
-            "settings.DB_MAX_OVERFLOW now equals the seam, so this test can no "
-            "longer tell 'pinned to the seam' from 'read from settings'. Pin the "
-            "assertion to the literal instead of deleting it."
-        )
+    def test_the_seam_is_NOT_read_from_settings(self, monkeypatch):
+        """R4's finding, pinned BEHAVIOURALLY rather than by proxy.
+
+        The first version asserted `settings.DB_MAX_OVERFLOW != SEAM`, which
+        inverts the day someone remediates R4's finding by setting the config
+        to 0 — the test went red at exactly the moment the config became
+        right, in an unrelated PR authored by someone with no L.0 context. A
+        check that fails when the defect it guards is fixed is not pinning it.
+
+        Driving the setting to an arbitrary value and asserting the engine
+        still shows the literal proves "not read from settings" for ANY value,
+        including 0, and can never invert."""
+        monkeypatch.setattr(settings, "DB_MAX_OVERFLOW", 99)
         engine = create_engine("postgresql+asyncpg://u:p@localhost:5432/none")
-        assert engine.pool._max_overflow != settings.DB_MAX_OVERFLOW
+        assert engine.pool._max_overflow == MAX_OVERFLOW_SEAM
+
+    @pytest.mark.parametrize("setting_value", [0, 20, 99])
+    def test_it_holds_for_every_setting_value_including_the_remediated_one(
+        self, monkeypatch, setting_value
+    ):
+        """0 is in the set deliberately — it is the value that broke the old
+        form, so it is the one worth pinning."""
+        monkeypatch.setattr(settings, "DB_MAX_OVERFLOW", setting_value)
+        engine = create_engine("postgresql+asyncpg://u:p@localhost:5432/none")
+        assert engine.pool._max_overflow == MAX_OVERFLOW_SEAM
+
+    def test_the_saturation_policy_is_pinned_not_left_to_the_default(self):
+        """branden's finding. With `max_overflow=0` the pool cannot burst, so
+        `pool_timeout` IS the saturation policy — and SQLAlchemy's 30 s default
+        is pile-up, not the `01` H5 "slip-a-slot" the plan specifies. It is also
+        >= the egress floor's own budget, so the substrate could outlast the
+        callers it serves."""
+        engine = create_engine("postgresql+asyncpg://u:p@localhost:5432/none")
+        assert engine.pool._timeout == POOL_TIMEOUT_SEAM
+        assert POOL_TIMEOUT_SEAM < 10, "the seam must defer, not stall"
+
+    def test_the_connection_wait_is_shorter_than_the_shortest_provider_timeout(self):
+        """The coupling that makes 30 s wrong rather than merely large: a
+        caller must never spend its provider budget waiting for a connection."""
+        from src.services.target.egress import TIMEOUT_CLASSES
+
+        assert POOL_TIMEOUT_SEAM < min(TIMEOUT_CLASSES.values())
+
+    def test_pool_recycle_is_carried_across_from_the_legacy_engine(self):
+        """`src/config/database.py` sets 300 explicitly ALONGSIDE pre-ping.
+        Dropping to -1 (never) in the target engine would be a regression
+        nobody chose."""
+        engine = create_engine("postgresql+asyncpg://u:p@localhost:5432/none")
+        assert engine.pool._recycle == POOL_RECYCLE_SEAM
+
+    def test_pool_size_is_pinned_too_so_the_invariant_cannot_be_overridden(self):
+        """Half a pinned inequality is not pinned. With `pool_size` read from
+        settings, a production `DB_POOL_SIZE` override breaks
+        `Σ(replica × (pool + overflow)) = 50` and no gate can see it — the test
+        would read the same overridden value it is meant to be checking."""
+        monkeypatch_free = create_engine("postgresql+asyncpg://u:p@localhost:5432/none")
+        assert monkeypatch_free.pool.size() == POOL_SIZE_SEAM
 
     def test_the_invariant_arithmetic_matches_05(self):
         """`05`: Σ(replica × (pool + overflow)) = 3×(10+0) + 2×(10+0) = 50."""
-        per_replica = settings.DB_POOL_SIZE + MAX_OVERFLOW_SEAM
+        # From the SEAM literals, not from settings: reading the setting here
+        # means CI only ever sees its default, so a production override would
+        # break the invariant with the gate still green.
+        per_replica = POOL_SIZE_SEAM + MAX_OVERFLOW_SEAM
         assert 3 * per_replica + 2 * per_replica == 50
 
 
@@ -63,7 +114,7 @@ class TestAUoWWithoutTenantContextIsUnconstructible:
     existence, so no code path can hold one and reach a query with it.
     """
 
-    @pytest.mark.parametrize("bad", [None, "", 0, [], {}])
+    @pytest.mark.parametrize("bad", [None, "", 0, [], {}, "   ", "\n", "\t", " \n\t "])
     def test_construction_refuses_every_absent_tenant(self, bad):
         with pytest.raises(TenantContextRequired):
             UnitOfWork(engine=None, tenant_id=bad)
@@ -200,6 +251,84 @@ class TestTenantScopingAndGucHygieneUnderPoolReuse:
                     assert not (
                         await c.execute(text(f"SELECT current_setting('{guc}', true)"))
                     ).scalar(), f"{guc} leaked across pool reuse"
+        finally:
+            await engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_the_COMPOSED_path_refuses_a_provider_call_inside_a_real_uow(self):
+        """branden's finding: the two halves were each proven and the JOIN was
+        not. `test_a_provider_call_inside_an_open_transaction_fails` sets the
+        ContextVar by hand, and the flag test proves a UoW sets it — but no
+        test ran the shape a caller actually writes. Each half can keep passing
+        while the join breaks, so this runs a real UoW transaction against live
+        Postgres with a real `egress.request` through it."""
+        import httpx
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        from src.services.target.egress import EgressPolicy
+        from src.services.target.egress import request as egress_request
+        from src.services.target.unit_of_work import TransactionDisciplineError
+
+        engine = create_async_engine(
+            async_database_url(settings.TEST_DB_NAME), pool_size=1, max_overflow=0
+        )
+        try:
+            transport = httpx.MockTransport(lambda r: httpx.Response(200, text="ok"))
+            async with httpx.AsyncClient(transport=transport) as client:
+                async with unit_of_work(engine, TENANT_A).begin():
+                    with pytest.raises(TransactionDisciplineError):
+                        await egress_request(
+                            client,
+                            "GET",
+                            "https://graph.instagram.com/v1/me",
+                            policy=EgressPolicy(),
+                            resolver=lambda h: ["93.184.216.34"],
+                        )
+                # ... and the same call OUTSIDE the transaction goes out, so the
+                # refusal above is the discipline rather than a broken call.
+                resp = await egress_request(
+                    client,
+                    "GET",
+                    "https://graph.instagram.com/v1/me",
+                    policy=EgressPolicy(),
+                    resolver=lambda h: ["93.184.216.34"],
+                )
+                assert resp.status_code == 200
+        finally:
+            await engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_a_task_spawned_INSIDE_the_transaction_is_also_refused(self):
+        """The per-task bound, as an assertion rather than a docstring claim:
+        a child task inherits the context, so it is caught too."""
+        import asyncio as aio
+
+        import httpx
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        from src.services.target.egress import EgressPolicy
+        from src.services.target.egress import request as egress_request
+        from src.services.target.unit_of_work import TransactionDisciplineError
+
+        engine = create_async_engine(
+            async_database_url(settings.TEST_DB_NAME), pool_size=1, max_overflow=0
+        )
+        try:
+            transport = httpx.MockTransport(lambda r: httpx.Response(200, text="ok"))
+            async with httpx.AsyncClient(transport=transport) as client:
+                async with unit_of_work(engine, TENANT_A).begin():
+
+                    async def child():
+                        return await egress_request(
+                            client,
+                            "GET",
+                            "https://graph.instagram.com/v1/me",
+                            policy=EgressPolicy(),
+                            resolver=lambda h: ["93.184.216.34"],
+                        )
+
+                    with pytest.raises(TransactionDisciplineError):
+                        await aio.create_task(child())
         finally:
             await engine.dispose()
 

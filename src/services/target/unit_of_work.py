@@ -50,6 +50,16 @@ egress floor checks before any provider call. The flag is reset from a token in
 a `finally`, never by assignment: a bare reset loses the previous value under
 nesting, and a leaked flag would make every later provider call in the same
 task raise — a wrong-way failure that looks like the discipline working.
+
+**The flag is per-task, and that is the bound.** Measured: a call made directly
+inside the transaction, from a task spawned inside it, or via
+``asyncio.to_thread`` is refused — those are the shapes `02` §5 is about, where
+the connection is genuinely held across the call. A task spawned *before* the
+transaction opened, or work handed to ``run_in_executor`` with a fresh event
+loop, carries its own context and is not seen. Those are not violations in the
+same sense (such a task holds no connection of yours), but they are the edge,
+and "ContextVar, therefore per-task, therefore blind across an executor
+boundary" is obvious now and expensive to rediscover at L.6.
 """
 
 from __future__ import annotations
@@ -67,6 +77,42 @@ from src.exceptions.base import StorydumpError
 #: `05` seam value. Pinned, not configurable, not read from settings — see the
 #: module docstring for why `settings.DB_MAX_OVERFLOW` is deliberately ignored.
 MAX_OVERFLOW_SEAM = 0
+
+#: `05` seam value: 10 per replica, both lanes (`3×10 workers + 2×10 ingress`).
+#: Pinned for the same reason the overflow is. Leaving HALF the inequality
+#: configurable was the gap: with `pool_size` read from settings, a production
+#: `DB_POOL_SIZE` override silently breaks `Σ(replica × (pool + overflow)) = 50`
+#: and no gate can see it, because the test would read the same overridden
+#: value it is meant to be checking.
+POOL_SIZE_SEAM = 10
+
+#: How long a caller waits for a connection before being told there is none.
+#:
+#: **This is the saturation policy, and pinning `max_overflow` to 0 is what
+#: made it one.** With burst capacity the SQLAlchemy default (30 s) was rarely
+#: reached; with overflow at 0 the pool cannot burst, so every saturation
+#: episode lands here. The number did not change — its meaning did.
+#:
+#: 30 s is pile-up, not the `01` H5 behaviour the plan specifies
+#: ("visible backpressure, slip-a-slot rather than pile-up"): on a bulk replica
+#: with 50 task slots one episode parks up to 40 tasks for 30 s each, all still
+#: holding their slots. It is also >= `EgressPolicy.total_budget_s`, so a job
+#: could burn its entire provider budget waiting for a connection it never got
+#: — the substrate outlasting its own callers' timeouts.
+#:
+#: 3 s is derived, not picked: it sits **below the shortest egress timeout
+#: class** (`fast` = 5.0 s), so the substrate can never be the slowest thing in
+#: a call; and it is far above the expected wait, since `05`'s model puts
+#: DB-active demand at ~2.5 against a pool of 10 — a wait of any length is
+#: already the tail, so failing fast there defers work rather than losing it.
+POOL_TIMEOUT_SEAM = 3.0
+
+#: Carried across from the legacy sync engine (`src/config/database.py`), which
+#: sets it explicitly to 300 alongside pre-ping. `pool_pre_ping` catches a dead
+#: connection, but the legacy author judged recycling necessary IN ADDITION,
+#: and silently dropping to -1 (never) in the target engine would be a
+#: regression nobody chose.
+POOL_RECYCLE_SEAM = 300
 
 #: True while a UoW transaction is open in this task. Read by the egress floor.
 _IN_TRANSACTION: contextvars.ContextVar[bool] = contextvars.ContextVar(
@@ -106,8 +152,10 @@ def create_engine(url: Optional[str] = None) -> AsyncEngine:
     """The async engine, with `max_overflow` pinned to the `05` seam."""
     return create_async_engine(
         url or async_database_url(),
-        pool_size=settings.DB_POOL_SIZE,
+        pool_size=POOL_SIZE_SEAM,
         max_overflow=MAX_OVERFLOW_SEAM,
+        pool_timeout=POOL_TIMEOUT_SEAM,
+        pool_recycle=POOL_RECYCLE_SEAM,
         pool_pre_ping=True,
     )
 
@@ -131,7 +179,7 @@ class UnitOfWork:
         actor_user_id: Optional[str] = None,
         channel: Optional[str] = None,
     ):
-        if not tenant_id or not isinstance(tenant_id, str):
+        if not tenant_id or not isinstance(tenant_id, str) or not tenant_id.strip():
             raise TenantContextRequired(
                 "a unit of work requires a tenant id — `02` §7 RLS reads "
                 "app.tenant_id, so a tenant-less transaction would be a widened "
