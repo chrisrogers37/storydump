@@ -304,6 +304,7 @@ class TestTheBoundaryIsDerivedAndLoud:
             "057_grant_matrix_and_archive_schema.sql",
             "058_rls_and_policies.sql",
             "059_security_definer_doors.sql",
+            "060_auth_plane_tables.sql",
         ], (
             f"the target lineage is {above}. If you are landing the next F.2"
             " increment, add it here — deliberately, and at the end: arm (b)"

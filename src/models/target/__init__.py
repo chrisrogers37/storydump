@@ -48,6 +48,7 @@ from src.models.target.accounts_sources_media import (
     PostLock,
     ProviderQuarantine,
 )
+from src.models.target.auth_plane import OAuthState, ServiceToken, SessionToken
 from src.models.target.base import TargetBase
 from src.models.target.machinery import (
     ChannelOutbox,
@@ -86,6 +87,7 @@ __all__ = [
     "MediaItem",
     "MediaSource",
     "OAuthCredential",
+    "OAuthState",
     "OnboardingSession",
     "PostIntent",
     "PostIntentTransition",
@@ -93,6 +95,8 @@ __all__ = [
     "ProviderOperation",
     "ProviderQuarantine",
     "RateCounter",
+    "ServiceToken",
+    "SessionToken",
     "User",
     "UserIdentity",
     "Workspace",
