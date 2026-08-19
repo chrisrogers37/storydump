@@ -797,9 +797,12 @@ const App = {
                 // users to ignore this line, so a REAL failure of the same card
                 // would hide behind it. The setup checklist above is unaffected;
                 // it renders from local state and needs no admin rights.
-                container.innerHTML = err && err.status === 403
-                    ? '<div class="card-body-empty">Deployment health is available to administrators only.</div>'
-                    : '<div class="card-body-empty">Failed to load health data</div>';
+                const message = this._failureMessage(err, {
+                    refused: 'Deployment health is available to administrators only.',
+                    failed: 'Failed to load health data',
+                });
+                container.innerHTML =
+                    '<div class="card-body-empty">' + this._escapeHtml(message) + '</div>';
             }
         } finally {
             if (loadingEl) loadingEl.classList.add('hidden');
@@ -1723,7 +1726,8 @@ const App = {
 
         if (!response.ok) {
             const error = await response.json().catch(() => ({}));
-            const err = new Error(error.detail || 'Request failed');
+            // slowapi's 429 body is {"error": ...}, not {"detail": ...}
+            const err = new Error(error.detail || error.error || 'Request failed');
             // Callers need to distinguish a refusal from a fault. Matching on
             // the detail string would couple the UI to server copy; the status
             // is the stable signal. See #922.
@@ -1742,7 +1746,8 @@ const App = {
 
         if (!response.ok) {
             const error = await response.json().catch(() => ({}));
-            const err = new Error(error.detail || 'Request failed');
+            // slowapi's 429 body is {"error": ...}, not {"detail": ...}
+            const err = new Error(error.detail || error.error || 'Request failed');
             // Callers need to distinguish a refusal from a fault. Matching on
             // the detail string would couple the UI to server copy; the status
             // is the stable signal. See #922.
@@ -1751,6 +1756,34 @@ const App = {
         }
 
         return response.json();
+    },
+
+    /**
+     * Human message for a failed request, enumerated by HTTP status.
+     *
+     * The point is that these are DIFFERENT OUTCOMES, not shades of one
+     * failure — collapsing any two destroys information the user needs, which
+     * is what #922 and #928 were both about. 401 and 429 are actionable and
+     * mean the same thing on every card; the 403 refusal differs per card, so
+     * the caller supplies it.
+     *
+     * Anything else falls to `failed` deliberately: a 5xx, a 422 from a
+     * malformed URL, or a network error carrying no status at all are alike in
+     * the only way that matters here — the user cannot respond to them
+     * differently. That residual is the honest remainder of an enumeration,
+     * not a catch-all hiding named cases.
+     */
+    _failureMessage(err, { refused, failed }) {
+        switch (err && err.status) {
+            case 401:
+                return 'Your session has expired. Reopen this page from Telegram.';
+            case 403:
+                return refused;
+            case 429:
+                return 'Too many requests. Try again in a moment.';
+            default:
+                return failed;
+        }
     },
 
     /**
