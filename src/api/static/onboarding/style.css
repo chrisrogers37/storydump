@@ -498,6 +498,13 @@ h2 {
     opacity: 0.6;
 }
 
+/* Schedule is the one expandable card that also carries a pinned Edit button.
+   btn-card-edit is absolutely positioned to the card's bottom-right, so an
+   expanded body would render underneath it — reserve the button's row. */
+#home-card-schedule.expanded {
+    padding-bottom: 44px;
+}
+
 .home-divider {
     height: 1px;
     background: rgba(0, 0, 0, 0.08);

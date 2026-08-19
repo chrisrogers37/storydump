@@ -511,6 +511,7 @@ const App = {
             queue: () => this._loadQueueDetail('queue'),
             history: () => this._loadHistoryDetail(),
             media: () => this._loadMediaStats(),
+            schedule: () => this._loadSchedulePreview(),
         };
 
         const loader = loaders[cardId];
@@ -565,6 +566,90 @@ const App = {
         } finally {
             if (loadingEl) loadingEl.classList.add('hidden');
         }
+    },
+
+    /**
+     * Drop a cached schedule preview after anything that changes the cadence.
+     *
+     * Cadence, posting window and pause state are all inputs to the slot
+     * computation, so a preview rendered before the change is wrong the moment
+     * it lands. Reloads in place if the card is open, otherwise lets the next
+     * expand fetch it.
+     */
+    _invalidateSchedulePreview() {
+        this._cardDataLoaded['schedule'] = false;
+        const card = document.getElementById('home-card-schedule');
+        if (card && card.classList.contains('expanded')) {
+            this._cardDataLoaded['schedule'] = true;
+            this._loadSchedulePreview();
+        }
+    },
+
+    /**
+     * Fetch and render the upcoming schedule preview.
+     */
+    async _loadSchedulePreview() {
+        const loadingEl = document.getElementById('schedule-loading');
+        if (loadingEl) loadingEl.classList.remove('hidden');
+
+        try {
+            const params = new URLSearchParams({
+                init_data: this.initData,
+                chat_id: this.chatId,
+                slots: 5,
+            });
+            const data = await this._apiGet(
+                '/api/onboarding/analytics/schedule-preview?' + params.toString()
+            );
+            this._renderSchedulePreview(data);
+        } catch (err) {
+            const container = document.getElementById('schedule-preview-list');
+            if (container) {
+                container.innerHTML = '<div class="card-body-empty">Failed to load schedule</div>';
+            }
+        } finally {
+            if (loadingEl) loadingEl.classList.add('hidden');
+        }
+    },
+
+    /**
+     * Render upcoming slots. Reuses the queue row shape — both answer
+     * "what goes out next", so they should read the same.
+     */
+    _renderSchedulePreview(data) {
+        const container = document.getElementById('schedule-preview-list');
+        if (!container) return;
+
+        if (data && data.status === 'paused') {
+            container.innerHTML =
+                '<div class="card-body-empty">Posting is paused \u2014 no slots scheduled</div>';
+            return;
+        }
+
+        const slots = (data && data.slots) || [];
+        if (slots.length === 0) {
+            container.innerHTML = '<div class="card-body-empty">No upcoming slots</div>';
+            return;
+        }
+
+        let html = '';
+        for (const slot of slots) {
+            const time = new Date(slot.slot_time);
+            const category = slot.predicted_category;
+            html += '<div class="queue-item-row">' +
+                '<div class="item-row-left">' +
+                '<div class="item-row-name">' + this._formatShortDateTime(time) + '</div>' +
+                '<div class="item-row-meta">' +
+                (category ? this._escapeHtml(category) : 'Any category') +
+                '</div>' +
+                '</div>' +
+                '<div class="item-row-right">' +
+                '<div class="item-row-time">' + this._formatRelativeTime(time) + '</div>' +
+                '</div>' +
+                '</div>';
+        }
+
+        container.innerHTML = html;
     },
 
     /**
@@ -1092,6 +1177,7 @@ const App = {
                 } else {
                     this._setHomeBadge('schedule', 'connected', 'Active');
                 }
+                this._invalidateSchedulePreview();
             }
         } catch (err) {
             // Revert toggle on failure
@@ -1135,6 +1221,7 @@ const App = {
 
             // Update controls summary
             this._updateControlsSummary();
+            this._invalidateSchedulePreview();
         } catch (err) {
             // Revert on failure
             this.setupState[settingName] = current;
@@ -1720,6 +1807,41 @@ const App = {
         const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
             'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
         return months[date.getMonth()] + ' ' + date.getDate();
+    },
+
+    /**
+     * Day + clock time for a scheduled slot, in UTC.
+     *
+     * UTC rather than local because the posting window is configured in UTC
+     * and the Schedule card's own summary line states it — rendering slots in
+     * the viewer's zone would contradict the line directly above them.
+     */
+    _formatShortDateTime(date) {
+        const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+            'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+        const now = new Date();
+        const isSameUTCDay = (a, b) =>
+            a.getUTCFullYear() === b.getUTCFullYear() &&
+            a.getUTCMonth() === b.getUTCMonth() &&
+            a.getUTCDate() === b.getUTCDate();
+
+        const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+        let day;
+        if (isSameUTCDay(date, now)) {
+            day = 'Today';
+        } else if (isSameUTCDay(date, tomorrow)) {
+            day = 'Tomorrow';
+        } else {
+            day = months[date.getUTCMonth()] + ' ' + date.getUTCDate();
+        }
+
+        const h = date.getUTCHours();
+        const m = String(date.getUTCMinutes()).padStart(2, '0');
+        const suffix = h < 12 ? 'am' : 'pm';
+        let hour12 = h % 12;
+        if (hour12 === 0) hour12 = 12;
+
+        return day + ' ' + hour12 + ':' + m + suffix;
     },
 };
 
