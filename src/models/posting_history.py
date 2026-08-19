@@ -1,6 +1,15 @@
 """Posting history model - permanent audit log."""
 
-from sqlalchemy import Column, String, DateTime, Text, Boolean, CheckConstraint
+from sqlalchemy import (
+    Column,
+    String,
+    DateTime,
+    Text,
+    Boolean,
+    CheckConstraint,
+    Index,
+    text,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy import ForeignKey
 from datetime import datetime
@@ -83,6 +92,19 @@ class PostingHistory(Base):
         CheckConstraint(
             f"posting_method IN ({sql_in_list(PostingMethod)})",
             name="check_posting_method",
+        ),
+        # One history row per queue item. The application-level guard
+        # (HistoryRepository.create_idempotent) is read-then-insert, so a
+        # replayed finalize can still race it; this is the DB-level backstop
+        # that turns that race into a rejected write rather than a duplicate.
+        # Partial because queue_item_id is nullable by contract — history
+        # outlives the queue rows it came from, and a row whose queue link has
+        # been cleaned up carries NULL, of which there may be many.
+        Index(
+            "uq_posting_history_queue_item_id",
+            "queue_item_id",
+            unique=True,
+            postgresql_where=text("queue_item_id IS NOT NULL"),
         ),
     )
 
