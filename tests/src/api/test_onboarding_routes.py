@@ -3,7 +3,7 @@
 import pytest
 from unittest.mock import Mock, patch
 
-from tests.src.api.conftest import CHAT_ID, mock_validate, service_ctx
+from tests.src.api.conftest import TENANT_ID, CHAT_ID, mock_validate, service_ctx
 
 
 def _default_setup_state(**overrides):
@@ -468,6 +468,16 @@ class TestOnboardingStartIndexing:
         assert data["new"] == 42
         assert data["total_processed"] == 42
         settings_svc.set_onboarding_step.assert_called_once_with(CHAT_ID, "indexing")
+        # Call ARGUMENTS, not just invocation (#872): this mock sits exactly
+        # on top of where sync() discarded its tenant — an invocation-only
+        # assertion was structurally silent about that.
+        sync_svc.sync.assert_called_once_with(
+            source_type="google_drive",
+            source_root="abc123",
+            triggered_by="onboarding",
+            telegram_chat_id=CHAT_ID,
+            chat_settings_id=TENANT_ID,
+        )
 
     def test_indexing_without_folder_returns_400(self, client):
         """Start indexing without a configured folder returns 400."""

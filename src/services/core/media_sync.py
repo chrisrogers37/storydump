@@ -203,9 +203,15 @@ class MediaSyncService(BaseService):
         Raises:
             ValueError: If provider is not configured or source_type is invalid
         """
-        resolved_type, resolved_root, chat_settings_id = self._resolve_source_config(
+        resolved_type, resolved_root, resolved_owner = self._resolve_source_config(
             source_type, source_root, telegram_chat_id
         )
+        # An explicitly-passed tenant is never displaced (#872): the resolver
+        # only fills the owner when the caller did not name one. Rebinding the
+        # parameter here is exactly the silent discard that 500'd every
+        # dashboard/onboarding sync under the fail-closed repositories.
+        if chat_settings_id is None:
+            chat_settings_id = resolved_owner
 
         with self.track_execution(
             method_name="sync",
