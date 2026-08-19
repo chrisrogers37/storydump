@@ -242,7 +242,7 @@ class TestInstagramAPIService:
         mock_settings.INSTAGRAM_ACCOUNT_ID = "12345"
         mock_settings.FACEBOOK_APP_ID = "67890"
 
-        assert instagram_service.is_configured() is True
+        assert instagram_service.is_configured(-100123) is True
 
     @patch("src.services.integrations.instagram_credentials.settings")
     def test_is_configured_chat_disabled(self, mock_settings, instagram_service):
@@ -259,7 +259,7 @@ class TestInstagramAPIService:
         chat_settings = Mock(enable_instagram_api=False)
         instagram_service.settings_service.get_settings.return_value = chat_settings
 
-        assert instagram_service.is_configured() is False
+        assert instagram_service.is_configured(-100123) is False
 
     @patch("src.services.integrations.instagram_credentials.settings")
     def test_is_configured_falls_back_to_env_when_no_chat_row(
@@ -271,7 +271,7 @@ class TestInstagramAPIService:
         mock_settings.FACEBOOK_APP_ID = "67890"
         instagram_service.settings_service.get_settings.return_value = None
 
-        assert instagram_service.is_configured() is False
+        assert instagram_service.is_configured(-100123) is False
 
     @patch("src.services.integrations.instagram_credentials.settings")
     def test_is_configured_missing_account_id(self, mock_settings, instagram_service):
@@ -284,7 +284,7 @@ class TestInstagramAPIService:
         # No multi-account active, no legacy account ID
         instagram_service.account_service.get_active_account.return_value = None
 
-        assert instagram_service.is_configured() is False
+        assert instagram_service.is_configured(-100123) is False
 
     @patch("src.services.integrations.instagram_credentials.settings")
     def test_is_configured_missing_app_id(self, mock_settings, instagram_service):
@@ -293,7 +293,7 @@ class TestInstagramAPIService:
         mock_settings.INSTAGRAM_ACCOUNT_ID = "12345"
         mock_settings.FACEBOOK_APP_ID = None
 
-        assert instagram_service.is_configured() is False
+        assert instagram_service.is_configured(-100123) is False
 
     # ==================== _check_response_errors Tests ====================
 
@@ -477,7 +477,9 @@ class TestInstagramAPIService:
         )
 
         with pytest.raises(RateLimitError, match="daily publishing limit reached"):
-            await instagram_service.post_story("https://example.com/image.jpg")
+            await instagram_service.post_story(
+                "https://example.com/image.jpg", telegram_chat_id=-100123
+            )
 
     @pytest.mark.asyncio
     @patch("src.services.integrations.instagram_api.settings")
@@ -495,7 +497,9 @@ class TestInstagramAPIService:
         instagram_service.token_service.get_token.return_value = None
 
         with pytest.raises(TokenExpiredError, match="No valid Instagram token"):
-            await instagram_service.post_story("https://example.com/image.jpg")
+            await instagram_service.post_story(
+                "https://example.com/image.jpg", telegram_chat_id=-100123
+            )
 
     @pytest.mark.asyncio
     @patch("src.services.integrations.instagram_credentials.settings")
@@ -521,7 +525,9 @@ class TestInstagramAPIService:
         instagram_service.account_service.get_active_account.return_value = None
 
         with pytest.raises(TokenExpiredError, match="No valid Instagram token"):
-            await instagram_service.post_story("https://example.com/image.jpg")
+            await instagram_service.post_story(
+                "https://example.com/image.jpg", telegram_chat_id=-100123
+            )
 
     @pytest.mark.asyncio
     @patch("src.services.integrations.instagram_api.settings")
@@ -576,7 +582,9 @@ class TestInstagramAPIService:
             )
             mock_instance.get = AsyncMock(return_value=status_response)
 
-            result = await instagram_service.post_story("https://example.com/image.jpg")
+            result = await instagram_service.post_story(
+                "https://example.com/image.jpg", telegram_chat_id=-100123
+            )
 
         assert result["success"] is True
         assert result["story_id"] == "story_456"
@@ -620,7 +628,9 @@ class TestInstagramAPIService:
             )
 
             with pytest.raises(InstagramAPIError, match="Network error"):
-                await instagram_service.post_story("https://example.com/image.jpg")
+                await instagram_service.post_story(
+                    "https://example.com/image.jpg", telegram_chat_id=-100123
+                )
 
     # ==================== _create_media_container Tests ====================
 
@@ -1228,7 +1238,9 @@ class TestPostStoryContainerCallback:
         instagram_service._wait_for_container_ready = AsyncMock()
         instagram_service._publish_container = AsyncMock(return_value="story-1")
 
-        result = await instagram_service.post_story("https://example.com/img.jpg")
+        result = await instagram_service.post_story(
+            "https://example.com/img.jpg", telegram_chat_id=-100123
+        )
         assert result["story_id"] == "story-1"
 
 
