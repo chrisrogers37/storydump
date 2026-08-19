@@ -300,6 +300,7 @@ class TestTheBoundaryIsDerivedAndLoud:
             "053_identity_and_tenancy_tables.sql",
             "054_accounts_sources_media_tables.sql",
             "055_intent_ledger_tables.sql",
+            "056_machinery_tables.sql",
         ], (
             f"the target lineage is {above}. If you are landing the next F.2"
             " increment, add it here — deliberately, and at the end: arm (b)"

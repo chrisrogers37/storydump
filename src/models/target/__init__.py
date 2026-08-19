@@ -49,6 +49,13 @@ from src.models.target.accounts_sources_media import (
     ProviderQuarantine,
 )
 from src.models.target.base import TargetBase
+from src.models.target.machinery import (
+    ChannelOutbox,
+    CommandDedup,
+    Job,
+    ProviderOperation,
+    RateCounter,
+)
 from src.models.target.intent_ledger import (
     AuditEvent,
     CategoryPostCaseMix,
@@ -71,8 +78,11 @@ __all__ = [
     "AuditEvent",
     "CategoryPostCaseMix",
     "ChannelBinding",
+    "ChannelOutbox",
+    "CommandDedup",
     "DailyPostCount",
     "IgAccount",
+    "Job",
     "MediaItem",
     "MediaSource",
     "OAuthCredential",
@@ -80,7 +90,9 @@ __all__ = [
     "PostIntent",
     "PostIntentTransition",
     "PostLock",
+    "ProviderOperation",
     "ProviderQuarantine",
+    "RateCounter",
     "User",
     "UserIdentity",
     "Workspace",
