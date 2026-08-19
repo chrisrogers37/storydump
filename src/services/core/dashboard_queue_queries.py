@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Optional
 
+from src.utils.datetime_utils import ensure_utc
+
 if TYPE_CHECKING:
     from src.services.core.dashboard_service import DashboardService
 
@@ -44,7 +46,7 @@ class QueueDashboardQueries:
         for item, file_name, category in listed_rows:
             items.append(
                 {
-                    "scheduled_for": item.scheduled_for.isoformat(),
+                    "scheduled_for": ensure_utc(item.scheduled_for).isoformat(),
                     "media_name": file_name if file_name else "Unknown",
                     "category": (category if category else None) or "uncategorized",
                     "status": item.status,
@@ -58,13 +60,13 @@ class QueueDashboardQueries:
 
         last_post_at = None
         if today_posts:
-            last_post_at = today_posts[0].posted_at.isoformat()
+            last_post_at = ensure_utc(today_posts[0].posted_at).isoformat()
         else:
             recent = self.service.history_repo.get_recent_posts(
                 hours=720, chat_settings_id=chat_settings_id, limit=1
             )
             if recent:
-                last_post_at = recent[0].posted_at.isoformat()
+                last_post_at = ensure_utc(recent[0].posted_at).isoformat()
 
         return {
             "items": items,
@@ -86,7 +88,7 @@ class QueueDashboardQueries:
         for item, file_name, category in rows:
             items.append(
                 {
-                    "scheduled_for": item.scheduled_for.isoformat(),
+                    "scheduled_for": ensure_utc(item.scheduled_for).isoformat(),
                     "file_name": file_name if file_name else "Unknown",
                     "category": (category if category else None) or "-",
                     "status": item.status,

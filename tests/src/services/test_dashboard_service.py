@@ -106,7 +106,9 @@ class TestGetQueueDetail:
         result = dashboard_service.get_queue_detail(chat_settings_id="tenant-uuid-1")
 
         assert result["posts_today"] == 1
-        assert result["last_post_at"] == "2026-03-01T14:00:00"
+        # Offset-bearing since #918: the naive form was parsed as LOCAL by the
+        # browser, which is what rendered already-posted items as "in 3h".
+        assert result["last_post_at"] == "2026-03-01T14:00:00+00:00"
 
     def test_respects_limit(self, dashboard_service):
         """get_queue_detail pushes limit to repo and uses count for total."""
@@ -234,7 +236,8 @@ class TestGetPendingQueueItems:
         assert result[0]["file_name"] == "queue_list.jpg"
         assert result[0]["category"] == "memes"
         assert result[0]["status"] == "pending"
-        assert result[0]["scheduled_for"] == "2026-03-01T14:00:00"
+        # Offset-bearing since #918 — see the note in TestGetQueueDetail.
+        assert result[0]["scheduled_for"] == "2026-03-01T14:00:00+00:00"
 
         # Verify media_repo.get_by_id was NOT called (no N+1)
         dashboard_service.media_repo.get_by_id.assert_not_called()

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from src.utils.datetime_utils import ensure_utc
+
 
 if TYPE_CHECKING:
     from src.services.core.dashboard_service import DashboardService
@@ -28,7 +30,7 @@ class HistoryDashboardQueries:
         for item, file_name, category in history_rows:
             items.append(
                 {
-                    "posted_at": item.posted_at.isoformat(),
+                    "posted_at": ensure_utc(item.posted_at).isoformat(),
                     "media_name": file_name if file_name else "Unknown",
                     "category": (category if category else None) or "uncategorized",
                     "status": item.status,
@@ -257,8 +259,6 @@ class HistoryDashboardQueries:
         """
         import random
         from datetime import datetime, timedelta, timezone
-
-        from src.utils.datetime_utils import ensure_utc
 
         with self.service.track_execution(
             "get_schedule_preview",
