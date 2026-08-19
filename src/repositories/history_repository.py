@@ -7,6 +7,7 @@ from sqlalchemy import func, and_, case
 
 from src.repositories.base_repository import BaseRepository
 from src.repositories.tenant_scope import TenantScope
+from src.utils.datetime_utils import naive_utc
 from src.models.enums import PostingMethod
 from src.models.posting_history import PostingHistory
 
@@ -72,7 +73,7 @@ class HistoryRepository(BaseRepository):
             query = query.filter(PostingHistory.status == status)
 
         if days:
-            since = datetime.now(timezone.utc) - timedelta(days=days)
+            since = naive_utc(datetime.now(timezone.utc) - timedelta(days=days))
             query = query.filter(PostingHistory.posted_at >= since)
 
         query = query.order_by(PostingHistory.posted_at.desc())
@@ -162,7 +163,7 @@ class HistoryRepository(BaseRepository):
         limit: Optional[int] = None,
     ) -> List[PostingHistory]:
         """Get posts from the last N hours."""
-        since = datetime.now(timezone.utc) - timedelta(hours=hours)
+        since = naive_utc(datetime.now(timezone.utc) - timedelta(hours=hours))
         query = (
             self._tenant_query(PostingHistory, chat_settings_id)
             .filter(PostingHistory.posted_at >= since)
@@ -190,6 +191,9 @@ class HistoryRepository(BaseRepository):
         Returns:
             Count of posts matching criteria
         """
+        # `posted_at` is a naive column; an aware cutoff from a caller would
+        # be cast using the SESSION timezone and silently shift the window (#909).
+        since = naive_utc(since)
         result = (
             self._tenant_query(PostingHistory, chat_settings_id)
             .with_entities(func.count(PostingHistory.id))
@@ -232,7 +236,7 @@ class HistoryRepository(BaseRepository):
 
         Returns: {"posted": N, "skipped": N, "rejected": N, "failed": N}
         """
-        since = datetime.now(timezone.utc) - timedelta(days=days)
+        since = naive_utc(datetime.now(timezone.utc) - timedelta(days=days))
         rows = (
             self._tenant_query(PostingHistory, chat_settings_id)
             .with_entities(PostingHistory.status, func.count(PostingHistory.id))
@@ -250,7 +254,7 @@ class HistoryRepository(BaseRepository):
 
         Returns: {"instagram_api": N, "telegram_manual": N}
         """
-        since = datetime.now(timezone.utc) - timedelta(days=days)
+        since = naive_utc(datetime.now(timezone.utc) - timedelta(days=days))
         rows = (
             self._tenant_query(PostingHistory, chat_settings_id)
             .with_entities(PostingHistory.posting_method, func.count(PostingHistory.id))
@@ -276,7 +280,7 @@ class HistoryRepository(BaseRepository):
         Returns: ``{"instagram_api": {"posted": N, "failed": M, ...},
                    "telegram_manual": {...}}``
         """
-        since = datetime.now(timezone.utc) - timedelta(days=days)
+        since = naive_utc(datetime.now(timezone.utc) - timedelta(days=days))
         rows = (
             self._tenant_query(PostingHistory, chat_settings_id)
             .with_entities(
@@ -307,7 +311,7 @@ class HistoryRepository(BaseRepository):
         """
         from sqlalchemy import cast, Date
 
-        since = datetime.now(timezone.utc) - timedelta(days=days)
+        since = naive_utc(datetime.now(timezone.utc) - timedelta(days=days))
         rows = (
             self._tenant_query(PostingHistory, chat_settings_id)
             .with_entities(
@@ -341,7 +345,7 @@ class HistoryRepository(BaseRepository):
         """
         from sqlalchemy import extract
 
-        since = datetime.now(timezone.utc) - timedelta(days=days)
+        since = naive_utc(datetime.now(timezone.utc) - timedelta(days=days))
         rows = (
             self._tenant_query(PostingHistory, chat_settings_id)
             .with_entities(
@@ -366,7 +370,7 @@ class HistoryRepository(BaseRepository):
         """
         from src.models.media_item import MediaItem
 
-        since = datetime.now(timezone.utc) - timedelta(days=days)
+        since = naive_utc(datetime.now(timezone.utc) - timedelta(days=days))
         coalesced_category = func.coalesce(MediaItem.category, "uncategorized")
         rows = (
             self._tenant_query(PostingHistory, chat_settings_id)
@@ -408,7 +412,7 @@ class HistoryRepository(BaseRepository):
         """
         from sqlalchemy import extract
 
-        since = datetime.now(timezone.utc) - timedelta(days=days)
+        since = naive_utc(datetime.now(timezone.utc) - timedelta(days=days))
         rows = (
             self._tenant_query(PostingHistory, chat_settings_id)
             .with_entities(
@@ -449,7 +453,7 @@ class HistoryRepository(BaseRepository):
         """
         from sqlalchemy import extract
 
-        since = datetime.now(timezone.utc) - timedelta(days=days)
+        since = naive_utc(datetime.now(timezone.utc) - timedelta(days=days))
         latency_expr = func.extract(
             "epoch", PostingHistory.posted_at - PostingHistory.queue_created_at
         )
@@ -550,7 +554,7 @@ class HistoryRepository(BaseRepository):
         """
         from src.models.user import User
 
-        since = datetime.now(timezone.utc) - timedelta(days=days)
+        since = naive_utc(datetime.now(timezone.utc) - timedelta(days=days))
         latency_expr = func.extract(
             "epoch", PostingHistory.posted_at - PostingHistory.queue_created_at
         )
@@ -638,7 +642,7 @@ class HistoryRepository(BaseRepository):
             "Saturday",
         ]
 
-        since = datetime.now(timezone.utc) - timedelta(days=days)
+        since = naive_utc(datetime.now(timezone.utc) - timedelta(days=days))
         rows = (
             self._tenant_query(PostingHistory, chat_settings_id)
             .with_entities(
@@ -689,6 +693,9 @@ class HistoryRepository(BaseRepository):
             ``failed``, ``api_posts``, ``manual_posts``. Sorted by ``total``
             descending so the busiest tenant reads first.
         """
+        # Naive column, caller-supplied bounds — see count_by_method (#909).
+        since = naive_utc(since)
+        until = naive_utc(until)
         query = self.db.query(
             PostingHistory.chat_settings_id.label("chat_settings_id"),
             func.count(PostingHistory.id).label("total"),

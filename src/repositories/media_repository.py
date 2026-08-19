@@ -11,6 +11,7 @@ from src.repositories.tenant_scope import (
     require_tenant_context,
     tenant_value,
 )
+from src.utils.datetime_utils import naive_utc
 from src.models.media_item import MediaItem
 from src.models.posting_queue import PostingQueue
 from src.models.media_lock import MediaPostingLock
@@ -649,7 +650,7 @@ class MediaRepository(BaseRepository):
         """
         from datetime import timezone
 
-        cutoff = datetime.now(timezone.utc) - timedelta(days=min_age_days)
+        cutoff = naive_utc(datetime.now(timezone.utc) - timedelta(days=min_age_days))
         coalesced = func.coalesce(MediaItem.category, "uncategorized")
         rows = (
             self._tenant_query(MediaItem, chat_settings_id)
