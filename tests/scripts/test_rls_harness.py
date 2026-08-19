@@ -227,22 +227,34 @@ class TestTheRuntimeLoginIsConfined:
         if the login had an attribute that explains the result instead."""
         row = fetch_one(
             confined["login_dsn"],
-            "SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user",
+            "SELECT current_user, rolsuper, rolbypassrls"
+            " FROM pg_roles WHERE rolname = current_user",
         )
-        assert row == (False, False)
+        assert row[0] == confined["login"], f"wrong subject answered: {row[0]}"
+        assert row[1:] == (False, False)
 
     def test_the_owner_is_also_neither_superuser_nor_bypassrls(
-        self, confined, owner_db
+        self, confined, owner_db, owner_actor
     ):
         """Owner-side analogue (#789 review minor): the owner's read-through is
         the PREMISE here, so the control that its bypass comes from OWNERSHIP —
         not from a role attribute that would explain the result trivially —
-        matters more on this side than on the login's."""
+        matters more on this side than on the login's.
+
+        Subject-identity-gated (#852 review): the first version read
+        ``owner_db`` directly, which authenticates as the ADMIN — a real
+        assertion about the wrong role, green here only because this host's
+        admin is not superuser, red in CI where stock POSTGRES_USER is. The
+        query now runs AS the owner and asserts who answered before asserting
+        anything about them — a gate must verify its own subject (the R8
+        rule, one layer down)."""
         row = fetch_one(
-            owner_db,
-            "SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user",
+            as_user(owner_db, owner_actor),
+            "SELECT current_user, rolsuper, rolbypassrls"
+            " FROM pg_roles WHERE rolname = current_user",
         )
-        assert row == (False, False)
+        assert row[0] == owner_actor, f"wrong subject answered: {row[0]}"
+        assert row[1:] == (False, False)
 
     def test_an_unset_tenant_guc_raises_rather_than_returning_rows(self, confined):
         """It fails closed by ERRORING, not by returning an empty set — and the

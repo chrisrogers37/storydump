@@ -573,7 +573,12 @@ def replay_advertised_stream(db_dsn: str, owner_actor: str, admin_conn) -> str:
     which now imports it, per the window_actor rule below)."""
     import psycopg2 as _psycopg2
 
-    from scripts.advertised_ddl import DEFAULT_DOCS, DEFAULT_MANIFEST, build_stream, load_manifest
+    from scripts.advertised_ddl import (
+        DEFAULT_DOCS,
+        DEFAULT_MANIFEST,
+        build_stream,
+        load_manifest,
+    )
 
     manifest = load_manifest(DEFAULT_MANIFEST)
     stream = build_stream(DEFAULT_DOCS, manifest)
@@ -639,7 +644,14 @@ def seed_workspace_chain(conn, name: str) -> dict:
         )
         intent = cur.fetchone()[0]
     conn.commit()
-    return {"user": user, "ws": ws, "src": src, "iga": iga, "media": mi, "intent": intent}
+    return {
+        "user": user,
+        "ws": ws,
+        "src": src,
+        "iga": iga,
+        "media": mi,
+        "intent": intent,
+    }
 
 
 def window_actor(db_dsn: str, owner_actor: str, admin_conn) -> str:
