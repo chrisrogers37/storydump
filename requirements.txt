@@ -6,6 +6,9 @@ pydantic-settings==2.14.2
 # Database
 sqlalchemy==2.0.49
 psycopg2-binary==2.9.12
+# L.0 (#857): SQLAlchemy's async Postgres driver for the target-side unit of
+# work. The legacy sync engine keeps psycopg2; the two coexist until M.3.
+asyncpg==0.31.0
 alembic==1.18.4
 
 # Telegram
