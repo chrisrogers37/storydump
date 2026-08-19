@@ -5,6 +5,12 @@ from datetime import datetime, timedelta
 from sqlalchemy import and_
 
 from src.repositories.base_repository import BaseRepository
+from src.repositories.tenant_scope import (
+    SYSTEM_SCOPE,
+    TenantScope,
+    require_tenant_context,
+    tenant_value,
+)
 from src.models.posting_queue import PostingQueue
 from src.utils.logger import logger
 
@@ -16,9 +22,10 @@ class QueueRepository(BaseRepository):
         super().__init__()
 
     def get_by_id(
-        self, queue_id: str, chat_settings_id: Optional[str] = None
+        self, queue_id: str, chat_settings_id: TenantScope
     ) -> Optional[PostingQueue]:
         """Get queue item by ID."""
+        require_tenant_context(chat_settings_id, where="queue.get_by_id")
         result = (
             self._tenant_query(PostingQueue, chat_settings_id)
             .filter(PostingQueue.id == queue_id)
@@ -64,7 +71,7 @@ class QueueRepository(BaseRepository):
         return queue_item
 
     def get_by_id_prefix(
-        self, id_prefix: str, chat_settings_id: Optional[str] = None
+        self, id_prefix: str, chat_settings_id: TenantScope
     ) -> Optional[PostingQueue]:
         """Get queue item by ID prefix (for shortened callback data).
 
@@ -78,6 +85,7 @@ class QueueRepository(BaseRepository):
         Returns:
             PostingQueue item or None if not found
         """
+        require_tenant_context(chat_settings_id, where="queue.get_by_id_prefix")
         from sqlalchemy import cast, String
 
         result = (
@@ -89,9 +97,10 @@ class QueueRepository(BaseRepository):
         return result
 
     def get_by_media_id(
-        self, media_id: str, chat_settings_id: Optional[str] = None
+        self, media_id: str, chat_settings_id: TenantScope
     ) -> Optional[PostingQueue]:
         """Get queue item by media ID."""
+        require_tenant_context(chat_settings_id, where="queue.get_by_media_id")
         result = (
             self._tenant_query(PostingQueue, chat_settings_id)
             .filter(PostingQueue.media_item_id == media_id)
@@ -101,13 +110,14 @@ class QueueRepository(BaseRepository):
         return result
 
     def get_pending(
-        self, limit: Optional[int] = None, chat_settings_id: Optional[str] = None
+        self, *, limit: Optional[int] = None, chat_settings_id: TenantScope
     ) -> List[PostingQueue]:
         """Get pending queue items ready to process.
 
         Uses FOR UPDATE SKIP LOCKED to prevent concurrent scheduler
         instances from claiming the same rows.
         """
+        require_tenant_context(chat_settings_id, where="queue.get_pending")
         now = datetime.utcnow()
         query = self._tenant_query(PostingQueue, chat_settings_id).filter(
             and_(PostingQueue.status == "pending", PostingQueue.scheduled_for <= now)
@@ -122,9 +132,10 @@ class QueueRepository(BaseRepository):
         return query.all()
 
     def get_all(
-        self, status: Optional[str] = None, chat_settings_id: Optional[str] = None
+        self, *, status: Optional[str] = None, chat_settings_id: TenantScope
     ) -> List[PostingQueue]:
         """Get all queue items, optionally filtered by status."""
+        require_tenant_context(chat_settings_id, where="queue.get_all")
         query = self._tenant_query(PostingQueue, chat_settings_id)
 
         if status:
@@ -137,13 +148,15 @@ class QueueRepository(BaseRepository):
     def get_all_with_media(
         self,
         status: Optional[str] = None,
-        chat_settings_id: Optional[str] = None,
+        *,
+        chat_settings_id: TenantScope,
         limit: Optional[int] = None,
     ) -> list:
         """Get queue items with joined media info (file_name, category).
 
         Returns list of (PostingQueue, file_name, category) tuples.
         """
+        require_tenant_context(chat_settings_id, where="queue.get_all_with_media")
         from src.models.media_item import MediaItem
 
         query = (
@@ -165,9 +178,10 @@ class QueueRepository(BaseRepository):
     def count_by_status(
         self,
         statuses: list[str],
-        chat_settings_id: Optional[str] = None,
+        chat_settings_id: TenantScope,
     ) -> int:
         """Count items matching any of the given statuses."""
+        require_tenant_context(chat_settings_id, where="queue.count_by_status")
         result = (
             self._tenant_query(PostingQueue, chat_settings_id)
             .filter(PostingQueue.status.in_(statuses))
@@ -176,8 +190,9 @@ class QueueRepository(BaseRepository):
         self.end_read_transaction()
         return result
 
-    def count_pending(self, chat_settings_id: Optional[str] = None) -> int:
+    def count_pending(self, chat_settings_id: TenantScope) -> int:
         """Count number of pending items."""
+        require_tenant_context(chat_settings_id, where="queue.count_pending")
         result = (
             self._tenant_query(PostingQueue, chat_settings_id)
             .filter(PostingQueue.status == "pending")
@@ -187,9 +202,10 @@ class QueueRepository(BaseRepository):
         return result
 
     def get_oldest_pending(
-        self, chat_settings_id: Optional[str] = None
+        self, chat_settings_id: TenantScope
     ) -> Optional[PostingQueue]:
         """Get the oldest pending item."""
+        require_tenant_context(chat_settings_id, where="queue.get_oldest_pending")
         result = (
             self._tenant_query(PostingQueue, chat_settings_id)
             .filter(PostingQueue.status == "pending")
@@ -203,13 +219,14 @@ class QueueRepository(BaseRepository):
         self,
         media_item_id: str,
         scheduled_for: datetime,
-        chat_settings_id: Optional[str] = None,
+        chat_settings_id: TenantScope,
     ) -> PostingQueue:
         """Create a new queue item."""
+        require_tenant_context(chat_settings_id, where="queue.create")
         queue_item = PostingQueue(
             media_item_id=media_item_id,
             scheduled_for=scheduled_for,
-            chat_settings_id=chat_settings_id,
+            chat_settings_id=tenant_value(chat_settings_id),
         )
         self.db.add(queue_item)
         self.db.commit()
@@ -258,7 +275,7 @@ class QueueRepository(BaseRepository):
                 f"(missing, or current status not in {allowed})"
             )
             return None
-        return self.get_by_id(queue_id)
+        return self.get_by_id(queue_id, chat_settings_id=SYSTEM_SCOPE)
 
     def update_status(self, queue_id: str, status: str) -> Optional[PostingQueue]:
         """Update queue item status unconditionally (see :meth:`transition` for
@@ -275,7 +292,7 @@ class QueueRepository(BaseRepository):
         the publish leaves a recoverable, non-duplicating row rather than
         re-serving the media.
         """
-        queue_item = self.get_by_id(queue_id)
+        queue_item = self.get_by_id(queue_id, chat_settings_id=SYSTEM_SCOPE)
         if queue_item:
             queue_item.status = "publishing"
             queue_item.instagram_container_id = container_id
@@ -287,7 +304,7 @@ class QueueRepository(BaseRepository):
         self, queue_id: str, scheduled_for: datetime
     ) -> PostingQueue:
         """Update queue item scheduled time."""
-        queue_item = self.get_by_id(queue_id)
+        queue_item = self.get_by_id(queue_id, chat_settings_id=SYSTEM_SCOPE)
         if queue_item:
             queue_item.scheduled_for = scheduled_for
             self.db.commit()
@@ -306,7 +323,7 @@ class QueueRepository(BaseRepository):
         ``publishing`` row keeps its status (the IG claim anchor stays
         authoritative, #549), as does terminal ``failed``.
         """
-        queue_item = self.get_by_id(queue_id)
+        queue_item = self.get_by_id(queue_id, chat_settings_id=SYSTEM_SCOPE)
         if queue_item:
             queue_item.telegram_message_id = message_id
             queue_item.telegram_chat_id = chat_id
@@ -318,7 +335,7 @@ class QueueRepository(BaseRepository):
 
     def delete(self, queue_id: str) -> bool:
         """Delete a queue item (after moving to history)."""
-        queue_item = self.get_by_id(queue_id)
+        queue_item = self.get_by_id(queue_id, chat_settings_id=SYSTEM_SCOPE)
         if queue_item:
             self.db.delete(queue_item)
             self.db.commit()
@@ -551,8 +568,9 @@ class QueueRepository(BaseRepository):
         self.end_read_transaction()
         return result
 
-    def delete_all_pending(self, chat_settings_id: Optional[str] = None) -> int:
+    def delete_all_pending(self, chat_settings_id: TenantScope) -> int:
         """Delete all pending queue items. Returns count of deleted items."""
+        require_tenant_context(chat_settings_id, where="queue.delete_all_pending")
         count = (
             self._tenant_query(PostingQueue, chat_settings_id)
             .filter(PostingQueue.status == "pending")

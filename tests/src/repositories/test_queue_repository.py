@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from src.repositories.queue_repository import QueueRepository
 from src.models.posting_queue import PostingQueue
+from src.repositories.tenant_scope import SYSTEM_SCOPE
 
 
 @pytest.fixture
@@ -44,6 +45,7 @@ class TestQueueRepository:
         queue_repo.create(
             media_item_id=media_item_id,
             scheduled_for=scheduled_time,
+            chat_settings_id=SYSTEM_SCOPE,
         )
 
         mock_db.add.assert_called_once()
@@ -67,7 +69,7 @@ class TestQueueRepository:
         mock_query.with_for_update.return_value = mock_query
         mock_query.all.return_value = mock_items
 
-        result = queue_repo.get_pending()
+        result = queue_repo.get_pending(chat_settings_id=SYSTEM_SCOPE)
 
         assert len(result) == 2
         mock_db.query.assert_called_with(PostingQueue)
@@ -137,7 +139,7 @@ class TestQueueRepository:
         mock_query = mock_db.query.return_value
         mock_query.all.return_value = mock_items
 
-        result = queue_repo.get_all()
+        result = queue_repo.get_all(chat_settings_id=SYSTEM_SCOPE)
 
         assert len(result) == 2
         mock_db.query.assert_called_with(PostingQueue)
@@ -148,7 +150,7 @@ class TestQueueRepository:
         mock_item = MagicMock(media_item_id=media_id)
         mock_db.query.return_value.filter.return_value.first.return_value = mock_item
 
-        result = queue_repo.get_by_media_id(media_id)
+        result = queue_repo.get_by_media_id(media_id, chat_settings_id=SYSTEM_SCOPE)
 
         assert result is mock_item
         assert result.media_item_id == media_id
@@ -157,7 +159,7 @@ class TestQueueRepository:
         """Test counting pending items."""
         mock_db.query.return_value.filter.return_value.count.return_value = 5
 
-        result = queue_repo.count_pending()
+        result = queue_repo.count_pending(chat_settings_id=SYSTEM_SCOPE)
 
         assert result == 5
 
@@ -177,14 +179,14 @@ class TestQueueRepositoryTenantFiltering:
             mock_filter.assert_called_once()
             assert mock_filter.call_args[0][2] == self.TENANT_ID
 
-    def test_get_by_id_without_tenant(self, queue_repo, mock_db):
-        """get_by_id works without chat_settings_id (backward compat)."""
+    def test_get_by_id_with_system_scope(self, queue_repo, mock_db):
+        """Deliberate cross-tenant read: explicit SYSTEM_SCOPE, never omission (F.1/#841)."""
         with patch.object(
             queue_repo, "_apply_tenant_filter", wraps=queue_repo._apply_tenant_filter
         ) as mock_filter:
-            queue_repo.get_by_id("some-id")
+            queue_repo.get_by_id("some-id", chat_settings_id=SYSTEM_SCOPE)
             mock_filter.assert_called_once()
-            assert mock_filter.call_args[0][2] is None
+            assert mock_filter.call_args[0][2] is SYSTEM_SCOPE
 
     def test_get_by_id_prefix_with_tenant(self, queue_repo, mock_db):
         """get_by_id_prefix passes chat_settings_id through."""
@@ -260,6 +262,7 @@ class TestQueueRepositoryTenantFiltering:
         queue_repo.create(
             media_item_id="media-123",
             scheduled_for=scheduled_time,
+            chat_settings_id=SYSTEM_SCOPE,
         )
 
         added_item = mock_db.add.call_args[0][0]
@@ -289,7 +292,7 @@ class TestGetAllWithMedia:
         mock_query.order_by.return_value = mock_query
         mock_query.all.return_value = [(mock_item, "story.jpg", "memes")]
 
-        result = queue_repo.get_all_with_media(status="pending")
+        result = queue_repo.get_all_with_media(status="pending", chat_settings_id=SYSTEM_SCOPE)
 
         assert len(result) == 1
         item, file_name, category = result[0]
@@ -306,7 +309,7 @@ class TestGetAllWithMedia:
         mock_query.order_by.return_value = mock_query
         mock_query.all.return_value = []
 
-        queue_repo.get_all_with_media(status="processing")
+        queue_repo.get_all_with_media(status="processing", chat_settings_id=SYSTEM_SCOPE)
 
         mock_query.filter.assert_called()
 
@@ -318,7 +321,7 @@ class TestGetAllWithMedia:
         mock_query.order_by.return_value = mock_query
         mock_query.all.return_value = []
 
-        queue_repo.get_all_with_media()
+        queue_repo.get_all_with_media(chat_settings_id=SYSTEM_SCOPE)
 
         # Should still call order_by and all
         mock_query.order_by.assert_called()
@@ -333,7 +336,7 @@ class TestGetAllWithMedia:
         mock_query.all.return_value = []
 
         with patch.object(queue_repo, "end_read_transaction") as mock_end:
-            queue_repo.get_all_with_media()
+            queue_repo.get_all_with_media(chat_settings_id=SYSTEM_SCOPE)
             mock_end.assert_called_once()
 
     def test_passes_tenant_filter(self, queue_repo, mock_db):

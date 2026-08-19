@@ -36,6 +36,7 @@ from src.repositories.history_repository import (
 from src.repositories.queue_repository import QueueRepository
 from src.services.core.telegram_utils import EXPIRED_CAPTION
 from src.utils.logger import logger
+from src.repositories.tenant_scope import SYSTEM_SCOPE
 
 
 async def expire_sent_row(row, *, bot, history_repo, queue_repo) -> str:
@@ -131,7 +132,7 @@ def record_expiry_and_delete(row, *, history_repo, queue_repo) -> bool:
                     chat_settings_id=str(row.chat_settings_id)
                     if row.chat_settings_id
                     else None,
-                )
+                ),
             )
         queue_repo.delete(row_id)
     except SQLAlchemyError:

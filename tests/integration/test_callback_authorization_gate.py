@@ -40,6 +40,7 @@ from src.repositories.membership_repository import MembershipRepository
 from src.repositories.queue_repository import QueueRepository
 from src.repositories.user_repository import UserRepository
 from src.services.core.telegram_service import TelegramService
+from src.repositories.tenant_scope import SYSTEM_SCOPE
 
 
 @pytest.fixture(autouse=True)
@@ -147,6 +148,7 @@ class _Seed:
                     file_hash=uuid4().hex,
                     file_size_bytes=2048,
                     mime_type="image/jpeg",
+                    chat_settings_id=SYSTEM_SCOPE,
                 ).id
             )
         finally:

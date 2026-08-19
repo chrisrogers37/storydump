@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from src.repositories.media_repository import MediaRepository
 from src.models.media_item import MediaItem
+from src.repositories.tenant_scope import SYSTEM_SCOPE
 
 
 @pytest.fixture
@@ -46,6 +47,7 @@ class TestMediaRepository:
             file_hash="abc123",
             file_size_bytes=102400,
             mime_type="image/jpeg",
+            chat_settings_id=SYSTEM_SCOPE,
         )
 
         mock_db.add.assert_called_once()
@@ -65,7 +67,7 @@ class TestMediaRepository:
         mock_item = MagicMock(file_path="/test/unique.jpg")
         mock_db.query.return_value.filter.return_value.first.return_value = mock_item
 
-        result = media_repo.get_by_path("/test/unique.jpg")
+        result = media_repo.get_by_path("/test/unique.jpg", chat_settings_id=SYSTEM_SCOPE)
 
         assert result is mock_item
         mock_db.query.assert_called_with(MediaItem)
@@ -74,7 +76,7 @@ class TestMediaRepository:
         """Test retrieving non-existent media by path returns None."""
         mock_db.query.return_value.filter.return_value.first.return_value = None
 
-        result = media_repo.get_by_path("/test/nonexistent.jpg")
+        result = media_repo.get_by_path("/test/nonexistent.jpg", chat_settings_id=SYSTEM_SCOPE)
 
         assert result is None
 
@@ -83,7 +85,7 @@ class TestMediaRepository:
         mock_items = [MagicMock(file_hash="hash999")]
         mock_db.query.return_value.filter.return_value.all.return_value = mock_items
 
-        result = media_repo.get_by_hash("hash999")
+        result = media_repo.get_by_hash("hash999", chat_settings_id=SYSTEM_SCOPE)
 
         assert len(result) == 1
         assert result[0].file_hash == "hash999"
@@ -97,7 +99,7 @@ class TestMediaRepository:
         mock_query = mock_db.query.return_value
         mock_query.having.return_value.all.return_value = [mock_dup]
 
-        result = media_repo.get_duplicates()
+        result = media_repo.get_duplicates(chat_settings_id=SYSTEM_SCOPE)
 
         assert len(result) == 1
         assert result[0][0] == "duplicate_hash"
@@ -111,7 +113,7 @@ class TestMediaRepository:
         mock_item.last_posted_at = None
         mock_db.query.return_value.filter.return_value.first.return_value = mock_item
 
-        media_repo.increment_times_posted("some-id")
+        media_repo.increment_times_posted("some-id", chat_settings_id=SYSTEM_SCOPE)
 
         assert mock_item.times_posted == 1
         assert mock_item.last_posted_at is not None
@@ -123,7 +125,7 @@ class TestMediaRepository:
         """Test incrementing post count for non-existent item."""
         mock_db.query.return_value.filter.return_value.first.return_value = None
 
-        result = media_repo.increment_times_posted("nonexistent-id")
+        result = media_repo.increment_times_posted("nonexistent-id", chat_settings_id=SYSTEM_SCOPE)
 
         assert result is None
         # commit called once by get_by_id's end_read_transaction (no write commit)
@@ -135,7 +137,7 @@ class TestMediaRepository:
         mock_items = [MagicMock(), MagicMock()]
         mock_query.all.return_value = mock_items
 
-        result = media_repo.get_all(is_active=True, category="memes", limit=10)
+        result = media_repo.get_all(is_active=True, category="memes", limit=10, chat_settings_id=SYSTEM_SCOPE)
 
         assert len(result) == 2
         mock_db.query.assert_called_with(MediaItem)
@@ -150,7 +152,7 @@ class TestMediaRepositorySyncMethods:
         mock_items = [MagicMock(source_type="local", is_active=True)]
         mock_db.query.return_value.filter.return_value.all.return_value = mock_items
 
-        result = media_repo.get_active_by_source_type("local")
+        result = media_repo.get_active_by_source_type("local", chat_settings_id=SYSTEM_SCOPE)
 
         assert len(result) == 1
         mock_db.query.assert_called_with(MediaItem)
@@ -164,7 +166,7 @@ class TestMediaRepositorySyncMethods:
         )
         mock_db.query.return_value.filter.return_value.first.return_value = mock_item
 
-        result = media_repo.get_inactive_by_source_identifier("local", "/media/old.jpg")
+        result = media_repo.get_inactive_by_source_identifier("local", "/media/old.jpg", chat_settings_id=SYSTEM_SCOPE)
 
         assert result is mock_item
 
@@ -172,7 +174,7 @@ class TestMediaRepositorySyncMethods:
         """Returns None when no inactive match found."""
         mock_db.query.return_value.filter.return_value.first.return_value = None
 
-        result = media_repo.get_inactive_by_source_identifier("local", "/nonexistent")
+        result = media_repo.get_inactive_by_source_identifier("local", "/nonexistent", chat_settings_id=SYSTEM_SCOPE)
 
         assert result is None
 
@@ -182,7 +184,7 @@ class TestMediaRepositorySyncMethods:
         mock_item.is_active = False
         mock_db.query.return_value.filter.return_value.first.return_value = mock_item
 
-        media_repo.reactivate("some-id")
+        media_repo.reactivate("some-id", chat_settings_id=SYSTEM_SCOPE)
 
         assert mock_item.is_active is True
         assert mock_item.updated_at is not None
@@ -200,6 +202,7 @@ class TestMediaRepositorySyncMethods:
             file_path="/new/path.jpg",
             file_name="new_name.jpg",
             source_identifier="/new/path.jpg",
+            chat_settings_id=SYSTEM_SCOPE,
         )
 
         assert mock_item.file_path == "/new/path.jpg"
@@ -219,6 +222,7 @@ class TestMediaRepositorySyncMethods:
         media_repo.update_source_info(
             media_id="item-1",
             file_name="only_name_changed.jpg",
+            chat_settings_id=SYSTEM_SCOPE,
         )
 
         assert mock_item.file_name == "only_name_changed.jpg"
@@ -238,7 +242,7 @@ class TestMediaRepositoryBackfillMethods:
         mock_item = MagicMock(instagram_media_id="17841405793087218")
         mock_db.query.return_value.filter.return_value.first.return_value = mock_item
 
-        result = media_repo.get_by_instagram_media_id("17841405793087218")
+        result = media_repo.get_by_instagram_media_id("17841405793087218", chat_settings_id=SYSTEM_SCOPE)
 
         assert result is mock_item
         mock_db.query.assert_called_with(MediaItem)
@@ -247,7 +251,7 @@ class TestMediaRepositoryBackfillMethods:
         """Returns None when no item with given Instagram media ID."""
         mock_db.query.return_value.filter.return_value.first.return_value = None
 
-        result = media_repo.get_by_instagram_media_id("nonexistent")
+        result = media_repo.get_by_instagram_media_id("nonexistent", chat_settings_id=SYSTEM_SCOPE)
 
         assert result is None
 
@@ -259,7 +263,7 @@ class TestMediaRepositoryBackfillMethods:
             ("id_3",),
         ]
 
-        result = media_repo.get_backfilled_instagram_media_ids()
+        result = media_repo.get_backfilled_instagram_media_ids(chat_settings_id=SYSTEM_SCOPE)
 
         assert result == {"id_1", "id_2", "id_3"}
 
@@ -267,7 +271,7 @@ class TestMediaRepositoryBackfillMethods:
         """Returns empty set when no backfilled items."""
         mock_db.query.return_value.filter.return_value.all.return_value = []
 
-        result = media_repo.get_backfilled_instagram_media_ids()
+        result = media_repo.get_backfilled_instagram_media_ids(chat_settings_id=SYSTEM_SCOPE)
 
         assert result == set()
 
@@ -281,7 +285,7 @@ class TestMediaRepositoryCountMethods:
         mock_query = mock_db.query.return_value
         mock_query.scalar.return_value = 42
 
-        result = media_repo.count_active()
+        result = media_repo.count_active(chat_settings_id=SYSTEM_SCOPE)
 
         assert result == 42
 
@@ -290,7 +294,7 @@ class TestMediaRepositoryCountMethods:
         mock_query = mock_db.query.return_value
         mock_query.scalar.return_value = None
 
-        result = media_repo.count_active()
+        result = media_repo.count_active(chat_settings_id=SYSTEM_SCOPE)
 
         assert result == 0
 
@@ -311,7 +315,7 @@ class TestMediaRepositoryCountMethods:
         mock_query = mock_db.query.return_value
         mock_query.all.return_value = [(0, 10), (1, 5), (2, 3)]
 
-        result = media_repo.count_by_posting_status()
+        result = media_repo.count_by_posting_status(chat_settings_id=SYSTEM_SCOPE)
 
         assert result == {
             "never_posted": 10,
@@ -324,7 +328,7 @@ class TestMediaRepositoryCountMethods:
         mock_query = mock_db.query.return_value
         mock_query.all.return_value = [(0, 10)]
 
-        result = media_repo.count_by_posting_status()
+        result = media_repo.count_by_posting_status(chat_settings_id=SYSTEM_SCOPE)
 
         assert result == {
             "never_posted": 10,
@@ -337,7 +341,7 @@ class TestMediaRepositoryCountMethods:
         mock_query = mock_db.query.return_value
         mock_query.all.return_value = []
 
-        result = media_repo.count_by_posting_status()
+        result = media_repo.count_by_posting_status(chat_settings_id=SYSTEM_SCOPE)
 
         assert result == {
             "never_posted": 0,
@@ -350,7 +354,7 @@ class TestMediaRepositoryCountMethods:
         mock_query = mock_db.query.return_value
         mock_query.all.return_value = [("memes", 10), ("merch", 5)]
 
-        result = media_repo.count_by_category()
+        result = media_repo.count_by_category(chat_settings_id=SYSTEM_SCOPE)
 
         assert result == {"memes": 10, "merch": 5}
 
@@ -359,7 +363,7 @@ class TestMediaRepositoryCountMethods:
         mock_query = mock_db.query.return_value
         mock_query.all.return_value = [(None, 3), ("memes", 7)]
 
-        result = media_repo.count_by_category()
+        result = media_repo.count_by_category(chat_settings_id=SYSTEM_SCOPE)
 
         assert result == {"uncategorized": 3, "memes": 7}
 
@@ -368,7 +372,7 @@ class TestMediaRepositoryCountMethods:
         mock_query = mock_db.query.return_value
         mock_query.all.return_value = []
 
-        result = media_repo.count_by_category()
+        result = media_repo.count_by_category(chat_settings_id=SYSTEM_SCOPE)
 
         assert result == {}
 
@@ -428,16 +432,16 @@ class TestMediaRepositoryTenantFiltering:
                 self.TENANT_ID,
             )
 
-    def test_get_by_id_without_tenant(self, media_repo, mock_db):
-        """get_by_id works without chat_settings_id (backward compat)."""
+    def test_get_by_id_with_system_scope(self, media_repo, mock_db):
+        """Deliberate cross-tenant read: explicit SYSTEM_SCOPE, never omission (F.1/#841)."""
         with patch.object(
             media_repo, "_apply_tenant_filter", wraps=media_repo._apply_tenant_filter
         ) as mock_filter:
-            media_repo.get_by_id("some-id")
+            media_repo.get_by_id("some-id", chat_settings_id=SYSTEM_SCOPE)
             mock_filter.assert_called_once_with(
                 mock_db.query.return_value.filter.return_value,
                 MediaItem,
-                None,
+                SYSTEM_SCOPE,
             )
 
     def test_get_by_path_with_tenant(self, media_repo, mock_db):
@@ -564,6 +568,7 @@ class TestMediaRepositoryTenantFiltering:
             file_name="image.jpg",
             file_hash="abc123",
             file_size_bytes=102400,
+            chat_settings_id=SYSTEM_SCOPE,
         )
 
         added_item = mock_db.add.call_args[0][0]
@@ -647,7 +652,7 @@ class TestMediaRepositoryWriteTenantScoping:
     def test_reactivate_without_tenant_unchanged(self, media_repo, mock_db):
         row = self._seed_row(mock_db, is_active=False)
 
-        result = media_repo.reactivate("media-id")
+        result = media_repo.reactivate("media-id", chat_settings_id=SYSTEM_SCOPE)
 
         assert result is row
         assert row.is_active is True
@@ -722,7 +727,7 @@ class TestMediaRepositoryWriteTenantScoping:
         row_b = MagicMock(chat_settings_id="tenant-B", is_active=True)
         mock_db.query.return_value.filter.return_value.all.return_value = [row_a, row_b]
 
-        count = media_repo.deactivate_by_ids(["a", "b"])
+        count = media_repo.deactivate_by_ids(["a", "b"], chat_settings_id=SYSTEM_SCOPE)
 
         assert count == 2
         assert row_a.is_active is False
@@ -779,7 +784,7 @@ class TestCountDeadContentByCategory:
         q.order_by.return_value = q
         q.all.return_value = [("memes", 15), ("merch", 5)]
 
-        result = media_repo.count_dead_content_by_category(min_age_days=30)
+        result = media_repo.count_dead_content_by_category(min_age_days=30, chat_settings_id=SYSTEM_SCOPE)
 
         assert len(result) == 2
         assert result[0] == {"category": "memes", "dead_count": 15}
@@ -794,6 +799,6 @@ class TestCountDeadContentByCategory:
         q.order_by.return_value = q
         q.all.return_value = []
 
-        result = media_repo.count_dead_content_by_category()
+        result = media_repo.count_dead_content_by_category(chat_settings_id=SYSTEM_SCOPE)
 
         assert result == []

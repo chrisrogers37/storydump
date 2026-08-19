@@ -14,6 +14,7 @@ from src.config.settings import settings
 from src.exceptions import TokenCorruptError, TokenExpiredError, TokenRevokedError
 from src.utils.datetime_utils import ensure_utc
 from src.utils.logger import logger
+from src.repositories.tenant_scope import SYSTEM_SCOPE
 
 
 class TokenRefreshService(BaseService):
@@ -211,6 +212,7 @@ class TokenRefreshService(BaseService):
                 "expires_in_seconds": expires_in,
             },
             instagram_account_id=instagram_account_id,
+            chat_settings_id=SYSTEM_SCOPE,
         )
         return expires_at
 

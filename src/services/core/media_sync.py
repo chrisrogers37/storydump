@@ -14,6 +14,7 @@ from src.services.media_sources.base_provider import (
 )
 from src.services.media_sources.factory import MediaSourceFactory
 from src.utils.logger import logger
+from src.repositories.tenant_scope import SYSTEM_SCOPE
 
 
 @dataclass
@@ -357,7 +358,9 @@ class MediaSyncService(BaseService):
 
         # Skip if another item already holds this file_path to avoid
         # unique constraint violation.
-        if self.media_repo.get_by_path(file_path, ctx.chat_settings_id):
+        if self.media_repo.get_by_path(
+            file_path, ctx.chat_settings_id, chat_settings_id=SYSTEM_SCOPE
+        ):
             ctx.result.unchanged += 1
             return True
 
@@ -380,7 +383,10 @@ class MediaSyncService(BaseService):
     def _handle_reactivation(self, file_info: MediaFileInfo, ctx: SyncContext) -> bool:
         """Case 3: Inactive record with same identifier — reactivate."""
         inactive = self.media_repo.get_inactive_by_source_identifier(
-            ctx.source_type, file_info.identifier, ctx.chat_settings_id
+            ctx.source_type,
+            file_info.identifier,
+            ctx.chat_settings_id,
+            chat_settings_id=SYSTEM_SCOPE,
         )
         if not inactive:
             return False
@@ -400,7 +406,9 @@ class MediaSyncService(BaseService):
         # The DB query catches cross-source-type duplicates not in ctx.db_by_hash.
         if file_hash and (
             file_hash in ctx.db_by_hash
-            or self.media_repo.get_active_by_hash(file_hash, ctx.chat_settings_id)
+            or self.media_repo.get_active_by_hash(
+                file_hash, ctx.chat_settings_id, chat_settings_id=SYSTEM_SCOPE
+            )
         ):
             ctx.result.unchanged += 1
             logger.info(
@@ -433,7 +441,9 @@ class MediaSyncService(BaseService):
     ):
         """Create a MediaSourceProvider based on source type and root."""
         if source_type == "local":
-            return MediaSourceFactory.create(source_type, base_path=source_root)
+            return MediaSourceFactory.create(
+                source_type, base_path=source_root, chat_settings_id=SYSTEM_SCOPE
+            )
         elif source_type == "google_drive":
             # The tenant is passed through as-is, including None. Substituting
             # the deployment-wide TELEGRAM_CHANNEL_ID here named a tenant this
@@ -446,9 +456,10 @@ class MediaSyncService(BaseService):
                 source_type,
                 root_folder_id=source_root,
                 telegram_chat_id=telegram_chat_id,
+                chat_settings_id=SYSTEM_SCOPE,
             )
         else:
-            return MediaSourceFactory.create(source_type)
+            return MediaSourceFactory.create(source_type, chat_settings_id=SYSTEM_SCOPE)
 
     def _persist_refreshed_gdrive_credentials(
         self, provider, telegram_chat_id: int

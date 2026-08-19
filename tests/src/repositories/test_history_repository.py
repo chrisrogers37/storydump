@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from src.repositories.history_repository import HistoryRepository, HistoryCreateParams
 from src.models.posting_history import PostingHistory
+from src.repositories.tenant_scope import SYSTEM_SCOPE
 
 
 @pytest.fixture
@@ -69,7 +70,7 @@ class TestHistoryRepository:
         mock_query = mock_db.query.return_value
         mock_query.all.return_value = mock_records
 
-        result = history_repo.get_by_media_id("some-media-id")
+        result = history_repo.get_by_media_id("some-media-id", chat_settings_id=SYSTEM_SCOPE)
 
         assert len(result) == 1
         assert result[0].media_item_id == "some-media-id"
@@ -84,7 +85,7 @@ class TestHistoryRepository:
         mock_query = mock_db.query.return_value
         mock_query.all.return_value = mock_records
 
-        result = history_repo.get_all(status="posted", days=7, limit=10)
+        result = history_repo.get_all(status="posted", days=7, limit=10, chat_settings_id=SYSTEM_SCOPE)
 
         assert len(result) == 2
         mock_db.query.assert_called_with(PostingHistory)
@@ -95,7 +96,7 @@ class TestHistoryRepository:
         mock_query = mock_db.query.return_value
         mock_query.all.return_value = mock_records
 
-        result = history_repo.get_recent_posts(hours=24)
+        result = history_repo.get_recent_posts(hours=24, chat_settings_id=SYSTEM_SCOPE)
 
         assert len(result) == 2
 
@@ -114,7 +115,7 @@ class TestGetAllWithMedia:
         mock_query.limit.return_value = mock_query
         mock_query.all.return_value = [(mock_item, "story.jpg", "memes")]
 
-        result = history_repo.get_all_with_media(limit=10)
+        result = history_repo.get_all_with_media(limit=10, chat_settings_id=SYSTEM_SCOPE)
 
         assert len(result) == 1
         item, file_name, category = result[0]
@@ -131,7 +132,7 @@ class TestGetAllWithMedia:
         mock_query.limit.return_value = mock_query
         mock_query.all.return_value = []
 
-        history_repo.get_all_with_media(limit=5)
+        history_repo.get_all_with_media(limit=5, chat_settings_id=SYSTEM_SCOPE)
 
         mock_query.limit.assert_called_with(5)
 
@@ -143,7 +144,7 @@ class TestGetAllWithMedia:
         mock_query.order_by.return_value = mock_query
         mock_query.all.return_value = []
 
-        history_repo.get_all_with_media()
+        history_repo.get_all_with_media(chat_settings_id=SYSTEM_SCOPE)
 
         # limit should not be called when not provided
         mock_query.order_by.assert_called()
@@ -158,7 +159,7 @@ class TestGetAllWithMedia:
         mock_query.all.return_value = []
 
         with patch.object(history_repo, "end_read_transaction") as mock_end:
-            history_repo.get_all_with_media()
+            history_repo.get_all_with_media(chat_settings_id=SYSTEM_SCOPE)
             mock_end.assert_called_once()
 
     def test_passes_tenant_filter(self, history_repo, mock_db):
@@ -344,7 +345,7 @@ class TestAnalyticsAggregations:
         q = self._make_chainable_query(mock_db)
         q.all.return_value = [("posted", 80), ("skipped", 10), ("rejected", 5)]
 
-        result = history_repo.get_stats_by_status(days=30)
+        result = history_repo.get_stats_by_status(days=30, chat_settings_id=SYSTEM_SCOPE)
 
         assert result == {"posted": 80, "skipped": 10, "rejected": 5}
 
@@ -353,7 +354,7 @@ class TestAnalyticsAggregations:
         q = self._make_chainable_query(mock_db)
         q.all.return_value = []
 
-        result = history_repo.get_stats_by_status(days=7)
+        result = history_repo.get_stats_by_status(days=7, chat_settings_id=SYSTEM_SCOPE)
 
         assert result == {}
 
@@ -362,7 +363,7 @@ class TestAnalyticsAggregations:
         q = self._make_chainable_query(mock_db)
         q.all.return_value = [("instagram_api", 60), ("telegram_manual", 20)]
 
-        result = history_repo.get_stats_by_method(days=30)
+        result = history_repo.get_stats_by_method(days=30, chat_settings_id=SYSTEM_SCOPE)
 
         assert result == {"instagram_api": 60, "telegram_manual": 20}
 
@@ -371,7 +372,7 @@ class TestAnalyticsAggregations:
         q = self._make_chainable_query(mock_db)
         q.all.return_value = [(None, 5)]
 
-        result = history_repo.get_stats_by_method(days=30)
+        result = history_repo.get_stats_by_method(days=30, chat_settings_id=SYSTEM_SCOPE)
 
         assert result == {"unknown": 5}
 
@@ -386,7 +387,7 @@ class TestAnalyticsAggregations:
             (date(2026, 4, 11), "posted", 5),
         ]
 
-        result = history_repo.get_daily_counts(days=30)
+        result = history_repo.get_daily_counts(days=30, chat_settings_id=SYSTEM_SCOPE)
 
         assert len(result) == 2
         day1 = result[0]
@@ -403,7 +404,7 @@ class TestAnalyticsAggregations:
         q = self._make_chainable_query(mock_db)
         q.all.return_value = []
 
-        result = history_repo.get_daily_counts(days=7)
+        result = history_repo.get_daily_counts(days=7, chat_settings_id=SYSTEM_SCOPE)
 
         assert result == []
 
@@ -412,7 +413,7 @@ class TestAnalyticsAggregations:
         q = self._make_chainable_query(mock_db)
         q.all.return_value = [(10, 15), (14, 20), (18, 8)]
 
-        result = history_repo.get_hourly_distribution(days=30)
+        result = history_repo.get_hourly_distribution(days=30, chat_settings_id=SYSTEM_SCOPE)
 
         assert len(result) == 3
         assert result[0] == {"hour": 10, "count": 15}
@@ -424,7 +425,7 @@ class TestAnalyticsAggregations:
         q = self._make_chainable_query(mock_db)
         q.all.return_value = []
 
-        result = history_repo.get_hourly_distribution(days=7)
+        result = history_repo.get_hourly_distribution(days=7, chat_settings_id=SYSTEM_SCOPE)
 
         assert result == []
 
@@ -439,7 +440,7 @@ class TestAnalyticsAggregations:
             ("merch", "skipped", 2),
         ]
 
-        result = history_repo.get_stats_by_category(days=30)
+        result = history_repo.get_stats_by_category(days=30, chat_settings_id=SYSTEM_SCOPE)
 
         assert len(result) == 2
         memes = next(c for c in result if c["category"] == "memes")
@@ -459,7 +460,7 @@ class TestAnalyticsAggregations:
         q = self._make_chainable_query(mock_db)
         q.all.return_value = []
 
-        result = history_repo.get_stats_by_category(days=7)
+        result = history_repo.get_stats_by_category(days=7, chat_settings_id=SYSTEM_SCOPE)
 
         assert result == []
 
@@ -469,7 +470,7 @@ class TestAnalyticsAggregations:
         # Unlikely but defensive: a category with no status counts
         q.all.return_value = []
 
-        result = history_repo.get_stats_by_category(days=30)
+        result = history_repo.get_stats_by_category(days=30, chat_settings_id=SYSTEM_SCOPE)
 
         assert result == []
 
@@ -483,7 +484,7 @@ class TestAnalyticsAggregations:
             (14, "skipped", 5),
         ]
 
-        result = history_repo.get_hourly_approval_rates(days=30)
+        result = history_repo.get_hourly_approval_rates(days=30, chat_settings_id=SYSTEM_SCOPE)
 
         assert len(result) == 2
         assert result[0]["hour"] == 10
@@ -499,7 +500,7 @@ class TestAnalyticsAggregations:
         q = self._make_chainable_query(mock_db)
         q.all.return_value = []
 
-        result = history_repo.get_hourly_approval_rates(days=7)
+        result = history_repo.get_hourly_approval_rates(days=7, chat_settings_id=SYSTEM_SCOPE)
 
         assert result == []
 
@@ -513,7 +514,7 @@ class TestAnalyticsAggregations:
             (6, "skipped", 10),
         ]
 
-        result = history_repo.get_dow_approval_rates(days=90)
+        result = history_repo.get_dow_approval_rates(days=90, chat_settings_id=SYSTEM_SCOPE)
 
         assert len(result) == 2
         assert result[0]["dow"] == 1
@@ -528,7 +529,7 @@ class TestAnalyticsAggregations:
         q = self._make_chainable_query(mock_db)
         q.all.return_value = []
 
-        result = history_repo.get_dow_approval_rates(days=90)
+        result = history_repo.get_dow_approval_rates(days=90, chat_settings_id=SYSTEM_SCOPE)
 
         assert result == []
 
@@ -572,7 +573,7 @@ class TestApprovalLatency:
 
         q.all.side_effect = [[hourly_row], [cat_row]]
 
-        result = history_repo.get_approval_latency(days=30)
+        result = history_repo.get_approval_latency(days=30, chat_settings_id=SYSTEM_SCOPE)
 
         assert result["overall"]["count"] == 50
         assert result["overall"]["avg_minutes"] == 5.0
@@ -596,7 +597,7 @@ class TestApprovalLatency:
         q.first.return_value = overall_row
         q.all.side_effect = [[], []]
 
-        result = history_repo.get_approval_latency(days=30)
+        result = history_repo.get_approval_latency(days=30, chat_settings_id=SYSTEM_SCOPE)
 
         assert result["overall"]["count"] == 0
         assert result["overall"]["avg_minutes"] == 0
@@ -627,7 +628,7 @@ class TestUserApprovalStats:
             ("user-2", "bob", "Bob", "posted", 20, 360.0),
         ]
 
-        result = history_repo.get_user_approval_stats(days=30)
+        result = history_repo.get_user_approval_stats(days=30, chat_settings_id=SYSTEM_SCOPE)
 
         assert len(result) == 2
         alice = result[0]  # sorted by total desc
@@ -650,7 +651,7 @@ class TestUserApprovalStats:
         q = self._make_chainable_query(mock_db)
         q.all.return_value = []
 
-        result = history_repo.get_user_approval_stats(days=30)
+        result = history_repo.get_user_approval_stats(days=30, chat_settings_id=SYSTEM_SCOPE)
 
         assert result == []
 

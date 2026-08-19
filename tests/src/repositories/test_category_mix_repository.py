@@ -7,6 +7,7 @@ from datetime import datetime
 
 from src.repositories.category_mix_repository import CategoryMixRepository
 from src.models.category_mix import CategoryPostCaseMix
+from src.repositories.tenant_scope import SYSTEM_SCOPE
 
 
 @pytest.mark.unit
@@ -93,7 +94,7 @@ class TestCategoryMixRepository:
         ]
         mock_db.query.return_value.filter.return_value.order_by.return_value.all.return_value = mock_records
 
-        result = mix_repo.get_current_mix()
+        result = mix_repo.get_current_mix(chat_settings_id=SYSTEM_SCOPE)
 
         assert len(result) == 2
         mock_db.query.assert_called_once()
@@ -106,7 +107,7 @@ class TestCategoryMixRepository:
         ]
         mock_db.query.return_value.filter.return_value.order_by.return_value.all.return_value = mock_records
 
-        result = mix_repo.get_current_mix_as_dict()
+        result = mix_repo.get_current_mix_as_dict(chat_settings_id=SYSTEM_SCOPE)
 
         assert result == {"memes": Decimal("0.7"), "merch": Decimal("0.3")}
 
@@ -114,7 +115,7 @@ class TestCategoryMixRepository:
         """Test has_current_mix returns True when mix exists."""
         mock_db.query.return_value.filter.return_value.scalar.return_value = 2
 
-        result = mix_repo.has_current_mix()
+        result = mix_repo.has_current_mix(chat_settings_id=SYSTEM_SCOPE)
 
         assert result is True
 
@@ -122,7 +123,7 @@ class TestCategoryMixRepository:
         """Test has_current_mix returns False when no mix exists."""
         mock_db.query.return_value.filter.return_value.scalar.return_value = 0
 
-        result = mix_repo.has_current_mix()
+        result = mix_repo.has_current_mix(chat_settings_id=SYSTEM_SCOPE)
 
         assert result is False
 
@@ -132,7 +133,7 @@ class TestCategoryMixRepository:
         mock_records = [Mock(category="memes", ratio=Decimal("1.0"))]
         mock_db.query.return_value.filter.return_value.order_by.return_value.all.return_value = mock_records
 
-        result = mix_repo.get_categories_without_ratio(["memes", "merch", "misc"])
+        result = mix_repo.get_categories_without_ratio(["memes", "merch", "misc"], chat_settings_id=SYSTEM_SCOPE)
 
         assert "merch" in result
         assert "misc" in result
@@ -148,7 +149,7 @@ class TestCategoryMixRepository:
             "merch": Decimal("0.3"),
         }
 
-        mix_repo.set_mix(ratios)
+        mix_repo.set_mix(ratios, chat_settings_id=SYSTEM_SCOPE)
 
         # Should add 2 new records
         assert mock_db.add.call_count == 2
@@ -165,7 +166,7 @@ class TestCategoryMixRepository:
 
         ratios = {"memes": Decimal("1.0")}
 
-        mix_repo.set_mix(ratios)
+        mix_repo.set_mix(ratios, chat_settings_id=SYSTEM_SCOPE)
 
         # Old record should be expired
         assert old_record.is_current is False

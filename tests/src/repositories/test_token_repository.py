@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 
 from src.repositories.token_repository import TokenRepository
 from src.models.api_token import ApiToken
+from src.repositories.tenant_scope import SYSTEM_SCOPE
 
 
 @pytest.mark.unit
@@ -118,6 +119,7 @@ class TestTokenRepository:
             expires_at=datetime.utcnow() + timedelta(days=60),
             scopes=["instagram_basic", "instagram_content_publish"],
             metadata={"method": "cli_wizard"},
+            chat_settings_id=SYSTEM_SCOPE,
         )
 
         mock_db.add.assert_called_once()
@@ -140,6 +142,7 @@ class TestTokenRepository:
             token_value="new_encrypted",
             expires_at=datetime.utcnow() + timedelta(days=60),
             scopes=["instagram_basic"],
+            chat_settings_id=SYSTEM_SCOPE,
         )
 
         mock_db.add.assert_not_called()
@@ -161,6 +164,7 @@ class TestTokenRepository:
             meta_account_id="26060527550287223",
             auth_method="instagram_login",
             issuing_app_id="ig_app_456",
+            chat_settings_id=SYSTEM_SCOPE,
         )
 
         added = mock_db.add.call_args[0][0]
@@ -185,6 +189,7 @@ class TestTokenRepository:
             token_value="new",
             auth_method="instagram_login",
             issuing_app_id="new_app",
+            chat_settings_id=SYSTEM_SCOPE,
         )
 
         assert existing.auth_method == "instagram_login"
@@ -205,6 +210,7 @@ class TestTokenRepository:
             service_name="instagram",
             token_type="access_token",
             token_value="new",
+            chat_settings_id=SYSTEM_SCOPE,
         )
 
         # Existing fields untouched — only the auth-related fields
@@ -304,6 +310,7 @@ class TestTokenRepositoryTenantScoped:
             token_type="access_token",
             token_value="enc",
             instagram_account_id="acct-1",
+            chat_settings_id=SYSTEM_SCOPE,
         )
 
         assert existing.chat_settings_id == "cs-uuid-1"

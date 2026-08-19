@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func, and_, case
 
 from src.repositories.base_repository import BaseRepository
+from src.repositories.tenant_scope import TenantScope, require_tenant_context
 from src.models.enums import PostingMethod
 from src.models.posting_history import PostingHistory
 
@@ -45,9 +46,10 @@ class HistoryRepository(BaseRepository):
         super().__init__()
 
     def get_by_id(
-        self, history_id: str, chat_settings_id: Optional[str] = None
+        self, history_id: str, chat_settings_id: TenantScope
     ) -> Optional[PostingHistory]:
         """Get history record by ID."""
+        require_tenant_context(chat_settings_id, where="history.get_by_id")
         result = (
             self._tenant_query(PostingHistory, chat_settings_id)
             .filter(PostingHistory.id == history_id)
@@ -61,9 +63,11 @@ class HistoryRepository(BaseRepository):
         status: Optional[str] = None,
         days: Optional[int] = None,
         limit: Optional[int] = None,
-        chat_settings_id: Optional[str] = None,
+        *,
+        chat_settings_id: TenantScope,
     ) -> List[PostingHistory]:
         """Get all history records with optional filters."""
+        require_tenant_context(chat_settings_id, where="history.get_all")
         query = self._tenant_query(PostingHistory, chat_settings_id)
 
         if status:
@@ -85,12 +89,14 @@ class HistoryRepository(BaseRepository):
     def get_all_with_media(
         self,
         limit: Optional[int] = None,
-        chat_settings_id: Optional[str] = None,
+        *,
+        chat_settings_id: TenantScope,
     ) -> list:
         """Get history items with joined media info (file_name, category).
 
         Returns list of (PostingHistory, file_name, category) tuples.
         """
+        require_tenant_context(chat_settings_id, where="history.get_all_with_media")
         from src.models.media_item import MediaItem
 
         query = (
@@ -111,9 +117,11 @@ class HistoryRepository(BaseRepository):
         self,
         media_id: str,
         limit: Optional[int] = None,
-        chat_settings_id: Optional[str] = None,
+        *,
+        chat_settings_id: TenantScope,
     ) -> List[PostingHistory]:
         """Get all history records for a specific media item."""
+        require_tenant_context(chat_settings_id, where="history.get_by_media_id")
         query = (
             self._tenant_query(PostingHistory, chat_settings_id)
             .filter(PostingHistory.media_item_id == media_id)
@@ -153,10 +161,12 @@ class HistoryRepository(BaseRepository):
     def get_recent_posts(
         self,
         hours: int = 24,
-        chat_settings_id: Optional[str] = None,
+        *,
+        chat_settings_id: TenantScope,
         limit: Optional[int] = None,
     ) -> List[PostingHistory]:
         """Get posts from the last N hours."""
+        require_tenant_context(chat_settings_id, where="history.get_recent_posts")
         since = datetime.now(timezone.utc) - timedelta(hours=hours)
         query = (
             self._tenant_query(PostingHistory, chat_settings_id)
@@ -170,7 +180,7 @@ class HistoryRepository(BaseRepository):
         return result
 
     def count_by_method(
-        self, method: str, since: datetime, chat_settings_id: Optional[str] = None
+        self, method: str, since: datetime, chat_settings_id: TenantScope
     ) -> int:
         """
         Count posts by posting method since a given time.
@@ -185,6 +195,7 @@ class HistoryRepository(BaseRepository):
         Returns:
             Count of posts matching criteria
         """
+        require_tenant_context(chat_settings_id, where="history.count_by_method")
         result = (
             self._tenant_query(PostingHistory, chat_settings_id)
             .with_entities(func.count(PostingHistory.id))
@@ -221,12 +232,13 @@ class HistoryRepository(BaseRepository):
     # ------------------------------------------------------------------
 
     def get_stats_by_status(
-        self, days: int = 30, chat_settings_id: Optional[str] = None
+        self, *, days: int = 30, chat_settings_id: TenantScope
     ) -> dict:
         """Count posts grouped by status within the given time window.
 
         Returns: {"posted": N, "skipped": N, "rejected": N, "failed": N}
         """
+        require_tenant_context(chat_settings_id, where="history.get_stats_by_status")
         since = datetime.now(timezone.utc) - timedelta(days=days)
         rows = (
             self._tenant_query(PostingHistory, chat_settings_id)
@@ -239,12 +251,13 @@ class HistoryRepository(BaseRepository):
         return {status: count for status, count in rows}
 
     def get_stats_by_method(
-        self, days: int = 30, chat_settings_id: Optional[str] = None
+        self, *, days: int = 30, chat_settings_id: TenantScope
     ) -> dict:
         """Count successful posts grouped by posting method.
 
         Returns: {"instagram_api": N, "telegram_manual": N}
         """
+        require_tenant_context(chat_settings_id, where="history.get_stats_by_method")
         since = datetime.now(timezone.utc) - timedelta(days=days)
         rows = (
             self._tenant_query(PostingHistory, chat_settings_id)
@@ -257,7 +270,7 @@ class HistoryRepository(BaseRepository):
         return {method or "unknown": count for method, count in rows}
 
     def get_stats_by_method_and_status(
-        self, days: int = 30, chat_settings_id: Optional[str] = None
+        self, *, days: int = 30, chat_settings_id: TenantScope
     ) -> dict:
         """Count posts grouped by (posting_method, status).
 
@@ -271,6 +284,9 @@ class HistoryRepository(BaseRepository):
         Returns: ``{"instagram_api": {"posted": N, "failed": M, ...},
                    "telegram_manual": {...}}``
         """
+        require_tenant_context(
+            chat_settings_id, where="history.get_stats_by_method_and_status"
+        )
         since = datetime.now(timezone.utc) - timedelta(days=days)
         rows = (
             self._tenant_query(PostingHistory, chat_settings_id)
@@ -294,12 +310,13 @@ class HistoryRepository(BaseRepository):
         return result
 
     def get_daily_counts(
-        self, days: int = 30, chat_settings_id: Optional[str] = None
+        self, *, days: int = 30, chat_settings_id: TenantScope
     ) -> list:
         """Count posts per day grouped by status.
 
         Returns list of {"date": "YYYY-MM-DD", "posted": N, "skipped": N, ...}
         """
+        require_tenant_context(chat_settings_id, where="history.get_daily_counts")
         from sqlalchemy import cast, Date
 
         since = datetime.now(timezone.utc) - timedelta(days=days)
@@ -328,12 +345,15 @@ class HistoryRepository(BaseRepository):
         return list(by_day.values())
 
     def get_hourly_distribution(
-        self, days: int = 30, chat_settings_id: Optional[str] = None
+        self, *, days: int = 30, chat_settings_id: TenantScope
     ) -> list:
         """Count successful posts by hour of day.
 
         Returns list of {"hour": 0-23, "count": N}
         """
+        require_tenant_context(
+            chat_settings_id, where="history.get_hourly_distribution"
+        )
         from sqlalchemy import extract
 
         since = datetime.now(timezone.utc) - timedelta(days=days)
@@ -352,13 +372,14 @@ class HistoryRepository(BaseRepository):
         return [{"hour": int(hour), "count": count} for hour, count in rows]
 
     def get_stats_by_category(
-        self, days: int = 30, chat_settings_id: Optional[str] = None
+        self, *, days: int = 30, chat_settings_id: TenantScope
     ) -> list:
         """Count posts grouped by media category and status.
 
         Joins with media_items to get category.
         Returns list of {"category": str, "posted": N, "skipped": N, ...}
         """
+        require_tenant_context(chat_settings_id, where="history.get_stats_by_category")
         from src.models.media_item import MediaItem
 
         since = datetime.now(timezone.utc) - timedelta(days=days)
@@ -395,12 +416,15 @@ class HistoryRepository(BaseRepository):
         return list(by_category.values())
 
     def get_hourly_approval_rates(
-        self, days: int = 30, chat_settings_id: Optional[str] = None
+        self, *, days: int = 30, chat_settings_id: TenantScope
     ) -> list:
         """Count posts by hour of day grouped by status.
 
         Returns list of {"hour": 0-23, "posted": N, "skipped": N, ..., "total": N, "approval_rate": float}
         """
+        require_tenant_context(
+            chat_settings_id, where="history.get_hourly_approval_rates"
+        )
         from sqlalchemy import extract
 
         since = datetime.now(timezone.utc) - timedelta(days=days)
@@ -434,7 +458,7 @@ class HistoryRepository(BaseRepository):
         return [by_hour[h] for h in sorted(by_hour)]
 
     def get_approval_latency(
-        self, days: int = 30, chat_settings_id: Optional[str] = None
+        self, *, days: int = 30, chat_settings_id: TenantScope
     ) -> dict:
         """Compute approval latency statistics (time from queue to decision).
 
@@ -442,6 +466,7 @@ class HistoryRepository(BaseRepository):
         Latency = posted_at - queue_created_at, in seconds.
         Only includes items with status 'posted' (approvals).
         """
+        require_tenant_context(chat_settings_id, where="history.get_approval_latency")
         from sqlalchemy import extract
 
         since = datetime.now(timezone.utc) - timedelta(days=days)
@@ -536,13 +561,16 @@ class HistoryRepository(BaseRepository):
         }
 
     def get_user_approval_stats(
-        self, days: int = 30, chat_settings_id: Optional[str] = None
+        self, *, days: int = 30, chat_settings_id: TenantScope
     ) -> list:
         """Per-user breakdown of approval decisions and response time.
 
         Returns list of per-user dicts: posted, skipped, rejected counts,
         approval_rate, and avg_latency_minutes.
         """
+        require_tenant_context(
+            chat_settings_id, where="history.get_user_approval_stats"
+        )
         from src.models.user import User
 
         since = datetime.now(timezone.utc) - timedelta(days=days)
@@ -614,13 +642,14 @@ class HistoryRepository(BaseRepository):
         return result
 
     def get_dow_approval_rates(
-        self, days: int = 90, chat_settings_id: Optional[str] = None
+        self, *, days: int = 90, chat_settings_id: TenantScope
     ) -> list:
         """Count posts by day of week grouped by status.
 
         Uses extract('dow') which returns 0=Sunday through 6=Saturday.
         Returns list of {"dow": 0-6, "day_name": str, "posted": N, ..., "approval_rate": float}
         """
+        require_tenant_context(chat_settings_id, where="history.get_dow_approval_rates")
         from sqlalchemy import extract
 
         day_names = [

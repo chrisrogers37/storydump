@@ -14,6 +14,7 @@ from src.config.settings import settings
 from src.repositories.token_repository import TokenRepository
 from src.utils.encryption import TokenEncryption
 from src.services.integrations.token_refresh import TokenRefreshService
+from src.repositories.tenant_scope import SYSTEM_SCOPE
 
 console = Console()
 
@@ -308,6 +309,7 @@ def _store_token(token: str, expires_in: int, account_info: dict = None):
         expires_at=expires_at,
         scopes=["instagram_basic", "instagram_content_publish", "pages_show_list"],
         metadata=metadata,
+        chat_settings_id=SYSTEM_SCOPE,
     )
 
 
