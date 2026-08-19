@@ -143,14 +143,13 @@ async def onboarding_start_indexing(request: StartIndexingRequest) -> dict:
     Requires that media-folder has already been validated and saved.
     Calls MediaSyncService.sync() with the chat's per-tenant config.
     """
-    _validate_request(request.init_data, request.chat_id)
+    auth = _validate_request(request.init_data, request.chat_id)
+    chat_settings_id = auth["chat_settings_id"]
 
     with SettingsService() as settings_service:
         source_type, source_root = settings_service.get_media_source_config(
-            request.chat_id
+            chat_settings_id
         )
-        chat_settings = settings_service.get_settings_if_exists(request.chat_id)
-        chat_settings_id = str(chat_settings.id) if chat_settings else None
 
     if not source_root:
         raise HTTPException(

@@ -190,9 +190,7 @@ class TestMyChatMemberHandler:
 
         mock_chat_settings = Mock()
         mock_chat_settings.id = uuid4()
-        service.settings_service.get_settings_if_exists.return_value = (
-            mock_chat_settings
-        )
+        service.settings_service.get_settings.return_value = mock_chat_settings
         service.membership_repo.deactivate_for_chat.return_value = 3
 
         # Pre-populate cache with entries for this chat
@@ -345,7 +343,7 @@ class TestNameCommand:
             mock_settings_inst = MockSettings.return_value
             mock_settings_inst.__enter__ = Mock(return_value=mock_settings_inst)
             mock_settings_inst.__exit__ = Mock(return_value=False)
-            mock_settings_inst.get_settings_if_exists.return_value = mock_chat_settings
+            mock_settings_inst.get_settings.return_value = mock_chat_settings
 
             await handlers.handle_name(mock_update, mock_context)
 
@@ -402,7 +400,7 @@ class TestNameCommand:
             mock_settings_inst = MockSettings.return_value
             mock_settings_inst.__enter__ = Mock(return_value=mock_settings_inst)
             mock_settings_inst.__exit__ = Mock(return_value=False)
-            mock_settings_inst.get_settings_if_exists.return_value = mock_chat_settings
+            mock_settings_inst.get_settings.return_value = mock_chat_settings
 
             await handlers.handle_name(mock_update, mock_context)
 

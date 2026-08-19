@@ -109,9 +109,9 @@ class MediaSyncService(BaseService):
 
         Resolution order: explicit params > per-chat DB config > global env vars.
 
-        The owning chat_settings_id is resolved (non-bootstrapping) alongside
-        the per-chat config load so sync can stamp media with its tenant. A
-        None owner — CLI, legacy global sync, or an explicit source override —
+        A chat-keyed sync resolves its owner through the one door (#842) and
+        refuses if the chat has no tenant. A None owner arises ONLY from the
+        explicit paths — CLI, legacy global sync, or a source override — and
         leaves media_items.chat_settings_id NULL, the legacy single-tenant
         marker, rather than fabricating an owner.
         """
@@ -121,11 +121,12 @@ class MediaSyncService(BaseService):
 
             settings_service = SettingsService()
             try:
-                source_type, source_root = settings_service.get_media_source_config(
+                chat_settings_id = settings_service.resolve_chat_settings_id(
                     telegram_chat_id
                 )
-                owner = settings_service.get_settings_if_exists(telegram_chat_id)
-                chat_settings_id = str(owner.id) if owner else None
+                source_type, source_root = settings_service.get_media_source_config(
+                    chat_settings_id
+                )
             finally:
                 settings_service.close()
 

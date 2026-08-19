@@ -17,7 +17,6 @@ from src.repositories.queue_repository import QueueRepository
 from src.repositories.history_repository import HistoryRepository
 from src.repositories.lock_repository import LockRepository
 from src.repositories.category_mix_repository import CategoryMixRepository
-from src.config.settings import settings
 from src.utils.datetime_utils import ensure_utc
 from src.utils.logger import logger
 from src.repositories.tenant_scope import SYSTEM_SCOPE
@@ -194,7 +193,7 @@ class SchedulerService(BaseService):
         # requeued — a maybe-delivered card must not be re-sent (#680).
         self.queue_repo.resolve_stale_processing(max_age_minutes=10)
 
-        chat_settings = self.settings_service.get_settings(telegram_chat_id)
+        chat_settings = self.settings_service.require_settings(telegram_chat_id)
 
         if chat_settings.is_paused:
             return {"posted": False, "reason": "paused"}
@@ -249,7 +248,7 @@ class SchedulerService(BaseService):
         Returns:
             Dict with posted, queue_item_id, media_item, error keys
         """
-        chat_settings = self.settings_service.get_settings(telegram_chat_id)
+        chat_settings = self.settings_service.require_settings(telegram_chat_id)
 
         return await self._select_and_send(
             chat_settings,
@@ -261,10 +260,13 @@ class SchedulerService(BaseService):
 
     def get_queue_preview(
         self,
-        telegram_chat_id: int,
+        chat_settings_id: str,
         count: int = 5,
     ) -> list:
         """Compute the next N selections without persisting.
+
+        Keyed by the resolved tenant id (#842): a None scope would mean
+        unfiltered at the repository, so no None can enter here.
 
         Passes previously-selected IDs as exclude_ids so each iteration
         returns a different item.
@@ -272,9 +274,6 @@ class SchedulerService(BaseService):
         Returns:
             List of dicts with media_id, file_name, category.
         """
-        owner = self.settings_service.get_settings_if_exists(telegram_chat_id)
-        chat_settings_id = str(owner.id) if owner else None
-
         previews = []
         seen_ids: list[str] = []
 
@@ -299,23 +298,22 @@ class SchedulerService(BaseService):
     # Queue management (kept from old scheduler)
     # ------------------------------------------------------------------
 
-    def _resolve_chat_settings_id(
-        self, telegram_chat_id: Optional[int] = None
-    ) -> Optional[str]:
-        """Derive chat_settings_id from telegram_chat_id."""
-        if telegram_chat_id is None:
-            telegram_chat_id = settings.ADMIN_TELEGRAM_CHAT_ID
-        chat_settings = self.settings_service.get_settings(telegram_chat_id)
-        return str(chat_settings.id) if chat_settings else None
+    def clear_pending_queue(self, telegram_chat_id: int) -> int:
+        """Delete all pending queue items for a chat.
 
-    def clear_pending_queue(self, telegram_chat_id: Optional[int] = None) -> int:
-        """Delete all pending queue items for a chat."""
-        chat_settings_id = self._resolve_chat_settings_id(telegram_chat_id)
+        The chat is required and resolved through the one door (#842); a
+        caller that means the admin chat says so at its own call site.
+        """
+        chat_settings_id = self.settings_service.resolve_chat_settings_id(
+            telegram_chat_id
+        )
         return self.queue_repo.delete_all_pending(chat_settings_id=chat_settings_id)
 
-    def count_pending(self, telegram_chat_id: Optional[int] = None) -> int:
-        """Count pending queue items for a chat."""
-        chat_settings_id = self._resolve_chat_settings_id(telegram_chat_id)
+    def count_pending(self, telegram_chat_id: int) -> int:
+        """Count pending queue items for a chat (resolved, never defaulted)."""
+        chat_settings_id = self.settings_service.resolve_chat_settings_id(
+            telegram_chat_id
+        )
         return self.queue_repo.count_pending(chat_settings_id=chat_settings_id)
 
     def check_availability(self, media_id: str) -> bool:

@@ -507,9 +507,7 @@ class TelegramAccountHandlers:
         # show_verbose_notifications preference. Without this the rebuild path
         # silently forced verbose=True (the _build_caption default), making the
         # per-chat toggle no-op after account-switcher round trips.
-        chat_settings = self.service.settings_service.get_settings(
-            chat_id, create_if_missing=False
-        )
+        chat_settings = self.service.settings_service.get_settings(chat_id)
         if not chat_settings:
             return
         verbose = self.service._is_verbose(chat_id, chat_settings=chat_settings)
@@ -560,9 +558,7 @@ class TelegramAccountHandlers:
         pending_items = self.service.queue_repo.get_pending_with_telegram_message(
             chat_id
         )
-        chat_settings = self.service.settings_service.get_settings(
-            chat_id, create_if_missing=False
-        )
+        chat_settings = self.service.settings_service.get_settings(chat_id)
         if not chat_settings:
             return
         if account_count is None:

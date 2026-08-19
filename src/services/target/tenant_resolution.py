@@ -40,29 +40,13 @@ touches ContextVars.
 from dataclasses import dataclass
 from typing import Optional
 
-from src.exceptions.base import StorydumpError
+from src.exceptions.tenancy import TenantResolutionError
 
 #: Channel vocabulary — must match ck_bindings_channel (`02` §1).
 CHAT_CHANNELS = ("telegram_group", "telegram_dm")
 
 #: workspace_members role ladder, least to greatest (`02` §1).
 ROLE_ORDER = ("member", "admin", "owner")
-
-
-class TenantResolutionError(StorydumpError):
-    """Inbound identity did not resolve — refused, never defaulted.
-
-    ``reason`` is a closed vocabulary so callers can route without parsing
-    prose: unknown_binding | revoked_binding | invalid_session |
-    expired_session | revoked_session | not_a_member | insufficient_role |
-    unknown_channel.
-    """
-
-    def __init__(self, reason: str, detail: str = ""):
-        self.reason = reason
-        super().__init__(
-            f"tenant resolution refused: {reason}" + (f" — {detail}" if detail else "")
-        )
 
 
 @dataclass(frozen=True)

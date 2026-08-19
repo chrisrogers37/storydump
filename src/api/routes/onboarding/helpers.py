@@ -5,7 +5,9 @@ from contextlib import contextmanager
 
 from fastapi import HTTPException, Request
 
+from src.exceptions.tenancy import TenantResolutionError
 from src.services.core.membership_service import MembershipService
+from src.services.core.settings_service import SettingsService
 from src.services.core.setup_state_service import SetupStateService
 from src.utils import auth_monitor
 from src.utils.logger import logger
@@ -25,6 +27,11 @@ GDRIVE_FOLDER_RE = re.compile(
 # exactly the discrimination a probe wants and a legitimate client does not
 # need. The operator still gets every reason, via auth_monitor.
 AUTH_FAILURE_DETAIL = "Invalid authentication credentials"
+
+# One string for BOTH an unknown chat and a denied membership — the deliberate
+# indistinguishability (#842: no chat-existence oracle) is enforced by this
+# name, not by four literals staying in sync.
+MEMBERSHIP_DENIED_DETAIL = "Not a member of this instance"
 
 
 def _client_ip(request: Request | None) -> str:
@@ -92,7 +99,9 @@ def _validate_request(
     membership).
 
     Raises HTTPException(401) on auth failure, HTTPException(403) on a chat_id
-    mismatch or a missing/inactive membership.
+    mismatch, an unknown chat, or a missing/inactive membership. On success the
+    returned dict carries ``chat_settings_id`` — the resolved tenant key every
+    downstream call takes instead of the chat id (#842).
     """
     user_info = _validate_auth(init_data, request)
 
@@ -113,13 +122,32 @@ def _validate_request(
         )
         raise HTTPException(status_code=403, detail="Chat ID mismatch")
 
+    # Resolve the tenant ONCE at the boundary (#842): chat ids die here. An
+    # unknown chat maps to the same 403 as a membership denial — the two were
+    # already indistinguishable (membership is keyed by the tenant id, so a
+    # chat with no row could never have a membership), and keeping them
+    # identical avoids a chat-existence oracle.
+    with SettingsService() as settings_service:
+        try:
+            chat_settings_id = settings_service.resolve_chat_settings_id(chat_id)
+        except TenantResolutionError:
+            ip = _client_ip(request)
+            logger.warning(
+                "Unknown chat: no tenant for chat %s (user_id=%s, ip=%s)",
+                chat_id,
+                user_info.get("user_id"),
+                ip,
+            )
+            auth_monitor.record_failure(ip, "unknown chat")
+            raise HTTPException(status_code=403, detail=MEMBERSHIP_DENIED_DETAIL)
+
     # Every path requires a server-side active membership for chat_id. A bound
     # token proves the user once belonged to this chat, not that they still do;
     # an unbound token's request chat_id is untrusted. The active
     # UserChatMembership is the authorization.
     user_id = user_info.get("user_id")
     with MembershipService() as membership_service:
-        authorized = membership_service.is_active_member(user_id, chat_id)
+        authorized = membership_service.is_active_member(user_id, chat_settings_id)
     if not authorized:
         ip = _client_ip(request)
         logger.warning(
@@ -129,8 +157,9 @@ def _validate_request(
             ip,
         )
         auth_monitor.record_failure(ip, "membership denied")
-        raise HTTPException(status_code=403, detail="Not a member of this instance")
+        raise HTTPException(status_code=403, detail=MEMBERSHIP_DENIED_DETAIL)
 
+    user_info["chat_settings_id"] = chat_settings_id
     return user_info
 
 

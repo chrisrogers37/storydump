@@ -148,7 +148,7 @@ class MediaSourceFactory:
             # service-account fallback and report a misleading auth error.
             from src.services.core.settings_service import SettingsService
 
-            chat_settings = SettingsService().get_settings_if_exists(telegram_chat_id)
+            chat_settings = SettingsService().get_settings(telegram_chat_id)
             if chat_settings and chat_settings.media_source_root:
                 kwargs["root_folder_id"] = chat_settings.media_source_root
 

@@ -6,13 +6,14 @@ import pytest
 from fastapi import HTTPException
 
 from src.api.routes.onboarding.helpers import (
+    MEMBERSHIP_DENIED_DETAIL,
     AUTH_FAILURE_DETAIL,
     _validate_admin,
     _validate_auth,
     _validate_request,
     service_error_handler,
 )
-from tests.src.api.conftest import CHAT_ID, mock_validate
+from tests.src.api.conftest import CHAT_ID, TENANT_ID, mock_validate, service_ctx
 
 
 class TestServiceErrorHandler:
@@ -247,7 +248,10 @@ class TestValidateRequestAuthorization:
         with self._auth({"user_id": 1, "chat_id": CHAT_ID}):
             result = _validate_request("token", CHAT_ID)
         assert result["user_id"] == 1
-        membership_cls.return_value.is_active_member.assert_called_once_with(1, CHAT_ID)
+        assert result["chat_settings_id"] == TENANT_ID
+        membership_cls.return_value.is_active_member.assert_called_once_with(
+            1, TENANT_ID
+        )
 
     def test_bound_token_non_member_is_rejected(self, _authorize_membership_by_default):
         """A bound token for a chat the user is not a member of → 403.
@@ -264,7 +268,9 @@ class TestValidateRequestAuthorization:
                     _validate_request("token", CHAT_ID)
         assert exc.value.status_code == 403
         assert "member" in exc.value.detail.lower()
-        membership_cls.return_value.is_active_member.assert_called_once_with(1, CHAT_ID)
+        membership_cls.return_value.is_active_member.assert_called_once_with(
+            1, TENANT_ID
+        )
 
     def test_bound_token_revoked_member_is_rejected(
         self, _authorize_membership_by_default
@@ -306,7 +312,9 @@ class TestValidateRequestAuthorization:
         with self._auth({"user_id": 1}):
             result = _validate_request("token", CHAT_ID)
         assert result["user_id"] == 1
-        membership_cls.return_value.is_active_member.assert_called_once_with(1, CHAT_ID)
+        membership_cls.return_value.is_active_member.assert_called_once_with(
+            1, TENANT_ID
+        )
 
     def test_unbound_token_non_member_is_rejected(
         self, _authorize_membership_by_default
@@ -320,6 +328,28 @@ class TestValidateRequestAuthorization:
                     _validate_request("token", CHAT_ID)
         assert exc.value.status_code == 403
         assert "member" in exc.value.detail.lower()
+
+    def test_unknown_chat_maps_to_the_membership_403(
+        self, _authorize_membership_by_default
+    ):
+        """A chat with no tenant refuses with the SAME 403 as a membership
+        denial (#842) — the boundary resolves once, refuses typed, and leaks
+        no chat-existence oracle; membership is never even asked."""
+        from src.exceptions.tenancy import TenantResolutionError
+
+        membership_cls = _authorize_membership_by_default
+        with patch("src.api.routes.onboarding.helpers.SettingsService") as settings_cls:
+            svc = service_ctx(settings_cls)
+            svc.resolve_chat_settings_id.side_effect = TenantResolutionError(
+                "unknown_binding"
+            )
+            with self._auth({"user_id": 1, "chat_id": CHAT_ID}):
+                with patch("src.api.routes.onboarding.helpers.auth_monitor"):
+                    with pytest.raises(HTTPException) as exc:
+                        _validate_request("token", CHAT_ID)
+        assert exc.value.status_code == 403
+        assert exc.value.detail == MEMBERSHIP_DENIED_DETAIL
+        membership_cls.return_value.is_active_member.assert_not_called()
 
     def test_unbound_token_unknown_user_fails_closed(
         self, _authorize_membership_by_default

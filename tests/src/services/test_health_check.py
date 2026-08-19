@@ -173,7 +173,7 @@ class TestHealthCheckService:
         mock_settings.INSTAGRAM_ACCOUNT_ID = None
         mock_settings.FACEBOOK_APP_ID = None
         # Admin chat has media sync disabled → media_sync health is "Disabled".
-        mock_settings_service_cls.return_value.__enter__.return_value.get_settings_if_exists.return_value = Mock(
+        mock_settings_service_cls.return_value.__enter__.return_value.get_settings.return_value = Mock(
             media_sync_enabled=False
         )
         health_service.queue_repo.count_pending.return_value = 5
@@ -274,7 +274,7 @@ class TestHealthCheckService:
         mock_settings_service = (
             mock_settings_service_cls.return_value.__enter__.return_value
         )
-        mock_settings_service.get_settings_if_exists.return_value = admin_chat
+        mock_settings_service.get_settings.return_value = admin_chat
 
         result = health_service._check_media_sync()
 
@@ -298,7 +298,7 @@ class TestHealthCheckService:
         mock_settings_service = (
             mock_settings_service_cls.return_value.__enter__.return_value
         )
-        mock_settings_service.get_settings_if_exists.return_value = admin_chat
+        mock_settings_service.get_settings.return_value = admin_chat
         mock_settings.MEDIA_SYNC_INTERVAL_SECONDS = 300
 
         mock_sync_info = {
@@ -347,7 +347,7 @@ class TestHealthCheckService:
         mock_settings_service = (
             mock_settings_service_cls.return_value.__enter__.return_value
         )
-        mock_settings_service.get_settings_if_exists.return_value = admin_chat
+        mock_settings_service.get_settings.return_value = admin_chat
 
         with (
             patch("src.services.core.media_sync.MediaSyncService") as mock_sync_class,
@@ -382,7 +382,7 @@ class TestHealthCheckService:
         mock_settings_service = (
             mock_settings_service_cls.return_value.__enter__.return_value
         )
-        mock_settings_service.get_settings_if_exists.return_value = admin_chat
+        mock_settings_service.get_settings.return_value = admin_chat
         mock_settings.MEDIA_SYNC_INTERVAL_SECONDS = 300  # 5 min
 
         # Last sync was 30 minutes ago (6x the interval)
@@ -427,7 +427,7 @@ class TestHealthCheckService:
             media_source_type="google_drive",
             media_source_root="folder123",
         )
-        mock_settings_service_cls.return_value.__enter__.return_value.get_settings_if_exists.return_value = admin_chat
+        mock_settings_service_cls.return_value.__enter__.return_value.get_settings.return_value = admin_chat
 
         with patch(
             "src.services.media_sources.factory.MediaSourceFactory"
@@ -459,7 +459,7 @@ class TestHealthCheckService:
         mock_settings_service = (
             mock_settings_service_cls.return_value.__enter__.return_value
         )
-        mock_settings_service.get_settings_if_exists.return_value = admin_chat
+        mock_settings_service.get_settings.return_value = admin_chat
 
         mock_sync_info = {
             "started_at": datetime.now(timezone.utc).isoformat(),

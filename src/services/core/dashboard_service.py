@@ -42,15 +42,11 @@ class DashboardService(BaseService):
         self.history_queries = HistoryDashboardQueries(self)
         self.instance_queries = InstanceDashboardQueries(self)
 
-    def resolve_chat_settings_id(self, telegram_chat_id: int) -> str:
-        chat_settings = self.settings_service.get_settings(telegram_chat_id)
-        return str(chat_settings.id)
-
     # -- Queue delegates --
 
-    def get_queue_detail(self, telegram_chat_id: int, limit: int = 10) -> dict:
+    def get_queue_detail(self, chat_settings_id: str, limit: int = 10) -> dict:
 
-        return self.queue_queries.get_queue_detail(telegram_chat_id, limit)
+        return self.queue_queries.get_queue_detail(chat_settings_id, limit)
 
     def get_pending_queue_items(self, chat_settings_id: Optional[str] = None) -> list:
 
@@ -60,7 +56,7 @@ class DashboardService(BaseService):
 
     def get_media_library(
         self,
-        telegram_chat_id: int,
+        chat_settings_id: str,
         page: int = 1,
         page_size: int = 20,
         category: Optional[str] = None,
@@ -68,65 +64,65 @@ class DashboardService(BaseService):
     ) -> dict:
 
         return self.media_queries.get_media_library(
-            telegram_chat_id, page, page_size, category, posting_status
+            chat_settings_id, page, page_size, category, posting_status
         )
 
-    def get_media_stats(self, telegram_chat_id: int) -> dict:
+    def get_media_stats(self, chat_settings_id: str) -> dict:
 
-        return self.media_queries.get_media_stats(telegram_chat_id)
+        return self.media_queries.get_media_stats(chat_settings_id)
 
-    def get_category_analytics(self, telegram_chat_id: int, days: int = 30) -> dict:
+    def get_category_analytics(self, chat_settings_id: str, days: int = 30) -> dict:
 
-        return self.media_queries.get_category_analytics(telegram_chat_id, days)
+        return self.media_queries.get_category_analytics(chat_settings_id, days)
 
-    def get_category_mix_drift(self, telegram_chat_id: int, days: int = 7) -> dict:
+    def get_category_mix_drift(self, chat_settings_id: str, days: int = 7) -> dict:
 
-        return self.media_queries.get_category_mix_drift(telegram_chat_id, days)
+        return self.media_queries.get_category_mix_drift(chat_settings_id, days)
 
     def get_dead_content_report(
-        self, telegram_chat_id: int, min_age_days: int = 30
+        self, chat_settings_id: str, min_age_days: int = 30
     ) -> dict:
 
         return self.media_queries.get_dead_content_report(
-            telegram_chat_id, min_age_days
+            chat_settings_id, min_age_days
         )
 
-    def get_content_reuse_insights(self, telegram_chat_id: int) -> dict:
+    def get_content_reuse_insights(self, chat_settings_id: str) -> dict:
 
-        return self.media_queries.get_content_reuse_insights(telegram_chat_id)
+        return self.media_queries.get_content_reuse_insights(chat_settings_id)
 
     # -- History delegates --
 
-    def get_history_detail(self, telegram_chat_id: int, limit: int = 10) -> dict:
+    def get_history_detail(self, chat_settings_id: str, limit: int = 10) -> dict:
 
-        return self.history_queries.get_history_detail(telegram_chat_id, limit)
+        return self.history_queries.get_history_detail(chat_settings_id, limit)
 
-    def get_analytics(self, telegram_chat_id: int, days: int = 30) -> dict:
+    def get_analytics(self, chat_settings_id: str, days: int = 30) -> dict:
 
-        return self.history_queries.get_analytics(telegram_chat_id, days)
+        return self.history_queries.get_analytics(chat_settings_id, days)
 
     def get_schedule_recommendations(
-        self, telegram_chat_id: int, days: int = 90
+        self, chat_settings_id: str, days: int = 90
     ) -> dict:
 
-        return self.history_queries.get_schedule_recommendations(telegram_chat_id, days)
+        return self.history_queries.get_schedule_recommendations(chat_settings_id, days)
 
     @staticmethod
     def _generate_recommendations(hourly: list, dow: list) -> list:
 
         return HistoryDashboardQueries._generate_recommendations(hourly, dow)
 
-    def get_schedule_preview(self, telegram_chat_id: int, slots: int = 10) -> dict:
+    def get_schedule_preview(self, chat_settings_id: str, slots: int = 10) -> dict:
 
-        return self.history_queries.get_schedule_preview(telegram_chat_id, slots)
+        return self.history_queries.get_schedule_preview(chat_settings_id, slots)
 
-    def get_approval_latency(self, telegram_chat_id: int, days: int = 30) -> dict:
+    def get_approval_latency(self, chat_settings_id: str, days: int = 30) -> dict:
 
-        return self.history_queries.get_approval_latency(telegram_chat_id, days)
+        return self.history_queries.get_approval_latency(chat_settings_id, days)
 
-    def get_team_performance(self, telegram_chat_id: int, days: int = 30) -> dict:
+    def get_team_performance(self, chat_settings_id: str, days: int = 30) -> dict:
 
-        return self.history_queries.get_team_performance(telegram_chat_id, days)
+        return self.history_queries.get_team_performance(chat_settings_id, days)
 
     # -- Instance delegates --
 

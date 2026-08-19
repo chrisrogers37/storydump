@@ -62,9 +62,11 @@ class TelegramUserManager:
             return
 
         try:
-            chat_settings = self.service.settings_service.get_settings_if_exists(
-                telegram_chat_id
-            )
+            # Deliberate #842 exception: ensure-membership is idempotent — a
+            # chat with no tenant has nothing to ensure into, so this is a
+            # no-op rather than a refusal. Provisioning happens only at the
+            # explicit onboarding doors.
+            chat_settings = self.service.settings_service.get_settings(telegram_chat_id)
             if not chat_settings:
                 return
             self.service.membership_repo.create_membership(

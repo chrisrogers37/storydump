@@ -38,7 +38,7 @@ class SetupStateService(BaseService):
         Returns a dict consumed by the onboarding API and convertible
         to Telegram display text via ``format_setup_status()``.
         """
-        chat_settings = self.settings_service.get_settings(telegram_chat_id)
+        chat_settings = self.settings_service.require_settings(telegram_chat_id)
         chat_settings_id = str(chat_settings.id)
 
         instagram = self._check_instagram(telegram_chat_id)

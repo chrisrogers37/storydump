@@ -10,6 +10,9 @@ from src.api.rate_limit import limiter
 
 VALID_USER = {"user_id": 12345, "first_name": "Chris"}
 CHAT_ID = -1001234567890
+#: The tenant id the default boundary fixture resolves CHAT_ID to (#842) —
+#: what routes hand to services instead of the chat id.
+TENANT_ID = "cs-test-1"
 
 
 @pytest.fixture(autouse=True)
@@ -29,7 +32,12 @@ def _authorize_membership_by_default():
     simulates by default. Tests that exercise the membership gate request this
     fixture and tweak ``is_active_member``; all others assume a real member.
     """
-    with patch("src.api.routes.onboarding.helpers.MembershipService") as mock_cls:
+    with (
+        patch("src.api.routes.onboarding.helpers.SettingsService") as mock_settings_cls,
+        patch("src.api.routes.onboarding.helpers.MembershipService") as mock_cls,
+    ):
+        settings_svc = service_ctx(mock_settings_cls)
+        settings_svc.resolve_chat_settings_id.return_value = TENANT_ID
         svc = service_ctx(mock_cls)
         svc.is_active_member.return_value = True
         yield mock_cls

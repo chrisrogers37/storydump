@@ -257,9 +257,7 @@ class TestInstagramAPIService:
         mock_settings.FACEBOOK_APP_ID = "67890"
 
         chat_settings = Mock(enable_instagram_api=False)
-        instagram_service.settings_service.get_settings_if_exists.return_value = (
-            chat_settings
-        )
+        instagram_service.settings_service.get_settings.return_value = chat_settings
 
         assert instagram_service.is_configured() is False
 
@@ -271,7 +269,7 @@ class TestInstagramAPIService:
         mock_settings.ENABLE_INSTAGRAM_API = False
         mock_settings.INSTAGRAM_ACCOUNT_ID = "12345"
         mock_settings.FACEBOOK_APP_ID = "67890"
-        instagram_service.settings_service.get_settings_if_exists.return_value = None
+        instagram_service.settings_service.get_settings.return_value = None
 
         assert instagram_service.is_configured() is False
 

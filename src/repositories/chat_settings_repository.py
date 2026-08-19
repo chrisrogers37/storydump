@@ -6,6 +6,7 @@ from datetime import datetime
 from sqlalchemy import or_
 
 from src.repositories.base_repository import BaseRepository
+from src.exceptions.tenancy import TenantResolutionError
 from src.models.chat_settings import ChatSettings
 from src.models.posting_queue import PostingQueue
 from src.models.user_interaction import UserInteraction
@@ -43,6 +44,21 @@ class ChatSettingsRepository(BaseRepository):
         )
         self.end_read_transaction()
         return result
+
+    def require_by_chat_id(self, telegram_chat_id: int) -> ChatSettings:
+        """Row-or-refuse: the one raise site of the #842 resolution policy.
+
+        A chat with no row refuses typed (``unknown_binding``); nothing is
+        ever minted on the way. Service-tier callers go through
+        ``SettingsService`` — this primitive exists so repo-composed modules
+        (OAuth, account service) share the same single refusal.
+        """
+        chat_settings = self.get_by_chat_id(telegram_chat_id)
+        if chat_settings is None:
+            raise TenantResolutionError(
+                "unknown_binding", f"no tenant for chat {telegram_chat_id}"
+            )
+        return chat_settings
 
     def get_by_chat_id(self, telegram_chat_id: int) -> Optional[ChatSettings]:
         """Get settings for a specific chat."""

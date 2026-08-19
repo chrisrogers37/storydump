@@ -18,9 +18,9 @@ from contextlib import contextmanager
 import psycopg2
 import pytest
 
+from src.exceptions.tenancy import TenantResolutionError
 from src.services.target.tenant_resolution import (
     ResolvedTenant,
-    TenantResolutionError,
     resolve_chat,
     resolve_web_session,
 )

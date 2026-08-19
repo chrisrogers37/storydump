@@ -52,7 +52,7 @@ class TestGetSetupState:
     @pytest.fixture(autouse=True)
     def setup_default_mocks(self, setup_service):
         """Set all-disconnected baseline. Tests override what they vary."""
-        self.service.settings_service.get_settings.return_value = (
+        self.service.settings_service.require_settings.return_value = (
             self._make_chat_settings()
         )
         self.service.ig_account_service.get_active_account.return_value = None
@@ -116,7 +116,7 @@ class TestGetSetupState:
 
     def test_media_indexed(self):
         """Configured folder with media items shows indexed."""
-        self.service.settings_service.get_settings.return_value = (
+        self.service.settings_service.require_settings.return_value = (
             self._make_chat_settings(media_source_root="folder123")
         )
         self.service.media_repo.get_active_by_source_type.return_value = [
