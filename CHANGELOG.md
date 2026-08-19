@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **F.1 build (#841): the repository layer's tenant access is fail-closed — "None means everything" is extinct; deliberate cross-tenant access is now the explicit, greppable `SYSTEM_SCOPE`.** Every tenant-scoped repository method (media, history, lock, queue, category-mix, token, audit — 78 methods) now REQUIRES tenant context: the owning `chat_settings_id`, or the `SYSTEM_SCOPE` marker from `src/repositories/tenant_scope.py` for sanctioned system paths (worker loops, maintenance sweeps, health checks, the CLI — the same internal path `_write_allowed` always documented). Omission is a `TypeError` at the call; explicit `None` raises `TenantContextError` at the boundary, before any SQL. **Zero behavior change by construction:** all 78 previously-omitting call sites across `src/`+`cli/` were converted to explicit `SYSTEM_SCOPE` (which is falsy, so every pre-existing filter branch treats it exactly as it treated omission), and row-construction sites write ownership through `tenant_value()` (system scope stamps NULL, as omission always did). The four F.1 gate obligations are pinned in `tests/src/repositories/test_f1_fail_closed.py`: boundary failure per repo, cross-tenant reads return zero rows on a real database, Class-3 (user-plane) repositories REJECT tenant context, and the fail-open signature pattern is extinct via a scanner proven able to fail on a reintroduced instance. `grep -rn SYSTEM_SCOPE src/ cli/` is now the standing inventory of cross-tenant access — the #841 burn-down list for converting system paths to real tenant scoping, one reviewable behavior change at a time (telegram handler paths and the OAuth token upsert are the named first candidates).
+
 ### Added
 
 - **F.2.6 — 02 §7-DDL's grant matrix and the `archive` schema land as migration 057 (#806)** — thirty grants/revokes, `CREATE SCHEMA archive` and its grant: advertised-stream statements 94..125, in stream order. Arm (b) reports `ok=True vacuous=False f2_count=126`; 131 stream statements remain.

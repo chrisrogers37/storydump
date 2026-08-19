@@ -9,6 +9,7 @@ from src.repositories.audit_repository import AuditRepository
 from src.repositories.lock_repository import LockRepository
 from src.config import defaults
 from src.utils.logger import logger
+from src.repositories.tenant_scope import SYSTEM_SCOPE
 
 
 class MediaLockService(BaseService):
@@ -85,6 +86,7 @@ class MediaLockService(BaseService):
             ttl_days=ttl_days,
             lock_reason=lock_reason,
             created_by_user_id=created_by_user_id,
+            chat_settings_id=SYSTEM_SCOPE,
         )
 
         try:
@@ -135,17 +137,19 @@ class MediaLockService(BaseService):
 
     def is_locked(self, media_item_id: str) -> bool:
         """Check if media item is currently locked."""
-        return self.lock_repo.is_locked(media_item_id)
+        return self.lock_repo.is_locked(media_item_id, chat_settings_id=SYSTEM_SCOPE)
 
     def get_active_lock(self, media_item_id: str):
         """Get active lock for media item (if any)."""
-        return self.lock_repo.get_active_lock(media_item_id)
+        return self.lock_repo.get_active_lock(
+            media_item_id, chat_settings_id=SYSTEM_SCOPE
+        )
 
     def remove_lock(
         self, lock_id: str, removed_by_user_id: Optional[str] = None
     ) -> bool:
         """Manually remove a lock."""
-        lock = self.lock_repo.get_by_id(lock_id)
+        lock = self.lock_repo.get_by_id(lock_id, chat_settings_id=SYSTEM_SCOPE)
         if not lock:
             return False
         lock_reason = lock.lock_reason
@@ -174,7 +178,7 @@ class MediaLockService(BaseService):
             Number of locks cleaned up
         """
         with self.track_execution("cleanup_expired_locks") as run_id:
-            count = self.lock_repo.cleanup_expired()
+            count = self.lock_repo.cleanup_expired(chat_settings_id=SYSTEM_SCOPE)
 
             self.set_result_summary(run_id, {"locks_cleaned": count})
 

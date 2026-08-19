@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from src.repositories.lock_repository import LockRepository
 from src.models.media_lock import MediaPostingLock
+from src.repositories.tenant_scope import SYSTEM_SCOPE
 
 
 @pytest.fixture
@@ -40,6 +41,7 @@ class TestLockRepository:
             media_item_id="some-media-id",
             ttl_days=30,
             lock_reason="recent_post",
+            chat_settings_id=SYSTEM_SCOPE,
         )
 
         mock_db.add.assert_called_once()
@@ -59,6 +61,7 @@ class TestLockRepository:
             ttl_days=None,
             lock_reason="permanent_reject",
             created_by_user_id="some-user-id",
+            chat_settings_id=SYSTEM_SCOPE,
         )
 
         added_lock = mock_db.add.call_args[0][0]
@@ -71,7 +74,7 @@ class TestLockRepository:
         mock_lock = MagicMock(spec=MediaPostingLock)
         mock_db.query.return_value.filter.return_value.first.return_value = mock_lock
 
-        result = lock_repo.is_locked("some-media-id")
+        result = lock_repo.is_locked("some-media-id", chat_settings_id=SYSTEM_SCOPE)
 
         assert result is True
 
@@ -79,7 +82,7 @@ class TestLockRepository:
         """Test checking if media is locked with no lock."""
         mock_db.query.return_value.filter.return_value.first.return_value = None
 
-        result = lock_repo.is_locked("some-media-id")
+        result = lock_repo.is_locked("some-media-id", chat_settings_id=SYSTEM_SCOPE)
 
         assert result is False
 
@@ -92,7 +95,7 @@ class TestLockRepository:
         mock_query = mock_db.query.return_value
         mock_query.all.return_value = mock_locks
 
-        result = lock_repo.get_all_active()
+        result = lock_repo.get_all_active(chat_settings_id=SYSTEM_SCOPE)
 
         assert len(result) == 2
         mock_db.query.assert_called_with(MediaPostingLock)
@@ -101,7 +104,7 @@ class TestLockRepository:
         """Test cleaning up expired locks."""
         mock_db.query.return_value.filter.return_value.delete.return_value = 3
 
-        result = lock_repo.cleanup_expired()
+        result = lock_repo.cleanup_expired(chat_settings_id=SYSTEM_SCOPE)
 
         assert result == 3
         mock_db.commit.assert_called_once()
@@ -138,7 +141,7 @@ class TestLockRepositoryCountMethods:
         mock_query.with_entities.return_value = mock_query
         mock_query.scalar.return_value = 5
 
-        result = lock_repo.count_permanent_locks()
+        result = lock_repo.count_permanent_locks(chat_settings_id=SYSTEM_SCOPE)
 
         assert result == 5
 
@@ -148,7 +151,7 @@ class TestLockRepositoryCountMethods:
         mock_query.with_entities.return_value = mock_query
         mock_query.scalar.return_value = None
 
-        result = lock_repo.count_permanent_locks()
+        result = lock_repo.count_permanent_locks(chat_settings_id=SYSTEM_SCOPE)
 
         assert result == 0
 
@@ -222,6 +225,7 @@ class TestLockRepositoryTenantFiltering:
         lock_repo.create(
             media_item_id="media-1",
             ttl_days=30,
+            chat_settings_id=SYSTEM_SCOPE,
         )
 
         added_lock = mock_db.add.call_args[0][0]
