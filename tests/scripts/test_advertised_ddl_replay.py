@@ -18,9 +18,7 @@ import psycopg2
 import pytest
 
 from scripts.advertised_ddl import (
-    DEFAULT_DOCS,
     DEFAULT_MANIFEST,
-    build_stream,
     load_manifest,
 )
 from scripts.tenancy_gate import (
@@ -28,7 +26,11 @@ from scripts.tenancy_gate import (
     tenancy_violations,
     tenant_keyed_tables,
 )
-from tests.scripts.conftest import fetch_one, window_actor
+from tests.scripts.conftest import (
+    fetch_one,
+    replay_advertised_stream,
+    seed_workspace_chain,
+)
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
@@ -41,74 +43,15 @@ DOOR_OWNER_ROLES = ("svc_claim", "svc_clock", "svc_maintenance", "svc_membership
 
 
 def _replay_as_window_actor(owner_window_db, owner_actor, admin_conn):
-    """Bootstrap as owner, then replay the advertised stream as svc_migration
-    into the empty public — the M.3 step-3 shape. Returns the window DSN."""
-    manifest = load_manifest(DEFAULT_MANIFEST)
-    stream = build_stream(DEFAULT_DOCS, manifest)
-    as_svc = window_actor(owner_window_db, owner_actor, admin_conn)
-    conn = psycopg2.connect(as_svc)
-    conn.autocommit = True
-    try:
-        with conn.cursor() as cur:
-            cur.execute(stream)
-    finally:
-        conn.close()
-    return as_svc
+    """The canonical stand-up, promoted to conftest — kept as a thin local
+    alias so this module's call sites read unchanged."""
+    return replay_advertised_stream(owner_window_db, owner_actor, admin_conn)
 
 
 def _seed_scheduled_intent(conn) -> str:
-    """The full parent chain a post_intent requires, born in 'scheduled'.
-
-    Run in ONE transaction and committed, because ``ct_workspaces_owner_at_insert``
-    is a CONSTRAINT TRIGGER INITIALLY DEFERRED — a workspace and its owner
-    member row must both exist by commit — so the chain is workspace + user +
-    owner membership + media_source + ig_account + media_item + intent, all
-    NOT-NULL / CHECK / composite-FK satisfied. ``app.actor_kind`` is set at
-    session scope (survives the commit) because the §4 insert/transition guards
-    and the governance audit triggers forbid anonymous writes. Returns the
-    intent id; leaves the connection idle (committed) with the GUC still set."""
-    conn.autocommit = False
-    with conn.cursor() as cur:
-        cur.execute("SET app.actor_kind = 'migration'")
-        cur.execute("INSERT INTO users DEFAULT VALUES RETURNING id")
-        user = cur.fetchone()[0]
-        cur.execute("INSERT INTO workspaces (name) VALUES ('arm-a') RETURNING id")
-        ws = cur.fetchone()[0]
-        cur.execute(
-            "INSERT INTO workspace_members (workspace_id, user_id, role)"
-            " VALUES (%s, %s, 'owner')",
-            (ws, user),
-        )
-        cur.execute(
-            "INSERT INTO media_sources (workspace_id, provider, config)"
-            " VALUES (%s, 'gdrive', '{\"v\": 1}') RETURNING id",
-            (ws,),
-        )
-        src = cur.fetchone()[0]
-        cur.execute(
-            "INSERT INTO ig_accounts (workspace_id, provider_account_ref)"
-            " VALUES (%s, 'acct-ref') RETURNING id",
-            (ws,),
-        )
-        iga = cur.fetchone()[0]
-        cur.execute(
-            "INSERT INTO media_items"
-            " (workspace_id, source_id, content_hash, file_name, media_kind,"
-            "  provider_file_ref)"
-            " VALUES (%s, %s, 'hash', 'f.jpg', 'image', 'file-ref') RETURNING id",
-            (ws, src),
-        )
-        mi = cur.fetchone()[0]
-        cur.execute(
-            "INSERT INTO post_intents"
-            " (workspace_id, ig_account_id, media_item_id, provider_account_ref,"
-            "  approval_mode, schedule_slot_at)"
-            " VALUES (%s, %s, %s, 'acct-ref', 'manual', now()) RETURNING id",
-            (ws, iga, mi),
-        )
-        intent = cur.fetchone()[0]
-    conn.commit()
-    return intent
+    """The shared parent chain (conftest.seed_workspace_chain owns the
+    deferred-constraint rationale); this suite only needs the intent id."""
+    return seed_workspace_chain(conn, "arm-a")["intent"]
 
 
 class TestTheStreamReplays:
