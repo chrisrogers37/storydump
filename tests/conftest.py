@@ -22,9 +22,12 @@ configured, and skipping is honest. A server that answered and then failed is a
 real failure and propagates.
 """
 
+import hashlib
 import os
+import re
 import socket
 import uuid
+from typing import NoReturn
 
 import pytest
 from dotenv import load_dotenv
@@ -129,21 +132,38 @@ def pytest_sessionfinish(session, exitstatus):
         session.exitstatus = 1
 
 
-def maintenance_connection():
-    """A connection to the ``postgres`` maintenance database.
+#: The database this suite's maintenance connections speak to. One spelling,
+#: because the reaper's whole safety property is that owner and reaper share it
+#: — advisory locks are DATABASE-scoped (see `assert_maintenance_scoped`), so a
+#: second literal drifting from this one disarms the ownership check silently.
+MAINTENANCE_DB = "postgres"
 
-    One door, so the reachability probe and the create/drop pair cannot
-    disagree about what "the server" means.
+
+def connection_to(database: str):
+    """An autocommit connection to ``database`` on the configured cluster.
+
+    One home for the credential block, so a test that has to reach a database
+    other than the maintenance one is not three hand-copied kwargs away from
+    the real thing.
     """
     conn = psycopg2.connect(
         host=settings.DB_HOST,
         port=settings.DB_PORT,
         user=settings.DB_USER,
         password=settings.DB_PASSWORD,
-        database="postgres",
+        database=database,
     )
     conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
     return conn
+
+
+def maintenance_connection():
+    """A connection to the maintenance database.
+
+    One door, so the reachability probe and the create/drop pair cannot
+    disagree about what "the server" means.
+    """
+    return connection_to(MAINTENANCE_DB)
 
 
 #: How long the listener probe waits before concluding nothing is there. It runs
@@ -273,6 +293,388 @@ def drop_test_database():
     conn.close()
 
 
+#: Arms the DESTRUCTIVE half of the stray reaper. Report-only by default, and
+#: that default is a rollout guarantee rather than timidity — see
+#: `reap_stray_databases`. Mirrors `dedup-media`'s dry-run-by-default shape.
+REAP_ARMED_ENV = "REAP_ORPHAN_TEST_DATABASES"
+
+
+def precondition_absent(reason: str) -> NoReturn:
+    """Skip — except where this environment declared integration coverage
+    mandatory, and a missing precondition is then a FAILURE.
+
+    Lives here rather than in a test module because it now has two consumers
+    (#804's refusal reproduction and #758's reaper tests) and it encodes a
+    policy, not a convenience. `tests/scripts/` skips unconditionally on the
+    same class of missing privilege; this diverges because a guard that quietly
+    does not run cannot be told apart from one that ran and found nothing —
+    which is the defect both issues were filed about.
+
+    DELIBERATELY NOT ROUTED THROUGH `integration_verdict`, 40 lines up, which
+    encodes the same two negative rows. Calling it would mean writing
+    `server_answered=False` for a precondition like a missing CREATEROLE — where
+    a server demonstrably DID answer and merely lacked a privilege. A false
+    argument to buy a shared spelling is the worse trade; the shared part that
+    can actually drift, `database_is_required()`, is called rather than
+    re-parsed.
+    """
+    if database_is_required():
+        pytest.fail(
+            f"{reason}\nIntegration coverage is mandatory here ({REQUIRE_DB_ENV}"
+            " is set), so a missing precondition fails rather than skips: a"
+            " guard that silently skips in CI is the absence it was written to"
+            " prevent, with a test file around it."
+        )
+    pytest.skip(reason)
+
+
+def require_role_privilege(conn, column: str, flag: str) -> None:
+    """Skip — or fail where a database is required — unless the current role is
+    SUPERUSER or holds ``column``.
+
+    One home for a probe that was on its way to a third copy: #804's refusal
+    reproduction needs CREATEROLE, #758's reaper tests need CREATEDB, and
+    `tests/scripts/conftest.py::actor_lacks_createrole` is the same query again.
+    That third copy stays put — it is outside this change and importable in
+    neither direction — but the two root-suite copies collapse here.
+
+    CI's `postgres:15` service makes `POSTGRES_USER` the cluster superuser, so
+    these gates genuinely run there; a local role created by hand often has
+    neither flag, and a silent pass would read as coverage that was never taken.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT rolsuper, {column} FROM pg_roles WHERE rolname = current_user"
+        )
+        row = cur.fetchone()
+    if row and (row[0] or row[1]):
+        return
+    precondition_absent(
+        f"{settings.DB_USER} lacks {flag}: needs SUPERUSER or {flag}."
+        f" Grant it with: ALTER ROLE {settings.DB_USER} {flag};"
+    )
+
+
+def reaping_is_armed() -> bool:
+    return os.environ.get(REAP_ARMED_ENV, "").strip().lower() in ("1", "true", "yes")
+
+
+def is_own_convention(datname: str) -> bool:
+    """Is this a database THIS suite's naming convention could have created?
+
+    The ownership boundary, and the only thing standing between a sweep and
+    somebody's real data. Anchored on the exact shape #763 generates —
+    ``<configured base>_<10 lowercase hex>`` — rather than a prefix test,
+    because `LIKE 'storyline_test%'` also matches a hand-made
+    `storyline_test_snapshot` or `storyline_testing`, and a reaper is not
+    entitled to guess.
+
+    Sibling of `tests/scripts/conftest.py::_is_suite_db`, deliberately not
+    shared with it: that predicate names a different convention
+    (``runner_test_``/``runner_tpl_``) and the two must never widen into each
+    other. Measured on the live cluster: all six root-suite strays present
+    today return False from `_is_suite_db`, which is correct — they are not its
+    to reap, and it is not ours to teach about them.
+    """
+    return (
+        re.fullmatch(rf"{re.escape(TEST_DB_BASE_NAME)}_[0-9a-f]{{10}}", datname)
+        is not None
+    )
+
+
+def session_database_lock_key(datname: str) -> int:
+    """The advisory-lock key a session holds for the whole life of its database.
+
+    Derived from the name so the owner and any reaper compute it identically
+    with nothing to look up and nothing to keep in step. blake2b rather than
+    `hash()` (per-process salt) or `hashtext()` (an internal PostgreSQL
+    function with no cross-version stability contract).
+    """
+    digest = hashlib.blake2b(datname.encode("utf-8"), digest_size=8).digest()
+    return int.from_bytes(digest, "big", signed=True)
+
+
+def assert_maintenance_scoped(conn, door: str) -> None:
+    """Refuse a lock operation on a connection that is not in the maintenance
+    database.
+
+    **PostgreSQL advisory locks are DATABASE-scoped, not cluster-scoped**, and
+    getting this wrong fails silently in the worst possible direction: the
+    reaper's probe would succeed against a database whose owner is holding the
+    very same key from elsewhere, and it would drop a live run while looking
+    like it worked. Measured on this cluster (PG 15.19), one key, three
+    sessions:
+
+    | prober | `pg_try_advisory_lock` |
+    |---|---|
+    | holder, on `postgres` | True |
+    | second connection, on ANOTHER database | **True** — no contention at all |
+    | second connection, on `postgres` | False — contends |
+
+    `pg_locks` confirms it: two granted rows, identical `classid`/`objid`/
+    `objsubid`, differing only in `database`.
+
+    This is also why `SUITE_CLUSTER_LOCK_KEY` works one directory over — every
+    holder reaches it through `maintenance_conn`, which always connects to
+    `postgres`. That is currently a property of how its callers are written; here
+    it is checked, for the same reason #808 checked rather than declared.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT current_database()")
+        current = cur.fetchone()[0]
+    if current != MAINTENANCE_DB:
+        raise RuntimeError(
+            f"{door}: advisory locks are DATABASE-scoped, so this must run on"
+            f" {MAINTENANCE_DB!r} to contend with database owners — got"
+            f" {current!r}. On the wrong database every probe succeeds and the"
+            " reaper drops live runs silently."
+        )
+
+
+def lock_holder(cur, key: int):
+    """Who holds advisory lock ``key``: ``(pid, usename, application_name)``.
+
+    A deliberate second copy of `tests/scripts/conftest.py::lock_holder` rather
+    than an import: that module already imports FROM this one, so the reverse is
+    a circular import, and it does filesystem work at import time (it walks the
+    migrations corpus) that every `pytest -m unit` run would then pay for.
+
+    Matched on the FULL identity, not on ``objid`` alone — measured there, a
+    two-argument `pg_advisory_lock(0, k)` lands on the same ``objid`` as our
+    one-argument bigint and is distinguished only by ``objsubid``.
+    """
+    cur.execute(
+        "SELECT a.pid, a.usename, a.application_name"
+        " FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid"
+        " WHERE l.locktype = 'advisory' AND l.granted"
+        "   AND l.classid = %s AND l.objid = %s AND l.objsubid = 1",
+        ((key >> 32) & 0xFFFFFFFF, key & 0xFFFFFFFF),
+    )
+    return cur.fetchone()
+
+
+def claim_session_database(conn) -> None:
+    """Hold this session's ownership lock for as long as the session lives.
+
+    Session-level (not transaction-level) so it survives every idle stretch,
+    which is the entire point — see `reap_stray_databases` for what idleness
+    does to the obvious alternative. Released by the connection closing, which
+    also covers a hard kill: measured on this cluster for #785, SIGKILL the
+    holder and the lock is gone with no cleanup path run.
+    """
+    assert_maintenance_scoped(conn, "claim_session_database")
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT pg_try_advisory_lock(%s)",
+            (session_database_lock_key(settings.TEST_DB_NAME),),
+        )
+        if not cur.fetchone()[0]:
+            holder = lock_holder(cur, session_database_lock_key(settings.TEST_DB_NAME))
+            raise RuntimeError(
+                f"could not claim the ownership lock for {settings.TEST_DB_NAME}"
+                f" — held by {holder}. Refusing to run unowned rather than"
+                " proceeding reapable by every peer.\n"
+                "A LIVE PEER HOLDING A COLLIDING KEY is the only cause this can"
+                " have: the name carries a fresh per-session uuid, a dead"
+                " backend releases its lock with no cleanup path (measured under"
+                " SIGKILL for #785), and a hold by THIS session would be"
+                " re-entrant and succeed. Naming the holder is the whole reason"
+                " an advisory lock beats a file lock here."
+            )
+
+
+def unowned_strays(conn, mine: str) -> list:
+    """Databases of this suite's convention that no live session is holding.
+
+    Returns ``[(datname, backends)]``.
+
+    **WHAT THIS PREDICATE ACTUALLY ANSWERS**, which is not the same as what it
+    is being used to mean. It answers: *no session connected to this cluster's
+    maintenance database is currently holding the key derived from this name.*
+    It is being used to mean *nobody owns this database.* The gap is sessions
+    that never took the lock — a checkout running code older than this change.
+    That window is real, it is why the destructive half ships disarmed, and it
+    closes on its own once every checkout holds the lock rather than by anyone
+    remembering.
+
+    The backend count is reported and deliberately NOT the gate. Measured over
+    two full live sessions, sampling `pg_stat_activity` every 200 ms against the
+    session's own database:
+
+    | run | samples | zero-backend | longest zero window |
+    |---|---|---|---|
+    | 1 | 288 (~58 s) | 35 (**12.2%**) | contiguous |
+    | 2 | 253 (~51 s) | 22 (**8.7%**) | ~**2.6 s** |
+
+    A test database is idle for long stretches — the unit tests never touch it
+    and SQLAlchemy returns pooled connections — so `count(backends) == 0`
+    answers *is anyone querying this right now*, not *does anyone own this*.
+    Those diverge for roughly a tenth of every run.
+
+    `tests/scripts/_sweep_leftovers` gates on exactly that count and is safe
+    anyway, because no concurrent session of that suite can exist while it holds
+    `SUITE_CLUSTER_LOCK_KEY`. **Its predicate is incidentally correct; its mutex
+    is what guarantees it** — its own message says as much ("a concurrent
+    pre-lock run may own it"). The root suite holds no such mutex, so copying
+    the predicate here would move the check without the guarantee, and a
+    backend-count reaper would drop a peer's live database at roughly 1-in-10
+    per sweep. The victim sees connection-loss errors in files they never
+    touched: the original #758 symptom, recreated by the fix for it and
+    attributed to someone else.
+    """
+    assert_maintenance_scoped(conn, "unowned_strays")
+    with conn.cursor() as cur:
+        # No SQL LIKE pre-filter. It was a SECOND, looser encoding of the
+        # convention that `is_own_convention` already owns, and measured on this
+        # cluster the obvious spelling is wrong in the permissive direction:
+        # `'storylineXtest_0123456789' LIKE 'storyline_test\_%'` is TRUE,
+        # because only the appended separator was escaped and the base's own
+        # underscores stayed single-character wildcards. Harmless while the
+        # regex re-filters, and exactly the prefix rule this module rejects.
+        # `pg_database` has tens of rows; filtering in Python costs nothing.
+        cur.execute(
+            "SELECT d.datname, count(a.pid) FROM pg_database d"
+            " LEFT JOIN pg_stat_activity a ON a.datname = d.datname"
+            " GROUP BY d.datname ORDER BY d.datname"
+        )
+        # `r[0] != mine` is NOT redundant with the lock probe below. In
+        # production this scan runs on the connection that HOLDS this session's
+        # lock, and advisory locks are re-entrant — measured, the same session
+        # takes its own key twice and gets True both times — so our own database
+        # probes free and would be listed as a stray. The drop refuses it a
+        # second time; this is what keeps the REPORT honest.
+        rows = [r for r in cur.fetchall() if is_own_convention(r[0]) and r[0] != mine]
+
+        unowned = []
+        for datname, backends in rows:
+            key = session_database_lock_key(datname)
+            cur.execute("SELECT pg_try_advisory_lock(%s)", (key,))
+            if not cur.fetchone()[0]:
+                continue
+            cur.execute("SELECT pg_advisory_unlock(%s)", (key,))
+            unowned.append((datname, backends))
+    return unowned
+
+
+def reap_stray_databases(conn, mine: str, strays) -> list:
+    """Report — and, only when armed, drop — crashed runs' leftover databases.
+
+    Returns the names acted on or reported.
+
+    **Report-only by default, and that is a rollout guarantee rather than
+    caution.** The ownership signal only sees sessions running this code; until
+    every checkout on a host does, an unowned-looking database may be a live run
+    from an older tree. Disarmed, this is a pure read: it opens no transaction,
+    drops nothing, and adds no catalog churn — which also means it cannot
+    contribute to the #773 shared-catalog race until someone arms it. **Arm it
+    only once every checkout on the host is on this code**; there is no way for
+    this function to check that, which is exactly why it is not the default.
+
+    ``strays`` is injectable, and that parameter exists because of a real
+    incident rather than for tidiness. Called with the default it SCANS, so its
+    blast radius is every unowned stray on the cluster — correct for the session
+    fixture and catastrophic for a test, which is what a test arming this
+    discovered by dropping six databases on a shared host mid-development.
+    Anything that wants to arm this against one database passes that one
+    database.
+
+    EVERY precondition is re-checked HERE rather than trusted from the scan —
+    name, ownership boundary AND the ownership lock — because the drop is the
+    destructive step and must verify its own preconditions instead of
+    inheriting them from a caller.
+
+    The lock re-check was missing when this first shipped, and the docstring
+    claimed the boundary could not be widened by an injected list. It could:
+    review handed this an injected list holding a peer-locked, idle,
+    convention-matching database and it was dropped, because the guards
+    checked only the name. Stated precisely now, because the previous wording
+    was the thing a reader would have trusted instead of the guard.
+
+    **The lock is the only ownership guarantee here, and nothing else pretends
+    to be one.** A database being actively queried is protected, but by
+    PostgreSQL refusing the DROP rather than by anything in this function — and
+    that protection is worth exactly what the measurement says it is worth: a
+    live session's database is idle 8-12% of the time, so it is absent precisely
+    when it would matter.
+
+    Never fails the run. A reaper is hygiene, and a hygiene step that can redden
+    a suite has inverted its own value.
+    """
+    if not strays:
+        return []
+
+    armed = reaping_is_armed()
+    verb = "Dropping" if armed else "Would drop"
+    print(
+        f"\n🧹 {len(strays)} orphaned test database(s) from crashed runs"
+        f" — {verb} (arm with {REAP_ARMED_ENV}=1):"
+    )
+    assert_maintenance_scoped(conn, "reap_stray_databases")
+    acted = []
+    for datname, backends in strays:
+        if datname == mine or not is_own_convention(datname):
+            print(f"   REFUSING {datname} — not this suite's to drop")
+            continue
+        print(f"   {datname}  (backends={backends}, no live owner)")
+        if not armed:
+            acted.append(datname)
+            continue
+        try:
+            # No re-check that the database is still IDLE: PostgreSQL enforces
+            # that itself and atomically, which a check here cannot. Measured —
+            # DROP against a database with one live connection raises
+            # `ObjectInUse`, and succeeds the moment that connection closes. An
+            # earlier version did re-check and killed no mutant.
+            #
+            # The OWNERSHIP lock IS re-checked, and that is a different matter.
+            # Found in review: the guards above test the name and nothing else,
+            # so an injected list containing a peer-locked, idle,
+            # convention-matching database was dropped — while this function's
+            # docstring claimed an injected list could never widen the boundary.
+            # A safety claim wider than what the code checks is the same defect
+            # as a harness authorising more than intended, and worse in one way:
+            # it is what the next reader relies on instead of reading the guard.
+            with conn.cursor() as cur:
+                key = session_database_lock_key(datname)
+                cur.execute("SELECT pg_try_advisory_lock(%s)", (key,))
+                if not cur.fetchone()[0]:
+                    print(
+                        f"   REFUSING {datname} — a live session holds its"
+                        " ownership lock"
+                    )
+                    continue
+                try:
+                    cur.execute(f'DROP DATABASE IF EXISTS "{datname}"')
+                finally:
+                    cur.execute("SELECT pg_advisory_unlock(%s)", (key,))
+            acted.append(datname)
+        except Exception as exc:  # noqa: BLE001 - hygiene must never fail
+            print(f"   ...could not drop {datname}: {exc}")
+    return acted
+
+
+def scan_and_reap_strays(conn, mine: str) -> list:
+    """The composition the session fixture runs: scan, then report-or-drop.
+
+    Separate from `reap_stray_databases` because `strays` used to default to
+    None and mean "scan the whole cluster" — a mode switch hiding in a data
+    parameter, whose dangerous mode was the default. A test that armed it
+    therefore authorised dropping every unowned database on the cluster, which
+    it did: six of them, on a shared host, while another checkout was running.
+    Splitting makes the blast radius a property of which function you call.
+
+    The swallow lives HERE rather than inside the scan, so a library function
+    returning ``[]`` never means two different things to a future caller. A
+    reaper is hygiene, and hygiene that can redden a suite has inverted its own
+    value.
+    """
+    try:
+        return reap_stray_databases(conn, mine, unowned_strays(conn, mine))
+    except Exception as exc:  # noqa: BLE001 - hygiene must never fail the run
+        print(f"\n⚠️  stray-database sweep skipped on error: {exc}")
+        return []
+
+
 @pytest.fixture(scope="session", autouse=True)
 def setup_test_database():
     """
@@ -321,6 +723,17 @@ def setup_test_database():
     # The server answered. NOTHING below is swallowed — every failure from here
     # is a database that WAS configured and then went wrong, which is exactly
     # the case the old `except Exception` turned into a green run.
+    #
+    # Claim BEFORE reaping, and reap before creating: the claim is what makes
+    # this session invisible to every other session's reaper, and taking it
+    # first means there is no instant at which our own database exists unowned.
+    # A connection rather than a flag, because the lock has to be held by a live
+    # backend to mean anything. A generator's locals live across the `yield`, so
+    # this stays open for the whole session without a module global.
+    ownership_conn = maintenance_connection()
+    claim_session_database(ownership_conn)
+    scan_and_reap_strays(ownership_conn, settings.TEST_DB_NAME)
+
     create_test_database()
     engine = create_engine(settings.test_database_url)
     Base.metadata.create_all(engine)
@@ -337,6 +750,11 @@ def setup_test_database():
     Base.metadata.drop_all(engine)
     engine.dispose()
     drop_test_database()
+
+    # Release the ownership lock LAST — while it is held, no other session's
+    # reaper can consider this database unowned, and the drop above is the point
+    # after which there is nothing left to protect.
+    ownership_conn.close()
 
 
 @pytest.fixture(scope="function")
