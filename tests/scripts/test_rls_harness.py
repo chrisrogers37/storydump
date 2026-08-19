@@ -231,6 +231,19 @@ class TestTheRuntimeLoginIsConfined:
         )
         assert row == (False, False)
 
+    def test_the_owner_is_also_neither_superuser_nor_bypassrls(
+        self, confined, owner_db
+    ):
+        """Owner-side analogue (#789 review minor): the owner's read-through is
+        the PREMISE here, so the control that its bypass comes from OWNERSHIP —
+        not from a role attribute that would explain the result trivially —
+        matters more on this side than on the login's."""
+        row = fetch_one(
+            owner_db,
+            "SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user",
+        )
+        assert row == (False, False)
+
     def test_an_unset_tenant_guc_raises_rather_than_returning_rows(self, confined):
         """It fails closed by ERRORING, not by returning an empty set — and the
         difference matters operationally. An empty result is indistinguishable
