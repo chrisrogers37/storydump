@@ -179,6 +179,9 @@ class TestAccountSelectorCallbacks:
         # Mock queue item
         mock_queue_item = Mock()
         mock_queue_item.id = queue_id
+        # Legacy NULL stamp: owned-OR-NULL (#895) permits it, so the switch
+        # proceeds — the ownership path is exercised, not bypassed by the mock.
+        mock_queue_item.chat_settings_id = None
         mock_account_handlers.service.queue_repo.get_by_id_prefix.return_value = (
             mock_queue_item
         )
