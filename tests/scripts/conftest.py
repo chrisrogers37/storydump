@@ -565,6 +565,95 @@ def set_test_passwords(admin_conn) -> None:
             cur.execute(f'ALTER ROLE "{role}" PASSWORD %s', (TEST_ACTOR_PASSWORD,))
 
 
+def replay_advertised_stream(db_dsn: str, owner_actor: str, admin_conn) -> str:
+    """Bootstrap as the owner, then replay the advertised stream as
+    svc_migration into the empty public — the M.3 step-3 shape. Returns the
+    window actor's DSN. The canonical full-schema stand-up: suites call this,
+    never inline the sequence (promoted from test_advertised_ddl_replay,
+    which now imports it, per the window_actor rule below)."""
+    import psycopg2 as _psycopg2
+
+    from scripts.advertised_ddl import (
+        DEFAULT_DOCS,
+        DEFAULT_MANIFEST,
+        build_stream,
+        load_manifest,
+    )
+
+    manifest = load_manifest(DEFAULT_MANIFEST)
+    stream = build_stream(DEFAULT_DOCS, manifest)
+    as_svc = window_actor(db_dsn, owner_actor, admin_conn)
+    conn = _psycopg2.connect(as_svc)
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            cur.execute(stream)
+    finally:
+        conn.close()
+    return as_svc
+
+
+def seed_workspace_chain(conn, name: str) -> dict:
+    """The full parent chain a post_intent requires, in ONE transaction.
+
+    One transaction and committed because ``ct_workspaces_owner_at_insert``
+    is a CONSTRAINT TRIGGER INITIALLY DEFERRED — a workspace and its owner
+    member row must both exist by commit. ``app.actor_kind`` is set at
+    session scope because the §4 guards and governance audit triggers forbid
+    anonymous writes. Returns the chain ids; the connection is left committed
+    with the GUC still set. ONE spelling for the whole suite — satellite rows
+    belong in the caller, not here."""
+    conn.autocommit = False
+    with conn.cursor() as cur:
+        cur.execute("SET app.actor_kind = 'migration'")
+        cur.execute("INSERT INTO users DEFAULT VALUES RETURNING id")
+        user = cur.fetchone()[0]
+        cur.execute("INSERT INTO workspaces (name) VALUES (%s) RETURNING id", (name,))
+        ws = cur.fetchone()[0]
+        cur.execute(
+            "INSERT INTO workspace_members (workspace_id, user_id, role)"
+            " VALUES (%s, %s, 'owner')",
+            (ws, user),
+        )
+        cur.execute(
+            "INSERT INTO media_sources (workspace_id, provider, config)"
+            " VALUES (%s, 'gdrive', '{\"v\": 1}') RETURNING id",
+            (ws,),
+        )
+        src = cur.fetchone()[0]
+        cur.execute(
+            "INSERT INTO ig_accounts (workspace_id, provider_account_ref)"
+            " VALUES (%s, %s) RETURNING id",
+            (ws, f"acct-{name}"),
+        )
+        iga = cur.fetchone()[0]
+        cur.execute(
+            "INSERT INTO media_items"
+            " (workspace_id, source_id, content_hash, file_name, media_kind,"
+            "  provider_file_ref)"
+            " VALUES (%s, %s, %s, 'f.jpg', 'image', %s) RETURNING id",
+            (ws, src, f"hash-{name}", f"ref-{name}"),
+        )
+        mi = cur.fetchone()[0]
+        cur.execute(
+            "INSERT INTO post_intents"
+            " (workspace_id, ig_account_id, media_item_id, provider_account_ref,"
+            "  approval_mode, schedule_slot_at)"
+            " VALUES (%s, %s, %s, %s, 'manual', now()) RETURNING id",
+            (ws, iga, mi, f"acct-{name}"),
+        )
+        intent = cur.fetchone()[0]
+    conn.commit()
+    return {
+        "user": user,
+        "ws": ws,
+        "src": src,
+        "iga": iga,
+        "media": mi,
+        "intent": intent,
+    }
+
+
 def window_actor(db_dsn: str, owner_actor: str, admin_conn) -> str:
     """Stand the window up the way M.3 does: bootstrap as the owner, then
     act as ``svc_migration``. Returns the window actor's DSN. The canonical
