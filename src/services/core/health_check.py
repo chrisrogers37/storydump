@@ -9,6 +9,7 @@ from src.repositories.history_repository import HistoryRepository
 from src.repositories.base_repository import BaseRepository
 from src.services.core.telegram_utils import GDRIVE_RECONNECT_GUIDANCE
 from src.config.settings import settings
+from src.utils.datetime_utils import ensure_utc
 from src.utils.logger import logger
 from src.repositories.tenant_scope import SYSTEM_SCOPE
 
@@ -204,7 +205,7 @@ class HealthCheckService(BaseService):
 
             # Alert if oldest item is very old
             if oldest_pending:
-                age = datetime.now(timezone.utc) - oldest_pending.created_at
+                age = datetime.now(timezone.utc) - ensure_utc(oldest_pending.created_at)
                 if age > timedelta(hours=self.MAX_PENDING_AGE_HOURS):
                     return {
                         "healthy": False,
@@ -332,7 +333,9 @@ class HealthCheckService(BaseService):
 
             # Check if last sync is stale (more than 3x interval)
             if last_sync["completed_at"]:
-                completed = datetime.fromisoformat(last_sync["completed_at"])
+                completed = ensure_utc(
+                    datetime.fromisoformat(last_sync["completed_at"])
+                )
                 stale_threshold = timedelta(
                     seconds=settings.MEDIA_SYNC_INTERVAL_SECONDS * 3
                 )
