@@ -790,7 +790,16 @@ const App = {
         } catch (err) {
             const container = document.getElementById('status-health-checks');
             if (container) {
-                container.innerHTML = '<div class="card-body-empty">Failed to load health data</div>';
+                // A 403 here is the admin gate doing its job (#898), not a
+                // fault. Rendering it as "Failed to load" made a deliberate
+                // authorisation decision look like a malfunction — which sends
+                // support chasing a defect that does not exist, and teaches
+                // users to ignore this line, so a REAL failure of the same card
+                // would hide behind it. The setup checklist above is unaffected;
+                // it renders from local state and needs no admin rights.
+                container.innerHTML = err && err.status === 403
+                    ? '<div class="card-body-empty">Deployment health is available to administrators only.</div>'
+                    : '<div class="card-body-empty">Failed to load health data</div>';
             }
         } finally {
             if (loadingEl) loadingEl.classList.add('hidden');
@@ -1714,7 +1723,12 @@ const App = {
 
         if (!response.ok) {
             const error = await response.json().catch(() => ({}));
-            throw new Error(error.detail || 'Request failed');
+            const err = new Error(error.detail || 'Request failed');
+            // Callers need to distinguish a refusal from a fault. Matching on
+            // the detail string would couple the UI to server copy; the status
+            // is the stable signal. See #922.
+            err.status = response.status;
+            throw err;
         }
 
         return response.json();
@@ -1728,7 +1742,12 @@ const App = {
 
         if (!response.ok) {
             const error = await response.json().catch(() => ({}));
-            throw new Error(error.detail || 'Request failed');
+            const err = new Error(error.detail || 'Request failed');
+            // Callers need to distinguish a refusal from a fault. Matching on
+            // the detail string would couple the UI to server copy; the status
+            // is the stable signal. See #922.
+            err.status = response.status;
+            throw err;
         }
 
         return response.json();
