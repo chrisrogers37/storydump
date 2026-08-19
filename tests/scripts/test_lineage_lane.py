@@ -301,6 +301,7 @@ class TestTheBoundaryIsDerivedAndLoud:
             "054_accounts_sources_media_tables.sql",
             "055_intent_ledger_tables.sql",
             "056_machinery_tables.sql",
+            "057_grant_matrix_and_archive_schema.sql",
         ], (
             f"the target lineage is {above}. If you are landing the next F.2"
             " increment, add it here — deliberately, and at the end: arm (b)"
@@ -416,18 +417,27 @@ class TestTheLaneReplaysAcrossTheBoundary:
         )
 
     def test_the_legacy_bound_is_load_bearing_not_tidy(
-        self, owner_actor, owner_db, second_scratch_db
+        self, owner_actor, owner_db, bootstrapped_db
     ):
         """Why every replay in `test_migration_gate.py` passes the bound, as an
         executable fact rather than a comment. Same corpus, same runner, one
         difference: the bounded run stops below the move and still has a schema
         to assert against; the unbounded run does not.
 
-        Neither arm is bootstrapped, deliberately — measured, no migration and
-        no `setup_database.sql` references a service role, so the bootstrap
-        buys this contrast nothing and its per-test role teardown is not free.
-        The lane tests that assert the LANE keep it, because that is where the
-        first policy-carrying table will need it.
+        THE UNBOUNDED ARM IS NOW BOOTSTRAPPED, and the premise that said it
+        need not be has expired. That premise was measured rather than assumed
+        — "no migration and no `setup_database.sql` references a service role"
+        — and migration 057 (F.2.6) is the first one that does: its grant
+        matrix names all six service roles, so an unbootstrapped replay fails
+        with `role "svc_ingress" does not exist` before it can draw any
+        contrast. This is the moment the note above anticipated when it said
+        the lane tests keep the bootstrap "because that is where the first
+        policy-carrying table will need it"; grants got there before policies.
+
+        The BOUNDED arm is deliberately still unbootstrapped. It stops below
+        the move and never reaches 057, so it needs no role and paying for the
+        teardown would buy nothing — and keeping it roleless preserves the
+        contrast this test exists to draw.
         """
         # The bounded arm runs as the OWNER ACTOR (#753): the legacy-lineage
         # replay's declared seed identity, so no superuser replay path
@@ -435,7 +445,7 @@ class TestTheLaneReplaysAcrossTheBoundary:
         as_owner = as_user(owner_db, owner_actor)
         psql_apply(as_owner, [SETUP_SQL])
         apply_pending(as_owner, MIGRATIONS_DIR, LEGACY_LINEAGE_MAX)
-        run_lane(second_scratch_db)
+        run_lane(bootstrapped_db)
 
         # The contrast is drawn on LEGACY-ONLY table names, not on emptiness:
         # from 053 the unbounded arm's `public` is populated — by the target
@@ -448,7 +458,7 @@ class TestTheLaneReplaysAcrossTheBoundary:
             "bounded: the legacy schema is still in public, which is what the"
             " legacy-lineage suites assert against"
         )
-        assert legacy_only & set(tables_in(second_scratch_db, "public")) == set(), (
+        assert legacy_only & set(tables_in(bootstrapped_db, "public")) == set(), (
             "unbounded: the move ran, so the legacy schema must be out of"
             " public — what is there instead is the target lineage"
         )
