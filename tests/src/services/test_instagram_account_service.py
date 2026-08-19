@@ -124,13 +124,13 @@ class TestGetActiveAccount:
     ):
         """Should return the active account when one is set."""
         sample_settings.active_instagram_account_id = sample_account.id
-        mock_settings_repo.get_or_create.return_value = sample_settings
+        mock_settings_repo.get_by_chat_id.return_value = sample_settings
         mock_account_repo.get_by_id.return_value = sample_account
 
         result = service.get_active_account(-1001234567890)
 
         assert result == sample_account
-        mock_settings_repo.get_or_create.assert_called_once_with(-1001234567890)
+        mock_settings_repo.get_by_chat_id.assert_called_once_with(-1001234567890)
         mock_account_repo.get_by_id.assert_called_once_with(str(sample_account.id))
 
     def test_returns_none_when_no_account_selected(
@@ -138,7 +138,7 @@ class TestGetActiveAccount:
     ):
         """Should return None when no active account is set."""
         sample_settings.active_instagram_account_id = None
-        mock_settings_repo.get_or_create.return_value = sample_settings
+        mock_settings_repo.get_by_chat_id.return_value = sample_settings
 
         result = service.get_active_account(-1001234567890)
 
@@ -155,7 +155,7 @@ class TestSwitchAccount:
 
     def _own(self, mock_settings_repo, mock_token_repo, sample_settings):
         """Wire the caller as a token-owner of whatever account is probed."""
-        mock_settings_repo.get_or_create.return_value = sample_settings
+        mock_settings_repo.get_by_chat_id.return_value = sample_settings
         mock_token_repo.get_owner_chat_ids.return_value = {str(sample_settings.id)}
 
     def test_switch_to_valid_account(
@@ -187,7 +187,7 @@ class TestSwitchAccount:
     ):
         """Tenant A cannot adopt tenant B's account: switching would let A
         post with B's credentials."""
-        mock_settings_repo.get_or_create.return_value = sample_settings
+        mock_settings_repo.get_by_chat_id.return_value = sample_settings
         mock_token_repo.get_owner_chat_ids.return_value = {str(uuid.uuid4())}
 
         with pytest.raises(ValueError, match="not found for this chat"):
@@ -204,7 +204,7 @@ class TestSwitchAccount:
     ):
         """A non-env chat cannot adopt legacy unstamped accounts."""
         sample_settings.telegram_chat_id = -100999
-        mock_settings_repo.get_or_create.return_value = sample_settings
+        mock_settings_repo.get_by_chat_id.return_value = sample_settings
         mock_token_repo.get_owner_chat_ids.return_value = set()
 
         with pytest.raises(ValueError, match="not found for this chat"):
@@ -284,7 +284,7 @@ class TestAddAccount:
         mock_account_repo.get_by_instagram_id.return_value = None
         mock_account_repo.get_by_username.return_value = None
         mock_account_repo.create.return_value = sample_account
-        mock_settings_repo.get_or_create.return_value = sample_settings
+        mock_settings_repo.get_by_chat_id.return_value = sample_settings
 
         service.add_account(
             display_name="Main Brand",
@@ -389,7 +389,7 @@ class TestUpdateAccountToken:
     ):
         """#675 — re-issued tokens carry the connecting chat's stamp."""
         mock_account_repo.get_by_meta_account_id.return_value = sample_account
-        mock_settings_repo.get_or_create.return_value = sample_settings
+        mock_settings_repo.get_by_chat_id.return_value = sample_settings
 
         service.update_account_token(
             instagram_account_id="17841234567890",
@@ -489,7 +489,7 @@ class TestDeactivateAccount:
     ):
         """A chat holding a token for the account may deactivate it."""
         chat = self._chat()
-        mock_settings_repo.get_or_create.return_value = chat
+        mock_settings_repo.get_by_chat_id.return_value = chat
         mock_token_repo.get_owner_chat_ids.return_value = {str(chat.id)}
         self._wire_success(mock_account_repo)
 
@@ -498,7 +498,7 @@ class TestDeactivateAccount:
         )
 
         assert result.is_active is False
-        mock_settings_repo.get_or_create.assert_called_once_with(self.TENANT_CHAT_ID)
+        mock_settings_repo.get_by_chat_id.assert_called_once_with(self.TENANT_CHAT_ID)
         mock_account_repo.deactivate.assert_called_once_with(str(sample_account.id))
 
     def test_deactivate_by_active_pointer_owner(
@@ -512,7 +512,7 @@ class TestDeactivateAccount:
         """A chat with the account selected as active may deactivate it,
         even when the tokens are stamped to another chat."""
         chat = self._chat(active_account_id=sample_account.id)
-        mock_settings_repo.get_or_create.return_value = chat
+        mock_settings_repo.get_by_chat_id.return_value = chat
         mock_token_repo.get_owner_chat_ids.return_value = {str(uuid.uuid4())}
         self._wire_success(mock_account_repo)
 
@@ -534,7 +534,7 @@ class TestDeactivateAccount:
         """Tenant A cannot deactivate tenant B's account: the flag is
         deployment-wide, so a foreign removal disables the account for B."""
         chat = self._chat()  # no active pointer to this account
-        mock_settings_repo.get_or_create.return_value = chat
+        mock_settings_repo.get_by_chat_id.return_value = chat
         mock_token_repo.get_owner_chat_ids.return_value = {str(uuid.uuid4())}
 
         with pytest.raises(ValueError, match="not found for this chat"):
@@ -557,7 +557,7 @@ class TestDeactivateAccount:
         from src.config.settings import settings as app_settings
 
         chat = self._chat(telegram_chat_id=app_settings.TELEGRAM_CHANNEL_ID)
-        mock_settings_repo.get_or_create.return_value = chat
+        mock_settings_repo.get_by_chat_id.return_value = chat
         mock_token_repo.get_owner_chat_ids.return_value = set()
         self._wire_success(mock_account_repo)
 
@@ -579,7 +579,7 @@ class TestDeactivateAccount:
     ):
         """A non-env chat cannot claim legacy unstamped accounts."""
         chat = self._chat()
-        mock_settings_repo.get_or_create.return_value = chat
+        mock_settings_repo.get_by_chat_id.return_value = chat
         mock_token_repo.get_owner_chat_ids.return_value = set()
 
         with pytest.raises(ValueError, match="not found for this chat"):
@@ -622,7 +622,7 @@ class TestGetAccountsForDisplay:
         """Should return properly formatted account data for Telegram UI."""
         mock_account_repo.get_all_active.return_value = [sample_account]
         sample_settings.active_instagram_account_id = sample_account.id
-        mock_settings_repo.get_or_create.return_value = sample_settings
+        mock_settings_repo.get_by_chat_id.return_value = sample_settings
         mock_account_repo.get_by_id.return_value = sample_account
 
         result = service.get_accounts_for_display(-1001234567890)
@@ -646,7 +646,7 @@ class TestGetAccountsForDisplay:
         """Should handle case when no account is selected."""
         mock_account_repo.get_all_active.return_value = [sample_account]
         sample_settings.active_instagram_account_id = None
-        mock_settings_repo.get_or_create.return_value = sample_settings
+        mock_settings_repo.get_by_chat_id.return_value = sample_settings
 
         result = service.get_accounts_for_display(-1001234567890)
 
@@ -669,7 +669,7 @@ class TestGetTokenForActiveAccount:
     ):
         """Should return access token for the currently active account."""
         sample_settings.active_instagram_account_id = sample_account.id
-        mock_settings_repo.get_or_create.return_value = sample_settings
+        mock_settings_repo.get_by_chat_id.return_value = sample_settings
         mock_account_repo.get_by_id.return_value = sample_account
 
         mock_token = Mock()
@@ -685,7 +685,7 @@ class TestGetTokenForActiveAccount:
     ):
         """Should return None when no active account is set."""
         sample_settings.active_instagram_account_id = None
-        mock_settings_repo.get_or_create.return_value = sample_settings
+        mock_settings_repo.get_by_chat_id.return_value = sample_settings
 
         result = service.get_token_for_active_account(-1001234567890)
 
@@ -705,7 +705,7 @@ class TestAutoSelectAccount:
     ):
         """Should auto-select when exactly one account exists and none is selected."""
         sample_settings.active_instagram_account_id = None
-        mock_settings_repo.get_or_create.return_value = sample_settings
+        mock_settings_repo.get_by_chat_id.return_value = sample_settings
         mock_account_repo.get_all_active.return_value = [sample_account]
         mock_settings_repo.update.return_value = sample_settings
 
@@ -724,7 +724,7 @@ class TestAutoSelectAccount:
     ):
         """Should not auto-select when an account is already selected."""
         sample_settings.active_instagram_account_id = sample_account.id
-        mock_settings_repo.get_or_create.return_value = sample_settings
+        mock_settings_repo.get_by_chat_id.return_value = sample_settings
         mock_account_repo.get_by_id.return_value = sample_account
 
         result = service.auto_select_account_if_single(-1001234567890)
@@ -741,7 +741,7 @@ class TestAutoSelectAccount:
     ):
         """Should not auto-select when multiple accounts exist."""
         sample_settings.active_instagram_account_id = None
-        mock_settings_repo.get_or_create.return_value = sample_settings
+        mock_settings_repo.get_by_chat_id.return_value = sample_settings
 
         second_account = Mock()
         second_account.id = uuid.uuid4()

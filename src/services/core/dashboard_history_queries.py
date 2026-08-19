@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from src.exceptions.tenancy import TenantResolutionError
+
 if TYPE_CHECKING:
     from src.services.core.dashboard_service import DashboardService
 
@@ -16,9 +18,8 @@ class HistoryDashboardQueries:
     def __init__(self, service: DashboardService):
         self.service = service
 
-    def get_history_detail(self, telegram_chat_id: int, limit: int = 10) -> dict:
+    def get_history_detail(self, chat_settings_id: str, limit: int = 10) -> dict:
         """Return recent posting history with media info."""
-        chat_settings_id = self.service.resolve_chat_settings_id(telegram_chat_id)
 
         history_rows = self.service.history_repo.get_all_with_media(
             limit=limit, chat_settings_id=chat_settings_id
@@ -38,7 +39,7 @@ class HistoryDashboardQueries:
 
         return {"items": items}
 
-    def get_analytics(self, telegram_chat_id: int, days: int = 30) -> dict:
+    def get_analytics(self, chat_settings_id: str, days: int = 30) -> dict:
         """Return aggregated posting analytics for the dashboard.
 
         Combines status breakdown, method breakdown, daily counts,
@@ -47,10 +48,8 @@ class HistoryDashboardQueries:
         """
         with self.service.track_execution(
             "get_analytics",
-            input_params={"telegram_chat_id": telegram_chat_id, "days": days},
+            input_params={"chat_settings_id": chat_settings_id, "days": days},
         ) as run_id:
-            chat_settings_id = self.service.resolve_chat_settings_id(telegram_chat_id)
-
             status_counts = self.service.history_repo.get_stats_by_status(
                 days=days, chat_settings_id=chat_settings_id
             )
@@ -117,7 +116,7 @@ class HistoryDashboardQueries:
             return result
 
     def get_schedule_recommendations(
-        self, telegram_chat_id: int, days: int = 90
+        self, chat_settings_id: str, days: int = 90
     ) -> dict:
         """Analyze posting history to recommend optimal posting times.
 
@@ -127,10 +126,8 @@ class HistoryDashboardQueries:
         """
         with self.service.track_execution(
             "get_schedule_recommendations",
-            input_params={"telegram_chat_id": telegram_chat_id, "days": days},
+            input_params={"chat_settings_id": chat_settings_id, "days": days},
         ) as run_id:
-            chat_settings_id = self.service.resolve_chat_settings_id(telegram_chat_id)
-
             hourly = self.service.history_repo.get_hourly_approval_rates(
                 days=days, chat_settings_id=chat_settings_id
             )
@@ -250,7 +247,7 @@ class HistoryDashboardQueries:
 
         return recommendations
 
-    def get_schedule_preview(self, telegram_chat_id: int, slots: int = 10) -> dict:
+    def get_schedule_preview(self, chat_settings_id: str, slots: int = 10) -> dict:
         """Show upcoming scheduled slots with predicted categories.
 
         Computes future slot times from the posting interval and
@@ -266,9 +263,15 @@ class HistoryDashboardQueries:
 
         with self.service.track_execution(
             "get_schedule_preview",
-            input_params={"telegram_chat_id": telegram_chat_id, "slots": slots},
+            input_params={"chat_settings_id": chat_settings_id, "slots": slots},
         ) as run_id:
-            chat_settings = self.service.settings_service.get_settings(telegram_chat_id)
+            chat_settings = self.service.settings_service.get_settings_by_id(
+                chat_settings_id
+            )
+            if chat_settings is None:
+                raise TenantResolutionError(
+                    "unknown_binding", f"no tenant {chat_settings_id}"
+                )
 
             if chat_settings.is_paused:
                 self.service.set_result_summary(run_id, {"status": "paused"})
@@ -337,16 +340,15 @@ class HistoryDashboardQueries:
                 "timezone": "UTC",
             }
 
-    def get_approval_latency(self, telegram_chat_id: int, days: int = 30) -> dict:
+    def get_approval_latency(self, chat_settings_id: str, days: int = 30) -> dict:
         """Return approval latency statistics — time from queue to decision.
 
         Shows overall avg/min/max and breakdowns by hour and category.
         """
         with self.service.track_execution(
             "get_approval_latency",
-            input_params={"telegram_chat_id": telegram_chat_id, "days": days},
+            input_params={"chat_settings_id": chat_settings_id, "days": days},
         ) as run_id:
-            chat_settings_id = self.service.resolve_chat_settings_id(telegram_chat_id)
             result = self.service.history_repo.get_approval_latency(
                 days=days, chat_settings_id=chat_settings_id
             )
@@ -360,7 +362,7 @@ class HistoryDashboardQueries:
             )
             return result
 
-    def get_team_performance(self, telegram_chat_id: int, days: int = 30) -> dict:
+    def get_team_performance(self, chat_settings_id: str, days: int = 30) -> dict:
         """Return per-user approval rates and response times.
 
         Shows each team member's posted/skipped/rejected counts,
@@ -368,9 +370,8 @@ class HistoryDashboardQueries:
         """
         with self.service.track_execution(
             "get_team_performance",
-            input_params={"telegram_chat_id": telegram_chat_id, "days": days},
+            input_params={"chat_settings_id": chat_settings_id, "days": days},
         ) as run_id:
-            chat_settings_id = self.service.resolve_chat_settings_id(telegram_chat_id)
             users = self.service.history_repo.get_user_approval_stats(
                 days=days, chat_settings_id=chat_settings_id
             )

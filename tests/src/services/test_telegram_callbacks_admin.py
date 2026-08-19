@@ -19,9 +19,12 @@ def mock_service():
     service.interaction_service = Mock()
     service._get_display_name.return_value = "AdminUser"
     # Default: the calling chat resolves to tenant "cs-1" (make_query's
-    # default chat). Cross-tenant tests override get_settings_if_exists.
+    # default chat). Cross-tenant tests override the door they exercise:
+    # batch-approve resolves via resolve_chat_settings_id; resume/reset read
+    # the row via get_settings (#842).
     service.settings_service = Mock()
-    service.settings_service.get_settings_if_exists.return_value = Mock(
+    service.settings_service.resolve_chat_settings_id.return_value = "cs-1"
+    service.settings_service.get_settings.return_value = Mock(
         id="cs-1", telegram_chat_id=-100123
     )
     return service
@@ -211,7 +214,7 @@ class TestHandleResumeCallback:
         now = datetime.now(timezone.utc)
         overdue = [Mock(id="q-1", scheduled_for=now - timedelta(hours=2))]
         handlers.service.queue_repo.get_all.return_value = overdue
-        handlers.service.settings_service.get_settings_if_exists.return_value = Mock(
+        handlers.service.settings_service.get_settings.return_value = Mock(
             id="cs-9", telegram_chat_id=-100987
         )
 
@@ -328,9 +331,7 @@ class TestCrossTenantIsolation:
     @patch("src.services.core.telegram_callbacks_admin.telegram_edit_with_retry")
     async def test_resume_clear_scopes_to_caller_tenant(self, mock_retry, handlers):
         """resume:clear queries and deletes only the calling chat's rows."""
-        handlers.service.settings_service.get_settings_if_exists.return_value = Mock(
-            id="cs-A"
-        )
+        handlers.service.settings_service.get_settings.return_value = Mock(id="cs-A")
         now = datetime.now(timezone.utc)
         handlers.service.queue_repo.get_all.return_value = [
             Mock(
@@ -350,7 +351,7 @@ class TestCrossTenantIsolation:
     @patch("src.services.core.telegram_callbacks_admin.telegram_edit_with_retry")
     async def test_resume_bails_when_chat_has_no_tenant(self, mock_retry, handlers):
         """No chat_settings → never run an unscoped query or delete anything."""
-        handlers.service.settings_service.get_settings_if_exists.return_value = None
+        handlers.service.settings_service.get_settings.return_value = None
 
         await handlers.handle_resume_callback("clear", _make_user(), _make_query())
 
@@ -360,9 +361,7 @@ class TestCrossTenantIsolation:
     @patch("src.services.core.telegram_callbacks_admin.telegram_edit_with_retry")
     async def test_reset_confirm_scopes_to_caller_tenant(self, mock_retry, handlers):
         """reset:confirm queries and deletes only the calling chat's rows."""
-        handlers.service.settings_service.get_settings_if_exists.return_value = Mock(
-            id="cs-A"
-        )
+        handlers.service.settings_service.get_settings.return_value = Mock(id="cs-A")
         handlers.service.queue_repo.get_all.return_value = [
             Mock(id="q-1", telegram_message_id=None)
         ]
@@ -379,7 +378,7 @@ class TestCrossTenantIsolation:
         self, mock_retry, handlers
     ):
         """No chat_settings → reset:confirm refuses rather than wipe everything."""
-        handlers.service.settings_service.get_settings_if_exists.return_value = None
+        handlers.service.settings_service.get_settings.return_value = None
 
         await handlers.handle_reset_callback("confirm", _make_user(), _make_query())
 
@@ -391,9 +390,7 @@ class TestCrossTenantIsolation:
         self, mock_retry, handlers
     ):
         """A button carrying another tenant's chat_settings_id is refused."""
-        handlers.service.settings_service.get_settings_if_exists.return_value = Mock(
-            id="cs-A"
-        )
+        handlers.service.settings_service.resolve_chat_settings_id.return_value = "cs-A"
 
         await handlers.handle_batch_approve("cs-VICTIM", _make_user(), _make_query())
 
@@ -406,9 +403,7 @@ class TestCrossTenantIsolation:
         self, mock_retry, handlers
     ):
         """A button carrying the caller's own chat_settings_id proceeds."""
-        handlers.service.settings_service.get_settings_if_exists.return_value = Mock(
-            id="cs-A"
-        )
+        handlers.service.settings_service.resolve_chat_settings_id.return_value = "cs-A"
         handlers.service.queue_repo.get_all_with_media.return_value = []
 
         await handlers.handle_batch_approve("cs-A", _make_user(), _make_query())

@@ -90,9 +90,14 @@ class TestResetQueueCommand:
 class TestQueuePreviewCommand:
     """Tests for the queue-preview CLI command."""
 
+    @patch("src.services.core.settings_service.SettingsService")
     @patch("cli.commands.queue.SchedulerService")
-    def test_queue_preview_shows_items(self, mock_service_class):
+    def test_queue_preview_shows_items(self, mock_service_class, mock_settings_class):
         """Test queue-preview displays upcoming selections."""
+        mock_settings = MagicMock()
+        mock_settings_class.return_value.__enter__ = Mock(return_value=mock_settings)
+        mock_settings_class.return_value.__exit__ = Mock(return_value=False)
+        mock_settings.resolve_chat_settings_id.return_value = "cs-admin"
         mock_service = MagicMock()
         mock_service_class.return_value.__enter__ = Mock(return_value=mock_service)
         mock_service_class.return_value.__exit__ = Mock(return_value=False)
@@ -108,9 +113,14 @@ class TestQueuePreviewCommand:
         assert "preview1.jpg" in result.output
         assert "preview2.jpg" in result.output
 
+    @patch("src.services.core.settings_service.SettingsService")
     @patch("cli.commands.queue.SchedulerService")
-    def test_queue_preview_empty(self, mock_service_class):
+    def test_queue_preview_empty(self, mock_service_class, mock_settings_class):
         """Test queue-preview when no eligible media."""
+        mock_settings = MagicMock()
+        mock_settings_class.return_value.__enter__ = Mock(return_value=mock_settings)
+        mock_settings_class.return_value.__exit__ = Mock(return_value=False)
+        mock_settings.resolve_chat_settings_id.return_value = "cs-admin"
         mock_service = MagicMock()
         mock_service_class.return_value.__enter__ = Mock(return_value=mock_service)
         mock_service_class.return_value.__exit__ = Mock(return_value=False)

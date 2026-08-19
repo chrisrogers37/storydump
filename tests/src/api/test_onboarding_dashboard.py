@@ -5,7 +5,7 @@ from uuid import uuid4
 
 import pytest
 
-from tests.src.api.conftest import CHAT_ID, mock_validate, service_ctx
+from tests.src.api.conftest import CHAT_ID, TENANT_ID, mock_validate, service_ctx
 
 
 def _mock_settings_obj(**overrides):
@@ -92,7 +92,7 @@ class TestQueueDetail:
         assert data["posts_today"] == 5
         assert data["last_post_at"] == "2026-02-22T14:00:00"
 
-        mock_svc.get_queue_detail.assert_called_once_with(CHAT_ID, limit=10)
+        mock_svc.get_queue_detail.assert_called_once_with(TENANT_ID, limit=10)
 
     def test_queue_detail_empty(self, client):
         """Queue detail with no pending items."""
@@ -207,7 +207,7 @@ class TestHistoryDetail:
         assert data["items"][0]["posting_method"] == "instagram_api"
         assert data["items"][1]["status"] == "skipped"
 
-        mock_svc.get_history_detail.assert_called_once_with(CHAT_ID, limit=10)
+        mock_svc.get_history_detail.assert_called_once_with(TENANT_ID, limit=10)
 
     def test_history_detail_empty(self, client):
         """History detail with no posts."""
@@ -273,7 +273,7 @@ class TestMediaStats:
         assert data["categories"][2]["name"] == "lifestyle"
         assert data["categories"][2]["count"] == 1
 
-        mock_svc.get_media_stats.assert_called_once_with(CHAT_ID)
+        mock_svc.get_media_stats.assert_called_once_with(TENANT_ID)
 
     def test_media_stats_empty(self, client):
         """Media stats with no active media."""
@@ -892,7 +892,7 @@ class TestSyncMedia:
                 "google_drive",
                 "folder123",
             )
-            mock_settings_svc.get_settings_if_exists.return_value = Mock(id="cs-abc")
+
             mock_sync_svc = service_ctx(MockSyncService)
             mock_sync_svc.sync.return_value = mock_result
 
@@ -914,7 +914,7 @@ class TestSyncMedia:
             source_root="folder123",
             triggered_by="dashboard",
             telegram_chat_id=CHAT_ID,
-            chat_settings_id="cs-abc",
+            chat_settings_id=TENANT_ID,
         )
 
     def test_sync_media_no_folder_configured(self, client):
@@ -1023,7 +1023,7 @@ class TestAccounts:
             mock_ig_svc = service_ctx(MockIGService)
             mock_ig_svc.list_accounts.return_value = [acct_1, acct_2]
             mock_settings_svc = service_ctx(MockSettingsService)
-            mock_settings_svc.get_settings.return_value = mock_settings
+            mock_settings_svc.get_settings_by_id.return_value = mock_settings
 
             response = client.get(
                 "/api/onboarding/accounts",
@@ -1055,7 +1055,7 @@ class TestAccounts:
             mock_ig_svc = service_ctx(MockIGService)
             mock_ig_svc.list_accounts.return_value = []
             mock_settings_svc = service_ctx(MockSettingsService)
-            mock_settings_svc.get_settings.return_value = mock_settings
+            mock_settings_svc.get_settings_by_id.return_value = mock_settings
 
             response = client.get(
                 "/api/onboarding/accounts",

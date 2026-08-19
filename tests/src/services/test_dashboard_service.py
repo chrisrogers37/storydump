@@ -31,7 +31,7 @@ def dashboard_service():
 
         # Default: _resolve_chat_settings_id returns a tenant ID
         mock_settings = Mock(id="tenant-uuid-1")
-        service.settings_service.get_settings.return_value = mock_settings
+        service.settings_service.get_settings_by_id.return_value = mock_settings
 
         _init_query_classes(service)
         return service
@@ -61,7 +61,7 @@ class TestGetQueueDetail:
         ]
         dashboard_service.history_repo.get_recent_posts.return_value = []
 
-        result = dashboard_service.get_queue_detail(telegram_chat_id=123)
+        result = dashboard_service.get_queue_detail(chat_settings_id="tenant-uuid-1")
 
         assert len(result["items"]) == 2
         assert result["items"][0]["media_name"] == "meme_01.jpg"
@@ -90,7 +90,7 @@ class TestGetQueueDetail:
         ]
         dashboard_service.history_repo.get_recent_posts.return_value = []
 
-        result = dashboard_service.get_queue_detail(telegram_chat_id=123)
+        result = dashboard_service.get_queue_detail(chat_settings_id="tenant-uuid-1")
 
         assert result["items"][0]["media_name"] == "Unknown"
         assert result["items"][0]["category"] == "uncategorized"
@@ -103,7 +103,7 @@ class TestGetQueueDetail:
         post = Mock(posted_at=datetime(2026, 3, 1, 14, 0))
         dashboard_service.history_repo.get_recent_posts.return_value = [post]
 
-        result = dashboard_service.get_queue_detail(telegram_chat_id=123)
+        result = dashboard_service.get_queue_detail(chat_settings_id="tenant-uuid-1")
 
         assert result["posts_today"] == 1
         assert result["last_post_at"] == "2026-03-01T14:00:00"
@@ -125,7 +125,9 @@ class TestGetQueueDetail:
         ]
         dashboard_service.history_repo.get_recent_posts.return_value = []
 
-        result = dashboard_service.get_queue_detail(telegram_chat_id=123, limit=3)
+        result = dashboard_service.get_queue_detail(
+            chat_settings_id="tenant-uuid-1", limit=3
+        )
 
         assert len(result["items"]) == 3
         assert result["total_in_flight"] == 5
@@ -140,7 +142,7 @@ class TestGetQueueDetail:
         dashboard_service.queue_repo.get_all_with_media.side_effect = [[], [], [], []]
         dashboard_service.history_repo.get_recent_posts.return_value = []
 
-        result = dashboard_service.get_queue_detail(telegram_chat_id=123)
+        result = dashboard_service.get_queue_detail(chat_settings_id="tenant-uuid-1")
 
         assert result["items"] == []
         assert result["total_in_flight"] == 0
@@ -164,7 +166,7 @@ class TestGetHistoryDetail:
             (history_item, "story_01.jpg", "memes"),
         ]
 
-        result = dashboard_service.get_history_detail(telegram_chat_id=123)
+        result = dashboard_service.get_history_detail(chat_settings_id="tenant-uuid-1")
 
         assert len(result["items"]) == 1
         assert result["items"][0]["media_name"] == "story_01.jpg"
@@ -187,7 +189,7 @@ class TestGetHistoryDetail:
             (item, None, None),
         ]
 
-        result = dashboard_service.get_history_detail(telegram_chat_id=123)
+        result = dashboard_service.get_history_detail(chat_settings_id="tenant-uuid-1")
 
         assert result["items"][0]["media_name"] == "Unknown"
         assert result["items"][0]["category"] == "uncategorized"
@@ -196,7 +198,7 @@ class TestGetHistoryDetail:
         """get_history_detail handles empty history."""
         dashboard_service.history_repo.get_all_with_media.return_value = []
 
-        result = dashboard_service.get_history_detail(telegram_chat_id=123)
+        result = dashboard_service.get_history_detail(chat_settings_id="tenant-uuid-1")
 
         assert result["items"] == []
 
@@ -204,7 +206,7 @@ class TestGetHistoryDetail:
         """get_history_detail passes limit argument to repository."""
         dashboard_service.history_repo.get_all_with_media.return_value = []
 
-        dashboard_service.get_history_detail(telegram_chat_id=123, limit=5)
+        dashboard_service.get_history_detail(chat_settings_id="tenant-uuid-1", limit=5)
 
         dashboard_service.history_repo.get_all_with_media.assert_called_once_with(
             limit=5, chat_settings_id="tenant-uuid-1"
@@ -288,7 +290,7 @@ class TestGetAnalytics:
             service.service_name = "DashboardService"
 
             mock_settings = Mock(id="tenant-uuid-1")
-            service.settings_service.get_settings.return_value = mock_settings
+            service.settings_service.get_settings_by_id.return_value = mock_settings
 
             _init_query_classes(service)
             return service
@@ -329,7 +331,7 @@ class TestGetAnalytics:
             },
         ]
 
-        result = service.get_analytics(telegram_chat_id=123, days=30)
+        result = service.get_analytics(chat_settings_id="tenant-uuid-1", days=30)
 
         assert result["summary"]["total_posts"] == 100
         assert result["summary"]["posted"] == 80
@@ -368,7 +370,7 @@ class TestGetAnalytics:
         service.history_repo.get_hourly_distribution.return_value = []
         service.history_repo.get_stats_by_category.return_value = []
 
-        result = service.get_analytics(telegram_chat_id=123, days=30)
+        result = service.get_analytics(chat_settings_id="tenant-uuid-1", days=30)
         summary = result["summary"]
 
         # Legacy field — IG and Telegram lumped together
@@ -397,7 +399,7 @@ class TestGetAnalytics:
         service.history_repo.get_hourly_distribution.return_value = []
         service.history_repo.get_stats_by_category.return_value = []
 
-        result = service.get_analytics(telegram_chat_id=123)
+        result = service.get_analytics(chat_settings_id="tenant-uuid-1")
 
         assert result["summary"]["total_posts"] == 0
         assert result["summary"]["success_rate"] == 0
@@ -418,7 +420,7 @@ class TestGetAnalytics:
         service.history_repo.get_hourly_distribution.return_value = []
         service.history_repo.get_stats_by_category.return_value = []
 
-        service.get_analytics(telegram_chat_id=123, days=7)
+        service.get_analytics(chat_settings_id="tenant-uuid-1", days=7)
 
         service.history_repo.get_stats_by_status.assert_called_once_with(
             days=7, chat_settings_id="tenant-uuid-1"
@@ -451,7 +453,7 @@ class TestGetCategoryAnalytics:
             service.service_name = "DashboardService"
 
             mock_settings = Mock(id="tenant-uuid-1")
-            service.settings_service.get_settings.return_value = mock_settings
+            service.settings_service.get_settings_by_id.return_value = mock_settings
             _init_query_classes(service)
             return service
 
@@ -484,7 +486,9 @@ class TestGetCategoryAnalytics:
             "merch": Decimal("0.30"),
         }
 
-        result = service.get_category_analytics(telegram_chat_id=123, days=30)
+        result = service.get_category_analytics(
+            chat_settings_id="tenant-uuid-1", days=30
+        )
 
         assert result["total_posts"] == 98
         assert len(result["categories"]) == 2
@@ -510,7 +514,7 @@ class TestGetCategoryAnalytics:
         ]
         service.category_mix_repo.get_current_mix_as_dict.return_value = {}
 
-        result = service.get_category_analytics(telegram_chat_id=123)
+        result = service.get_category_analytics(chat_settings_id="tenant-uuid-1")
 
         assert result["categories"][0]["configured_ratio"] is None
 
@@ -521,7 +525,7 @@ class TestGetCategoryAnalytics:
         service.history_repo.get_stats_by_category.return_value = []
         service.category_mix_repo.get_current_mix_as_dict.return_value = {}
 
-        result = service.get_category_analytics(telegram_chat_id=123)
+        result = service.get_category_analytics(chat_settings_id="tenant-uuid-1")
 
         assert result["total_posts"] == 0
         assert result["categories"] == []
@@ -544,7 +548,7 @@ class TestGetScheduleRecommendations:
             service.service_name = "DashboardService"
 
             mock_settings = Mock(id="tenant-uuid-1")
-            service.settings_service.get_settings.return_value = mock_settings
+            service.settings_service.get_settings_by_id.return_value = mock_settings
             _init_query_classes(service)
             return service
 
@@ -588,7 +592,7 @@ class TestGetScheduleRecommendations:
             },
         ]
 
-        result = service.get_schedule_recommendations(telegram_chat_id=123)
+        result = service.get_schedule_recommendations(chat_settings_id="tenant-uuid-1")
 
         assert result["status"] == "ok"
         assert len(result["hourly_rates"]) == 3
@@ -610,7 +614,7 @@ class TestGetScheduleRecommendations:
         ]
         service.history_repo.get_dow_approval_rates.return_value = []
 
-        result = service.get_schedule_recommendations(telegram_chat_id=123)
+        result = service.get_schedule_recommendations(chat_settings_id="tenant-uuid-1")
 
         assert result["status"] == "insufficient_data"
         assert result["recommendations"] == []
@@ -634,7 +638,7 @@ class TestGetScheduleRecommendations:
             },
         ]
 
-        result = service.get_schedule_recommendations(telegram_chat_id=123)
+        result = service.get_schedule_recommendations(chat_settings_id="tenant-uuid-1")
 
         assert result["status"] == "ok"
         # Difference is only 0.10 — at threshold, shouldn't crash regardless of outcome
@@ -703,13 +707,13 @@ class TestGetSchedulePreview:
             posting_hours_end=2,
             last_post_sent_at=None,
         )
-        service.settings_service.get_settings.return_value = mock_settings
+        service.settings_service.get_settings_by_id.return_value = mock_settings
         service.category_mix_repo.get_current_mix_as_dict.return_value = {
             "memes": Decimal("0.50"),
             "merch": Decimal("0.50"),
         }
 
-        result = service.get_schedule_preview(telegram_chat_id=123, slots=5)
+        result = service.get_schedule_preview(chat_settings_id="tenant-uuid-1", slots=5)
 
         assert result["status"] == "ok"
         assert len(result["slots"]) == 5
@@ -722,9 +726,9 @@ class TestGetSchedulePreview:
         """Preview returns paused status when posting is paused."""
         service = self._setup_service()
         mock_settings = Mock(is_paused=True)
-        service.settings_service.get_settings.return_value = mock_settings
+        service.settings_service.get_settings_by_id.return_value = mock_settings
 
-        result = service.get_schedule_preview(telegram_chat_id=123)
+        result = service.get_schedule_preview(chat_settings_id="tenant-uuid-1")
 
         assert result["status"] == "paused"
         assert result["slots"] == []
@@ -744,12 +748,12 @@ class TestGetSchedulePreview:
             posting_hours_end=2,
             last_post_sent_at=last_post,
         )
-        service.settings_service.get_settings.return_value = mock_settings
+        service.settings_service.get_settings_by_id.return_value = mock_settings
         service.category_mix_repo.get_current_mix_as_dict.return_value = {
             "memes": Decimal("1.0"),
         }
 
-        result = service.get_schedule_preview(telegram_chat_id=123, slots=2)
+        result = service.get_schedule_preview(chat_settings_id="tenant-uuid-1", slots=2)
 
         assert result["status"] == "ok"
         assert len(result["slots"]) == 2
@@ -770,7 +774,7 @@ class TestGetCategoryMixDrift:
             service.service_run_repo = MagicMock()
             service.service_name = "DashboardService"
             mock_settings = Mock(id="tenant-uuid-1")
-            service.settings_service.get_settings.return_value = mock_settings
+            service.settings_service.get_settings_by_id.return_value = mock_settings
             _init_query_classes(service)
             return service
 
@@ -788,7 +792,9 @@ class TestGetCategoryMixDrift:
             {"category": "merch", "posted": 70},
         ]
 
-        result = service.get_category_mix_drift(telegram_chat_id=123, days=7)
+        result = service.get_category_mix_drift(
+            chat_settings_id="tenant-uuid-1", days=7
+        )
 
         assert not result["healthy"]
         memes = next(c for c in result["categories"] if c["category"] == "memes")
@@ -811,7 +817,7 @@ class TestGetCategoryMixDrift:
             {"category": "merch", "posted": 50},
         ]
 
-        result = service.get_category_mix_drift(telegram_chat_id=123)
+        result = service.get_category_mix_drift(chat_settings_id="tenant-uuid-1")
 
         assert result["healthy"]
         assert result["max_drift"] == 0.0
@@ -826,7 +832,7 @@ class TestGetCategoryMixDrift:
         }
         service.history_repo.get_stats_by_category.return_value = []
 
-        result = service.get_category_mix_drift(telegram_chat_id=123)
+        result = service.get_category_mix_drift(chat_settings_id="tenant-uuid-1")
 
         assert result["total_posted"] == 0
         assert result["categories"][0]["actual_ratio"] == 0
@@ -844,7 +850,7 @@ class TestGetApprovalLatency:
             service.service_run_repo = MagicMock()
             service.service_name = "DashboardService"
             mock_settings = Mock(id="tenant-uuid-1")
-            service.settings_service.get_settings.return_value = mock_settings
+            service.settings_service.get_settings_by_id.return_value = mock_settings
             _init_query_classes(service)
             return service
 
@@ -862,7 +868,7 @@ class TestGetApprovalLatency:
             "by_category": [{"category": "memes", "count": 30, "avg_minutes": 3.0}],
         }
 
-        result = service.get_approval_latency(telegram_chat_id=123, days=30)
+        result = service.get_approval_latency(chat_settings_id="tenant-uuid-1", days=30)
 
         assert result["overall"]["count"] == 50
         assert result["overall"]["avg_minutes"] == 5.0
@@ -884,7 +890,7 @@ class TestGetApprovalLatency:
             "by_category": [],
         }
 
-        result = service.get_approval_latency(telegram_chat_id=123)
+        result = service.get_approval_latency(chat_settings_id="tenant-uuid-1")
 
         assert result["overall"]["count"] == 0
         assert result["days"] == 30
@@ -902,7 +908,7 @@ class TestGetContentReuseInsights:
             service.service_run_repo = MagicMock()
             service.service_name = "DashboardService"
             mock_settings = Mock(id="tenant-uuid-1")
-            service.settings_service.get_settings.return_value = mock_settings
+            service.settings_service.get_settings_by_id.return_value = mock_settings
             _init_query_classes(service)
             return service
 
@@ -919,7 +925,7 @@ class TestGetContentReuseInsights:
             {"category": "merch", "dead_count": 10},
         ]
 
-        result = service.get_content_reuse_insights(telegram_chat_id=123)
+        result = service.get_content_reuse_insights(chat_settings_id="tenant-uuid-1")
 
         assert result["total_active"] == 100
         assert result["never_posted"] == 30
@@ -938,7 +944,7 @@ class TestGetContentReuseInsights:
         }
         service.media_repo.count_dead_content_by_category.return_value = []
 
-        result = service.get_content_reuse_insights(telegram_chat_id=123)
+        result = service.get_content_reuse_insights(chat_settings_id="tenant-uuid-1")
 
         assert result["total_active"] == 0
         assert result["reuse_rate"] == 0
@@ -957,7 +963,7 @@ class TestGetDeadContentReport:
             service.service_run_repo = MagicMock()
             service.service_name = "DashboardService"
             mock_settings = Mock(id="tenant-uuid-1")
-            service.settings_service.get_settings.return_value = mock_settings
+            service.settings_service.get_settings_by_id.return_value = mock_settings
             _init_query_classes(service)
             return service
 
@@ -970,7 +976,7 @@ class TestGetDeadContentReport:
             {"category": "merch", "dead_count": 5},
         ]
 
-        result = service.get_dead_content_report(telegram_chat_id=123)
+        result = service.get_dead_content_report(chat_settings_id="tenant-uuid-1")
 
         assert result["total_active"] == 100
         assert result["total_dead"] == 15
@@ -983,7 +989,7 @@ class TestGetDeadContentReport:
         service.media_repo.count_active.return_value = 50
         service.media_repo.count_dead_content_by_category.return_value = []
 
-        result = service.get_dead_content_report(telegram_chat_id=123)
+        result = service.get_dead_content_report(chat_settings_id="tenant-uuid-1")
 
         assert result["total_dead"] == 0
         assert result["dead_percentage"] == 0
@@ -1001,7 +1007,7 @@ class TestGetTeamPerformance:
             service.service_run_repo = MagicMock()
             service.service_name = "DashboardService"
             mock_settings = Mock(id="tenant-uuid-1")
-            service.settings_service.get_settings.return_value = mock_settings
+            service.settings_service.get_settings_by_id.return_value = mock_settings
             _init_query_classes(service)
             return service
 
@@ -1021,7 +1027,7 @@ class TestGetTeamPerformance:
             },
         ]
 
-        result = service.get_team_performance(telegram_chat_id=123, days=30)
+        result = service.get_team_performance(chat_settings_id="tenant-uuid-1", days=30)
 
         assert len(result["users"]) == 1
         assert result["users"][0]["username"] == "alice"
@@ -1033,7 +1039,7 @@ class TestGetTeamPerformance:
         service = self._setup_service()
         service.history_repo.get_user_approval_stats.return_value = []
 
-        result = service.get_team_performance(telegram_chat_id=123)
+        result = service.get_team_performance(chat_settings_id="tenant-uuid-1")
 
         assert result["users"] == []
         assert result["days"] == 30

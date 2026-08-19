@@ -190,7 +190,7 @@ class TestGDriveExchangeAndStore:
         """Successful exchange stores access and refresh tokens."""
         mock_chat_settings = Mock()
         mock_chat_settings.id = uuid.uuid4()
-        service.settings_repo.get_or_create.return_value = mock_chat_settings
+        service.settings_repo.get_by_chat_id.return_value = mock_chat_settings
 
         with (
             patch.object(
@@ -226,7 +226,7 @@ class TestGDriveExchangeAndStore:
         """Exchange stores issued_at on refresh token for TTL tracking."""
         mock_chat_settings = Mock()
         mock_chat_settings.id = uuid.uuid4()
-        service.settings_repo.get_or_create.return_value = mock_chat_settings
+        service.settings_repo.get_by_chat_id.return_value = mock_chat_settings
 
         with (
             patch.object(
@@ -262,7 +262,7 @@ class TestGDriveExchangeAndStore:
         """Exchange without refresh_token only stores access token."""
         mock_chat_settings = Mock()
         mock_chat_settings.id = uuid.uuid4()
-        service.settings_repo.get_or_create.return_value = mock_chat_settings
+        service.settings_repo.get_by_chat_id.return_value = mock_chat_settings
 
         with (
             patch.object(
@@ -293,7 +293,7 @@ class TestGDriveExchangeAndStore:
         """Exchange resolves chat_settings_id from telegram_chat_id."""
         mock_chat_settings = Mock()
         mock_chat_settings.id = uuid.uuid4()
-        service.settings_repo.get_or_create.return_value = mock_chat_settings
+        service.settings_repo.get_by_chat_id.return_value = mock_chat_settings
 
         with (
             patch.object(
@@ -311,7 +311,7 @@ class TestGDriveExchangeAndStore:
         ):
             await service.exchange_and_store("code", -100123)
 
-        service.settings_repo.get_or_create.assert_called_once_with(-100123)
+        service.settings_repo.get_by_chat_id.assert_called_once_with(-100123)
 
 
 # ==================== Get User Credentials Tests ====================
@@ -661,10 +661,12 @@ class TestGDriveDisconnect:
         )
 
     def test_disconnect_chat_not_found(self):
-        """Disconnect raises ValueError when chat not found."""
+        """Disconnect refuses typed when the chat has no tenant (#842)."""
+        from src.exceptions.tenancy import TenantResolutionError
+
         self.service.settings_repo.get_by_chat_id.return_value = None
 
-        with pytest.raises(ValueError, match="No settings found"):
+        with pytest.raises(TenantResolutionError, match="unknown_binding"):
             self.service.disconnect_for_chat(-1001234567890)
 
     def test_disconnect_no_tokens_is_idempotent(self):

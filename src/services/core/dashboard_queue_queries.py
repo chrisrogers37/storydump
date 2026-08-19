@@ -14,13 +14,12 @@ class QueueDashboardQueries:
     def __init__(self, service: DashboardService):
         self.service = service
 
-    def get_queue_detail(self, telegram_chat_id: int, limit: int = 10) -> dict:
+    def get_queue_detail(self, chat_settings_id: str, limit: int = 10) -> dict:
         """Return in-flight queue items with media info and activity summary.
 
         JIT semantics: the queue holds only items currently awaiting team
         action (0-5 typical), not a multi-day schedule.
         """
-        chat_settings_id = self.service.resolve_chat_settings_id(telegram_chat_id)
 
         # "Awaiting team action" spans the pre-delivery shapes AND the
         # delivery states: 'delivered' cards sit in the chat awaiting a

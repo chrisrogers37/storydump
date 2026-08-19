@@ -11,6 +11,7 @@ from telegram.error import TelegramError
 
 from src.config.settings import settings
 from src.services.core.dashboard_service import DashboardService
+from src.exceptions.tenancy import TenantResolutionError
 from src.services.core.telegram_utils import (
     build_webapp_button,
     escape_markdownv2,
@@ -121,7 +122,13 @@ class TelegramCommandHandlers:
 
     async def _handle_group_status(self, update, user, chat_id):
         """Show instance-scoped status in group chats."""
-        chat_settings = self.service.settings_service.get_settings(chat_id)
+        try:
+            chat_settings = self.service.settings_service.require_settings(chat_id)
+        except TenantResolutionError:
+            await update.message.reply_text(
+                "⚠️ This group isn't set up yet. Run /start first."
+            )
+            return
         cs_id = str(chat_settings.id)
 
         # Gather stats — all scoped to this tenant
@@ -492,7 +499,13 @@ class TelegramCommandHandlers:
             update.effective_user, telegram_chat_id=chat_id
         )
 
-        chat_settings = self.service.settings_service.get_settings(chat_id)
+        try:
+            chat_settings = self.service.settings_service.require_settings(chat_id)
+        except TenantResolutionError:
+            await update.message.reply_text(
+                "⚠️ This group isn't set up yet. Run /start first."
+            )
+            return
         cs_id = str(chat_settings.id)
 
         # Get all pending queue items with media info
@@ -696,7 +709,7 @@ class TelegramCommandHandlers:
         from src.services.core.settings_service import SettingsService
 
         with SettingsService() as settings_service:
-            chat_settings = settings_service.get_settings_if_exists(chat_id)
+            chat_settings = settings_service.get_settings(chat_id)
             if not chat_settings:
                 await update.message.reply_text(
                     "⚠️ This group isn't set up yet. Run /start first."

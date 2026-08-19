@@ -29,7 +29,7 @@ class TelegramLifecycleHandler:
         from before migration 030).
         """
         try:
-            chat = self.service.settings_service.get_settings_if_exists(
+            chat = self.service.settings_service.get_settings(
                 self.service.admin_chat_id
             )
         except Exception:  # noqa: BLE001 — never block startup on a DB hiccup

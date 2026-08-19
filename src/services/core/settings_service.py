@@ -56,24 +56,14 @@ class SettingsService(BaseService):
         self.settings_repo = ChatSettingsRepository()
         self.audit_repo = AuditRepository()
 
-    def get_settings(
-        self, telegram_chat_id: int, create_if_missing: bool = True
-    ) -> Optional[ChatSettings]:
-        """
-        Get settings for a chat.
+    def get_settings(self, telegram_chat_id: int) -> Optional[ChatSettings]:
+        """Read a chat's settings row. Never creates (#842 policy).
 
-        Args:
-            telegram_chat_id: Telegram chat/channel ID
-            create_if_missing: If True (default), create from .env defaults
-                on first access. If False, return None when no record exists.
-                Use False in contexts where creating a phantom row is wrong
-                (e.g. group callbacks that may reference an uninitialized chat).
-
-        Returns:
-            ChatSettings record, or None if create_if_missing=False and not found
+        Returns None for a chat with no row. A read that sometimes minted
+        (the old ``create_if_missing=True`` default) is how phantom tenants
+        were born; minting is now only ever ``provision()``, and resolution
+        that must not fail open is ``resolve_chat_settings_id()``.
         """
-        if create_if_missing:
-            return self.settings_repo.get_or_create(telegram_chat_id)
         return self.settings_repo.get_by_chat_id(telegram_chat_id)
 
     def migrate_chat_id(
@@ -86,15 +76,6 @@ class SettingsService(BaseService):
         splitting it across three would make a partial migration possible.
         """
         return self.settings_repo.migrate_chat_id(old_chat_id, new_chat_id)
-
-    def get_settings_if_exists(self, telegram_chat_id: int) -> Optional[ChatSettings]:
-        """Look up settings for a chat without creating a row.
-
-        Returns None if no chat_settings record exists for this chat_id.
-        Use this when you need a read-only lookup that must not create
-        phantom rows (e.g. checking group membership eligibility).
-        """
-        return self.settings_repo.get_by_chat_id(telegram_chat_id)
 
     def get_settings_by_id(self, chat_settings_id: str) -> Optional[ChatSettings]:
         """Look up settings by chat_settings UUID (the tenant primary key).
@@ -116,12 +97,31 @@ class SettingsService(BaseService):
         target resolver; the exception type and reason string are already the
         target contract, so edges that catch it do not change.
         """
+        return str(self.require_settings(telegram_chat_id).id)
+
+    def require_settings(self, telegram_chat_id: int) -> ChatSettings:
+        """Row-or-refuse: the door's policy for methods that need the row.
+
+        Same refusal as ``resolve_chat_settings_id`` — a write or a row-read
+        against an unknown chat is refused typed, never satisfied by minting
+        a phantom row on the way.
+        """
         chat_settings = self.settings_repo.get_by_chat_id(telegram_chat_id)
         if chat_settings is None:
             raise TenantResolutionError(
                 "unknown_binding", f"no tenant for chat {telegram_chat_id}"
             )
-        return str(chat_settings.id)
+        return chat_settings
+
+    def provision(self, telegram_chat_id: int) -> ChatSettings:
+        """THE named provisioning door: create-or-return the chat's tenant row.
+
+        Minting a tenant is an explicit act of the onboarding flows (group
+        /start first contact, group linking) — never a side effect of a read
+        or a resolution (#842 policy). If you are not implementing first
+        contact, you want ``get_settings`` or ``resolve_chat_settings_id``.
+        """
+        return self.settings_repo.get_or_create(telegram_chat_id)
 
     def set_paused(
         self, telegram_chat_id: int, paused: bool, user: Optional[User] = None
@@ -138,7 +138,7 @@ class SettingsService(BaseService):
             triggered_by="user",
             input_params={"paused": paused},
         ) as run_id:
-            settings = self.settings_repo.get_or_create(telegram_chat_id)
+            settings = self.require_settings(telegram_chat_id)
             if settings.is_paused == paused:
                 self.set_result_summary(run_id, {"paused": paused, "changed": False})
                 return
@@ -195,7 +195,7 @@ class SettingsService(BaseService):
             triggered_by="user",
             input_params={"setting_name": setting_name},
         ) as run_id:
-            settings = self.settings_repo.get_or_create(telegram_chat_id)
+            settings = self.require_settings(telegram_chat_id)
             old_value = getattr(settings, setting_name)
             new_value = not old_value
 
@@ -268,7 +268,7 @@ class SettingsService(BaseService):
             triggered_by="user",
             input_params={"setting_name": setting_name, "value": value},
         ) as run_id:
-            settings = self.settings_repo.get_or_create(telegram_chat_id)
+            settings = self.require_settings(telegram_chat_id)
             old_value = getattr(settings, setting_name)
 
             # Validate numeric settings
@@ -331,7 +331,7 @@ class SettingsService(BaseService):
 
         Returns dict with all settings and their display values.
         """
-        settings = self.get_settings(telegram_chat_id)
+        settings = self.require_settings(telegram_chat_id)
 
         return {
             "dry_run_mode": settings.dry_run_mode,
@@ -351,24 +351,25 @@ class SettingsService(BaseService):
         }
 
     def get_media_source_config(
-        self, telegram_chat_id: int
+        self, chat_settings_id: str
     ) -> tuple[Optional[str], Optional[str]]:
-        """Get resolved media source configuration for a chat.
+        """Get resolved media source configuration for a tenant.
 
-        Per-chat DB value is the only source of truth. `media_source_type`
-        falls back to the code default (`local`) for chats whose source
+        Per-tenant DB value is the only source of truth. `media_source_type`
+        falls back to the code default (`local`) for tenants whose source
         was never set; `media_source_root` returns None and the caller is
         expected to surface "no source configured" rather than auto-guess.
 
-        Args:
-            telegram_chat_id: Telegram chat/channel ID
-
-        Returns:
-            Tuple of (source_type, source_root)
+        Keyed by the resolved tenant id (#842); a vanished tenant row is a
+        typed refusal, never a defaulted config.
         """
         from src.config import defaults
 
-        chat_settings = self.get_settings(telegram_chat_id)
+        chat_settings = self.get_settings_by_id(chat_settings_id)
+        if chat_settings is None:
+            raise TenantResolutionError(
+                "unknown_binding", f"no tenant {chat_settings_id}"
+            )
 
         source_type = (
             chat_settings.media_source_type or defaults.DEFAULT_MEDIA_SOURCE_TYPE

@@ -8,7 +8,6 @@ from fastapi import APIRouter, File, Form, HTTPException, Query, Request, Upload
 from fastapi.responses import Response
 
 from src.repositories.audit_repository import AuditRepository
-from src.repositories.chat_settings_repository import ChatSettingsRepository
 from src.repositories.media_repository import MediaRepository
 from src.services.core.dashboard_service import DashboardService
 from src.services.core.health_check import HealthCheckService
@@ -53,10 +52,10 @@ async def onboarding_queue_detail(
     limit: int = Query(default=10, ge=1, le=50),
 ) -> dict:
     """Return detailed queue items with schedule summary for dashboard."""
-    _validate_request(init_data, chat_id)
+    auth = _validate_request(init_data, chat_id)
 
     with DashboardService() as service:
-        return service.get_queue_detail(chat_id, limit=limit)
+        return service.get_queue_detail(auth["chat_settings_id"], limit=limit)
 
 
 @router.get("/history-detail")
@@ -66,10 +65,10 @@ async def onboarding_history_detail(
     limit: int = Query(default=10, ge=1, le=50),
 ) -> dict:
     """Return recent posting history with media info for dashboard."""
-    _validate_request(init_data, chat_id)
+    auth = _validate_request(init_data, chat_id)
 
     with DashboardService() as service:
-        return service.get_history_detail(chat_id, limit=limit)
+        return service.get_history_detail(auth["chat_settings_id"], limit=limit)
 
 
 @router.get("/media-stats")
@@ -78,10 +77,10 @@ async def onboarding_media_stats(
     chat_id: int,
 ) -> dict:
     """Return media library breakdown by category for dashboard."""
-    _validate_request(init_data, chat_id)
+    auth = _validate_request(init_data, chat_id)
 
     with DashboardService() as service:
-        return service.get_media_stats(chat_id)
+        return service.get_media_stats(auth["chat_settings_id"])
 
 
 @router.get("/accounts")
@@ -90,14 +89,14 @@ async def onboarding_accounts(
     chat_id: int,
 ) -> dict:
     """List all active Instagram accounts with active account for this chat marked."""
-    _validate_request(init_data, chat_id)
+    auth = _validate_request(init_data, chat_id)
 
     with (
         InstagramAccountService() as account_service,
         SettingsService() as settings_service,
     ):
         accounts = account_service.list_accounts(include_inactive=False)
-        chat_settings = settings_service.get_settings(chat_id)
+        chat_settings = settings_service.get_settings_by_id(auth["chat_settings_id"])
         active_account_id = (
             str(chat_settings.active_instagram_account_id)
             if chat_settings.active_instagram_account_id
@@ -125,10 +124,10 @@ async def onboarding_schedule_recommendations(
     days: int = Query(default=90, ge=7, le=365),
 ) -> dict:
     """Return posting time recommendations based on approval patterns."""
-    _validate_request(init_data, chat_id)
+    auth = _validate_request(init_data, chat_id)
 
     with DashboardService() as service:
-        return service.get_schedule_recommendations(chat_id, days=days)
+        return service.get_schedule_recommendations(auth["chat_settings_id"], days=days)
 
 
 @router.get("/analytics/categories")
@@ -138,10 +137,10 @@ async def onboarding_analytics_categories(
     days: int = Query(default=30, ge=1, le=365),
 ) -> dict:
     """Return per-category performance with configured vs actual ratios."""
-    _validate_request(init_data, chat_id)
+    auth = _validate_request(init_data, chat_id)
 
     with DashboardService() as service:
-        return service.get_category_analytics(chat_id, days=days)
+        return service.get_category_analytics(auth["chat_settings_id"], days=days)
 
 
 @router.get("/analytics/schedule-preview")
@@ -151,10 +150,10 @@ async def onboarding_schedule_preview(
     slots: int = Query(default=10, ge=1, le=50),
 ) -> dict:
     """Return upcoming scheduled slots with predicted categories."""
-    _validate_request(init_data, chat_id)
+    auth = _validate_request(init_data, chat_id)
 
     with DashboardService() as service:
-        return service.get_schedule_preview(chat_id, slots=slots)
+        return service.get_schedule_preview(auth["chat_settings_id"], slots=slots)
 
 
 @router.get("/analytics/content-reuse")
@@ -163,10 +162,10 @@ async def onboarding_content_reuse(
     chat_id: int,
 ) -> dict:
     """Return content reuse insights — evergreen vs one-shot media."""
-    _validate_request(init_data, chat_id)
+    auth = _validate_request(init_data, chat_id)
 
     with DashboardService() as service:
-        return service.get_content_reuse_insights(chat_id)
+        return service.get_content_reuse_insights(auth["chat_settings_id"])
 
 
 @router.get("/analytics/service-health")
@@ -198,10 +197,10 @@ async def onboarding_category_drift(
     days: int = Query(default=7, ge=1, le=90),
 ) -> dict:
     """Return category mix drift — configured vs actual posting ratios."""
-    _validate_request(init_data, chat_id)
+    auth = _validate_request(init_data, chat_id)
 
     with DashboardService() as service:
-        return service.get_category_mix_drift(chat_id, days=days)
+        return service.get_category_mix_drift(auth["chat_settings_id"], days=days)
 
 
 @router.get("/analytics/dead-content")
@@ -211,10 +210,12 @@ async def onboarding_dead_content(
     min_age_days: int = Query(default=30, ge=1, le=365),
 ) -> dict:
     """Return dead content report — never-posted media items."""
-    _validate_request(init_data, chat_id)
+    auth = _validate_request(init_data, chat_id)
 
     with DashboardService() as service:
-        return service.get_dead_content_report(chat_id, min_age_days=min_age_days)
+        return service.get_dead_content_report(
+            auth["chat_settings_id"], min_age_days=min_age_days
+        )
 
 
 @router.get("/analytics/approval-latency")
@@ -224,10 +225,10 @@ async def onboarding_approval_latency(
     days: int = Query(default=30, ge=1, le=365),
 ) -> dict:
     """Return approval latency statistics — time from queue to decision."""
-    _validate_request(init_data, chat_id)
+    auth = _validate_request(init_data, chat_id)
 
     with DashboardService() as service:
-        return service.get_approval_latency(chat_id, days=days)
+        return service.get_approval_latency(auth["chat_settings_id"], days=days)
 
 
 @router.get("/analytics/team-performance")
@@ -237,10 +238,10 @@ async def onboarding_team_performance(
     days: int = Query(default=30, ge=1, le=365),
 ) -> dict:
     """Return per-user approval rates and response times."""
-    _validate_request(init_data, chat_id)
+    auth = _validate_request(init_data, chat_id)
 
     with DashboardService() as service:
-        return service.get_team_performance(chat_id, days=days)
+        return service.get_team_performance(auth["chat_settings_id"], days=days)
 
 
 @router.get("/analytics")
@@ -250,10 +251,10 @@ async def onboarding_analytics(
     days: int = Query(default=30, ge=1, le=365),
 ) -> dict:
     """Return aggregated posting analytics for the dashboard."""
-    _validate_request(init_data, chat_id)
+    auth = _validate_request(init_data, chat_id)
 
     with DashboardService() as service:
-        return service.get_analytics(chat_id, days=days)
+        return service.get_analytics(auth["chat_settings_id"], days=days)
 
 
 @router.get("/system-status")
@@ -456,7 +457,8 @@ async def onboarding_upload_media(
 
     Files are stored locally and indexed for posting.
     """
-    _validate_request(init_data, chat_id)
+    auth = _validate_request(init_data, chat_id)
+    chat_settings_id = auth["chat_settings_id"]
 
     content, claimed_mime = await _validate_upload_content(request, file)
     file_hash = calculate_bytes_hash(content)
@@ -464,10 +466,6 @@ async def onboarding_upload_media(
     safe_name = Path(file.filename or "upload").name
     if not safe_name or safe_name.startswith("."):
         safe_name = "upload"
-
-    with SettingsService() as settings_service:
-        chat_settings = settings_service.get_settings(chat_id)
-        chat_settings_id = str(chat_settings.id)
 
     valid_category = _resolve_upload_category(category, chat_settings_id)
 
@@ -519,13 +517,8 @@ async def onboarding_audit_log(
     # Authorization — including the active-membership check for unbound tokens —
     # is enforced centrally by _validate_request. This endpoint only needs the
     # resolved tenant id to scope its query.
-    _validate_request(init_data, chat_id)
-
-    with ChatSettingsRepository() as cs_repo:
-        cs = cs_repo.get_by_chat_id(chat_id)
-        if not cs:
-            raise HTTPException(status_code=404, detail="Instance not found")
-        chat_settings_id = str(cs.id)
+    auth = _validate_request(init_data, chat_id)
+    chat_settings_id = auth["chat_settings_id"]
 
     with AuditRepository() as audit_repo:
         entries = audit_repo.get_for_instance(
@@ -566,11 +559,8 @@ async def onboarding_media_thumbnail(
     Instead we fetch server-side, require chat membership, and stream the
     bytes back from storydump.app so cookies gate every read.
     """
-    _validate_request(init_data, chat_id)
-
-    with SettingsService() as settings_service:
-        chat_settings = settings_service.get_settings(chat_id)
-        chat_settings_id = str(chat_settings.id)
+    auth = _validate_request(init_data, chat_id)
+    chat_settings_id = auth["chat_settings_id"]
 
     with MediaRepository() as media_repo:
         item = media_repo.get_by_id(media_id, chat_settings_id=chat_settings_id)

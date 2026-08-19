@@ -119,9 +119,7 @@ class InstagramCredentialManager:
         if telegram_chat_id is None:
             telegram_chat_id = settings.ADMIN_TELEGRAM_CHAT_ID
 
-        chat_settings = self.service.settings_service.get_settings_if_exists(
-            telegram_chat_id
-        )
+        chat_settings = self.service.settings_service.get_settings(telegram_chat_id)
         if chat_settings is None or not chat_settings.enable_instagram_api:
             return False
 
@@ -316,6 +314,18 @@ class InstagramCredentialManager:
         checks = {}
         errors = []
         account_info = None
+
+        if chat_settings is None:
+            # Unknown chat: the safety check fails closed (#842) — it must
+            # never mint a tenant to have something to check.
+            errors.append(f"No settings row for chat {telegram_chat_id}")
+            return {
+                "safe_to_post": False,
+                "checks": checks,
+                "errors": errors,
+                "dry_run_mode": None,
+                "account": None,
+            }
 
         # Check 1: Instagram API enabled (from database)
         checks["instagram_api_enabled"] = chat_settings.enable_instagram_api

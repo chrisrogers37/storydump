@@ -7,6 +7,7 @@ from telegram.error import ChatMigrated, TimedOut
 from src.config import defaults
 from src.exceptions.google_drive import GoogleDriveAuthError
 from src.exceptions.telegram import AmbiguousDeliveryError, ChatMigratedError
+from src.exceptions.tenancy import TenantResolutionError
 from src.services.core.telegram_utils import escape_markdown as _escape_md
 from src.utils.logger import logger
 from src.repositories.tenant_scope import SYSTEM_SCOPE
@@ -258,7 +259,19 @@ class TelegramNotificationService:
                 f"Queue item {queue_item.id} has no chat_settings_id (legacy row); "
                 f"falling back to the global channel"
             )
-        return self.service.settings_service.get_settings(self.service.channel_id)
+        channel_settings = self.service.settings_service.get_settings(
+            self.service.channel_id
+        )
+        if channel_settings is None:
+            # Deployment misconfiguration, not a tenant condition: the global
+            # channel row is provisioned by first contact. Refuse loudly (the
+            # per-item send error handling contains it) rather than minting a
+            # row from inside a delivery path (#842).
+            raise TenantResolutionError(
+                "unknown_binding",
+                f"global channel {self.service.channel_id} has no settings row",
+            )
+        return channel_settings
 
     def _build_caption(
         self,

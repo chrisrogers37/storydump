@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TelegramError
 
+from src.exceptions.tenancy import TenantResolutionError
 from src.config.constants import (
     MAX_POSTING_HOUR,
     MAX_POSTS_PER_DAY,
@@ -249,9 +250,7 @@ class TelegramSettingsHandlers:
     async def handle_settings_edit_start(self, setting_name: str, user, query, context):
         """Start editing a numeric setting (posts_per_day or hours)."""
         chat_id = query.message.chat_id
-        chat_settings = self.service.settings_service.get_settings(
-            chat_id, create_if_missing=False
-        )
+        chat_settings = self.service.settings_service.get_settings(chat_id)
         if not chat_settings:
             return
 
@@ -453,10 +452,15 @@ class TelegramSettingsHandlers:
                 ]
             ]
 
-            chat_settings = self.service.settings_service.get_settings(
-                chat_id, create_if_missing=False
-            )
-            chat_settings_id = str(chat_settings.id) if chat_settings else None
+            try:
+                chat_settings_id = (
+                    self.service.settings_service.resolve_chat_settings_id(chat_id)
+                )
+            except TenantResolutionError:
+                await query.answer(
+                    "❌ No instance is configured for this chat.", show_alert=True
+                )
+                return
             pending_count = self.service.queue_repo.count_pending(
                 chat_settings_id=chat_settings_id
             )
@@ -491,10 +495,15 @@ class TelegramSettingsHandlers:
         if action == "clear_queue":
             await query.answer("Clearing queue...")
 
-            chat_settings = self.service.settings_service.get_settings(
-                chat_id, create_if_missing=False
-            )
-            chat_settings_id = str(chat_settings.id) if chat_settings else None
+            try:
+                chat_settings_id = (
+                    self.service.settings_service.resolve_chat_settings_id(chat_id)
+                )
+            except TenantResolutionError:
+                await query.answer(
+                    "❌ No instance is configured for this chat.", show_alert=True
+                )
+                return
             # Route button-bearing rows through the shared reap so live cards are
             # expired (buttons stripped + terminal history) rather than orphaned;
             # button-less rows are plain-deleted.

@@ -225,9 +225,7 @@ class TelegramCallbackQueueHandlers:
         )
 
         # Rebuild original keyboard
-        chat_settings = self.service.settings_service.get_settings(
-            chat_id, create_if_missing=False
-        )
+        chat_settings = self.service.settings_service.get_settings(chat_id)
         if not chat_settings:
             return
         reply_markup = build_queue_action_keyboard(
@@ -250,9 +248,7 @@ class TelegramCallbackQueueHandlers:
         """Handle 'Regenerate Caption' button — generate a new AI caption."""
         # Guard: check toggle is still enabled
         chat_id = query.message.chat_id
-        chat_settings = self.service.settings_service.get_settings(
-            chat_id, create_if_missing=False
-        )
+        chat_settings = self.service.settings_service.get_settings(chat_id)
         if not chat_settings or not chat_settings.enable_ai_captions:
             await query.answer(
                 "AI captions are disabled for this instance", show_alert=True
@@ -404,9 +400,7 @@ class TelegramCallbackQueueHandlers:
         )
 
         # Get chat settings for enable_instagram_api check (use DB, not env var)
-        chat_settings = self.service.settings_service.get_settings(
-            chat_id, create_if_missing=False
-        )
+        chat_settings = self.service.settings_service.get_settings(chat_id)
         if not chat_settings:
             return
 

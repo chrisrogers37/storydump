@@ -121,11 +121,15 @@ class MediaSyncService(BaseService):
 
             settings_service = SettingsService()
             try:
-                source_type, source_root = settings_service.get_media_source_config(
+                # One door (#842): a chat-keyed sync that cannot resolve its
+                # tenant refuses, instead of the old None owner silently
+                # widening every media mutation to all tenants.
+                chat_settings_id = settings_service.resolve_chat_settings_id(
                     telegram_chat_id
                 )
-                owner = settings_service.get_settings_if_exists(telegram_chat_id)
-                chat_settings_id = str(owner.id) if owner else None
+                source_type, source_root = settings_service.get_media_source_config(
+                    chat_settings_id
+                )
             finally:
                 settings_service.close()
 

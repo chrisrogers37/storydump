@@ -11,6 +11,7 @@ from cryptography.fernet import InvalidToken
 from telegram import Bot
 
 from src.config.settings import settings
+from src.exceptions.tenancy import TenantResolutionError
 from src.repositories.chat_settings_repository import ChatSettingsRepository
 from src.repositories.token_repository import TokenRepository
 from src.services.base_service import BaseService
@@ -184,8 +185,14 @@ class GoogleDriveOAuthService(BaseService):
             # Step 2: Fetch user email
             email = await self._get_user_email(access_token)
 
-            # Step 3: Resolve chat_settings_id
-            chat_settings = self.settings_repo.get_or_create(telegram_chat_id)
+            # Step 3: Resolve chat_settings_id — resolution, never a mint
+            # (#842): the OAuth flow was launched from a live chat, so a
+            # missing row here is a forged/stale state param, refused typed.
+            chat_settings = self.settings_repo.get_by_chat_id(telegram_chat_id)
+            if chat_settings is None:
+                raise TenantResolutionError(
+                    "unknown_binding", f"no tenant for chat {telegram_chat_id}"
+                )
             chat_settings_id = str(chat_settings.id)
 
             # Step 4: Encrypt and store tokens
@@ -313,7 +320,9 @@ class GoogleDriveOAuthService(BaseService):
         ) as run_id:
             chat_settings = self.settings_repo.get_by_chat_id(telegram_chat_id)
             if not chat_settings:
-                raise ValueError(f"No settings found for chat {telegram_chat_id}")
+                raise TenantResolutionError(
+                    "unknown_binding", f"no tenant for chat {telegram_chat_id}"
+                )
 
             chat_settings_id = str(chat_settings.id)
             tokens_deleted = self.token_repo.delete_tokens_for_chat(
@@ -346,6 +355,8 @@ class GoogleDriveOAuthService(BaseService):
         Returns a google.oauth2.credentials.Credentials object, or None if
         no user OAuth tokens are stored for this tenant.
         """
+        # #842 edge contract, stated: an unknown chat has no credentials —
+        # None is this function's documented answer, not a silent default.
         chat_settings = self.settings_repo.get_by_chat_id(telegram_chat_id)
         if not chat_settings:
             return None
@@ -407,6 +418,7 @@ class GoogleDriveOAuthService(BaseService):
         if not credentials or not credentials.token:
             return False
 
+        # #842 edge contract, stated: nothing to persist for an unknown chat.
         chat_settings = self.settings_repo.get_by_chat_id(telegram_chat_id)
         if not chat_settings:
             return False
