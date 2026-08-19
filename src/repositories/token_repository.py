@@ -260,8 +260,7 @@ class TokenRepository(BaseRepository):
                 existing.issuing_app_id = issuing_app_id
             if chat_settings_id:
                 existing.chat_settings_id = chat_settings_id
-            self.db.commit()
-            self.db.refresh(existing)
+            self.commit_and_refresh(existing)
             return existing
         else:
             # Create new token
@@ -280,8 +279,7 @@ class TokenRepository(BaseRepository):
                 chat_settings_id=tenant_value(chat_settings_id),
             )
             self.db.add(token)
-            self.db.commit()
-            self.db.refresh(token)
+            self.commit_and_refresh(token)
             return token
 
     def delete_token(self, service_name: str, token_type: str) -> bool:
@@ -390,8 +388,7 @@ class TokenRepository(BaseRepository):
                 existing.scopes = scopes
             if metadata is not None:
                 existing.token_metadata = metadata
-            self.db.commit()
-            self.db.refresh(existing)
+            self.commit_and_refresh(existing)
             return existing
         else:
             token = ApiToken(
@@ -405,8 +402,7 @@ class TokenRepository(BaseRepository):
                 token_metadata=metadata,
             )
             self.db.add(token)
-            self.db.commit()
-            self.db.refresh(token)
+            self.commit_and_refresh(token)
             return token
 
     def delete_tokens_for_chat(

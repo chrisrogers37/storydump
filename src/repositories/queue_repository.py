@@ -220,8 +220,7 @@ class QueueRepository(BaseRepository):
             chat_settings_id=tenant_value(chat_settings_id),
         )
         self.db.add(queue_item)
-        self.db.commit()
-        self.db.refresh(queue_item)
+        self.commit_and_refresh(queue_item)
         return queue_item
 
     def transition(
@@ -287,8 +286,7 @@ class QueueRepository(BaseRepository):
         if queue_item:
             queue_item.status = "publishing"
             queue_item.instagram_container_id = container_id
-            self.db.commit()
-            self.db.refresh(queue_item)
+            self.commit_and_refresh(queue_item)
         return queue_item
 
     def update_scheduled_time(
@@ -298,8 +296,7 @@ class QueueRepository(BaseRepository):
         queue_item = self.get_by_id(queue_id, chat_settings_id=SYSTEM_SCOPE)
         if queue_item:
             queue_item.scheduled_for = scheduled_for
-            self.db.commit()
-            self.db.refresh(queue_item)
+            self.commit_and_refresh(queue_item)
         return queue_item
 
     def set_telegram_message(
@@ -320,8 +317,7 @@ class QueueRepository(BaseRepository):
             queue_item.telegram_chat_id = chat_id
             if queue_item.status in ("pending", "processing", "sent_unconfirmed"):
                 queue_item.status = "delivered"
-            self.db.commit()
-            self.db.refresh(queue_item)
+            self.commit_and_refresh(queue_item)
         return queue_item
 
     def delete(self, queue_id: str) -> bool:

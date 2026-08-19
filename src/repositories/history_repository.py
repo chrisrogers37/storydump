@@ -138,8 +138,7 @@ class HistoryRepository(BaseRepository):
 
         history = PostingHistory(**asdict(params))
         self.db.add(history)
-        self.db.commit()
-        self.db.refresh(history)
+        self.commit_and_refresh(history)
         return history
 
     def create_idempotent(self, params: HistoryCreateParams) -> PostingHistory:

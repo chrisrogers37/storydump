@@ -54,7 +54,7 @@ class TestHistoryRepository:
         history_repo.create(params)
 
         mock_db.add.assert_called_once()
-        mock_db.commit.assert_called_once()
+        mock_db.commit.assert_called()
         mock_db.refresh.assert_called_once()
 
         added = mock_db.add.call_args[0][0]

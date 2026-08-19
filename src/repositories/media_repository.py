@@ -248,8 +248,7 @@ class MediaRepository(BaseRepository):
         if media_item:
             media_item.is_active = True
             media_item.updated_at = datetime.utcnow()
-            self.db.commit()
-            self.db.refresh(media_item)
+            self.commit_and_refresh(media_item)
         return media_item
 
     def update_source_info(
@@ -289,8 +288,7 @@ class MediaRepository(BaseRepository):
             if thumbnail_url is not None:
                 media_item.thumbnail_url = thumbnail_url
             media_item.updated_at = datetime.utcnow()
-            self.db.commit()
-            self.db.refresh(media_item)
+            self.commit_and_refresh(media_item)
         return media_item
 
     def get_all(
@@ -421,8 +419,7 @@ class MediaRepository(BaseRepository):
             thumbnail_url=thumbnail_url,
         )
         self.db.add(media_item)
-        self.db.commit()
-        self.db.refresh(media_item)
+        self.commit_and_refresh(media_item)
         return media_item
 
     # NOTE: Unused in production as of 2026-02-10.
@@ -456,8 +453,7 @@ class MediaRepository(BaseRepository):
                 media_item.custom_metadata = custom_metadata
 
             media_item.updated_at = datetime.utcnow()
-            self.db.commit()
-            self.db.refresh(media_item)
+            self.commit_and_refresh(media_item)
         return media_item
 
     def increment_times_posted(
@@ -472,8 +468,7 @@ class MediaRepository(BaseRepository):
         if media_item:
             media_item.times_posted += 1
             media_item.last_posted_at = datetime.utcnow()
-            self.db.commit()
-            self.db.refresh(media_item)
+            self.commit_and_refresh(media_item)
         return media_item
 
     def update_cloud_info(
@@ -510,8 +505,7 @@ class MediaRepository(BaseRepository):
             media_item.cloud_uploaded_at = cloud_uploaded_at
             media_item.cloud_expires_at = cloud_expires_at
             media_item.updated_at = datetime.utcnow()
-            self.db.commit()
-            self.db.refresh(media_item)
+            self.commit_and_refresh(media_item)
         return media_item
 
     def clear_stale_cloud_info(self, retention_hours: int) -> int:
@@ -553,8 +547,7 @@ class MediaRepository(BaseRepository):
         if media_item:
             media_item.is_active = False
             media_item.updated_at = datetime.utcnow()
-            self.db.commit()
-            self.db.refresh(media_item)
+            self.commit_and_refresh(media_item)
         return media_item
 
     def delete(self, media_id: str, chat_settings_id: TenantScope) -> bool:
