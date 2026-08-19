@@ -122,6 +122,28 @@ def _build_already_handled_caption(history) -> str:
         return f"ℹ️ Already processed (status: {status})"
 
 
+def caller_may_act_on_queue_row(row, caller_cs_id) -> bool:
+    """Owned-OR-NULL, the ONE queue-ownership rule (#895) — the same predicate
+    the callback gate applies to full-UUID actions, so a caller may act on a
+    queue row iff:
+
+    * it exists, AND
+    * it carries no instance stamp (legacy single-tenant data — allowed so the
+      rule does not depend on the ownership backfill), OR its stamp is the
+      caller's own tenant.
+
+    A populated FOREIGN stamp is refused; ``row is None`` is refused (nothing to
+    act on). The gate resolves full UUIDs and applies this; the ``sap:``/``btp:``
+    handlers resolve their SHORT PREFIX and apply the SAME rule — because the
+    gate cannot resolve a prefix, so an unscoped prefix read that skipped this
+    check disclosed a foreign tenant's post content (the #895 bypass).
+    """
+    if row is None:
+        return False
+    stamp = getattr(row, "chat_settings_id", None)
+    return stamp is None or str(stamp) == str(caller_cs_id)
+
+
 async def validate_queue_item(service: TelegramService, queue_id: str, query):
     """Fetch a queue item by ID, showing an error if not found.
 

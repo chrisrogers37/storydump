@@ -1057,9 +1057,11 @@ class TestGetServiceHealthStats:
             service.service_run_repo.get_health_stats.return_value = [
                 {
                     "service_name": "PostingService",
-                    "call_count": 100,
+                    "call_count": 102,
                     "success_count": 95,
                     "failure_count": 5,
+                    "unresolved_count": 2,
+                    "resolved_count": 100,
                     "error_rate": 0.05,
                     "avg_duration_ms": 150,
                 },
@@ -1067,10 +1069,17 @@ class TestGetServiceHealthStats:
 
             result = service.get_service_health_stats(hours=24)
 
-            assert result["total_calls"] == 100
+            assert result["total_calls"] == 102
             assert result["total_failures"] == 5
-            assert result["overall_error_rate"] == 0.05
             assert len(result["services"]) == 1
+
+            # #882 review: unresolved runs are a first-class term, and the
+            # overall rate is over RESOLVED runs so two crashes cannot dilute
+            # it. Over call_count this would read 0.05 either way, which is the
+            # arithmetic that let a crash improve the number.
+            assert result["total_unresolved"] == 2
+            assert result["total_resolved"] == 100
+            assert result["overall_error_rate"] == 0.05
 
     def test_handles_no_runs(self):
         """Returns zeros when no service runs in window."""
