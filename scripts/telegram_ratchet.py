@@ -28,32 +28,56 @@ Two consequences, both load-bearing:
 
 ## COUNT THE THING, NOT THE STRING
 
-A raw substring match is not a usable predicate here, and this is measured
-rather than asserted. On the tree at install:
+Grepping the file *text* is not a usable predicate here, and this is measured
+rather than asserted. On the tree as of #868, over 164 scanned modules:
 
-    substring "telegram" anywhere ....... 72 modules
-    structural coupling (this module) ... 27 modules
+    substring "telegram" anywhere in the text ... 80 modules
+    this module's predicate ..................... 16 modules
 
-**46 of the 72 are false positives** — prose, comments, unrelated identifiers —
-and a ratchet baselined at 72 would carry ~45 modules of phantom headroom in
-which a genuine new coupling could land without reddening. That is precisely
-the defect found in the F.1 `SYSTEM_SCOPE` ratchet, at larger scale.
+**64 of the 80 are false positives** — prose, comments, caught exception types,
+unrelated identifiers — and a ratchet baselined at 80 would carry 64 modules of
+phantom headroom in which a genuine new coupling could land without reddening.
+That is precisely the defect found in the F.1 `SYSTEM_SCOPE` ratchet, at larger
+scale.
 
-It also fails in the *other* direction, which matters more:
-``src/services/core/telegram_operation_state.py`` is a Telegram module that
-contains no literal "telegram" in its text, so a substring predicate **misses**
-it. Over-counting reads as protection; under-counting is a hole.
+So adapter-hood is decided on the module's own declared name:
 
-So coupling is resolved from the AST import graph:
+    a module is a Telegram adapter if its filename stem is exactly
+    ``telegram`` or begins with ``telegram_``
 
-    a module is Telegram-coupled if it
-      (a) imports the `telegram` SDK (`import telegram`, `from telegram... `), OR
-      (b) imports any module whose dotted path contains `telegram`, OR
-      (c) is itself at a path containing `telegram`
+### Why this reads the NAME and no longer reads the IMPORTS (#868)
 
-(c) is included because an adapter module is part of the Telegram surface even
-when nothing it imports names Telegram — that is the case the substring
-predicate misses.
+Until #868 the predicate also exempted a module that (a) imported the
+`telegram` SDK or (b) imported anything whose dotted path contained
+"telegram". Both were facts about what a module happens to import, for any
+reason at all — and "any reason at all" is where it broke. A module can need a
+Telegram-domain name without being an inbound edge: catching an SDK exception
+type, making an outbound Bot API call, importing a shared UI constant. The
+predicate could not tell those from adapter-hood, so it exempted them, and an
+exempted module's chat-id functions are invisible to
+``chat_id_functions_outside_adapters`` by construction.
+
+That was not theoretical. **Eleven modules were wrongly exempt, hiding 25
+chat-id-taking functions** — including ``scheduler.py`` (caught internal
+exception types), ``google_drive_oauth.py`` and ``oauth_service.py``
+(``from telegram import Bot``, for outbound alerting) and
+``start_command_router.py`` (``InlineKeyboardButton``, for building UI). The
+gate ran, passed, and published a number about a set 25 functions narrower
+than the one it named. Nothing was newly broken by the fix; the axis simply
+began reporting its true count.
+
+An import is therefore not consulted, and there is deliberately no parameter
+left through which it could be.
+
+### Stem, not raw substring
+
+The name check is on the path **stem**, not a substring of the path. A
+hypothetical ``nontelegram_helper.py`` contains "telegram" in its path and
+would have matched the older raw-substring form; it is not an adapter and does
+not match this one. On the present tree the two forms agree (16 either way), so
+this is a **preemptive** tightening of a collision class rather than a
+currently load-bearing distinction — stated that way so nobody reads the 16 as
+evidence for it.
 
 ## EQUALITY, NOT CEILING
 
@@ -77,6 +101,15 @@ Measured at install, before choosing any of their shapes:
     chat_id_functions_outside_adapters ..  115  ratcheted (equality)
     provider_account_ref_log_sites ......  0    HARD ZERO
 
+**Those install figures are not comparable to the committed baseline, and the
+reason is #868, not the burn-down.** They were produced by the import-reading
+predicate described above, which wrongly exempted eleven non-adapter modules —
+so the first two overstate the adapter set and the third understates the
+violation set by the 25 functions those modules hid. Corrected, the same
+measurement on the same axes reads 16 / 15 / 114 / 0. Do not read a movement
+from 27 to 16, or 115 to 114, as burn-down progress: most of it is the
+predicate being fixed. The committed baseline JSON is the only current number.
+
 Only the last is a pass/fail rule, and only because it is already clean. The
 other three are violated today by the plan's own account — FC-2 clause 3 says
 the core segment *must reach* empty, which presupposes it is not — so shipping
@@ -84,11 +117,18 @@ them as pass/fail would be red on arrival, and narrowing them until they passed
 would be the "blocks nothing or blocks everything" failure §4 warns about. They
 ratchet instead.
 
-`chat_id_functions_outside_adapters` excludes the allowlisted Telegram modules
+`chat_id_functions_outside_adapters` excludes the adapter modules
 deliberately: a Telegram adapter accepting a chat id is FC-2 working as
-intended (adapters at the edges), so counting those 45 functions as violations
-would make the rule fire on the correct design. The rule is that *non-adapter*
-code must not take Telegram ids.
+intended (adapters at the edges), so counting those functions as violations
+would make the rule fire on the correct design — 19 of the tree's 133
+chat-id-shaped functions sit inside adapters and are excluded on that basis.
+The rule is that *non-adapter* code must not take Telegram ids.
+
+**That exclusion is the reason this predicate has to be narrow rather than
+generous.** Every module it exempts takes its chat-id functions out of the
+counted set with it, so a predicate that is loose about adapter-hood does not
+merely mislabel a module — it blinds the axis. #868 is exactly that failure
+having already happened.
 
 ## Exit codes
 
@@ -164,36 +204,16 @@ def unparsable(repo: pathlib.Path, roots=DEFAULT_ROOTS):
     return sorted(m for m in discover_modules(repo, roots) if _parse(repo / m) is None)
 
 
-def imported_names(tree) -> set:
-    """Every dotted name *tree* imports, absolute forms only.
+def is_telegram_coupled(module: str) -> bool:
+    """The predicate. See the module docstring for why it is not a substring
+    and why it no longer reads imports (#868).
 
-    Relative imports are recorded by their module part; the leading dots are
-    dropped because coupling is judged on the name, and a relative import of a
-    Telegram module still names it.
+    Takes no tree: adapter-hood is a fact about the module's own declared
+    name, and there is deliberately no parameter through which an import
+    could be consulted again.
     """
-    names = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            names.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom):
-            if node.module:
-                names.add(node.module)
-    return names
-
-
-def is_telegram_coupled(module: str, tree) -> bool:
-    """The predicate. See the module docstring for why it is not a substring."""
-    if "telegram" in module.lower():
-        return True
-    if tree is None:
-        return False
-    for name in imported_names(tree):
-        lowered = name.lower()
-        if lowered == "telegram" or lowered.startswith("telegram."):
-            return True
-        if "telegram" in lowered:
-            return True
-    return False
+    stem = pathlib.PurePosixPath(module).stem
+    return stem == "telegram" or stem.startswith("telegram_")
 
 
 def chat_id_functions(tree):
@@ -257,7 +277,7 @@ def measure(repo: pathlib.Path, roots=DEFAULT_ROOTS) -> dict:
     telegram, core, chat_ids, log_sites = [], [], [], []
     for module in discover_modules(repo, roots):
         tree = _parse(repo / module)
-        coupled = is_telegram_coupled(module, tree)
+        coupled = is_telegram_coupled(module)
         if coupled:
             telegram.append(module)
             if module.startswith(CORE_SEGMENT):
