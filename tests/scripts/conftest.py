@@ -565,6 +565,78 @@ def set_test_passwords(admin_conn) -> None:
             cur.execute(f'ALTER ROLE "{role}" PASSWORD %s', (TEST_ACTOR_PASSWORD,))
 
 
+def external_ref_for(name: str) -> str:
+    """A deterministic, plausible Telegram group ref for seeded bindings —
+    ONE spelling for the suite (PYTHONHASHSEED-independent)."""
+    import hashlib as _hashlib
+
+    return "-100" + str(int(_hashlib.sha256(name.encode()).hexdigest()[:8], 16))
+
+
+class login_txn:
+    """A NON-autocommit connection as a named login, subject-gated.
+
+    The canonical way a test acts as somebody (#852's lesson made reusable):
+    asserts ``current_user`` on entry so a wrong-subject connection is loud,
+    and stays in a transaction block so ``SET LOCAL`` takes. Rolls back on
+    exit unless the body committed."""
+
+    def __init__(self, dsn: str, expect_user: str | None = None):
+        self._dsn = dsn
+        self._expect = expect_user
+
+    def __enter__(self):
+        import psycopg2 as _psycopg2
+
+        self._conn = _psycopg2.connect(self._dsn)
+        if self._expect is not None:
+            with self._conn.cursor() as cur:
+                cur.execute("SELECT current_user")
+                who = cur.fetchone()[0]
+                assert who == self._expect, f"wrong subject: {who}"
+        return self._conn
+
+    def __exit__(self, *exc):
+        try:
+            self._conn.rollback()
+        finally:
+            self._conn.close()
+        return False
+
+
+@pytest.fixture(scope="module")
+def replayed_two_tenant_world(admin_conn, owner_actor):
+    """The full advertised schema replayed under the declared actors, with
+    TWO seeded workspace chains and login passwords set — the shared world
+    the F.3/F.4 suites both stand on (one home; satellites belong to each
+    suite's own fixture). Everything after the first ``next`` sits inside
+    the try so a failed replay or seed cannot leak the scratch DB and
+    cluster roles (the documented cascade class)."""
+    import psycopg2 as _psycopg2
+
+    gen = _scratch(admin_conn, owner=owner_actor, roles=[])
+    db = next(gen)
+    try:
+        stream = replay_advertised_stream(db, owner_actor, admin_conn)
+        set_test_passwords(admin_conn)
+        conn = _psycopg2.connect(stream)
+        try:
+            a = seed_workspace_chain(conn, "world-tenant-a")
+            b = seed_workspace_chain(conn, "world-tenant-b")
+        finally:
+            conn.close()
+        yield {
+            "db": db,
+            "stream": stream,
+            "worker": as_user(db, "svc_worker"),
+            "ingress": as_user(db, "svc_ingress"),
+            "a": a,
+            "b": b,
+        }
+    finally:
+        gen.close()
+
+
 def replay_advertised_stream(db_dsn: str, owner_actor: str, admin_conn) -> str:
     """Bootstrap as the owner, then replay the advertised stream as
     svc_migration into the empty public — the M.3 step-3 shape. Returns the

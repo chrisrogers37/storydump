@@ -31,10 +31,20 @@ Privilege reality, measured in the tests rather than assumed (`02` §7):
   since adding a resolver door is a plan amendment (`02` §7-DDL + a
   migration), not an engineering call.
 
-Connections are caller-supplied DB-API connections; SET LOCAL is
-transaction-scoped, so the gate's claim never outlives the caller's
-transaction. The L.0 async unit of work adapts this seam; nothing here
-touches ContextVars.
+Connections are caller-supplied DB-API connections and MUST be in a
+transaction block (non-autocommit): SET LOCAL is transaction-scoped, so the
+gate's claim never outlives the caller's transaction — and on an autocommit
+connection it would silently no-op, which the gate turns into a loud
+``claim_not_set`` refusal by reading the claim back. The L.0 async unit of
+work adapts this seam; nothing here touches ContextVars.
+
+House-rule note (.claude/rules: services contain no SQL): that rule presumes
+the legacy repository layer, which the target tier deliberately lacks until
+L.0 builds the unit of work — this module IS the pre-L.0 seam, so it speaks
+SQL directly and says so rather than growing a repository that FC-7 dooms.
+``resolve_web_session`` composes ``authorize_member`` (authentication, then
+authorization); already-authenticated callers enter at ``authorize_member``
+directly.
 """
 
 from dataclasses import dataclass
@@ -55,7 +65,9 @@ class TenantResolutionError(StorydumpError):
     ``reason`` is a closed vocabulary so callers can route without parsing
     prose: unknown_binding | revoked_binding | invalid_session |
     expired_session | revoked_session | not_a_member | insufficient_role |
-    unknown_channel.
+    unknown_channel | claim_not_set | unknown_identity | user_disabled |
+    workspace_suspended. A bad ``minimum_role`` argument raises ValueError —
+    a caller bug is not a refusal of a request.
     """
 
     def __init__(self, reason: str, detail: str = ""):
@@ -76,6 +88,29 @@ class ResolvedTenant:
     user_id: Optional[str] = None
     channel_binding_id: Optional[str] = None
     via: str = ""
+
+
+def resolve_actor(conn, provider: str, external_id: str) -> str:
+    """Inbound ACTOR identity → user_id, via ``user_identities``' unique key.
+
+    User-plane (`02` §7: ``p_user_plane`` USING true) — readable as
+    ``svc_ingress`` before any tenant context exists, so the actor half of
+    the `01` §1 triple needs no door. A disabled user is refused HERE, the
+    one ingress gate `02` §1 names for it."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT ui.user_id, u.state FROM user_identities ui"
+            " JOIN users u ON u.id = ui.user_id"
+            " WHERE ui.provider = %s AND ui.external_id = %s",
+            (provider, external_id),
+        )
+        row = cur.fetchone()
+    if row is None:
+        raise TenantResolutionError("unknown_identity")
+    user_id, state = row
+    if state != "active":
+        raise TenantResolutionError("user_disabled")
+    return str(user_id)
 
 
 def resolve_chat(conn, channel: str, external_ref: str) -> ResolvedTenant:
@@ -133,6 +168,11 @@ def resolve_web_session(
         raise TenantResolutionError("revoked_session")
     if expired:
         raise TenantResolutionError("expired_session")
+    with conn.cursor() as cur:
+        cur.execute("SELECT state FROM users WHERE id = %s", (str(user_id),))
+        u = cur.fetchone()
+    if u is None or u[0] != "active":
+        raise TenantResolutionError("user_disabled")
     role = authorize_member(
         conn, str(claimed_workspace_id), str(user_id), minimum_role=minimum_role
     )
@@ -149,17 +189,28 @@ def authorize_member(
     """The one central authorization gate (`01` §1): workspace_members role
     check, in one place, never per handler.
 
-    Sets the CLAIMED workspace as transaction-local tenant context first —
-    "the door tenant context walks through": under RLS the membership row is
-    visible iff the claim is the row's own workspace, so a false claim reads
-    empty and refuses. Fail-closed by construction, and safe to call on a
-    privileged connection too (the read is then unfiltered but the WHERE
-    still binds both keys).
+    Correctness truth, stated exactly (#842 review): the WHERE binding both
+    keys is the mechanism that refuses a false claim — it must stay, because
+    on a privileged connection (owner bypass) RLS subtracts nothing and the
+    WHERE is all there is. The transaction-local claim is two other things:
+    the handoff (the caller's transaction proceeds under the claimed tenant)
+    and defense-in-depth under RLS (as ``svc_ingress`` the read is filtered
+    TO the claim, which the positive-path test proves is load-bearing). The
+    claim is READ BACK after being set and refused if absent — which also
+    makes an autocommit connection (where SET LOCAL silently no-ops) a loud
+    refusal instead of an unclaimed read.
     """
     if minimum_role not in ROLE_ORDER:
-        raise TenantResolutionError("insufficient_role", f"unknown role {minimum_role}")
+        raise ValueError(f"unknown minimum_role {minimum_role!r}")
     with conn.cursor() as cur:
         cur.execute("SET LOCAL app.tenant_id = %s", (str(workspace_id),))
+        cur.execute("SELECT current_setting('app.tenant_id', true)")
+        claimed = cur.fetchone()[0]
+        if claimed != str(workspace_id):
+            raise TenantResolutionError(
+                "claim_not_set",
+                "SET LOCAL did not take — is the connection in a transaction?",
+            )
         cur.execute(
             "SELECT role FROM workspace_members"
             " WHERE workspace_id = %s AND user_id = %s",
@@ -169,6 +220,14 @@ def authorize_member(
     if row is None:
         raise TenantResolutionError("not_a_member")
     role = row[0]
+    with conn.cursor() as cur:
+        cur.execute("SELECT state FROM workspaces WHERE id = %s", (str(workspace_id),))
+        ws_row = cur.fetchone()
+    if ws_row is not None and ws_row[0] != "active":
+        # `06` §lifecycle: a suspended/offboarding workspace answers inbound
+        # with a refusal, not silence. (Row invisible on a filtered read
+        # cannot happen past a successful membership read — same claim.)
+        raise TenantResolutionError("workspace_suspended", ws_row[0])
     if ROLE_ORDER.index(role) < ROLE_ORDER.index(minimum_role):
         raise TenantResolutionError(
             "insufficient_role", f"{role} < required {minimum_role}"
