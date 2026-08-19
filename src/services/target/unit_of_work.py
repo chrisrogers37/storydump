@@ -87,11 +87,18 @@ def in_transaction() -> bool:
     return _IN_TRANSACTION.get()
 
 
-def async_database_url() -> str:
-    """The asyncpg URL, built from the same settings the sync engine uses."""
+def async_database_url(database: Optional[str] = None) -> str:
+    """The asyncpg URL, built from the same settings the sync engine uses.
+
+    *database* overrides the database name only. It exists for the test
+    harness, which runs against the session-scoped test database rather than
+    `settings.DB_NAME` — CI provisions `TEST_DB_NAME` and has no `DB_NAME`
+    database at all, so a URL hardcoded to the latter passes locally (where a
+    dev database happens to exist) and fails there. Production passes nothing.
+    """
     return (
         f"postgresql+asyncpg://{settings.DB_USER}:{settings.DB_PASSWORD}"
-        f"@{settings.DB_HOST}:{settings.DB_PORT}/{settings.DB_NAME}"
+        f"@{settings.DB_HOST}:{settings.DB_PORT}/{database or settings.DB_NAME}"
     )
 
 

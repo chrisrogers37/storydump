@@ -8,7 +8,6 @@ property of a real connection being handed to a second borrower.
 
 from __future__ import annotations
 
-import asyncio
 
 import pytest
 from sqlalchemy import text
@@ -125,19 +124,23 @@ class TestTenantScopingAndGucHygieneUnderPoolReuse:
     without ever exercising reuse, which is the vacuity this gate is about.
     """
 
-    @pytest.fixture()
-    def engine(self):
-        eng = create_engine(async_database_url())
-        yield eng
-        asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
-            eng.dispose()
-        )
+    @pytest.fixture(autouse=True)
+    def _require_db(self, setup_test_database):
+        """The suite's own session-DB fixture: creates `TEST_DB_NAME` and skips
+        cleanly when no database is reachable. Depending on it is what makes
+        these tests run against the database CI actually provisions — CI has no
+        `DB_NAME` database, so building the URL from that name fails there
+        while passing locally, which is exactly what it did on the first push."""
+        if setup_test_database is None:
+            pytest.skip("Database not available - skipping integration test")
 
     @pytest.mark.asyncio
     async def test_each_uow_sees_only_its_own_tenant_across_recycled_connections(self):
         from sqlalchemy.ext.asyncio import create_async_engine
 
-        engine = create_async_engine(async_database_url(), pool_size=1, max_overflow=0)
+        engine = create_async_engine(
+            async_database_url(settings.TEST_DB_NAME), pool_size=1, max_overflow=0
+        )
         try:
             seen = []
             for tenant in (TENANT_A, TENANT_B, TENANT_A, TENANT_B):
@@ -156,7 +159,9 @@ class TestTenantScopingAndGucHygieneUnderPoolReuse:
         SAME single-slot pool must see no tenant at all."""
         from sqlalchemy.ext.asyncio import create_async_engine
 
-        engine = create_async_engine(async_database_url(), pool_size=1, max_overflow=0)
+        engine = create_async_engine(
+            async_database_url(settings.TEST_DB_NAME), pool_size=1, max_overflow=0
+        )
         try:
             async with unit_of_work(engine, TENANT_A).begin() as s:
                 assert (
@@ -176,7 +181,9 @@ class TestTenantScopingAndGucHygieneUnderPoolReuse:
     async def test_actor_gucs_are_set_and_are_also_transaction_scoped(self):
         from sqlalchemy.ext.asyncio import create_async_engine
 
-        engine = create_async_engine(async_database_url(), pool_size=1, max_overflow=0)
+        engine = create_async_engine(
+            async_database_url(settings.TEST_DB_NAME), pool_size=1, max_overflow=0
+        )
         try:
             uow = unit_of_work(
                 engine, TENANT_A, actor_kind="system", actor_user_id=None, channel="web"
@@ -200,7 +207,9 @@ class TestTenantScopingAndGucHygieneUnderPoolReuse:
     async def test_the_discipline_flag_is_set_inside_and_clear_outside(self):
         from sqlalchemy.ext.asyncio import create_async_engine
 
-        engine = create_async_engine(async_database_url(), pool_size=1, max_overflow=0)
+        engine = create_async_engine(
+            async_database_url(settings.TEST_DB_NAME), pool_size=1, max_overflow=0
+        )
         try:
             assert in_transaction() is False
             async with unit_of_work(engine, TENANT_A).begin():
