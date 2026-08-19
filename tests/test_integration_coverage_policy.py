@@ -28,7 +28,6 @@ mocks at all.
 import socket
 import uuid
 from contextlib import closing
-from typing import NoReturn
 from unittest.mock import Mock
 
 import psycopg2
@@ -42,6 +41,8 @@ from tests.conftest import (
     database_is_required,
     integration_verdict,
     maintenance_connection,
+    precondition_absent,
+    require_role_privilege,
     server_answered,
     server_is_listening,
     skip_ceiling_breach,
@@ -59,51 +60,6 @@ def _free_port() -> int:
 #: exists only to be refused, and is dropped in the same fixture that made it.
 #: `CREATE ROLE ... LOGIN` needs one to produce a login role at all.
 PROBE_ROLE_PASSWORD = "probe_role_password"
-
-
-def _precondition_absent(reason: str) -> NoReturn:
-    """Skip — except where this environment declared integration coverage
-    mandatory, and a missing precondition is then a FAILURE.
-
-    `tests/scripts/` skips unconditionally on the same missing privilege, and
-    this deliberately diverges: that suite has no `REQUIRE_TEST_DATABASE`
-    notion, and this file's whole subject is that a guard which quietly does
-    not run cannot be told apart from one that ran and found nothing. #804
-    exists because the #801 reproduction lived only in a session — a version of
-    it that silently skips in CI is the same absence with a test file around it.
-
-    The three skips this produces do not breach `MAX_EXPECTED_SKIPS` either, so
-    the backstop one layer up would not catch them.
-
-    DELIBERATELY NOT ROUTED THROUGH `integration_verdict`, which encodes the
-    same two negative rows 40 lines up in the module this file imports from.
-    Calling it would mean writing `server_answered=False` for the CREATEROLE
-    case — where a server demonstrably DID answer and merely lacked a
-    privilege — inside the one file whose whole subject is that distinction. A
-    false argument to buy a shared spelling is the worse trade; the shared part
-    that matters, `database_is_required()`, is called rather than re-parsed.
-
-    WHICH CALLER THIS ACTUALLY BITES FOR, measured rather than assumed. Of the
-    two preconditions below, only the missing CREATEROLE reaches the `fail`
-    branch. With no server at all, `setup_test_database` raises its own
-    `RuntimeError` from session setup first, so the fail here is shadowed —
-    measured: no server + `REQUIRE_TEST_DATABASE=1` errors 4 tests from
-    `tests/conftest.py`, while no CREATEROLE + the same flag errors exactly the
-    3 that use the fixture, from this line.
-
-    The shadowed branch is kept deliberately. It is one `if` covering both
-    callers, and deleting it would encode "the session fixture will always get
-    there first" as a standing assumption — a fixture ordering this file does
-    not own, whose quiet change would remove the guard rather than break it.
-    """
-    if database_is_required():
-        pytest.fail(
-            f"{reason}\nIntegration coverage is mandatory here ({REQUIRE_DB_ENV}"
-            " is set), so a missing precondition fails rather than skips: the"
-            " CONNECTION LIMIT 0 guard (#804) would otherwise disappear in"
-            " exactly the environment it was written for."
-        )
-    pytest.skip(reason)
 
 
 @pytest.fixture
@@ -144,24 +100,13 @@ def a_refusing_role():
     try:
         conn = maintenance_connection()
     except psycopg2.OperationalError as exc:
-        _precondition_absent(
+        precondition_absent(
             f"no PostgreSQL answered at {settings.DB_HOST}:{settings.DB_PORT} — {exc}"
         )
 
     with closing(conn):
+        require_role_privilege(conn, "rolcreaterole", "CREATEROLE")
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT rolsuper, rolcreaterole FROM pg_roles"
-                " WHERE rolname = current_user"
-            )
-            row = cur.fetchone()
-            if not (row and (row[0] or row[1])):
-                _precondition_absent(
-                    f"{settings.DB_USER} cannot provision roles: needs SUPERUSER"
-                    " or CREATEROLE. Grant it with:"
-                    f" ALTER ROLE {settings.DB_USER} CREATEROLE;"
-                )
-
             name = f"probe804_{SESSION_DB_SUFFIX}_{uuid.uuid4().hex[:8]}"
             cur.execute(
                 f'CREATE ROLE "{name}" LOGIN PASSWORD %s CONNECTION LIMIT 0',
