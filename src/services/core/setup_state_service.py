@@ -188,9 +188,10 @@ class SetupStateService(BaseService):
                 hours=720, chat_settings_id=chat_settings_id
             )
             if recent_posts:
-                last_post_at = recent_posts[0].posted_at.isoformat()
+                posted_at = ensure_utc(recent_posts[0].posted_at)
+                last_post_at = posted_at.isoformat()
                 # Consider posting active if last post was within 48 hours
-                age = datetime.now(timezone.utc) - recent_posts[0].posted_at
+                age = datetime.now(timezone.utc) - posted_at
                 posting_active = age < timedelta(hours=48)
         except Exception:  # noqa: BLE001 — best-effort status check
             logger.debug("Failed to fetch queue/history for setup state")
