@@ -4,6 +4,7 @@ from typing import Optional
 
 from src.services.base_service import BaseService
 from src.services.core.settings_service import SettingsService
+from src.services.tenancy import PROVISION, resolve_tenant_from_chat_id
 from src.repositories.history_repository import HistoryRepository
 from src.repositories.media_repository import MediaRepository
 from src.repositories.queue_repository import QueueRepository
@@ -43,8 +44,16 @@ class DashboardService(BaseService):
         self.instance_queries = InstanceDashboardQueries(self)
 
     def resolve_chat_settings_id(self, telegram_chat_id: int) -> str:
-        chat_settings = self.settings_service.get_settings(telegram_chat_id)
-        return str(chat_settings.id)
+        # Delegates to the ONE resolver (F.3/#842). PROVISION preserves this
+        # method's prior behaviour exactly: it called `get_settings` with the
+        # default `create_if_missing=True`, so an unknown chat was bootstrapped
+        # rather than refused. The policy is now written at the call site
+        # instead of inherited from a default two layers down.
+        return resolve_tenant_from_chat_id(
+            telegram_chat_id,
+            on_missing=PROVISION,
+            settings_repo=self.settings_service.settings_repo,
+        ).tenant_id
 
     # -- Queue delegates --
 

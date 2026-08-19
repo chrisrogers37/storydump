@@ -114,6 +114,24 @@ DEFAULT_ROOTS = ("src", "cli")
 #: The core-services segment FC-2 clause 3 requires to reach empty.
 CORE_SEGMENT = "src/services/core/"
 
+#: The ONE sanctioned inbound translator (F.3/#842). Exempt from the chat-id
+#: rule, narrowly and by exact path, because it is the rule's TERMINUS rather
+#: than a member of its burn-down: every one of the remaining chat-id call
+#: sites is meant to end up routing through this module, so counting it as a
+#: violation would make the target of the migration score as debt and grow the
+#: burn-down by two entries that can never retire.
+#:
+#: It cannot be covered by the Telegram-adapter exemption above, and that is
+#: not an oversight: the resolver is deliberately channel-NEUTRAL — it imports
+#: no Telegram and carries no Telegram in its path — so the adapter test does
+#: not and should not match it. An explicit, greppable exception is the same
+#: move F.1 made with SYSTEM_SCOPE: name the sanctioned case rather than let it
+#: blend into the population.
+#:
+#: Exact paths only. A prefix would silently exempt anything later added under
+#: the same package.
+SANCTIONED_INBOUND = frozenset({"src/services/tenancy/resolver.py"})
+
 #: Logging call names the `07` §5 pattern list applies to.
 LOG_CALLS = frozenset(
     {"debug", "info", "warning", "warn", "error", "exception", "critical", "log"}
@@ -262,7 +280,7 @@ def measure(repo: pathlib.Path, roots=DEFAULT_ROOTS) -> dict:
             telegram.append(module)
             if module.startswith(CORE_SEGMENT):
                 core.append(module)
-        else:
+        elif module not in SANCTIONED_INBOUND:
             chat_ids.extend(f"{module}::{fn}" for fn in chat_id_functions(tree))
         log_sites.extend(f"{module}::{ln}" for ln in provider_ref_log_sites(tree))
     return {

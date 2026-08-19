@@ -4,6 +4,7 @@ from typing import Optional
 
 from src.models.user import ROLE_ADMIN
 from src.repositories.chat_settings_repository import ChatSettingsRepository
+from src.services.tenancy import ABSENT, resolve_tenant_from_chat_id
 from src.repositories.membership_repository import MembershipRepository
 from src.repositories.user_repository import UserRepository
 from src.services.base_service import BaseService
@@ -41,13 +42,15 @@ class MembershipService(BaseService):
         if not user:
             return False
 
-        chat_settings = self.chat_settings_repo.get_by_chat_id(telegram_chat_id)
-        if not chat_settings:
+        # The ONE resolver (F.3/#842); ABSENT matches the prior lookup and the
+        # False below is this method's own policy, unchanged.
+        tenant_id = resolve_tenant_from_chat_id(
+            telegram_chat_id, on_missing=ABSENT, settings_repo=self.chat_settings_repo
+        ).tenant_id
+        if not tenant_id:
             return False
 
-        membership = self.membership_repo.get_membership(
-            str(user.id), str(chat_settings.id)
-        )
+        membership = self.membership_repo.get_membership(str(user.id), tenant_id)
         return bool(membership and membership.is_active)
 
     def is_system_admin(self, telegram_user_id: Optional[int]) -> bool:

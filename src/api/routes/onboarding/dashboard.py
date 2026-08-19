@@ -9,6 +9,7 @@ from fastapi.responses import Response
 
 from src.repositories.audit_repository import AuditRepository
 from src.repositories.chat_settings_repository import ChatSettingsRepository
+from src.services.tenancy import ABSENT, resolve_tenant_from_chat_id
 from src.repositories.media_repository import MediaRepository
 from src.services.core.dashboard_service import DashboardService
 from src.services.core.health_check import HealthCheckService
@@ -522,10 +523,13 @@ async def onboarding_audit_log(
     _validate_request(init_data, chat_id)
 
     with ChatSettingsRepository() as cs_repo:
-        cs = cs_repo.get_by_chat_id(chat_id)
-        if not cs:
+        # The ONE resolver (F.3/#842). ABSENT matches the prior lookup; the 404
+        # is this route's own policy and is deliberately unchanged.
+        chat_settings_id = resolve_tenant_from_chat_id(
+            chat_id, on_missing=ABSENT, settings_repo=cs_repo
+        ).tenant_id
+        if not chat_settings_id:
             raise HTTPException(status_code=404, detail="Instance not found")
-        chat_settings_id = str(cs.id)
 
     with AuditRepository() as audit_repo:
         entries = audit_repo.get_for_instance(

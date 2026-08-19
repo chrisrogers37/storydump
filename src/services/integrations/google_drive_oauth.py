@@ -12,6 +12,7 @@ from telegram import Bot
 
 from src.config.settings import settings
 from src.repositories.chat_settings_repository import ChatSettingsRepository
+from src.services.tenancy import ABSENT, resolve_tenant_from_chat_id
 from src.repositories.token_repository import TokenRepository
 from src.services.base_service import BaseService
 from src.utils.encryption import TokenEncryption
@@ -311,11 +312,14 @@ class GoogleDriveOAuthService(BaseService):
             triggered_by="user",
             input_params={"chat_id": telegram_chat_id},
         ) as run_id:
-            chat_settings = self.settings_repo.get_by_chat_id(telegram_chat_id)
-            if not chat_settings:
+            # The ONE resolver (F.3/#842). ABSENT matches the prior
+            # `get_by_chat_id`: look up, never create. The ValueError below is
+            # this call site's own policy and is deliberately unchanged.
+            chat_settings_id = resolve_tenant_from_chat_id(
+                telegram_chat_id, on_missing=ABSENT, settings_repo=self.settings_repo
+            ).tenant_id
+            if not chat_settings_id:
                 raise ValueError(f"No settings found for chat {telegram_chat_id}")
-
-            chat_settings_id = str(chat_settings.id)
             tokens_deleted = self.token_repo.delete_tokens_for_chat(
                 self.SERVICE_NAME, chat_settings_id
             )
@@ -346,11 +350,11 @@ class GoogleDriveOAuthService(BaseService):
         Returns a google.oauth2.credentials.Credentials object, or None if
         no user OAuth tokens are stored for this tenant.
         """
-        chat_settings = self.settings_repo.get_by_chat_id(telegram_chat_id)
-        if not chat_settings:
+        chat_settings_id = resolve_tenant_from_chat_id(
+            telegram_chat_id, on_missing=ABSENT, settings_repo=self.settings_repo
+        ).tenant_id
+        if not chat_settings_id:
             return None
-
-        chat_settings_id = str(chat_settings.id)
 
         access_row = self.token_repo.get_token_for_chat(
             self.SERVICE_NAME, self.TOKEN_TYPE_ACCESS, chat_settings_id
@@ -407,11 +411,11 @@ class GoogleDriveOAuthService(BaseService):
         if not credentials or not credentials.token:
             return False
 
-        chat_settings = self.settings_repo.get_by_chat_id(telegram_chat_id)
-        if not chat_settings:
+        chat_settings_id = resolve_tenant_from_chat_id(
+            telegram_chat_id, on_missing=ABSENT, settings_repo=self.settings_repo
+        ).tenant_id
+        if not chat_settings_id:
             return False
-
-        chat_settings_id = str(chat_settings.id)
 
         access_row = self.token_repo.get_token_for_chat(
             self.SERVICE_NAME, self.TOKEN_TYPE_ACCESS, chat_settings_id

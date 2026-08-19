@@ -11,6 +11,7 @@ from src.exceptions.telegram import AmbiguousDeliveryError, ChatMigratedError
 from src.services.base_service import BaseService
 from src.services.core.queue_reap import record_expiry_and_delete
 from src.services.core.settings_service import SettingsService
+from src.services.tenancy import PROVISION, resolve_tenant_from_chat_id
 from src.repositories.atomic_session import atomic_session
 from src.repositories.media_repository import MediaRepository
 from src.repositories.queue_repository import QueueRepository
@@ -305,8 +306,17 @@ class SchedulerService(BaseService):
         """Derive chat_settings_id from telegram_chat_id."""
         if telegram_chat_id is None:
             telegram_chat_id = settings.ADMIN_TELEGRAM_CHAT_ID
-        chat_settings = self.settings_service.get_settings(telegram_chat_id)
-        return str(chat_settings.id) if chat_settings else None
+        # The ONE resolver (F.3/#842). PROVISION preserves the prior
+        # `get_settings` default; the `or None` keeps this method's defensive
+        # shape, which callers rely on to pass a tenant-less scope onward.
+        return (
+            resolve_tenant_from_chat_id(
+                telegram_chat_id,
+                on_missing=PROVISION,
+                settings_repo=self.settings_service.settings_repo,
+            ).tenant_id
+            or None
+        )
 
     def clear_pending_queue(self, telegram_chat_id: Optional[int] = None) -> int:
         """Delete all pending queue items for a chat."""

@@ -12,6 +12,8 @@ from src.utils.logger import logger
 from src.utils.resilience import telegram_edit_with_retry
 from datetime import datetime, timedelta, timezone
 
+from src.services.tenancy import ABSENT, resolve_tenant_from_chat_id
+
 if TYPE_CHECKING:
     from src.models.chat_settings import ChatSettings
     from src.services.core.telegram_callbacks_core import TelegramCallbackCore
@@ -37,10 +39,14 @@ class TelegramCallbackAdminHandlers:
         None as "no tenant scope" and refuse to operate — never fall back to
         an unscoped query, which would reach across every tenant's rows.
         """
-        chat_settings = self.service.settings_service.get_settings_if_exists(
-            query.message.chat_id
-        )
-        return str(chat_settings.id) if chat_settings else None
+        # The ONE resolver (F.3/#842). ABSENT is the exact equivalent of the
+        # `get_settings_if_exists` this replaced: look up, never create, and
+        # hand back None so the caller refuses rather than widening.
+        return resolve_tenant_from_chat_id(
+            query.message.chat_id,
+            on_missing=ABSENT,
+            settings_repo=self.service.settings_service.settings_repo,
+        ).tenant_id
 
     async def _require_caller_tenant(self, query) -> ChatSettings | None:
         """Resolve the caller's ChatSettings row, or warn and return None.
