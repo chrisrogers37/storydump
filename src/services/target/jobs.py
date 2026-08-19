@@ -57,13 +57,19 @@ needed here:
   does not duplicate it.
 * **`jobs` has NO transition guard, and this contract is written against
   that measured fact** (#883 follow-on; the gate pins the absence as a
-  tripwire). `02` §5 denies jobs state the authority role that earned
-  `post_intents` its trigger — bookkeeping, "never the authority on whether
-  an external effect happened" — and the two edges where concurrency could
-  lie are refused by predicates that re-evaluate correctly at READ
-  COMMITTED: the partial unique index and the token+state CAS. Whether the
-  machinery tables deserve defense-in-depth edge triggers is a plan
-  question, filed, not an L.2 engineering call.
+  tripwire). What makes that safe is the MECHANISM on each
+  concurrency-bearing edge, not any classification of the table (#887
+  ruling): `ready → leased` is guarded by a partial UNIQUE INDEX —
+  writer-independent, so #883's the-trigger-is-the-authority argument does
+  not transfer at all — and `leased → terminal` by the token+state CAS,
+  where the argument transfers INVERTED: only a WRONG caller (a stale
+  owner) can be misled, about its own staleness, which is a far weaker
+  failure than #883's correct caller misled about its own success. This
+  argument is PER-EDGE and does not extend to a table lacking both
+  mechanisms — `channel_outbox` (L.4) has neither, and must build or
+  justify its own. (`02` §5's "bookkeeping, never the authority on whether
+  an external effect happened" is containment of one proposition, not the
+  carrier of this conclusion.) Defense-in-depth remains #887's question.
 
 Every `05` number (lease duration, heartbeat interval, per-workspace lane cap)
 arrives as a parameter — callers read config and pass values (`02` §7's door

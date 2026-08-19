@@ -544,15 +544,17 @@ class TestWhatTheDatabaseDeliberatelyDoesNotEnforce:
     `jobs` has NO transition guard, and the L.2 service contract is written
     against that fact rather than around an assumption.
 
-    Why no guard is the right reading, argued not assumed: `02` §5 denies
-    jobs state the authority role that earned `post_intents` its trigger —
-    "execution bookkeeping only; it is never the authority on whether an
-    external effect happened" — and the two transitions where concurrency
-    could lie are guarded by re-evaluation-correct PREDICATES proven above
-    (the partial unique index entering `leased`; the token+state CAS leaving
-    it, including the double-finalize case). The residual — a bare UPDATE
+    Why no guard is the right reading — carried by the MECHANISM on each
+    edge, not by any classification of the table (#887 ruling): entering
+    `leased` is guarded by a partial UNIQUE INDEX, writer-independent and
+    therefore stronger than a trigger (#883's authority argument does not
+    transfer); leaving it is the token+state CAS, where the argument
+    transfers INVERTED — only a WRONG caller (a stale owner) can be misled,
+    about its own staleness, the far weaker failure. Both proven above,
+    including the double-finalize case. The residual — a bare UPDATE
     resurrecting a terminal row — has no code path and no silent-success
-    flavor: nothing is told it won, because nothing legitimate asks.
+    flavor. THIS ARGUMENT IS PER-EDGE: a table with neither mechanism
+    (`channel_outbox`, L.4) inherits none of it.
 
     These tests pin the ABSENCE as a tripwire: if an edge guard ever lands
     on `jobs`, they go red and the service contract is revisited
