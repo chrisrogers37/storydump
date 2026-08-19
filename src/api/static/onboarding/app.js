@@ -934,10 +934,12 @@ const App = {
                 html += '<span class="account-active-badge">Active</span>';
             } else {
                 html += '<button class="btn-account-action btn-account-switch" ' +
-                    'onclick="App.switchAccount(\'' + this._escapeHtml(acct.id) + '\')">Switch</button>';
+                    'data-action="switchAccount" data-args=\'' +
+                    this._escapeAttr(JSON.stringify([acct.id])) + '\'>Switch</button>';
             }
             html += '<button class="btn-account-action btn-account-remove" ' +
-                'onclick="App.confirmRemoveAccount(\'' + this._escapeHtml(acct.id) + '\')">Remove</button>';
+                'data-action="confirmRemoveAccount" data-args=\'' +
+                this._escapeAttr(JSON.stringify([acct.id])) + '\'>Remove</button>';
             html += '</div></div>';
         }
 
@@ -1759,7 +1761,7 @@ const App = {
         app.innerHTML =
             '<div class="step"><div class="step-content" style="text-align:center;padding-top:60px">' +
             '<h2>Oops</h2><p class="subtitle">' + this._escapeHtml(message) + '</p>' +
-            '<button class="btn btn-primary" onclick="location.reload()" style="margin-top:24px">Reload</button>' +
+            '<button class="btn btn-primary" data-action="reloadPage" style="margin-top:24px">Reload</button>' +
             '</div></div>';
     },
 
@@ -1767,6 +1769,22 @@ const App = {
         const div = document.createElement('div');
         div.textContent = text;
         return div.innerHTML;
+    },
+
+    /**
+     * Escape for an HTML *attribute* value.
+     *
+     * _escapeHtml is textContent-based, so it encodes & < > and leaves quotes
+     * alone — correct in text context, no defence inside a quoted attribute.
+     * Anything interpolated into an attribute goes through this instead.
+     */
+    _escapeAttr(text) {
+        return String(text)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
     },
 
     _showCardError(containerId, message) {
@@ -1844,6 +1862,80 @@ const App = {
         return day + ' ' + hour12 + ':' + m + suffix;
     },
 };
+
+/**
+ * Actions reachable from a data-action attribute.
+ *
+ * An explicit allowlist, not App[name]: dispatching a DOM-supplied string into
+ * an arbitrary property of App would make every method — including future ones
+ * nobody vetted for this — reachable from markup. This maps only what the page
+ * actually needs, and an unknown action is a no-op rather than a lookup.
+ */
+const ACTIONS = {
+    adjustSetting: (...a) => App.adjustSetting(...a),
+    cancelAddAccount: () => App.cancelAddAccount(),
+    cancelDisconnectGdrive: () => App.cancelDisconnectGdrive(),
+    cancelRemoveAccount: () => App.cancelRemoveAccount(),
+    confirmDisconnectGdrive: () => App.confirmDisconnectGdrive(),
+    confirmRemoveAccount: (...a) => App.confirmRemoveAccount(...a),
+    connectOAuth: (...a) => App.connectOAuth(...a),
+    editSection: (...a) => App.editSection(...a),
+    executeDisconnectGdrive: () => App.executeDisconnectGdrive(),
+    executeRemoveAccount: () => App.executeRemoveAccount(),
+    finishSetup: () => App.finishSetup(),
+    goToStep: (...a) => App.goToStep(...a),
+    reloadPage: () => location.reload(),
+    returnToHome: () => App.returnToHome(),
+    runFullSetup: () => App.runFullSetup(),
+    saveSchedule: () => App.saveSchedule(),
+    saveScheduleAndReturn: () => App.saveScheduleAndReturn(),
+    selectOption: (...a) => App.selectOption(...a),
+    selectWindow: (...a) => App.selectWindow(...a),
+    showAddAccountForm: () => App.showAddAccountForm(),
+    startIndexing: () => App.startIndexing(),
+    submitAddAccount: () => App.submitAddAccount(),
+    switchAccount: (...a) => App.switchAccount(...a),
+    syncMedia: () => App.syncMedia(),
+    toggleCard: (...a) => App.toggleCard(...a),
+    toggleSetting: (...a) => App.toggleSetting(...a),
+    validateFolder: () => App.validateFolder(),
+};
+
+/**
+ * Run the action declared on the nearest ancestor carrying one.
+ *
+ * `eventName` is matched against the element's declared data-event (default
+ * 'click'). Without that match a checkbox toggle would fire twice — once from
+ * the click on the input, once from the change it triggers — and net to no
+ * change at all.
+ *
+ * Args ride in data-args as JSON so types survive the DOM: selectWindow(9, 21)
+ * needs numbers, adjustSetting('posts_per_day', 1) needs a string then a number.
+ */
+function _runDeclaredAction(event, eventName) {
+    const el = event.target.closest('[data-action]');
+    if (!el) return;
+    if ((el.dataset.event || 'click') !== eventName) return;
+
+    const fn = ACTIONS[el.dataset.action];
+    if (!fn) return;
+
+    let args = [];
+    const raw = el.dataset.args;
+    if (raw) {
+        try {
+            args = JSON.parse(raw);
+        } catch (err) {
+            return;
+        }
+    }
+    fn(...args);
+}
+
+// Delegated listeners replace inline on* attributes, which the Mini App's CSP
+// (script-src without 'unsafe-inline') refuses to execute. See #879.
+document.addEventListener('click', e => _runDeclaredAction(e, 'click'));
+document.addEventListener('change', e => _runDeclaredAction(e, 'change'));
 
 // Start the app when DOM is ready
 document.addEventListener('DOMContentLoaded', () => App.init());
