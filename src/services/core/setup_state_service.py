@@ -5,6 +5,8 @@ from datetime import datetime, timedelta, timezone
 from src.services.base_service import BaseService
 from src.services.core.instagram_account_service import InstagramAccountService
 from src.services.core.settings_service import SettingsService
+from sqlalchemy.exc import SQLAlchemyError
+
 from src.repositories.history_repository import HistoryRepository
 from src.repositories.media_repository import MediaRepository
 from src.repositories.queue_repository import QueueRepository
@@ -193,8 +195,19 @@ class SetupStateService(BaseService):
                 # Consider posting active if last post was within 48 hours
                 age = datetime.now(timezone.utc) - posted_at
                 posting_active = age < timedelta(hours=48)
-        except Exception:  # noqa: BLE001 — best-effort status check
+        except SQLAlchemyError:
+            # Expected here: transient database trouble. Best-effort by design —
+            # a status field must degrade rather than break the dashboard.
             logger.debug("Failed to fetch queue/history for setup state")
+        except Exception:  # noqa: BLE001 — see below
+            # Deliberately still broad, for the same reason: this must not break
+            # the dashboard. What changed is the VOLUME. Anything that is not a
+            # database error is a defect in this block, and #918 is what silence
+            # costs — an aware/naive TypeError kept posting_active permanently
+            # False for every tenant that had ever posted, with no crash and
+            # nothing above debug. Breadth was never the problem; a swallowed
+            # programming error presenting as data was.
+            logger.exception("Unexpected error in setup-state activity check")
         return {
             "in_flight_count": in_flight_count,
             "last_post_at": last_post_at,
