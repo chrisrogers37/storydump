@@ -111,7 +111,13 @@ def backfill_instagram(
     # overridable with --chat-id.
     from src.config.settings import settings
 
-    target_chat_id = chat_id if chat_id is not None else settings.ADMIN_TELEGRAM_CHAT_ID
+    # Operator-only CLI edge: visible in --help, overridable with --chat-id,
+    # and unreachable from inbound Telegram or webhook data. The marker below
+    # is what declares it to the #867 gate; grepping for that marker gives
+    # the full inventory of deliberate admin grants.
+    target_chat_id = (  # admin-grant-ok: operator edge, reasoned above
+        chat_id if chat_id is not None else settings.ADMIN_TELEGRAM_CHAT_ID
+    )
 
     service = InstagramBackfillService()
 
