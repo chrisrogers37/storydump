@@ -1,14 +1,12 @@
 """Posting service - Google Drive auth alerts and posting utilities."""
 
 from datetime import datetime, timezone
-from typing import Optional
 
 from telegram import Bot
 
 from src.services.base_service import BaseService
 from src.services.core.settings_service import SettingsService
 from src.services.core.telegram_utils import GDRIVE_RECONNECT_GUIDANCE
-from src.config.settings import settings
 from src.utils.logger import logger
 
 
@@ -25,9 +23,7 @@ class PostingService(BaseService):
         super().__init__()
         self.settings_service = SettingsService()
 
-    async def send_gdrive_auth_alert(
-        self, telegram_chat_id: Optional[int] = None, *, bot: Bot
-    ) -> None:
+    async def send_gdrive_auth_alert(self, telegram_chat_id: int, *, bot: Bot) -> None:
         """Send a Google Drive reconnect alert to Telegram.
 
         Gated on chat_settings.gdrive_alerted_at: fires once per disconnect
@@ -39,8 +35,15 @@ class PostingService(BaseService):
         Application's rate-limited ExtBot, so the alert shares the same
         outbound pacing as every other send instead of bypassing it via a
         raw Bot.
+
+        The chat is REQUIRED (#867). This previously fell back to
+        ADMIN_TELEGRAM_CHAT_ID on an absent id, with nothing in the docstring
+        saying so — a tenant's reconnect alert would have been delivered to
+        the admin chat instead. The one caller (the scheduler tick) has always
+        passed a real tenant id, so nothing observable changes; the branch is
+        gone so it cannot start mattering.
         """
-        chat_id = telegram_chat_id or settings.ADMIN_TELEGRAM_CHAT_ID
+        chat_id = telegram_chat_id
         if not chat_id:
             return
 

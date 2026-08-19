@@ -98,8 +98,33 @@ class TestSendGdriveAuthAlert:
 
     @pytest.mark.asyncio
     @patch("src.services.core.posting.settings")
-    async def test_falls_back_to_admin_chat_id(self, mock_settings, posting_service):
-        """Uses ADMIN_TELEGRAM_CHAT_ID when no chat_id provided."""
+    async def test_omitting_the_chat_is_a_caller_bug_not_an_admin_grant(
+        self, mock_settings, posting_service
+    ):
+        """#867. This spot previously asserted the opposite — that an omitted
+        chat SILENTLY became ADMIN_TELEGRAM_CHAT_ID. That is the F.1 fail-open
+        shape wearing a default, and it was undocumented here: the docstring
+        described the gating, the state and the bot, and never mentioned that
+        an absent id redirected a tenant's alert to the admin chat.
+
+        The parameter is required now, so the mistake cannot be made silently.
+        """
+        mock_settings.ADMIN_TELEGRAM_CHAT_ID = -100999
+        bot = AsyncMock()
+
+        with pytest.raises(TypeError):
+            await posting_service.send_gdrive_auth_alert(bot=bot)
+
+        bot.send_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("src.services.core.posting.settings")
+    async def test_an_explicitly_absent_chat_never_reaches_the_admin_tenant(
+        self, mock_settings, posting_service
+    ):
+        """The load-bearing half, and the one that goes red on the old code:
+        an admin chat IS configured, so under the retired fallback this call
+        delivered a tenant alert to it. Now it sends nothing at all."""
         mock_settings.ADMIN_TELEGRAM_CHAT_ID = -100999
         mock_settings.OAUTH_REDIRECT_BASE_URL = "https://example.com"
         posting_service.settings_service.get_settings.return_value = _chat_settings(
@@ -107,11 +132,10 @@ class TestSendGdriveAuthAlert:
         )
 
         bot = AsyncMock()
-        await posting_service.send_gdrive_auth_alert(bot=bot)
+        await posting_service.send_gdrive_auth_alert(None, bot=bot)
 
-        call_kwargs = bot.send_message.call_args.kwargs
-        assert call_kwargs["chat_id"] == -100999
-        posting_service.settings_service.get_settings.assert_called_once_with(-100999)
+        bot.send_message.assert_not_called()
+        posting_service.settings_service.get_settings.assert_not_called()
 
     @pytest.mark.asyncio
     @patch("src.services.core.posting.settings")
@@ -142,11 +166,11 @@ class TestSendGdriveAuthAlert:
     async def test_no_chat_id_at_all_returns_early(
         self, mock_settings, posting_service
     ):
-        """Returns without sending when no chat_id and no admin default."""
+        """Returns without sending when the chat is falsy."""
         mock_settings.ADMIN_TELEGRAM_CHAT_ID = None
 
         bot = AsyncMock()
-        await posting_service.send_gdrive_auth_alert(bot=bot)
+        await posting_service.send_gdrive_auth_alert(None, bot=bot)
 
         bot.send_message.assert_not_called()
         posting_service.settings_service.get_settings.assert_not_called()
