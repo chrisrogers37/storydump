@@ -60,6 +60,7 @@ first production run.
 from __future__ import annotations
 
 import argparse
+import decimal
 import json
 import sys
 import textwrap
@@ -785,6 +786,22 @@ class Report:
         return HALT if self.blockers else CLEAR
 
 
+def _jsonable(value):
+    """Coerce a psycopg2 scalar to something `json.dumps` accepts.
+
+    `numeric` comes back as `Decimal`, which the JSON encoder refuses. The TEXT
+    renderer never noticed because it `str()`s everything — so `--json` crashed
+    while `--text` was fine, on the same run, and the agreement test missed it
+    by running against an EMPTY corpus where no aggregate produces a numeric at
+    all. Coercing here rather than passing `default=str` to `json.dumps` keeps
+    the two renderers looking at the same values instead of at two encodings of
+    them.
+    """
+    if isinstance(value, decimal.Decimal):
+        return float(value)
+    return value
+
+
 def _legacy_base_tables(conn, schema: str) -> list:
     with conn.cursor() as cur:
         cur.execute(
@@ -829,7 +846,7 @@ def run(conn, schema: str = "public") -> Report:
                 cur.execute(check.sql)
                 fetched = cur.fetchall()
             if check.kind == DISCLOSURE:
-                result.rows = [list(r) for r in fetched]
+                result.rows = [[_jsonable(v) for v in row] for row in fetched]
             else:
                 result.value = fetched[0][0] if fetched else 0
         except psycopg2.Error as exc:

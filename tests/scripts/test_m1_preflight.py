@@ -15,6 +15,8 @@ records nothing at all, and both of those render as "not a blocker". So
 
 from __future__ import annotations
 
+import json
+
 import psycopg2
 import pytest
 
@@ -224,3 +226,30 @@ class TestTheReportTellsTheTruthAboutItself:
     def test_json_and_text_agree_on_the_verdict(self, conn):
         report = pf.run(conn)
         assert pf.to_json(report)["verdict"] in pf.render(report)
+
+    def test_json_survives_a_disclosure_carrying_a_numeric(self, conn):
+        """`--json` crashed on production while `--text` rendered fine: the
+        `posting_queue.by_status` average comes back as a `Decimal`, which the
+        JSON encoder refuses and the text renderer `str()`s without noticing.
+
+        The pre-existing agreement test could not catch it — it runs on an
+        EMPTY corpus, where no aggregate produces a numeric at all. So this one
+        SEEDS a queue row, which is the only way the offending value exists.
+        Serialising is the assertion; there is nothing else to check."""
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO media_items (id, file_path, file_name, file_size,"
+                " file_hash, source_type) VALUES"
+                " ('44444444-4444-4444-4444-444444444444','/p','n',1,'h','google_drive')"
+            )
+            cur.execute(
+                "INSERT INTO posting_queue (media_item_id, scheduled_for, status)"
+                " VALUES ('44444444-4444-4444-4444-444444444444',"
+                "         (now() AT TIME ZONE 'UTC'), 'pending')"
+            )
+
+        report = pf.run(conn)
+        rows = pf.to_json(report)["disclosures"]["posting_queue.by_status"]
+        assert rows, "the seeded row must reach the disclosure, or this proves nothing"
+
+        json.dumps(pf.to_json(report))
