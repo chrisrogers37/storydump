@@ -112,6 +112,104 @@ class Check:
 
 
 # ---------------------------------------------------------------------------
+# Vocabulary drift — the load-bearing form of a check a CHECK constraint would
+# otherwise foreclose.
+#
+# THE DEFECT THIS EXISTS BECAUSE OF (#944 review). The battery shipped with
+# `posting_history.status_outside_the_1to1_map`, counting rows whose `status`
+# is outside the five the transform maps 1:1. `check_history_status` admits
+# EXACTLY those five, so no write path can produce such a row: the check
+# returned 0 correctly and could never return anything else. A green light
+# nobody can make red. Proven rather than argued — seeding a sixth value
+# returns `CheckViolation`, not a query result. A second instance
+# (`user_interactions.interaction_type_outside_the_check_set`) turned up by
+# cross-referencing every legacy CHECK against every value list in this file,
+# and chasing it found a live application bug (#946).
+#
+# DELETING THEM WOULD HAVE LOST A REAL CONCERN. The risk was never a stray row
+# — the constraint prevents that. It is that a MIGRATION widens the vocabulary
+# and the transform's mapping silently stops being total: a sixth status with
+# no terminal state, a sixth lock reason with no target kind. The row-count
+# form cannot see that coming. This form sees it the moment the constraint
+# moves, which is the earliest it is knowable.
+#
+# So the duplication becomes the point. This file states the vocabulary it
+# assumes; the check asserts the database still agrees. Same diff-not-memory
+# principle the `spec` field exists for, applied to a constraint rather than
+# to a document.
+# ---------------------------------------------------------------------------
+
+_Q = chr(39)  # a single quote, kept out of the SQL below so it stays readable
+
+
+def _vocabulary_sql(table: str, conname: str, expected: tuple) -> str:
+    """Nonzero when the live CHECK no longer admits exactly `expected`.
+
+    Counts THREE ways to drift, because each has a different consequence and
+    any one alone would let the other two through:
+
+      * a value the constraint admits that this file does not know about
+        (widened — the mapping is no longer total)
+      * a value this file expects that the constraint no longer admits
+        (narrowed — the mapping has dead branches, and a postcondition
+        asserting round-trip counts will fail inside the window)
+      * the constraint ABSENT entirely, which admits everything and would
+        otherwise report a clean zero — the same unreachable-vs-empty collapse
+        this module refuses everywhere else
+
+    Values come out of `pg_get_constraintdef`, so the comparison is against
+    what PostgreSQL will actually enforce rather than against a second
+    hand-maintained list.
+    """
+    literals = ", ".join(_Q + v.replace(_Q, _Q * 2) + _Q for v in expected)
+    # The regex is  '([^']*)'  — quote, capture the run of non-quotes, quote.
+    # As a SQL literal every quote in it doubles, so this builds
+    #   '''([^'']*)'''
+    # Verified against a live constraint rather than reasoned about: an
+    # earlier version matched runs of non-quote characters ANYWHERE in the
+    # definition, whose first hit is "CHECK (((status)::text = ANY ((ARRAY[".
+    pattern = _Q + _Q * 2 + "([^" + _Q * 2 + "]*)" + _Q * 2 + _Q
+    return (
+        "WITH def AS ("
+        "  SELECT pg_get_constraintdef(c.oid) AS d"
+        "    FROM pg_constraint c"
+        "    JOIN pg_class r ON r.oid = c.conrelid"
+        "    JOIN pg_namespace n ON n.oid = r.relnamespace"
+        f"   WHERE r.relname = {_Q}{table}{_Q}"
+        f"     AND c.conname = {_Q}{conname}{_Q}"
+        "     AND n.nspname = current_schema()),"
+        " live AS ("
+        f"  SELECT DISTINCT m[1] AS v FROM def, regexp_matches(d, {pattern}, {_Q}g{_Q}) m),"
+        f" expected AS (SELECT unnest(ARRAY[{literals}]) AS v)"
+        " SELECT (SELECT count(*) FROM live WHERE v NOT IN (SELECT v FROM expected))"
+        "      + (SELECT count(*) FROM expected WHERE v NOT IN (SELECT v FROM live))"
+        "      + (SELECT CASE WHEN EXISTS (SELECT 1 FROM def) THEN 0 ELSE 1 END)"
+    )
+
+
+def vocabulary_check(
+    table: str, conname: str, expected: tuple, spec: str, consumer: str
+) -> Check:
+    """A drift check over one legacy CHECK constraint's value set."""
+    return Check(
+        table=table,
+        name=f"vocabulary_drift_{conname}",
+        kind=BLOCKER,
+        sql=_vocabulary_sql(table, conname, expected),
+        spec=spec,
+        why=f"{conname} is the vocabulary {consumer} maps from. This file"
+        f" assumes it admits exactly {sorted(expected)}. Nonzero means the"
+        " database and this file disagree: widened makes the mapping"
+        " non-total, narrowed leaves dead branches, absent admits anything."
+        " Counting ROWS outside the set instead is foreclosed BY the"
+        " constraint and could never fire.",
+        remedy="Reconcile the mapping with the migration that moved the"
+        " constraint, then update the expected set here. Never update this"
+        " list alone — that re-creates the silent drift it exists to catch.",
+    )
+
+
+# ---------------------------------------------------------------------------
 # THE BATTERY — spec §5.1, in the spec's own order (M1-01 .. M1-11), because
 # that is the order a blocker actually bites: a chat that cannot become a
 # workspace takes everything workspace-rooted with it.
@@ -537,17 +635,6 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         "posting_history",
-        "status_outside_the_1to1_map",
-        BLOCKER,
-        "SELECT count(*) FROM posting_history WHERE status NOT IN"
-        " ('posted','failed','skipped','rejected','expired')",
-        spec="§4.8",
-        why="Five legacy statuses map 1:1 onto post_intents terminal states."
-        " A sixth value has no mapping and would be dropped silently.",
-        remedy="Extend the map, or quarantine the rows.",
-    ),
-    Check(
-        "posting_history",
         "status_success_disagreement",
         COUNT,
         "SELECT count(*) FROM posting_history WHERE (status = 'posted') <> success",
@@ -668,16 +755,6 @@ CHECKS: tuple[Check, ...] = (
         " until then a §5.2 quarantine feed.",
         fork="C (addendum)",
     ),
-    Check(
-        "user_interactions",
-        "interaction_type_outside_the_check_set",
-        COUNT,
-        "SELECT count(*) FROM user_interactions WHERE interaction_type NOT IN"
-        " ('command','callback','message','bot_response')",
-        spec="§4.9",
-        why="A known writer implies drift is possible. The mapping carries any"
-        " value (detail is typed open), so this is a census, not a gate.",
-    ),
     # ===== M1-10  onboarding (proposed drop) ==============================
     Check(
         "onboarding_sessions",
@@ -710,6 +787,96 @@ CHECKS: tuple[Check, ...] = (
         why="Total rows, for the 3f snapshot. Deliberately NOT the drop-check —"
         " confusing the two is what made an expired-session table look like a"
         " failed gate.",
+    ),
+    # ===== vocabulary drift — every legacy CHECK a mapping reads from =====
+    #
+    # Nine constraints, one mechanism. Each is a value set some §4 mapping
+    # translates FROM, so a migration that moves one makes that mapping
+    # non-total without touching a single row. Two of these replace row-count
+    # checks that the same constraints foreclosed (see the block above
+    # `_vocabulary_sql`); the other seven are the rest of the population that
+    # cross-referencing turned up, added here rather than left for the next
+    # reviewer to find one at a time.
+    vocabulary_check(
+        "posting_history",
+        "check_history_status",
+        ("posted", "failed", "skipped", "rejected", "expired"),
+        spec="§4.8",
+        consumer="the 1:1 terminal-state map (a sixth status has no target state)",
+    ),
+    vocabulary_check(
+        "posting_history",
+        "check_posting_method",
+        ("instagram_api", "telegram_manual", "system_expiry", "auto_reapproval"),
+        spec="SD-3 / §4.8",
+        consumer="SD-3's approval_mode derivation and published_via (a fifth"
+        " method falls through SD-3's else-branch unnoticed)",
+    ),
+    vocabulary_check(
+        "media_posting_locks",
+        "check_lock_reason",
+        ("recent_post", "skip", "permanent_reject", "manual_hold", "seasonal"),
+        spec="§4.6",
+        consumer="the ruled kind map recent_post->recent, skip->skip,"
+        " permanent_reject->reject, manual_hold->hold, seasonal->seasonal"
+        " (a sixth reason has no target kind)",
+    ),
+    vocabulary_check(
+        "user_chat_memberships",
+        "check_instance_role",
+        ("owner", "admin", "member"),
+        spec="§4.2 / m1_ladder",
+        consumer="the owner ladder's CASE and the 1:1 role map (a fourth role"
+        " reaches neither and silently becomes rung 3 or nothing)",
+    ),
+    vocabulary_check(
+        "user_interactions",
+        "check_interaction_type",
+        ("command", "callback", "message", "bot_response"),
+        spec="§4.9",
+        consumer="§4.9's audit_events mapping. The spec profiles values"
+        " OUTSIDE this set, citing a writer that emits onboarding_dropout —"
+        " which this constraint forbids, so that write has never succeeded"
+        " (#946). The drift form is what catches the fix for #946 landing",
+    ),
+    vocabulary_check(
+        "onboarding_sessions",
+        "check_onboarding_step",
+        ("naming", "awaiting_group", "complete"),
+        spec="§4.10",
+        consumer="the alternate branch's 1:1 step map, which §4.10 already"
+        " warns names a different machine from the target CHECK",
+    ),
+    vocabulary_check(
+        "posting_queue",
+        "check_status",
+        (
+            "pending",
+            "processing",
+            "failed",
+            "publishing",
+            "sent_unconfirmed",
+            "delivered",
+        ),
+        spec="FC-7.4",
+        consumer="the queue clause. `04` L86 words it as 'pending' while the"
+        " spec's postcondition is status-blind, so the vocabulary is exactly"
+        " what decides whether those two ever diverge",
+    ),
+    vocabulary_check(
+        "users",
+        "check_user_role",
+        ("admin", "member"),
+        spec="SD-13 / §4.1",
+        consumer="SD-13, which dissolves the column but emits a G-LOG row per"
+        " legacy admin (a third role changes what is logged)",
+    ),
+    vocabulary_check(
+        "audit_log",
+        "check_audit_entity_type",
+        ("setting", "membership", "lock"),
+        spec="§4.9",
+        consumer="the entity_type -> entity_kind mapping",
     ),
     # ===== ledger + the undispositioned table =============================
     Check(
