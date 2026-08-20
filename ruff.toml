@@ -10,6 +10,20 @@
 
 target-version = "py310"
 
+# Scope is the whole repository, declared here rather than as a directory list
+# in CI. An allowlist of directories is correct only until the next directory
+# is added, and it fails silently when it stops being complete: `scripts/` and
+# `setup.py` went unlinted that way, and a green Lint check reported on them
+# for as long as it took someone to notice.
+#
+# `extend-exclude` rather than `exclude` — plain `exclude` REPLACES ruff's
+# built-in exclusions, which would enlist `.venv/`, `build/` and friends.
+#
+# Markdown is excluded because ruff formats Python code blocks inside `.md`,
+# and the code in this repo's documentation is illustrative: snippets are
+# deliberately partial, so gating them would fail a code lint on a prose edit.
+extend-exclude = ["*.md"]
+
 [lint]
 select = [
     "E4",  # pycodestyle — imports

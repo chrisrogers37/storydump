@@ -26,15 +26,19 @@ jobs:
       - name: Install ruff
         run: pip install ruff
 
-      # tests/ is linted here for the same reason src/ is: a test that does
-      # not run is not a weaker defect than code that does not work, and the
-      # pyflakes rules the repo selects (F811 in particular) catch a shadowed
-      # definition that no test count, tick or coverage number can show.
+      # Scope is the whole repository, not a directory list. tests/ is linted
+      # for the same reason src/ is: a test that does not run is not a weaker
+      # defect than code that does not work, and the pyflakes rules the repo
+      # selects (F811 in particular) catch a shadowed definition that no test
+      # count, tick or coverage number can show. The same argument reaches
+      # every other directory, which is why none are named — an allowlist here
+      # is complete only until the next directory lands, and it goes stale
+      # without turning anything red. Exclusions live in ruff.toml.
       - name: Run ruff check
-        run: ruff check src/ cli/ tests/ --output-format=github
+        run: ruff check . --output-format=github
 
       - name: Run ruff format check
-        run: ruff format src/ cli/ tests/ --check
+        run: ruff format . --check
 
   fc2-ratchet:
     name: FC-2 Telegram ratchet
