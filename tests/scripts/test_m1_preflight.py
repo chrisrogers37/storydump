@@ -192,6 +192,40 @@ class TestUnreachableIsNotTheSameAsEmpty:
         )
         assert "Skipped is not passed." in pf.render(report)
 
+    def test_an_unevaluable_fc8_census_is_ERROR_not_CLEAR(self, conn):
+        """FC-8's two counts are a Phase M precondition. If the census cannot
+        run, the honest answer is "could not answer" — but the error used to be
+        recorded into `report.fc8` ONLY, where it renders as a line of text and
+        contributes to no verdict, so the run could still exit CLEAR.
+
+        Dropping `media_items` is how the census becomes unevaluable, and it is
+        also what several other checks read — which is the point: EVERY path
+        that could not answer has to reach the exit code, not just the ones
+        that happen to be in the registry."""
+        with conn.cursor() as cur:
+            cur.execute("DROP TABLE media_items CASCADE")
+
+        report = pf.run(conn)
+
+        assert "error" in report.fc8
+        assert any(r.check.table == "(fc8_gate)" for r in report.errored), (
+            "the census failure must land in `errored`, or it contributes to no verdict"
+        )
+        assert report.exit_code() == pf.ERROR
+        assert report.exit_code() != pf.CLEAR
+
+    def test_an_unevaluable_rung_query_is_ERROR_not_CLEAR(self, conn):
+        """Same shape, other reporting-only field. `report.rungs` is printed
+        for coverage honesty; a failure to compute it must not read as a corpus
+        that exercises no rungs."""
+        with conn.cursor() as cur:
+            cur.execute("DROP TABLE user_chat_memberships CASCADE")
+
+        report = pf.run(conn)
+
+        assert any(r.check.table == "(ladder)" for r in report.errored)
+        assert report.exit_code() == pf.ERROR
+
     def test_an_absent_optional_table_still_blocks_when_it_IS_present(self, conn):
         """The other half. Absence is tolerated; presence is not, because the
         disposition gap (#941) is real wherever the table is."""
@@ -226,6 +260,24 @@ class TestTheReportTellsTheTruthAboutItself:
     def test_json_and_text_agree_on_the_verdict(self, conn):
         report = pf.run(conn)
         assert pf.to_json(report)["verdict"] in pf.render(report)
+
+    def test_jsonable_coerces_every_type_json_would_refuse(self):
+        """Unit-level because no disclosure returns a date today. That is
+        exactly why it is here — the Decimal case shipped because the only
+        test that could have caught it ran on a corpus that could not produce
+        the value."""
+        import datetime as dt
+        import decimal as dec
+
+        assert pf._jsonable(dec.Decimal("1.5")) == 1.5
+        assert pf._jsonable(dt.date(2026, 8, 20)) == "2026-08-20"
+        assert pf._jsonable(dt.datetime(2026, 8, 20, 1, 2, 3)).startswith("2026-08-20T")
+        assert pf._jsonable(7) == 7
+        assert pf._jsonable("x") == "x"
+        assert pf._jsonable(None) is None
+        json.dumps(
+            [pf._jsonable(dec.Decimal("1.5")), pf._jsonable(dt.date(2026, 8, 20))]
+        )
 
     def test_json_survives_a_disclosure_carrying_a_numeric(self, conn):
         """`--json` crashed on production while `--text` rendered fine: the

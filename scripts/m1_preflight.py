@@ -60,6 +60,7 @@ first production run.
 from __future__ import annotations
 
 import argparse
+import datetime
 import decimal
 import json
 import sys
@@ -789,16 +790,23 @@ class Report:
 def _jsonable(value):
     """Coerce a psycopg2 scalar to something `json.dumps` accepts.
 
-    `numeric` comes back as `Decimal`, which the JSON encoder refuses. The TEXT
+    `numeric` comes back as `Decimal` and dates come back as `date`/`datetime`;
+    the JSON encoder refuses all three. The TEXT
     renderer never noticed because it `str()`s everything — so `--json` crashed
     while `--text` was fine, on the same run, and the agreement test missed it
     by running against an EMPTY corpus where no aggregate produces a numeric at
     all. Coercing here rather than passing `default=str` to `json.dumps` keeps
     the two renderers looking at the same values instead of at two encodings of
     them.
+
+    No disclosure returns a date TODAY. It is handled anyway because that is
+    the identical defect one type over, and leaving a known second instance
+    open after writing the paragraph above would be its own kind of dishonest.
     """
     if isinstance(value, decimal.Decimal):
         return float(value)
+    if isinstance(value, (datetime.datetime, datetime.date)):
+        return value.isoformat()
     return value
 
 
@@ -859,7 +867,13 @@ def run(conn, schema: str = "public") -> Report:
     if present_tables is None:
         report.results.append(
             Result(
-                check=Check("(coverage)", "table_inventory", BLOCKER, "", ""),
+                check=Check(
+                    table="(coverage)",
+                    name="table_inventory",
+                    kind=BLOCKER,
+                    sql="",
+                    spec="§5.1",
+                ),
                 error="could not read the table inventory — coverage unknown",
             )
         )
@@ -867,11 +881,29 @@ def run(conn, schema: str = "public") -> Report:
         report.unclaimed_tables = sorted(present_tables - claimed)
 
     # FC-8 is imported, never re-implemented.
+    #
+    # A FAILURE HERE MUST REACH THE EXIT CODE. An earlier version recorded the
+    # error into `report.fc8` only — where it renders as a line of text and
+    # contributes to no verdict, so a run whose FC-8 census could not be
+    # evaluated could still exit CLEAR. That is the unreachable-vs-empty
+    # collapse this module's own docstring is about, inside the module.
     try:
         report.fc8 = fc8_census(conn).to_json()
     except psycopg2.Error as exc:
         conn.rollback()
         report.fc8 = {"error": type(exc).__name__}
+        report.results.append(
+            Result(
+                check=Check(
+                    table="(fc8_gate)",
+                    name="census",
+                    kind=BLOCKER,
+                    sql="",
+                    spec="§7 / #792",
+                ),
+                error=f"{type(exc).__name__}: FC-8 census could not be evaluated",
+            )
+        )
 
     # Which rungs the corpus actually exercises — coverage honesty for the
     # ladder. A rung with no rows here is a rung production cannot validate.
@@ -885,6 +917,18 @@ def run(conn, schema: str = "public") -> Report:
     except psycopg2.Error as exc:
         conn.rollback()
         report.rungs = {"error": type(exc).__name__}
+        report.results.append(
+            Result(
+                check=Check(
+                    table="(ladder)",
+                    name="rung_coverage",
+                    kind=BLOCKER,
+                    sql="",
+                    spec="m1_ladder",
+                ),
+                error=f"{type(exc).__name__}: rung coverage could not be evaluated",
+            )
+        )
 
     return report
 
