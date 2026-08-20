@@ -197,26 +197,13 @@ class UnitOfWork:
         return self._tenant_id
 
     async def _apply_gucs(self, session) -> None:
-        """`SET LOCAL` every GUC this UoW carries — transaction-scoped.
-
-        LOCAL rather than SESSION is what makes pool reuse safe: the value dies
-        with the transaction, so the next task to borrow the connection cannot
-        inherit another tenant's scope. The gate proves that under reuse rather
-        than trusting it.
-        """
-        await session.execute(
-            text("SELECT set_config('app.tenant_id', :v, true)"),
-            {"v": self._tenant_id},
+        await apply_gucs(
+            session,
+            tenant_id=self._tenant_id,
+            actor_kind=self._actor_kind,
+            actor_user_id=self._actor_user_id,
+            channel=self._channel,
         )
-        for name, value in (
-            ("app.actor_kind", self._actor_kind),
-            ("app.actor_user_id", self._actor_user_id),
-            ("app.channel", self._channel),
-        ):
-            if value is not None:
-                await session.execute(
-                    text(f"SELECT set_config('{name}', :v, true)"), {"v": value}
-                )
 
     @asynccontextmanager
     async def begin(self):
@@ -233,6 +220,46 @@ class UnitOfWork:
                     yield session
         finally:
             _IN_TRANSACTION.reset(token)
+
+
+async def apply_gucs(
+    executor,
+    *,
+    tenant_id: str,
+    actor_kind: Optional[str] = None,
+    actor_user_id: Optional[str] = None,
+    channel: Optional[str] = None,
+) -> None:
+    """`SET LOCAL` the tenancy/actor GUCs — the ONE spelling of the security
+    invariant, shared by the UoW and by raw-connection transactions (the §6
+    permit path). *executor* is anything with ``.execute`` (AsyncSession or
+    AsyncConnection).
+
+    LOCAL (`is_local=true`) rather than SESSION is what makes pool reuse safe:
+    the value dies with the transaction, so the next task to borrow the
+    connection cannot inherit another tenant's scope. Two hand-rolled copies
+    of this call is how a third ships `is_local=false` and leaks tenant scope
+    with no gate able to see it — hence one home.
+
+    Known coverage note: a raw-connection transaction (the permit path) never
+    sets `_IN_TRANSACTION`, so the §5 discipline tripwire does not cover the
+    permit window. Inert today — `acquire_permit` commits before returning,
+    so no provider call can happen inside it — named here because this is
+    where the next reader will look.
+    """
+    await executor.execute(
+        text("SELECT set_config('app.tenant_id', :v, true)"),
+        {"v": tenant_id},
+    )
+    for name, value in (
+        ("app.actor_kind", actor_kind),
+        ("app.actor_user_id", actor_user_id),
+        ("app.channel", channel),
+    ):
+        if value is not None:
+            await executor.execute(
+                text(f"SELECT set_config('{name}', :v, true)"), {"v": value}
+            )
 
 
 def unit_of_work(engine: AsyncEngine, tenant_id: str, **gucs) -> UnitOfWork:
