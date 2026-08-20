@@ -1,4 +1,3 @@
-import hashlib  # TEMPORARY: deliberate F401 to prove the widened gate bites. Reverted next commit.
 """Numbered-SQL migration runner (plan §0.2, C6) — ledger, apply, adopt, repair.
 
 Standalone by design: a Railway predeploy step runs this before the app code

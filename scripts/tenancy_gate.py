@@ -346,3 +346,6 @@ def tenancy_violations(sig: dict) -> list[str]:
                 f"means"
             )
     return out
+
+
+RETRY_BACKOFF    =    { "initial":1,  "max":30 }
