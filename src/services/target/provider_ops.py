@@ -118,23 +118,13 @@ def business_key(op_kind: str, intent_id, generation: int) -> str:
 
 
 async def _lease_is_live(conn, job_id, lease_token) -> bool:
-    """`02` §6 step 1's re-check: state AND expiry, not merely id + token.
+    """`02` §6 step 1's re-check — delegated to `jobs.lease_is_live`, the one
+    SQL site for the predicate (state AND expiry AND ``FOR SHARE``; its
+    docstring carries the derivation). The refusal stays this module's:
+    a fenced permit raises :class:`PermitRefused`, not `JobFenced`."""
+    from src.services.target.jobs import lease_is_live
 
-    The pass-2 form checked id + token only and so passed a lease that had
-    expired without being reassigned. ``FOR SHARE`` holds the row against a
-    concurrent finalization for the rest of the transaction, which is what
-    makes the permit insert and this check one indivisible decision.
-    """
-    result = await conn.execute(
-        text(
-            "SELECT 1 FROM jobs"
-            " WHERE id = :job AND lease_token = :token"
-            "   AND state = 'leased' AND locked_until > now()"
-            " FOR SHARE"
-        ),
-        {"job": str(job_id), "token": str(lease_token)},
-    )
-    return result.first() is not None
+    return await lease_is_live(conn, job_id, lease_token)
 
 
 async def acquire_permit(
