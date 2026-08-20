@@ -195,7 +195,84 @@ async def finalize_job(session, job_id, lease_token, terminal_state: str) -> Non
         {"terminal": terminal_state, "id": job_id, "token": lease_token},
     )
     if result.rowcount == 0:
-        raise JobFenced(f"job {job_id}: lease token no longer owns the job; aborting")
+        raise _fenced(job_id)
+
+
+async def lease_is_live(executor, job_id, lease_token) -> bool:
+    """THE lease-liveness predicate (`02` §6 step 1/step 3) — the one SQL
+    site, shared by :func:`assert_lease` and the permit rail. State AND
+    expiry, not merely id + token (the pass-2 form passed a lease that had
+    expired without reassignment), and ``FOR SHARE`` holds the row against a
+    concurrent finalization for the rest of the transaction — the check and
+    the writes that follow it are one indivisible decision.
+
+    One home on purpose: this predicate has been written wrong once already,
+    and each copy gets pinned by a different gate, so a strengthening lands
+    in one while the other's suite stays green.
+    """
+    result = await executor.execute(
+        text(
+            "SELECT 1 FROM jobs"
+            " WHERE id = :job AND lease_token = :token"
+            "   AND state = 'leased' AND locked_until > now()"
+            " FOR SHARE"
+        ),
+        {"job": str(job_id), "token": str(lease_token)},
+    )
+    return result.first() is not None
+
+
+def _fenced(job_id) -> JobFenced:
+    return JobFenced(f"job {job_id}: lease token no longer owns the job; aborting")
+
+
+async def assert_lease(session, job_id, lease_token) -> None:
+    """`02` §6 step 3's re-CAS for the domain transactions BETWEEN permits:
+    "the worker records the outcome ... in the same domain transaction (which
+    also re-CASes the lease token — a fenced worker cannot record outcomes
+    either)". Raises :class:`JobFenced` so the caller's transaction aborts
+    with it — a stale owner resuming mid-ladder cannot write checkpoints over
+    the new owner's progress, and cannot reach provider work behind it.
+    """
+    if not await lease_is_live(session, job_id, lease_token):
+        raise _fenced(job_id)
+
+
+async def reschedule_job(
+    session, job_id, lease_token, *, run_at, restore_attempt: bool
+) -> None:
+    """`leased → ready` at a chosen `run_at` — the §4 deferral edge ("the
+    worker reschedules the job to the account's next slot") and the R8
+    retryable-failure backoff, in the CALLER's transaction (a deferral's audit
+    row and this reschedule commit together or not at all).
+
+    Mirrors `fn_reaper_sweep`'s re-ready shape exactly (state, locked_by,
+    lease_token, locked_until all cleared) so a rescheduled job is
+    indistinguishable from a reaped one to every claimer. CAS'd on the lease
+    like finalization — zero rows raises :class:`JobFenced`.
+
+    *restore_attempt* returns the attempt the claim consumed: a DEFERRAL is
+    normal operation (`06`), not a failure, and the attempts budget is R8's
+    retryable-failure budget — §4 names the approval-TTL reaper, not attempts,
+    as the bound on endless deferral. A retryable FAILURE keeps its attempt.
+    """
+    result = await session.execute(
+        text(
+            "UPDATE jobs SET state = 'ready', locked_by = NULL,"
+            "  lease_token = NULL, locked_until = NULL, run_at = :run_at,"
+            "  attempts = CASE WHEN :restore THEN GREATEST(attempts - 1, 0)"
+            "                  ELSE attempts END"
+            " WHERE id = :job AND lease_token = :token AND state = 'leased'"
+        ),
+        {
+            "run_at": run_at,
+            "restore": restore_attempt,
+            "job": str(job_id),
+            "token": str(lease_token),
+        },
+    )
+    if result.rowcount == 0:
+        raise _fenced(job_id)
 
 
 class LeaseHeartbeat:
