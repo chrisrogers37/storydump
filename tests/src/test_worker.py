@@ -11,10 +11,13 @@ from src.services.target.work_loop import Parked, WorkerConfig
 from src.worker import compose
 
 
-def test_w1_composition_live_kinds_are_plan_slot_and_reap_expired_without_cloudinary():
+def test_w1_composition_live_kinds_without_cloudinary():
+    # refresh_credential and reauth_prompt are live in EVERY composition:
+    # compose always wires the real refresh door (no config needed) and the
+    # prompt executor writes outbox rows only (W5d/W5e).
     app = compose(engine=object(), config=WorkerConfig(), env={})
     live = {k for k, e in app.registry.items() if not isinstance(e, Parked)}
-    assert live == {"plan_slot", "reap_expired"}
+    assert live == {"plan_slot", "reap_expired", "refresh_credential", "reauth_prompt"}
 
 
 def test_cloudinary_config_brings_the_transit_reaper_live():

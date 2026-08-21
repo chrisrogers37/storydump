@@ -210,3 +210,240 @@ class TestStoreArmsTheTick:
         assert any(j["payload"].get("credential_id") == cred_id for j in minted), (
             "the tick must mint a refresh job for the newly stored credential"
         )
+
+
+async def _run_once_w5(lane_db, refresh_stub):
+    """One bulk-lane cycle with a scripted refresh door (w1 gate's harness)."""
+    from src.services.target.work_loop import WorkerConfig
+    from src.worker import compose
+
+    engine = create_async_engine(_async_url(lane_db))
+    try:
+        app = compose(
+            engine=engine, config=WorkerConfig(), env={}, refresh=refresh_stub
+        )
+        wl = next(wl_ for wl_ in app.loops if wl_.lane == "bulk")
+        conn = await engine.connect()
+        try:
+            wl.bind_claim_conn(conn)
+            claimed = await wl.run_once()
+        finally:
+            await conn.close()
+        return wl, claimed
+    finally:
+        await engine.dispose()
+
+
+async def _store_cred(lane_db, chain) -> str:
+    from sqlalchemy import text as sqltext
+
+    from src.services.target import ig_login_oauth as oauth
+
+    engine = create_async_engine(_async_url(lane_db))
+    try:
+        maker = async_sessionmaker(engine, expire_on_commit=False)
+        async with maker() as session:
+            async with session.begin():
+                await session.execute(sqltext("SET LOCAL app.actor_kind = 'migration'"))
+                return await oauth.store_credential(
+                    session,
+                    workspace_id=chain["ws"],
+                    ig_account_id=chain["iga"],
+                    token="tok-OLD",
+                )
+    finally:
+        await engine.dispose()
+
+
+def _cred_row(conn, cred_id):
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT state, expires_at, next_refresh_at FROM oauth_credentials"
+            " WHERE id = %s",
+            (cred_id,),
+        )
+        r = cur.fetchone()
+    return {"state": r[0], "expires_at": r[1], "next_refresh_at": r[2]}
+
+
+class TestRefreshExecutorOnTheRealMachinery:
+    @pytest.mark.asyncio
+    async def test_success_swaps_in_place_and_the_job_finalizes(
+        self, lane_db, sync_conn
+    ):
+        from datetime import datetime, timezone
+
+        from src.services.target import ig_login_oauth as oauth
+
+        chain = seed_workspace_chain(sync_conn, "w5d-ok")
+        cred_id = await _store_cred(lane_db, chain)
+        _tick(sync_conn)
+        assert _jobs_of_kind(sync_conn, "refresh_credential")
+
+        seen_tokens = []
+
+        async def stub(token):
+            seen_tokens.append(token)
+            return "tok-NEW", datetime(2027, 1, 1, tzinfo=timezone.utc)
+
+        wl, claimed = await _run_once_w5(lane_db, stub)
+        assert claimed is True and wl.processed == 1
+        assert seen_tokens == ["tok-OLD"], "the door must receive the stored token"
+
+        row = _cred_row(sync_conn, cred_id)
+        assert row["state"] == "active"
+        assert row["expires_at"] is not None
+
+        # The NEW token is what the ring now holds — read it back through the
+        # real decrypt path, not by comparing ciphertext.
+        engine = create_async_engine(_async_url(lane_db))
+        try:
+            maker = async_sessionmaker(engine, expire_on_commit=False)
+            async with maker() as s:
+                got = await oauth.load_credential(s, credential_id=cred_id)
+        finally:
+            await engine.dispose()
+        assert got == "tok-NEW"
+
+        jobs = _jobs_of_kind(sync_conn, "refresh_credential")
+        assert {j["state"] for j in jobs} == {"succeeded"}
+
+    @pytest.mark.asyncio
+    async def test_definitive_rejection_flips_both_and_the_cadence_prompts(
+        self, lane_db, sync_conn
+    ):
+        """The whole W5d→062→W5e arc, end to end on the real schema."""
+        import uuid as uuidlib
+
+        from src.services.target.credential_lifecycle import RefreshRejected
+
+        chain = seed_workspace_chain(sync_conn, "w5d-dead")
+        cred_id = await _store_cred(lane_db, chain)
+        _tick(sync_conn)
+
+        async def rejecting(token):
+            raise RefreshRejected(401)
+
+        wl, claimed = await _run_once_w5(lane_db, rejecting)
+        assert claimed is True and wl.processed == 1
+
+        assert _cred_row(sync_conn, cred_id)["state"] == "expired"
+        with sync_conn.cursor() as cur:
+            cur.execute("SELECT state FROM ig_accounts WHERE id = %s", (chain["iga"],))
+            assert cur.fetchone()[0] == "reauth_required", (
+                "D31: both flips must land — account side missing"
+            )
+        refresh_jobs = _jobs_of_kind(sync_conn, "refresh_credential")
+        assert {j["state"] for j in refresh_jobs} == {"succeeded"}, (
+            "a definitive rejection is handled work, not a retry"
+        )
+
+        # The 062 leg is the single prompt producer: next tick mints.
+        _tick(sync_conn)
+        prompts_minted = _jobs_of_kind(sync_conn, "reauth_prompt")
+        assert len(prompts_minted) == 1
+
+        # Give the workspace a surface, run the prompt executor, and the
+        # notification lands on the binding.
+        binding = str(uuidlib.uuid4())
+        with sync_conn.cursor() as cur:
+            cur.execute("SET app.actor_kind = 'migration'")
+            cur.execute(
+                "INSERT INTO channel_bindings (id, workspace_id, channel, external_ref)"
+                " VALUES (%s, %s, 'telegram_group', '-100555001')",
+                (binding, chain["ws"]),
+            )
+        sync_conn.commit()
+
+        wl, claimed = await _run_once_w5(lane_db, rejecting)
+        assert claimed is True and wl.processed == 1
+        with sync_conn.cursor() as cur:
+            cur.execute(
+                "SELECT payload FROM channel_outbox"
+                " WHERE binding_id = %s AND kind = 'notification'",
+                (binding,),
+            )
+            rows = cur.fetchall()
+        assert len(rows) == 1, "exactly one notification per binding"
+        assert "re-authoriz" in rows[0][0]["text"], (
+            "the prompt must say what happened and what is paused"
+        )
+        prompt_jobs = _jobs_of_kind(sync_conn, "reauth_prompt")
+        assert {j["state"] for j in prompt_jobs} == {"succeeded"}
+        _no_stranded(sync_conn)
+
+    @pytest.mark.asyncio
+    async def test_transient_failure_retries_and_never_marks_dead(
+        self, lane_db, sync_conn
+    ):
+        from src.services.target.credential_lifecycle import RefreshTransient
+
+        chain = seed_workspace_chain(sync_conn, "w5d-flaky")
+        cred_id = await _store_cred(lane_db, chain)
+        _tick(sync_conn)
+
+        async def flaky(token):
+            raise RefreshTransient(503)
+
+        wl, claimed = await _run_once_w5(lane_db, flaky)
+        assert claimed is True
+
+        assert _cred_row(sync_conn, cred_id)["state"] == "active", (
+            "D31: a transient fault must never take the liveness edge"
+        )
+        job = _jobs_of_kind(sync_conn, "refresh_credential")[0]
+        assert job["state"] == "ready", "alive on the ladder, not dead, not done"
+        _no_stranded(sync_conn)
+
+    @pytest.mark.asyncio
+    async def test_undecryptable_payload_is_handled_work_not_a_retry_loop(
+        self, lane_db, sync_conn
+    ):
+        chain = seed_workspace_chain(sync_conn, "w5d-corrupt")
+        cred_id = await _store_cred(lane_db, chain)
+        _tick(sync_conn)
+        with sync_conn.cursor() as cur:
+            cur.execute("SET app.actor_kind = 'migration'")
+            cur.execute(
+                "UPDATE oauth_credentials SET encrypted_payload = 'not-a-token'"
+                " WHERE id = %s",
+                (cred_id,),
+            )
+        sync_conn.commit()
+
+        async def must_not_be_called(token):
+            raise AssertionError("provider must not be called for an unreadable token")
+
+        wl, claimed = await _run_once_w5(lane_db, must_not_be_called)
+        assert claimed is True and wl.processed == 1
+        assert _cred_row(sync_conn, cred_id)["state"] == "expired"
+        job = _jobs_of_kind(sync_conn, "refresh_credential")[0]
+        assert job["state"] == "succeeded", (
+            "retrying an unreadable payload cannot make it readable"
+        )
+
+
+class TestReauthPromptStale:
+    @pytest.mark.asyncio
+    async def test_a_reconnected_account_gets_no_prompt(self, lane_db, sync_conn):
+        chain = seed_workspace_chain(sync_conn, "w5e-stale")
+        _set_account_state(sync_conn, chain["iga"], "reauth_required")
+        _tick(sync_conn)
+        assert len(_jobs_of_kind(sync_conn, "reauth_prompt")) == 1
+        _set_account_state(sync_conn, chain["iga"], "active")
+
+        async def unused(token):
+            raise AssertionError("refresh door must not be touched")
+
+        wl, claimed = await _run_once_w5(lane_db, unused)
+        assert claimed is True and wl.processed == 1
+        with sync_conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM channel_outbox")
+            assert cur.fetchone()[0] == 0, "a stale prompt must not fire"
+        assert _jobs_of_kind(sync_conn, "reauth_prompt")[0]["state"] == "succeeded"
+
+
+def _no_stranded(conn):
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM jobs WHERE state = 'leased'")
+        assert cur.fetchone()[0] == 0, "a leased row nobody owns"

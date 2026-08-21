@@ -30,7 +30,7 @@ from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from src.services.target import jobs, scheduler, unit_of_work
+from src.services.target import credential_lifecycle, jobs, scheduler, unit_of_work
 from src.services.target import prompts as prompts_mod
 from src.services.target.work_loop import (
     Parked,
@@ -127,16 +127,21 @@ class WorkerApp:
     prompt_sweeper: object = None  # set by run(); sweeps/prompted/advanced
 
 
-def compose(*, engine, config: WorkerConfig, env: dict, transport=None) -> WorkerApp:
+def compose(
+    *, engine, config: WorkerConfig, env: dict, transport=None, refresh=None
+) -> WorkerApp:
     """Assemble the object graph. Touches no network — the transport arrives
     built (main() constructs it from TARGET_TELEGRAM_BOT_TOKEN) and its
-    credential is probed by run(), not here."""
+    credential is probed by run(), not here. *refresh* defaults to the real
+    IG refresh door — always constructible (no config), egress-floored; tests
+    inject a scripted one."""
     deps = WorkerDeps(
         meta=None,
         transit=_transit_from_env(env),
         media_fetch=None,
         transport=transport,
         poll=None,
+        refresh=refresh if refresh is not None else credential_lifecycle.ig_refresh,
         engine=engine,
         config=config,
     )
