@@ -43,7 +43,7 @@ class MembershipService(BaseService):
             return False
 
         membership = self.membership_repo.get_membership(
-            str(user.id), str(chat_settings_id)
+            str(user.id), chat_settings_id=str(chat_settings_id)
         )
         return bool(membership and membership.is_active)
 

@@ -543,7 +543,7 @@ async def onboarding_audit_log(
 
     with AuditRepository() as audit_repo:
         entries = audit_repo.get_for_instance(
-            chat_settings_id, limit=limit, offset=offset
+            chat_settings_id=chat_settings_id, limit=limit, offset=offset
         )
         return {
             "entries": [

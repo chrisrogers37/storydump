@@ -118,7 +118,7 @@ class CategoryMixRepository(BaseRepository):
 
         return new_records
 
-    def has_current_mix(self, chat_settings_id: TenantScope) -> bool:
+    def has_current_mix(self, *, chat_settings_id: TenantScope) -> bool:
         """Check if any current mix ratios exist."""
         count = (
             self._tenant_query(CategoryPostCaseMix, chat_settings_id)
@@ -130,7 +130,7 @@ class CategoryMixRepository(BaseRepository):
         return count > 0
 
     def get_categories_without_ratio(
-        self, categories: List[str], chat_settings_id: TenantScope
+        self, categories: List[str], *, chat_settings_id: TenantScope
     ) -> List[str]:
         """Find categories that don't have a current ratio defined."""
         current_mix = self.get_current_mix_as_dict(chat_settings_id=chat_settings_id)

@@ -308,6 +308,7 @@ class TokenRepository(BaseRepository):
         self,
         service_name: str,
         token_type: str,
+        *,
         chat_settings_id: str,
     ) -> Optional[ApiToken]:
         """Get active (non-revoked) token scoped to a specific tenant (chat).
@@ -339,6 +340,7 @@ class TokenRepository(BaseRepository):
         service_name: str,
         token_type: str,
         token_value: str,
+        *,
         chat_settings_id: str,
         issued_at: Optional[datetime] = None,
         expires_at: Optional[datetime] = None,
@@ -408,6 +410,7 @@ class TokenRepository(BaseRepository):
     def delete_tokens_for_chat(
         self,
         service_name: str,
+        *,
         chat_settings_id: str,
     ) -> int:
         """Delete all tokens for a service scoped to a specific tenant.

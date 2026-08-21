@@ -78,7 +78,7 @@ class SettingsService(BaseService):
         chat_settings_id foreign key (queue items, locks, media).
         Returns None if the referenced tenant no longer exists.
         """
-        return self.settings_repo.get_by_id(chat_settings_id)
+        return self.settings_repo.get_by_id(chat_settings_id=chat_settings_id)
 
     def resolve_chat_settings_id(self, telegram_chat_id: int) -> str:
         """THE legacy resolution door (`04` F.3, #842): chat -> tenant key.
@@ -99,7 +99,7 @@ class SettingsService(BaseService):
 
     def require_settings_by_id(self, chat_settings_id: str) -> ChatSettings:
         """Row-or-refuse by tenant key — the by-id twin of require_settings."""
-        chat_settings = self.settings_repo.get_by_id(chat_settings_id)
+        chat_settings = self.settings_repo.get_by_id(chat_settings_id=chat_settings_id)
         if chat_settings is None:
             raise TenantResolutionError(
                 "unknown_binding", f"no tenant {chat_settings_id}"

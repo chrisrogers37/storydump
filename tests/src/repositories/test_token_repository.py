@@ -321,7 +321,7 @@ class TestTokenRepositoryTenantScoped:
         mock_db.query.return_value.filter.return_value.first.return_value = mock_token
 
         result = token_repo.get_token_for_chat(
-            "google_drive", "oauth_access", "chat-uuid-1"
+            "google_drive", "oauth_access", chat_settings_id="chat-uuid-1"
         )
 
         assert result is mock_token
@@ -344,7 +344,7 @@ class TestTokenRepositoryTenantScoped:
         mock_db.query.return_value.filter.return_value.first.return_value = None
 
         result = token_repo.get_token_for_chat(
-            "google_drive", "oauth_access", "chat-uuid-1"
+            "google_drive", "oauth_access", chat_settings_id="chat-uuid-1"
         )
 
         assert result is None
@@ -391,7 +391,9 @@ class TestTokenRepositoryTenantScoped:
         """Delete all tokens for a service scoped to a chat."""
         mock_db.query.return_value.filter.return_value.delete.return_value = 2
 
-        count = token_repo.delete_tokens_for_chat("google_drive", "chat-uuid-1")
+        count = token_repo.delete_tokens_for_chat(
+            "google_drive", chat_settings_id="chat-uuid-1"
+        )
 
         assert count == 2
         mock_db.commit.assert_called()

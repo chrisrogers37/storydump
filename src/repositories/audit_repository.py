@@ -47,6 +47,7 @@ class AuditRepository(BaseRepository):
 
     def get_for_instance(
         self,
+        *,
         chat_settings_id: str,
         limit: int = 50,
         offset: int = 0,

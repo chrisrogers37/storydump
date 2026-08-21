@@ -445,7 +445,7 @@ class TestHandleInstanceManage:
                 "some-uuid", user, query
             )
 
-        mock_repo.get_by_id.assert_called_once_with("some-uuid")
+        mock_repo.get_by_id.assert_called_once_with(chat_settings_id="some-uuid")
         query.edit_message_text.assert_called_once()
         call_kwargs = query.edit_message_text.call_args.kwargs
         assert "Quick Setup" in call_kwargs["text"]

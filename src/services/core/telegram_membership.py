@@ -126,7 +126,9 @@ class TelegramMembershipHandler:
         if not chat_settings:
             return
 
-        count = self.service.membership_repo.deactivate_for_chat(str(chat_settings.id))
+        count = self.service.membership_repo.deactivate_for_chat(
+            chat_settings_id=str(chat_settings.id)
+        )
         evicted = self.service.user_manager.evict_memberships_for_chat(chat.id)
 
         logger.info(

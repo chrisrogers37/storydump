@@ -218,7 +218,7 @@ class TelegramSettingsHandlers:
         from src.repositories.chat_settings_repository import ChatSettingsRepository
 
         with ChatSettingsRepository() as repo:
-            cs = repo.get_by_id(data)
+            cs = repo.get_by_id(chat_settings_id=data)
 
         if not cs:
             await query.answer("Instance not found.", show_alert=True)

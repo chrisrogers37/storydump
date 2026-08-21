@@ -34,7 +34,7 @@ class LockRepository(BaseRepository):
         return result
 
     def get_active_lock(
-        self, media_id: str, chat_settings_id: TenantScope
+        self, media_id: str, *, chat_settings_id: TenantScope
     ) -> Optional[MediaPostingLock]:
         """Get active lock for media item (if any)."""
         now = datetime.utcnow()
@@ -51,11 +51,16 @@ class LockRepository(BaseRepository):
         self.end_read_transaction()
         return result
 
-    def is_locked(self, media_id: str, chat_settings_id: TenantScope) -> bool:
+    def is_locked(self, media_id: str, *, chat_settings_id: TenantScope) -> bool:
         """Check if media item is currently locked."""
-        return self.get_active_lock(media_id, chat_settings_id) is not None
+        return (
+            self.get_active_lock(media_id, chat_settings_id=chat_settings_id)
+            is not None
+        )
 
-    def get_all_active(self, chat_settings_id: TenantScope) -> List[MediaPostingLock]:
+    def get_all_active(
+        self, *, chat_settings_id: TenantScope
+    ) -> List[MediaPostingLock]:
         """Get all active locks."""
         now = datetime.utcnow()
         result = (
@@ -107,7 +112,7 @@ class LockRepository(BaseRepository):
         return False
 
     def get_permanent_locks(
-        self, chat_settings_id: TenantScope
+        self, *, chat_settings_id: TenantScope
     ) -> List[MediaPostingLock]:
         """Get all permanent locks (locked_until IS NULL)."""
         result = (
@@ -119,7 +124,7 @@ class LockRepository(BaseRepository):
         self.end_read_transaction()
         return result
 
-    def count_permanent_locks(self, chat_settings_id: TenantScope) -> int:
+    def count_permanent_locks(self, *, chat_settings_id: TenantScope) -> int:
         """Count permanent locks (locked_until IS NULL)."""
         result = (
             self._tenant_query(MediaPostingLock, chat_settings_id)
@@ -130,7 +135,7 @@ class LockRepository(BaseRepository):
         self.end_read_transaction()
         return result or 0
 
-    def count_by_reason(self, chat_settings_id: TenantScope) -> dict:
+    def count_by_reason(self, *, chat_settings_id: TenantScope) -> dict:
         """Count active locks grouped by lock_reason."""
         now = datetime.utcnow()
         rows = (
@@ -149,7 +154,7 @@ class LockRepository(BaseRepository):
         self.end_read_transaction()
         return {reason: count for reason, count in rows}
 
-    def cleanup_expired(self, chat_settings_id: TenantScope) -> int:
+    def cleanup_expired(self, *, chat_settings_id: TenantScope) -> int:
         """Delete all expired locks. Returns count of deleted locks."""
         now = datetime.utcnow()
         count = (
