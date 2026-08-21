@@ -15,7 +15,11 @@ commit-dependent, and a test pinning them would be pinning this laptop.
 
 import pathlib
 
+import importlib
+
 import pytest
+
+from scripts import target_reachability as tr
 
 from scripts.target_reachability import (
     PARITY_ITEMS,
@@ -86,3 +90,43 @@ class TestTheDenominatorComesFromDisk:
         different findings, and only the second one blocks a cutover."""
         (tmp_path / "src").mkdir()
         assert target_modules_on_disk(tmp_path) == set()
+
+
+class TestTheHitsAreDifferentialNotCumulative:
+    """The measurement must not depend on what was imported before it.
+
+    `closure_for` computed `hits` from all of `sys.modules` rather than from
+    `after - before`, so an earlier call's target modules were attributed to
+    every later one. Measured on the pre-fix code: with `src.worker` imported
+    first, `src.main` reported 14 target hits while importing none of them —
+    which reads as "the deployed worker reaches target code", i.e. the cutover
+    blocker RESOLVED. It failed toward the answer everyone wants.
+    """
+
+    def test_a_module_that_imports_no_target_reports_none_after_one_that_does(
+        self,
+    ):
+        first = tr.closure_for("src.worker")
+        assert first[1], "precondition: src.worker must reach target modules"
+        _, hits, _ = tr.closure_for("src.main")
+        assert hits == set(), (
+            "src.main imports no target module, so measuring it AFTER a module "
+            f"that does must still report none — got {sorted(hits)}"
+        )
+
+    def test_the_positive_control_is_cumulative_and_survives_being_second(self):
+        """It must not go false merely because an earlier call imported it.
+
+        A control that fails on correct behaviour teaches its reader to ignore
+        it, so this asymmetry with `hits` is deliberate and is pinned here.
+        """
+        tr.closure_for("src.worker")
+        _, _, positive_ok = tr.closure_for("src.main")
+        assert positive_ok, (
+            f"{tr.CONTROL_POSITIVE} is imported once per process; the positive "
+            "control reads the cumulative closure and must stay true"
+        )
+
+    def test_the_negative_control_names_a_module_that_cannot_exist(self):
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module(tr.CONTROL_NEGATIVE)

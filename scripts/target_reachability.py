@@ -131,12 +131,45 @@ def target_modules_on_disk(root: pathlib.Path) -> set[str]:
     return found
 
 
-def closure_for(entry: str) -> tuple[int, set[str]]:
+#: The positive and negative controls from the manual #942 run, ported rather
+#: than reinvented. They pin OPPOSITE failure directions and that is the point:
+#: `POSITIVE` catches a walker that has stopped matching, `NEGATIVE` catches one
+#: that has started matching everything. The second is not hypothetical — before
+#: the `(after - before)` fix below, a target module imported by an EARLIER
+#: entrypoint was attributed to every later one, so `src.main` measured after
+#: `src.worker` reported 14 target hits while importing none of them.
+CONTROL_POSITIVE = "src.config.settings"
+CONTROL_NEGATIVE = "src.services.target.__NONEXISTENT__"
+
+
+def closure_for(entry: str) -> tuple[int, set[str], bool]:
+    """Modules `entry` adds to this process, and which of them are target tier.
+
+    METHOD — SEQUENTIAL, ONE PROCESS, and it decides the answer, so it is
+    stated here rather than left to the reader. Every entrypoint is imported
+    into the SAME interpreter in Procfile order, so what is measured is what
+    each one adds GIVEN WHAT CAME BEFORE IT. A fresh process per entrypoint
+    answers a different question and returns different numbers — measured on
+    `92a92e6`, `src.api.app` is +381 sequentially and +1155 fresh, a 3x swing
+    on one commit. #942 §1 was retracted over exactly this distinction.
+
+    HITS ARE DIFFERENTIAL, and must stay that way. They are computed from
+    `after - before`, never from `after`: the latter attributes an earlier
+    call's target modules to every later one, which fails toward "the deployed
+    entrypoint reaches target code" — the direction nobody re-checks, because
+    it is the answer everyone wants.
+    """
     before = set(sys.modules)
     importlib.import_module(entry)
     after = set(sys.modules)
-    hits = {n for n in after if n.startswith(TARGET_PREFIXES)}
-    return len(after - before), hits
+    new = after - before
+    hits = {n for n in new if n.startswith(TARGET_PREFIXES)}
+    # The positive control is CUMULATIVE on purpose, and the asymmetry with
+    # `hits` is the whole subtlety. "settings is in this closure" is a question
+    # about `after`; against `new` it would go false for every entrypoint after
+    # the first, since settings is imported once per process — a control that
+    # fails on correct behaviour trains its reader to ignore it.
+    return len(new), hits, CONTROL_POSITIVE in after
 
 
 def target_callables(root: pathlib.Path) -> list[str]:
@@ -188,9 +221,11 @@ def main(argv=None) -> int:
         return ERROR
 
     on_disk = target_modules_on_disk(root)
+    controls_positive: list[tuple[str, bool]] = []
     deployed = {}
     for proc, mod in procfile_entrypoints(root):
-        size, hits = closure_for(mod)
+        size, hits, pos_ok = closure_for(mod)
+        controls_positive.append((proc, pos_ok))
         deployed[proc] = {
             "module": mod,
             "closure_new": size,
@@ -201,12 +236,33 @@ def main(argv=None) -> int:
     # error -- this instrument has to run on commits that predate W1, or it
     # cannot produce the before/after it exists to produce.
     try:
-        root_size, root_hits = closure_for("src.worker")
+        root_size, root_hits, pos_ok = closure_for("src.worker")
+        controls_positive.append(("src.worker", pos_ok))
         root_present = True
     except ModuleNotFoundError:
         root_size, root_hits, root_present = 0, set(), False
     callables = target_callables(root)
     ev = parity(callables)
+
+    # CONTROLS, run rather than asserted in prose. They are reported in both
+    # output modes and set the exit code, because a control nobody can see the
+    # result of is decoration.
+    all_hits = set(root_hits)
+    for d in deployed.values():
+        all_hits |= set(d["target_hits"])
+    controls = {
+        "positive": {
+            "probe": CONTROL_POSITIVE,
+            "per_closure": dict(controls_positive),
+            "ok": all(ok for _, ok in controls_positive) and bool(controls_positive),
+        },
+        "negative": {
+            "probe": CONTROL_NEGATIVE,
+            "ok": CONTROL_NEGATIVE not in all_hits
+            and not any(h == CONTROL_NEGATIVE for h in all_hits),
+        },
+    }
+    controls_ok = controls["positive"]["ok"] and controls["negative"]["ok"]
 
     if args.json:
         print(
@@ -223,11 +279,13 @@ def main(argv=None) -> int:
                     },
                     "target_callables": len(callables),
                     "parity_evidence": ev,
+                    "controls": controls,
+                    "closure_new_is_comparable": False,
                 },
                 indent=2,
             )
         )
-        return OK
+        return OK if controls_ok else ERROR
 
     print("=" * 78)
     print("#942 TARGET REACHABILITY")
@@ -266,11 +324,34 @@ def main(argv=None) -> int:
         short = [h.replace("src.services.target.", "") for h in hits[:3]]
         print(f"  {label:18s} {'(none)' if not hits else ', '.join(short)[:52]}")
 
+    print("\nCONTROLS\n" + "-" * 78)
+    pos = controls["positive"]
+    print(
+        f"  positive  {pos['probe']:38s} "
+        f"{'PASS' if pos['ok'] else 'FAIL'}  (present in every closure)"
+    )
+    for name, ok in pos["per_closure"].items():
+        print(f"              {name:36s} {'yes' if ok else 'NO'}")
+    neg = controls["negative"]
+    print(
+        f"  negative  {neg['probe']:38s} "
+        f"{'PASS' if neg['ok'] else 'FAIL'}  (never matches)"
+    )
+    if not controls_ok:
+        print("\n  *** A CONTROL FAILED — the numbers above are not evidence. ***")
+
     print("\n" + "=" * 78)
     print("Import-reachable is not execution-reachable. A module in a closure")
     print("can be imported; nothing here proves it is ever called.")
+    print()
+    print("`closure +N` is NOT COMPARABLE ACROSS RUNS and must not be quoted")
+    print("against a figure from another environment. It counts every module")
+    print("including stdlib and third-party, so it moves with the interpreter")
+    print("and the installed set; and it is measured sequentially, so it also")
+    print("moves with Procfile order. Only the `target modules reached` counts")
+    print("and the module NAMES transfer between runs.")
     print("=" * 78)
-    return OK
+    return OK if controls_ok else ERROR
 
 
 if __name__ == "__main__":
