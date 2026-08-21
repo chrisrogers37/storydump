@@ -68,6 +68,24 @@ class TestTheVerdictSurvivesBeingQuotedAlone:
         assert classify_partition(0, 950, 0)[0] == "CLEAN"
 
 
+def _sql_ident_char(ch: str) -> bool:
+    """Is `ch` part of a SQL identifier?
+
+    BORROW THE SUBSTRATE'S DEFINITION, NOT THE HOST LANGUAGE'S. The first
+    version of this boundary used `str.isalnum()`, which answers "is this a
+    word character" with PYTHON's notion of a word — and `_` is not alnum. SQL
+    identifiers contain underscores, and every alias in `LOCKS_SQL` uses them,
+    so `rows_from_history` carried a `from` that read as a bounded keyword: the
+    projection truncated at `rows_` and `live_locks` went invisible again.
+
+    That is the same defect the boundary was ADDED to fix, reproduced one scope
+    narrower — the gate stopped at the first `FROM`, the fix stopped at a `from`
+    inside a word. **When you add a boundary, ask what the boundary itself is
+    bounded by.**
+    """
+    return ch.isalnum() or ch == "_"
+
+
 class TestALivenessNameIsBackedByALivenessFilter:
     """#974 — `live_locks` was the alias on a bare `count(*)`. It was not
     returning a wrong number: the table holds zero expired rows because
@@ -109,8 +127,8 @@ class TestALivenessNameIsBackedByALivenessFilter:
             elif (
                 depth == 0
                 and upper.startswith("FROM", i)
-                and (i == 0 or not body[i - 1].isalnum())
-                and (i + 4 >= len(body) or not body[i + 4].isalnum())
+                and (i == 0 or not _sql_ident_char(body[i - 1]))
+                and (i + 4 >= len(body) or not _sql_ident_char(body[i + 4]))
             ):
                 end = i
                 break
@@ -186,6 +204,35 @@ class TestALivenessNameIsBackedByALivenessFilter:
             )
             with pytest.raises(AssertionError):
                 self.test_every_lifecycle_alias_filters_on_locked_until()
+            with pytest.raises(AssertionError):
+                self.test_the_unfiltered_count_is_not_named_for_a_lifecycle()
+        finally:
+            mod.LOCKS_SQL = before
+
+    def test_an_alias_containing_from_does_not_end_the_projection(self):
+        """The boundary's own boundary — virgil's finding, kept as a control.
+
+        `_` is not `isalnum`, so an alias like `rows_from_history` used to read
+        as a bounded `from` and truncate the scan at `rows_`. Every alias in
+        this query uses underscores, so it is the file's own naming convention
+        walking into the hole, not a contrived shape.
+        """
+        before = mod.LOCKS_SQL
+        try:
+            mod.LOCKS_SQL = before.replace(
+                "AS backed_by_history\n  FROM media_posting_locks l",
+                "AS rows_from_history,\n       count(*) AS live_locks"
+                "\n  FROM media_posting_locks l",
+            )
+            assert mod.LOCKS_SQL != before, "mutation did not apply"
+            aliases = [a for a, _ in self._select_items()]
+            assert "rows_from_history" in aliases, (
+                "an alias containing 'from' ended the projection early — "
+                f"the gate sees only {aliases}"
+            )
+            assert "live_locks" in aliases, (
+                f"the column after it is invisible — gate sees {aliases}"
+            )
             with pytest.raises(AssertionError):
                 self.test_the_unfiltered_count_is_not_named_for_a_lifecycle()
         finally:
