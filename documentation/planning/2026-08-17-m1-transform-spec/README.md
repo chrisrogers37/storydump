@@ -408,7 +408,8 @@ Per file, the verbatim `-- runner:postcondition` lines (each a single-boolean SE
 **M1-02** (workspaces + members + bindings; owner invariant is *also* enforced by the deferred triggers at this file's commit — these make the arithmetic visible)
 ```
 -- runner:postcondition SELECT NOT EXISTS (SELECT cs.telegram_chat_id::text FROM legacy.chat_settings cs EXCEPT (SELECT b.external_ref FROM channel_bindings b UNION SELECT d.external_ref FROM <recorded chat drops> d UNION SELECT q.external_ref FROM <quarantine: rung-4 chats> q))   -- THE MASTER IDENTITY, restated as a PARTITION over legacy chats: every chat becomes a binding, a recorded drop, or a quarantine entry. See "why this is no longer counted in workspaces" below
--- runner:postcondition SELECT NOT EXISTS (SELECT b.external_ref FROM channel_bindings b EXCEPT SELECT cs.telegram_chat_id::text FROM legacy.chat_settings cs)   -- the other direction: no binding is invented. Without it the partition above is one-sided and a dropped chat cancels against a spurious binding
+-- runner:postcondition SELECT NOT EXISTS (SELECT ref FROM (SELECT b.external_ref AS ref FROM channel_bindings b UNION ALL SELECT d.external_ref FROM <recorded chat drops> d UNION ALL SELECT q.external_ref FROM <quarantine: rung-4 chats> q) buckets EXCEPT SELECT cs.telegram_chat_id::text FROM legacy.chat_settings cs)   -- NOTHING INVENTED: no bucket names a chat legacy never had. Covers all three buckets, not just bindings -- a drop recorded for a nonexistent chat is as wrong as a binding minted for one
+-- runner:postcondition SELECT NOT EXISTS (SELECT ref FROM (SELECT b.external_ref AS ref FROM channel_bindings b UNION ALL SELECT d.external_ref FROM <recorded chat drops> d UNION ALL SELECT q.external_ref FROM <quarantine: rung-4 chats> q) buckets GROUP BY ref HAVING count(*) > 1)   -- DISJOINT: no chat lands in two buckets. UNION ALL is load-bearing here -- UNION would dedupe the duplicate away and the check would pass on exactly what it exists to catch
 -- runner:postcondition SELECT NOT EXISTS (SELECT 1 FROM workspaces w WHERE NOT EXISTS (SELECT 1 FROM channel_bindings b WHERE b.workspace_id = w.id))   -- replaces the bindings-1:1-to-workspaces check; see below for why that one had to go
 -- runner:postcondition SELECT NOT EXISTS (SELECT 1 FROM workspaces w WHERE NOT EXISTS (SELECT 1 FROM workspace_members m WHERE m.workspace_id = w.id AND m.role='owner'))
 -- runner:postcondition SELECT (SELECT count(*) FROM workspace_members) = (SELECT count(*) FROM legacy.user_chat_memberships WHERE is_active IS TRUE)   -- + deferred-chat term under A2 (a deferred chat defers its members with it)
@@ -427,8 +428,23 @@ reads `1 + 0 = 2`. Measured, not argued — evaluated against the shipped target
 that shape built: **`False`**.
 
 What is actually conserved is not workspaces. **Every legacy chat becomes exactly one of
-three things: a binding, a recorded drop, or a quarantine entry.** That is a partition, and
-stating it as one is what the three lines above do.
+three things: a binding, a recorded drop, or a quarantine entry.**
+
+**Saying "partition" is a claim with three parts, and the first version of this section only
+made one of them.** A partition is exhaustive *and* disjoint *and* introduces nothing from
+outside the source set. The set-difference over legacy chats proves only the first. Both gaps
+were reachable — measured against the same modelled buckets:
+
+| defect | exhaustiveness alone | with the two lines added |
+|---|---|---|
+| a chat recorded as **both** a binding and a drop | **passes** | caught by the disjointness line |
+| a **drop recorded for a chat legacy never had** | **passes** | caught by the nothing-invented line |
+
+The earlier reverse-direction check was scoped to bindings, so the second row escaped it
+entirely: a phantom drop is exactly as wrong as a phantom binding and was not being looked
+for. `UNION ALL` rather than `UNION` in both lines is not stylistic — `UNION` would dedupe a
+double-bucketed chat away and the disjointness check would pass on the one thing it exists to
+catch.
 
 **The form is fork-independent, which is why it is written now rather than after the ruling.**
 It holds under a collapse shape (two bindings on one workspace, or one binding plus one
