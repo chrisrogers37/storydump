@@ -13,6 +13,9 @@ PR body, never ridden.
 """
 
 import json
+from datetime import datetime
+
+import pytest
 
 from src.services.target import prompts
 
@@ -31,6 +34,72 @@ def _card_input(**over):
 
 def _buttons(payload):
     return [b for row in payload["reply_markup"]["inline_keyboard"] for b in row]
+
+
+class TestStringSlotWidths:
+    """The defensive str branch must survive every fractional width PG emits.
+
+    Postgres strips trailing fractional zeros in timestamptz text/jsonb
+    rendering, so a microsecond value arrives at any width 0-6; at the
+    repository's 3.10 floor a bare ``fromisoformat`` rejects widths 1, 2,
+    4 and 5 (#969). Width 5 is the incident's real shape (``.05024``).
+
+    Bound, stated rather than implied: the call-site leg below has teeth
+    ONLY at the 3.10 floor — on 3.11+ every width parses natively, so a
+    green on a dev interpreter is not evidence for it. CI runs the floor.
+    The helper leg asserts the canonicalized string itself and goes red
+    under mutation on every interpreter.
+    """
+
+    WIDTHS = {
+        0: "2026-08-21T17:00:00+00:00",
+        1: "2026-08-21T17:00:00.5+00:00",
+        2: "2026-08-21T17:00:00.05+00:00",
+        3: "2026-08-21T17:00:00.050+00:00",
+        4: "2026-08-21T17:00:00.0502+00:00",
+        5: "2026-08-21T17:00:00.05024+00:00",
+        6: "2026-08-21T17:00:00.050240+00:00",
+    }
+
+    @staticmethod
+    def _canonical6(raw: str) -> str:
+        """The width-6 form of this value (each width is its own instant —
+        PG strips trailing zeros of one value, so one instant yields one
+        stripped width; widths here are distinct values by construction)."""
+        if "." not in raw:
+            return raw
+        head, tail = raw.split(".", 1)
+        num = tail[
+            : next((i for i, c in enumerate(tail) if not c.isdigit()), len(tail))
+        ]
+        rest = tail[len(num) :]
+        return f"{head}.{num.ljust(6, '0')}{rest}"
+
+    @pytest.mark.parametrize("width", sorted(WIDTHS))
+    def test_every_width_renders_the_same_slot_as_the_datetime_form(self, width):
+        raw = self.WIDTHS[width]
+        via_str = prompts.render_card(
+            _card_input(schedule_slot_at=raw), api_publishing_enabled=True
+        )
+        via_dt = prompts.render_card(
+            _card_input(schedule_slot_at=datetime.fromisoformat(self._canonical6(raw))),
+            api_publishing_enabled=True,
+        )
+        assert via_str["text"] == via_dt["text"], (
+            f"width {width} parsed to a different rendered slot"
+        )
+
+    def test_canonical_fraction_pads_stripped_widths_and_passes_full_ones(self):
+        for width, raw in self.WIDTHS.items():
+            got = prompts._canonical_fraction(raw)
+            if width in (0, 6):
+                assert got == raw, f"width {width} must pass through untouched"
+            else:
+                assert got == self._canonical6(raw), (
+                    f"width {width} not canonicalized: {got}"
+                )
+                assert len(got.split(".", 1)[1].split("+")[0]) == 6
+            datetime.fromisoformat(got)
 
 
 class TestCardRender:

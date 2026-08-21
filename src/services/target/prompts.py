@@ -35,6 +35,8 @@ reaper to expire.
 
 from __future__ import annotations
 
+import re
+
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -62,6 +64,21 @@ def _token(action: str, intent_id: str) -> str:
     return token
 
 
+def _canonical_fraction(value: str) -> str:
+    """Pad a 1-5 digit fractional-seconds field to the canonical 6 digits.
+
+    Postgres strips trailing fractional zeros when rendering a timestamptz
+    into text/jsonb, so a microsecond value can arrive at any width 1-6.
+    Widths other than 3 and 6 are rejected by ``fromisoformat`` at the
+    repository's 3.10 floor, so the string is canonicalized before parsing
+    rather than teaching this module which widths which interpreter accepts.
+    Width 0 (no fraction) and width 6 pass through untouched.
+    """
+    return re.sub(
+        r"\.(\d{1,5})(?!\d)", lambda m: "." + m.group(1).ljust(6, "0"), value, count=1
+    )
+
+
 def render_card(intent: dict, *, api_publishing_enabled: bool) -> dict:
     """The approval-prompt payload in the transport contract
     (``{"v": 1, "text": ..., "reply_markup": ...}``).
@@ -73,7 +90,7 @@ def render_card(intent: dict, *, api_publishing_enabled: bool) -> dict:
     intent_id = str(intent["intent_id"])
     slot = intent.get("schedule_slot_at")
     if isinstance(slot, str):
-        slot = datetime.fromisoformat(slot)
+        slot = datetime.fromisoformat(_canonical_fraction(slot))
     tz = intent.get("tz") or "UTC"
     local = slot.astimezone(ZoneInfo(tz))
     text = (
