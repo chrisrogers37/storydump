@@ -169,6 +169,37 @@ def compose(*, engine, config: WorkerConfig, env: dict) -> WorkerApp:
     )
 
 
+def status_line(*, loops, clock, heartbeat) -> str:
+    """One human-readable line from the observables — the soak's visibility."""
+    lanes = " ".join(
+        f"{wl.lane}[processed={wl.processed} parked={wl.parked}"
+        f" failures={wl.failures} fenced={wl.fenced}]"
+        for wl in loops
+    )
+    clock_part = (
+        f"clock[elected={clock.elected} ticks={clock.ticks}"
+        f" inserts={clock.inserts} errs={clock.consecutive_failures}]"
+        if clock is not None
+        else "clock[unstarted]"
+    )
+    hb_part = (
+        f"heartbeat[beats={heartbeat.beats} short={heartbeat.short_beats}"
+        f" errs={heartbeat.consecutive_failures}]"
+    )
+    return f"{lanes} {clock_part} {hb_part}"
+
+
+async def _status_reporter(app: WorkerApp, stop: asyncio.Event, every: float) -> None:
+    while not stop.is_set():
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=every)
+        except asyncio.TimeoutError:
+            logger.info(
+                "status: %s",
+                status_line(loops=app.loops, clock=app.clock, heartbeat=app.heartbeat),
+            )
+
+
 async def run(app: WorkerApp, *, stop: asyncio.Event | None = None) -> None:
     """Bind connections, start the clock/heartbeat/loops, run until stopped.
 
@@ -215,9 +246,14 @@ async def run(app: WorkerApp, *, stop: asyncio.Event | None = None) -> None:
         sorted(k for k, e in app.registry.items() if not hasattr(e, "reason")),
         sorted(set(app.recurring) - {"v"}),
     )
+    status_task = asyncio.create_task(
+        _status_reporter(app, stop, 60.0), name="status-reporter"
+    )
     try:
         await stop.wait()
     finally:
+        status_task.cancel()
+        await asyncio.gather(status_task, return_exceptions=True)
         for wl in app.loops:
             wl.stop()
         await asyncio.gather(*loop_tasks, return_exceptions=True)
@@ -229,7 +265,10 @@ async def run(app: WorkerApp, *, stop: asyncio.Event | None = None) -> None:
             await conn.close()
         await election_conn.close()
         await engine.dispose()
-        logger.info("worker stopped cleanly")
+        logger.info(
+            "worker stopped cleanly; final %s",
+            status_line(loops=app.loops, clock=app.clock, heartbeat=app.heartbeat),
+        )
 
 
 def main() -> None:

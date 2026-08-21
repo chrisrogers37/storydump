@@ -77,3 +77,36 @@ class TestEngineUrlFromEnv:
         from src.worker import engine_url_from_env
 
         assert engine_url_from_env({}) is None
+
+
+class TestStatusLine:
+    """The soak's visibility: one line a human can read from the log, built
+    from the observables the loops/clock/heartbeat already keep."""
+
+    def test_status_line_carries_every_lane_and_the_clock_and_heartbeat(self):
+        from src.worker import status_line
+
+        class _L:
+            def __init__(self, lane):
+                self.lane = lane
+                self.processed, self.parked, self.failures, self.fenced = 3, 1, 0, 0
+
+        class _C:
+            ticks, inserts, elected, consecutive_failures = 40, 2, True, 0
+
+        class _H:
+            beats, short_beats, consecutive_failures = 12, 0, 0
+
+        line = status_line(
+            loops=[_L("interactive"), _L("bulk")], clock=_C, heartbeat=_H
+        )
+        for token in (
+            "interactive",
+            "bulk",
+            "processed=3",
+            "parked=1",
+            "ticks=40",
+            "elected=True",
+            "beats=12",
+        ):
+            assert token in line
