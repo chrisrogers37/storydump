@@ -13,6 +13,7 @@ exactly the shape a two-bucket framing labels PARTIAL while the gate separates
 
 import pytest
 
+from scripts import fork_a_attribution as mod
 from scripts.fork_a_attribution import classify_partition
 
 
@@ -65,3 +66,79 @@ class TestTheVerdictSurvivesBeingQuotedAlone:
         assert classify_partition(950, 0, 635)[0] == "NOT-AT-ALL"
         assert classify_partition(0, 950, 635)[0] == "PARTIAL"
         assert classify_partition(0, 950, 0)[0] == "CLEAN"
+
+
+class TestALivenessNameIsBackedByALivenessFilter:
+    """#974 — `live_locks` was the alias on a bare `count(*)`. It was not
+    returning a wrong number: the table holds zero expired rows because
+    `cleanup_expired_locks` deletes them, so filtered and unfiltered agreed.
+    The name asserted a property the query never checked, and it was true only
+    because a reaper outside this script kept it true.
+
+    So the check is inverted into a drift gate rather than pinned to a count:
+    any alias claiming a lifecycle property must be backed by a FILTER that
+    reads `locked_until`. A count with no filter must be named for that.
+    """
+
+    LIFECYCLE_WORDS = ("live", "in_force", "permanent", "expired", "active")
+
+    def _select_items(self):
+        """(alias, expression) for each projected column of LOCKS_SQL."""
+        body = mod.LOCKS_SQL.strip()
+        body = body[body.upper().index("SELECT") + 6 : body.upper().index("FROM")]
+        items, depth, cur = [], 0, ""
+        for ch in body:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            if ch == "," and depth == 0:
+                items.append(cur)
+                cur = ""
+            else:
+                cur += ch
+        items.append(cur)
+        out = []
+        for it in items:
+            expr, _, alias = it.rpartition(" AS ")
+            out.append((alias.strip().lower(), " ".join(expr.split())))
+        return out
+
+    def test_every_lifecycle_alias_filters_on_locked_until(self):
+        offenders = [
+            alias
+            for alias, expr in self._select_items()
+            if any(w in alias for w in self.LIFECYCLE_WORDS)
+            and "locked_until" not in expr
+        ]
+        assert offenders == [], (
+            "these aliases claim a lock lifecycle property but the expression "
+            "never reads locked_until: " + ", ".join(offenders)
+        )
+
+    def test_the_unfiltered_count_is_not_named_for_a_lifecycle(self):
+        unfiltered = [
+            alias for alias, expr in self._select_items() if "FILTER" not in expr
+        ]
+        assert unfiltered, "expected at least one unfiltered total for comparison"
+        for alias in unfiltered:
+            assert not any(w in alias for w in self.LIFECYCLE_WORDS), (
+                f"{alias!r} is an unfiltered count(*) wearing a lifecycle name"
+            )
+
+    def test_the_gate_would_have_caught_the_defect(self):
+        """Positive control: the pre-#974 shape must fail both checks."""
+        before = mod.LOCKS_SQL
+        try:
+            mod.LOCKS_SQL = (
+                "SELECT count(*) AS live_locks,"
+                " count(*) FILTER (WHERE l.media_item_id IN"
+                " (SELECT media_item_id FROM posting_history)) AS backed_by_history"
+                " FROM media_posting_locks l"
+            )
+            with pytest.raises(AssertionError):
+                self.test_every_lifecycle_alias_filters_on_locked_until()
+            with pytest.raises(AssertionError):
+                self.test_the_unfiltered_count_is_not_named_for_a_lifecycle()
+        finally:
+            mod.LOCKS_SQL = before
