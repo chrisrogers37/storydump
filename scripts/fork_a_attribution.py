@@ -49,6 +49,14 @@ disagreement is itself informative.
   identity fields (display name, username, created_at) that the ruling needs.
 - **It does not rule on Fork A.** That is the owner's.
 
+## Running it
+
+    python -m scripts.fork_a_attribution
+
+Package-imported like ``m1_preflight``, so ``python scripts/fork_a_attribution.py``
+does NOT work from a bare shell — a direct path invocation puts ``scripts/`` on
+``sys.path`` rather than the repo root.
+
 ## Exit codes
 
     0  OK       — measurement ran
@@ -58,17 +66,14 @@ disagreement is itself informative.
 from __future__ import annotations
 
 import argparse
-import pathlib
 import sys
 
 import psycopg2
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-
 # The read-only + identity contract is defined once, in the script that
 # established it. Restating it here would be a second copy that can drift
 # from the one the reviewer already audited.
-from observed_use import assert_identity, fmt, q, resolve_dsn  # noqa: E402
+from scripts.observed_use import assert_identity, fmt, q, resolve_dsn
 
 OK, ERROR = 0, 2
 

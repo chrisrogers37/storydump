@@ -11,14 +11,9 @@ exactly the shape a two-bucket framing labels PARTIAL while the gate separates
 0.1% of the population.
 """
 
-import pathlib
-import sys
-
 import pytest
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "scripts"))
-
-from fork_a_attribution import classify_partition  # noqa: E402
+from scripts.fork_a_attribution import classify_partition
 
 
 class TestTheVerdictSurvivesBeingQuotedAlone:
