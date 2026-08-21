@@ -17,10 +17,17 @@ deeplink button. Callback tokens are versioned (`v1:<action>:<intent-uuid>`)
 and fit Telegram's 64-byte `callback_data` bound; the inbound half that
 parses them is the W4 increment, gated on #854.
 
-`prompt_intent` implements the `02` §4 matrix edge exactly: `scheduled →
-prompt_pending` commits in the SAME transaction as its outbox rows ("outbox
+`prompt_intent` implements the `02` §4 `scheduled → prompt_pending` edge:
+the transition commits in the SAME transaction as its outbox rows ("outbox
 rows created for active push bindings, same tx"), one card per active push
-binding. No active push binding → no transition at all: an intent parked in
+binding. The advance and failure edges are implemented on their FIRST
+disjunct only: the spec's `prompt_pending → awaiting_approval` reads
+"delivered on ≥ 1 binding, **or** workspace has web access" and `→ failed`
+mirrors it — the web-access disjunct has no referent anywhere in schema or
+code today (it arrives with X.2's web surface), so the sweep advances and
+fails on delivery evidence alone. Stated here the same way the auto-mode
+and photo-preview deferrals are, so the narrowing is a decision on the
+record, not an overclaim. No active push binding → no transition at all: an intent parked in
 `prompt_pending` with no card anywhere would be unreachable by any tap, so
 the no-surface case stays `scheduled` for a later sweep to retry or the
 reaper to expire.
