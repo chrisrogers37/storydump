@@ -125,15 +125,30 @@ def build_registry(deps: WorkerDeps) -> dict:
 
     async def plan_slot(session, job):
         payload = job.get("payload") or {}
+        # The slot rides jsonb as a string Postgres rendered, so POSTGRES
+        # parses it back (#969): PG strips trailing fractional zeros when
+        # rendering timestamptz into jsonb, and CPython's fromisoformat is
+        # version-sensitive about fraction widths (3.10, the repo floor,
+        # rejects most of them — a stranding clock, not an outage, because
+        # the R8 backoff swallowed the ValueError). Producer parses its own
+        # rendering; no interpreter rule is encoded anywhere.
         row = (
             (
                 await session.execute(
                     text(
-                        "SELECT a.provider_account_ref, w.approval_mode"
+                        "SELECT a.provider_account_ref, w.approval_mode,"
+                        # The inner CAST AS text pins $1's inferred type: bare
+                        # CAST(:slot AS timestamptz) makes PG infer the param
+                        # as timestamptz and asyncpg then refuses the string
+                        # (measured — the gate went red on exactly that).
+                        "       CAST(CAST(:slot AS text) AS timestamptz) AS slot_at"
                         " FROM ig_accounts a JOIN workspaces w ON w.id = a.workspace_id"
                         " WHERE a.id = :acct"
                     ),
-                    {"acct": str(payload["ig_account_id"])},
+                    {
+                        "acct": str(payload["ig_account_id"]),
+                        "slot": str(payload["slot_at"]),
+                    },
                 )
             )
             .mappings()
@@ -144,11 +159,7 @@ def build_registry(deps: WorkerDeps) -> dict:
                 f"plan_slot {job['id']}: account {payload.get('ig_account_id')}"
                 " has no ig_accounts row"
             )
-        slot_at = payload["slot_at"]
-        if isinstance(slot_at, str):
-            # jsonb round-trips the clock's timestamptz as an ISO string;
-            # asyncpg wants a datetime.
-            slot_at = datetime.fromisoformat(slot_at)
+        slot_at = row["slot_at"]
         await scheduler.execute_plan_slot(
             session,
             workspace_id=str(job["workspace_id"]),
