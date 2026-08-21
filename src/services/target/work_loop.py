@@ -414,11 +414,7 @@ class WorkLoop:
         while not self._stop.is_set():
             worked = await self.run_once()
             if not worked:
-                try:
-                    async with asyncio.timeout(self._config.claim_idle_seconds):
-                        await self._stop.wait()
-                except TimeoutError:
-                    pass
+                await jobs.wait_or_stop(self._stop, self._config.claim_idle_seconds)
 
     def stop(self) -> None:
         self._stop.set()

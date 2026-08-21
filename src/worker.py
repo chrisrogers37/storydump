@@ -261,11 +261,7 @@ class SenderSweeper:
                             self.mints += await ensure_sender_jobs(session)
                 except Exception:  # noqa: BLE001 — outlive a blip, loudly
                     logger.exception("sender-job sweep failed; retrying on cadence")
-            try:
-                async with asyncio.timeout(self._app.config.sender_sweep_seconds):
-                    await stop.wait()
-            except TimeoutError:
-                pass
+            await jobs.wait_or_stop(stop, self._app.config.sender_sweep_seconds)
 
 
 async def supervise(stop: asyncio.Event, tasks) -> asyncio.Task | None:
@@ -307,10 +303,7 @@ async def supervise(stop: asyncio.Event, tasks) -> asyncio.Task | None:
 
 async def _status_reporter(app: WorkerApp, stop: asyncio.Event, every: float) -> None:
     while not stop.is_set():
-        try:
-            async with asyncio.timeout(every):
-                await stop.wait()
-        except TimeoutError:
+        if not await jobs.wait_or_stop(stop, every):
             logger.info(
                 "status: %s",
                 status_line(
