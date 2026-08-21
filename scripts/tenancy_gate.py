@@ -89,6 +89,11 @@ _TENANCY_IRRELEVANT: tuple[str, ...] = (
     "GRANT ",
     "REVOKE ",
     "INSERT INTO ",
+    # 062 adds two kinds, both provably inert on the four facts: a COMMENT
+    # changes no state at all, and DROP FUNCTION touches no table, policy or
+    # RLS bit (the reducing hazards the refusal names are all table-shaped).
+    "COMMENT ON ",
+    "DROP FUNCTION ",
 )
 
 
@@ -246,6 +251,18 @@ def expected_tenancy(statements) -> dict:
         if m:
             if m.group(1) in sig:
                 sig[m.group(1)]["policies"] += 1
+            continue
+
+        # ADD COLUMN is HANDLED, not allowlisted, because one spelling of it
+        # moves a fact: adding the tenant key itself flips tenant_keyed. Any
+        # other column provably moves none of the four facts. A blanket
+        # "ALTER TABLE " prefix would also admit DROP COLUMN workspace_id —
+        # the exact reducing case the refusal below exists for — so the match
+        # is on the ADD COLUMN form specifically (062 is the first member).
+        m = re.match(r"ALTER TABLE (?:public\.)?(\w+) ADD COLUMN (\w+)", stmt)
+        if m:
+            if m.group(2) == "workspace_id" and m.group(1) in sig:
+                sig[m.group(1)]["tenant_keyed"] = True
             continue
 
         # ALLOWLIST, not a denylist, and the direction is the whole point.
