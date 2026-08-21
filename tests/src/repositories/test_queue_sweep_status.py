@@ -112,7 +112,7 @@ def _delete_rows(*pairs) -> None:
     for media_id, queue_id in pairs:
         queue_repo = QueueRepository()
         try:
-            queue_repo.delete(str(queue_id))
+            queue_repo.delete(str(queue_id), SYSTEM_SCOPE)
         finally:
             queue_repo.close()
         media_repo = MediaRepository()
@@ -287,7 +287,7 @@ class TestDeliveredOnStamp:
         try:
             repo = QueueRepository()
             try:
-                repo.set_telegram_message(str(pair[1]), 555001, 222333)
+                repo.set_telegram_message(str(pair[1]), 555001, 222333, SYSTEM_SCOPE)
             finally:
                 repo.close()
             assert _status_of(pair[1]) == "delivered"
@@ -300,7 +300,7 @@ class TestDeliveredOnStamp:
         try:
             repo = QueueRepository()
             try:
-                repo.set_telegram_message(str(pair[1]), 555002, 222333)
+                repo.set_telegram_message(str(pair[1]), 555002, 222333, SYSTEM_SCOPE)
             finally:
                 repo.close()
             assert _status_of(pair[1]) == "delivered"
@@ -314,7 +314,7 @@ class TestDeliveredOnStamp:
         try:
             repo = QueueRepository()
             try:
-                repo.set_telegram_message(str(pair[1]), 555003, 222333)
+                repo.set_telegram_message(str(pair[1]), 555003, 222333, SYSTEM_SCOPE)
             finally:
                 repo.close()
             row_repo = QueueRepository()
@@ -567,7 +567,7 @@ class TestOnClickResolvesSentUnconfirmed:
                 claimed = repo.claim_for_processing(str(queue_id))
                 assert claimed is not None
                 assert claimed.status == "processing"
-                repo.set_telegram_message(str(queue_id), 556677, 222333)
+                repo.set_telegram_message(str(queue_id), 556677, 222333, SYSTEM_SCOPE)
             finally:
                 repo.close()
             row = _get_row(queue_id)

@@ -17,23 +17,29 @@ where Postgres is absent.
 """
 
 import re
+from contextlib import contextmanager
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 from src.repositories.audit_repository import AuditRepository
+from src.repositories.base_repository import BaseRepository
 from src.repositories.category_mix_repository import CategoryMixRepository
 from src.repositories.history_repository import HistoryRepository
 from src.repositories.lock_repository import LockRepository
 from src.repositories.media_repository import MediaRepository
 from src.repositories.onboarding_repository import OnboardingRepository
 from src.repositories.queue_repository import QueueRepository
+from src.models.posting_queue import PostingQueue
 from src.repositories.tenant_scope import (
     SYSTEM_SCOPE,
     TenantContextError,
     require_tenant_context,
     require_tenant_id,
+    scope_of_row,
     tenant_value,
+    write_allowed,
 )
 from src.repositories.token_repository import TokenRepository
 from src.repositories.user_repository import UserRepository
@@ -88,8 +94,26 @@ class TestObligation1AbsentContextFailsAtTheBoundary:
             (LockRepository, lambda r: r.get_by_id("x")),
             (QueueRepository, lambda r: r.get_by_id("x")),
             (CategoryMixRepository, lambda r: r.get_current_mix()),
+            (QueueRepository, lambda r: r.delete("x")),
+            (QueueRepository, lambda r: r.update_status("x", "failed")),
+            (QueueRepository, lambda r: r.transition("x", "failed")),
+            (QueueRepository, lambda r: r.mark_publishing("x", "c")),
+            (QueueRepository, lambda r: r.update_scheduled_time("x", None)),
+            (QueueRepository, lambda r: r.set_telegram_message("x", 1, 2)),
         ],
-        ids=["media", "history", "lock", "queue", "category_mix"],
+        ids=[
+            "media",
+            "history",
+            "lock",
+            "queue",
+            "category_mix",
+            "queue_delete",
+            "queue_update_status",
+            "queue_transition",
+            "queue_mark_publishing",
+            "queue_update_scheduled_time",
+            "queue_set_telegram_message",
+        ],
     )
     def test_omission_is_a_typeerror(self, repo_cls, call):
         repo = repo_cls()
@@ -116,6 +140,10 @@ class TestObligation1AbsentContextFailsAtTheBoundary:
                 TokenRepository,
                 lambda r: r.revoke_tokens_for_service("svc", chat_settings_id=None),
             ),
+            (QueueRepository, lambda r: r.delete("x", None)),
+            (QueueRepository, lambda r: r.transition("x", "failed", None)),
+            (QueueRepository, lambda r: r.mark_publishing("x", "c", None)),
+            (QueueRepository, lambda r: r.set_telegram_message("x", 1, 2, None)),
         ],
         ids=[
             "media-none",
@@ -126,6 +154,10 @@ class TestObligation1AbsentContextFailsAtTheBoundary:
             "history-kwonly-none",
             "audit-kwonly-none",
             "token-kwonly-none",
+            "queue_delete-none",
+            "queue_transition-none",
+            "queue_mark_publishing-none",
+            "queue_set_telegram_message-none",
         ],
     )
     def test_explicit_none_raises_before_any_query(self, repo_cls, call, monkeypatch):
@@ -281,13 +313,23 @@ class TestObligation4TheFailOpenSignatureIsExtinct:
         burn-down progress always lowers the pin in the diff that earns it.
 
         Stated blind spot: an alias (`S = SYSTEM_SCOPE`) or an attribute
-        re-export would evade the Name match. No such form exists today;
-        introducing one moves this count DOWN, which the equality pin also
-        refuses — the evasion is loud, not silent.
+        re-export would evade the Name match. `scope_of_row` is the one
+        sanctioned derivation — it RESOLVES to a real tenant id for a stamped
+        row and only falls back to SYSTEM_SCOPE for a legacy unstamped one,
+        which it logs at WARNING. That residual is deliberately observable in
+        production rather than counted here, because its size is a property
+        of the DATA (how much predates the #412 backfill), not of the source,
+        and a source count would report it as zero while it is not.
+
+        Burn-down history: 64 → 48 (#841 items 1+3). 12 telegram second-hop
+        reads now scope to the row the caller already holds; four
+        QueueRepository by-identity mutators collapse into the shared
+        ownership-checked `BaseRepository._get_for_write`, whose own
+        identity-first read keeps ONE marked site where five were unmarked.
         """
         import ast as _ast
 
-        pinned = 64
+        pinned = 48
         count = 0
         offenders = {}
         for d in ("src", "cli"):
@@ -335,3 +377,223 @@ class TestObligation4TheFailOpenSignatureIsExtinct:
         assert tenant_value(SYSTEM_SCOPE) is None
         assert tenant_value("42") == "42"
         assert not SYSTEM_SCOPE, "SYSTEM_SCOPE must stay falsy (behavior-preserving)"
+
+
+class TestScopeOfRowCarriesTheRowsOwnScope:
+    """A second-hop read is scoped by the row the caller ALREADY HOLDS.
+
+    Before #841 items 1+3 these sites passed SYSTEM_SCOPE — the whole estate
+    granted in order to fetch one row's own media. The helper is the narrowing,
+    so its three outcomes are pinned here rather than left to the call sites.
+    """
+
+    class _Row:
+        def __init__(self, stamp):
+            self.id = "row-1"
+            self.chat_settings_id = stamp
+
+    def test_a_stamped_row_scopes_to_its_stamp(self):
+        assert scope_of_row(self._Row("tenant-A"), where="t") == "tenant-A"
+
+    def test_a_stamped_row_scope_is_a_string_not_the_column_object(self):
+        """UUID columns come back as UUID objects; the tenant filter compares
+        against strings everywhere else in the layer."""
+        from uuid import uuid4
+
+        u = uuid4()
+        assert scope_of_row(self._Row(u), where="t") == str(u)
+
+    def test_an_unstamped_legacy_row_falls_back_to_system_scope(self):
+        assert scope_of_row(self._Row(None), where="t") is SYSTEM_SCOPE
+
+    def test_the_legacy_fallback_is_logged_not_silent(self):
+        """The residual is a DATA property the source census cannot see, so
+        production observability is the only place it can be counted."""
+        with patch("src.repositories.tenant_scope.logger") as mock_logger:
+            scope_of_row(self._Row(None), where="t")
+            mock_logger.warning.assert_called_once()
+
+    def test_a_stamped_row_logs_nothing(self):
+        """The positive control: a warning on every call would be no signal."""
+        with patch("src.repositories.tenant_scope.logger") as mock_logger:
+            scope_of_row(self._Row("tenant-A"), where="t")
+            mock_logger.warning.assert_not_called()
+
+    def test_none_is_refused_rather_than_widened(self):
+        """Returning SYSTEM_SCOPE for an absent row would rebuild the
+        fail-open default one layer up — "no context means everything"."""
+        with pytest.raises(TenantContextError):
+            scope_of_row(None, where="t")
+
+
+@contextmanager
+def owned_queue_bed(tag):
+    """Two real tenants, one media item owned by the first, and a purge.
+
+    The two integration classes below both need exactly this, and a teardown
+    fixed in one copy but not the other is a leaked row that fails the NEXT
+    run — so there is one copy. Deletes are explicit because
+    ``route_repos_to_test_db`` rolls nothing back and ``repo.create`` commits.
+    """
+    from sqlalchemy import text
+
+    owner, _ = make_tenant()
+    stranger, _ = make_tenant()
+    media_repo = MediaRepository()
+    repo = QueueRepository()
+    rows = []
+    media_id = None
+    try:
+        item = media_repo.create(
+            file_path=f"/{tag}/{owner}.jpg",
+            file_name=f"{tag}.jpg",
+            file_hash=f"{tag}-{owner}",
+            file_size_bytes=1,
+            chat_settings_id=owner,
+        )
+        media_id = str(item.id)
+        yield owner, stranger, repo, media_id, rows
+    finally:
+        for row_id in rows:
+            repo.db.execute(
+                text("DELETE FROM posting_queue WHERE id = :i"), {"i": row_id}
+            )
+        if media_id:
+            repo.db.execute(
+                text("DELETE FROM media_items WHERE id = :m"), {"m": media_id}
+            )
+        repo.db.commit()
+        repo.close()
+        media_repo.close()
+        delete_tenants([owner, stranger])
+
+
+class TestTheOwnershipRuleHasOneMeaningInTwoLanguages:
+    """`write_allowed` (Python) and `_owned_or_null` (SQL) are twins: the
+    fetch-then-mutate path uses the first, and the single-statement
+    conditional UPDATE — whose atomicity is the point — needs the second.
+
+    Two expressions of one rule is a fork risk. They are pinned against each
+    other here, and the SQL side is evaluated BY THE DATABASE against real
+    rows: a clause compared to a hand-written Python re-statement of itself
+    would agree by construction and prove nothing.
+    """
+
+    pytestmark = [pytest.mark.integration]
+
+    @pytest.fixture(autouse=True)
+    def _db(self, route_repos_to_test_db):
+        yield
+
+    # (owner stamp, caller scope, may the caller write it?)
+    CASES = [
+        ("own", "own", True),
+        ("other", "own", False),  # the #597 hole
+        (None, "own", True),  # legacy NULL-owned, pre-#412 backfill
+        ("other", SYSTEM_SCOPE, True),
+        (None, SYSTEM_SCOPE, True),
+    ]
+
+    def test_the_sql_clause_and_the_python_predicate_agree(self):
+        from datetime import datetime, timedelta
+
+        with owned_queue_bed("twin") as (owner, other, repo, media_id, rows):
+            resolve = {
+                "own": owner,
+                "other": other,
+                None: None,
+                SYSTEM_SCOPE: SYSTEM_SCOPE,
+            }
+            for stamp, caller, expected in self.CASES:
+                row = repo.create(
+                    media_item_id=media_id,
+                    scheduled_for=datetime.utcnow() + timedelta(days=1),
+                    chat_settings_id=resolve[stamp] or SYSTEM_SCOPE,
+                )
+                rows.append(str(row.id))
+                caller_scope = resolve[caller]
+
+                # Python side.
+                assert write_allowed(resolve[stamp], caller_scope) is expected, (
+                    stamp,
+                    caller,
+                    "python",
+                )
+
+                # SQL side — the clause, run by Postgres against the real row.
+                q = (
+                    repo.db.query(PostingQueue)
+                    .filter(PostingQueue.id == str(row.id))
+                    .filter(*BaseRepository._owned_or_null(PostingQueue, caller_scope))
+                )
+                assert (q.first() is not None) is expected, (stamp, caller, "sql")
+
+    def test_system_scope_gets_no_clause_at_all(self):
+        assert BaseRepository._owned_or_null(PostingQueue, SYSTEM_SCOPE) == ()
+
+    def test_a_tenant_caller_gets_a_restricting_clause(self):
+        """The negative direction — if this returned None for a real tenant,
+        every conditional UPDATE would silently run unscoped."""
+        assert BaseRepository._owned_or_null(PostingQueue, "tenant-A") != ()
+
+
+class TestQueueMutatorsRefuseAForeignTenant:
+    """#841 item 3: the by-identity mutators took no tenant context at all —
+    knowing a UUID was sufficient to delete, reschedule or re-status another
+    tenant's queue row. The read side was scoped; the write side was not, which
+    is the fail-open shape F.1 exists to extinguish.
+
+    A refusal returns the same answer as "not found" on purpose: a caller must
+    not be able to probe another tenant's queue by UUID.
+    """
+
+    pytestmark = [pytest.mark.integration]
+
+    @pytest.fixture(autouse=True)
+    def _db(self, route_repos_to_test_db):
+        yield
+
+    def test_a_foreign_tenant_cannot_mutate_or_delete(self):
+        from datetime import datetime, timedelta
+
+        with owned_queue_bed("xt") as (owner, stranger, repo, media_id, rows):
+            row = repo.create(
+                media_item_id=media_id,
+                scheduled_for=datetime.utcnow() + timedelta(days=1),
+                chat_settings_id=owner,
+            )
+            queue_id = str(row.id)
+            rows.append(queue_id)
+
+            # Fetch-then-mutate family: refused, and the row is untouched.
+            assert repo.mark_publishing(queue_id, "c-1", stranger) is None
+            assert repo.set_telegram_message(queue_id, 1, 2, stranger) is None
+            assert (
+                repo.update_scheduled_time(queue_id, datetime.utcnow(), stranger)
+                is None
+            )
+
+            # Conditional-UPDATE family: the ownership rule rides in the WHERE
+            # clause, so a foreign caller matches zero rows.
+            assert repo.update_status(queue_id, "failed", stranger) is None
+            assert (
+                repo.transition(queue_id, "failed", stranger, allowed_from={"pending"})
+                is None
+            )
+
+            still = repo.get_by_id(queue_id, chat_settings_id=owner)
+            assert still is not None, "a refused write must not delete the row"
+            assert still.status == "pending", "a refused write must not change status"
+            assert still.instagram_container_id is None
+            assert still.telegram_message_id is None
+
+            # Delete is the same rule, and its False is indistinguishable from
+            # not-found — no probing another tenant's queue by UUID.
+            assert repo.delete(queue_id, stranger) is False
+            assert repo.get_by_id(queue_id, chat_settings_id=owner) is not None
+
+            # The owner is unaffected by any of it — the positive control,
+            # without which a method that refused EVERYONE would pass.
+            assert repo.update_status(queue_id, "processing", owner) is not None
+            assert repo.delete(queue_id, owner) is True
+            rows.remove(queue_id)

@@ -28,7 +28,7 @@ class TestRejectConfirmation:
         service = handlers.service
         queue_id = str(uuid4())
 
-        mock_queue_item = Mock()
+        mock_queue_item = Mock(chat_settings_id="cs-1")
         mock_queue_item.media_item_id = uuid4()
         service.queue_repo.get_by_id.return_value = mock_queue_item
         service.queue_repo.claim_for_processing.return_value = mock_queue_item
@@ -84,7 +84,7 @@ class TestRejectConfirmation:
         queue_id = str(uuid4())
         media_id = uuid4()
 
-        mock_queue_item = Mock()
+        mock_queue_item = Mock(chat_settings_id="cs-1")
         mock_queue_item.media_item_id = media_id
         mock_queue_item.created_at = datetime.utcnow()
         mock_queue_item.scheduled_for = datetime.utcnow()
@@ -110,7 +110,7 @@ class TestRejectConfirmation:
         assert str(media_id) in str(call_args)
 
         # Should delete from queue
-        service.queue_repo.delete.assert_called_once_with(queue_id)
+        service.queue_repo.delete.assert_called_once_with(queue_id, "cs-1")
 
         # Should create history record with status='rejected'
         service.history_repo.create_idempotent.assert_called_once()
@@ -126,7 +126,7 @@ class TestRejectConfirmation:
         service = handlers.service
         queue_id = str(uuid4())
 
-        mock_queue_item = Mock()
+        mock_queue_item = Mock(chat_settings_id="cs-1")
         mock_queue_item.media_item_id = uuid4()
         service.queue_repo.get_by_id.return_value = mock_queue_item
         service.queue_repo.claim_for_processing.return_value = mock_queue_item
@@ -185,7 +185,7 @@ class TestResumeCallbacks:
         service.settings_service.get_settings.return_value = mock_chat_settings
 
         # Create overdue item
-        overdue_item = Mock()
+        overdue_item = Mock(chat_settings_id="cs-1")
         overdue_item.id = uuid4()
         overdue_item.scheduled_for = datetime(2020, 1, 1, 12, 0, tzinfo=timezone.utc)
 
@@ -228,7 +228,7 @@ class TestResumeCallbacks:
         service.settings_service.get_settings.return_value = mock_chat_settings
 
         # Create overdue and future items
-        overdue_item = Mock()
+        overdue_item = Mock(chat_settings_id="cs-1")
         overdue_item.id = uuid4()
         overdue_item.scheduled_for = datetime(2020, 1, 1, 12, 0, tzinfo=timezone.utc)
 
@@ -249,7 +249,7 @@ class TestResumeCallbacks:
         )
 
         # Should delete the overdue item
-        service.queue_repo.delete.assert_called_once_with(str(overdue_item.id))
+        service.queue_repo.delete.assert_called_once_with(str(overdue_item.id), "cs-1")
 
         # Should show success message
         call_args = mock_query.edit_message_text.call_args
@@ -274,7 +274,7 @@ class TestResumeCallbacks:
         )
         service.settings_service.get_settings.return_value = mock_chat_settings
 
-        overdue_item = Mock()
+        overdue_item = Mock(chat_settings_id="cs-1")
         overdue_item.scheduled_for = datetime(2020, 1, 1, 12, 0, tzinfo=timezone.utc)
 
         service.queue_repo.get_all.return_value = [overdue_item]
@@ -365,7 +365,7 @@ class TestVerbosePostedSkipped:
         service = handlers.service
         queue_id = str(uuid4())
 
-        mock_queue_item = Mock()
+        mock_queue_item = Mock(chat_settings_id="cs-1")
         mock_queue_item.media_item_id = uuid4()
         mock_queue_item.created_at = datetime.utcnow()
         mock_queue_item.scheduled_for = datetime.utcnow()
@@ -406,7 +406,7 @@ class TestVerbosePostedSkipped:
         service = handlers.service
         queue_id = str(uuid4())
 
-        mock_queue_item = Mock()
+        mock_queue_item = Mock(chat_settings_id="cs-1")
         mock_queue_item.media_item_id = uuid4()
         mock_queue_item.created_at = datetime.utcnow()
         mock_queue_item.scheduled_for = datetime.utcnow()
@@ -447,7 +447,7 @@ class TestVerbosePostedSkipped:
         service = handlers.service
         queue_id = str(uuid4())
 
-        mock_queue_item = Mock()
+        mock_queue_item = Mock(chat_settings_id="cs-1")
         mock_queue_item.media_item_id = uuid4()
         mock_queue_item.created_at = datetime.utcnow()
         mock_queue_item.scheduled_for = datetime.utcnow()
@@ -486,7 +486,7 @@ class TestVerboseRejected:
         service = handlers.service
         queue_id = str(uuid4())
 
-        mock_queue_item = Mock()
+        mock_queue_item = Mock(chat_settings_id="cs-1")
         mock_queue_item.media_item_id = uuid4()
         mock_queue_item.created_at = datetime.utcnow()
         mock_queue_item.scheduled_for = datetime.utcnow()
@@ -528,7 +528,7 @@ class TestVerboseRejected:
         service = handlers.service
         queue_id = str(uuid4())
 
-        mock_queue_item = Mock()
+        mock_queue_item = Mock(chat_settings_id="cs-1")
         mock_queue_item.media_item_id = uuid4()
         mock_queue_item.created_at = datetime.utcnow()
         mock_queue_item.scheduled_for = datetime.utcnow()
@@ -576,7 +576,7 @@ class TestCompleteQueueAction:
         queue_id = str(uuid4())
         media_id = uuid4()
 
-        mock_queue_item = Mock()
+        mock_queue_item = Mock(chat_settings_id="cs-1")
         mock_queue_item.media_item_id = media_id
         mock_queue_item.created_at = datetime.utcnow()
         mock_queue_item.scheduled_for = datetime.utcnow()
@@ -606,7 +606,7 @@ class TestCompleteQueueAction:
         service.media_repo.increment_times_posted.assert_called_once()
         service.lock_service.create_lock.assert_called_once()
         service.user_repo.increment_posts.assert_called_once()
-        service.queue_repo.delete.assert_called_once_with(queue_id)
+        service.queue_repo.delete.assert_called_once_with(queue_id, "cs-1")
 
     @pytest.mark.asyncio
     async def test_skipped_creates_skip_lock(self, mock_callback_handlers):
@@ -616,7 +616,7 @@ class TestCompleteQueueAction:
         queue_id = str(uuid4())
         media_id = uuid4()
 
-        mock_queue_item = Mock()
+        mock_queue_item = Mock(chat_settings_id="cs-1")
         mock_queue_item.media_item_id = media_id
         mock_queue_item.telegram_chat_id = -100123
         mock_queue_item.created_at = datetime.utcnow()
@@ -651,7 +651,7 @@ class TestCompleteQueueAction:
             str(media_id), lock_reason="skip", telegram_chat_id=-100123
         )
         service.user_repo.increment_posts.assert_not_called()
-        service.queue_repo.delete.assert_called_once_with(queue_id)
+        service.queue_repo.delete.assert_called_once_with(queue_id, "cs-1")
 
     @pytest.mark.asyncio
     async def test_queue_item_not_found(self, mock_callback_handlers):
@@ -689,7 +689,7 @@ class TestEarlyProcessingFeedback:
         service = handlers.service
         queue_id = str(uuid4())
 
-        mock_queue_item = Mock()
+        mock_queue_item = Mock(chat_settings_id="cs-1")
         mock_queue_item.media_item_id = uuid4()
         mock_queue_item.created_at = datetime.utcnow()
         mock_queue_item.scheduled_for = datetime.utcnow()
@@ -737,7 +737,7 @@ class TestEarlyProcessingFeedback:
         service = handlers.service
         queue_id = str(uuid4())
 
-        mock_queue_item = Mock()
+        mock_queue_item = Mock(chat_settings_id="cs-1")
         mock_queue_item.media_item_id = uuid4()
         mock_queue_item.created_at = datetime.utcnow()
         mock_queue_item.scheduled_for = datetime.utcnow()
@@ -779,11 +779,10 @@ class TestEarlyProcessingFeedback:
         service = handlers.service
         queue_id = str(uuid4())
 
-        mock_queue_item = Mock()
+        mock_queue_item = Mock(chat_settings_id="cs-1")
         mock_queue_item.media_item_id = uuid4()
         mock_queue_item.created_at = datetime.utcnow()
         mock_queue_item.scheduled_for = datetime.utcnow()
-        mock_queue_item.chat_settings_id = uuid4()
         service.queue_repo.get_by_id.return_value = mock_queue_item
         service.queue_repo.claim_for_processing.return_value = mock_queue_item
 
@@ -833,7 +832,7 @@ class TestRaceConditionHandling:
         service = handlers.service
         queue_id = str(uuid4())
 
-        mock_queue_item = Mock()
+        mock_queue_item = Mock(chat_settings_id="cs-1")
         mock_queue_item.media_item_id = uuid4()
         mock_queue_item.created_at = datetime.utcnow()
         mock_queue_item.scheduled_for = datetime.utcnow()
@@ -928,7 +927,7 @@ class TestRaceConditionHandling:
         service = handlers.service
         queue_id = str(uuid4())
 
-        mock_queue_item = Mock()
+        mock_queue_item = Mock(chat_settings_id="cs-1")
         mock_queue_item.media_item_id = uuid4()
         mock_queue_item.created_at = datetime.utcnow()
         mock_queue_item.scheduled_for = datetime.utcnow()
@@ -963,7 +962,7 @@ class TestRaceConditionHandling:
         service = handlers.service
         queue_id = str(uuid4())
 
-        mock_queue_item = Mock()
+        mock_queue_item = Mock(chat_settings_id="cs-1")
         mock_queue_item.media_item_id = uuid4()
         mock_queue_item.created_at = datetime.utcnow()
         mock_queue_item.scheduled_for = datetime.utcnow()
@@ -1003,7 +1002,7 @@ class TestRaceConditionHandling:
         service = handlers.service
         queue_id = str(uuid4())
 
-        mock_queue_item = Mock()
+        mock_queue_item = Mock(chat_settings_id="cs-1")
         mock_queue_item.media_item_id = uuid4()
         mock_queue_item.created_at = datetime.utcnow()
         mock_queue_item.scheduled_for = datetime.utcnow()
@@ -1045,7 +1044,7 @@ class TestRaceConditionHandling:
         service = handlers.service
         queue_id = str(uuid4())
 
-        mock_queue_item = Mock()
+        mock_queue_item = Mock(chat_settings_id="cs-1")
         mock_queue_item.media_item_id = uuid4()
         mock_queue_item.created_at = datetime.utcnow()
         mock_queue_item.scheduled_for = datetime.utcnow()
@@ -1091,11 +1090,10 @@ class TestSSLRetry:
         service = handlers.service
         queue_id = str(uuid4())
 
-        mock_queue_item = Mock()
+        mock_queue_item = Mock(chat_settings_id="cs-1")
         mock_queue_item.media_item_id = uuid4()
         mock_queue_item.created_at = datetime.utcnow()
         mock_queue_item.scheduled_for = datetime.utcnow()
-        mock_queue_item.chat_settings_id = uuid4()
         service.queue_repo.get_by_id.return_value = mock_queue_item
         service.queue_repo.claim_for_processing.return_value = mock_queue_item
         service.media_repo.get_by_id.return_value = Mock(
@@ -1134,7 +1132,7 @@ class TestSSLRetry:
         service = handlers.service
         queue_id = str(uuid4())
 
-        mock_queue_item = Mock()
+        mock_queue_item = Mock(chat_settings_id="cs-1")
         mock_queue_item.media_item_id = uuid4()
         mock_queue_item.created_at = datetime.utcnow()
         mock_queue_item.scheduled_for = datetime.utcnow()
@@ -1172,11 +1170,10 @@ class TestSSLRetry:
         service = handlers.service
         queue_id = str(uuid4())
 
-        mock_queue_item = Mock()
+        mock_queue_item = Mock(chat_settings_id="cs-1")
         mock_queue_item.media_item_id = uuid4()
         mock_queue_item.created_at = datetime.utcnow()
         mock_queue_item.scheduled_for = datetime.utcnow()
-        mock_queue_item.chat_settings_id = uuid4()
         service.queue_repo.get_by_id.return_value = mock_queue_item
         service.queue_repo.claim_for_processing.return_value = mock_queue_item
         service.media_repo.get_by_id.return_value = Mock(
@@ -1212,7 +1209,7 @@ class TestSSLRetry:
         service = handlers.service
         queue_id = str(uuid4())
 
-        mock_queue_item = Mock()
+        mock_queue_item = Mock(chat_settings_id="cs-1")
         mock_queue_item.media_item_id = uuid4()
         mock_queue_item.created_at = datetime.utcnow()
         mock_queue_item.scheduled_for = datetime.utcnow()
@@ -1256,11 +1253,10 @@ class TestSSLRetry:
         service = handlers.service
         queue_id = str(uuid4())
 
-        mock_queue_item = Mock()
+        mock_queue_item = Mock(chat_settings_id="cs-1")
         mock_queue_item.media_item_id = uuid4()
         mock_queue_item.created_at = datetime.utcnow()
         mock_queue_item.scheduled_for = datetime.utcnow()
-        mock_queue_item.chat_settings_id = uuid4()
         service.queue_repo.get_by_id.return_value = mock_queue_item
         service.queue_repo.claim_for_processing.return_value = mock_queue_item
         service.media_repo.get_by_id.return_value = Mock(
@@ -1332,7 +1328,7 @@ class TestAtomicClaim:
         service = handlers.service
         queue_id = str(uuid4())
 
-        mock_queue_item = Mock()
+        mock_queue_item = Mock(chat_settings_id="cs-1")
         mock_queue_item.media_item_id = uuid4()
         mock_queue_item.created_at = datetime.utcnow()
         mock_queue_item.scheduled_for = datetime.utcnow()
@@ -1359,7 +1355,7 @@ class TestAtomicClaim:
         )
 
         service.history_repo.create_idempotent.assert_called_once()
-        service.queue_repo.delete.assert_called_once_with(queue_id)
+        service.queue_repo.delete.assert_called_once_with(queue_id, "cs-1")
 
     async def test_rejected_uses_operation_lock(self, mock_callback_handlers):
         """handle_rejected respects operation lock (prevents double rejection)."""
@@ -1398,11 +1394,10 @@ class TestAtomicClaim:
         service = handlers.service
         queue_id = str(uuid4())
 
-        mock_queue_item = Mock()
+        mock_queue_item = Mock(chat_settings_id="cs-1")
         mock_queue_item.media_item_id = uuid4()
         mock_queue_item.created_at = datetime.utcnow()
         mock_queue_item.scheduled_for = datetime.utcnow()
-        mock_queue_item.chat_settings_id = uuid4()
         service.queue_repo.claim_for_processing.return_value = mock_queue_item
         service.media_repo.get_by_id.return_value = Mock(
             file_name="test.jpg", generated_caption=None
@@ -1435,7 +1430,7 @@ class TestAtomicClaim:
         # retry was skipped because history already existed
         assert service.history_repo.create_idempotent.call_count == 1
         # Queue item still cleaned up
-        service.queue_repo.delete.assert_called_once_with(queue_id)
+        service.queue_repo.delete.assert_called_once_with(queue_id, "cs-1")
 
 
 @pytest.mark.unit

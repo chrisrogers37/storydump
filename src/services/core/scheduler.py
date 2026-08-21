@@ -19,7 +19,7 @@ from src.repositories.lock_repository import LockRepository
 from src.repositories.category_mix_repository import CategoryMixRepository
 from src.utils.datetime_utils import ensure_utc
 from src.utils.logger import logger
-from src.repositories.tenant_scope import SYSTEM_SCOPE
+from src.repositories.tenant_scope import SYSTEM_SCOPE, scope_of_row
 
 
 class SchedulerService(BaseService):
@@ -463,7 +463,8 @@ class SchedulerService(BaseService):
         import asyncio
 
         queue_item_id = str(queue_item.id)
-        self.queue_repo.update_status(queue_item_id, "processing")
+        item_scope = scope_of_row(queue_item, where="scheduler.send_to_telegram")
+        self.queue_repo.update_status(queue_item_id, "processing", item_scope)
 
         last_error: Optional[str] = None
 
@@ -530,6 +531,7 @@ class SchedulerService(BaseService):
                 self.queue_repo.transition(
                     queue_item_id,
                     "sent_unconfirmed",
+                    item_scope,
                     allowed_from={"processing"},
                 )
                 return False
@@ -563,7 +565,11 @@ class SchedulerService(BaseService):
 
         # Mark queue item as failed (don't delete — preserves evidence)
         try:
-            self.queue_repo.update_status(queue_item_id, "failed")
+            self.queue_repo.update_status(
+                queue_item_id,
+                "failed",
+                scope_of_row(queue_item, where="scheduler.record_send_failure"),
+            )
         except Exception:  # noqa: BLE001 — best-effort
             logger.error(f"Failed to mark queue item {queue_item_id} as failed")
 
@@ -647,7 +653,7 @@ class SchedulerService(BaseService):
 
             def _persist_container(container_id):
                 container_created["id"] = container_id
-                self.queue_repo.mark_publishing(queue_id, container_id)
+                self.queue_repo.mark_publishing(queue_id, container_id, cs_id)
 
             confirmed_failed = False
             try:
@@ -700,7 +706,7 @@ class SchedulerService(BaseService):
                         f"(container {container_created['id']}) — releasing row "
                         f"for retry"
                     )
-                self.queue_repo.delete(queue_id)
+                self.queue_repo.delete(queue_id, cs_id)
                 logger.warning(
                     f"Auto-approve Instagram failed for {media_item.file_name} "
                     f"[{media_item.category}] — not recording as posted"
@@ -751,7 +757,7 @@ class SchedulerService(BaseService):
             lock_service.create_lock(
                 media_id, telegram_chat_id=chat_settings.telegram_chat_id
             )
-            self.queue_repo.delete(queue_id)
+            self.queue_repo.delete(queue_id, cs_id)
 
         self.settings_service.update_last_post_sent_at(
             chat_settings.telegram_chat_id, sent_at_override or now

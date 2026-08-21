@@ -305,7 +305,7 @@ class TestExecuteCompleteDbOps:
             "media-1", telegram_chat_id=-100123
         )
         core.service.user_repo.increment_posts.assert_called_once_with("user-1")
-        core.service.queue_repo.delete.assert_called_once_with("q-1")
+        core.service.queue_repo.delete.assert_called_once_with("q-1", "cs-1")
 
     def test_skipped_creates_skip_lock(self, core):
         """For 'skipped' status: create skip lock, no post increment.
@@ -366,7 +366,7 @@ class TestExecuteRejectDbOps:
         core.service.lock_service.create_permanent_lock.assert_called_once_with(
             "media-1", created_by_user_id="user-1"
         )
-        core.service.queue_repo.delete.assert_called_once_with("q-1")
+        core.service.queue_repo.delete.assert_called_once_with("q-1", "cs-1")
 
 
 # ──────────────────────────────────────────────────────────────

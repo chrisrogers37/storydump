@@ -6,6 +6,7 @@ from typing import Optional
 from src.config.constants import MAX_CAPTION_LENGTH
 from src.config.settings import settings
 from src.repositories.media_repository import MediaRepository
+from src.repositories.tenant_scope import scope_of_row
 from src.services.base_service import BaseService
 from src.utils.logger import logger
 
@@ -90,9 +91,9 @@ class CaptionService(BaseService):
                 self.media_repo.update_metadata(
                     str(media_item.id),
                     generated_caption=caption,
-                    chat_settings_id=str(media_item.chat_settings_id)
-                    if media_item.chat_settings_id
-                    else None,
+                    chat_settings_id=scope_of_row(
+                        media_item, where="caption_service.generate_caption"
+                    ),
                 )
 
             self.set_result_summary(

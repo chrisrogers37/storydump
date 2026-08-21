@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock, patch
 from uuid import uuid4
 
 from src.exceptions.google_drive import GoogleDriveAuthError
+from src.repositories.tenant_scope import SYSTEM_SCOPE
 from src.services.core.scheduler import SchedulerService
 from tests.src.services.conftest import mock_track_execution
 
@@ -380,14 +381,14 @@ class TestSendToTelegram:
     async def test_success(self, scheduler_service_mocked):
         """Marks item as processing, sends, returns True."""
         service = scheduler_service_mocked
-        queue_item = Mock(id=uuid4())
+        queue_item = Mock(id=uuid4(), chat_settings_id="cs-1")
         service.telegram_service.send_notification = AsyncMock(return_value=True)
 
         result = await service._send_to_telegram(queue_item)
 
         assert result is True
         service.queue_repo.update_status.assert_called_once_with(
-            str(queue_item.id), "processing"
+            str(queue_item.id), "processing", "cs-1"
         )
 
     @pytest.mark.asyncio
@@ -408,7 +409,9 @@ class TestSendToTelegram:
 
         assert result is False
         assert service.telegram_service.send_notification.call_count == 3
-        service.queue_repo.update_status.assert_any_call(str(queue_item.id), "failed")
+        service.queue_repo.update_status.assert_any_call(
+            str(queue_item.id), "failed", str(queue_item.chat_settings_id)
+        )
         service.queue_repo.delete.assert_not_called()
         service.history_repo.create.assert_called_once()
         params = service.history_repo.create.call_args[0][0]
@@ -465,10 +468,13 @@ class TestSendToTelegram:
         assert service.telegram_service.send_notification.call_count == 1
         # Claimed to processing, then moved out of the limbo to sent_unconfirmed.
         service.queue_repo.update_status.assert_called_once_with(
-            str(queue_item.id), "processing"
+            str(queue_item.id), "processing", SYSTEM_SCOPE
         )
         service.queue_repo.transition.assert_called_once_with(
-            str(queue_item.id), "sent_unconfirmed", allowed_from={"processing"}
+            str(queue_item.id),
+            "sent_unconfirmed",
+            SYSTEM_SCOPE,
+            allowed_from={"processing"},
         )
         service.history_repo.create.assert_not_called()
 
@@ -492,7 +498,11 @@ class TestSendToTelegram:
 
         assert result is False
         assert service.telegram_service.send_notification.call_count == 3
-        service.queue_repo.update_status.assert_any_call(str(queue_item.id), "failed")
+        # NULL-owned row (pre-#412 backfill): scope_of_row resolves to
+        # SYSTEM_SCOPE rather than the string "None".
+        service.queue_repo.update_status.assert_any_call(
+            str(queue_item.id), "failed", SYSTEM_SCOPE
+        )
         params = service.history_repo.create.call_args[0][0]
         assert params.error_message == "Network error"
 
@@ -515,7 +525,11 @@ class TestSendToTelegram:
             await service._send_to_telegram(queue_item)
 
         assert service.telegram_service.send_notification.call_count == 1
-        service.queue_repo.update_status.assert_any_call(str(queue_item.id), "failed")
+        # NULL-owned row (pre-#412 backfill): scope_of_row resolves to
+        # SYSTEM_SCOPE rather than the string "None".
+        service.queue_repo.update_status.assert_any_call(
+            str(queue_item.id), "failed", SYSTEM_SCOPE
+        )
         service.history_repo.create.assert_called_once()
 
     @pytest.mark.asyncio
@@ -550,7 +564,7 @@ class TestSendToTelegram:
         """Successful send resets the consecutive failure counter."""
         service = scheduler_service_mocked
         service._consecutive_send_failures = 5
-        queue_item = Mock(id=uuid4())
+        queue_item = Mock(id=uuid4(), chat_settings_id="cs-1")
         service.telegram_service.send_notification = AsyncMock(return_value=True)
 
         await service._send_to_telegram(queue_item)
@@ -1036,7 +1050,7 @@ class TestAutoApproval:
         media = Mock(id=uuid4(), file_name="meme.jpg", category="memes", times_posted=3)
         scheduler_service.media_repo.get_next_eligible_for_posting.return_value = media
 
-        queue_item = Mock(id=uuid4())
+        queue_item = Mock(id=uuid4(), chat_settings_id="cs-1")
         scheduler_service.queue_repo.create.return_value = queue_item
 
         cs = _make_chat_settings()
@@ -1062,7 +1076,7 @@ class TestAutoApproval:
         media = Mock(id=uuid4(), file_name="new.jpg", category="memes", times_posted=0)
         scheduler_service.media_repo.get_next_eligible_for_posting.return_value = media
 
-        queue_item = Mock(id=uuid4())
+        queue_item = Mock(id=uuid4(), chat_settings_id="cs-1")
         scheduler_service.queue_repo.create.return_value = queue_item
         scheduler_service.telegram_service.send_notification = AsyncMock(
             return_value=True
@@ -1083,7 +1097,7 @@ class TestAutoApproval:
         media = Mock(id=uuid4(), file_name="old.jpg", category="merch", times_posted=5)
         scheduler_service.media_repo.get_next_eligible_for_posting.return_value = media
 
-        queue_item = Mock(id=uuid4())
+        queue_item = Mock(id=uuid4(), chat_settings_id="cs-1")
         scheduler_service.queue_repo.create.return_value = queue_item
         scheduler_service.telegram_service.send_notification = AsyncMock(
             return_value=True
@@ -1102,7 +1116,7 @@ class TestAutoApproval:
     async def test_auto_approve_creates_lock_and_history(self, scheduler_service):
         """Auto-approve creates history record, lock, and increments times_posted."""
         media = Mock(id=uuid4(), file_name="test.jpg", category="memes", times_posted=2)
-        queue_item = Mock(id=uuid4())
+        queue_item = Mock(id=uuid4(), chat_settings_id="cs-1")
         scheduler_service.queue_repo.create.return_value = queue_item
         cs = _make_chat_settings()
 
@@ -1158,7 +1172,7 @@ class TestAutoApproveInstagram:
             source_identifier="test/meme.jpg",
             mime_type="image/jpeg",
         )
-        queue_item = Mock(id=uuid4())
+        queue_item = Mock(id=uuid4(), chat_settings_id="cs-1")
         scheduler_service.queue_repo.create.return_value = queue_item
         cs = _make_chat_settings(enable_instagram_api=True)
 
@@ -1219,7 +1233,7 @@ class TestAutoApproveInstagram:
             category="memes",
             times_posted=3,
         )
-        queue_item = Mock(id=uuid4())
+        queue_item = Mock(id=uuid4(), chat_settings_id="cs-1")
         scheduler_service.queue_repo.create.return_value = queue_item
         cs = _make_chat_settings(enable_instagram_api=True)
 
@@ -1259,7 +1273,7 @@ class TestAutoApproveInstagram:
             source_identifier="test/meme.jpg",
             mime_type="image/jpeg",
         )
-        queue_item = Mock(id=uuid4())
+        queue_item = Mock(id=uuid4(), chat_settings_id="cs-1")
         scheduler_service.queue_repo.create.return_value = queue_item
         cs = _make_chat_settings(enable_instagram_api=True)
 
@@ -1314,7 +1328,7 @@ class TestAutoApproveInstagram:
             category="memes",
             times_posted=3,
         )
-        queue_item = Mock(id=uuid4())
+        queue_item = Mock(id=uuid4(), chat_settings_id="cs-1")
         scheduler_service.queue_repo.create.return_value = queue_item
         cs = _make_chat_settings(enable_instagram_api=False)
 
@@ -1333,7 +1347,7 @@ class TestAutoApproveInstagram:
             category="memes",
             times_posted=3,
         )
-        queue_item = Mock(id=uuid4())
+        queue_item = Mock(id=uuid4(), chat_settings_id="cs-1")
         scheduler_service.queue_repo.create.return_value = queue_item
         cs = _make_chat_settings(enable_instagram_api=True, dry_run_mode=True)
 
@@ -1508,7 +1522,7 @@ class TestCatchupAfterRestart:
             id=uuid4(), file_name="catch.jpg", category="memes", times_posted=0
         )
         service.media_repo.get_next_eligible_for_posting.return_value = media
-        queue_item = Mock(id=uuid4())
+        queue_item = Mock(id=uuid4(), chat_settings_id="cs-1")
         service.queue_repo.create.return_value = queue_item
         service.telegram_service.send_notification = AsyncMock(return_value=True)
 
@@ -1535,7 +1549,7 @@ class TestCatchupAfterRestart:
         media = Mock(
             id=uuid4(), file_name="repost.jpg", category="memes", times_posted=3
         )
-        queue_item = Mock(id=uuid4())
+        queue_item = Mock(id=uuid4(), chat_settings_id="cs-1")
         service.queue_repo.create.return_value = queue_item
         cs = _make_chat_settings()
 
@@ -1863,7 +1877,7 @@ class TestAutoApproveClaimBeforePublish:
         The 'publishing' row must survive (never deleted) so the next selection
         pass is blocked and the story is not re-published."""
         service = scheduler_service
-        queue_item = Mock(id=uuid4())
+        queue_item = Mock(id=uuid4(), chat_settings_id="cs-1")
         service.queue_repo.create.return_value = queue_item
         service._auto_approve_instagram = self._ig_container_then("story-999")
         # Simulate the crash: the atomic finalize raises mid-bookkeeping.
@@ -1877,7 +1891,7 @@ class TestAutoApproveClaimBeforePublish:
 
         # Row was claimed into 'publishing' with the container anchor…
         service.queue_repo.mark_publishing.assert_called_once_with(
-            str(queue_item.id), "container-xyz"
+            str(queue_item.id), "container-xyz", str(cs.id)
         )
         # …and must NOT be deleted — it stays stuck, blocking reselection.
         service.queue_repo.delete.assert_not_called()
@@ -1887,7 +1901,7 @@ class TestAutoApproveClaimBeforePublish:
         the row stays 'publishing' (stuck), is not deleted, not re-published,
         and writes no success history."""
         service = scheduler_service
-        queue_item = Mock(id=uuid4())
+        queue_item = Mock(id=uuid4(), chat_settings_id="cs-1")
         service.queue_repo.create.return_value = queue_item
         service._auto_approve_instagram = self._ig_container_then(None)
 
@@ -1898,7 +1912,7 @@ class TestAutoApproveClaimBeforePublish:
 
         assert result["posted"] is False
         service.queue_repo.mark_publishing.assert_called_once_with(
-            str(queue_item.id), "container-xyz"
+            str(queue_item.id), "container-xyz", str(cs.id)
         )
         service.queue_repo.delete.assert_not_called()  # stuck, not released
         service.history_repo.create_idempotent.assert_not_called()  # no success row
@@ -1908,7 +1922,7 @@ class TestAutoApproveClaimBeforePublish:
         """Failure BEFORE a container exists (nothing published): the transient
         row is released (deleted) and the media stays eligible for retry."""
         service = scheduler_service
-        queue_item = Mock(id=uuid4())
+        queue_item = Mock(id=uuid4(), chat_settings_id="cs-1")
         service.queue_repo.create.return_value = queue_item
 
         async def _fail_pre_container(media, cs, on_container_created=None):
@@ -1923,7 +1937,9 @@ class TestAutoApproveClaimBeforePublish:
 
         assert result["posted"] is False
         service.queue_repo.mark_publishing.assert_not_called()
-        service.queue_repo.delete.assert_called_once_with(str(queue_item.id))
+        service.queue_repo.delete.assert_called_once_with(
+            str(queue_item.id), str(cs.id)
+        )
         service.history_repo.create_idempotent.assert_not_called()
 
     @staticmethod
@@ -1951,7 +1967,7 @@ class TestAutoApproveClaimBeforePublish:
         from src.exceptions.instagram import InstagramAPIError
 
         service = scheduler_service
-        queue_item = Mock(id=uuid4())
+        queue_item = Mock(id=uuid4(), chat_settings_id="cs-1")
         service.queue_repo.create.return_value = queue_item
         service._auto_approve_instagram = self._ig_container_then_raises(
             InstagramAPIError("Media container failed", error_code=status_code)
@@ -1965,10 +1981,12 @@ class TestAutoApproveClaimBeforePublish:
         assert result["posted"] is False
         # The row was claimed the instant the container existed…
         service.queue_repo.mark_publishing.assert_called_once_with(
-            str(queue_item.id), "container-xyz"
+            str(queue_item.id), "container-xyz", str(cs.id)
         )
         # …but IG confirmed it's dead, so it is released — not left stuck.
-        service.queue_repo.delete.assert_called_once_with(str(queue_item.id))
+        service.queue_repo.delete.assert_called_once_with(
+            str(queue_item.id), str(cs.id)
+        )
         service.history_repo.create_idempotent.assert_not_called()
 
     async def test_ambiguous_raise_after_container_stays_stuck(self, scheduler_service):
@@ -1978,7 +1996,7 @@ class TestAutoApproveClaimBeforePublish:
         from src.exceptions.instagram import InstagramAPIError
 
         service = scheduler_service
-        queue_item = Mock(id=uuid4())
+        queue_item = Mock(id=uuid4(), chat_settings_id="cs-1")
         service.queue_repo.create.return_value = queue_item
         # No error_code → ambiguous (e.g. the 180s wall-clock timeout wrapper).
         service._auto_approve_instagram = self._ig_container_then_raises(
@@ -1992,7 +2010,7 @@ class TestAutoApproveClaimBeforePublish:
 
         assert result["posted"] is False
         service.queue_repo.mark_publishing.assert_called_once_with(
-            str(queue_item.id), "container-xyz"
+            str(queue_item.id), "container-xyz", str(cs.id)
         )
         service.queue_repo.delete.assert_not_called()  # stuck, not released
         service.history_repo.create_idempotent.assert_not_called()

@@ -30,7 +30,7 @@ from src.services.core.telegram_utils import (
 from src.utils.logger import logger
 from src.utils.resilience import telegram_edit_with_retry
 from datetime import datetime, timezone
-from src.repositories.tenant_scope import SYSTEM_SCOPE
+from src.repositories.tenant_scope import scope_of_row
 
 if TYPE_CHECKING:
     from src.services.core.telegram_service import TelegramService
@@ -161,7 +161,9 @@ class TelegramAutopostHandler:
 
             media_item = self.service.media_repo.get_by_id(
                 str(queue_item.media_item_id),
-                chat_settings_id=SYSTEM_SCOPE,
+                chat_settings_id=scope_of_row(
+                    queue_item, where="autopost.handle_autopost"
+                ),
             )
             if not media_item:
                 await query.edit_message_caption(caption="⚠️ Media item not found")
@@ -380,9 +382,9 @@ class TelegramAutopostHandler:
             cloud_url=ctx.cloud_url,
             cloud_public_id=ctx.cloud_public_id,
             cloud_uploaded_at=datetime.now(timezone.utc),
-            chat_settings_id=str(ctx.queue_item.chat_settings_id)
-            if ctx.queue_item.chat_settings_id
-            else None,
+            chat_settings_id=scope_of_row(
+                ctx.queue_item, where="autopost.upload_to_cloudinary"
+            ),
         )
 
         return True
@@ -514,7 +516,11 @@ class TelegramAutopostHandler:
         """Claim-before-publish: record the container on the context and flip
         the queue row to 'publishing' with the persisted container_id (#549)."""
         ctx.container_id = container_id
-        self.service.queue_repo.mark_publishing(ctx.queue_id, container_id)
+        self.service.queue_repo.mark_publishing(
+            ctx.queue_id,
+            container_id,
+            scope_of_row(ctx.queue_item, where="autopost.mark_container_created"),
+        )
 
     def _record_successful_post(self, ctx: AutopostContext, story_id: str) -> None:
         """Record a successful Instagram post in all relevant tables.
@@ -525,6 +531,9 @@ class TelegramAutopostHandler:
         double-insert.
         """
         now = datetime.now(timezone.utc)
+        queue_scope = scope_of_row(
+            ctx.queue_item, where="autopost.record_successful_post"
+        )
         with atomic_session(
             [
                 self.service.history_repo,
@@ -555,15 +564,16 @@ class TelegramAutopostHandler:
             )
             self.service.media_repo.increment_times_posted(
                 str(ctx.queue_item.media_item_id),
-                chat_settings_id=str(ctx.queue_item.chat_settings_id)
-                if ctx.queue_item.chat_settings_id
-                else None,
+                chat_settings_id=queue_scope,
             )
             self.service.lock_service.create_lock(
                 str(ctx.queue_item.media_item_id),
                 telegram_chat_id=ctx.chat_id,
             )
-            self.service.queue_repo.delete(ctx.queue_id)
+            self.service.queue_repo.delete(
+                ctx.queue_id,
+                queue_scope,
+            )
             self.service.user_repo.increment_posts(str(ctx.user.id))
 
     async def _send_success_message(self, ctx: AutopostContext, story_id: str) -> None:
@@ -639,9 +649,9 @@ class TelegramAutopostHandler:
                     cloud_public_id=None,
                     cloud_uploaded_at=None,
                     cloud_expires_at=None,
-                    chat_settings_id=str(ctx.queue_item.chat_settings_id)
-                    if ctx.queue_item.chat_settings_id
-                    else None,
+                    chat_settings_id=scope_of_row(
+                        ctx.queue_item, where="autopost.cleanup_cloudinary"
+                    ),
                 )
                 logger.info(f"Cleaned up Cloudinary upload: {ctx.cloud_public_id}")
             else:
@@ -674,9 +684,16 @@ class TelegramAutopostHandler:
         # nothing published, no duplicate risk), then show the graceful
         # daily-limit card with the manual buttons — never the ambiguous
         # "held for review" dead-end that would strand the row in 'publishing'.
+        queue_scope = scope_of_row(
+            ctx.queue_item, where="autopost.handle_autopost_error"
+        )
         if isinstance(e, RateLimitError):
             if ctx.container_id is not None:
-                self.service.queue_repo.update_status(ctx.queue_id, "processing")
+                self.service.queue_repo.update_status(
+                    ctx.queue_id,
+                    "processing",
+                    queue_scope,
+                )
             caption = (
                 "⚠️ *Instagram daily limit reached*\n\n"
                 "You've hit Instagram's daily posting limit. Post manually "
@@ -725,7 +742,11 @@ class TelegramAutopostHandler:
                 f"Autopost container confirmed-failed for {ctx.media_item.file_name} "
                 f"(container {ctx.container_id}) — releasing row for retry"
             )
-            self.service.queue_repo.update_status(ctx.queue_id, "processing")
+            self.service.queue_repo.update_status(
+                ctx.queue_id,
+                "processing",
+                queue_scope,
+            )
 
         if isinstance(e, MediaUnsupportedError):
             try:

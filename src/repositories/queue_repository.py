@@ -227,6 +227,7 @@ class QueueRepository(BaseRepository):
         self,
         queue_id: str,
         to_status: str,
+        chat_settings_id: TenantScope,
         allowed_from: Optional[Iterable[str]] = None,
     ) -> Optional[PostingQueue]:
         """Move a queue row to ``to_status`` through one atomic guarded seam.
@@ -240,12 +241,20 @@ class QueueRepository(BaseRepository):
         ``claim_for_processing``'s concurrency-safe conditional claim. With
         ``allowed_from=None`` the status is set unconditionally.
 
-        Returns the updated row, or ``None`` if the row is gone or its current
-        status is outside ``allowed_from``.
+        Tenant-scoped (#841) via :meth:`BaseRepository._owned_or_null`, which
+        rides in the SAME WHERE clause as the status guard — see there for why
+        this path cannot pre-read the owner. A foreign row matches zero rows
+        and returns ``None``, indistinguishable from "the row moved under us":
+        a caller learns nothing about another tenant's rows.
+
+        Returns the updated row, or ``None`` if the row is gone, owned by
+        another tenant, or its current status is outside ``allowed_from``.
         """
+        require_tenant_context(chat_settings_id, where="queue.transition")
         query = self.db.query(PostingQueue).filter(PostingQueue.id == queue_id)
         if allowed_from is not None:
             query = query.filter(PostingQueue.status.in_(list(allowed_from)))
+        query = query.filter(*self._owned_or_null(PostingQueue, chat_settings_id))
         # synchronize_session=False keeps this ONE statement. "fetch" may
         # split it into a pre-SELECT + primary-key UPDATE, and that second
         # statement carries no allowed_from guard — a transition blocked on a
@@ -262,17 +271,24 @@ class QueueRepository(BaseRepository):
             allowed = set(allowed_from) if allowed_from is not None else "any"
             logger.info(
                 f"Queue item {queue_id} not transitioned to {to_status} "
-                f"(missing, or current status not in {allowed})"
+                f"(missing, not owned by the caller, or current status not in "
+                f"{allowed})"
             )
             return None
+        # Re-read of a row this statement just proved the caller may write —
+        # system-scoped so a legacy NULL-owned row still returns.
         return self.get_by_id(queue_id, chat_settings_id=SYSTEM_SCOPE)
 
-    def update_status(self, queue_id: str, status: str) -> Optional[PostingQueue]:
+    def update_status(
+        self, queue_id: str, status: str, chat_settings_id: TenantScope
+    ) -> Optional[PostingQueue]:
         """Update queue item status unconditionally (see :meth:`transition` for
         a from-state-guarded write)."""
-        return self.transition(queue_id, status)
+        return self.transition(queue_id, status, chat_settings_id)
 
-    def mark_publishing(self, queue_id: str, container_id: str) -> PostingQueue:
+    def mark_publishing(
+        self, queue_id: str, container_id: str, chat_settings_id: TenantScope
+    ) -> PostingQueue:
         """Claim a queue row for an in-flight Instagram publish (#549).
 
         Flips the row to ``status='publishing'`` and persists the IG media
@@ -282,7 +298,7 @@ class QueueRepository(BaseRepository):
         the publish leaves a recoverable, non-duplicating row rather than
         re-serving the media.
         """
-        queue_item = self.get_by_id(queue_id, chat_settings_id=SYSTEM_SCOPE)
+        queue_item = self._get_for_write(PostingQueue, queue_id, chat_settings_id)
         if queue_item:
             queue_item.status = "publishing"
             queue_item.instagram_container_id = container_id
@@ -290,17 +306,21 @@ class QueueRepository(BaseRepository):
         return queue_item
 
     def update_scheduled_time(
-        self, queue_id: str, scheduled_for: datetime
+        self, queue_id: str, scheduled_for: datetime, chat_settings_id: TenantScope
     ) -> PostingQueue:
         """Update queue item scheduled time."""
-        queue_item = self.get_by_id(queue_id, chat_settings_id=SYSTEM_SCOPE)
+        queue_item = self._get_for_write(PostingQueue, queue_id, chat_settings_id)
         if queue_item:
             queue_item.scheduled_for = scheduled_for
             self.commit_and_refresh(queue_item)
         return queue_item
 
     def set_telegram_message(
-        self, queue_id: str, message_id: int, chat_id: int
+        self,
+        queue_id: str,
+        message_id: int,
+        chat_id: int,
+        chat_settings_id: TenantScope,
     ) -> PostingQueue:
         """Stamp the row with its Telegram card and promote it to 'delivered'.
 
@@ -311,7 +331,7 @@ class QueueRepository(BaseRepository):
         ``publishing`` row keeps its status (the IG claim anchor stays
         authoritative, #549), as does terminal ``failed``.
         """
-        queue_item = self.get_by_id(queue_id, chat_settings_id=SYSTEM_SCOPE)
+        queue_item = self._get_for_write(PostingQueue, queue_id, chat_settings_id)
         if queue_item:
             queue_item.telegram_message_id = message_id
             queue_item.telegram_chat_id = chat_id
@@ -320,9 +340,13 @@ class QueueRepository(BaseRepository):
             self.commit_and_refresh(queue_item)
         return queue_item
 
-    def delete(self, queue_id: str) -> bool:
-        """Delete a queue item (after moving to history)."""
-        queue_item = self.get_by_id(queue_id, chat_settings_id=SYSTEM_SCOPE)
+    def delete(self, queue_id: str, chat_settings_id: TenantScope) -> bool:
+        """Delete a queue item (after moving to history).
+
+        Tenant-scoped (#841): a row owned by another tenant is not deleted and
+        returns False — the same answer as "not found", so a caller cannot
+        probe another tenant's queue by UUID."""
+        queue_item = self._get_for_write(PostingQueue, queue_id, chat_settings_id)
         if queue_item:
             self.db.delete(queue_item)
             self.db.commit()

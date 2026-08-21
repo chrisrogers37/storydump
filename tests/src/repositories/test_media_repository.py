@@ -630,17 +630,6 @@ class TestMediaRepositoryWriteTenantScoping:
         return row
 
     # ── the ownership predicate ─────────────────────────────────────────
-    def test_write_allowed_same_tenant(self):
-        assert MediaRepository._write_allowed("tenant-A", "tenant-A") is True
-
-    def test_write_allowed_different_tenant_refused(self):
-        assert MediaRepository._write_allowed("tenant-B", "tenant-A") is False
-
-    def test_write_allowed_null_owned_falls_back(self):
-        assert MediaRepository._write_allowed(None, "tenant-A") is True
-
-    def test_write_allowed_no_actor_tenant_unchanged(self):
-        assert MediaRepository._write_allowed("tenant-B", None) is True
 
     # ── reactivate ──────────────────────────────────────────────────────
     def test_reactivate_blocks_cross_tenant(self, media_repo, mock_db):
@@ -664,7 +653,9 @@ class TestMediaRepositoryWriteTenantScoping:
     def test_reactivate_allows_null_owned_with_warning(self, media_repo, mock_db):
         row = self._seed_row(mock_db, chat_settings_id=None, is_active=False)
 
-        with patch("src.repositories.media_repository.logger") as mock_logger:
+        # The legacy NULL-owned warning is emitted by the shared
+        # BaseRepository._get_for_write, not the media module (#841).
+        with patch("src.repositories.base_repository.logger") as mock_logger:
             result = media_repo.reactivate("media-id", chat_settings_id="tenant-A")
 
         assert result is row

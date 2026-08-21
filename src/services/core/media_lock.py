@@ -9,7 +9,7 @@ from src.repositories.audit_repository import AuditRepository
 from src.repositories.lock_repository import LockRepository
 from src.config import defaults
 from src.utils.logger import logger
-from src.repositories.tenant_scope import SYSTEM_SCOPE
+from src.repositories.tenant_scope import SYSTEM_SCOPE, scope_of_row
 
 
 class MediaLockService(BaseService):
@@ -96,9 +96,7 @@ class MediaLockService(BaseService):
                 action="create",
                 new_value={"reason": lock_reason, "ttl_days": ttl_days},
                 changed_by_user_id=created_by_user_id,
-                chat_settings_id=str(lock.chat_settings_id)
-                if lock.chat_settings_id
-                else None,
+                chat_settings_id=scope_of_row(lock, where="media_lock.create_lock"),
             )
         except SQLAlchemyError:
             logger.warning("Audit log failed for lock create", exc_info=True)
@@ -153,9 +151,7 @@ class MediaLockService(BaseService):
         if not lock:
             return False
         lock_reason = lock.lock_reason
-        lock_chat_settings_id = (
-            str(lock.chat_settings_id) if lock.chat_settings_id else None
-        )
+        lock_scope = scope_of_row(lock, where="media_lock.remove_lock")
         result = self.lock_repo.delete(lock_id)
         try:
             self.audit_repo.log(
@@ -164,7 +160,7 @@ class MediaLockService(BaseService):
                 action="delete",
                 old_value={"reason": lock_reason},
                 changed_by_user_id=removed_by_user_id,
-                chat_settings_id=lock_chat_settings_id,
+                chat_settings_id=lock_scope,
             )
         except SQLAlchemyError:
             logger.warning("Audit log failed for lock delete", exc_info=True)

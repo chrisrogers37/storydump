@@ -19,7 +19,7 @@ from src.config import defaults
 from src.utils.logger import logger
 from src.utils.resilience import telegram_edit_with_retry
 from src.utils.webapp_auth import generate_url_token
-from src.repositories.tenant_scope import SYSTEM_SCOPE
+from src.repositories.tenant_scope import SYSTEM_SCOPE, scope_of_row
 
 if TYPE_CHECKING:
     from src.services.core.telegram_service import TelegramService
@@ -207,7 +207,10 @@ async def validate_queue_and_media(service: TelegramService, queue_id: str, quer
         return None, None
 
     media_item = service.media_repo.get_by_id(
-        str(queue_item.media_item_id), chat_settings_id=SYSTEM_SCOPE
+        str(queue_item.media_item_id),
+        chat_settings_id=scope_of_row(
+            queue_item, where="utils.validate_queue_and_media"
+        ),
     )
     if not media_item:
         await query.edit_message_caption(caption="⚠️ Media item not found")
@@ -258,7 +261,12 @@ async def reconcile_card_messages(
                 f"Could not strip sibling card {stored_id} for queue {queue_id[:8]}"
             )
 
-    service.queue_repo.set_telegram_message(queue_id, clicked_id, message.chat_id)
+    service.queue_repo.set_telegram_message(
+        queue_id,
+        clicked_id,
+        message.chat_id,
+        scope_of_row(queue_item, where="utils.reconcile_card_messages"),
+    )
 
 
 # =========================================================================
