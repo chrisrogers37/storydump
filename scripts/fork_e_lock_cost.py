@@ -47,6 +47,15 @@ Those are counted separately below rather than folded in.
   ``observed_use.py``, not restated, so there is one audited copy.
 - **It does not rule on Fork E.** It prices it.
 
+## Running it
+
+    python -m scripts.fork_e_lock_cost
+
+Package-imported like ``m1_preflight``, so ``python scripts/fork_e_lock_cost.py``
+does NOT work from a bare shell — a direct path invocation puts ``scripts/`` on
+``sys.path`` rather than the repo root. Stated because the obvious invocation is
+the one that fails.
+
 ## Exit codes
 
     0  OK       — measurement ran
@@ -61,9 +70,7 @@ import sys
 
 import psycopg2
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-
-from observed_use import assert_identity, fmt, q, resolve_dsn  # noqa: E402
+from scripts.observed_use import assert_identity, fmt, q, resolve_dsn
 
 OK, ERROR = 0, 2
 

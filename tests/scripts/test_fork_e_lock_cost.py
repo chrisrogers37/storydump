@@ -11,14 +11,9 @@ the source it claims to quote. The guard reads it back; this proves the guard
 can fail.
 """
 
-import pathlib
-import sys
-
 import pytest
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "scripts"))
-
-from fork_e_lock_cost import (  # noqa: E402
+from scripts.fork_e_lock_cost import (
     CODE_DEFAULT_REPOST_TTL_DAYS,
     assert_code_default_matches_source,
 )
@@ -38,7 +33,7 @@ class TestThePrintedFallbackCannotGoStale:
     def test_the_guard_fails_when_the_source_moves(self, tmp_path, monkeypatch):
         """A guard that cannot fail proves nothing. Drift is simulated by
         pointing the guard at a defaults.py that disagrees."""
-        import fork_e_lock_cost as mod
+        from scripts import fork_e_lock_cost as mod
 
         fake_root = tmp_path / "scripts"
         fake_root.mkdir()
@@ -55,7 +50,7 @@ class TestThePrintedFallbackCannotGoStale:
     ):
         """Deletion is a different failure from disagreement, and silently
         passing on a missing constant would be the worse of the two."""
-        import fork_e_lock_cost as mod
+        from scripts import fork_e_lock_cost as mod
 
         fake_root = tmp_path / "scripts"
         fake_root.mkdir()
