@@ -32,10 +32,12 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from src.services.target import jobs, scheduler, unit_of_work
 from src.services.target.work_loop import (
+    Parked,
     WorkerConfig,
     WorkerDeps,
     WorkLoop,
     build_registry,
+    ensure_sender_jobs,
 )
 
 logger = logging.getLogger("target.worker")
@@ -118,20 +120,20 @@ class WorkerApp:
     clock: object = None  # set by run() so a supervisor can read its observables
 
 
-def compose(*, engine, config: WorkerConfig, env: dict) -> WorkerApp:
-    """Assemble the object graph. Touches no network."""
+def compose(*, engine, config: WorkerConfig, env: dict, transport=None) -> WorkerApp:
+    """Assemble the object graph. Touches no network — the transport arrives
+    built (main() constructs it from TARGET_TELEGRAM_BOT_TOKEN) and its
+    credential is probed by run(), not here."""
     deps = WorkerDeps(
         meta=None,
         transit=_transit_from_env(env),
         media_fetch=None,
-        transport=None,
+        transport=transport,
         poll=None,
         engine=engine,
         config=config,
     )
     registry = build_registry(deps)
-    from src.services.target.work_loop import Parked
-
     live = {k for k, e in registry.items() if not isinstance(e, Parked)}
     recurring = {"v": 1, "reap_expired": 6 * 3600.0}
     if "reap_transit_assets" in live:
@@ -169,7 +171,41 @@ def compose(*, engine, config: WorkerConfig, env: dict) -> WorkerApp:
     )
 
 
-def status_line(*, loops, clock, heartbeat) -> str:
+DEAD_CREDENTIAL_REASON = (
+    "credential rejected by Telegram at startup (getMe 401/403) — DEAD TOKEN;"
+    " the channel is down until it is replaced, and every park of this job is"
+    " this reminder"
+)
+
+
+async def apply_transport_probe(app: WorkerApp) -> None:
+    """The composition-time credential check — the shitpost-alpha lesson.
+
+    A live probe logs the bot identity once. A dead one parks the channel IN
+    THE SHARED REGISTRY with the dead-token reason (the loops hold the same
+    dict, so every sender claim from here on warns with it) and logs at ERROR.
+    A transport that would send nothing must never be indistinguishable from
+    one with nothing to send.
+    """
+    transport = app.deps.transport
+    if transport is None:
+        return
+    from src.channels.telegram_transport import TelegramAuthDead
+
+    try:
+        username = await transport.probe()
+    except TelegramAuthDead as exc:
+        logger.error(
+            "Telegram credential is DEAD at startup (%s) — parking the"
+            " deliver_outbox channel; the worker runs without it",
+            exc,
+        )
+        app.registry["deliver_outbox"] = Parked(DEAD_CREDENTIAL_REASON)
+        return
+    logger.info("telegram channel live as @%s", username)
+
+
+def status_line(*, loops, clock, heartbeat, transport=None) -> str:
     """One human-readable line from the observables — the soak's visibility."""
     lanes = " ".join(
         f"{wl.lane}[processed={wl.processed} parked={wl.parked}"
@@ -186,17 +222,48 @@ def status_line(*, loops, clock, heartbeat) -> str:
         f"heartbeat[beats={heartbeat.beats} short={heartbeat.short_beats}"
         f" errs={heartbeat.consecutive_failures}]"
     )
-    return f"{lanes} {clock_part} {hb_part}"
+    line = f"{lanes} {clock_part} {hb_part}"
+    if transport is not None:
+        line += f" transport[auth_failures={transport.auth_failures}]"
+    return line
+
+
+async def _sender_job_sweeper(app: WorkerApp, stop: asyncio.Event) -> None:
+    """Mint sender jobs on cadence while the channel is live. Never mints for
+    a parked channel — that would manufacture parked work on a timer."""
+    maker = async_sessionmaker(app.engine, expire_on_commit=False)
+    while not stop.is_set():
+        if not isinstance(app.registry.get("deliver_outbox"), Parked):
+            try:
+                async with maker() as session:
+                    async with session.begin():
+                        await unit_of_work.apply_gucs(
+                            session, tenant_id="", actor_kind="system"
+                        )
+                        await ensure_sender_jobs(session)
+            except Exception:  # noqa: BLE001 — the sweep must outlive a blip
+                logger.exception("sender-job sweep failed; retrying on cadence")
+        try:
+            async with asyncio.timeout(app.config.sender_sweep_seconds):
+                await stop.wait()
+        except TimeoutError:
+            pass
 
 
 async def _status_reporter(app: WorkerApp, stop: asyncio.Event, every: float) -> None:
     while not stop.is_set():
         try:
-            await asyncio.wait_for(stop.wait(), timeout=every)
-        except asyncio.TimeoutError:
+            async with asyncio.timeout(every):
+                await stop.wait()
+        except TimeoutError:
             logger.info(
                 "status: %s",
-                status_line(loops=app.loops, clock=app.clock, heartbeat=app.heartbeat),
+                status_line(
+                    loops=app.loops,
+                    clock=app.clock,
+                    heartbeat=app.heartbeat,
+                    transport=app.deps.transport,
+                ),
             )
 
 
@@ -246,14 +313,19 @@ async def run(app: WorkerApp, *, stop: asyncio.Event | None = None) -> None:
         sorted(k for k, e in app.registry.items() if not hasattr(e, "reason")),
         sorted(set(app.recurring) - {"v"}),
     )
+    await apply_transport_probe(app)
     status_task = asyncio.create_task(
         _status_reporter(app, stop, 60.0), name="status-reporter"
+    )
+    sweep_task = asyncio.create_task(
+        _sender_job_sweeper(app, stop), name="sender-job-sweeper"
     )
     try:
         await stop.wait()
     finally:
         status_task.cancel()
-        await asyncio.gather(status_task, return_exceptions=True)
+        sweep_task.cancel()
+        await asyncio.gather(status_task, sweep_task, return_exceptions=True)
         for wl in app.loops:
             wl.stop()
         await asyncio.gather(*loop_tasks, return_exceptions=True)
@@ -264,6 +336,8 @@ async def run(app: WorkerApp, *, stop: asyncio.Event | None = None) -> None:
         for conn in claim_conns:
             await conn.close()
         await election_conn.close()
+        if app.deps.transport is not None:
+            await app.deps.transport.aclose()
         await engine.dispose()
         logger.info(
             "worker stopped cleanly; final %s",
@@ -279,7 +353,13 @@ def main() -> None:
     config = WorkerConfig()
     env = dict(os.environ)
     engine = unit_of_work.create_engine(engine_url_from_env(env))
-    app = compose(engine=engine, config=config, env=env)
+    transport = None
+    token = env.get("TARGET_TELEGRAM_BOT_TOKEN")
+    if token:
+        from src.channels.telegram_transport import TelegramTransport
+
+        transport = TelegramTransport(token)
+    app = compose(engine=engine, config=config, env=env, transport=transport)
     asyncio.run(run(app))
 
 

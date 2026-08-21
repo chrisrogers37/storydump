@@ -110,3 +110,72 @@ class TestStatusLine:
             "beats=12",
         ):
             assert token in line
+
+
+class TestTransportComposition:
+    """W2: the channel goes live only through a LIVE credential, and a dead
+    one is a named, recurring, observable state — the shitpost-alpha lesson
+    as compose/run behavior."""
+
+    def test_a_supplied_transport_brings_deliver_outbox_live(self):
+        from src.services.target.work_loop import Parked
+
+        class _T:
+            def for_chat(self, ref):
+                async def send(row):
+                    return "1"
+
+                return send
+
+        app = compose(engine=object(), config=WorkerConfig(), env={}, transport=_T())
+        assert not isinstance(app.registry["deliver_outbox"], Parked)
+
+    def test_no_transport_parks_with_the_w2_reason(self):
+        from src.services.target.work_loop import Parked
+
+        app = compose(engine=object(), config=WorkerConfig(), env={})
+        entry = app.registry["deliver_outbox"]
+        assert isinstance(entry, Parked) and "transport" in entry.reason
+
+    async def test_a_dead_probe_parks_the_channel_loudly_and_names_the_dead_token(
+        self, caplog
+    ):
+        from src.channels.telegram_transport import TelegramAuthDead
+        from src.services.target.work_loop import Parked
+        from src.worker import apply_transport_probe
+
+        class _Dead:
+            def for_chat(self, ref):  # pragma: no cover - never bound
+                raise AssertionError
+
+            async def probe(self):
+                raise TelegramAuthDead("getMe: 401 Unauthorized")
+
+        app = compose(engine=object(), config=WorkerConfig(), env={}, transport=_Dead())
+        with caplog.at_level("ERROR"):
+            await apply_transport_probe(app)
+
+        entry = app.registry["deliver_outbox"]
+        assert isinstance(entry, Parked)
+        assert "DEAD" in entry.reason and "credential" in entry.reason.lower()
+        assert any("DEAD" in r.message for r in caplog.records)
+        # the loops share the same dict object, so the park reaches them
+        assert app.loops[0]._registry is app.registry
+
+    async def test_a_live_probe_logs_the_bot_identity_and_keeps_the_channel(self):
+        from src.services.target.work_loop import Parked
+        from src.worker import apply_transport_probe
+
+        class _Live:
+            def for_chat(self, ref):
+                async def send(row):
+                    return "1"
+
+                return send
+
+            async def probe(self):
+                return "soak_bot"
+
+        app = compose(engine=object(), config=WorkerConfig(), env={}, transport=_Live())
+        await apply_transport_probe(app)
+        assert not isinstance(app.registry["deliver_outbox"], Parked)

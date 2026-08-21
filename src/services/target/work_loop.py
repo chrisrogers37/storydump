@@ -20,13 +20,23 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from src.services.target import jobs, publish_pipeline, reconciler, scheduler
+from src.services.target import (
+    jobs,
+    outbox,
+    publish_pipeline,
+    reconciler,
+    scheduler,
+    unit_of_work,
+)
 
 logger = logging.getLogger("target.work_loop")
 
@@ -190,10 +200,56 @@ def build_registry(deps: WorkerDeps) -> dict:
         logger.info("publish_pipeline %s -> %s", job["id"], outcome)
 
     async def deliver_outbox(session, job):
-        # W2 replaces this body with the bounded sender hold: run an
-        # OutboxPoller for < lease_seconds while THIS lease serializes the
-        # binding's sender, then reschedule so the job cycles, not finalizes.
-        raise NotImplementedError("the W2 increment wires the sender hold")
+        # The bounded sender hold: while THIS lease serializes the binding's
+        # sender, run poller ticks until the queue drains or the hold elapses,
+        # then return — the loop finalizes the job and the sweep re-mints one
+        # when new rows arrive, so the sender cycles rather than lives forever.
+        payload = job.get("payload") or {}
+        binding_id = str(
+            payload.get("binding_id") or job["serialization_key"].split(":", 1)[1]
+        )
+        row = (
+            (
+                await session.execute(
+                    text(
+                        "SELECT external_ref, workspace_id FROM channel_bindings"
+                        " WHERE id = :b"
+                    ),
+                    {"b": binding_id},
+                )
+            )
+            .mappings()
+            .first()
+        )
+        if row is None:
+            raise RuntimeError(
+                f"deliver_outbox {job['id']}: binding {binding_id} has no row"
+            )
+        poller = outbox.OutboxPoller(
+            poller_session_factory(deps.engine, str(row["workspace_id"])),
+            binding_id=binding_id,
+            transport=deps.transport.for_chat(row["external_ref"]),
+            clock=_utcnow,
+            interval_seconds=cfg.poller_interval_seconds,
+            chat_limit=cfg.chat_limit,
+            chat_window_seconds=cfg.chat_window_seconds,
+            global_limit=cfg.global_limit,
+            global_window_seconds=cfg.global_window_seconds,
+        )
+        deadline = time.monotonic() + cfg.sender_hold_seconds
+        while time.monotonic() < deadline:
+            before = (poller.deferred, poller.consecutive_failures)
+            result = await poller.tick()
+            if (
+                result is None
+                and (
+                    poller.deferred,
+                    poller.consecutive_failures,
+                )
+                == before
+            ):
+                break  # drained: not paced, not failed — nothing pending
+            await asyncio.sleep(cfg.poller_interval_seconds)
 
     registry: dict = {kind: Parked(_UNBUILT_REASON) for kind in UNBUILT_KINDS}
     registry["plan_slot"] = plan_slot
@@ -342,11 +398,58 @@ class WorkLoop:
             worked = await self.run_once()
             if not worked:
                 try:
-                    await asyncio.wait_for(
-                        self._stop.wait(), timeout=self._config.claim_idle_seconds
-                    )
-                except asyncio.TimeoutError:
+                    async with asyncio.timeout(self._config.claim_idle_seconds):
+                        await self._stop.wait()
+                except TimeoutError:
                     pass
 
     def stop(self) -> None:
         self._stop.set()
+
+
+def poller_session_factory(engine, tenant_id: str):
+    """Sessions for the outbox poller with the GUC invariant pre-applied.
+
+    The poller opens its own transaction per tick and commits it; SET LOCAL
+    inside that transaction is what keeps pool reuse safe (`apply_gucs`).
+    """
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+
+    @asynccontextmanager
+    async def factory():
+        async with maker() as session:
+            await unit_of_work.apply_gucs(
+                session, tenant_id=tenant_id, actor_kind="system"
+            )
+            yield session
+
+    return factory
+
+
+async def ensure_sender_jobs(session) -> int:
+    """Mint one `deliver_outbox` job per Telegram binding that has pending
+    outbox rows and no live sender job. Idempotent by the live-job check on
+    the `tg:<binding>` serialization key; returns rows minted.
+
+    The sweep-driven cycle is the design: a sender hold drains and the job
+    finalizes `succeeded`; the next sweep re-mints only while pending rows
+    exist, so an empty outbox mints nothing and a busy one always has exactly
+    one live sender per binding.
+    """
+    result = await session.execute(
+        text(
+            "INSERT INTO jobs (kind, workspace_id, lane, serialization_key,"
+            " run_at, max_attempts, payload)"
+            " SELECT 'deliver_outbox', b.workspace_id, 'interactive',"
+            "        'tg:' || b.id, now(), 3,"
+            "        jsonb_build_object('v', 1, 'binding_id', b.id)"
+            "   FROM channel_bindings b"
+            "  WHERE b.state = 'active' AND b.channel LIKE 'telegram%'"
+            "    AND EXISTS (SELECT 1 FROM channel_outbox o"
+            "                 WHERE o.binding_id = b.id AND o.state = 'pending')"
+            "    AND NOT EXISTS (SELECT 1 FROM jobs j"
+            "                     WHERE j.serialization_key = 'tg:' || b.id"
+            "                       AND j.state IN ('ready', 'leased'))"
+        )
+    )
+    return result.rowcount
