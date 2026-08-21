@@ -14,10 +14,86 @@ and unique indexes: inline SQL produces constraints while SQLAlchemy's
 ``unique=True, index=True`` produces a unique index — same guarantee,
 different catalog rows, deliberately treated as equal).
 
-Exclusion: ``schema_version`` — the legacy self-stamp table exists only on
-the migration-built side by design (models never declared it; the runner
-ledger supersedes it and lives in the ``runner`` schema, outside this
-comparison).
+What this gate DOES NOT compare, and why each omission is structural
+--------------------------------------------------------------------
+
+Stated because a scoped green tick whose scope is invisible gets read under
+time pressure as "the schemas match". It means "the schemas match on the
+dimensions below, by design". Measured against `main` (runner-replayed vs
+``create_all``), the excluded dimensions hold **152 divergences** — every one
+of them expected:
+
+``schema_version`` (table)
+    The legacy self-stamp table exists only on the migration-built side by
+    design: models never declared it, and the runner ledger supersedes it in
+    the ``runner`` schema, outside this comparison.
+
+Column defaults — **65 diverging**
+    SQLAlchemy ``default=`` is applied in **Python** and emits no DDL
+    ``DEFAULT``; only ``server_default=`` would. So the migration side carries
+    ``CURRENT_TIMESTAMP`` / ``uuid_generate_v4()`` where the models side
+    carries nothing, on every stamped column in the schema::
+
+        api_tokens.id          migrated: uuid_generate_v4()   orm: None
+        api_tokens.created_at  migrated: CURRENT_TIMESTAMP    orm: None
+
+    Both are correct: an ORM insert gets its value from Python, a raw SQL
+    insert from the DDL. Comparing this axis would report all 65 forever.
+
+Non-unique indexes — **87 diverging**
+    Excluded because a non-unique index carries **no correctness guarantee**.
+    It is a query-planning object; nothing about the data is different if it
+    is absent, differently named, or differently shaped. Unique indexes ARE
+    compared — uniqueness constrains data, which is why they sit above with
+    the constraints rather than here.
+
+    The 87 decompose into THREE categories, not two, and the decomposition is
+    worth stating because both shorter summaries are wrong::
+
+        54  (27 pairs)  same table + columns + predicate, different NAME
+        18  ( 9 pairs)  same table + columns, DIFFERENT PREDICATE
+        15              ORPHANS — present on one side, no counterpart at all
+
+    **Naming (54).** The only group that is "same guarantee, different catalog
+    rows" — the case this module already treats as equal for unique indexes.
+
+    **Partial vs unconditional (18).** A deliberate divergence in SHAPE: the
+    migrations hand-write partial indexes where ``index=True``, which takes no
+    predicate, emits unconditional ones ::
+
+        migrated:  ... (auth_method) WHERE (auth_method IS NOT NULL)
+        orm:       ... (auth_method)
+
+    Two valid indexes over one column, different planner behaviour, identical
+    correctness.
+
+    **Orphans (15).** A different situation, and worth telling apart from the
+    above: not two shapes of one index but an index that is simply absent on
+    one side. **All 15 are migration-only** (zero models-only), from three
+    causes — 5 multi-column (``index=True`` is per-column and has no composite
+    form), 5 single-column-with-a-predicate (same limitation), and 5 plain
+    single-column indexes the models just do not declare.
+
+    **The "no correctness guarantee" reason above covers orphans too, and this
+    is stated rather than left to inherit:** an index that is absent on one
+    side is a planner difference, not a data-integrity one — exactly as a
+    differently-shaped or differently-named one is. Nothing about the data
+    differs because a non-unique index is missing.
+
+    Two summaries are false and are named as false so they are not re-derived:
+    "all 87 are naming" (the first draft of #957) and "the 33 non-naming are
+    all partial-vs-unconditional" (its correction). The measured answer is the
+    three categories above.
+
+Triggers — **0 diverging**
+    Not compared, and currently identical anyway. Listed so a future
+    divergence here is a known blind spot rather than a discovery.
+
+**Do not "fix" these omissions by adding the dimensions.** Each would report
+its full population as a failure on the first run, permanently, and the
+natural next step is to weaken or delete the gate. If comparing one of them
+ever becomes genuinely worth doing, it is a separate decision that must carry
+these numbers with it (#957).
 """
 
 import psycopg2
