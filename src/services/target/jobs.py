@@ -275,6 +275,28 @@ async def reschedule_job(
         raise _fenced(job_id)
 
 
+async def wait_or_stop(event, timeout_seconds: float) -> bool:
+    """Wait for *event* up to *timeout_seconds*; True when it fired.
+
+    The 3.10-safe form of the wait-with-deadline idiom. Neither of the obvious
+    spellings works here: `asyncio.timeout` is 3.11+ (the repo floor is 3.10 —
+    CI's supervision log was the discovery: `lease-heartbeat DIED
+    (AttributeError...)`), and `wait_for(event.wait(), ...)` leaks an
+    unawaited coroutine under cancel races (#958). Owning the waiter task and
+    always reaping it is leak-free on every supported version.
+    """
+    waiter = asyncio.ensure_future(event.wait())
+    done, _ = await asyncio.wait({waiter}, timeout=timeout_seconds)
+    if waiter not in done:
+        waiter.cancel()
+        try:
+            await waiter
+        except asyncio.CancelledError:
+            pass
+        return False
+    return True
+
+
 class LeaseHeartbeat:
     """One independent asyncio task per worker process (`02` §5): extends
     `locked_until` for every registered lease each interval, in a single
@@ -351,11 +373,8 @@ class LeaseHeartbeat:
         `consecutive_failures`, logs, and the loop continues — the task's
         whole purpose is surviving until the next beat."""
         while True:
-            try:
-                await asyncio.wait_for(self._stopping.wait(), timeout=self._interval)
+            if await wait_or_stop(self._stopping, self._interval):
                 return
-            except asyncio.TimeoutError:
-                pass
             try:
                 await self.beat_once()
             except Exception:  # noqa: BLE001 — the loop must outlive one beat
