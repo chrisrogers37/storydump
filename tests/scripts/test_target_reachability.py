@@ -16,6 +16,10 @@ commit-dependent, and a test pinning them would be pinning this laptop.
 import pathlib
 
 import importlib
+import json
+import subprocess
+import sys
+import textwrap
 
 import pytest
 
@@ -103,15 +107,50 @@ class TestTheHitsAreDifferentialNotCumulative:
     blocker RESOLVED. It failed toward the answer everyone wants.
     """
 
+    #: `closure_for` is per-process-sequential BY DESIGN, so only a fresh
+    #: interpreter can test it honestly. In the shared pytest process the
+    #: earlier `tests/scripts/` gate files have already imported the target
+    #: tier, so `src.worker`'s delta is empty before this file runs and the
+    #: precondition fails — the first version of this test passed file-solo and
+    #: was red on every full-suite run. **That is this PR's own defect one
+    #: scope up**: the fix stopped an earlier CALL leaking into a later one, and
+    #: the test then inherited an earlier FILE leaking into it. Same mechanism,
+    #: wider scope. A subprocess is the only boundary that actually holds.
+    PROBE = textwrap.dedent(
+        """
+        import json, sys
+        sys.path.insert(0, %r)
+        from scripts.target_reachability import closure_for
+        out = {}
+        for mod in ("src.worker", "src.main"):
+            size, hits, positive_ok = closure_for(mod)
+            out[mod] = {"size": size, "hits": sorted(hits), "positive_ok": positive_ok}
+        print(json.dumps(out))
+        """
+    )
+
+    def _run_probe(self):
+        root = str(pathlib.Path(tr.__file__).resolve().parent.parent)
+        proc = subprocess.run(
+            [sys.executable, "-c", self.PROBE % root],
+            capture_output=True,
+            text=True,
+            cwd=root,
+        )
+        assert proc.returncode == 0, f"probe failed: {proc.stderr[-800:]}"
+        return json.loads(proc.stdout.strip().splitlines()[-1])
+
     def test_a_module_that_imports_no_target_reports_none_after_one_that_does(
         self,
     ):
-        first = tr.closure_for("src.worker")
-        assert first[1], "precondition: src.worker must reach target modules"
-        _, hits, _ = tr.closure_for("src.main")
-        assert hits == set(), (
+        out = self._run_probe()
+        assert out["src.worker"]["hits"], (
+            "precondition: src.worker must reach target modules in a FRESH "
+            "process — an empty set here means the isolation is not holding"
+        )
+        assert out["src.main"]["hits"] == [], (
             "src.main imports no target module, so measuring it AFTER a module "
-            f"that does must still report none — got {sorted(hits)}"
+            f"that does must still report none — got {out['src.main']['hits']}"
         )
 
     def test_the_positive_control_is_cumulative_and_survives_being_second(self):
@@ -120,13 +159,23 @@ class TestTheHitsAreDifferentialNotCumulative:
         A control that fails on correct behaviour teaches its reader to ignore
         it, so this asymmetry with `hits` is deliberate and is pinned here.
         """
-        tr.closure_for("src.worker")
-        _, _, positive_ok = tr.closure_for("src.main")
+        out = self._run_probe()
+        positive_ok = out["src.main"]["positive_ok"]
         assert positive_ok, (
             f"{tr.CONTROL_POSITIVE} is imported once per process; the positive "
             "control reads the cumulative closure and must stay true"
         )
 
-    def test_the_negative_control_names_a_module_that_cannot_exist(self):
-        with pytest.raises(ModuleNotFoundError):
-            importlib.import_module(tr.CONTROL_NEGATIVE)
+    def test_the_negative_probe_is_present_and_not_target_tier(self):
+        """The probe must be able to APPEAR in hits, or it cannot go red.
+
+        Retired the fabricated `__NONEXISTENT__` probe and its test: that test
+        verified the probe could not be imported, which is precisely WHY the
+        control could never fire. A control is only a control if some defect
+        makes it red.
+        """
+        importlib.import_module(tr.CONTROL_NEGATIVE)  # present: must not raise
+        assert not tr.CONTROL_NEGATIVE.startswith(tr.TARGET_PREFIXES), (
+            "the negative probe must not be target tier, or a correct walker "
+            "would count it and the control would be red on healthy code"
+        )

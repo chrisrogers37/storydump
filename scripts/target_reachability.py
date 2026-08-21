@@ -131,15 +131,29 @@ def target_modules_on_disk(root: pathlib.Path) -> set[str]:
     return found
 
 
-#: The positive and negative controls from the manual #942 run, ported rather
-#: than reinvented. They pin OPPOSITE failure directions and that is the point:
-#: `POSITIVE` catches a walker that has stopped matching, `NEGATIVE` catches one
-#: that has started matching everything. The second is not hypothetical — before
-#: the `(after - before)` fix below, a target module imported by an EARLIER
-#: entrypoint was attributed to every later one, so `src.main` measured after
-#: `src.worker` reported 14 target hits while importing none of them.
+#: Two controls pinning OPPOSITE failure directions: `POSITIVE` catches a walker
+#: that has stopped matching, `NEGATIVE` catches one that has started matching
+#: everything.
+#:
+#: THE NEGATIVE PROBE IS A DELIBERATE DIVERGENCE FROM THE MANUAL #942 RUN, and
+#: is documented here so nobody later "restores" the original as a tidy-up. That
+#: run used a FABRICATED module (`src.services.target.__NONEXISTENT__`). A probe
+#: for something that cannot exist can never enter `sys.modules`, so it can never
+#: enter `hits` under ANY defect that derives hits from `sys.modules` — including
+#: the one this script was fixed for, and including the very failure the control
+#: claims to catch. Measured on the running instrument: mutate the walker to
+#: match everything and it reports 780 garbage hits, exit 0, negative control
+#: `ok: true`. **A control whose probe cannot exist is unfalsifiable — it is a
+#: sentence, not a control.**
+#:
+#: So the negative is a SELECTIVITY probe instead: a module that genuinely IS
+#: present in every closure but is NOT target tier. Under match-everything it
+#: lands in hits and the control goes red. It is the same module as the positive
+#: probe on purpose — one module, two opposite questions: "does the walker see
+#: real modules at all" (it must be in the closure) and "does the walker
+#: discriminate" (it must NOT be in target hits).
 CONTROL_POSITIVE = "src.config.settings"
-CONTROL_NEGATIVE = "src.services.target.__NONEXISTENT__"
+CONTROL_NEGATIVE = "src.config.settings"
 
 
 def closure_for(entry: str) -> tuple[int, set[str], bool]:
@@ -258,8 +272,7 @@ def main(argv=None) -> int:
         },
         "negative": {
             "probe": CONTROL_NEGATIVE,
-            "ok": CONTROL_NEGATIVE not in all_hits
-            and not any(h == CONTROL_NEGATIVE for h in all_hits),
+            "ok": CONTROL_NEGATIVE not in all_hits,
         },
     }
     controls_ok = controls["positive"]["ok"] and controls["negative"]["ok"]
@@ -335,7 +348,7 @@ def main(argv=None) -> int:
     neg = controls["negative"]
     print(
         f"  negative  {neg['probe']:38s} "
-        f"{'PASS' if neg['ok'] else 'FAIL'}  (never matches)"
+        f"{'PASS' if neg['ok'] else 'FAIL'}  (present, but never a target hit)"
     )
     if not controls_ok:
         print("\n  *** A CONTROL FAILED — the numbers above are not evidence. ***")
