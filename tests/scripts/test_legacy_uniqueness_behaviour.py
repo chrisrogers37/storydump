@@ -206,7 +206,7 @@ def _lock(conn, media=MEDIA_A, until=None):
 RULES: tuple[Rule, ...] = (
     Rule(
         index="users_telegram_user_id_key",
-        migration="001",
+        migration="setup_database.sql",
         refuses="a second user with the same telegram_user_id",
         permits="a user with a different telegram_user_id (insert-path control)",
         setup=lambda c: _user(c, tg=80001),
@@ -335,7 +335,7 @@ RULES: tuple[Rule, ...] = (
     ),
     Rule(
         index="idx_media_items_file_path_legacy_unique",
-        migration="044",
+        migration="014",
         refuses="two NULL-tenant rows sharing a file_path — which"
         " unique_file_path_per_tenant CANNOT catch, because NULLs are distinct"
         " in a plain UNIQUE and the pair never collides there",
