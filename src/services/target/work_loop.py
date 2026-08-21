@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from src.services.target import (
     jobs,
     outbox,
+    prompts,
     publish_pipeline,
     reconciler,
     scheduler,
@@ -67,6 +68,7 @@ class WorkerConfig:
     park_seconds: float = 900.0  # executor-less kinds retry this often
     sender_hold_seconds: float = 45.0  # < lease_seconds: poller hold per claim
     sender_sweep_seconds: float = 3.0  # cadence of the sender-job mint sweep
+    prompt_sweep_seconds: float = 5.0  # cadence of the prompt sweep (W3)
     lane_max_consecutive_errors: int = 10  # claim errors before the lane dies loudly
     poller_interval_seconds: float = 2.0  # 05: outbox cadence
     chat_limit: int = 18  # 05: per-chat sends per window
@@ -160,7 +162,7 @@ def build_registry(deps: WorkerDeps) -> dict:
                 " has no ig_accounts row"
             )
         slot_at = row["slot_at"]
-        await scheduler.execute_plan_slot(
+        intent_id = await scheduler.execute_plan_slot(
             session,
             workspace_id=str(job["workspace_id"]),
             ig_account_id=str(payload["ig_account_id"]),
@@ -168,6 +170,12 @@ def build_registry(deps: WorkerDeps) -> dict:
             provider_account_ref=row["provider_account_ref"],
             approval_mode=row["approval_mode"],
         )
+        if intent_id is not None:
+            # The fast path of the `02` §4 prompt edge: mint and prompt on
+            # the same beat, same transaction. The prompt sweep is the
+            # correctness backstop for anything this misses (a crash between
+            # mint and prompt, or intents minted before W3 existed).
+            await prompts.sweep_due_prompts(session, limit=1)
 
     async def reap_expired(session, job):
         await scheduler.execute_reap_expired(

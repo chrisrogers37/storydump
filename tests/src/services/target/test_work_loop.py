@@ -153,6 +153,14 @@ class TestPlanSlotAdapterMapsThePayload:
         from datetime import datetime, timezone
 
         resolved_slot = datetime(2026, 8, 21, 10, 0, tzinfo=timezone.utc)
+
+        swept = []
+
+        async def fake_sweep(session, *, limit):
+            swept.append(limit)
+            return {"prompted": 0, "advanced": 0, "failed_no_surface": 0}
+
+        monkeypatch.setattr(work_loop.prompts, "sweep_due_prompts", fake_sweep)
         session = _FakeSession(
             rows=[
                 {
@@ -187,6 +195,7 @@ class TestPlanSlotAdapterMapsThePayload:
         assert bound["slot"] == "2026-08-21T10:00:00+00:00", (
             "the raw payload string must ride to Postgres unmodified"
         )
+        assert swept == [1], "a minted intent triggers the same-beat prompt fast path"
 
 
 class _Recorder:
