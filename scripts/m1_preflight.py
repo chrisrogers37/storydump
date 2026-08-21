@@ -219,17 +219,20 @@ CHECKS: tuple[Check, ...] = (
     # ===== the two collapse counts every conditional fork keys on ==========
     Check(
         "chat_settings",
-        "fork_c_and_d_collapse_counts",
+        "fork_c_collapse_counts",
         DISCLOSURE,
         "SELECT count(*) AS chats,"
         "       count(*) FILTER (WHERE telegram_chat_id < 0) AS group_chats"
         "  FROM chat_settings",
         spec="§3.3",
-        why="THE conditional-fork input, printed by the spec verbatim. Fork C"
-        " collapses at group_chats = 1; Fork D collapses only at chats = 1"
-        " TOTAL. The two are deliberately different counts — a single DM-rooted"
-        " row makes minting rule W mint two workspaces where a collapse shape"
-        " mints one, so C can collapse while D does not.",
+        why="Fork C's collapse input, printed by the spec verbatim: C collapses"
+        " at group_chats = 1. The chats TOTAL is still printed beside it, but it"
+        " no longer feeds a fork — Fork D was ANSWERED BY THE SHIPPED SCHEMA"
+        " (§3.4/§4.2), not by this count. channel_bindings is UNIQUE on"
+        " (channel, external_ref) with NO uniqueness on workspace_id, so N"
+        " channels per tenant is the design and minting rule W is retired."
+        " The total is kept because a second chat still changes the DM-binding"
+        " derivation's ambiguity, which is a data question rather than a fork.",
     ),
     Check(
         "chat_settings",
@@ -237,9 +240,12 @@ CHECKS: tuple[Check, ...] = (
         COUNT,
         "SELECT count(*) FROM chat_settings WHERE telegram_chat_id > 0",
         spec="§3.4 addendum / §4.2",
-        why="A DM-rooted tenant is product-shaped and is Fork D's territory."
-        " It is also why D's collapse keys on chats rather than group_chats.",
-        fork="D",
+        why="A DM-rooted tenant is product-shaped. It no longer names an open"
+        " fork: §4.2 binds a DM to the workspace of the user it is with, via"
+        " telegram_chat_id -> users.telegram_user_id -> active membership. This"
+        " count is the denominator for that derivation — a DM resolving to zero"
+        " groups, or to more than one, is what would break it, so the number"
+        " stays worth printing without a fork attached to it.",
     ),
     # ===== M1-01  users -> users, user_identities =========================
     Check("users", "total", COUNT, "SELECT count(*) FROM users", spec="§4.1"),
@@ -323,9 +329,10 @@ CHECKS: tuple[Check, ...] = (
         " nothing workspace-rooted beneath it.",
         remedy="Fork A's adjudication procedure, which does not exist yet — no"
         " printed actor can perform it (svc_migration holds SELECT only on"
-        " legacy). Note the count is Fork-D-conditional: under a collapse shape"
-        " a DM-rooted chat mints no workspace and this feed may be empty.",
-        fork="A (volume conditional on D)",
+        " legacy). The volume is no longer D-conditional: §4.2 retires minting"
+        " rule W, so a DM-rooted chat mints no workspace of its own under the"
+        " ruled mapping rather than under one of two candidate shapes.",
+        fork="A",
     ),
     Check(
         "user_chat_memberships",
@@ -407,7 +414,7 @@ CHECKS: tuple[Check, ...] = (
         " ig_accounts.workspace_id is NOT NULL.",
         remedy="Fork C conditional: at group_chats = 1 the NULL-chat tokens"
         " resolve to the sole group tenant and these become reachable, so read"
-        " this beside fork_c_and_d_collapse_counts. Widening the ruled fan-out"
+        " this beside fork_c_collapse_counts. Widening the ruled fan-out"
         " source is a plan change, not the spec's call.",
         fork="C",
     ),
@@ -502,7 +509,7 @@ CHECKS: tuple[Check, ...] = (
         spec="§4.5 / 044",
         why="Ruled for this table by the 044 sole-tenant rule — which assigns"
         " rows to THE tenant and therefore needs exactly one to exist. Read"
-        " beside fork_c_and_d_collapse_counts.",
+        " beside fork_c_collapse_counts.",
         remedy="044's own header requires explicit owner sign-off for this"
         " class of write; never via CI or on merge.",
     ),

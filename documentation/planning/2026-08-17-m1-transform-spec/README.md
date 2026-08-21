@@ -4,7 +4,7 @@
 
 **Scope:** the `02` §9 disposition index made executable — per-legacy-table transform statements as runner-migration files, the per-column mapping with the `02` §0 timestamp rule applied per column, machine-checkable postconditions (row-count reconciliation + per-table invariants), and the quarantine feeds. This is `04` Phase M step **3e**: files that read `legacy.<table>` and write the target tables, inside the single advisory-locked runner invocation, after 3d (the F.2 schema files) and before 3f (snapshots).
 
-**What this spec does NOT decide** (§3 is the register): Forks A–C from mason's menu (**D is answered by the shipped schema rather than by a ruling — §3.4/§4.2**); Fork E (surfaced here, same discipline); #793 (`instagram_backfill` disposition — open, unforced at the 2026-08-13 census); the one-PR-vs-two program-shape split proposed in #790 comment 5280282481. Two forks are conditional on mason's §0 measurement (two counts, reproduced in §3.3; being chased separately) — **and the two counts are not interchangeable**: C collapses at `group_chats = 1` (one live *group* tenant — 044's derivation keys on a single group chat), D only at `chats = 1` **total** (a single DM-rooted row already makes minting rule W and a collapse shape disagree). Their sections are marked **conditional**, not blocked. Two register entries are additionally **lifted to the plan author** (§3.8) and are likewise not decided here.
+**What this spec does NOT decide** (§3 is the register): Forks A–C from mason's menu (**D is answered by the shipped schema rather than by a ruling — §3.4/§4.2**); Fork E (surfaced here, same discipline); #793 (`instagram_backfill` disposition — open, unforced at the 2026-08-13 census); the one-PR-vs-two program-shape split proposed in #790 comment 5280282481. **One** fork is conditional on mason's §0 measurement (§3.3; being chased separately): **C**, which collapses at `group_chats = 1` — one live *group* tenant, since 044's derivation keys on a single group chat. Its section is marked **conditional**, not blocked. **D is no longer among them**: it was previously paired with C here as collapsing at `chats = 1` total, on the reading that a DM-rooted row makes minting rule W and a collapse shape disagree. The shipped schema retires rule W outright (§3.4/§4.2), so no count decides D and the pairing of the two measurements is itself retired. Two register entries are additionally **lifted to the plan author** (§3.8) and are likewise not decided here.
 
 **Sources of truth** (all at `origin/main` `c28066d`): `02-domain-model.md` §0/§1/§2/§3/§4/§9 · `04-execution-sequence.md` L76–160 (Phase M) · `03-decision-record.md` D39/D40/D41 · `documentation/planning/2026-08-14-f2-increment-split/README.md` (the 3d band this spec lands after) · `documentation/operations/migration-runner.md` + `scripts/migration_runner.py` (file contract) · `scripts/fc8_gate.py` (#792) · `src/models/*.py` (legacy column ground truth) · #790 + comments 5280282481 / 5286087397 / 5286618365 / 5318301047 · #787 (measured inert for the production world) · #793 (open).
 
@@ -115,7 +115,7 @@ Ruled for `media_items` only (the 044 sole-tenant rule, cited in `02` §9). Open
 
 **Ratifier: the product owner.** Migration 044's own header sets that bar for this class of write ("DO NOT APPLY WITHOUT RATIFICATION… apply only on explicit sign-off, never via CI or on merge"). Named because C is the fork most likely to be resolved by a measurement and then quietly actioned by whoever ran the query — the measurement *sizes* it; only the owner ratifies it.
 
-**Conditional collapse:** if the measurement below returns **`group_chats = 1`** (one live group tenant — migration 044's standing assertion; the total `chats` count is Fork D's number, §3.4, not this one), C1/C2/C3 coincide for every affected row and C is a one-line ruling. ari is chasing it; this spec does not block on it:
+**Conditional collapse:** if the measurement below returns **`group_chats = 1`** (one live group tenant — migration 044's standing assertion; the total `chats` count is **no longer a fork's number** — D is answered by the schema (§3.4); it is printed because it bounds the DM-binding derivation's ambiguity, §3.4, not this one), C1/C2/C3 coincide for every affected row and C is a one-line ruling. ari is chasing it; this spec does not block on it:
 
 ```sql
 SELECT count(*) AS chats,
@@ -142,7 +142,21 @@ tenant many channels.
 The original register entry is kept below because the reasoning it records is still how the
 question was framed, and a reader arriving from `02` or `04` will look for it.
 
+**A register-hygiene note, because this will recur.** Decision **D13** — *"A Telegram chat is one
+binding of a workspace… 0..n per workspace"* — was ratified **2026-08-10**, eleven days before this
+correction, and a comment citing it sits in `053` immediately after the `channel_bindings` table,
+untouched by this change. **The question was already settled in prose before the register posed it
+as open**, and the D-numbers this document cites as sources of truth (D39/D40/D41) never picked it
+up. So the failure was not that nobody knew — it is that a ratified decision did not propagate into
+the register that a later reader consults, and the register is the surface that gets trusted. Worth
+naming as a process defect rather than a one-off: the same gap will hide the next D13. Not fixed
+here; fixing it means auditing the D-number chain, which is a separate piece of work.
+
 ---
+
+> **SUPERSEDED — retained as the record of how the question was framed, not as a current
+> statement. Every present-tense claim below is false as of 2026-08-21: §4.2 no longer mints by
+> rule W, and no count decides D.**
 
 Nothing states how many workspaces the transform mints. §4.2 is written against a **minting rule W** = "one workspace per `chat_settings` row, `workspace_id := chat_settings.id`" — labeled as Fork D's obvious reading, **not** a ruling. At **`chats = 1` total** — the first count of §3.3's query, deliberately not `group_chats` — every candidate shape degenerates to the same transform, so §4.2's mapping stands regardless. The distinction is live, not theoretical: `.claude/rules/database.md` gives each Telegram chat its own settings row, so `chats > 1, group_chats = 1` is an ordinary state — and there a single DM-rooted row makes W mint two workspaces where a collapse shape mints one, so D does **not** collapse even though C does. If `chats` returns > 1, W is D's ruling to make (product owner — merging minted workspaces afterwards is `06` §4 clone-and-retire per account, on live data).
 
@@ -273,6 +287,18 @@ workspace for the DM and be refused at commit. **Rule W is inexpressible against
 schema on the actual corpus** — which is why the 1,095-row quarantine dissolves: it was the cost
 of a mapping the schema does not admit, not a cost to weigh.
 
+**Precisely which thing refuses it, because the DDL trigger alone does not.** A workspace minted
+for a DM-shaped chat with an *arbitrary* user inserted as owner **commits fine** — measured by
+rajan on an independent build, and it is the right probe to have run, because "the schema refuses
+W" invites a literal reader to test exactly that and conclude the claim is overstated. The trigger
+enforces *an* owner row, not a **derived** one. What closes that door is the trigger **jointly with
+the pre-existing reconciliation postcondition** `count(workspace_members) = count(active legacy
+memberships)` (§6, untouched by this change): a synthetic owner has no backing legacy membership,
+so it breaks the count identity in the same transaction. Neither half is sufficient alone —
+the trigger admits a fabricated owner, and the postcondition alone would admit an ownerless
+workspace that mints no members at all. **The refusal is the pair, and stating it as the trigger's
+work would leave the load-bearing half undocumented.**
+
 **The replacement is derived, not asserted.** A DM chat binds to the workspace of the user it is
 with, reached by a join that already exists — `chat_settings.telegram_chat_id` (DM) →
 `users.telegram_user_id` → that user's active `user_chat_memberships` → the group chat's
@@ -284,8 +310,11 @@ ownership, and a version phrased as "the workspace this user owns" would fail he
 **What would make this wrong**, stated so it is checkable rather than trusted:
 
 - **A DM user in two groups** → the join returns >1 workspace and the rule needs a tiebreak it
-  does not have. Currently 0; it is a property of the *data*, not the mapping, so it can change
-  without anything here changing.
+  does not have. Currently 0 — but **that floor is lower than it sounds, and saying so is the
+  point**: exactly ONE group chat exists, so there is only one candidate to resolve to and the
+  ambiguous case is **structurally untestable today** rather than merely unobserved. A zero from
+  a population that cannot produce the condition is not evidence the rule handles it. The second
+  group chat is what first exercises this, and it must be re-derived then, not assumed to hold.
 - **A DM user in no group** → nothing to bind to; that row is a quarantine feed, not a drop.
   Currently 0.
 - **A group chat with zero active memberships** → mints no workspace under any rule, because the
@@ -397,7 +426,7 @@ Auto-audit: one trigger-minted `ig_account` row per insert. **Profiles:** (a) le
 
 ### 4.8 `legacy.posting_history` → `post_intents` + companion `audit_events` (M1-08) — **attribution; Fork A feed; Fork C conditional**
 
-**Attribution (ruled mechanism, `04` L85):** the account-switch timeline reconstructed from `legacy.service_runs` — `service_name = 'InstagramAccountService'`, `method_name IN ('switch_account','add_account')`, completed rows; the switched-to account is `input_params->>'account_id'` (a legacy `instagram_accounts.id`), ordered by `started_at` (conv). A history row attributes to the account active at `posted_at`; **±6h tolerance at boundaries, nearest-timestamp tie-break** (ruled). Feeds to quarantine (§5.2): rows in a timeline gap; rows matching nothing; ambiguous-boundary rows beyond the tie-break; the two auto-set paths that write no `service_runs` record (the pass-4-named known gap). **Degenerate short-circuit:** a workspace whose pair-set (4.4) holds exactly one account attributes every row to it trivially — no timeline consulted; at the current census this is the expected world, and the profile sizes it. `service_runs` carries **no tenant column**: at `chats = 1` the global timeline is trivially exact; at `group_chats = 1` with DM rows present it is exact iff no attributable history resolves outside the sole group tenant **and no switch-timeline events originate outside it** — pollution enters on the *events* side, not only the history side (#827 approval note), so the §5.1 battery profiles **both**. An events-side polluter is loud rather than silent: it pulls attribution toward a (workspace, account) pair absent from the workspace's pair-set, which the composite `fk_intent_account` refuses into the quarantine feed instead of admitting quietly. Under N > 1 group tenants per-workspace timelines need `user_id`-membership inference — that residue is named as C/D-conditional, not silently absorbed. `service_runs` itself: consumed here, snapshotted at 3f, never lands in target (ruled).
+**Attribution (ruled mechanism, `04` L85):** the account-switch timeline reconstructed from `legacy.service_runs` — `service_name = 'InstagramAccountService'`, `method_name IN ('switch_account','add_account')`, completed rows; the switched-to account is `input_params->>'account_id'` (a legacy `instagram_accounts.id`), ordered by `started_at` (conv). A history row attributes to the account active at `posted_at`; **±6h tolerance at boundaries, nearest-timestamp tie-break** (ruled). Feeds to quarantine (§5.2): rows in a timeline gap; rows matching nothing; ambiguous-boundary rows beyond the tie-break; the two auto-set paths that write no `service_runs` record (the pass-4-named known gap). **Degenerate short-circuit:** a workspace whose pair-set (4.4) holds exactly one account attributes every row to it trivially — no timeline consulted; at the current census this is the expected world, and the profile sizes it. `service_runs` carries **no tenant column**: at `chats = 1` the global timeline is trivially exact; at `group_chats = 1` with DM rows present it is exact iff no attributable history resolves outside the sole group tenant **and no switch-timeline events originate outside it** — pollution enters on the *events* side, not only the history side (#827 approval note), so the §5.1 battery profiles **both**. An events-side polluter is loud rather than silent: it pulls attribution toward a (workspace, account) pair absent from the workspace's pair-set, which the composite `fk_intent_account` refuses into the quarantine feed instead of admitting quietly. Under N > 1 group tenants per-workspace timelines need `user_id`-membership inference — that residue is **C-conditional and corpus-conditional, not D-conditional** — the axis is how many GROUP tenants exist (Fork C's count), plus whether any switch events were ever recorded; D no longer names an axis at all (§3.4). Named rather than silently absorbed. **And the second half is now measured: there are ZERO `switch_account`/`add_account` rows in `service_runs`, all time** — the table holds 7,551 rows across 7 services and `InstagramAccountService` is not one of them, so this mechanism has no input on the migration corpus regardless of tenant count (#943). `service_runs` itself: consumed here, snapshotted at 3f, never lands in target (ruled).
 
 | Legacy | → `post_intents` | Rule |
 |---|---|---|
