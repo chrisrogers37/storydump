@@ -310,8 +310,12 @@ async def store_credential(
     result = await conn.execute(
         text(
             "INSERT INTO oauth_credentials"
-            " (workspace_id, ig_account_id, provider, encrypted_payload, expires_at)"
-            " VALUES (:ws, :acct, :provider, :payload, :exp) RETURNING id"
+            " (workspace_id, ig_account_id, provider, encrypted_payload,"
+            "  expires_at, next_refresh_at)"
+            # next_refresh_at = now(): immediately due, so the next clock tick
+            # mints a refresh and that mint re-arms the cadence. Without this
+            # a stored credential is invisible to the refresh leg forever.
+            " VALUES (:ws, :acct, :provider, :payload, :exp, now()) RETURNING id"
         ),
         {
             "ws": str(workspace_id),
