@@ -127,6 +127,15 @@ SELECT count(*) AS chats,
 
 Nothing states how many workspaces the transform mints. §4.2 is written against a **minting rule W** = "one workspace per `chat_settings` row, `workspace_id := chat_settings.id`" — labeled as Fork D's obvious reading, **not** a ruling. At **`chats = 1` total** — the first count of §3.3's query, deliberately not `group_chats` — every candidate shape degenerates to the same transform, so §4.2's mapping stands regardless. The distinction is live, not theoretical: `.claude/rules/database.md` gives each Telegram chat its own settings row, so `chats > 1, group_chats = 1` is an ordinary state — and there a single DM-rooted row makes W mint two workspaces where a collapse shape mints one, so D does **not** collapse even though C does. If `chats` returns > 1, W is D's ruling to make (product owner — merging minted workspaces afterwards is `06` §4 clone-and-retire per account, on live data).
 
+**Restated 2026-08-21 — M1-02's postconditions no longer assume W.** The master identity used to
+be counted in workspaces, which is rule W's shape, and it stops balancing under a collapse:
+evaluated against the shipped target schema at production's two-chat shape it returns **`False`**.
+It is now a **partition over legacy chats** — every chat becomes a binding, a recorded drop, or a
+quarantine entry — which holds under either ruling without editing a character. §6's M1-02 block
+carries the lines and the reasoning. **This does not decide D**, and under a separate-workspace
+ruling the file needs more than a postcondition change: the shipped schema fails that shape for
+two independent reasons that are not about counting, both named in §6.
+
 **Addendum this spec surfaces (C-adjacent, for the C ruling to also cover; confirmed as a genuine menu addition in the #827 review):** `user_interactions` has **no tenant column at all** — only a raw, nullable `telegram_chat_id`. M1-09 resolves it via `legacy.chat_settings.telegram_chat_id`; rows with NULL or unresolvable chat ids have no workspace under any C option as written. Same class, one table further out; named here so the C ruling can say whether it covers them (until then they are a §5.2 feed). Also profiled: `chat_settings` rows with `telegram_chat_id > 0` (a DM-rooted tenant would be product-shaped — Fork D's territory, and the reason D's collapse keys on `chats`, not `group_chats`).
 
 ### 3.5 Fork E — live `recent` locks have no account (surfaced by this spec; menu, no pick)
@@ -398,13 +407,79 @@ Per file, the verbatim `-- runner:postcondition` lines (each a single-boolean SE
 
 **M1-02** (workspaces + members + bindings; owner invariant is *also* enforced by the deferred triggers at this file's commit — these make the arithmetic visible)
 ```
--- runner:postcondition SELECT (SELECT count(*) FROM workspaces) + (SELECT count(*) FROM <quarantine: rung-4 chats>) = (SELECT count(*) FROM legacy.chat_settings)   -- the master identity, M1-08's shape-general form (A1: term = 0; A2: term > 0 and the file completes green; A3: the halt). #827 Finding 3: the earlier hard-zero arm was the A1 instance only
--- runner:postcondition SELECT (SELECT count(*) FROM channel_bindings WHERE channel='telegram_group') = (SELECT count(*) FROM workspaces)   -- bindings track MINTED workspaces, so this holds under every A shape
+-- runner:postcondition SELECT NOT EXISTS (SELECT cs.telegram_chat_id::text FROM legacy.chat_settings cs EXCEPT (SELECT b.external_ref FROM channel_bindings b UNION SELECT d.external_ref FROM <recorded chat drops> d UNION SELECT q.external_ref FROM <quarantine: rung-4 chats> q))   -- THE MASTER IDENTITY, restated as a PARTITION over legacy chats: every chat becomes a binding, a recorded drop, or a quarantine entry. See "why this is no longer counted in workspaces" below
+-- runner:postcondition SELECT NOT EXISTS (SELECT b.external_ref FROM channel_bindings b EXCEPT SELECT cs.telegram_chat_id::text FROM legacy.chat_settings cs)   -- the other direction: no binding is invented. Without it the partition above is one-sided and a dropped chat cancels against a spurious binding
+-- runner:postcondition SELECT NOT EXISTS (SELECT 1 FROM workspaces w WHERE NOT EXISTS (SELECT 1 FROM channel_bindings b WHERE b.workspace_id = w.id))   -- replaces the bindings-1:1-to-workspaces check; see below for why that one had to go
 -- runner:postcondition SELECT NOT EXISTS (SELECT 1 FROM workspaces w WHERE NOT EXISTS (SELECT 1 FROM workspace_members m WHERE m.workspace_id = w.id AND m.role='owner'))
 -- runner:postcondition SELECT (SELECT count(*) FROM workspace_members) = (SELECT count(*) FROM legacy.user_chat_memberships WHERE is_active IS TRUE)   -- + deferred-chat term under A2 (a deferred chat defers its members with it)
 -- runner:postcondition SELECT (SELECT count(*) FROM audit_events WHERE actor_kind='migration' AND entity_kind='member' AND detail->>'transform_log'='membership_dropped_inactive') = (SELECT count(*) FROM legacy.user_chat_memberships WHERE is_active IS NOT TRUE)   -- + deferred-chat term under A2
 -- runner:postcondition SELECT (SELECT count(*) FROM workspaces WHERE tz='UTC' AND id IN (SELECT id FROM legacy.chat_settings WHERE posting_timezone IS NOT NULL AND fn_safe_tz(posting_timezone) <> posting_timezone)) = (SELECT count(*) FROM audit_events WHERE detail->>'transform_log'='tz_discarded')   -- both sides defer together under A2; holds under every A shape
 ```
+
+**Why the master identity is no longer counted in workspaces** (restated 2026-08-21; mason
+raised both of these against Fork D, and neither had been printed).
+
+The earlier form was `workspaces + rung-4 quarantine = legacy chat count`. It assumed one
+workspace per legacy chat — minting rule W, which §3.4 has always labelled Fork D's obvious
+reading rather than a ruling. **Under a collapse shape it stops balancing**: production has
+two legacy chats and one of them is a DM that mints no workspace of its own, so the identity
+reads `1 + 0 = 2`. Measured, not argued — evaluated against the shipped target schema with
+that shape built: **`False`**.
+
+What is actually conserved is not workspaces. **Every legacy chat becomes exactly one of
+three things: a binding, a recorded drop, or a quarantine entry.** That is a partition, and
+stating it as one is what the three lines above do.
+
+**The form is fork-independent, which is why it is written now rather than after the ruling.**
+It holds under a collapse shape (two bindings on one workspace, or one binding plus one
+recorded drop) and under separate-workspace minting (two bindings on two workspaces) without
+changing a character. Only the values it evaluates to depend on the ruling. **Under a
+separate-workspace ruling this postcondition is still not sufficient on its own** — the
+shipped schema fails that shape for reasons that are not about counting (a DM chat with zero
+memberships cannot satisfy `ct_workspaces_owner_at_insert`, and its history rows point at
+media owned by the other workspace, which the composite tenant FK makes inexpressible). That
+is a DDL question and it is deliberately not answered here.
+
+**It is a partition rather than a re-balanced count, and that is load-bearing.** A count
+identity balances whenever two errors cancel. Measured: drop the DM chat silently and mint one
+binding for a chat that does not exist in legacy, and the count form returns **`True`** while
+the set form returns **`False`**. A count that can be satisfied by two mistakes is not a
+conservation check.
+
+**Why the bindings check had to be replaced, and why it is the more dangerous of the two.**
+`count(bindings WHERE channel='telegram_group') = count(workspaces)` does **not fail** under a
+collapse shape — measured, it returns **`True`**. `ck_bindings_channel` admits `telegram_dm`
+as well, so a DM binding carried onto the group workspace is simply invisible to a predicate
+filtered on `telegram_group`. The check goes on passing while no longer conserving what it was
+written to conserve. A postcondition that breaks announces itself; one that goes quiet does
+not. Chat-to-binding conservation now lives in the partition above, and what remains here is
+the property that genuinely holds under every shape: **no minted workspace is binding-less**.
+
+**The rung-4 term stays, and stating why matters more than the line itself.** Under a collapse
+shape the DM mints no workspace, so on *this corpus* the owner-less-workspace failure does not
+arise. **That is a fact about this corpus and not about the design.** The ladder still has four
+rungs, rung 4 still has no adjudication procedure (Fork A), and production exercises neither
+rung 1 nor rung 2 — `m1_preflight` prints exactly that on every run. A chat with memberships
+that are all inactive still resolves to rung 4 under any Fork D shape. The term is therefore
+kept rather than dropped, and what keeps that honest is a test rather than this paragraph:
+`test_m1_ladder.py::TestEachRungIsReachedAndTakesPrecedence::test_rung4_quarantine_when_every_membership_is_inactive`
+seeds a chat whose every membership is inactive and asserts it still resolves to rung 4. It is
+marked `integration`, and CI runs `pytest tests/` with no marker filter, so it executes on every
+run regardless of which way Fork D is ruled.
+
+**A third line in this block is exposed to the same fork and is NOT restated here, because it
+is latent rather than live.** `count(workspace_members) = count(active legacy memberships)`
+assumes the two sides cannot collide. Under a collapse they can: `workspace_members` is keyed
+`(workspace_id, user_id)`, so a user holding a membership in *both* collapsed chats would
+produce one target row from two legacy rows and the count would come up short — a genuine
+failure, and one that reads as a miscount rather than as a collapse consequence.
+
+**Measured on production (read-only, 2026-08-21): zero users hold a membership in more than one
+chat.** One chat carries all three memberships; the DM carries none. So the identity holds at
+`3 = 3` under either ruling and there is nothing to fix today. It is named because the
+condition protecting it is a property of the *data*, not of the mapping — a second chat
+gaining a shared member before the window would make it live, and the same query re-run at
+window prep is what would catch that.
 
 **M1-03**
 ```
