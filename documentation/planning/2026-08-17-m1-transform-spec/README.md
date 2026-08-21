@@ -154,11 +154,13 @@ here; fixing it means auditing the D-number chain, which is a separate piece of 
 
 ---
 
-> **SUPERSEDED — retained as the record of how the question was framed, not as a current
-> statement. Every present-tense claim below is false as of 2026-08-21: §4.2 no longer mints by
-> rule W, and no count decides D.**
-
-Nothing states how many workspaces the transform mints. §4.2 is written against a **minting rule W** = "one workspace per `chat_settings` row, `workspace_id := chat_settings.id`" — labeled as Fork D's obvious reading, **not** a ruling. At **`chats = 1` total** — the first count of §3.3's query, deliberately not `group_chats` — every candidate shape degenerates to the same transform, so §4.2's mapping stands regardless. The distinction is live, not theoretical: `.claude/rules/database.md` gives each Telegram chat its own settings row, so `chats > 1, group_chats = 1` is an ordinary state — and there a single DM-rooted row makes W mint two workspaces where a collapse shape mints one, so D does **not** collapse even though C does. If `chats` returns > 1, W is D's ruling to make (product owner — merging minted workspaces afterwards is `06` §4 clone-and-retire per account, on live data).
+> **SUPERSEDED — the single paragraph inside this quote is retained as the record of
+> how the question was framed, not as a current statement. Its present-tense claims are
+> false as of 2026-08-21: §4.2 no longer mints by rule W, and no count decides D. The
+> fence ends where this quote ends — everything after it is LIVE, including the
+> restatement immediately below and §3.4's C-menu addendum.**
+>
+> Nothing states how many workspaces the transform mints. §4.2 is written against a **minting rule W** = "one workspace per `chat_settings` row, `workspace_id := chat_settings.id`" — labeled as Fork D's obvious reading, **not** a ruling. At **`chats = 1` total** — the first count of §3.3's query, deliberately not `group_chats` — every candidate shape degenerates to the same transform, so §4.2's mapping stands regardless. The distinction is live, not theoretical: `.claude/rules/database.md` gives each Telegram chat its own settings row, so `chats > 1, group_chats = 1` is an ordinary state — and there a single DM-rooted row makes W mint two workspaces where a collapse shape mints one, so D does **not** collapse even though C does. If `chats` returns > 1, W is D's ruling to make (product owner — merging minted workspaces afterwards is `06` §4 clone-and-retire per account, on live data).
 
 **Restated 2026-08-21 — M1-02's postconditions no longer assume W.** The master identity used to
 be counted in workspaces, which is rule W's shape, and it stops balancing under a collapse:
@@ -169,7 +171,7 @@ carries the lines and the reasoning. **This does not decide D**, and under a sep
 ruling the file needs more than a postcondition change: the shipped schema fails that shape for
 two independent reasons that are not about counting, both named in §6.
 
-**Addendum this spec surfaces (C-adjacent, for the C ruling to also cover; confirmed as a genuine menu addition in the #827 review):** `user_interactions` has **no tenant column at all** — only a raw, nullable `telegram_chat_id`. M1-09 resolves it via `legacy.chat_settings.telegram_chat_id`; rows with NULL or unresolvable chat ids have no workspace under any C option as written. Same class, one table further out; named here so the C ruling can say whether it covers them (until then they are a §5.2 feed). Also profiled: `chat_settings` rows with `telegram_chat_id > 0` (a DM-rooted tenant would be product-shaped — Fork D's territory, and the reason D's collapse keys on `chats`, not `group_chats`).
+**Addendum this spec surfaces (C-adjacent, for the C ruling to also cover; confirmed as a genuine menu addition in the #827 review):** `user_interactions` has **no tenant column at all** — only a raw, nullable `telegram_chat_id`. M1-09 resolves it via `legacy.chat_settings.telegram_chat_id`; rows with NULL or unresolvable chat ids have no workspace under any C option as written. Same class, one table further out; named here so the C ruling can say whether it covers them (until then they are a §5.2 feed). Also profiled: `chat_settings` rows with `telegram_chat_id > 0` (a DM-rooted tenant is product-shaped; it no longer names a fork — §3.4/§4.2 bind a DM to the workspace of the user it is with, so this count is the denominator for that derivation rather than an input to a cardinality decision).
 
 ### 3.5 Fork E — live `recent` locks have no account (surfaced by this spec; menu, no pick)
 
@@ -592,7 +594,9 @@ kept rather than dropped, and what keeps that honest is a test rather than this 
 `test_m1_ladder.py::TestEachRungIsReachedAndTakesPrecedence::test_rung4_quarantine_when_every_membership_is_inactive`
 seeds a chat whose every membership is inactive and asserts it still resolves to rung 4. It is
 marked `integration`, and CI runs `pytest tests/` with no marker filter, so it executes on every
-run regardless of which way Fork D is ruled.
+run regardless of workspace cardinality — and that phrasing is deliberate now that D is
+answered rather than ruled (§3.4): the test's value is that it holds under the derived
+shape, not that it survives a pending decision.
 
 **A third line in this block is exposed to the same fork and is NOT restated here, because it
 is latent rather than live.** `count(workspace_members) = count(active legacy memberships)`
