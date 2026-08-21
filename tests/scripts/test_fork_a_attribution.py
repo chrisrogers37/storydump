@@ -83,9 +83,40 @@ class TestALivenessNameIsBackedByALivenessFilter:
     LIFECYCLE_WORDS = ("live", "in_force", "permanent", "expired", "active")
 
     def _select_items(self):
-        """(alias, expression) for each projected column of LOCKS_SQL."""
+        """(alias, expression) for each projected column of LOCKS_SQL.
+
+        The projection ends at the FROM **at depth 0**, not at the first one.
+        Bounding it as "everything up to the next FROM" ended the scan inside
+        the `backed_by_history` subquery, so that column — and every column
+        after it — was invisible to the gate. A fresh `count(*) AS live_locks`
+        appended there passed both checks, which is the exact defect the gate
+        exists to catch, sitting in the gate's own blind spot.
+
+        The rule that avoids the class: **bound the scope positively.**
+        "Everything until I hit X" inherits whatever the text does next;
+        "the tokens at depth 0" is a property of the thing being parsed.
+        """
         body = mod.LOCKS_SQL.strip()
-        body = body[body.upper().index("SELECT") + 6 : body.upper().index("FROM")]
+        start = body.upper().index("SELECT") + 6
+        depth, end = 0, None
+        i = start
+        upper = body.upper()
+        while i < len(body):
+            if body[i] == "(":
+                depth += 1
+            elif body[i] == ")":
+                depth -= 1
+            elif (
+                depth == 0
+                and upper.startswith("FROM", i)
+                and (i == 0 or not body[i - 1].isalnum())
+                and (i + 4 >= len(body) or not body[i + 4].isalnum())
+            ):
+                end = i
+                break
+            i += 1
+        assert end is not None, "no depth-0 FROM: the projection was not bounded"
+        body = body[start:end]
         items, depth, cur = [], 0, ""
         for ch in body:
             if ch == "(":
@@ -125,6 +156,40 @@ class TestALivenessNameIsBackedByALivenessFilter:
             assert not any(w in alias for w in self.LIFECYCLE_WORDS), (
                 f"{alias!r} is an unfiltered count(*) wearing a lifecycle name"
             )
+
+    def test_a_defect_AFTER_the_subquery_is_visible_to_the_gate(self):
+        """The control virgil built, kept as a test rather than a demonstration.
+
+        The parser used to end the projection at the FIRST `FROM` — the one
+        inside `backed_by_history`'s subquery — so any column defined at or
+        after that point was outside the gate's view. He proved it by appending
+        a fresh `count(*) AS live_locks`, the exact defect this gate exists to
+        catch, and watching it pass both checks.
+
+        A gate with a blind spot at the end of its own input is worse than no
+        gate: it reports on the columns it happens to reach and says nothing
+        about the rest, in the same green.
+        """
+        before = mod.LOCKS_SQL
+        try:
+            # appended AFTER the subquery, i.e. in the old parser's blind spot
+            mod.LOCKS_SQL = before.replace(
+                "AS backed_by_history\n  FROM media_posting_locks l",
+                "AS backed_by_history,\n       count(*) AS live_locks"
+                "\n  FROM media_posting_locks l",
+            )
+            assert mod.LOCKS_SQL != before, "mutation did not apply"
+            aliases = [a for a, _ in self._select_items()]
+            assert "live_locks" in aliases, (
+                "the gate cannot see a column defined after the subquery — "
+                f"it sees only {aliases}"
+            )
+            with pytest.raises(AssertionError):
+                self.test_every_lifecycle_alias_filters_on_locked_until()
+            with pytest.raises(AssertionError):
+                self.test_the_unfiltered_count_is_not_named_for_a_lifecycle()
+        finally:
+            mod.LOCKS_SQL = before
 
     def test_the_gate_would_have_caught_the_defect(self):
         """Positive control: the pre-#974 shape must fail both checks."""
