@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from unittest.mock import Mock, patch
 
 from src.config.constants import MAX_CAPTION_LENGTH
+from src.repositories.tenant_scope import SYSTEM_SCOPE
 from src.services.core.caption_service import CaptionService
 
 
@@ -75,7 +76,9 @@ class TestCaptionService:
         caption_service.media_repo.update_metadata.assert_called_once_with(
             str(media_item.id),
             generated_caption="Check this out!",
-            chat_settings_id=None,
+            # NULL-owned media: scope_of_row resolves to SYSTEM_SCOPE. Passing
+            # None here used to raise TenantContextError (#841).
+            chat_settings_id=SYSTEM_SCOPE,
         )
 
     @pytest.mark.asyncio

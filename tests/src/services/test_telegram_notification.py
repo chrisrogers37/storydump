@@ -1045,7 +1045,7 @@ class TestTenantRouting:
         assert factory_kwargs["telegram_chat_id"] == self.TENANT_CHAT_ID
         # Queue row records the tenant chat id
         mock_telegram_service.queue_repo.set_telegram_message.assert_called_once_with(
-            queue_item_id, 12345, self.TENANT_CHAT_ID
+            queue_item_id, 12345, self.TENANT_CHAT_ID, str(tenant_cs_id)
         )
         # Interaction log attributed to the tenant chat
         log_kwargs = (

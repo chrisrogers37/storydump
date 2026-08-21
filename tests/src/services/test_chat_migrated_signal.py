@@ -284,7 +284,9 @@ class TestSchedulerRecordsThePair:
 
         assert result is False
         assert service.telegram_service.send_notification.call_count == 1
-        service.queue_repo.update_status.assert_any_call(str(queue_item.id), "failed")
+        service.queue_repo.update_status.assert_any_call(
+            str(queue_item.id), "failed", str(queue_item.chat_settings_id)
+        )
         service.history_repo.create.assert_called_once()
         params = service.history_repo.create.call_args[0][0]
         assert ChatMigratedError.parse_pair(params.error_message) == (OLD_ID, NEW_ID)

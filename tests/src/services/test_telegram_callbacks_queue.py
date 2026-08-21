@@ -140,7 +140,10 @@ class TestDoCompleteQueueAction:
     async def test_happy_path(self, mock_retry, handlers):
         """Claim, execute DB ops, update caption, log interaction."""
         queue_item = Mock(
-            media_item_id="m-1", telegram_message_id=42, telegram_chat_id=-100123
+            media_item_id="m-1",
+            telegram_message_id=42,
+            telegram_chat_id=-100123,
+            chat_settings_id="cs-1",
         )
         handlers.service.queue_repo.claim_for_processing.return_value = queue_item
         media_item = Mock(file_name="photo.jpg")
@@ -181,7 +184,10 @@ class TestDoCompleteQueueAction:
     async def test_operational_error_retries(self, mock_retry, handlers):
         """On OperationalError, refresh sessions and retry once."""
         queue_item = Mock(
-            media_item_id="m-1", telegram_message_id=42, telegram_chat_id=-100123
+            media_item_id="m-1",
+            telegram_message_id=42,
+            telegram_chat_id=-100123,
+            chat_settings_id="cs-1",
         )
         handlers.service.queue_repo.claim_for_processing.return_value = queue_item
         handlers.service.history_repo.get_by_queue_item_id.return_value = None
@@ -207,7 +213,10 @@ class TestDoCompleteQueueAction:
     async def test_operational_error_with_existing_history(self, mock_retry, handlers):
         """If history already exists after OperationalError, just clean up."""
         queue_item = Mock(
-            media_item_id="m-1", telegram_message_id=42, telegram_chat_id=-100123
+            media_item_id="m-1",
+            telegram_message_id=42,
+            telegram_chat_id=-100123,
+            chat_settings_id="cs-1",
         )
         handlers.service.queue_repo.claim_for_processing.return_value = queue_item
         media_item = Mock(file_name="photo.jpg")
@@ -229,14 +238,17 @@ class TestDoCompleteQueueAction:
             "q-1", user, query, "posted", True, "Done!", "posted"
         )
 
-        handlers.service.queue_repo.delete.assert_called_once_with("q-1")
+        handlers.service.queue_repo.delete.assert_called_once_with("q-1", "cs-1")
         assert handlers.core._execute_complete_db_ops.call_count == 1
 
     @patch("src.services.core.telegram_callbacks_queue.telegram_edit_with_retry")
     async def test_operational_error_queue_item_gone(self, mock_retry, handlers):
         """If queue item gone after session refresh, show 'already processed'."""
         queue_item = Mock(
-            media_item_id="m-1", telegram_message_id=42, telegram_chat_id=-100123
+            media_item_id="m-1",
+            telegram_message_id=42,
+            telegram_chat_id=-100123,
+            chat_settings_id="cs-1",
         )
         handlers.service.queue_repo.claim_for_processing.return_value = queue_item
         handlers.service.history_repo.get_by_queue_item_id.return_value = None
@@ -468,7 +480,10 @@ class TestHandleRejectConfirmation:
     async def test_shows_confirmation_dialog(self, mock_retry, mock_validate, handlers):
         """Shows Yes/No keyboard with file name and warning."""
         queue_item = Mock(
-            media_item_id="m-1", telegram_message_id=42, telegram_chat_id=-100123
+            media_item_id="m-1",
+            telegram_message_id=42,
+            telegram_chat_id=-100123,
+            chat_settings_id="cs-1",
         )
         mock_validate.return_value = queue_item
         media_item = Mock(file_name="photo.jpg")
@@ -555,7 +570,10 @@ class TestHandleRejected:
     async def test_do_handle_rejected_happy_path(self, mock_retry, handlers):
         """Successful rejection: claim, DB ops, update caption, log."""
         queue_item = Mock(
-            media_item_id="m-1", telegram_message_id=42, telegram_chat_id=-100123
+            media_item_id="m-1",
+            telegram_message_id=42,
+            telegram_chat_id=-100123,
+            chat_settings_id="cs-1",
         )
         handlers.service.queue_repo.claim_for_processing.return_value = queue_item
         media_item = Mock(file_name="photo.jpg")
@@ -592,7 +610,10 @@ class TestHandleRejected:
         """Verbose mode includes file name and permanent rejection notice."""
         handlers.service._is_verbose.return_value = True
         queue_item = Mock(
-            media_item_id="m-1", telegram_message_id=42, telegram_chat_id=-100123
+            media_item_id="m-1",
+            telegram_message_id=42,
+            telegram_chat_id=-100123,
+            chat_settings_id="cs-1",
         )
         handlers.service.queue_repo.claim_for_processing.return_value = queue_item
         media_item = Mock(file_name="photo.jpg")
@@ -612,7 +633,10 @@ class TestHandleRejected:
     ):
         """On OperationalError, refresh and retry once."""
         queue_item = Mock(
-            media_item_id="m-1", telegram_message_id=42, telegram_chat_id=-100123
+            media_item_id="m-1",
+            telegram_message_id=42,
+            telegram_chat_id=-100123,
+            chat_settings_id="cs-1",
         )
         handlers.service.queue_repo.claim_for_processing.return_value = queue_item
         handlers.service.history_repo.get_by_queue_item_id.return_value = None

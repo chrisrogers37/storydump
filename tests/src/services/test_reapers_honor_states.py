@@ -102,7 +102,7 @@ def _delete_rows(pair) -> None:
     media_id, queue_id = pair
     queue_repo = QueueRepository()
     try:
-        queue_repo.delete(str(queue_id))
+        queue_repo.delete(str(queue_id), SYSTEM_SCOPE)
     finally:
         queue_repo.close()
     media_repo = MediaRepository()

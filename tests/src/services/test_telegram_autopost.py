@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch, AsyncMock
 from uuid import uuid4
 import threading
 
+from src.repositories.tenant_scope import SYSTEM_SCOPE
 from src.services.core.telegram_autopost import (
     AutopostContext,
     TelegramAutopostHandler,
@@ -1072,15 +1073,19 @@ class TestRecordSuccessfulPost:
         # 1. Create history (idempotently — #551)
         handler.service.history_repo.create_idempotent.assert_called_once()
         # 2. Increment times posted
+        # NULL-owned ctx row: scope_of_row resolves to SYSTEM_SCOPE. Before
+        # #841 this passed None, which the fail-closed method rejects.
         handler.service.media_repo.increment_times_posted.assert_called_once_with(
-            str(ctx.queue_item.media_item_id), chat_settings_id=None
+            str(ctx.queue_item.media_item_id), chat_settings_id=SYSTEM_SCOPE
         )
         # 3. Create lock — chat_id passed so per-chat TTL can be applied
         handler.service.lock_service.create_lock.assert_called_once_with(
             str(ctx.queue_item.media_item_id), telegram_chat_id=ctx.chat_id
         )
         # 4. Delete queue item
-        handler.service.queue_repo.delete.assert_called_once_with(ctx.queue_id)
+        handler.service.queue_repo.delete.assert_called_once_with(
+            ctx.queue_id, SYSTEM_SCOPE
+        )
         # 5. Increment user posts
         handler.service.user_repo.increment_posts.assert_called_once_with(
             str(ctx.user.id)
@@ -1276,7 +1281,7 @@ class TestHandleAutopostError:
 
         # Released for retry — not stranded in 'publishing'.
         handler.service.queue_repo.update_status.assert_called_once_with(
-            ctx.queue_id, "processing"
+            ctx.queue_id, "processing", SYSTEM_SCOPE
         )
         # Falls through to the normal error UI (retry keyboard), not the
         # "held for review" hold message.
@@ -1322,7 +1327,7 @@ class TestHandleAutopostError:
 
         # Row released for retry — never stranded in 'publishing'.
         handler.service.queue_repo.update_status.assert_called_once_with(
-            ctx.queue_id, "processing"
+            ctx.queue_id, "processing", SYSTEM_SCOPE
         )
 
         call_kwargs = ctx.query.edit_message_caption.call_args.kwargs
@@ -1368,7 +1373,7 @@ class TestCloudinaryCleanup:
             cloud_public_id=None,
             cloud_uploaded_at=None,
             cloud_expires_at=None,
-            chat_settings_id=None,
+            chat_settings_id=SYSTEM_SCOPE,
         )
 
     def test_cleanup_skipped_when_no_public_id(
@@ -1738,8 +1743,11 @@ class TestAutopostClaimBeforePublish:
                 cloud,
             )
 
+        # The row's OWN stamp, deliberately a different uuid from cs.id in
+        # this fixture — so this asserts the scope came from the row, not from
+        # ambient chat settings.
         service.queue_repo.mark_publishing.assert_called_once_with(
-            str(queue_item.id), "container-xyz"
+            str(queue_item.id), "container-xyz", str(queue_item.chat_settings_id)
         )
         service.queue_repo.delete.assert_not_called()
 
@@ -1781,8 +1789,11 @@ class TestAutopostClaimBeforePublish:
 
         assert story_id == "story-1"
         assert published["container_marked"] is True
+        # The row's OWN stamp, deliberately a different uuid from cs.id in
+        # this fixture — so this asserts the scope came from the row, not from
+        # ambient chat settings.
         service.queue_repo.mark_publishing.assert_called_once_with(
-            str(queue_item.id), "container-xyz"
+            str(queue_item.id), "container-xyz", str(queue_item.chat_settings_id)
         )
 
     async def test_record_successful_post_is_idempotent(self, mock_autopost_handler):
@@ -1807,7 +1818,9 @@ class TestAutopostClaimBeforePublish:
 
         service.history_repo.create_idempotent.assert_called_once()
         service.history_repo.create.assert_not_called()
-        service.queue_repo.delete.assert_called_once_with(str(queue_item.id))
+        service.queue_repo.delete.assert_called_once_with(
+            str(queue_item.id), str(queue_item.chat_settings_id)
+        )
 
 
 @pytest.mark.unit

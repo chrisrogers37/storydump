@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from telegram import InlineKeyboardMarkup
 from telegram.error import TelegramError
 
+from src.repositories.tenant_scope import scope_of_row
 from src.services.core.queue_reap import reap_pending_rows
 from src.services.core.telegram_utils import NO_INSTANCE_CONFIGURED_MESSAGE
 from src.utils.logger import logger
@@ -213,7 +214,11 @@ class TelegramCallbackAdminHandlers:
             for i, item in enumerate(overdue):
                 # Spread out over next few hours
                 new_time = now + timedelta(hours=1 + (i * 0.5))
-                self.service.queue_repo.update_scheduled_time(str(item.id), new_time)
+                self.service.queue_repo.update_scheduled_time(
+                    str(item.id),
+                    new_time,
+                    scope_of_row(item, where="callbacks_admin.do_resume_callback"),
+                )
                 rescheduled += 1
 
             self.service.settings_service.set_paused(

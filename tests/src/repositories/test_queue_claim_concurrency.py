@@ -125,7 +125,7 @@ def _delete_rows(media_id, queue_id) -> None:
     """Tear down the rows created by :func:`_create_pending_queue_row`."""
     queue_repo = QueueRepository()
     try:
-        queue_repo.delete(str(queue_id))
+        queue_repo.delete(str(queue_id), SYSTEM_SCOPE)
     finally:
         queue_repo.close()
 
@@ -342,9 +342,9 @@ def test_claim_admits_delivery_states(delivery_status):
                 # A row only reaches 'delivered' stamped (INV-1,
                 # check_delivered_stamped) — go through the real seam,
                 # which stamps and promotes in one step.
-                repo.set_telegram_message(str(queue_id), 990001, 110011)
+                repo.set_telegram_message(str(queue_id), 990001, 110011, SYSTEM_SCOPE)
             else:
-                repo.update_status(str(queue_id), delivery_status)
+                repo.update_status(str(queue_id), delivery_status, SYSTEM_SCOPE)
             claimed = repo.claim_for_processing(str(queue_id))
         finally:
             repo.close()
@@ -374,7 +374,7 @@ async def test_transition_concurrent_loser_fails():
     qid = str(queue_id)
     seed = QueueRepository()
     try:
-        seed.update_status(qid, "processing")
+        seed.update_status(qid, "processing", SYSTEM_SCOPE)
     finally:
         seed.close()
 
@@ -400,7 +400,7 @@ async def test_transition_concurrent_loser_fails():
 
             sess.commit = gated_commit  # instance-level gate, winner's session only
             row = queue_repo.transition(
-                qid, "sent_unconfirmed", allowed_from={"processing"}
+                qid, "sent_unconfirmed", SYSTEM_SCOPE, allowed_from={"processing"}
             )
             return row is not None
         except Exception as exc:  # noqa: BLE001 — collect, never escape the thread
@@ -419,7 +419,9 @@ async def test_transition_concurrent_loser_fails():
             # become 'delivered' (INV-1, check_delivered_stamped) — the target
             # state is incidental to what this test proves (exactly one of two
             # concurrent guarded transitions succeeds).
-            row = queue_repo.transition(qid, "failed", allowed_from={"processing"})
+            row = queue_repo.transition(
+                qid, "failed", SYSTEM_SCOPE, allowed_from={"processing"}
+            )
             return row is not None
         except Exception as exc:  # noqa: BLE001
             errors.append(("loser", repr(exc)))
@@ -472,8 +474,8 @@ def test_transition_unconditional_sets_status():
     try:
         repo = QueueRepository()
         try:
-            repo.update_status(qid := str(queue_id), "processing")
-            row = repo.transition(qid, "failed")
+            repo.update_status(qid := str(queue_id), "processing", SYSTEM_SCOPE)
+            row = repo.transition(qid, "failed", SYSTEM_SCOPE)
             assert row is not None and row.status == "failed"
         finally:
             repo.close()
@@ -488,9 +490,12 @@ def test_transition_allowed_from_mismatch_is_noop():
     try:
         repo = QueueRepository()
         try:
-            repo.update_status(qid := str(queue_id), "failed")
+            repo.update_status(qid := str(queue_id), "failed", SYSTEM_SCOPE)
             assert (
-                repo.transition(qid, "delivered", allowed_from={"processing"}) is None
+                repo.transition(
+                    qid, "delivered", SYSTEM_SCOPE, allowed_from={"processing"}
+                )
+                is None
             )
             assert repo.get_by_id(qid, chat_settings_id=SYSTEM_SCOPE).status == "failed"
         finally:
@@ -505,7 +510,9 @@ def test_transition_missing_row_returns_none():
     repo = QueueRepository()
     try:
         assert (
-            repo.transition(str(uuid4()), "delivered", allowed_from={"processing"})
+            repo.transition(
+                str(uuid4()), "delivered", SYSTEM_SCOPE, allowed_from={"processing"}
+            )
             is None
         )
     finally:
