@@ -91,6 +91,7 @@ class WorkerApp:
     config: WorkerConfig
     deps: WorkerDeps
     engine: object
+    clock: object = None  # set by run() so a supervisor can read its observables
 
 
 def compose(*, engine, config: WorkerConfig, env: dict) -> WorkerApp:
@@ -144,11 +145,15 @@ def compose(*, engine, config: WorkerConfig, env: dict) -> WorkerApp:
     )
 
 
-async def run(app: WorkerApp) -> None:
-    """Bind connections, start the clock/heartbeat/loops, run until stopped."""
+async def run(app: WorkerApp, *, stop: asyncio.Event | None = None) -> None:
+    """Bind connections, start the clock/heartbeat/loops, run until stopped.
+
+    *stop* is the test seam: signals set the same event, so a harness can end
+    a soak the way SIGTERM would without owning a process.
+    """
     engine = app.engine
     cfg = app.config
-    stop = asyncio.Event()
+    stop = stop or asyncio.Event()
 
     def _request_stop(signame: str):
         logger.info("received %s — stopping", signame)
@@ -166,7 +171,7 @@ async def run(app: WorkerApp) -> None:
     for wl, conn in zip(app.loops, claim_conns):
         wl.bind_claim_conn(conn)
 
-    clock = scheduler.Clock(
+    clock = app.clock = scheduler.Clock(
         election_conn,
         async_sessionmaker(engine, expire_on_commit=False),
         interval_seconds=cfg.clock_interval_seconds,

@@ -170,6 +170,12 @@ class TestPlanSlotAdapterMapsThePayload:
         assert seen["ig_account_id"] == "acct-1"
         assert seen["provider_account_ref"] == "ig-acct-9"
         assert seen["approval_mode"] == "manual"
+        # The payload crosses jsonb as an ISO string; asyncpg refuses a str
+        # for timestamptz, so the adapter owns the parse (found by the gate).
+        from datetime import datetime
+
+        assert isinstance(seen["slot_at"], datetime)
+        assert seen["slot_at"].isoformat() == "2026-08-21T10:00:00+00:00"
 
 
 class _Recorder:

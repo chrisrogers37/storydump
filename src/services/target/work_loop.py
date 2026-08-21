@@ -132,11 +132,16 @@ def build_registry(deps: WorkerDeps) -> dict:
                 f"plan_slot {job['id']}: account {payload.get('ig_account_id')}"
                 " has no ig_accounts row"
             )
+        slot_at = payload["slot_at"]
+        if isinstance(slot_at, str):
+            # jsonb round-trips the clock's timestamptz as an ISO string;
+            # asyncpg wants a datetime.
+            slot_at = datetime.fromisoformat(slot_at)
         await scheduler.execute_plan_slot(
             session,
             workspace_id=str(job["workspace_id"]),
             ig_account_id=str(payload["ig_account_id"]),
-            slot_at=payload["slot_at"],
+            slot_at=slot_at,
             provider_account_ref=row["provider_account_ref"],
             approval_mode=row["approval_mode"],
         )
