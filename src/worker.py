@@ -271,7 +271,9 @@ class SenderSweeper:
 async def supervise(stop: asyncio.Event, tasks) -> asyncio.Task | None:
     """Wait until stop is requested OR any supervised task exits.
 
-    Returns the task that died (None when stop fired first). The caller owns
+    Returns the dead task: one that raised (regardless of stop), or one that
+    exited cleanly before stop was requested. None on legitimate shutdown —
+    a clean or cancelled exit after stop fired. The caller owns
     what loud means; this only guarantees a death can never pass unnoticed —
     the class finding from #958: two background tasks could die while the
     worker kept printing healthy status lines.
@@ -285,13 +287,21 @@ async def supervise(stop: asyncio.Event, tasks) -> asyncio.Task | None:
         if not stop_waiter.done():
             stop_waiter.cancel()
             await asyncio.gather(stop_waiter, return_exceptions=True)
-    if stop.is_set():
-        # A task exiting because stop fired is a clean stop, not a death —
-        # both can land in the same FIRST_COMPLETED batch (measured: the
-        # soak's status reporter, exiting on the very stop that ended the
-        # soak, read as died until this guard existed).
-        return None
-    dead = [t for t in done if t is not stop_waiter]
+    # Death is a PER-TASK verdict, never a global-flag one (navi, #958 cycle
+    # 2 — a blanket stop.is_set() exclusion masked a real crash that raced an
+    # external stop). A task is dead when it RAISED (always, stop or no stop),
+    # or when it returned cleanly while stop was unset (every supervised body
+    # is a while-not-stop loop, so a clean early return is only reachable
+    # through a bug). A clean exit after stop fired is legitimate shutdown —
+    # the soak's own status reporter, measured — and cancellation is shutdown
+    # machinery, not death.
+    dead = [
+        t
+        for t in done
+        if t is not stop_waiter
+        and not t.cancelled()
+        and (t.exception() is not None or not stop.is_set())
+    ]
     return dead[0] if dead else None
 
 

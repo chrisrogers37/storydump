@@ -210,6 +210,43 @@ class TestTaskSupervision:
         assert isinstance(died.exception(), RuntimeError)
         t_ok.cancel()
 
+    async def test_a_real_death_coincident_with_stop_is_still_reported(self):
+        """navi's cycle-2 adversarial case, taken as shipped: an independent
+        crash racing an external stop signal must surface as a death — the
+        blanket stop.is_set() exclusion masked it as a clean stop."""
+        import asyncio
+
+        from src.worker import supervise
+
+        stop = asyncio.Event()
+
+        async def crashes():
+            raise RuntimeError("real unrelated crash")
+
+        t = asyncio.create_task(crashes(), name="victim")
+        stop.set()
+        await asyncio.sleep(0)
+        died = await supervise(stop, [t])
+        assert died is t
+        assert isinstance(died.exception(), RuntimeError)
+
+    async def test_a_clean_exit_while_stop_is_unset_is_still_a_death(self):
+        """The case the per-exception condition alone would drop: every
+        supervised body is a while-not-stop loop, so a CLEAN return with stop
+        unset is only reachable through a bug — it must be a death, not a
+        quiet exit-0 shutdown."""
+        import asyncio
+
+        from src.worker import supervise
+
+        async def wanders_off():
+            return  # no exception, no stop — a loop that just... ended
+
+        stop = asyncio.Event()
+        t = asyncio.create_task(wanders_off(), name="wanderer")
+        died = await supervise(stop, [t])
+        assert died is t and died.exception() is None
+
     async def test_a_task_exiting_because_stop_fired_is_not_a_death(self):
         """The race the soak caught live: stop fires, a task's own loop sees
         it and returns, and both land in the same FIRST_COMPLETED batch. An
