@@ -4,7 +4,7 @@
 
 **Scope:** the `02` §9 disposition index made executable — per-legacy-table transform statements as runner-migration files, the per-column mapping with the `02` §0 timestamp rule applied per column, machine-checkable postconditions (row-count reconciliation + per-table invariants), and the quarantine feeds. This is `04` Phase M step **3e**: files that read `legacy.<table>` and write the target tables, inside the single advisory-locked runner invocation, after 3d (the F.2 schema files) and before 3f (snapshots).
 
-**What this spec does NOT decide** (§3 is the register): Forks A–D from mason's menu; Fork E (surfaced here, same discipline); #793 (`instagram_backfill` disposition — open, unforced at the 2026-08-13 census); the one-PR-vs-two program-shape split proposed in #790 comment 5280282481. Two forks are conditional on mason's §0 measurement (two counts, reproduced in §3.3; being chased separately) — **and the two counts are not interchangeable**: C collapses at `group_chats = 1` (one live *group* tenant — 044's derivation keys on a single group chat), D only at `chats = 1` **total** (a single DM-rooted row already makes minting rule W and a collapse shape disagree). Their sections are marked **conditional**, not blocked. Two register entries are additionally **lifted to the plan author** (§3.8) and are likewise not decided here.
+**What this spec does NOT decide** (§3 is the register): Forks A–C from mason's menu (**D is answered by the shipped schema rather than by a ruling — §3.4/§4.2**); Fork E (surfaced here, same discipline); #793 (`instagram_backfill` disposition — open, unforced at the 2026-08-13 census); the one-PR-vs-two program-shape split proposed in #790 comment 5280282481. Two forks are conditional on mason's §0 measurement (two counts, reproduced in §3.3; being chased separately) — **and the two counts are not interchangeable**: C collapses at `group_chats = 1` (one live *group* tenant — 044's derivation keys on a single group chat), D only at `chats = 1` **total** (a single DM-rooted row already makes minting rule W and a collapse shape disagree). Their sections are marked **conditional**, not blocked. Two register entries are additionally **lifted to the plan author** (§3.8) and are likewise not decided here.
 
 **Sources of truth** (all at `origin/main` `c28066d`): `02-domain-model.md` §0/§1/§2/§3/§4/§9 · `04-execution-sequence.md` L76–160 (Phase M) · `03-decision-record.md` D39/D40/D41 · `documentation/planning/2026-08-14-f2-increment-split/README.md` (the 3d band this spec lands after) · `documentation/operations/migration-runner.md` + `scripts/migration_runner.py` (file contract) · `scripts/fc8_gate.py` (#792) · `src/models/*.py` (legacy column ground truth) · #790 + comments 5280282481 / 5286087397 / 5286618365 / 5318301047 · #787 (measured inert for the production world) · #793 (open).
 
@@ -19,7 +19,7 @@ M.1 files are the **3e band**: numbered immediately after the last F.2.9 file, b
 | Slot | File (name at land time) | Writes | Reads (`legacy.*`) | Fork exposure |
 |---|---|---|---|---|
 | M1-01 | `NNN_m1_users_identities.sql` | `users`, `user_identities` | `users` | — |
-| M1-02 | `NNN_m1_workspaces_members_bindings.sql` | `workspaces`, `workspace_members`, `channel_bindings`, `audit_events` (drop records + tz log) | `chat_settings`, `user_chat_memberships` | **A** (rung-4 feed), **D** (conditional) |
+| M1-02 | `NNN_m1_workspaces_members_bindings.sql` | `workspaces`, `workspace_members`, `channel_bindings`, `audit_events` (drop records + tz log) | `chat_settings`, `user_chat_memberships` | **A** (rung-4 feed); ~~D~~ **answered by the schema, §3.4** |
 | M1-03 | `NNN_m1_media_sources.sql` | `media_sources` | `chat_settings` | — |
 | M1-04 | `NNN_m1_ig_accounts.sql` | `ig_accounts` | `instagram_accounts`, `api_tokens`, `chat_settings` | **B** (`next_slot_at`), **C** (conditional: NULL-chat tokens) |
 | M1-05 | `NNN_m1_media_items.sql` | `media_items` | `media_items`, `chat_settings` | #793 (fail-closed assert) |
@@ -123,7 +123,26 @@ SELECT count(*) AS chats,
   FROM chat_settings;
 ```
 
-### 3.4 Fork D — workspace cardinality (conditional)
+### 3.4 Fork D — workspace cardinality — **ANSWERED BY THE SHIPPED SCHEMA (2026-08-21), not by a ruling**
+
+**This is no longer a fork.** `channel_bindings` is UNIQUE on `(channel, external_ref)` and
+carries **no** uniqueness on `workspace_id`, so **N channels per tenant is the design**, and
+`telegram_group`/`telegram_dm` are two **channel kinds rather than two tenants**. Minting rule W
+is retired in §4.2 — measured there against a scratch build of 052+053 and against production:
+the schema *refuses* W for a chat with no active memberships, and production's DM chat has
+exactly that shape. A fork asks which of two admissible readings to pick; only one of these is
+admissible, so there is nothing to rule. **The 1,095-row quarantine dissolves with it** — it was
+the cost of a mapping the target does not admit.
+
+Per Chris's ruling that parity is not the bar (*"best from first principles in the next state"*),
+where the legacy shape and the schema's shape disagree the schema's is the one encoded. They
+disagree exactly here: legacy gives each Telegram chat its own settings row, the target gives one
+tenant many channels.
+
+The original register entry is kept below because the reasoning it records is still how the
+question was framed, and a reader arriving from `02` or `04` will look for it.
+
+---
 
 Nothing states how many workspaces the transform mints. §4.2 is written against a **minting rule W** = "one workspace per `chat_settings` row, `workspace_id := chat_settings.id`" — labeled as Fork D's obvious reading, **not** a ruling. At **`chats = 1` total** — the first count of §3.3's query, deliberately not `group_chats` — every candidate shape degenerates to the same transform, so §4.2's mapping stands regardless. The distinction is live, not theoretical: `.claude/rules/database.md` gives each Telegram chat its own settings row, so `chats > 1, group_chats = 1` is an ordinary state — and there a single DM-rooted row makes W mint two workspaces where a collapse shape mints one, so D does **not** collapse even though C does. If `chats` returns > 1, W is D's ruling to make (product owner — merging minted workspaces afterwards is `06` §4 clone-and-retire per account, on live data).
 
@@ -218,13 +237,71 @@ Format per table: disposition (from `02` §9) · per-column mapping (every legac
 
 `users.primary_email` := NULL (telegram-only users, `02` L61). One `user_identities` row per user; `verified_at` := NULL. No governance trigger on these tables — no auto-audit rows.
 
-### 4.2 `legacy.chat_settings` → `workspaces` + `channel_bindings` (M1-02, with 4.3's members) — **Fork D conditional**
+### 4.2 `legacy.chat_settings` → `workspaces` + `channel_bindings` (M1-02, with 4.3's members) — **minting rule W RETIRED (2026-08-21)**
 
-Minting rule **W** (§3.4): one workspace per chat row, `workspaces.id := chat_settings.id`. Every cell below survives any D outcome at **`chats = 1`** (D's collapse count — the query's total, deliberately not `group_chats`; §3.4).
+**Minting rule W — "one workspace per chat row, `workspaces.id := chat_settings.id`" — is retired.
+Not as a fork resolution. The shipped target schema REFUSES it on the production corpus**, so it
+was never one of two readings that a ruling could pick between.
+
+**What the schema actually says** (053:322–343, still the authority — verified that none of
+054–061 alters these objects; 058 only enables RLS):
+
+| constraint | on | consequence |
+|---|---|---|
+| `uq_binding_external` | **`(channel, external_ref)`** | a legacy chat binds **exactly once**; says nothing about workspaces |
+| *(no unique on `workspace_id`)* | — | **N bindings per workspace is the design** |
+| `ck_bindings_channel` | `channel IN ('telegram_group','telegram_dm')` | two **channel kinds**, explicitly not two tenants |
+| `ct_workspaces_owner_at_insert` | `workspaces` | a workspace with no owner member row **fails at commit** |
+
+`uq_bindings_ws_id UNIQUE (workspace_id, id)` is *not* a cardinality limit — `id` is already the
+primary key, so the pair is trivially unique. It exists as a composite-FK target so child tables
+can enforce tenant consistency. Reading it as "one binding per workspace" is the misreading this
+section exists to close.
+
+**Measured, both directions, on a scratch build of 052+053** (positive control first, so a pass
+cannot come from everything failing):
+
+| probe | result |
+|---|---|
+| one workspace + owner + **two** bindings (`telegram_group` + `telegram_dm`) | **COMMITS**; 2 rows land |
+| rule W on a DM chat with zero memberships (its own workspace) | **REFUSED** — `trg_workspaces_owner_at_insert`: *"workspace … created without an owner member row"* |
+| same `(channel, external_ref)` twice | **REFUSED** — `uq_binding_external` |
+
+**And production is exactly that shape** (read-only, 2026-08-21): group `-1003688539654` carries
+**3** active memberships; DM `7668871620` carries **0**. So rule W would mint an ownerless
+workspace for the DM and be refused at commit. **Rule W is inexpressible against the shipped
+schema on the actual corpus** — which is why the 1,095-row quarantine dissolves: it was the cost
+of a mapping the schema does not admit, not a cost to weigh.
+
+**The replacement is derived, not asserted.** A DM chat binds to the workspace of the user it is
+with, reached by a join that already exists — `chat_settings.telegram_chat_id` (DM) →
+`users.telegram_user_id` → that user's active `user_chat_memberships` → the group chat's
+workspace. Measured on production: **0** DM-chat users hold membership in more than one group
+(so no tiebreak is needed), **1 of 1** DM chats resolves to exactly one group, **0** resolve to
+none. **The DM user's role is `member`, not `owner`** — so the rule is *membership*, not
+ownership, and a version phrased as "the workspace this user owns" would fail here.
+
+**What would make this wrong**, stated so it is checkable rather than trusted:
+
+- **A DM user in two groups** → the join returns >1 workspace and the rule needs a tiebreak it
+  does not have. Currently 0; it is a property of the *data*, not the mapping, so it can change
+  without anything here changing.
+- **A DM user in no group** → nothing to bind to; that row is a quarantine feed, not a drop.
+  Currently 0.
+- **A group chat with zero active memberships** → mints no workspace under any rule, because the
+  owner trigger refuses it. This is rung 4 and is unchanged.
+- **A migration relaxing `ct_workspaces_owner_at_insert` or adding a unique on `workspace_id`** →
+  re-derive. Verified absent through 061 today.
+
+**Consequence for G-IDS, which the retired rule was carrying silently:** `workspaces.id :=
+chat_settings.id` is only well-defined when exactly one chat mints the workspace. Under the
+derived shape the **group** chat mints it and supplies the id; the DM contributes a binding and
+no id. A corpus where two *group* chats collapse to one workspace has no such rule and would
+need one — not this corpus, and named rather than assumed.
 
 | Legacy | → `workspaces` | Rule |
 |---|---|---|
-| `id` | `id` | G-IDS / rule W |
+| `id` | `id` | G-IDS; supplied by the **group** chat that mints the workspace (rule W retired — see above) |
 | `display_name` | `name` | SD-12 |
 | — | `state` | `'active'` (no legacy counterpart; pause is separate) |
 | `posting_timezone` | `tz` | **G-TZ (ruled)** + G-LOG `tz_discarded` |
