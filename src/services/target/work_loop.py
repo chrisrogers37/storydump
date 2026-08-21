@@ -230,8 +230,8 @@ class WorkLoop:
     def __init__(
         self,
         *,
-        claim_conn,
-        session_factory,
+        claim_conn=None,
+        session_for: Callable[[dict], Any],
         lane: str,
         registry: dict,
         heartbeat,
@@ -239,8 +239,8 @@ class WorkLoop:
         worker_name: str,
     ):
         self._claim_conn = claim_conn
-        self._session_factory = session_factory
-        self._lane = lane
+        self._session_for = session_for
+        self.lane = lane
         self._registry = registry
         self._heartbeat = heartbeat
         self._config = config
@@ -252,11 +252,18 @@ class WorkLoop:
         self.consecutive_errors = 0
         self._stop = asyncio.Event()
 
+    def bind_claim_conn(self, conn) -> None:
+        """The run-time half of construction: compose() wires everything that
+        needs no connection; the entrypoint binds the live claim connection."""
+        self._claim_conn = conn
+
     async def run_once(self) -> bool:
         """Claim and run at most one job. Returns True when one was claimed."""
+        if self._claim_conn is None:
+            raise RuntimeError("WorkLoop.run before bind_claim_conn")
         job = await jobs.claim_job(
             self._claim_conn,
-            lane=self._lane,
+            lane=self.lane,
             worker=self._worker_name,
             lease_seconds=self._config.lease_seconds,
             ws_lane_cap=self._config.ws_lane_cap,
@@ -280,7 +287,7 @@ class WorkLoop:
             )
         if isinstance(entry, Parked):
             logger.warning("parked kind %s (job %s): %s", kind, job["id"], entry.reason)
-            async with self._session_factory.begin() as session:
+            async with self._session_for(job) as session:
                 await jobs.reschedule_job(
                     session,
                     job["id"],
@@ -291,7 +298,7 @@ class WorkLoop:
             self.parked += 1
             return
         try:
-            async with self._session_factory.begin() as session:
+            async with self._session_for(job) as session:
                 await entry(session, job)
                 await jobs.finalize_job(
                     session,
@@ -313,7 +320,7 @@ class WorkLoop:
             self.failures += 1
             self.consecutive_errors += 1
             try:
-                async with self._session_factory.begin() as session:
+                async with self._session_for(job) as session:
                     await jobs.reschedule_job(
                         session,
                         job["id"],

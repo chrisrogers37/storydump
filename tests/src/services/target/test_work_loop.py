@@ -219,13 +219,15 @@ def _loop_with(monkeypatch, *, registry, claims):
         async def __aexit__(self, *exc):
             return False
 
-    class _SF:
-        def begin(self):
-            return _SessionCtx()
+    seen_session_jobs = []
+
+    def session_for(job):
+        seen_session_jobs.append(job["id"])
+        return _SessionCtx()
 
     loop = work_loop.WorkLoop(
         claim_conn=object(),
-        session_factory=_SF(),
+        session_for=session_for,
         lane="bulk",
         registry=registry,
         heartbeat=hb,
