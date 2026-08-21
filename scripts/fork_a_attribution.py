@@ -187,9 +187,36 @@ SELECT count(*) AS ig_rows,
 
 # Fork E's stake, reported because mason's re-posing turned on it: E4 attributes
 # live locks VIA history rows, so "drop history" is not free.
+#
+# #974 — the column was named `live_locks` over a count with NO liveness
+# filter. It was not returning a wrong number: measured 2026-08-21, the table
+# holds ZERO expired rows because `cleanup_expired_locks` deletes them, so
+# filtered and unfiltered agree exactly. That is the defect. The name asserted
+# a property the query never checked, and it was true only because a reaper
+# outside this script kept it true — so it would have gone wrong silently the
+# first time that reaper lagged, in the direction of over-stating the stake.
+#
+# "Rename it" and "add the filter" are both wrong ALONE, in opposite
+# directions. `total_locks` is honest about the query but leaves the section
+# header ("locks that dropping history would strand") over-stating, since an
+# expired lock strands nothing. A bare `locked_until > now()` drops the 20
+# `permanent_reject` rows, which store `locked_until = NULL` and are in force
+# FOREVER — under-stating the stake by exactly the locks that can never
+# expire. So the count is decomposed instead, and every part is named for what
+# it counts.
+#
+# The vocabulary is `fork_e_lock_cost.py`'s (#967), deliberately not a second
+# one: that script is the authority on Fork E's population and a rival
+# predicate here would be the fork this repo keeps paying for. `all_rows` is
+# reported alongside so a reader can SEE the filtered and unfiltered figures
+# agree, rather than having to trust that they do.
 LOCKS_SQL = """
-SELECT count(*) AS live_locks,
-       count(*) FILTER (WHERE l.media_item_id IN
+SELECT count(*) AS all_rows,
+       count(*) FILTER (WHERE l.locked_until >  now()) AS in_force,
+       count(*) FILTER (WHERE l.locked_until IS NULL)  AS permanent,
+       count(*) FILTER (WHERE l.locked_until <= now()) AS expired,
+       count(*) FILTER (WHERE (l.locked_until > now() OR l.locked_until IS NULL)
+                          AND l.media_item_id IN
               (SELECT media_item_id FROM posting_history)) AS backed_by_history
   FROM media_posting_locks l
 """
@@ -280,7 +307,11 @@ def main(argv=None) -> int:
                 "INSTAGRAM POPULATION — two independent predicates, crossed",
                 IG_POPULATION_SQL,
             ),
-            ("FORK E STAKE — locks that 'drop history' would strand", LOCKS_SQL),
+            (
+                "FORK E STAKE — locks that 'drop history' would strand"
+                " (in_force + permanent; fork_e_lock_cost.py is the authority)",
+                LOCKS_SQL,
+            ),
             (
                 "MIGRATION TIMESTAMPS — is created_at an epoch or an artefact?",
                 SCHEMA_VERSION_SQL,
