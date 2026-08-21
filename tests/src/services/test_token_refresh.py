@@ -176,7 +176,7 @@ class TestTokenRefreshService:
         refresh_token.issued_at = datetime.now(timezone.utc) - timedelta(days=1)
 
         token_service.token_repo.get_token_for_chat.side_effect = (
-            lambda svc, token_type, cid: (
+            lambda svc, token_type, *, chat_settings_id: (
                 mock_db_token if token_type == "oauth_access" else refresh_token
             )
         )
@@ -196,7 +196,7 @@ class TestTokenRefreshService:
         mock_db_token.expires_at = datetime.now(timezone.utc) - timedelta(hours=1)
 
         token_service.token_repo.get_token_for_chat.side_effect = (
-            lambda svc, token_type, cid: (
+            lambda svc, token_type, *, chat_settings_id: (
                 mock_db_token if token_type == "oauth_access" else None
             )
         )
@@ -221,7 +221,7 @@ class TestTokenRefreshService:
         refresh_token.issued_at = datetime.now(timezone.utc) - timedelta(days=1)
 
         token_service.token_repo.get_token_for_chat.side_effect = (
-            lambda svc, token_type, cid: (
+            lambda svc, token_type, *, chat_settings_id: (
                 mock_db_token if token_type == "oauth_access" else refresh_token
             )
         )
@@ -259,7 +259,7 @@ class TestTokenRefreshService:
 
         mock_db_token.is_expired = False
         token_service.token_repo.get_token_for_chat.side_effect = (
-            lambda svc, token_type, cid: (
+            lambda svc, token_type, *, chat_settings_id: (
                 mock_db_token if token_type == "oauth_access" else refresh_token
             )
         )
@@ -286,7 +286,7 @@ class TestTokenRefreshService:
         mock_db_token.expires_at = datetime.now(timezone.utc) - timedelta(hours=1)
 
         token_service.token_repo.get_token_for_chat.side_effect = (
-            lambda svc, token_type, cid: (
+            lambda svc, token_type, *, chat_settings_id: (
                 mock_db_token if token_type == "oauth_access" else refresh_token
             )
         )
@@ -312,7 +312,7 @@ class TestTokenRefreshService:
         mock_db_token.expires_at = datetime.now(timezone.utc) - timedelta(hours=1)
 
         token_service.token_repo.get_token_for_chat.side_effect = (
-            lambda svc, token_type, cid: (
+            lambda svc, token_type, *, chat_settings_id: (
                 mock_db_token if token_type == "oauth_access" else refresh_token
             )
         )
@@ -337,7 +337,7 @@ class TestTokenRefreshService:
         mock_db_token.is_expired = False
 
         token_service.token_repo.get_token_for_chat.side_effect = (
-            lambda svc, token_type, cid: (
+            lambda svc, token_type, *, chat_settings_id: (
                 mock_db_token if token_type == "oauth_access" else refresh_token
             )
         )

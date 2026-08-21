@@ -526,7 +526,7 @@ class TokenRefreshService(BaseService):
         after 7 days).
         """
         db_token = self.token_repo.get_token_for_chat(
-            service, "oauth_access", chat_settings_id
+            service, "oauth_access", chat_settings_id=chat_settings_id
         )
 
         if not db_token:
@@ -546,7 +546,7 @@ class TokenRefreshService(BaseService):
             }
 
         refresh_token = self.token_repo.get_token_for_chat(
-            service, "oauth_refresh", chat_settings_id
+            service, "oauth_refresh", chat_settings_id=chat_settings_id
         )
         refresh_token_exists = refresh_token is not None
         auto_refreshable = refresh_token_exists and not refresh_token.is_expired

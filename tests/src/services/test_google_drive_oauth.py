@@ -365,7 +365,7 @@ class TestGDriveGetUserCredentials:
         mock_refresh = Mock()
         mock_refresh.token_value = "encrypted_refresh"
 
-        def get_token_side_effect(service_name, token_type, chat_id):
+        def get_token_side_effect(service_name, token_type, *, chat_settings_id):
             if token_type == "oauth_access":
                 return mock_access
             return mock_refresh
@@ -403,7 +403,7 @@ class TestGDriveGetUserCredentials:
         mock_refresh = Mock()
         mock_refresh.token_value = "encrypted_refresh"
 
-        def get_token_side_effect(service_name, token_type, chat_id):
+        def get_token_side_effect(service_name, token_type, *, chat_settings_id):
             if token_type == "oauth_access":
                 return mock_access
             return mock_refresh
@@ -432,8 +432,10 @@ class TestGDriveGetUserCredentials:
         mock_access.token_value = "encrypted_access"
         mock_access.expires_at = None
 
-        self.service.token_repo.get_token_for_chat.side_effect = lambda sn, tt, cid: (
-            mock_access if tt == "oauth_access" else None
+        self.service.token_repo.get_token_for_chat.side_effect = (
+            lambda sn, tt, *, chat_settings_id: (
+                mock_access if tt == "oauth_access" else None
+            )
         )
         self.service._encryption.decrypt.side_effect = lambda v: f"decrypted_{v}"
 
@@ -643,7 +645,7 @@ class TestGDriveDisconnect:
         assert result["disconnected"] is True
         assert result["tokens_deleted"] == 2
         self.service.token_repo.delete_tokens_for_chat.assert_called_once_with(
-            "google_drive", "uuid-123"
+            "google_drive", chat_settings_id="uuid-123"
         )
 
     def test_disconnect_clears_folder_and_sync(self):

@@ -210,7 +210,7 @@ class TestMyChatMemberHandler:
         await handler.handle_my_chat_member(mock_update, Mock())
 
         service.membership_repo.deactivate_for_chat.assert_called_once_with(
-            str(mock_chat_settings.id)
+            chat_settings_id=str(mock_chat_settings.id)
         )
 
         # Cache entries for -100999 should be evicted

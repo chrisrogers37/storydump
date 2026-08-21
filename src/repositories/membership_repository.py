@@ -114,7 +114,7 @@ class MembershipRepository(BaseRepository):
             self.db.commit()
         except IntegrityError:
             self.db.rollback()
-            return self.get_membership(user_id, chat_settings_id)
+            return self.get_membership(user_id, chat_settings_id=chat_settings_id)
         self.db.refresh(membership)
         # commit_and_refresh is deliberately NOT used here (#908). It routes
         # through the wrapper commit(), which records a circuit-breaker FAILURE
@@ -162,7 +162,7 @@ class MembershipRepository(BaseRepository):
         self, user_id: str, *, chat_settings_id: str
     ) -> Optional[UserChatMembership]:
         """Deactivate a specific membership."""
-        membership = self.get_membership(user_id, chat_settings_id)
+        membership = self.get_membership(user_id, chat_settings_id=chat_settings_id)
         if membership and membership.is_active:
             membership.is_active = False
             self.commit_and_refresh(membership)
