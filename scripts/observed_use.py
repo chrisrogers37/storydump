@@ -59,8 +59,10 @@ than this table vouching for itself.
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
+import pathlib
 import subprocess
 import sys
 import tempfile
@@ -78,78 +80,34 @@ EXPECTED_HOST = "ep-hidden-shadow-aify76h5.c-4.us-east-1.aws.neon.tech"
 # storydump's Railway project (personal workspace).
 RAILWAY_PROJECT_ID = "33d1ccca-353c-4236-8d39-0d8fd916f054"
 
-# Names the code can write, taken from the call sites. A name with a ':' suffix
-# is parameterised (``switch_account:{account_id}``) and fragments under a naive
-# GROUP BY, so the report also groups on the root.
-RECORDED_COMMANDS = {
-    "/start",
-    "/status",
-    "/next",
-    "/help",
-    "/cleanup",
-    "/approveall",
-    "/link",
-    "/name",
-    "/instances",
-    "/new",
-    "/settings",
-    "/setup",
+# ---------------------------------------------------------------------------
+# The dispatch surface is DERIVED FROM SOURCE, never listed here.
+#
+# m1_preflight states the rule this obeys: "a second enumeration of the same
+# predicates is exactly the fork that would drift." A hand-kept copy of the
+# dispatch table goes stale the first time someone adds a callback, and the
+# reader who then trusts a zero is hitting the exact defect this script exists
+# to expose. So the keys come from telegram_service.py and the writable names
+# come from the log_* call sites, both read with ast at run time.
+# ---------------------------------------------------------------------------
+
+SRC = pathlib.Path(__file__).resolve().parent.parent / "src" / "services" / "core"
+
+# Historical fact, not a mirror of current code: handle_removed_command does not
+# log, so these went dark AT RETIREMENT rather than when demand ended. Dates are
+# the commits that routed each command to the redirect (git log -S).
+# Also not derivable: a handler whose recorded name is not its dispatch key.
+# Verified by reading the call sites. Without this, a renamed key lands in
+# "SILENT" — which would assert that its zero is meaningless when in fact its
+# traffic is recorded, just under another string.
+RENAMED = {
+    "sap": "switch_account_from_post",
+    "account_remove": "remove_account",
+    "account_remove_confirmed": "remove_account",
+    # handle_schedule_confirm logs under the schedule_action name, not its own.
+    "schedule_confirm": "schedule_action",
 }
-RECORDED_CALLBACK_ROOTS = {
-    "posted",
-    "skip",
-    "reject",
-    "cancel_reject",
-    "confirm_reject",
-    "autopost",
-    "batch_approve",
-    "instance_new",
-    "select_account",
-    "cycle_account",
-    "switch_account",
-    "remove_account",
-    "switch_account_from_post",
-    "settings_toggle",
-    "schedule_action",
-    "schedule_confirm",
-    "resume",
-    "clear",
-}
-# Dispatch keys with NO call site that writes a row. A zero for these is
-# uninterpretable by construction.
-SILENT_CALLBACKS = {
-    "back",
-    "regenerate_caption",
-    "batch_approve_cancel",
-    "instance_manage",
-    "btp",
-    "settings_refresh",
-    "settings_edit",
-    "settings_edit_cancel",
-    "settings_close",
-    "settings_accounts",
-    "accounts_config",
-}
-# Registered slash commands routed to handle_removed_command, which replies
-# with a redirect and does not log. Structurally silent.
-SILENT_COMMANDS = {
-    "/queue",
-    "/pause",
-    "/resume",
-    "/history",
-    "/sync",
-    "/schedule",
-    "/stats",
-    "/locks",
-    "/reset",
-    "/dryrun",
-    "/backfill",
-    "/connect",
-}
-# Recorded under a string that is not the dispatch key.
-# When each retired command stopped writing rows. `handle_removed_command` does
-# not log, so the recorder went dark on these AT RETIREMENT — not when demand
-# ended. A zero after these dates is an artifact of the instrument, not a signal.
+
 RETIRED_ON = {
     "/schedule": "2026-02-19",
     "/stats": "2026-02-19",
@@ -165,11 +123,95 @@ RETIRED_ON = {
     "/sync": "2026-02-23",
 }
 
-RENAMED = {
-    "sap": "switch_account_from_post",
-    "account_remove": "remove_account:{id}",
-    "account_remove_confirmed": "remove_account:{id}",
-}
+
+def _dict_keys(node) -> list:
+    return [k.value for k in node.keys if isinstance(k, ast.Constant)]
+
+
+def _root(node) -> str | None:
+    """The stable prefix of a recorded name.
+
+    A literal is its own root. An f-string root is the constant before the first
+    placeholder (``f"switch_account:{id}"`` -> ``switch_account``), because that
+    is what survives the ``split_part(name, ':', 1)`` the queries group on.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value.split(":")[0]
+    if isinstance(node, ast.JoinedStr) and node.values:
+        head = node.values[0]
+        if isinstance(head, ast.Constant) and isinstance(head.value, str):
+            return head.value.split(":")[0]
+    return None
+
+
+def dispatch_surface() -> dict:
+    """Read the live dispatch surface out of telegram_service.py."""
+    tree = ast.parse((SRC / "telegram_service.py").read_text())
+    tabular, active, retired, specials = [], [], [], []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.FunctionDef)
+            and node.name == "_build_callback_dispatch_table"
+        ):
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Dict):
+                    tabular = _dict_keys(sub)
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "command_map" for t in node.targets
+        ):
+            for key, val in zip(node.value.keys, node.value.values):
+                if not isinstance(key, ast.Constant):
+                    continue
+                tgt = (
+                    retired
+                    if ast.unparse(val).endswith("handle_removed_command")
+                    else active
+                )
+                tgt.append("/" + key.value)
+        if (
+            isinstance(node, ast.AsyncFunctionDef)
+            and node.name == "_handle_callback_special_cases"
+        ):
+            specials = [
+                c.comparators[0].value
+                for c in ast.walk(node)
+                if isinstance(c, ast.Compare)
+                and isinstance(c.left, ast.Name)
+                and c.left.id == "action"
+                and isinstance(c.comparators[0], ast.Constant)
+            ]
+    return {
+        "tabular": tabular,
+        "special": specials,
+        "active": active,
+        "retired": retired,
+    }
+
+
+def writable_names() -> tuple[set, set]:
+    """Names the code can actually write, and the call sites it cannot resolve.
+
+    ``callback_name=`` is matched on ANY call, not only ``log_callback`` — the
+    queue handlers pass the name down to a shared completion helper, so the
+    literal lives at the caller. A keyword bound to a variable cannot be read
+    statically; it is RETURNED as unresolved rather than dropped, because a
+    silently missing name is what turns a real zero into a false one.
+    """
+    names, unresolved = set(), set()
+    for path in sorted(SRC.glob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if not isinstance(node, ast.Call):
+                continue
+            for kw in node.keywords:
+                if kw.arg not in ("command", "callback_name"):
+                    continue
+                root = _root(kw.value)
+                if root:
+                    names.add(root)
+                else:
+                    unresolved.add(f"{path.name}:{node.lineno} {kw.arg}=")
+    return names, unresolved
+
 
 VOCAB_SQL = """
 SELECT interaction_type,
@@ -235,7 +277,7 @@ SELECT interaction_type,
        split_part(interaction_name, ':', 1) AS name_root,
        count(*) AS n, max(created_at) AS last_used
   FROM user_interactions
- WHERE created_at > now() - interval '%s days'
+ WHERE created_at > now() - (%s * interval '1 day')
  GROUP BY 1, 2 ORDER BY 3 DESC
 """
 
@@ -321,9 +363,9 @@ def assert_identity(dsn: str) -> str:
     return host
 
 
-def q(conn, sql):
+def q(conn, sql, params=None):
     with conn.cursor() as cur:
-        cur.execute(sql)
+        cur.execute(sql, params)
         return [d[0] for d in cur.description], cur.fetchall()
 
 
@@ -410,7 +452,7 @@ def main(argv=None) -> int:
 
         for days in (90, 30):
             print(f"\nLIVE VOCABULARY — last {days} days\n" + "-" * 78)
-            cols, rows = q(conn, LIVE_SQL % days)
+            cols, rows = q(conn, LIVE_SQL, (days,))
             print(fmt(cols, rows))
 
         # A zero is only a signal for a name the code can actually write.
@@ -420,36 +462,59 @@ def main(argv=None) -> int:
                 "FROM user_interactions"
             )
             seen = {r[0] for r in cur.fetchall()}
-        writable = RECORDED_COMMANDS | RECORDED_CALLBACK_ROOTS
+        surface = dispatch_surface()
+        writable, unresolved = writable_names()
+        dispatch_cb = set(surface["tabular"]) | set(surface["special"])
+
         print(
             "\nREAL ZEROS — the code writes this name; production never did\n"
             + "-" * 78
         )
-        for n in sorted(writable - seen):
+        for n in sorted((writable & (dispatch_cb | set(surface["active"]))) - seen):
             print(f"  {n}")
+
         print(
             "\nHISTORICAL — present in data, not producible by current code\n"
             + "-" * 78
         )
-        for n in sorted(seen - writable - {"photo_notification", "caption_update"}):
+        producible = (
+            writable
+            | set(surface["active"])
+            | {
+                "photo_notification",
+                "caption_update",
+            }
+        )
+        for n in sorted(seen - producible):
             note = f"  (recorder went dark {RETIRED_ON[n]})" if n in RETIRED_ON else ""
             print(f"  {n}{note}")
 
         if args.surface:
+            silent_cb = sorted(dispatch_cb - writable - set(RENAMED))
+            silent_cmd = sorted(set(surface["retired"]) - writable)
             print("\nDISPATCH SURFACE — what a zero can and cannot mean\n" + "-" * 78)
-            print(f"  recorded commands   {len(RECORDED_COMMANDS)}")
-            print(f"  recorded cb roots   {len(RECORDED_CALLBACK_ROOTS)}")
             print(
-                f"  SILENT commands     {len(SILENT_COMMANDS)}  {sorted(SILENT_COMMANDS)}"
+                f"  derived from        {SRC.name}/telegram_service.py "
+                f"(never a list in this module)"
             )
             print(
-                f"  SILENT callbacks    {len(SILENT_CALLBACKS)}  {sorted(SILENT_CALLBACKS)}"
+                f"  callbacks           {len(surface['tabular'])} tabular + "
+                f"{len(surface['special'])} special-case = {len(dispatch_cb)}"
             )
-            print(f"  RENAMED             {RENAMED}")
             print(
-                f"  retired-on dates    {len(RETIRED_ON)} commands, "
-                f"dark since 2026-02-19/2026-02-23"
+                f"  commands            {len(surface['active'])} active + "
+                f"{len(surface['retired'])} retired"
             )
+            print(f"  SILENT callbacks    {len(silent_cb)}  {silent_cb}")
+            print(f"  SILENT commands     {len(silent_cmd)}  {silent_cmd}")
+            print(f"  RENAMED (key != recorded name)  {RENAMED}")
+            if unresolved:
+                print(
+                    "  UNRESOLVED call sites (name is a variable, not a literal)"
+                    " — a zero for these is unreadable:"
+                )
+                for u in sorted(unresolved):
+                    print(f"      {u}")
     finally:
         conn.close()
     return OK
