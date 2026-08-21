@@ -317,7 +317,7 @@ class GoogleDriveOAuthService(BaseService):
 
             chat_settings_id = str(chat_settings.id)
             tokens_deleted = self.token_repo.delete_tokens_for_chat(
-                self.SERVICE_NAME, chat_settings_id
+                self.SERVICE_NAME, chat_settings_id=chat_settings_id
             )
 
             self.settings_repo.update(
@@ -355,10 +355,12 @@ class GoogleDriveOAuthService(BaseService):
         chat_settings_id = str(chat_settings.id)
 
         access_row = self.token_repo.get_token_for_chat(
-            self.SERVICE_NAME, self.TOKEN_TYPE_ACCESS, chat_settings_id
+            self.SERVICE_NAME, self.TOKEN_TYPE_ACCESS, chat_settings_id=chat_settings_id
         )
         refresh_row = self.token_repo.get_token_for_chat(
-            self.SERVICE_NAME, self.TOKEN_TYPE_REFRESH, chat_settings_id
+            self.SERVICE_NAME,
+            self.TOKEN_TYPE_REFRESH,
+            chat_settings_id=chat_settings_id,
         )
 
         if not access_row:
@@ -417,7 +419,7 @@ class GoogleDriveOAuthService(BaseService):
         chat_settings_id = str(chat_settings.id)
 
         access_row = self.token_repo.get_token_for_chat(
-            self.SERVICE_NAME, self.TOKEN_TYPE_ACCESS, chat_settings_id
+            self.SERVICE_NAME, self.TOKEN_TYPE_ACCESS, chat_settings_id=chat_settings_id
         )
         if not access_row:
             return False

@@ -135,7 +135,7 @@ class SetupStateService(BaseService):
     def _check_gdrive(self, chat_settings_id: str) -> dict:
         try:
             token = self.token_repo.get_token_for_chat(
-                "google_drive", "oauth_access", chat_settings_id
+                "google_drive", "oauth_access", chat_settings_id=chat_settings_id
             )
             if token:
                 email = None
