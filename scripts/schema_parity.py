@@ -47,24 +47,43 @@ Non-unique indexes — **87 diverging**
     compared — uniqueness constrains data, which is why they sit above with
     the constraints rather than here.
 
-    The 87 decompose, and the decomposition is worth stating because the
-    obvious summary is wrong::
+    The 87 decompose into THREE categories, not two, and the decomposition is
+    worth stating because both shorter summaries are wrong::
 
-        54 (27 pairs)  same table + columns + predicate, different NAME
-        24             migration-only shapes
-         9             models-only shapes
+        54  (27 pairs)  same table + columns + predicate, different NAME
+        18  ( 9 pairs)  same table + columns, DIFFERENT PREDICATE
+        15              ORPHANS — present on one side, no counterpart at all
 
-    Only the first group is the "same guarantee, different catalog rows" case
-    this module already treats as equal for unique indexes. **The other 33 are
-    genuinely different shapes**: the migrations hand-write PARTIAL indexes
-    where ``index=True`` emits unconditional ones ::
+    **Naming (54).** The only group that is "same guarantee, different catalog
+    rows" — the case this module already treats as equal for unique indexes.
+
+    **Partial vs unconditional (18).** A deliberate divergence in SHAPE: the
+    migrations hand-write partial indexes where ``index=True``, which takes no
+    predicate, emits unconditional ones ::
 
         migrated:  ... (auth_method) WHERE (auth_method IS NOT NULL)
         orm:       ... (auth_method)
 
-    Two valid indexes over one column with different planner behaviour and
-    identical correctness. Describing all 87 as a naming difference — as the
-    first draft of #957 did — is the tempting summary and it is false.
+    Two valid indexes over one column, different planner behaviour, identical
+    correctness.
+
+    **Orphans (15).** A different situation, and worth telling apart from the
+    above: not two shapes of one index but an index that is simply absent on
+    one side. **All 15 are migration-only** (zero models-only), from three
+    causes — 5 multi-column (``index=True`` is per-column and has no composite
+    form), 5 single-column-with-a-predicate (same limitation), and 5 plain
+    single-column indexes the models just do not declare.
+
+    **The "no correctness guarantee" reason above covers orphans too, and this
+    is stated rather than left to inherit:** an index that is absent on one
+    side is a planner difference, not a data-integrity one — exactly as a
+    differently-shaped or differently-named one is. Nothing about the data
+    differs because a non-unique index is missing.
+
+    Two summaries are false and are named as false so they are not re-derived:
+    "all 87 are naming" (the first draft of #957) and "the 33 non-naming are
+    all partial-vs-unconditional" (its correction). The measured answer is the
+    three categories above.
 
 Triggers — **0 diverging**
     Not compared, and currently identical anyway. Listed so a future
