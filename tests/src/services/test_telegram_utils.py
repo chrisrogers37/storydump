@@ -481,18 +481,22 @@ class TestReconcileCardMessages:
 
     async def test_backfills_missing_message_id(self):
         service = self._service()
-        queue_item = Mock(telegram_message_id=None, telegram_chat_id=None)
+        queue_item = Mock(
+            telegram_message_id=None, telegram_chat_id=None, chat_settings_id="cs-1"
+        )
 
         await reconcile_card_messages(service, "q-1", queue_item, self._query())
 
         service.queue_repo.set_telegram_message.assert_called_once_with(
-            "q-1", 42, -100123
+            "q-1", 42, -100123, "cs-1"
         )
         service.bot.edit_message_reply_markup.assert_not_called()
 
     async def test_strips_sibling_card_and_repoints_on_mismatch(self):
         service = self._service()
-        queue_item = Mock(telegram_message_id=555, telegram_chat_id=-100123)
+        queue_item = Mock(
+            telegram_message_id=555, telegram_chat_id=-100123, chat_settings_id="cs-1"
+        )
 
         with patch(
             "src.services.core.telegram_utils.telegram_edit_with_retry",
@@ -506,14 +510,16 @@ class TestReconcileCardMessages:
         assert strip.kwargs["message_id"] == 555
         assert strip.kwargs["chat_id"] == -100123
         service.queue_repo.set_telegram_message.assert_called_once_with(
-            "q-1", 42, -100123
+            "q-1", 42, -100123, "cs-1"
         )
 
     async def test_sibling_strip_failure_still_repoints(self):
         """A vanished sibling (BadRequest on strip) must not abort the
         re-point — the row must end up tracking the acted-on card."""
         service = self._service()
-        queue_item = Mock(telegram_message_id=555, telegram_chat_id=-100123)
+        queue_item = Mock(
+            telegram_message_id=555, telegram_chat_id=-100123, chat_settings_id="cs-1"
+        )
 
         with patch(
             "src.services.core.telegram_utils.telegram_edit_with_retry",
@@ -523,7 +529,7 @@ class TestReconcileCardMessages:
             await reconcile_card_messages(service, "q-1", queue_item, self._query())
 
         service.queue_repo.set_telegram_message.assert_called_once_with(
-            "q-1", 42, -100123
+            "q-1", 42, -100123, "cs-1"
         )
 
     async def test_matching_card_costs_nothing(self):
@@ -539,7 +545,9 @@ class TestReconcileCardMessages:
 
     async def test_no_message_on_query_is_a_no_op(self):
         service = self._service()
-        queue_item = Mock(telegram_message_id=None, telegram_chat_id=None)
+        queue_item = Mock(
+            telegram_message_id=None, telegram_chat_id=None, chat_settings_id="cs-1"
+        )
         query = AsyncMock()
         query.message = None
 

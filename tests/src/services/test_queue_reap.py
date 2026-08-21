@@ -94,7 +94,9 @@ class TestExpireSentRow:
         assert params.queue_item_id == str(row.id)
         assert params.media_item_id == str(row.media_item_id)
 
-        queue_repo.delete.assert_called_once_with(str(row.id))
+        queue_repo.delete.assert_called_once_with(
+            str(row.id), str(row.chat_settings_id)
+        )
 
     @pytest.mark.asyncio
     async def test_not_modified_is_already_expired_so_records_and_deletes(self):
@@ -121,7 +123,9 @@ class TestExpireSentRow:
 
         assert result == "reaped"
         history_repo.create.assert_called_once()
-        queue_repo.delete.assert_called_once_with(str(row.id))
+        queue_repo.delete.assert_called_once_with(
+            str(row.id), str(row.chat_settings_id)
+        )
         # One attempt only — in-reap retries would feed an active flood window.
         assert bot.edit_message_caption.await_count == 1
 
@@ -176,7 +180,9 @@ class TestExpireSentRow:
         # Nothing editable left to orphan → proceed to record + delete.
         assert result == "reaped"
         history_repo.create.assert_called_once()
-        queue_repo.delete.assert_called_once_with(str(row.id))
+        queue_repo.delete.assert_called_once_with(
+            str(row.id), str(row.chat_settings_id)
+        )
 
     @pytest.mark.asyncio
     async def test_record_failure_returns_failed_rolls_back_keeps_row(self):
@@ -261,7 +267,9 @@ class TestExpireSentRow:
 
         assert result == "reaped"
         history_repo.create.assert_not_called()
-        queue_repo.delete.assert_called_once_with(str(row.id))
+        queue_repo.delete.assert_called_once_with(
+            str(row.id), str(row.chat_settings_id)
+        )
 
 
 @pytest.mark.unit
@@ -295,7 +303,9 @@ class TestRecordExpiryAndDelete:
         assert params.queue_item_id == str(row.id)
         assert params.media_item_id == str(row.media_item_id)
         assert params.chat_settings_id == str(row.chat_settings_id)
-        queue_repo.delete.assert_called_once_with(str(row.id))
+        queue_repo.delete.assert_called_once_with(
+            str(row.id), str(row.chat_settings_id)
+        )
 
     def test_idempotent_history_skips_create_but_still_deletes(self):
         """Existing history row → create skipped, delete still runs."""
@@ -310,7 +320,9 @@ class TestRecordExpiryAndDelete:
 
         assert result is True
         history_repo.create.assert_not_called()
-        queue_repo.delete.assert_called_once_with(str(row.id))
+        queue_repo.delete.assert_called_once_with(
+            str(row.id), str(row.chat_settings_id)
+        )
 
     def test_history_write_failure_keeps_row_and_rolls_back(self):
         """History write rejected → row NOT deleted (never delete without the

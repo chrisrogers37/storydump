@@ -13,7 +13,7 @@ from src.repositories.history_repository import HistoryCreateParams
 from src.utils.logger import logger
 from src.utils.resilience import telegram_edit_with_retry
 from datetime import datetime, timezone
-from src.repositories.tenant_scope import SYSTEM_SCOPE
+from src.repositories.tenant_scope import scope_of_row
 
 if TYPE_CHECKING:
     from src.services.core.telegram_service import TelegramService
@@ -142,10 +142,13 @@ class TelegramCallbackCore:
         Separated to enable retry on OperationalError.
         Returns the media_item.
         """
+        queue_scope = scope_of_row(
+            queue_item, where="callbacks_core.execute_complete_db_ops"
+        )
         with self._shared_session():
             media_item = self.service.media_repo.get_by_id(
                 str(queue_item.media_item_id),
-                chat_settings_id=SYSTEM_SCOPE,
+                chat_settings_id=queue_scope,
             )
 
             # Idempotent on queue_item_id: a lingering 'processing' row can be
@@ -158,9 +161,7 @@ class TelegramCallbackCore:
             if status == "posted":
                 self.service.media_repo.increment_times_posted(
                     str(queue_item.media_item_id),
-                    chat_settings_id=str(queue_item.chat_settings_id)
-                    if queue_item.chat_settings_id
-                    else None,
+                    chat_settings_id=queue_scope,
                 )
                 self.service.lock_service.create_lock(
                     str(queue_item.media_item_id),
@@ -174,7 +175,7 @@ class TelegramCallbackCore:
                     telegram_chat_id=queue_item.telegram_chat_id,
                 )
 
-            self.service.queue_repo.delete(queue_id)
+            self.service.queue_repo.delete(queue_id, queue_scope)
             return media_item
 
     def _execute_reject_db_ops(self, queue_id, queue_item, user):
@@ -186,10 +187,13 @@ class TelegramCallbackCore:
         Separated to enable retry on OperationalError.
         Returns the media_item.
         """
+        queue_scope = scope_of_row(
+            queue_item, where="callbacks_core.execute_reject_db_ops"
+        )
         with self._shared_session():
             media_item = self.service.media_repo.get_by_id(
                 str(queue_item.media_item_id),
-                chat_settings_id=SYSTEM_SCOPE,
+                chat_settings_id=queue_scope,
             )
 
             self.service.history_repo.create_idempotent(
@@ -202,7 +206,10 @@ class TelegramCallbackCore:
                 str(queue_item.media_item_id), created_by_user_id=str(user.id)
             )
 
-            self.service.queue_repo.delete(queue_id)
+            self.service.queue_repo.delete(
+                queue_id,
+                queue_scope,
+            )
             return media_item
 
     def _refresh_repo_sessions(self):

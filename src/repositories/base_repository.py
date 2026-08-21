@@ -3,11 +3,17 @@
 import contextvars
 from typing import Optional
 
+from sqlalchemy import or_
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from src.config.database import get_db
-from src.repositories.tenant_scope import TenantScope, require_tenant_context
+from src.repositories.tenant_scope import (
+    SYSTEM_SCOPE,
+    TenantScope,
+    require_tenant_context,
+    write_allowed,
+)
 from src.utils.logger import logger
 from src.utils.resilience import db_circuit_breaker
 
@@ -319,6 +325,91 @@ class BaseRepository:
         require_tenant_context(chat_settings_id, where="_tenant_query")
         query = self.db.query(model_class)
         return self._apply_tenant_filter(query, model_class, chat_settings_id)
+
+    @staticmethod
+    def _owned_or_null(model_class, chat_settings_id: TenantScope):
+        """The owned-OR-NULL ownership rule as a SQL clause — the twin of
+        :func:`write_allowed`, for writes that must stay ONE statement.
+
+        A fetch-then-mutate path uses ``_get_for_write``; a conditional UPDATE
+        whose atomicity is the point (``QueueRepository.transition``) cannot
+        pre-read without reopening the race it exists to close, so it carries
+        the ownership rule in its own WHERE clause instead.
+
+        Two expressions of one rule is a fork risk, so they are defined as
+        twins and pinned by a test that runs both over the same inputs
+        (``test_the_sql_clause_and_the_python_predicate_agree``). A
+        Returns a tuple of clauses to splat into ``.filter(*...)`` — EMPTY for
+        a SYSTEM_SCOPE caller, meaning "add no restriction", which is the same
+        permission ``write_allowed`` grants it. A tuple rather than an
+        optional clause so no caller has to branch on a sentinel.
+        """
+        if not chat_settings_id:
+            return ()
+        return (
+            or_(
+                model_class.chat_settings_id.is_(None),
+                model_class.chat_settings_id == chat_settings_id,
+            ),
+        )
+
+    def _get_for_write(self, model_class, row_id, chat_settings_id: TenantScope):
+        """Resolve a row for a tenant-scoped mutation, or None if the caller
+        may not write it.
+
+        Fetches by IDENTITY — deliberately system-scoped, and the SYSTEM_SCOPE
+        marker stays visible so this sanctioned cross-tenant read keeps its
+        entry in the #841 inventory.
+
+        Identity-first rather than a filtered read, even though
+        :meth:`_owned_or_null` could express the same rule in SQL: a filter
+        returns None for a foreign row and for a missing one alike, so the
+        method could not tell them apart and the refusal would go UNLOGGED.
+        Fetch-then-check is what makes a cross-tenant write attempt visible;
+        :meth:`_owned_or_null` documents the opposite trade.
+
+        Then applies :func:`write_allowed`. A row owned by another tenant
+        returns None — the mutator no-ops rather than raising, matching the
+        not-found path a caller already handles — and is logged. The legacy
+        NULL-owned fallback is logged too, so the pre-#412 path stays
+        observable rather than merely permitted.
+        """
+        where = f"{model_class.__name__}._get_for_write"
+        require_tenant_context(chat_settings_id, where=where)
+        row = (
+            self._tenant_query(model_class, SYSTEM_SCOPE)
+            .filter(model_class.id == row_id)
+            .first()
+        )
+        if row is None:
+            self.end_read_transaction()
+            return None
+        if not write_allowed(row.chat_settings_id, chat_settings_id):
+            logger.warning(
+                "%s: refused cross-tenant write to %s (owner=%s, caller tenant=%s)",
+                where,
+                row_id,
+                row.chat_settings_id,
+                chat_settings_id,
+            )
+            return None
+        if chat_settings_id and row.chat_settings_id is None:
+            logger.warning(
+                "%s: mutating legacy NULL-owned row %s under tenant %s "
+                "(pre-#412 ownership backfill fallback)",
+                where,
+                row_id,
+                chat_settings_id,
+            )
+        # Closes the read exactly as the by-id getters do (#908). The
+        # MediaRepository original reached this through ``self.get_by_id``;
+        # the generic form queries directly, so the read-close is explicit
+        # rather than inherited. It runs AFTER the ownership check, not
+        # before: reading ``row.chat_settings_id`` past a commit is free only
+        # because ``expire_on_commit=False`` is set in src/config/database.py,
+        # and this method should not depend on that from another file.
+        self.end_read_transaction()
+        return row
 
     @staticmethod
     def check_connection():

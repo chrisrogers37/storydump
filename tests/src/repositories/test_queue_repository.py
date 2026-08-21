@@ -117,7 +117,7 @@ class TestQueueRepository:
         mock_item = MagicMock()
         mock_db.query.return_value.filter.return_value.first.return_value = mock_item
 
-        result = queue_repo.delete("some-id")
+        result = queue_repo.delete("some-id", SYSTEM_SCOPE)
 
         assert result is True
         mock_db.delete.assert_called_once_with(mock_item)
@@ -128,7 +128,7 @@ class TestQueueRepository:
         """Test deleting a non-existent queue item."""
         mock_db.query.return_value.filter.return_value.first.return_value = None
 
-        result = queue_repo.delete("nonexistent-id")
+        result = queue_repo.delete("nonexistent-id", SYSTEM_SCOPE)
 
         assert result is False
         mock_db.delete.assert_not_called()
@@ -452,7 +452,7 @@ class TestMarkPublishing:
         mock_item.instagram_container_id = None
         mock_db.query.return_value.filter.return_value.first.return_value = mock_item
 
-        result = queue_repo.mark_publishing("q-1", "container-abc")
+        result = queue_repo.mark_publishing("q-1", "container-abc", SYSTEM_SCOPE)
 
         assert result is mock_item
         assert mock_item.status == "publishing"
@@ -462,7 +462,7 @@ class TestMarkPublishing:
     def test_no_op_when_missing(self, queue_repo, mock_db):
         """mark_publishing returns None when the row is gone."""
         mock_db.query.return_value.filter.return_value.first.return_value = None
-        assert queue_repo.mark_publishing("nope", "c") is None
+        assert queue_repo.mark_publishing("nope", "c", SYSTEM_SCOPE) is None
 
 
 @pytest.mark.unit

@@ -305,8 +305,8 @@ class TestHandleResetCallback:
         for the remaining orphaned-button delete path (#561).
         """
         mock_expire.return_value = "reaped"
-        button_row = Mock(id="q-live", telegram_message_id=555)
-        plain_row = Mock(id="q-dead", telegram_message_id=None)
+        button_row = Mock(id="q-live", telegram_message_id=555, chat_settings_id="cs-1")
+        plain_row = Mock(id="q-dead", telegram_message_id=None, chat_settings_id="cs-1")
         handlers.service.queue_repo.get_all.return_value = [button_row, plain_row]
 
         await handlers.handle_reset_callback("confirm", _make_user(), _make_query())
@@ -315,7 +315,7 @@ class TestHandleResetCallback:
         mock_expire.assert_awaited_once()
         assert mock_expire.await_args.args[0] is button_row
         # Only the button-less row is hard-deleted; the live one is never delete()d.
-        handlers.service.queue_repo.delete.assert_called_once_with("q-dead")
+        handlers.service.queue_repo.delete.assert_called_once_with("q-dead", "cs-1")
 
 
 # ──────────────────────────────────────────────────────────────

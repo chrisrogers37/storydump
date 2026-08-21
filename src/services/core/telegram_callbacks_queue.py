@@ -17,7 +17,7 @@ from src.services.core.telegram_utils import (
 )
 from src.utils.logger import logger
 from src.utils.resilience import telegram_edit_with_retry
-from src.repositories.tenant_scope import SYSTEM_SCOPE
+from src.repositories.tenant_scope import scope_of_row
 
 if TYPE_CHECKING:
     from src.services.core.telegram_callbacks_core import TelegramCallbackCore
@@ -91,6 +91,9 @@ class TelegramCallbackQueueHandlers:
         await reconcile_card_messages(self.service, queue_id, queue_item, query)
 
         # Execute DB operations with retry-once on SSL/connection errors
+        queue_scope = scope_of_row(
+            queue_item, where="callbacks_queue.do_complete_queue_action"
+        )
         try:
             media_item = self.core._execute_complete_db_ops(
                 queue_id, queue_item, user, status, success
@@ -109,15 +112,19 @@ class TelegramCallbackQueueHandlers:
                     f"History already exists for queue {queue_id[:8]}, "
                     f"cleaning up queue item only"
                 )
-                self.service.queue_repo.delete(queue_id)
+                self.service.queue_repo.delete(
+                    queue_id,
+                    queue_scope,
+                )
                 media_item = self.service.media_repo.get_by_id(
                     str(queue_item.media_item_id),
-                    chat_settings_id=SYSTEM_SCOPE,
+                    chat_settings_id=queue_scope,
                 )
             else:
                 # Re-fetch — may have been deleted by concurrent operation
                 queue_item = self.service.queue_repo.get_by_id(
-                    queue_id, chat_settings_id=SYSTEM_SCOPE
+                    queue_id,
+                    chat_settings_id=queue_scope,
                 )
                 if not queue_item:
                     logger.info(f"Queue item {queue_id[:8]} gone after session refresh")
@@ -298,7 +305,10 @@ class TelegramCallbackQueueHandlers:
 
         # Re-fetch media_item to pick up the persisted generated_caption
         media_item = self.service.media_repo.get_by_id(
-            str(queue_item.media_item_id), chat_settings_id=SYSTEM_SCOPE
+            str(queue_item.media_item_id),
+            chat_settings_id=scope_of_row(
+                queue_item, where="callbacks_queue.handle_regenerate_caption"
+            ),
         )
 
         # Rebuild caption and keyboard with the new generated caption
@@ -341,7 +351,10 @@ class TelegramCallbackQueueHandlers:
 
         # Get media item for filename
         media_item = self.service.media_repo.get_by_id(
-            str(queue_item.media_item_id), chat_settings_id=SYSTEM_SCOPE
+            str(queue_item.media_item_id),
+            chat_settings_id=scope_of_row(
+                queue_item, where="callbacks_queue.handle_reject_confirmation"
+            ),
         )
         file_name = _escape_markdown(media_item.file_name) if media_item else "Unknown"
 
@@ -472,6 +485,9 @@ class TelegramCallbackQueueHandlers:
         await reconcile_card_messages(self.service, queue_id, queue_item, query)
 
         # Execute DB operations with retry-once on SSL/connection errors
+        queue_scope = scope_of_row(
+            queue_item, where="callbacks_queue.do_handle_rejected"
+        )
         try:
             media_item = self.core._execute_reject_db_ops(queue_id, queue_item, user)
         except OperationalError as e:
@@ -487,14 +503,18 @@ class TelegramCallbackQueueHandlers:
                     f"History already exists for rejected queue {queue_id[:8]}, "
                     f"cleaning up queue item only"
                 )
-                self.service.queue_repo.delete(queue_id)
+                self.service.queue_repo.delete(
+                    queue_id,
+                    queue_scope,
+                )
                 media_item = self.service.media_repo.get_by_id(
                     str(queue_item.media_item_id),
-                    chat_settings_id=SYSTEM_SCOPE,
+                    chat_settings_id=queue_scope,
                 )
             else:
                 queue_item = self.service.queue_repo.get_by_id(
-                    queue_id, chat_settings_id=SYSTEM_SCOPE
+                    queue_id,
+                    chat_settings_id=queue_scope,
                 )
                 if not queue_item:
                     logger.info(f"Queue item {queue_id[:8]} gone after session refresh")

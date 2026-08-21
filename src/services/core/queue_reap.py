@@ -34,6 +34,7 @@ from src.repositories.history_repository import (
     HistoryRepository,
 )
 from src.repositories.queue_repository import QueueRepository
+from src.repositories.tenant_scope import scope_of_row
 from src.services.core.telegram_utils import EXPIRED_CAPTION
 from src.utils.logger import logger
 
@@ -133,7 +134,9 @@ def record_expiry_and_delete(row, *, history_repo, queue_repo) -> bool:
                     else None,
                 ),
             )
-        queue_repo.delete(row_id)
+        queue_repo.delete(
+            row_id, scope_of_row(row, where="queue_reap.record_expiry_and_delete")
+        )
     except SQLAlchemyError:
         # DB failures only — a programming error (malformed row, bad params)
         # must propagate loudly instead of masquerading as a per-row retry.

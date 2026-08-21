@@ -18,7 +18,7 @@ from src.services.core.telegram_utils import (
     caller_may_act_on_queue_row,
 )
 from src.utils.logger import logger
-from src.repositories.tenant_scope import SYSTEM_SCOPE
+from src.repositories.tenant_scope import SYSTEM_SCOPE, scope_of_row
 
 if TYPE_CHECKING:
     from src.services.core.telegram_service import TelegramService
@@ -627,7 +627,9 @@ class TelegramAccountHandlers:
             try:
                 media_item = self.service.media_repo.get_by_id(
                     str(queue_item.media_item_id),
-                    chat_settings_id=SYSTEM_SCOPE,
+                    chat_settings_id=scope_of_row(
+                        queue_item, where="accounts.batch_update_pending_captions"
+                    ),
                 )
                 if not media_item:
                     continue
