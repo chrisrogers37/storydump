@@ -480,7 +480,7 @@ class TestEveryCountCanBeMadeToMove:
     DISCLOSURE checks are deliberately NOT covered here, and saying so is the
     point rather than leaving a silent gap. They are censuses: they assert
     nothing, carry no verdict, and an empty one is itself informative. Two of
-    them (`fork_c_and_d_collapse_counts`, `schema_version.head_version`) are
+    them (`fork_c_collapse_counts`, `schema_version.head_version`) are
     un-grouped aggregates that return a row on an empty table by construction,
     so "seeding makes a row appear" is not even expressible for them.
     """
