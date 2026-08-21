@@ -150,8 +150,17 @@ class TestPlanSlotAdapterMapsThePayload:
         monkeypatch.setattr(
             work_loop.scheduler, "execute_plan_slot", fake_execute_plan_slot
         )
+        from datetime import datetime, timezone
+
+        resolved_slot = datetime(2026, 8, 21, 10, 0, tzinfo=timezone.utc)
         session = _FakeSession(
-            rows=[{"provider_account_ref": "ig-acct-9", "approval_mode": "manual"}]
+            rows=[
+                {
+                    "provider_account_ref": "ig-acct-9",
+                    "approval_mode": "manual",
+                    "slot_at": resolved_slot,
+                }
+            ]
         )
         job = {
             "id": "j1",
@@ -170,12 +179,14 @@ class TestPlanSlotAdapterMapsThePayload:
         assert seen["ig_account_id"] == "acct-1"
         assert seen["provider_account_ref"] == "ig-acct-9"
         assert seen["approval_mode"] == "manual"
-        # The payload crosses jsonb as an ISO string; asyncpg refuses a str
-        # for timestamptz, so the adapter owns the parse (found by the gate).
-        from datetime import datetime
-
-        assert isinstance(seen["slot_at"], datetime)
-        assert seen["slot_at"].isoformat() == "2026-08-21T10:00:00+00:00"
+        # The payload crosses jsonb as a string POSTGRES rendered, so the
+        # resolve query casts it server-side (#969) — the executor receives
+        # the row's datetime and no Python parser ever sees the string.
+        assert seen["slot_at"] is resolved_slot
+        bound = session.statements[0][1]
+        assert bound["slot"] == "2026-08-21T10:00:00+00:00", (
+            "the raw payload string must ride to Postgres unmodified"
+        )
 
 
 class _Recorder:

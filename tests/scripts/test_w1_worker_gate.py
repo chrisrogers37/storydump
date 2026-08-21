@@ -315,3 +315,67 @@ class TestTheWorkerIdlesVisibly:
             minted = cur.fetchone()[0]
         assert minted >= 1, "clock -> plan_slot -> intent must complete unaided"
         _assert_no_stranded_lease(sync_conn)
+
+
+class TestJsonbTimestampWidths:
+    """#969 — deterministic by construction: Postgres strips trailing zeros
+    rendering timestamptz into jsonb, CPython's fromisoformat is version-
+    sensitive about fraction widths (3.10, the declared floor, rejects most
+    of them), and the old adapter parsed in Python — so ~1 in 10 clock ticks
+    stranded on backoff, passing locally on 3.11 by luck. The resolve query
+    now casts server-side; every width that Postgres can render must mint.
+    The incident's exact 5-digit string is among the constructed cases."""
+
+    WIDTHS = [
+        "2026-08-21T16:44:41+00:00",  # no fraction
+        "2026-08-21T16:44:41.1+00:00",
+        "2026-08-21T16:44:41.05+00:00",
+        "2026-08-21T16:44:41.123+00:00",
+        "2026-08-21T16:44:41.1234+00:00",
+        "2026-08-21T16:44:41.05024+00:00",  # the incident string's shape
+        "2026-08-21T16:44:41.123456+00:00",
+    ]
+
+    async def test_every_fraction_width_postgres_renders_mints_the_intent(
+        self, lane_db, sync_conn
+    ):
+        chain = seed_workspace_chain(sync_conn, "w1widths")
+        with sync_conn.cursor() as cur:
+            cur.execute("SET app.actor_kind = 'migration'")
+            for i in range(len(self.WIDTHS)):
+                cur.execute(
+                    "INSERT INTO media_items (workspace_id, source_id, content_hash,"
+                    " file_name, media_kind, provider_file_ref)"
+                    " VALUES (%s, %s, %s, 'w.jpg', 'image', %s)",
+                    (chain["ws"], chain["src"], f"hash-w{i}", f"ref-w{i}"),
+                )
+        sync_conn.commit()
+
+        for width in self.WIDTHS:
+            _insert_job(
+                sync_conn,
+                kind="plan_slot",
+                workspace_id=chain["ws"],
+                serialization_key=f"acct:{chain['iga']}:{width[-12:]}",
+                payload='{"v": 1, "ig_account_id": "%s", "slot_at": "%s"}'
+                % (chain["iga"], width),
+            )
+
+        for _ in self.WIDTHS:
+            wl, claimed = await _run_once(lane_db)
+            assert claimed is True
+            assert wl.failures == 0, (
+                "a fraction width Postgres rendered must never strand the clock"
+            )
+
+        with sync_conn.cursor() as cur:
+            # Assert each CONSTRUCTED slot minted exactly once — the seed
+            # chain carries its own intent, so a bare count would be off-by-one.
+            for width in self.WIDTHS:
+                cur.execute(
+                    "SELECT count(*) FROM post_intents WHERE ig_account_id = %s"
+                    " AND state = 'scheduled' AND schedule_slot_at = CAST(%s AS timestamptz)",
+                    (chain["iga"], width),
+                )
+                assert cur.fetchone()[0] == 1, f"width {width!r} did not mint"
+        _assert_no_stranded_lease(sync_conn)
