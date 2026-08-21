@@ -352,9 +352,12 @@ class LeaseHeartbeat:
         whole purpose is surviving until the next beat."""
         while True:
             try:
-                await asyncio.wait_for(self._stopping.wait(), timeout=self._interval)
+                # asyncio.timeout, not wait_for(Event.wait(), ...): the latter
+                # leaks an unawaited coroutine under cancel races (#958).
+                async with asyncio.timeout(self._interval):
+                    await self._stopping.wait()
                 return
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
             try:
                 await self.beat_once()

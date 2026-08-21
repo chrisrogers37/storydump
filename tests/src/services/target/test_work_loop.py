@@ -329,3 +329,61 @@ class TestOneCycle:
         loop, hb, events = _loop_with(monkeypatch, registry={}, claims=[])
         processed = await loop.run_once()
         assert processed is False and events.calls == []
+
+
+class TestLaneSurvivesTransientClaimErrors:
+    """navi's second instance: an unguarded claim error killed the lane task
+    silently. The lane now survives transient errors loudly (logged, counted)
+    and dies LOUDLY — by raising into the supervisor — only when they persist
+    past the configured ceiling."""
+
+    async def test_transient_claim_errors_are_survived_and_counted(
+        self, monkeypatch, caplog
+    ):
+        calls = {"n": 0}
+
+        async def flaky_claim(conn, **kwargs):
+            calls["n"] += 1
+            if calls["n"] <= 2:
+                raise ConnectionError("db blip")
+            return None
+
+        monkeypatch.setattr(work_loop.jobs, "claim_job", flaky_claim)
+        loop = work_loop.WorkLoop(
+            claim_conn=object(),
+            session_for=lambda job: None,
+            lane="bulk",
+            registry={},
+            heartbeat=_FakeHeartbeat(),
+            config=WorkerConfig(claim_idle_seconds=0.01),
+            worker_name="w-t",
+        )
+        with caplog.at_level("ERROR"):
+            assert await loop.run_once() is False
+            assert await loop.run_once() is False
+        assert loop.consecutive_errors == 2
+        assert sum("claim failed" in r.message for r in caplog.records) == 2
+        assert await loop.run_once() is False  # healthy claim resets
+        assert loop.consecutive_errors == 0
+
+    async def test_persistent_claim_errors_raise_past_the_ceiling(self, monkeypatch):
+        async def dead_claim(conn, **kwargs):
+            raise ConnectionError("db down")
+
+        monkeypatch.setattr(work_loop.jobs, "claim_job", dead_claim)
+        cfg = WorkerConfig(claim_idle_seconds=0.01, lane_max_consecutive_errors=3)
+        loop = work_loop.WorkLoop(
+            claim_conn=object(),
+            session_for=lambda job: None,
+            lane="bulk",
+            registry={},
+            heartbeat=_FakeHeartbeat(),
+            config=cfg,
+            worker_name="w-t",
+        )
+        import pytest as _pytest
+
+        with _pytest.raises(ConnectionError):
+            for _ in range(10):
+                await loop.run_once()
+        assert loop.consecutive_errors == 3

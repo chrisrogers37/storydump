@@ -66,6 +66,8 @@ class WorkerConfig:
     retry_backoff_seconds: float = 60.0  # R8 retryable-failure backoff
     park_seconds: float = 900.0  # executor-less kinds retry this often
     sender_hold_seconds: float = 45.0  # < lease_seconds: poller hold per claim
+    sender_sweep_seconds: float = 3.0  # cadence of the sender-job mint sweep
+    lane_max_consecutive_errors: int = 10  # claim errors before the lane dies loudly
     poller_interval_seconds: float = 2.0  # 05: outbox cadence
     chat_limit: int = 18  # 05: per-chat sends per window
     chat_window_seconds: int = 60
@@ -322,13 +324,28 @@ class WorkLoop:
         """Claim and run at most one job. Returns True when one was claimed."""
         if self._claim_conn is None:
             raise RuntimeError("WorkLoop.run before bind_claim_conn")
-        job = await jobs.claim_job(
-            self._claim_conn,
-            lane=self.lane,
-            worker=self._worker_name,
-            lease_seconds=self._config.lease_seconds,
-            ws_lane_cap=self._config.ws_lane_cap,
-        )
+        try:
+            job = await jobs.claim_job(
+                self._claim_conn,
+                lane=self.lane,
+                worker=self._worker_name,
+                lease_seconds=self._config.lease_seconds,
+                ws_lane_cap=self._config.ws_lane_cap,
+            )
+        except Exception as exc:  # noqa: BLE001 — survive transient, die loud on persistent
+            self.consecutive_errors += 1
+            logger.error(
+                "lane %s: claim failed (%r) — %d/%d consecutive; the lane dies"
+                " loudly at the ceiling",
+                self.lane,
+                exc,
+                self.consecutive_errors,
+                self._config.lane_max_consecutive_errors,
+            )
+            if self.consecutive_errors >= self._config.lane_max_consecutive_errors:
+                raise
+            return False
+        self.consecutive_errors = 0
         if job is None:
             return False
         token = job["lease_token"]

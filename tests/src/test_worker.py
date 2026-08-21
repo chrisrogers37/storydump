@@ -179,3 +179,84 @@ class TestTransportComposition:
         app = compose(engine=object(), config=WorkerConfig(), env={}, transport=_Live())
         await apply_transport_probe(app)
         assert not isinstance(app.registry["deliver_outbox"], Parked)
+
+
+class TestTaskSupervision:
+    """navi's class finding on #958: two background tasks could die silently
+    (the sweeper's missing config field; a lane's unguarded claim error) while
+    the worker kept printing healthy status lines. The worker now supervises
+    every task it owns: a death is logged loudly, stops the worker, and
+    surfaces as a raise — silence is structurally impossible."""
+
+    def test_the_sweep_cadence_field_exists(self):
+        assert WorkerConfig().sender_sweep_seconds > 0
+
+    async def test_supervise_returns_the_task_that_died(self):
+        import asyncio
+
+        from src.worker import supervise
+
+        async def dies():
+            raise RuntimeError("boom")
+
+        async def healthy():
+            await asyncio.Event().wait()
+
+        stop = asyncio.Event()
+        t_dead = asyncio.create_task(dies(), name="doomed")
+        t_ok = asyncio.create_task(healthy(), name="fine")
+        died = await supervise(stop, [t_dead, t_ok])
+        assert died is t_dead
+        assert isinstance(died.exception(), RuntimeError)
+        t_ok.cancel()
+
+    async def test_a_task_exiting_because_stop_fired_is_not_a_death(self):
+        """The race the soak caught live: stop fires, a task's own loop sees
+        it and returns, and both land in the same FIRST_COMPLETED batch. An
+        exit AFTER stop is a clean stop, never a death."""
+        import asyncio
+
+        from src.worker import supervise
+
+        stop = asyncio.Event()
+
+        async def stops_with_us():
+            await stop.wait()
+
+        t = asyncio.create_task(stops_with_us(), name="obedient")
+        stop.set()
+        await asyncio.sleep(0)  # let the task finish alongside the waiter
+        died = await supervise(stop, [t])
+        assert died is None
+
+    async def test_supervise_returns_none_when_stop_fires_first(self):
+        import asyncio
+
+        from src.worker import supervise
+
+        async def healthy():
+            await asyncio.Event().wait()
+
+        stop = asyncio.Event()
+        t_ok = asyncio.create_task(healthy(), name="fine")
+        stop.set()
+        died = await supervise(stop, [t_ok])
+        assert died is None and not t_ok.done()
+        t_ok.cancel()
+
+
+class TestSweeperObservables:
+    def test_status_line_carries_the_sweeper_counters(self):
+        from src.worker import status_line
+
+        class _L:
+            lane, processed, parked, failures, fenced = "bulk", 0, 0, 0, 0
+
+        class _H:
+            beats, short_beats, consecutive_failures = 0, 0, 0
+
+        class _S:
+            sweeps, mints = 7, 2
+
+        line = status_line(loops=[_L], clock=None, heartbeat=_H, sweeper=_S)
+        assert "sweeps=7" in line and "mints=2" in line

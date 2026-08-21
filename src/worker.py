@@ -43,6 +43,10 @@ from src.services.target.work_loop import (
 logger = logging.getLogger("target.worker")
 
 
+class WorkerTaskDied(RuntimeError):
+    """A supervised background task exited before stop was requested."""
+
+
 def engine_url_from_env(env: dict):
     """The branch-soak/deploy door: TARGET_DATABASE_URL, made asyncpg-safe.
 
@@ -118,6 +122,7 @@ class WorkerApp:
     deps: WorkerDeps
     engine: object
     clock: object = None  # set by run() so a supervisor can read its observables
+    sweeper: object = None  # set by run(); carries sweeps/mints observables
 
 
 def compose(*, engine, config: WorkerConfig, env: dict, transport=None) -> WorkerApp:
@@ -205,7 +210,7 @@ async def apply_transport_probe(app: WorkerApp) -> None:
     logger.info("telegram channel live as @%s", username)
 
 
-def status_line(*, loops, clock, heartbeat, transport=None) -> str:
+def status_line(*, loops, clock, heartbeat, transport=None, sweeper=None) -> str:
     """One human-readable line from the observables — the soak's visibility."""
     lanes = " ".join(
         f"{wl.lane}[processed={wl.processed} parked={wl.parked}"
@@ -225,29 +230,69 @@ def status_line(*, loops, clock, heartbeat, transport=None) -> str:
     line = f"{lanes} {clock_part} {hb_part}"
     if transport is not None:
         line += f" transport[auth_failures={transport.auth_failures}]"
+    if sweeper is not None:
+        line += f" sweeper[sweeps={sweeper.sweeps} mints={sweeper.mints}]"
     return line
 
 
-async def _sender_job_sweeper(app: WorkerApp, stop: asyncio.Event) -> None:
-    """Mint sender jobs on cadence while the channel is live. Never mints for
-    a parked channel — that would manufacture parked work on a timer."""
-    maker = async_sessionmaker(app.engine, expire_on_commit=False)
-    while not stop.is_set():
-        if not isinstance(app.registry.get("deliver_outbox"), Parked):
+class SenderSweeper:
+    """The sender-job mint sweep, with the observables its silent death cost
+    us (#958 review, navi): `sweeps` counts iterations, `mints` counts jobs
+    minted — both ride the status line, so a sweeper that stops sweeping is
+    visible as a counter that stops moving, and a sweeper that DIES is caught
+    by run()'s task supervision."""
+
+    def __init__(self, app: "WorkerApp"):
+        self._app = app
+        self.sweeps = 0
+        self.mints = 0
+
+    async def run(self, stop: asyncio.Event) -> None:
+        maker = async_sessionmaker(self._app.engine, expire_on_commit=False)
+        while not stop.is_set():
+            self.sweeps += 1
+            if not isinstance(self._app.registry.get("deliver_outbox"), Parked):
+                try:
+                    async with maker() as session:
+                        async with session.begin():
+                            await unit_of_work.apply_gucs(
+                                session, tenant_id="", actor_kind="system"
+                            )
+                            self.mints += await ensure_sender_jobs(session)
+                except Exception:  # noqa: BLE001 — outlive a blip, loudly
+                    logger.exception("sender-job sweep failed; retrying on cadence")
             try:
-                async with maker() as session:
-                    async with session.begin():
-                        await unit_of_work.apply_gucs(
-                            session, tenant_id="", actor_kind="system"
-                        )
-                        await ensure_sender_jobs(session)
-            except Exception:  # noqa: BLE001 — the sweep must outlive a blip
-                logger.exception("sender-job sweep failed; retrying on cadence")
-        try:
-            async with asyncio.timeout(app.config.sender_sweep_seconds):
-                await stop.wait()
-        except TimeoutError:
-            pass
+                async with asyncio.timeout(self._app.config.sender_sweep_seconds):
+                    await stop.wait()
+            except TimeoutError:
+                pass
+
+
+async def supervise(stop: asyncio.Event, tasks) -> asyncio.Task | None:
+    """Wait until stop is requested OR any supervised task exits.
+
+    Returns the task that died (None when stop fired first). The caller owns
+    what loud means; this only guarantees a death can never pass unnoticed —
+    the class finding from #958: two background tasks could die while the
+    worker kept printing healthy status lines.
+    """
+    stop_waiter = asyncio.create_task(stop.wait(), name="stop-waiter")
+    try:
+        done, _ = await asyncio.wait(
+            {stop_waiter, *tasks}, return_when=asyncio.FIRST_COMPLETED
+        )
+    finally:
+        if not stop_waiter.done():
+            stop_waiter.cancel()
+            await asyncio.gather(stop_waiter, return_exceptions=True)
+    if stop.is_set():
+        # A task exiting because stop fired is a clean stop, not a death —
+        # both can land in the same FIRST_COMPLETED batch (measured: the
+        # soak's status reporter, exiting on the very stop that ended the
+        # soak, read as died until this guard existed).
+        return None
+    dead = [t for t in done if t is not stop_waiter]
+    return dead[0] if dead else None
 
 
 async def _status_reporter(app: WorkerApp, stop: asyncio.Event, every: float) -> None:
@@ -263,6 +308,7 @@ async def _status_reporter(app: WorkerApp, stop: asyncio.Event, every: float) ->
                     clock=app.clock,
                     heartbeat=app.heartbeat,
                     transport=app.deps.transport,
+                    sweeper=app.sweeper,
                 ),
             )
 
@@ -317,18 +363,43 @@ async def run(app: WorkerApp, *, stop: asyncio.Event | None = None) -> None:
     status_task = asyncio.create_task(
         _status_reporter(app, stop, 60.0), name="status-reporter"
     )
-    sweep_task = asyncio.create_task(
-        _sender_job_sweeper(app, stop), name="sender-job-sweeper"
-    )
+    app.sweeper = SenderSweeper(app)
+    sweep_task = asyncio.create_task(app.sweeper.run(stop), name="sender-job-sweeper")
+    supervised = [
+        t
+        for t in (hb_task, status_task, sweep_task, getattr(app.clock, "_task", None))
+        if t is not None
+    ] + loop_tasks
+    died = None
     try:
-        await stop.wait()
+        died = await supervise(stop, supervised)
+        if died is not None:
+            exc = died.exception() if not died.cancelled() else None
+            logger.error(
+                "background task %s DIED (%r) before stop was requested —"
+                " stopping the worker LOUDLY; a limping worker is the silent"
+                " failure this supervision exists to prevent",
+                died.get_name(),
+                exc,
+            )
+            stop.set()
     finally:
         status_task.cancel()
         sweep_task.cancel()
-        await asyncio.gather(status_task, sweep_task, return_exceptions=True)
+        for result in await asyncio.gather(
+            status_task, sweep_task, return_exceptions=True
+        ):
+            if isinstance(result, Exception) and not isinstance(
+                result, asyncio.CancelledError
+            ):
+                logger.error("task raised during shutdown: %r", result)
         for wl in app.loops:
             wl.stop()
-        await asyncio.gather(*loop_tasks, return_exceptions=True)
+        for result in await asyncio.gather(*loop_tasks, return_exceptions=True):
+            if isinstance(result, Exception) and not isinstance(
+                result, asyncio.CancelledError
+            ):
+                logger.error("lane raised during shutdown: %r", result)
         await clock.stop()
         await app.heartbeat.stop()
         hb_task.cancel()
@@ -340,9 +411,20 @@ async def run(app: WorkerApp, *, stop: asyncio.Event | None = None) -> None:
             await app.deps.transport.aclose()
         await engine.dispose()
         logger.info(
-            "worker stopped cleanly; final %s",
-            status_line(loops=app.loops, clock=app.clock, heartbeat=app.heartbeat),
+            "worker stopped %s; final %s",
+            "after a task death" if died is not None else "cleanly",
+            status_line(
+                loops=app.loops,
+                clock=app.clock,
+                heartbeat=app.heartbeat,
+                transport=app.deps.transport,
+                sweeper=app.sweeper,
+            ),
         )
+        if died is not None:
+            raise WorkerTaskDied(f"background task {died.get_name()} died") from (
+                died.exception() if not died.cancelled() else None
+            )
 
 
 def main() -> None:
@@ -360,7 +442,10 @@ def main() -> None:
 
         transport = TelegramTransport(token)
     app = compose(engine=engine, config=config, env=env, transport=transport)
-    asyncio.run(run(app))
+    try:
+        asyncio.run(run(app))
+    except WorkerTaskDied:
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":

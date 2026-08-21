@@ -290,10 +290,17 @@ class TestTheWorkerIdlesVisibly:
             await asyncio.sleep(6.0)
         finally:
             stop.set()
+            # run() raising WorkerTaskDied here would mean a background task
+            # died mid-soak — the supervision converts silence into failure.
             await asyncio.wait_for(runner, timeout=15.0)
 
         assert app.clock is not None and app.clock.elected is True
         assert app.clock.ticks >= 3, "the clock must tick on its cadence"
+        # Positive controls (#958 review): counters whose ABSENCE of movement
+        # is a failure — a dead task can no longer hide behind a quiet pass.
+        assert app.sweeper is not None and app.sweeper.sweeps >= 2, (
+            "the sender sweeper must be alive and sweeping for the whole run"
+        )
         bulk = next(wl_ for wl_ in app.loops if wl_.lane == "bulk")
         assert bulk.processed >= 1, "the clock-minted plan_slot job must be run"
         assert bulk.parked >= 1, "the executor-less kind must park, not vanish"

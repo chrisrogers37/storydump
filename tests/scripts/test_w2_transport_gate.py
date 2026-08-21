@@ -185,3 +185,66 @@ class TestDeadCredentialMidRun:
                 assert cur.fetchone()[0] == 0
         finally:
             await engine.dispose()
+
+
+class TestReMintThroughTheRealSweeper:
+    """The claim navi refuted, proven the honest way this time: rows enqueued
+    AFTER the worker is up get their sender job from the PERIODIC sweeper —
+    not from a test helper calling the mint function directly — and the
+    sweeper is still alive at the end. Positive controls throughout: sweeps
+    and mints are counters whose absence of movement is a failure, never a
+    silence."""
+
+    async def test_rows_enqueued_after_startup_are_delivered_by_the_live_worker(
+        self, lane_db, sync_conn
+    ):
+        import asyncio
+
+        from src.worker import run
+
+        chain, binding = _seed_binding_with_pending(sync_conn, "w2remint", rows=0)
+        transport = _FakeTransport()
+        cfg = WorkerConfig(
+            lease_seconds=10.0,
+            claim_idle_seconds=0.1,
+            clock_interval_seconds=5.0,
+            heartbeat_interval_seconds=0.5,
+            sender_sweep_seconds=0.3,
+            poller_interval_seconds=0.05,
+            sender_hold_seconds=3.0,
+        )
+        engine = create_async_engine(_async_url(lane_db))
+        app = compose(engine=engine, config=cfg, env={}, transport=transport)
+        stop = asyncio.Event()
+        runner = asyncio.create_task(run(app, stop=stop))
+        try:
+            await asyncio.sleep(1.0)  # worker up; outbox empty; sweeps ticking
+            with sync_conn.cursor() as cur:
+                cur.execute("SET app.actor_kind = 'migration'")
+                cur.execute(
+                    "INSERT INTO channel_outbox (workspace_id, binding_id, kind,"
+                    " payload) VALUES (%s, %s, 'approval_prompt',"
+                    " jsonb_build_object('v', 1, 'text', 'late card'))",
+                    (chain["ws"], binding),
+                )
+            sync_conn.commit()
+
+            deadline = asyncio.get_running_loop().time() + 12.0
+            while not transport.sent and asyncio.get_running_loop().time() < deadline:
+                await asyncio.sleep(0.2)
+        finally:
+            stop.set()
+            await asyncio.wait_for(runner, timeout=20.0)
+
+        assert transport.sent, "the late row was never delivered — re-mint is broken"
+        assert app.sweeper is not None and app.sweeper.sweeps >= 3, (
+            "the sweeper must still be sweeping, not dead after one pass"
+        )
+        assert app.sweeper.mints >= 1, "the sender job must come from the SWEEPER"
+        with sync_conn.cursor() as cur:
+            cur.execute(
+                "SELECT state FROM channel_outbox WHERE binding_id = %s", (binding,)
+            )
+            assert cur.fetchone()[0] == "sent"
+            cur.execute("SELECT count(*) FROM jobs WHERE state = 'leased'")
+            assert cur.fetchone()[0] == 0
