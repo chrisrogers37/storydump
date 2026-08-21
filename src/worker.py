@@ -41,6 +41,30 @@ from src.services.target.work_loop import (
 logger = logging.getLogger("target.worker")
 
 
+def engine_url_from_env(env: dict):
+    """The branch-soak/deploy door: TARGET_DATABASE_URL, made asyncpg-safe.
+
+    Accepts the plain `postgresql://` URL a platform hands out and rewrites
+    what the asyncpg driver refuses: the dialect suffix, and the libpq-only
+    `sslmode`/`channel_binding` query params (Neon appends both; asyncpg
+    takes `ssl=`). Returns None when unset so `unit_of_work.create_engine`
+    falls back to the settings-built URL.
+    """
+    url = env.get("TARGET_DATABASE_URL")
+    if not url:
+        return None
+    url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+    parts = urlsplit(url)
+    params = dict(parse_qsl(parts.query))
+    sslmode = params.pop("sslmode", None)
+    params.pop("channel_binding", None)
+    if sslmode and "ssl" not in params:
+        params["ssl"] = sslmode
+    return urlunsplit(parts._replace(query=urlencode(params)))
+
+
 def _transit_from_env(env):
     name = env.get("CLOUDINARY_CLOUD_NAME")
     key = env.get("CLOUDINARY_API_KEY")
@@ -214,8 +238,9 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     config = WorkerConfig()
-    engine = unit_of_work.create_engine()
-    app = compose(engine=engine, config=config, env=dict(os.environ))
+    env = dict(os.environ)
+    engine = unit_of_work.create_engine(engine_url_from_env(env))
+    app = compose(engine=engine, config=config, env=env)
     asyncio.run(run(app))
 
 

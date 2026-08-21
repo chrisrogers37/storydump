@@ -49,3 +49,31 @@ def test_heartbeat_and_lease_numbers_agree():
     assert app.heartbeat_lease_seconds == cfg.lease_seconds
     assert cfg.sender_hold_seconds < cfg.lease_seconds
     assert app.heartbeat_interval_seconds < cfg.lease_seconds / 2
+
+
+class TestEngineUrlFromEnv:
+    """TARGET_DATABASE_URL is the branch-soak/deploy door: a plain postgres URL
+    in, an asyncpg-dialect URL out, with the libpq-only params asyncpg refuses
+    rewritten (Neon hands out `sslmode=require&channel_binding=require`)."""
+
+    def test_plain_postgres_url_gains_the_asyncpg_driver(self):
+        from src.worker import engine_url_from_env
+
+        url = engine_url_from_env({"TARGET_DATABASE_URL": "postgresql://u:p@h/db"})
+        assert url == "postgresql+asyncpg://u:p@h/db"
+
+    def test_libpq_ssl_params_are_rewritten_for_asyncpg(self):
+        from src.worker import engine_url_from_env
+
+        url = engine_url_from_env(
+            {
+                "TARGET_DATABASE_URL": "postgresql://u:p@h/db?sslmode=require&channel_binding=require"
+            }
+        )
+        assert "sslmode" not in url and "channel_binding" not in url
+        assert url.endswith("?ssl=require")
+
+    def test_absent_env_returns_none_so_settings_decide(self):
+        from src.worker import engine_url_from_env
+
+        assert engine_url_from_env({}) is None
