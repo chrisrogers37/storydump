@@ -15,6 +15,7 @@ class InstagramAccountRepository(BaseRepository):
 
     def _ownership_predicate(
         self,
+        *,
         chat_settings_id: str,
         active_account_id: Optional[str],
         include_unstamped_legacy: bool,
@@ -50,6 +51,7 @@ class InstagramAccountRepository(BaseRepository):
 
     def get_owned(
         self,
+        *,
         chat_settings_id: str,
         active_account_id: Optional[str],
         include_unstamped_legacy: bool,
@@ -68,7 +70,9 @@ class InstagramAccountRepository(BaseRepository):
         agreement test pins the two together.
         """
         predicate = self._ownership_predicate(
-            chat_settings_id, active_account_id, include_unstamped_legacy
+            chat_settings_id=chat_settings_id,
+            active_account_id=active_account_id,
+            include_unstamped_legacy=include_unstamped_legacy,
         )
         query = self.db.query(InstagramAccount).filter(predicate)
         if not include_inactive:

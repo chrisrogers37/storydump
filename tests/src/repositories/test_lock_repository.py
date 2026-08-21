@@ -197,7 +197,7 @@ class TestLockRepositoryTenantFiltering:
         """is_locked passes chat_settings_id through to get_active_lock."""
         with patch.object(lock_repo, "get_active_lock", return_value=None) as mock_get:
             lock_repo.is_locked("media-1", chat_settings_id=self.TENANT_ID)
-            mock_get.assert_called_once_with("media-1", self.TENANT_ID)
+            mock_get.assert_called_once_with("media-1", chat_settings_id=self.TENANT_ID)
 
     def test_get_all_active_with_tenant(self, lock_repo, mock_db):
         """get_all_active passes chat_settings_id through tenant filter."""

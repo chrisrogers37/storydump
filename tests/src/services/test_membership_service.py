@@ -57,7 +57,9 @@ class TestIsActiveMember:
         service.user_repo.get_by_telegram_id.return_value = Mock(id="u-1")
         service.membership_repo.get_membership.return_value = Mock(is_active=True)
         assert service.is_active_member(123, "cs-1") is True
-        service.membership_repo.get_membership.assert_called_once_with("u-1", "cs-1")
+        service.membership_repo.get_membership.assert_called_once_with(
+            "u-1", chat_settings_id="cs-1"
+        )
 
 
 @pytest.mark.unit

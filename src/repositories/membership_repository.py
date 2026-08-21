@@ -43,7 +43,7 @@ class MembershipRepository(BaseRepository):
         return result
 
     def get_for_chat(
-        self, chat_settings_id: str, active_only: bool = True
+        self, *, chat_settings_id: str, active_only: bool = True
     ) -> list[UserChatMembership]:
         """Get all memberships for a chat instance."""
         query = self.db.query(UserChatMembership).filter(
@@ -56,7 +56,7 @@ class MembershipRepository(BaseRepository):
         return result
 
     def get_membership(
-        self, user_id: str, chat_settings_id: str
+        self, user_id: str, *, chat_settings_id: str
     ) -> Optional[UserChatMembership]:
         """Get a specific user-chat membership."""
         result = (
@@ -73,13 +73,14 @@ class MembershipRepository(BaseRepository):
     def create_membership(
         self,
         user_id: str,
+        *,
         chat_settings_id: str,
         instance_role: str = "member",
     ) -> UserChatMembership:
         """Idempotent upsert. Returns existing membership if active; reactivates if inactive."""
         from sqlalchemy.exc import IntegrityError
 
-        existing = self.get_membership(user_id, chat_settings_id)
+        existing = self.get_membership(user_id, chat_settings_id=chat_settings_id)
         if existing:
             if not existing.is_active:
                 existing.is_active = True
@@ -138,7 +139,7 @@ class MembershipRepository(BaseRepository):
             logger.warning("Audit log failed for membership change", exc_info=True)
         return membership
 
-    def deactivate_for_chat(self, chat_settings_id: str) -> int:
+    def deactivate_for_chat(self, *, chat_settings_id: str) -> int:
         """Deactivate all memberships for a chat (e.g. bot kicked from group).
 
         Returns number of memberships deactivated.
@@ -158,7 +159,7 @@ class MembershipRepository(BaseRepository):
         return count
 
     def deactivate(
-        self, user_id: str, chat_settings_id: str
+        self, user_id: str, *, chat_settings_id: str
     ) -> Optional[UserChatMembership]:
         """Deactivate a specific membership."""
         membership = self.get_membership(user_id, chat_settings_id)

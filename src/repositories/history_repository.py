@@ -175,7 +175,7 @@ class HistoryRepository(BaseRepository):
         return result
 
     def count_by_method(
-        self, method: str, since: datetime, chat_settings_id: TenantScope
+        self, method: str, since: datetime, *, chat_settings_id: TenantScope
     ) -> int:
         """
         Count posts by posting method since a given time.

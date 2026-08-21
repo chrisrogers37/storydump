@@ -201,7 +201,7 @@ class TestChatSettingsRepository:
             mock_settings
         )
 
-        result = settings_repo.get_by_id("abc-123")
+        result = settings_repo.get_by_id(chat_settings_id="abc-123")
 
         assert result is mock_settings
         mock_db.commit.assert_called()  # end_read_transaction
@@ -210,6 +210,6 @@ class TestChatSettingsRepository:
         """Test getting settings by non-existent UUID returns None."""
         mock_db.query.return_value.filter.return_value.first.return_value = None
 
-        result = settings_repo.get_by_id("nonexistent-uuid")
+        result = settings_repo.get_by_id(chat_settings_id="nonexistent-uuid")
 
         assert result is None
