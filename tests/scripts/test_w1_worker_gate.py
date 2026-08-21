@@ -301,6 +301,9 @@ class TestTheWorkerIdlesVisibly:
         assert app.sweeper is not None and app.sweeper.sweeps >= 2, (
             "the sender sweeper must be alive and sweeping for the whole run"
         )
+        assert app.prompt_sweeper is not None and app.prompt_sweeper.sweeps >= 1, (
+            "the prompt sweeper must be alive too (W3)"
+        )
         bulk = next(wl_ for wl_ in app.loops if wl_.lane == "bulk")
         assert bulk.processed >= 1, "the clock-minted plan_slot job must be run"
         assert bulk.parked >= 1, "the executor-less kind must park, not vanish"

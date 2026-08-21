@@ -233,6 +233,18 @@ class TestReMintThroughTheRealSweeper:
             while not transport.sent and asyncio.get_running_loop().time() < deadline:
                 await asyncio.sleep(0.2)
         finally:
+            # Wait for the third sweep on its own bounded clock before
+            # stopping: the >=3 assert discriminates died-after-one-pass
+            # (#958's regression, which pins sweeps at 1 forever) from a
+            # loaded host where each sweep's real DB query outlasts the
+            # 0.3s interval — a fixed post-hoc count conflates the two.
+            sweep_deadline = asyncio.get_running_loop().time() + 10.0
+            while (
+                app.sweeper is not None
+                and app.sweeper.sweeps < 3
+                and asyncio.get_running_loop().time() < sweep_deadline
+            ):
+                await asyncio.sleep(0.2)
             stop.set()
             await asyncio.wait_for(runner, timeout=20.0)
 

@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from src.services.target import jobs, scheduler, unit_of_work
+from src.services.target import prompts as prompts_mod
 from src.services.target.work_loop import (
     Parked,
     WorkerConfig,
@@ -123,6 +124,7 @@ class WorkerApp:
     engine: object
     clock: object = None  # set by run() so a supervisor can read its observables
     sweeper: object = None  # set by run(); carries sweeps/mints observables
+    prompt_sweeper: object = None  # set by run(); sweeps/prompted/advanced
 
 
 def compose(*, engine, config: WorkerConfig, env: dict, transport=None) -> WorkerApp:
@@ -210,7 +212,9 @@ async def apply_transport_probe(app: WorkerApp) -> None:
     logger.info("telegram channel live as @%s", username)
 
 
-def status_line(*, loops, clock, heartbeat, transport=None, sweeper=None) -> str:
+def status_line(
+    *, loops, clock, heartbeat, transport=None, sweeper=None, prompt_sweeper=None
+) -> str:
     """One human-readable line from the observables — the soak's visibility."""
     lanes = " ".join(
         f"{wl.lane}[processed={wl.processed} parked={wl.parked}"
@@ -232,6 +236,12 @@ def status_line(*, loops, clock, heartbeat, transport=None, sweeper=None) -> str
         line += f" transport[auth_failures={transport.auth_failures}]"
     if sweeper is not None:
         line += f" sweeper[sweeps={sweeper.sweeps} mints={sweeper.mints}]"
+    if prompt_sweeper is not None:
+        line += (
+            f" prompts[sweeps={prompt_sweeper.sweeps}"
+            f" prompted={prompt_sweeper.prompted}"
+            f" advanced={prompt_sweeper.advanced}]"
+        )
     return line
 
 
@@ -262,6 +272,39 @@ class SenderSweeper:
                 except Exception:  # noqa: BLE001 — outlive a blip, loudly
                     logger.exception("sender-job sweep failed; retrying on cadence")
             await jobs.wait_or_stop(stop, self._app.config.sender_sweep_seconds)
+
+
+class PromptSweeper:
+    """The W3 prompt sweep on its own cadence: due intents gain cards,
+    delivered cards advance their intents, dead cards fail them. Counters
+    ride the status line — the same absence-is-failure control the sender
+    sweeper carries. Runs regardless of channel state: cards enqueued while
+    the transport is parked simply wait as `pending` rows."""
+
+    def __init__(self, app: "WorkerApp"):
+        self._app = app
+        self.sweeps = 0
+        self.prompted = 0
+        self.advanced = 0
+        self.failed_no_surface = 0
+
+    async def run(self, stop: asyncio.Event) -> None:
+        maker = async_sessionmaker(self._app.engine, expire_on_commit=False)
+        while not stop.is_set():
+            self.sweeps += 1
+            try:
+                async with maker() as session:
+                    async with session.begin():
+                        await unit_of_work.apply_gucs(
+                            session, tenant_id="", actor_kind="system"
+                        )
+                        counts = await prompts_mod.sweep_due_prompts(session, limit=50)
+                self.prompted += counts["prompted"]
+                self.advanced += counts["advanced"]
+                self.failed_no_surface += counts["failed_no_surface"]
+            except Exception:  # noqa: BLE001 — outlive a blip, loudly
+                logger.exception("prompt sweep failed; retrying on cadence")
+            await jobs.wait_or_stop(stop, self._app.config.prompt_sweep_seconds)
 
 
 async def supervise(stop: asyncio.Event, tasks) -> asyncio.Task | None:
@@ -312,6 +355,7 @@ async def _status_reporter(app: WorkerApp, stop: asyncio.Event, every: float) ->
                     heartbeat=app.heartbeat,
                     transport=app.deps.transport,
                     sweeper=app.sweeper,
+                    prompt_sweeper=app.prompt_sweeper,
                 ),
             )
 
@@ -368,9 +412,19 @@ async def run(app: WorkerApp, *, stop: asyncio.Event | None = None) -> None:
     )
     app.sweeper = SenderSweeper(app)
     sweep_task = asyncio.create_task(app.sweeper.run(stop), name="sender-job-sweeper")
+    app.prompt_sweeper = PromptSweeper(app)
+    prompt_task = asyncio.create_task(
+        app.prompt_sweeper.run(stop), name="prompt-sweeper"
+    )
     supervised = [
         t
-        for t in (hb_task, status_task, sweep_task, getattr(app.clock, "_task", None))
+        for t in (
+            hb_task,
+            status_task,
+            sweep_task,
+            prompt_task,
+            getattr(app.clock, "_task", None),
+        )
         if t is not None
     ] + loop_tasks
     died = None
@@ -389,8 +443,9 @@ async def run(app: WorkerApp, *, stop: asyncio.Event | None = None) -> None:
     finally:
         status_task.cancel()
         sweep_task.cancel()
+        prompt_task.cancel()
         for result in await asyncio.gather(
-            status_task, sweep_task, return_exceptions=True
+            status_task, sweep_task, prompt_task, return_exceptions=True
         ):
             if isinstance(result, Exception) and not isinstance(
                 result, asyncio.CancelledError
@@ -422,6 +477,7 @@ async def run(app: WorkerApp, *, stop: asyncio.Event | None = None) -> None:
                 heartbeat=app.heartbeat,
                 transport=app.deps.transport,
                 sweeper=app.sweeper,
+                prompt_sweeper=app.prompt_sweeper,
             ),
         )
         if died is not None:
