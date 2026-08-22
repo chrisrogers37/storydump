@@ -103,7 +103,6 @@ class WorkerDeps:
     transport: Optional[Callable[[dict], Any]] = None
     poll: Optional[Callable[..., Any]] = None
     refresh: Optional[Callable[..., Any]] = None
-    drive: Any = None
     engine: Any = None
     config: WorkerConfig = field(default_factory=WorkerConfig)
 
