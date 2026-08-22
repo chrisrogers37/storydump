@@ -5,6 +5,7 @@ from unittest.mock import Mock, MagicMock, patch
 
 from src.repositories.chat_settings_repository import ChatSettingsRepository
 from src.models.chat_settings import ChatSettings
+from src.repositories.tenant_scope import SYSTEM_SCOPE, TenantContextError
 
 
 @pytest.mark.unit
@@ -194,14 +195,14 @@ class TestChatSettingsRepository:
         assert result == []
 
     def test_get_by_id_found(self, settings_repo, mock_db):
-        """Test getting settings by UUID primary key."""
+        """A tenant reading itself gets its row."""
         mock_settings = Mock(spec=ChatSettings)
         mock_settings.id = "abc-123"
         mock_db.query.return_value.filter.return_value.first.return_value = (
             mock_settings
         )
 
-        result = settings_repo.get_by_id(chat_settings_id="abc-123")
+        result = settings_repo.get_by_id("abc-123", chat_settings_id="abc-123")
 
         assert result is mock_settings
         mock_db.commit.assert_called()  # end_read_transaction
@@ -210,6 +211,66 @@ class TestChatSettingsRepository:
         """Test getting settings by non-existent UUID returns None."""
         mock_db.query.return_value.filter.return_value.first.return_value = None
 
-        result = settings_repo.get_by_id(chat_settings_id="nonexistent-uuid")
+        result = settings_repo.get_by_id(
+            "nonexistent-uuid", chat_settings_id="nonexistent-uuid"
+        )
 
         assert result is None
+
+    def test_system_scope_reads_any_tenant(self, settings_repo, mock_db):
+        """The deliberate cross-tenant door, for callers dereferencing a
+        chat_settings_id foreign key off a row they already hold."""
+        mock_settings = Mock(spec=ChatSettings)
+        mock_db.query.return_value.filter.return_value.first.return_value = (
+            mock_settings
+        )
+
+        result = settings_repo.get_by_id("other-tenant", chat_settings_id=SYSTEM_SCOPE)
+
+        assert result is mock_settings
+
+    def test_another_tenant_reads_as_absent_and_never_queries(
+        self, settings_repo, mock_db
+    ):
+        """#512: an unentitled scope gets the SAME answer as a missing row.
+
+        The db is stubbed to return a row, so a `None` here can only come from
+        the entitlement rule and not from an empty result — without that, a
+        repository that queried and found nothing would pass this identically.
+        The session is asserted untouched too: a refused call must not check
+        out a connection.
+        """
+        mock_db.query.return_value.filter.return_value.first.return_value = Mock(
+            spec=ChatSettings
+        )
+
+        result = settings_repo.get_by_id("victim-tenant", chat_settings_id="attacker")
+
+        assert result is None
+        mock_db.query.assert_not_called()
+
+    @pytest.mark.parametrize("absent", [None, ""], ids=["none", "empty"])
+    def test_absent_context_raises_rather_than_widening(
+        self, settings_repo, mock_db, absent
+    ):
+        """Fail-closed (F.1/#841). None must not behave like SYSTEM_SCOPE.
+
+        Both absent values are parametrized rather than looped: a loop stops at
+        the first failure, so the second value was only ever checked while the
+        first passed.
+
+        The refusal is caught rather than required, so that
+        ``assert_not_called`` runs whether or not it fired. A widening mutant
+        then fails on the PROPERTY — it reached the session — instead of only
+        on a missing exception, which is a claim about the refusal's mechanism
+        rather than about the guarantee. Asserting the raise afterwards keeps
+        both halves; only their order changes.
+        """
+        raised = False
+        try:
+            settings_repo.get_by_id("abc-123", chat_settings_id=absent)
+        except TenantContextError:
+            raised = True
+
+        mock_db.query.assert_not_called()
+        assert raised, "absent context must refuse, never widen"
