@@ -249,9 +249,28 @@ class TestChatSettingsRepository:
         assert result is None
         mock_db.query.assert_not_called()
 
-    def test_absent_context_raises_rather_than_widening(self, settings_repo, mock_db):
-        """Fail-closed (F.1/#841). None must not behave like SYSTEM_SCOPE."""
-        for absent in (None, ""):
-            with pytest.raises(TenantContextError):
-                settings_repo.get_by_id("abc-123", chat_settings_id=absent)
+    @pytest.mark.parametrize("absent", [None, ""], ids=["none", "empty"])
+    def test_absent_context_raises_rather_than_widening(
+        self, settings_repo, mock_db, absent
+    ):
+        """Fail-closed (F.1/#841). None must not behave like SYSTEM_SCOPE.
+
+        Both absent values are parametrized rather than looped: a loop stops at
+        the first failure, so the second value was only ever checked while the
+        first passed.
+
+        The refusal is caught rather than required, so that
+        ``assert_not_called`` runs whether or not it fired. A widening mutant
+        then fails on the PROPERTY — it reached the session — instead of only
+        on a missing exception, which is a claim about the refusal's mechanism
+        rather than about the guarantee. Asserting the raise afterwards keeps
+        both halves; only their order changes.
+        """
+        raised = False
+        try:
+            settings_repo.get_by_id("abc-123", chat_settings_id=absent)
+        except TenantContextError:
+            raised = True
+
         mock_db.query.assert_not_called()
+        assert raised, "absent context must refuse, never widen"
