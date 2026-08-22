@@ -198,9 +198,10 @@ def _history(conn, media=MEDIA_A, queue=QUEUE_A, chat=CHAT_A, story=None):
     _x(
         conn,
         "INSERT INTO posting_history (id, media_item_id, queue_item_id,"
-        " queue_created_at, scheduled_for, posted_at, status, success,"
-        " posting_method, chat_settings_id, instagram_story_id)"
-        " VALUES (%s,%s,%s,now(),now(),now(),'posted',true,'instagram_api',%s,%s)",
+        " queue_created_at, queue_deleted_at, scheduled_for, posted_at, status,"
+        " success, posting_method, chat_settings_id, instagram_story_id)"
+        " VALUES (%s,%s,%s,now(),now(),now(),now(),'posted',true,"
+        "'instagram_api',%s,%s)",
         _uuid(),
         media,
         queue,

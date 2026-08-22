@@ -297,28 +297,28 @@ class TestTheBoundaryIsDerivedAndLoud:
             if m.version > move.version
         ]
         assert above == [
-            "052_shared_trigger_functions.sql",
-            "053_identity_and_tenancy_tables.sql",
-            "054_accounts_sources_media_tables.sql",
-            "055_intent_ledger_tables.sql",
-            "056_machinery_tables.sql",
-            "057_grant_matrix_and_archive_schema.sql",
-            "058_rls_and_policies.sql",
-            "059_security_definer_doors.sql",
-            "060_auth_plane_tables.sql",
+            "053_shared_trigger_functions.sql",
+            "054_identity_and_tenancy_tables.sql",
+            "055_accounts_sources_media_tables.sql",
+            "056_intent_ledger_tables.sql",
+            "057_machinery_tables.sql",
+            "058_grant_matrix_and_archive_schema.sql",
+            "059_rls_and_policies.sql",
+            "060_security_definer_doors.sql",
+            "061_auth_plane_tables.sql",
             # 062 is the first file PAST F.2: 061 completed the lineage, and
             # this one extends the advertised stream rather than consuming a
             # remaining prefix of it (#883).
-            "061_intent_self_transition_guard.sql",
+            "062_intent_self_transition_guard.sql",
             # 063 extends the stream the same way: the W5e reauth-prompt clock
             # leg (#942), advertised in 07 §9 before landing here.
-            "062_reauth_prompt_leg.sql",
+            "063_reauth_prompt_leg.sql",
             # 064 replaces 063's fn_clock_tick to add the refresh leg's provider
             # guard (#982 prerequisite, #978 disclosure). A REPLACEMENT rather
             # than an edit: the runner keys on file-byte checksums, so an applied
             # file that changes is a hard failure — fix forward. 063 set the
             # precedent by dropping and recreating what 060 created.
-            "063_refresh_leg_provider_guard.sql",
+            "064_refresh_leg_provider_guard.sql",
         ], (
             f"the target lineage is {above}. If you are landing the next F.2"
             " increment, add it here — deliberately, and at the end: arm (b)"
