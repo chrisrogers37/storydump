@@ -29,6 +29,8 @@ from typing import Any, Callable, Optional
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from src.services.target import credential_lifecycle
+
 from src.services.target import (
     jobs,
     outbox,
@@ -96,12 +98,13 @@ class WorkerDeps:
     media_fetch: Optional[Callable[[dict], Any]] = None
     transport: Optional[Callable[[dict], Any]] = None
     poll: Optional[Callable[..., Any]] = None
+    refresh: Optional[Callable[..., Any]] = None
     engine: Any = None
     config: WorkerConfig = field(default_factory=WorkerConfig)
 
 
 _UNBUILT_REASON = (
-    "no executor exists in the target tier (build-path W5d/W6/X.3/S.4); "
+    "no executor exists in the target tier (build-path W6/X.3/S.4); "
     "job stays alive and re-checks on the park cadence"
 )
 
@@ -110,10 +113,8 @@ _UNBUILT_REASON = (
 UNBUILT_KINDS = (
     "sync_media_source",
     "first_ingest_chunk",
-    "refresh_credential",
     "offboard_workspace",
     "revoke_workspace_credentials",
-    "reauth_prompt",
     "retention_sweep",
     "reencrypt_credentials",
     "send_email",
@@ -298,6 +299,21 @@ def build_registry(deps: WorkerDeps) -> dict:
         if deps.transport is not None
         else Parked("no channel transport configured (build-path W2)")
     )
+
+    async def refresh_credential(session, job):
+        return await credential_lifecycle.refresh_credential(deps, session, job)
+
+    async def reauth_prompt(session, job):
+        return await credential_lifecycle.reauth_prompt(deps, session, job)
+
+    registry["refresh_credential"] = (
+        refresh_credential
+        if deps.refresh is not None
+        else Parked("no refresh door provided (compose wires the real one)")
+    )
+    # No external seam: the prompt writes outbox rows and nothing else, so it
+    # is live in every deployment that has an engine at all.
+    registry["reauth_prompt"] = reauth_prompt
     return registry
 
 

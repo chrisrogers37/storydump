@@ -160,9 +160,9 @@ class TestParkingOnTheRealMachinery:
         chain = seed_workspace_chain(sync_conn, "w1park")
         job_id = _insert_job(
             sync_conn,
-            kind="refresh_credential",
+            kind="sync_media_source",
             workspace_id=chain["ws"],
-            payload='{"v": 1, "credential_id": "%s"}' % uuid.uuid4(),
+            payload='{"v": 1, "source_id": "%s", "reason": "baseline"}' % uuid.uuid4(),
         )
 
         wl, claimed = await _run_once(lane_db)
@@ -269,9 +269,9 @@ class TestTheWorkerIdlesVisibly:
         sync_conn.commit()
         _insert_job(
             sync_conn,
-            kind="refresh_credential",
+            kind="sync_media_source",
             workspace_id=chain["ws"],
-            payload='{"v": 1, "credential_id": "%s"}' % uuid.uuid4(),
+            payload='{"v": 1, "source_id": "%s", "reason": "baseline"}' % uuid.uuid4(),
         )
 
         from src.worker import run

@@ -70,6 +70,9 @@ class IgAccount(TargetBase):
     tz = Column(Text, nullable=True)
     next_slot_at = Column(TZ, nullable=True)
     last_posted_at = Column(TZ, nullable=True)
+    # When the reauth-prompt clock leg last minted for this account (062);
+    # NULL = never prompted. Stamped at mint, symmetric with next_slot_at.
+    last_reauth_prompt_at = Column(TZ, nullable=True)
     created_at, updated_at = timestamps()
 
     __table_args__ = (
@@ -85,6 +88,11 @@ class IgAccount(TargetBase):
         CheckConstraint("tz IS NULL OR fn_safe_tz(tz) = tz", name="ck_iga_tz_valid"),
         # Exists to be a composite-FK target, not for its own sake.
         UniqueConstraint("workspace_id", "id", name="uq_ig_accounts_ws_id"),
+        Index(
+            "ix_ig_accounts_reauth_due",
+            "last_reauth_prompt_at",
+            postgresql_where=text("state = 'reauth_required'"),
+        ),
         Index(
             "uq_ig_account_live",
             "workspace_id",

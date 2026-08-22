@@ -46,6 +46,7 @@ def full_deps(**over):
         media_fetch=_fake_seam,
         transport=_fake_seam,
         poll=_fake_seam,
+        refresh=_fake_seam,
         config=WorkerConfig(),
     )
     base.update(over)
@@ -75,9 +76,11 @@ class TestRegistryCoversTheSchema:
             "reconcile_ambiguous",
             "reap_expired",
             "reap_transit_assets",
+            "refresh_credential",
+            "reauth_prompt",
         }
 
-    def test_the_nine_unbuilt_kinds_park_even_with_every_seam_supplied(self):
+    def test_the_unbuilt_kinds_park_even_with_every_seam_supplied(self):
         registry = build_registry(full_deps())
         unbuilt = schema_kinds() - {
             "plan_slot",
@@ -86,6 +89,8 @@ class TestRegistryCoversTheSchema:
             "reconcile_ambiguous",
             "reap_expired",
             "reap_transit_assets",
+            "refresh_credential",
+            "reauth_prompt",
         }
         assert unbuilt, "denominator went empty — the schema kinds parse broke"
         for kind in unbuilt:

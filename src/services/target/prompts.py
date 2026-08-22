@@ -150,6 +150,30 @@ async def prompt_intent(session, intent_row: dict, bindings: list) -> list:
     return out_ids
 
 
+async def push_bindings(session, workspace_id: str) -> list[str]:
+    """Binding ids that can carry a push to this workspace.
+
+    ONE owner for the predicate: the W3 sweep and the W5e reauth prompt both
+    route on "where can we say this", and two spellings of that question is
+    how the two surfaces drift apart.
+    """
+    rows = (
+        (
+            await session.execute(
+                text(
+                    "SELECT id FROM channel_bindings"
+                    " WHERE workspace_id = :ws AND state = 'active'"
+                    "   AND channel LIKE 'telegram%'"
+                ),
+                {"ws": str(workspace_id)},
+            )
+        )
+        .mappings()
+        .all()
+    )
+    return [str(r["id"]) for r in rows]
+
+
 async def sweep_due_prompts(session, *, limit: int = 50) -> dict:
     """The prompt sweep — the `02` §4 matrix legs, idempotent, in the
     caller's transaction. Three legs, three counts:
@@ -188,21 +212,10 @@ async def sweep_due_prompts(session, *, limit: int = 50) -> dict:
         .all()
     )
     for row in due:
-        bindings = (
-            (
-                await session.execute(
-                    text(
-                        "SELECT id FROM channel_bindings"
-                        " WHERE workspace_id = :ws AND state = 'active'"
-                        "   AND channel LIKE 'telegram%'"
-                    ),
-                    {"ws": str(row["workspace_id"])},
-                )
-            )
-            .mappings()
-            .all()
+        binding_ids = await push_bindings(session, str(row["workspace_id"]))
+        minted = await prompt_intent(
+            session, dict(row), [{"id": b} for b in binding_ids]
         )
-        minted = await prompt_intent(session, dict(row), [dict(b) for b in bindings])
         if minted:
             counts["prompted"] += 1
 

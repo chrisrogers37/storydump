@@ -308,6 +308,49 @@ class TestPostureFiresOnRealPostgres:
         self._exec(scratch_db, "DROP TABLE posture_probe")
 
 
+class TestAddColumnBoundaryIsBoundedAtBothEnds:
+    """#978 review (virgil): `re.match` anchors only the START, so a compound
+    ALTER — `ADD COLUMN foo, DROP COLUMN workspace_id` — matched as a prefix
+    and rode the continue past the refusal. The bound is a TOP-LEVEL comma:
+    a single ADD COLUMN never carries one outside parentheses, while a
+    paren'd type (`numeric(10,2)`) legitimately carries one inside. A comma
+    at depth zero means a second action — whatever it is, including the
+    fact-MOVING ones a verb denylist would have to keep chasing — and falls
+    through to the loud refusal. Control-run established the regression on
+    the pre-fix SHA before this pin existed; these keep it dead.
+    """
+
+    BASE = "CREATE TABLE t ( id uuid, workspace_id uuid )"
+
+    ADMITTED = {
+        "intended_062": "ALTER TABLE t ADD COLUMN last_reauth_prompt_at TIMESTAMPTZ NULL",
+        "tenant_key_add": "ALTER TABLE t ADD COLUMN workspace_id uuid",
+        "paren_type": "ALTER TABLE t ADD COLUMN amount numeric(10,2)",
+    }
+    REFUSED = {
+        "bare_drop": "ALTER TABLE t DROP COLUMN workspace_id",
+        "compound_drop": "ALTER TABLE t ADD COLUMN foo text, DROP COLUMN workspace_id",
+        "compound_rename": "ALTER TABLE t ADD COLUMN foo text, RENAME TO other",
+        "compound_add_key": "ALTER TABLE t ADD COLUMN foo text, ADD COLUMN workspace_id uuid",
+        "compound_force_rls": "ALTER TABLE t ADD COLUMN foo text, FORCE ROW LEVEL SECURITY",
+    }
+
+    @pytest.mark.parametrize("name", sorted(ADMITTED))
+    def test_single_action_add_column_is_admitted(self, name):
+        expected_tenancy([self.BASE, self.ADMITTED[name]])
+
+    @pytest.mark.parametrize("name", sorted(REFUSED))
+    def test_everything_else_falls_through_to_the_refusal(self, name):
+        with pytest.raises(AssertionError):
+            expected_tenancy([self.BASE, self.REFUSED[name]])
+
+    def test_adding_the_tenant_key_flips_the_fact(self):
+        sig = expected_tenancy(
+            ["CREATE TABLE t ( id uuid )", "ALTER TABLE t ADD COLUMN workspace_id uuid"]
+        )
+        assert sig["t"]["tenant_keyed"] is True
+
+
 class TestExpectedTenancyDerivation:
     """`expected_tenancy` — the static half of the prefix-aware lane check.
 
