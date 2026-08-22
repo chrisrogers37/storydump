@@ -19,6 +19,16 @@ impossible.
    (filtered on `__module__`, so an imported name does not count) enumerated,
    and the 14-item vocabulary tested against them.
 
+## A non-zero DEPLOYED figure is labelled by the script, not by a reader
+
+The deployed axis moving off zero reads as this blocker clearing, and it moves
+in the flattering direction, so it is the reading nobody re-checks. When any
+entrypoint reports a non-zero count the script prints the bound in the same
+block as the figure -- importable-not-serving, which entrypoints are still
+zero, and what would actually clear the blocker. A caveat kept in prose
+elsewhere degrades the moment someone re-derives the number; a label the print
+path emits cannot be separated from it.
+
 ## Import-reachable is not execution-reachable
 
 A module in a closure proves it *can be imported*, never that anything calls
@@ -218,6 +228,75 @@ def parity(callables: list[str]) -> dict:
     }
 
 
+#: The Procfile entrypoint whose movement would actually clear #942. Named once,
+#: as a value, because `_label_deployed` both TESTS this and PRINTS it: a copy in
+#: prose inside the print is free to drift from the copy in the predicate, and
+#: the drift would only ever show up in the one state the label exists for.
+CLEARING_ENTRYPOINT = "worker"
+
+
+def _label_deployed(deployed: dict) -> None:
+    """Print the bound ON THE SAME BLOCK as any non-zero deployed figure.
+
+    This exists because prose can always be separated from the number it
+    describes. The #942 body carries an amendment saying a non-zero `web`
+    reading is importable-not-serving; that amendment does not travel with a
+    figure someone re-derives by running this script and pastes into a new
+    comment. A label emitted by the act of printing the number cannot be
+    separated from it -- including by the author of this script months later,
+    which is the case that actually matters.
+
+    **The message is keyed on the same fact it names, which is not decoration.**
+    An earlier version fired on "any entrypoint non-zero" and printed one fixed
+    conclusion: that this is not the blocker clearing, because the blocker
+    clears when `CLEARING_ENTRYPOINT` reaches the tier. But that entrypoint is
+    itself a key in `deployed`, so on the day it DID move, the banner would have
+    printed it in the non-zero list underneath a headline denying the blocker
+    was clearing -- a caveat outliving its premise, at the exact moment it
+    mattered, with more authority than the prose it replaced because a script
+    printed it. That is the failure this label exists to prevent, one level up.
+
+    Silent when every entrypoint reads zero: there is nothing to misread yet,
+    and a banner that always fires is one nobody reads.
+    """
+    nonzero = [p for p, d in deployed.items() if d["target_hits"]]
+    if not nonzero:
+        return
+    zero = [p for p, d in deployed.items() if not d["target_hits"]]
+    rule = "  " + "=" * 74
+    print()
+    print(rule)
+    if CLEARING_ENTRYPOINT in nonzero:
+        print(
+            f"  THE CLEARING ENTRYPOINT HAS MOVED: {CLEARING_ENTRYPOINT!r} now reaches"
+        )
+        print(
+            "  the target tier. This instrument CANNOT confirm the blocker is cleared."
+        )
+        print(
+            "  It establishes import-reachability only -- that the process could import"
+        )
+        print(
+            "  target code, never that any call path runs it. Someone has to go find the"
+        )
+        print("  call site by hand before this is reported as resolved.")
+    else:
+        print("  IMPORTABLE, NOT SERVING. This is NOT the #942 blocker clearing.")
+        print(
+            "  A target module in a deployed closure can be IMPORTED by that process."
+        )
+        print("  Nothing here shows traffic reaching it -- a route mounted but never")
+        print("  registered with its provider imports its handler and serves nothing.")
+        print(
+            f"  The blocker clears when {CLEARING_ENTRYPOINT!r} reaches the tier. That is"
+        )
+        print("  a separate decision; do not read movement elsewhere as resolution.")
+    print(
+        f"  Non-zero: {', '.join(nonzero)}.   Still zero: {', '.join(zero) or 'none'}."
+    )
+    print(rule)
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("--root", default=None, help="repo root (default: this file's repo)")
@@ -313,6 +392,9 @@ def main(argv=None) -> int:
             f"  {proc:8s} {d['module']:16s} closure +{d['closure_new']:5d}   "
             f"target modules reached: {len(d['target_hits'])}"
         )
+        for m in d["target_hits"]:
+            print(f"      + {m}")
+    _label_deployed(deployed)
 
     print("\nTHE TARGET ROOT (src.worker — NOT a Procfile entrypoint)\n" + "-" * 78)
     if not root_present:

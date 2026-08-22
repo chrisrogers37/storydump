@@ -193,6 +193,21 @@ class Settings(BaseSettings):
     TELEGRAM_CHANNEL_ID: int
     ADMIN_TELEGRAM_CHAT_ID: int
 
+    # Target tier (the serving system being cut over to). Prefixed because these
+    # pair with TARGET_TELEGRAM_BOT_TOKEN -- a DIFFERENT bot from
+    # TELEGRAM_BOT_TOKEN above -- and because this class reads whatever the
+    # ambient environment holds under a bare name (see the note at the top of
+    # this class). An operator setting a bare TELEGRAM_ name gets no signal about
+    # which of the two bots it belongs to.
+    #
+    # The value Telegram echoes in X-Telegram-Bot-Api-Secret-Token, set when the
+    # target webhook is registered. Optional and absent by default, and the
+    # absence is load-bearing: verify_secret_token refuses when the expected
+    # value is missing, so an unset deployment refuses every delivery at the
+    # ingress door rather than accepting every one. Arming the target webhook is
+    # therefore two deliberate acts -- set this, then register -- not one.
+    TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN: Optional[str] = None
+
     # Number of Telegram updates processed concurrently (PTB
     # Application.concurrent_updates). Each concurrent callback runs in its own
     # asyncio Task with its own per-task DB session (see BaseRepository), so this
