@@ -15,7 +15,7 @@ from src.exceptions.instagram import (
     TokenRevokedError,
     MediaUploadError,
     MediaUnsupportedError,
-    is_container_confirmed_failed,
+    is_publish_definitively_failed,
 )
 from src.exceptions.tenancy import TenantResolutionError
 from src.exceptions.backfill import (
@@ -37,7 +37,7 @@ __all__ = [
     "TokenRevokedError",
     "MediaUploadError",
     "MediaUnsupportedError",
-    "is_container_confirmed_failed",
+    "is_publish_definitively_failed",
     "BackfillError",
     "BackfillMediaExpiredError",
     "BackfillMediaNotFoundError",

@@ -1175,7 +1175,7 @@ class TestPostStoryContainerCallback:
         must let it propagate — AFTER the claim-before-publish callback fired
         (anchor persisted) and WITHOUT ever publishing — so callers can classify
         it as an IG-confirmed failure and release the row for retry."""
-        from src.exceptions import is_container_confirmed_failed
+        from src.exceptions import is_publish_definitively_failed
 
         mock_settings.ADMIN_TELEGRAM_CHAT_ID = -100123
         instagram_service.get_content_publishing_limit = AsyncMock(
@@ -1214,7 +1214,7 @@ class TestPostStoryContainerCallback:
         instagram_service._publish_container.assert_not_called()
         # The raised error carries IG's status_code → classifies as confirmed-dead.
         assert excinfo.value.error_code == status_code
-        assert is_container_confirmed_failed(excinfo.value) is True
+        assert is_publish_definitively_failed(excinfo.value) is True
 
     @pytest.mark.asyncio
     @patch("src.services.integrations.instagram_api.settings")
@@ -1245,27 +1245,171 @@ class TestPostStoryContainerCallback:
 
 
 @pytest.mark.unit
-class TestContainerConfirmedFailedClassifier:
-    """is_container_confirmed_failed distinguishes an IG-*confirmed* container
-    failure (status_code ERROR/EXPIRED — IG says nothing published, safe to
-    release for retry) from an ambiguous crash/timeout (publish outcome
-    unknown, must stay stuck)."""
+class TestPublishDefinitivelyFailedClassifier:
+    """is_publish_definitively_failed is the release gate for #549's
+    claim-before-publish anchor: True means the story provably did not publish
+    and the claimed row is safe to release; False holds the row forever. It
+    must therefore be exactly as wide as the evidence and no wider (#940)."""
+
+    @pytest.fixture
+    def instagram_service(self):
+        with (
+            patch("src.services.integrations.instagram_api.TokenRefreshService"),
+            patch("src.services.integrations.instagram_api.CloudStorageService"),
+            patch("src.services.integrations.instagram_api.HistoryRepository"),
+            patch("src.services.integrations.instagram_api.InstagramAccountService"),
+            patch("src.services.integrations.instagram_api.TokenRepository"),
+            patch("src.services.integrations.instagram_api.TokenEncryption"),
+            patch("src.services.integrations.instagram_api.SettingsService"),
+            patch("src.services.base_service.ServiceRunRepository"),
+        ):
+            from src.services.integrations.instagram_api import InstagramAPIService
+
+            service = InstagramAPIService()
+            service.history_repo = Mock()
+            service.track_execution = mock_track_execution
+            service.set_result_summary = Mock()
+            return service
+
+    def _response(self, status, *, body=None, text=None):
+        """A real httpx.Response, so these exercise the shipped parse path."""
+        request = httpx.Request("POST", "https://graph.instagram.com/x/media_publish")
+        if text is not None:
+            return httpx.Response(status, text=text, request=request)
+        return httpx.Response(status, json=body, request=request)
+
+    # --- registry one: container status on a 200 body -----------------------
 
     @pytest.mark.parametrize("status_code", ["ERROR", "EXPIRED"])
-    def test_true_for_ig_confirmed_status_codes(self, status_code):
-        from src.exceptions import is_container_confirmed_failed
+    def test_true_for_ig_confirmed_container_status(self, status_code):
+        """IG reports container death in a 200 body, so there is no HTTP status
+        to read — this registry cannot ride the 4xx check and needs its own."""
+        from src.exceptions import is_publish_definitively_failed
 
         exc = InstagramAPIError("container failed", error_code=status_code)
-        assert is_container_confirmed_failed(exc) is True
+        assert exc.http_status is None
+        assert is_publish_definitively_failed(exc) is True
 
-    def test_false_for_ambiguous_instagram_error(self):
-        from src.exceptions import is_container_confirmed_failed
+    # --- registry two: a 4xx, stamped by the real boundary ------------------
 
-        # A timeout/crash carries no ERROR/EXPIRED status_code → ambiguous.
-        assert is_container_confirmed_failed(InstagramAPIError("timed out")) is False
+    @pytest.mark.parametrize(
+        "body,expected_type",
+        [
+            ({"error": {"code": 4, "message": "quota"}}, RateLimitError),
+            ({"error": {"code": 17, "message": "quota"}}, RateLimitError),
+            ({"error": {"code": 190, "message": "expired"}}, TokenExpiredError),
+            (
+                {"error": {"code": 190, "error_subcode": 458, "message": "revoked"}},
+                TokenRevokedError,
+            ),
+            (
+                {"error": {"code": 190, "message": "Cannot parse access token"}},
+                TokenCorruptError,
+            ),
+            ({"error": {"code": 102, "message": "oauth"}}, TokenExpiredError),
+            ({"error": {"code": 9004, "message": "bad media"}}, MediaUnsupportedError),
+            ({"error": {"code": 1, "message": "unknown"}}, InstagramAPIError),
+        ],
+        ids=lambda v: getattr(v, "__name__", None) or str(v),
+    )
+    def test_every_4xx_rejection_classifies_definitive(
+        self, instagram_service, body, expected_type
+    ):
+        """Driven through the shipped _check_response_errors rather than a
+        hand-built exception: the stamp is the thing under test, and an
+        exception constructed in the test would carry whatever the test chose.
+        """
+        from src.exceptions import is_publish_definitively_failed
+
+        with pytest.raises(expected_type) as excinfo:
+            instagram_service._check_response_errors(self._response(400, body=body))
+
+        assert excinfo.value.http_status == 400
+        assert is_publish_definitively_failed(excinfo.value) is True
+
+    def test_an_unparseable_4xx_body_is_still_a_rejection(self, instagram_service):
+        """The one raise site that never had an error code to read. It is a
+        refusal all the same, and before the stamp existed it was the widest
+        hole in the classifier — no code, so nothing to test."""
+        from src.exceptions import is_publish_definitively_failed
+
+        with pytest.raises(InstagramAPIError) as excinfo:
+            instagram_service._check_response_errors(
+                self._response(403, text="<html>Forbidden</html>")
+            )
+
+        assert excinfo.value.error_code is None
+        assert excinfo.value.http_status == 403
+        assert is_publish_definitively_failed(excinfo.value) is True
+
+    def test_the_stamp_reaches_a_raise_site_added_later(self, instagram_service):
+        """The boundary stamps, not each raise site, and it stamps the status
+        it actually received. Looks redundant beside the 400 cases above; it is
+        not — a stamp hardcoded to 400 passes all of those and fails here,
+        which is the only reason this uses 422 and an unrecognised error code.
+        """
+        with pytest.raises(InstagramAPIError) as excinfo:
+            instagram_service._check_response_errors(
+                self._response(422, body={"error": {"code": 12345, "message": "new"}})
+            )
+
+        assert excinfo.value.http_status == 422
+
+    # --- what must STAY ambiguous, or #549's guarantee is gone --------------
+
+    def test_a_5xx_stays_ambiguous(self, instagram_service):
+        """The non-idempotent-write case: Instagram may have created the story
+        and then failed to say so. This is the line between 'refused' and
+        'any non-2xx', and it is the reason the check is not `!= 200`."""
+        from src.exceptions import is_publish_definitively_failed
+
+        with pytest.raises(InstagramAPIError) as excinfo:
+            instagram_service._check_response_errors(
+                self._response(500, body={"error": {"code": 2, "message": "transient"}})
+            )
+
+        assert excinfo.value.http_status == 500
+        assert is_publish_definitively_failed(excinfo.value) is False
+
+    @pytest.mark.asyncio
+    async def test_a_200_with_no_story_id_stays_ambiguous(self, instagram_service):
+        """Raised from _publish_container after the POST returned 200. The
+        publish may well have happened; we simply cannot read the id. Driven
+        through the real method so the absent stamp is the shipped behaviour
+        and not an omission the test arranged."""
+        from src.exceptions import is_publish_definitively_failed
+
+        request = httpx.Request("POST", "https://graph.instagram.com/x/media_publish")
+        with patch(
+            "httpx.AsyncClient.post",
+            new=AsyncMock(return_value=httpx.Response(200, json={}, request=request)),
+        ):
+            with pytest.raises(InstagramAPIError) as excinfo:
+                await instagram_service._publish_container("tok", "acct-1", "c-1")
+
+        assert "No story ID" in str(excinfo.value)
+        assert excinfo.value.http_status is None
+        assert is_publish_definitively_failed(excinfo.value) is False
+
+    def test_a_transport_failure_stays_ambiguous(self):
+        """No response at all — the media_publish POST may have reached
+        Instagram. These are httpx exceptions, so they are not
+        InstagramAPIError and can never carry a stamp."""
+        from src.exceptions import is_publish_definitively_failed
+
+        assert is_publish_definitively_failed(httpx.ReadTimeout("timed out")) is False
+        assert is_publish_definitively_failed(httpx.ConnectError("no route")) is False
+
+    def test_an_instagram_error_with_no_stamp_stays_ambiguous(self):
+        """The default. A bare InstagramAPIError carries neither registry's
+        evidence, and the row must stay held rather than be released on the
+        strength of nothing."""
+        from src.exceptions import is_publish_definitively_failed
+
+        assert is_publish_definitively_failed(InstagramAPIError("crashed")) is False
 
     def test_false_for_non_instagram_exception(self):
-        from src.exceptions import is_container_confirmed_failed
+        from src.exceptions import is_publish_definitively_failed
 
-        assert is_container_confirmed_failed(RuntimeError("boom")) is False
-        assert is_container_confirmed_failed(TimeoutError()) is False
+        assert is_publish_definitively_failed(RuntimeError("boom")) is False
+        assert is_publish_definitively_failed(TimeoutError()) is False

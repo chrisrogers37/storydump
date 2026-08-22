@@ -15,6 +15,11 @@ class InstagramAPIError(StorydumpError):
         message: Human-readable error description
         error_code: Instagram/Meta error code (e.g., 'OAuthException')
         error_subcode: More specific error subcode from Meta
+        http_status: The HTTP status Instagram answered with, when this error
+            was raised from a response. ``None`` means no response was
+            classified — a transport failure, or a 2xx body we could not use.
+            The distinction is load-bearing for
+            :func:`is_publish_definitively_failed`.
     """
 
     def __init__(
@@ -22,10 +27,12 @@ class InstagramAPIError(StorydumpError):
         message: str,
         error_code: Optional[str] = None,
         error_subcode: Optional[int] = None,
+        http_status: Optional[int] = None,
     ):
         super().__init__(message)
         self.error_code = error_code
         self.error_subcode = error_subcode
+        self.http_status = http_status
 
     def __str__(self) -> str:
         base = super().__str__()
@@ -37,24 +44,59 @@ class InstagramAPIError(StorydumpError):
 # Instagram container ``status_code`` values that affirmatively confirm the
 # media will never publish. ``InstagramAPIService._wait_for_container_ready``
 # raises an ``InstagramAPIError`` carrying ``error_code=status_code`` for each
-# of these. Unlike an ambiguous crash/timeout (publish outcome unknown), one of
-# these means Instagram has told us nothing was posted — so a claimed
-# 'publishing' row can be safely released for retry instead of held forever.
+# of these — on an HTTP 200 body, which is why they need their own test rather
+# than riding the status check below.
 CONTAINER_CONFIRMED_FAILED_STATUS_CODES = frozenset({"ERROR", "EXPIRED"})
 
 
-def is_container_confirmed_failed(exc: BaseException) -> bool:
-    """Whether ``exc`` is Instagram affirmatively confirming the media container
-    failed (status_code ERROR/EXPIRED) — i.e. the publish provably never
-    happened, so the claimed row is safe to release for retry.
+def _is_client_rejection(http_status: Optional[int]) -> bool:
+    """Whether Instagram answered with a 4xx — a request it refused to act on.
 
-    Returns False for an ambiguous crash/timeout where a container exists but
-    the publish outcome is unknown; only the confirmed-failed case is safe to
-    release (the ambiguous case must stay stuck to avoid a duplicate story).
+    Deliberately NOT "any non-2xx". A 5xx is the classic non-idempotent-write
+    ambiguity: the server may have created the story and then failed to tell
+    us. A 4xx is a refusal made before any work happened.
     """
+    return http_status is not None and 400 <= http_status < 500
+
+
+def is_publish_definitively_failed(exc: BaseException) -> bool:
+    """Whether ``exc`` means the story provably did NOT publish, so a claimed
+    'publishing' row is safe to release for retry instead of held forever.
+
+    Two independent ways to be sure, because Instagram says "this did not
+    publish" in two different registers:
+
+    - **A container status of ERROR/EXPIRED.** IG returns 200 and reports the
+      failure in the body, so there is no HTTP status to read.
+    - **A 4xx on the call itself.** Instagram received the request and refused
+      it. Whether that refusal landed on ``media_publish`` (the publish was
+      rejected) or on an earlier call (the publish was never attempted), the
+      story was not created either way.
+
+    Everything else stays ambiguous and the row stays held — this predicate is
+    the release gate for #549's claim-before-publish anchor, so its default
+    must be "we do not know". The cases that keep the hold, and are meant to:
+
+    - a transport failure with no response at all — the ``media_publish`` POST
+      may have reached Instagram;
+    - a 5xx, which may follow a story that was actually created;
+    - an HTTP 200 whose body carries no story id.
+
+    Testing only the first registry is not sufficient, and the shortfall is
+    not a corner case: a predicate that reads container status alone sends
+    every error raised off a rejected response into the ambiguous branch,
+    where the queue row is held and never revisited. Measured on production
+    for #940, that stranded 6 of 158 container-creating attempts. The general
+    argument was already written down for one error class in
+    ``telegram_autopost``'s RateLimitError special case — that Instagram
+    enforces the publish quota at the call itself, so a rejection there means
+    the story was never created. That reasoning is not specific to quota.
+    """
+    if not isinstance(exc, InstagramAPIError):
+        return False
     return (
-        isinstance(exc, InstagramAPIError)
-        and exc.error_code in CONTAINER_CONFIRMED_FAILED_STATUS_CODES
+        exc.error_code in CONTAINER_CONFIRMED_FAILED_STATUS_CODES
+        or _is_client_rejection(exc.http_status)
     )
 
 
