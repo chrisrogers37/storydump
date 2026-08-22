@@ -385,3 +385,62 @@ class TestLegacyStampParity:
         runner replay too (psycopg2 executes the INSERTs like psql did)."""
         row = fetch_one(replayed_db, "SELECT max(version) FROM schema_version")
         assert row[0] == max(corpus_versions())
+
+
+class TestTheDerivedAdoptionProbesReadBothWays:
+    """#997 — a file above the floor is adopted on evidence derived from its own
+    ``runner:postcondition`` lines, so those lines must answer correctly in BOTH
+    worlds, and a probe that can only ever answer one way is not evidence.
+
+    The predicates are READ FROM THE FILE rather than restated here — one
+    predicate, one home, the same rule that lets adoption derive them at all. A
+    copy in this test could pass while the file the runner actually reads says
+    something else.
+
+    The false direction is the production-safety one and it is about RAISING,
+    not about being wrong. Adopt treats a probe that errors as a hard failure,
+    never as false, so a probe built on ``has_table_privilege`` naming a role
+    that does not exist yet takes down first contact rather than reporting
+    ``not applied``. Catalog reads answer ``false`` on the same database. The
+    assertion below is therefore that these return false *without raising*.
+    """
+
+    @staticmethod
+    def _probes(version: int) -> tuple:
+        migration = next(
+            m for m in discover_migrations(MIGRATIONS_DIR) if m.version == version
+        )
+        assert migration.postconditions, (
+            f"migration {version:03d} carries no runner:postcondition lines, so"
+            " adopt has nothing to derive adoption evidence from (#997)"
+        )
+        return migration.postconditions
+
+    # The TRUE direction is already gated and is deliberately not duplicated
+    # here. `test_lineage_lane.py::run_lane` replays the corpus through ONE
+    # unbounded `apply_pending`, which crosses the schema move and applies 062;
+    # `_run_postconditions` raises unless every line returns exactly true, so a
+    # probe that could not read true where its own file had just applied fails
+    # that lane rather than this file. A copy here would replay the same
+    # lineage a second time to assert the same thing.
+    #
+    # What the lane CANNOT say is what a probe does on a database the file has
+    # NOT reached, because it never asks one there. That is the direction below,
+    # and it is the one production meets first.
+
+    def test_062_probes_read_false_without_raising_before_the_target_lineage(
+        self, at49_db, owner_actor
+    ):
+        """The false direction, which is the one that reaches production first.
+
+        `at49_db` is the shape production is in: legacy lineage only, no target
+        tables, and none of the seven service roles — no migration creates
+        those, so a database that has only ever run migrations cannot have
+        them.
+        """
+        as_owner = as_user(at49_db, owner_actor)
+        for probe in self._probes(62):
+            row = fetch_one(as_owner, probe)  # must not raise
+            assert row[0] is False, (
+                f"062 probe read true on a database predating 062: {probe}"
+            )
