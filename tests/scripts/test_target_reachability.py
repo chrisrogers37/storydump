@@ -17,6 +17,7 @@ import pathlib
 
 import importlib
 import json
+import os
 import subprocess
 import sys
 import textwrap
@@ -526,13 +527,25 @@ class TestTheHitsAreDifferentialNotCumulative:
     #: scope up**: the fix stopped an earlier CALL leaking into a later one, and
     #: the test then inherited an earlier FILE leaking into it. Same mechanism,
     #: wider scope. A subprocess is the only boundary that actually holds.
+    #: The no-target specimen was `src.main` until the #942 gate made the
+    #: deployed worker entrypoint import the root ON PURPOSE — the premise
+    #: "imports no target module" stopped being true of it, and (worse) the
+    #: assertion would have STAYED GREEN: measured after `src.worker`, every
+    #: target module is already in `sys.modules`, so the differential reads
+    #: empty either way. A test whose docstring goes false while its assert
+    #: stays green is pinned to nothing. The specimen is now a legacy loop
+    #: module that genuinely imports no target code and adds a large novel
+    #: closure of its own (~300 modules), so the discrimination being tested
+    #: is exercised over real breadth.
+    SPECIMEN = "src.services.core.loops.scheduler_loop"
+
     PROBE = textwrap.dedent(
         """
         import json, sys
         sys.path.insert(0, %r)
         from scripts.target_reachability import closure_for
         out = {}
-        for mod in ("src.worker", "src.main"):
+        for mod in ("src.worker", %r):
             size, hits, positive_ok = closure_for(mod)
             out[mod] = {"size": size, "hits": sorted(hits), "positive_ok": positive_ok}
         print(json.dumps(out))
@@ -542,7 +555,7 @@ class TestTheHitsAreDifferentialNotCumulative:
     def _run_probe(self):
         root = str(pathlib.Path(tr.__file__).resolve().parent.parent)
         proc = subprocess.run(
-            [sys.executable, "-c", self.PROBE % root],
+            [sys.executable, "-c", self.PROBE % (root, self.SPECIMEN)],
             capture_output=True,
             text=True,
             cwd=root,
@@ -558,9 +571,14 @@ class TestTheHitsAreDifferentialNotCumulative:
             "precondition: src.worker must reach target modules in a FRESH "
             "process — an empty set here means the isolation is not holding"
         )
-        assert out["src.main"]["hits"] == [], (
-            "src.main imports no target module, so measuring it AFTER a module "
-            f"that does must still report none — got {out['src.main']['hits']}"
+        assert out[self.SPECIMEN]["size"] > 0, (
+            "precondition: the specimen must add novel modules of its own, or "
+            "an empty differential proves nothing about discrimination"
+        )
+        assert out[self.SPECIMEN]["hits"] == [], (
+            f"{self.SPECIMEN} imports no target module, so measuring it AFTER "
+            f"a module that does must still report none — got "
+            f"{out[self.SPECIMEN]['hits']}"
         )
 
     def test_the_positive_control_is_cumulative_and_survives_being_second(self):
@@ -570,7 +588,7 @@ class TestTheHitsAreDifferentialNotCumulative:
         it, so this asymmetry with `hits` is deliberate and is pinned here.
         """
         out = self._run_probe()
-        positive_ok = out["src.main"]["positive_ok"]
+        positive_ok = out[self.SPECIMEN]["positive_ok"]
         assert positive_ok, (
             f"{tr.CONTROL_POSITIVE} is imported once per process; the positive "
             "control reads the cumulative closure and must stay true"
@@ -650,6 +668,89 @@ class TestTheDeployedLabelCannotOutliveItsOwnPremise:
             "clearing branch is unreachable and the label can only ever deny"
         )
 
+    def test_with_gate_facts_the_by_hand_instruction_becomes_the_gated_answer(
+        self, capsys
+    ):
+        """#942 gate: when the movement has a known, gated call site, sending
+        the reader hunting is the wrong instruction — the label names the gate
+        instead. The by-hand text remains the fallback for a movement the gate
+        contract cannot account for (asserted by the sibling test above, which
+        passes no gate)."""
+        tr._label_deployed(
+            {"worker": {"target_hits": ["x"]}, "web": {"target_hits": []}},
+            gate={
+                "var": "WORKER_IMPL",
+                "default": "legacy",
+                "armed_value": "target",
+                "this_run_selects": "legacy",
+            },
+        )
+        out = capsys.readouterr().out
+        assert "THE CLEARING ENTRYPOINT HAS MOVED" in out
+        assert "CANNOT confirm the blocker is cleared" in out
+        assert "WORKER_IMPL=target" in out
+        assert "IMPORTABLE-NOT-SERVING until armed" in out
+        # The schema half rides the SAME banner (rajan, #1005 review): the
+        # operator arming this acts on what THIS text says, not on a PR body.
+        assert "ARMING PRESUPPOSES" in out
+        assert "target schema" in out
+        assert "by hand" not in out
+
 
 def _repo_root():
     return pathlib.Path(__file__).resolve().parents[2]
+
+
+class TestGateLabel:
+    """The moved number carries its bound in the same output that prints it.
+
+    Full-instrument runs, because the claim under test is the composed one:
+    the real measurement moves the worker axis AND the printed figure carries
+    the gate's terms, sourced from `src.worker_impl` — never restated. The
+    terms are asserted as LITERALS on purpose: they are the operator-facing
+    contract (`WORKER_IMPL=target` typed into a service dashboard), and a
+    silent respelling in the leaf must redden something.
+
+    The JSON test doubles as the instrument-level movement pin: non-empty
+    `deployed.worker.target_hits` containing `work_loop` IS the deployed-axis
+    movement, and lazifying the eager import in `src.main` reddens it. Pinned
+    on the output contract rather than any measurement internal, so it holds
+    across instrument rewrites (#989 landed one mid-PR and it held).
+    """
+
+    def _run(self, *flags):
+        env = {k: v for k, v in os.environ.items() if k != "WORKER_IMPL"}
+        proc = subprocess.run(
+            [sys.executable, "-m", "scripts.target_reachability", *flags],
+            capture_output=True,
+            text=True,
+            cwd=_repo_root(),
+            env=env,
+        )
+        assert proc.returncode == 0, proc.stderr[-800:]
+        return proc.stdout
+
+    def test_json_carries_the_gate_facts_and_the_movement(self):
+        out = json.loads(self._run("--json"))
+        assert out["worker_gate"] == {
+            "var": "WORKER_IMPL",
+            "default": "legacy",
+            "armed_value": "target",
+            "this_run_selects": "legacy",
+        }
+        hits = out["deployed"]["worker"]["target_hits"]
+        assert hits, "the deployed worker entrypoint no longer reaches the tier"
+        assert "src.services.target.work_loop" in hits
+
+    def test_text_labels_the_moved_axis_with_the_gate(self):
+        out = self._run()
+        assert "IMPORTABLE-NOT-SERVING until armed" in out
+        assert "WORKER_IMPL=target" in out
+        assert "ARMING PRESUPPOSES" in out
+
+    def test_the_facts_are_silent_when_there_is_nothing_to_label(self):
+        """Zero worker hits (a pre-gate commit) must print exactly as before —
+        the instrument runs across history, and a banner that always fires is
+        one nobody reads."""
+        assert tr.worker_gate_facts({}) is None
+        assert tr.worker_gate_facts({"worker": {"target_hits": []}}) is None
