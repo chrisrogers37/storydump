@@ -11,6 +11,16 @@
 -- account / week) and is deliberately NOT a parameter: the tick's signature
 -- stays stable, and the number's home is `05`, not a config knob.
 
+-- Adoption evidence + post-apply verification (#997). Three catalog reads, one
+-- per structural thing this file does, so the probe derives from the DDL rather
+-- than from a judgment about it. Catalog-only and deliberately so: a
+-- has_*_privilege probe RAISES when its role is absent, and the runner treats a
+-- raising probe as a hard failure rather than as false -- which on a database
+-- that predates the service roles is every probe of that shape.
+-- runner:postcondition SELECT count(*) = 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'ig_accounts' AND column_name = 'last_reauth_prompt_at'
+-- runner:postcondition SELECT count(*) = 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_class t ON t.oid = i.indrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND t.relname = 'ig_accounts' AND c.relname = 'ix_ig_accounts_reauth_due' AND i.indpred IS NOT NULL
+-- runner:postcondition SELECT count(*) = 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = 'fn_clock_tick' AND 'o_reauth_jobs' = ANY(p.proargnames)
+
 ALTER TABLE ig_accounts
   ADD COLUMN last_reauth_prompt_at TIMESTAMPTZ NULL;
 
