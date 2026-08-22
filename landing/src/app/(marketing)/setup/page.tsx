@@ -1,19 +1,17 @@
 import type { Metadata } from "next"
 import Link from "next/link"
-import { ArrowRight, Clock } from "lucide-react"
+import { ArrowRight } from "lucide-react"
 import { Checklist } from "@/components/setup/checklist"
 
 export const metadata: Metadata = {
   title: "Getting Started",
   description:
-    "Set up Storydump in under an hour. Connect your Instagram Business account, Google Drive, and Telegram to start automating your Stories.",
+    "Connect your Instagram Business account, Google Drive, and Telegram to start automating your Stories.",
   alternates: { canonical: "/setup" },
 }
 
 const prerequisites = [
   { label: "Instagram Business or Creator account" },
-  { label: "Meta Developer account with an app configured" },
-  { label: "Google Cloud project with Drive API enabled" },
   { label: "Google Drive folder with your media organized" },
   { label: "Telegram account (the app, not the web version)" },
 ]
@@ -29,13 +27,6 @@ export default function SetupOverview() {
         things. Don&apos;t worry — this guide walks you through everything step
         by step.
       </p>
-
-      <div className="mt-8 flex items-center gap-2 text-sm text-muted-foreground">
-        <Clock className="h-4 w-4" />
-        <span>
-          Estimated time: 30-60 minutes (mostly waiting for Meta approvals)
-        </span>
-      </div>
 
       <div className="mt-8">
         <h2 className="text-xl font-semibold">What You&apos;ll Need</h2>

@@ -92,15 +92,12 @@ export default function ConnectTelegram() {
             <li>
               <span className="font-medium text-foreground">
                 Connect Instagram
-              </span>{" "}
-              — authorize your Meta App (have your App ID and Secret ready)
+              </span>
             </li>
             <li>
               <span className="font-medium text-foreground">
                 Connect Google Drive
-              </span>{" "}
-              — authorize your Google Cloud project (have your Client ID and
-              Secret ready)
+              </span>
             </li>
             <li>
               <span className="font-medium text-foreground">
