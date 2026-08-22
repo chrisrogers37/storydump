@@ -125,11 +125,11 @@ export default function MediaOrganize() {
 
       <div className="mt-12 flex items-center justify-between">
         <Link
-          href="/setup/google-drive"
+          href="/setup/instagram"
           className="inline-flex items-center gap-2 text-sm text-muted-foreground transition-colors hover:text-foreground"
         >
           <ArrowLeft className="h-4 w-4" />
-          Google Drive
+          Instagram Account
         </Link>
         <Link
           href="/setup/connect"
