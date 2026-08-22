@@ -1,4 +1,4 @@
-"""Plan 07 — the auth-plane models (F.2.9, migration 060).
+"""Plan 07 — the auth-plane models (F.2.9, migration 061).
 
 The mirror of `060_auth_plane_tables.sql`, on the terms
 `identity_and_tenancy` set: the second side of the `04` §0.2 parity gate, not

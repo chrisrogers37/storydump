@@ -1,4 +1,4 @@
--- Migration: 053_identity_and_tenancy_tables.sql
+-- Migration: 054_identity_and_tenancy_tables.sql
 -- Description: F.2.2 — plan 02 §1's identity and tenancy tables, the first
 --   tables of the target schema. Seven of them: users, user_identities,
 --   workspaces, workspace_members, workspace_invitations, channel_bindings,

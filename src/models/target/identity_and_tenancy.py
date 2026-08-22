@@ -1,4 +1,4 @@
-"""Plan 02 §1 — the identity and tenancy models (F.2.2, migration 053).
+"""Plan 02 §1 — the identity and tenancy models (F.2.2, migration 054).
 
 The mirror of `053_identity_and_tenancy_tables.sql`, and mirror is the whole
 job: these models are not an independent design, they are the second side of
@@ -11,7 +11,7 @@ is a red test, not a discovery for later.
 
 **They land per increment rather than in one pass, and the gate decided that
 rather than a preference.** Lane parity compares the replayed `public` against
-`create_all` output; 053 puts seven tables in the first and nothing in the
+`create_all` output; 054 puts seven tables in the first and nothing in the
 second, so a models-in-one-pass reading would have to run the gate knowingly
 red from F.2.2 to F.2.7 — the same "red and known" cost #806 Fork 1 declined
 when it declined option D.
@@ -20,7 +20,7 @@ when it declined option D.
 parity comparator is relation-scoped and reads none of them, so restating them
 would be an unchecked second copy — the drift class this file exists to
 prevent. `trg_touch_updated_at` fires on every table below, is declared once in
-052, and is deliberately NOT mirrored as a SQLAlchemy `onupdate`: the database
+053, and is deliberately NOT mirrored as a SQLAlchemy `onupdate`: the database
 owns `updated_at` on every write path, including the ones that never go through
 the ORM, and a Python-side duplicate would be a second answer to a question
 that has one.
@@ -122,7 +122,7 @@ class Workspace(TargetBase):
     state = Column(Text, nullable=False, server_default=text("'active'"))
 
     # IANA zone name, workspace default. The CHECK is a write-time backstop
-    # calling 052's fn_safe_tz — the service boundary validates first, and the
+    # calling 053's fn_safe_tz — the service boundary validates first, and the
     # read-side decay case (a zone withdrawn from tzdata after a valid write)
     # is what fn_safe_tz's fallback exists for.
     tz = Column(Text, nullable=False, server_default=text("'UTC'"))
@@ -188,7 +188,7 @@ class Workspace(TargetBase):
 class WorkspaceMember(TargetBase):
     """Membership, and the structural home of ownership.
 
-    Exactly one owner at every commit, by two mechanisms that 053 installs
+    Exactly one owner at every commit, by two mechanisms that 054 installs
     together: ``uq_members_one_owner`` is "at most one", and the deferred
     constraint-trigger PAIR is "at least one" on every path — demotion, removal
     and workspace creation alike. Only the index is a relation, so only the

@@ -1,4 +1,4 @@
--- Migration: 058_rls_and_policies.sql
+-- Migration: 059_rls_and_policies.sql
 -- Description: F.2.7 — plan 02 §7-DDL's row-level security. Twenty-three
 --   ALTER TABLE ... ENABLE ROW LEVEL SECURITY and fifty-three CREATE POLICY.
 --   NO TABLES, NO INDEXES, NO GRANTS, NO FUNCTIONS.

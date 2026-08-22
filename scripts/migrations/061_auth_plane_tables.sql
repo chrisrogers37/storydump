@@ -1,4 +1,4 @@
--- Migration: 060_auth_plane_tables.sql
+-- Migration: 061_auth_plane_tables.sql
 -- Description: F.2.9 — plan 07's auth plane, and THE LAST F.2 INCREMENT. Three
 --   tables (session_tokens, oauth_states, service_tokens) with their touch
 --   triggers, RLS enablement, two grants and five policies. Statements

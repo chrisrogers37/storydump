@@ -1,4 +1,4 @@
-"""Plan 02 §3 — the intent ledger models (F.2.4, migration 055).
+"""Plan 02 §3 — the intent ledger models (F.2.4, migration 056).
 
 The mirror of `055_intent_ledger_tables.sql`, on the terms
 `identity_and_tenancy` set: not an independent design, but the second side of
@@ -7,7 +7,7 @@ tables, columns (type + nullability), CHECK constraints (by name AND normalized
 definition), uniqueness semantics and foreign keys.
 
 **Deliberately absent, and this increment has more of it than the last two.**
-055 carries four trigger functions, eleven triggers and 27 seeded rows; none of
+056 carries four trigger functions, eleven triggers and 27 seeded rows; none of
 that is mirrored here. The comparator is relation-scoped, so restating a
 `plpgsql` body or a seed would be an unchecked second copy — the drift class
 these modules exist to prevent. The state machine is enforced by
@@ -20,7 +20,7 @@ the evidence of the deletion. Adding an `fk()` here would be a red parity test,
 and it would also be wrong.
 
 **`post_intents`' two composite FKs carry NO `ON DELETE`**, unlike every
-composite FK in 054. That asymmetry is the plan's and is load-bearing: an
+composite FK in 055. That asymmetry is the plan's and is load-bearing: an
 intent references an account and a media item under default `NO ACTION`, so a
 delete that would strand a live intent is REFUSED rather than silently
 cascading the ledger away. `daily_post_counts` does cascade, because a count is
@@ -119,7 +119,7 @@ class PostIntent(TargetBase):
     # The colon is backslash-escaped: SQLAlchemy `text()` reads `:1` as a BIND
     # PARAMETER and would emit `DEFAULT '{"v"NULL}'`, so the table would not
     # create. The parity gate never compares defaults, so this fails loudly at
-    # `create_all` rather than as drift — the 053 finding, applied here.
+    # `create_all` rather than as drift — the 054 finding, applied here.
     attempts_by_step = Column(
         JSONB, nullable=False, server_default=text(r"""'{"v"\:1}'""")
     )
@@ -217,7 +217,7 @@ class PostIntent(TargetBase):
             "entered_state_at",
             postgresql_where=text("state IN ('awaiting_approval','approved')"),
         ),
-        # Created by migration 056 (F.2.5), not 055 — the plan groups it under
+        # Created by migration 057 (F.2.5), not 056 — the plan groups it under
         # §6 with the outbox rather than with the ledger. It lives here because
         # `create_all` renders a table's indexes from its own `__table_args__`,
         # so this is the only place the model side can produce it.
@@ -292,7 +292,7 @@ class DailyPostCount(TargetBase):
 
 class PostIntentTransition(TargetBase):
     """The legal-edge reference table. `trg_intent_guard` reads it on every
-    UPDATE, so the 27 rows migration 055 seeds are load-bearing rather than
+    UPDATE, so the 27 rows migration 056 seeds are load-bearing rather than
     fixture data — an unseeded copy of this schema rejects every transition.
 
     Insert-only (§0 class): edges are added or deleted, never updated, so there

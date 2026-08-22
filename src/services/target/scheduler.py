@@ -4,7 +4,7 @@ Three things that are easy to conflate and must not be: the **clock** decides
 *when*, the **dispatcher** decides *what runs*, and **system jobs** are the
 recurring population riding on both. The clock does not execute work — `05`
 puts it "inside an elected worker, no separate pool" — and the dispatcher is
-`fn_clock_tick`, a `059` door that already exists. This module is the election,
+`fn_clock_tick`, a `060` door that already exists. This module is the election,
 the loop, and the executors.
 
 ## Does L.4's lease argument extend to recurring work? No, and the shape
@@ -150,7 +150,7 @@ async def tick(
     refresh_cadence_seconds: int,
     recurring: dict,
 ) -> dict:
-    """One dispatcher pass, through the `059` door. Runs in the caller's tx.
+    """One dispatcher pass, through the `060` door. Runs in the caller's tx.
 
     The door is the authority on what a tick does and on how its insert budget
     is shared between the four classes — this wrapper adds no policy, exactly

@@ -200,7 +200,7 @@ Raising the transaction isolation level would also close this — at REPEATABLE 
 gets a serialization error — and is deliberately **not** the fix here: it is a fleet-wide change to
 every transaction L.0 opens, with its own retry semantics, and wants its own decision.
 
-## §9 — The reauth-prompt clock leg (#942 W5e; lands as migration 062)
+## §9 — The reauth-prompt clock leg (#942 W5e; lands as migration 063)
 
 `02` §5 :1165 declares `reauth_prompt` with the clock as its producer; nothing implemented the
 leg, so the kind had executors' worth of design and no mints. This block is the leg, its marker

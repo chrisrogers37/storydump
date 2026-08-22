@@ -303,7 +303,7 @@ CHECKS: tuple[Check, ...] = (
         " defect — blocked so the discarded values are reviewed before the"
         " window rather than found in the log after it.",
         remedy="Confirm each value is genuinely junk, then let G-TZ map it."
-        " APPROXIMATE: fn_safe_tz is a target function (migration 052) and"
+        " APPROXIMATE: fn_safe_tz is a target function (migration 053) and"
         " cannot be called against a legacy database, so the catalog stands in."
         " It can only OVER-report — a value in neither view may still be"
         " accepted by AT TIME ZONE — so a hit is a prompt to look, never proof.",

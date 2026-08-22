@@ -1,6 +1,6 @@
 """L.2 — the durable counter idiom over `rate_counters` (#859, `02` §6).
 
-`056` shipped the table (composite PK ``(scope, key, window_start)``,
+`057` shipped the table (composite PK ``(scope, key, window_start)``,
 `ck_rate_scope`, `ck_rate_nonneg`); the limit is deliberately NOT in the
 database. There is no function, trigger, or CHECK enforcing it — the
 advertised-DDL manifest classes the increment-and-check "illustrative" —

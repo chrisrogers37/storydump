@@ -98,7 +98,15 @@ these numbers with it (#957).
 
 import psycopg2
 
-EXCLUDED_TABLES = {"schema_version"}
+#: Tables the models deliberately do not declare, so parity must not read
+#: their absence as drift. Both are database-side artifacts with no ORM
+#: reader: ``schema_version`` is the legacy lineage ledger, and
+#: ``posting_history_dedup_archive`` is the one-time forensic copy migration
+#: 050 takes before reducing the duplicate groups (#695) — retained
+#: indefinitely because for three of its rows a distinct ``instagram_story_id``
+#: is the only surviving evidence that a story published more than once.
+#: Declaring a model for either would assert the application manages it.
+EXCLUDED_TABLES = {"schema_version", "posting_history_dedup_archive"}
 
 
 def schema_signature(dsn: str) -> dict:

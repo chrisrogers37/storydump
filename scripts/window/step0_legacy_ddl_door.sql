@@ -1,16 +1,16 @@
 -- M.3 step-0 window legacy-DDL door (plan 04, printed in full there; this file is
 -- its transcription, not a new design). Applied by the owner actor IMMEDIATELY
 -- AFTER step0_bootstrap.sql, and by the CI lineage stand-up before any world
--- that replays 050.
+-- that replays 051.
 --
 -- THIS IS NOT A RUNNER MIGRATION. It is the #787 ruling's mechanism: option (d),
 -- a SECURITY DEFINER function owned by the database-owner actor.
 --
--- WHY IT EXISTS. Window step 3b applies 050 as svc_migration. 050 ALTERs two
+-- WHY IT EXISTS. Window step 3b applies 051 as svc_migration. 051 ALTERs two
 -- owner-owned legacy tables, ALTER requires table ownership or membership in the
 -- owning role, and NO GRANT CAN PRODUCE IT -- ALTER is not a grantable
 -- privilege. Postgres also checks ownership BEFORE it determines a statement is
--- a no-op, so 050's idempotency buys nothing at the privilege layer: as
+-- a no-op, so 051's idempotency buys nothing at the privilege layer: as
 -- svc_migration both statements fail `must be owner of table` even against a
 -- fully-normalized database. A definer door is the only mechanism that scopes
 -- the elevation to STATEMENTS rather than to a ROLE.
@@ -57,10 +57,10 @@ BEGIN;
 CREATE SCHEMA IF NOT EXISTS window_ddl;
 REVOKE ALL ON SCHEMA window_ddl FROM PUBLIC;
 
--- 050's two statements, verbatim, fully schema-qualified. Qualification is not
+-- 051's two statements, verbatim, fully schema-qualified. Qualification is not
 -- style: `search_path` is pinned to pg_catalog, and the legacy lineage sits in
 -- `public` for the whole life of this door (3b runs before the 3c move).
-CREATE OR REPLACE FUNCTION window_ddl.fn_050_chain_reconciliation()
+CREATE OR REPLACE FUNCTION window_ddl.fn_051_chain_reconciliation()
 RETURNS void
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -75,7 +75,7 @@ END
 $fn$;
 
 -- THE access control. Same transaction as the CREATE above.
-REVOKE ALL ON FUNCTION window_ddl.fn_050_chain_reconciliation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION window_ddl.fn_051_chain_reconciliation() FROM PUBLIC;
 
 -- The window actor is the only grantee. Guarded because this file is also
 -- applied to CI owner-worlds that stand the lineage up without the bootstrap,
@@ -84,7 +84,7 @@ DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'svc_migration') THEN
     GRANT USAGE ON SCHEMA window_ddl TO svc_migration;
-    GRANT EXECUTE ON FUNCTION window_ddl.fn_050_chain_reconciliation()
+    GRANT EXECUTE ON FUNCTION window_ddl.fn_051_chain_reconciliation()
       TO svc_migration;
   END IF;
 END $$;

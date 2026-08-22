@@ -161,7 +161,7 @@ SETUP_SQL = REPO_ROOT / "scripts" / "setup_database.sql"
 #: construction. Re-derive them by hand when the plan changes — that is a review
 #: event, which is the point.
 #:
-#: `F2_2_START` lived here too and went with migration 053: it existed to slice
+#: `F2_2_START` lived here too and went with migration 054: it existed to slice
 #: the F.2.2 segment out of the stream for a control that STAGED that segment
 #: while the target lineage was empty. The lineage carries it for real now, so
 #: the slice has no consumer — and an unconsumed literal is the drift this
@@ -172,8 +172,8 @@ BOOTSTRAP_SQL = REPO_ROOT / "scripts" / "window" / "step0_bootstrap.sql"
 
 #: The step-0 companion artifact (#787): the window's legacy-DDL definer
 #: door. Applied by the owner actor immediately after the bootstrap, and by
-#: any owner-world stand-up that will replay 050 — 050 calls the door rather
-#: than issuing owner DDL itself, so a world without it cannot apply 050 at
+#: any owner-world stand-up that will replay 051 — 051 calls the door rather
+#: than issuing owner DDL itself, so a world without it cannot apply 051 at
 #: all. Deliberately a SECOND file rather than more of the bootstrap: the
 #: bootstrap is cluster-scoped (it provisions the seven svc_* roles and so
 #: needs the suite mutex), this is per-database and needs none, which is what
@@ -181,12 +181,12 @@ BOOTSTRAP_SQL = REPO_ROOT / "scripts" / "window" / "step0_bootstrap.sql"
 DOOR_SQL = REPO_ROOT / "scripts" / "window" / "step0_legacy_ddl_door.sql"
 
 #: THE LEGACY LINEAGE'S STAND-UP IS TWO FILES SINCE #787, and this constant is
-#: the one place that says so. 050 routes its owner-DDL through the step-0
-#: definer door, so any world that will REPLAY 050 — not merely one that applies
+#: the one place that says so. 051 routes its owner-DDL through the step-0
+#: definer door, so any world that will REPLAY 051 — not merely one that applies
 #: `SETUP_SQL` — has to carry the door first. Window worlds get it from
 #: `run_bootstrap`; owner worlds get it from here. Named rather than inlined
 #: because the failure mode of forgetting it is a bare `schema "window_ddl" does
-#: not exist` at migration 050, which reads as a corpus defect rather than as a
+#: not exist` at migration 051, which reads as a corpus defect rather than as a
 #: missing fixture file.
 LEGACY_STANDUP = [SETUP_SQL, DOOR_SQL]
 
@@ -196,7 +196,7 @@ LEGACY_STANDUP = [SETUP_SQL, DOOR_SQL]
 #: and it would be right on the day it was typed and silently wrong the first
 #: time anyone renumbered anything. Read it, do not replace it with an int.
 #:
-#: What it is FOR: from 051 on the corpus holds two lineages in one directory,
+#: What it is FOR: from 052 on the corpus holds two lineages in one directory,
 #: and the suites below guard the legacy one — the schema the running
 #: application is built on. Replaying past the boundary renames `public` out
 #: from under them, so every legacy-lineage replay passes this bound. The lane

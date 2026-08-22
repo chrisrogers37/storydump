@@ -1,10 +1,10 @@
-"""Plan 02 §5 and §6 — the execution machinery models (F.2.5, migration 056).
+"""Plan 02 §5 and §6 — the execution machinery models (F.2.5, migration 057).
 
 The mirror of `056_machinery_tables.sql`, on the terms `identity_and_tenancy`
 set: the second side of the `04` §0.2 parity gate, not an independent design.
 
 **One of this increment's indexes is NOT here, and that is correct.**
-`ix_intents_parked` is created by 056 on `post_intents`, which 055 owns, so it
+`ix_intents_parked` is created by 057 on `post_intents`, which 056 owns, so it
 is declared on `PostIntent` in `intent_ledger.py` — the model side renders
 indexes from the table's own `__table_args__`, so there is nowhere else it
 could come from. It is marked there as belonging to this increment.

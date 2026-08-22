@@ -281,7 +281,7 @@ class TestDoubleTransition:
     property that actually holds, not the phrasing."""
 
     def test_a_same_state_write_is_REFUSED_and_moves_nothing(self, ledger):
-        """#883 closed this. Before `061` a same-state write SUCCEEDED as a
+        """#883 closed this. Before `062` a same-state write SUCCEEDED as a
         no-op, and this test asserted that — correctly, because asserting the
         gate's wording would have asserted something false at the time.
 
@@ -326,7 +326,7 @@ class TestDoubleTransition:
         )
 
     def test_a_NON_state_update_is_untouched_by_the_self_transition_guard(self, ledger):
-        """The other half of `061`, and the reason it is `UPDATE OF state`.
+        """The other half of `062`, and the reason it is `UPDATE OF state`.
 
         A checkpoint update does not name `state`, so the guard must never
         fire on it. Without this, the fix for #883 would silently forbid every
@@ -361,12 +361,12 @@ class TestDoubleTransition:
         Two writers take the same edge on the same intent. The loser blocks on
         the row lock, and when the winner commits it re-evaluates against the
         winner's row — so a BEFORE trigger sees ``OLD.state = NEW.state`` and,
-        before `061`, skipped every check and wrote a no-op. Both callers were
+        before `062`, skipped every check and wrote a no-op. Both callers were
         told they had transitioned; one had. `transition()` raising or not is
         the caller's only success signal, and ``rowcount`` does not separate
         them either: the loser got 1, identical to the winner.
 
-        Born red against the pre-`061` trigger, asserting the defect verbatim
+        Born red against the pre-`062` trigger, asserting the defect verbatim
         (`the LOSER ... was told it succeeded (rowcount=1)`). It is here so the
         next person to touch these triggers cannot reintroduce it quietly.
 

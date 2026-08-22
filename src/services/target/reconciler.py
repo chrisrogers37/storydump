@@ -97,7 +97,7 @@ def next_delay_seconds(checks: int) -> Optional[int]:
 
 
 async def sweep_due(conn, *, limit: int, notify_after_seconds: int) -> list[dict]:
-    """Call the `fn_reconciler_sweep` door (shipped in migration 059).
+    """Call the `fn_reconciler_sweep` door (shipped in migration 060).
 
     The door owns the budget: ``p_lim`` bounds the WHOLE sweep across both
     reasons, ladder-due rows taking priority over notify-window rows. This

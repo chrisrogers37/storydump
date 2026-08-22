@@ -54,7 +54,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.slow]
 TICK_MAX, REFRESH_CADENCE_S = 500, 7 * 24 * 3600
 REAPER_LIM, APPROVAL_TTL_S, APPROVED_TTL_S = 500, 24 * 3600, 24 * 3600
 
-#: `uq_intent_slot`, verbatim from `055` — re-added after its drop proof.
+#: `uq_intent_slot`, verbatim from `056` — re-added after its drop proof.
 UQ_INTENT_SLOT_SQL = (
     "CREATE UNIQUE INDEX uq_intent_slot ON post_intents"
     " (workspace_id, ig_account_id, schedule_slot_at)"

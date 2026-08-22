@@ -1,4 +1,4 @@
--- Migration: 054_accounts_sources_media_tables.sql
+-- Migration: 055_accounts_sources_media_tables.sql
 -- Description: F.2.3 — plan 02 §2's accounts, sources and media tables. Six of
 --   them: ig_accounts, provider_quarantine, media_sources, oauth_credentials,
 --   media_items, post_locks, with their six touch triggers and eleven

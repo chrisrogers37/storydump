@@ -48,7 +48,7 @@ A file's execution mode is a declared discovery-time fact — ``wrapped`` (the
 runner owns one transaction, ledger row inside it), ``self-managed`` (the file
 carries its own BEGIN/COMMIT, the legacy corpus shape, run with psql
 semantics), or ``no-transaction`` — visible in ``status`` output. New files
-(051+) should be ``wrapped``.
+(052+) should be ``wrapped``.
 """
 
 import argparse

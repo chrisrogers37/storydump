@@ -2,7 +2,7 @@
 
 THE DATABASE IS THE AUTHORITY, SO THE HEAVY HALF BYPASSES THE SERVICE — the
 L.1 doctrine, unchanged: `uq_jobs_serialized_lease`, `ck_jobs_system_kinds`,
-the NOT NULL, and the two `059` doors are what these tests prove, from plain
+the NOT NULL, and the two `060` doors are what these tests prove, from plain
 psycopg2 connections as the real `svc_worker` login. A smaller final class
 asserts the L.2 service surfaces those verdicts rather than substituting its
 own.
@@ -65,7 +65,7 @@ _UPSERT_TEMPLATE = (
 )
 UPSERT_SQL = _UPSERT_TEMPLATE.format(guard=" WHERE rc.count < %s")
 UNGUARDED_UPSERT_SQL = _UPSERT_TEMPLATE.format(guard="")
-#: `ck_jobs_system_kinds`, verbatim from 056 — re-added after the drop proof.
+#: `ck_jobs_system_kinds`, verbatim from 057 — re-added after the drop proof.
 PAIRING_CHECK_SQL = (
     "ALTER TABLE jobs ADD CONSTRAINT ck_jobs_system_kinds CHECK ("
     "(workspace_id IS NULL) = (kind IN"
@@ -217,7 +217,7 @@ class TestClaimDoor:
         assert row["state"] == "leased"
         assert row["locked_by"] == "w-basic"
         assert row["lease_token"] is not None
-        assert row["attempts"] == 1, "attempts increments at claim time (059)"
+        assert row["attempts"] == 1, "attempts increments at claim time (060)"
 
     def test_a_future_run_at_is_not_claimable(self, jobs_db):
         key = _key()
@@ -833,7 +833,7 @@ class TestTheServicePathAgreesWithTheDoors:
 
             # A token the door no longer honors: the count comes back short,
             # the tripwire fires, and WHICH lease is stale stays the CAS's
-            # question — the count alone cannot say (059's contract).
+            # question — the count alone cannot say (060's contract).
             hb.register(uuid.uuid4())
             assert await hb.beat_once() == 1
             assert hb.short_beats == 1 and shorts == [(2, 1)]

@@ -1,4 +1,4 @@
--- Migration: 057_grant_matrix_and_archive_schema.sql
+-- Migration: 058_grant_matrix_and_archive_schema.sql
 -- Description: F.2.6 — plan 02 §7-DDL's grant matrix, plus the `archive`
 --   schema and its grant. Thirty grants/revokes, one CREATE SCHEMA, one grant
 --   on it. NO TABLES, NO INDEXES, NO TRIGGERS, NO FUNCTIONS.

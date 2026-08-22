@@ -2,10 +2,10 @@
 (#859, `04` §L.2).
 
 A deliberately thin layer over the merged machinery, on the L.1 doctrine: the
-DATABASE is the authority. Migration `056` shipped the `jobs` table with the
+DATABASE is the authority. Migration `057` shipped the `jobs` table with the
 kind registry, the pairing equivalence, and `uq_jobs_serialized_lease` — THE
 serialization guard ("two leased jobs with one key are impossible by
-constraint, not by claim-query discipline"). Migration `059` shipped the two
+constraint, not by claim-query discipline"). Migration `060` shipped the two
 `SECURITY DEFINER` doors this module calls: `fn_claim_job` (the `02` §5 claim
 query, `FOR UPDATE SKIP LOCKED`, `LIMIT 1`, token minted and `attempts`
 incremented at claim time) and `fn_extend_leases` (the heartbeat UPDATE,

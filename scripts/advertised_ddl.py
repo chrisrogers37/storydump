@@ -305,7 +305,7 @@ def f2_prefix_report(f2_statements, stream_statements) -> F2PrefixReport:
 
 
 def target_lineage_files(migrations_dir) -> list:
-    """The F.2 migration files: numbered files ABOVE the 051 schema-move (the
+    """The F.2 migration files: numbered files ABOVE the 052 schema-move (the
     target lineage). Uses the runner's own move-marker discovery so it cannot
     drift from the boundary the runner enforces."""
     from scripts.migration_runner import discover_migrations, schema_move_migration

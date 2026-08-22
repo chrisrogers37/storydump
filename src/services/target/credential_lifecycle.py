@@ -2,7 +2,7 @@
 
 Two executors and one provider door. `refresh_credential` consumes the clock's
 weekly mints: load the token, ask the provider for a fresh one, swap in place.
-`reauth_prompt` consumes the 062 cadence leg's mints: tell the human, through
+`reauth_prompt` consumes the 063 cadence leg's mints: tell the human, through
 the workspace's own bindings, that posting for an account is paused until they
 reconnect. Between them, a credential can no longer die silently — which was
 the dated consequence of these kinds having no executor (`work_loop`'s parked
@@ -23,7 +23,7 @@ here is loud, not latent.
 - **Definitive auth-class rejection** (:class:`RefreshRejected` — the provider
   ANSWERED and the answer is "this credential is bad"): `mark_dead` performs
   both flips in one transaction — credential → ``expired``, account →
-  ``reauth_required``. No inline prompt mint: the 062 clock leg is the single
+  ``reauth_required``. No inline prompt mint: the 063 clock leg is the single
   producer of `reauth_prompt` jobs and picks the account up on its next tick
   (marker NULL = immediately eligible), so prompting has exactly one door.
 - **Transient** (network faults, 429, 5xx — no definitive answer): raise, and
@@ -152,7 +152,7 @@ async def refresh_credential(deps, session, job) -> str:
         new_token, expires_at = await deps.refresh(token)
     except RefreshRejected as exc:
         # Phase 3b — D31's liveness edge: both flips, one transaction. The
-        # 062 clock leg mints the reauth prompt on its next tick.
+        # 063 clock leg mints the reauth prompt on its next tick.
         async with factory() as s:
             await oauth.mark_dead(s, credential_id=credential_id)
             await s.commit()
@@ -176,7 +176,7 @@ async def refresh_credential(deps, session, job) -> str:
 
 
 async def reauth_prompt(deps, session, job) -> str:
-    """Executor for the 062 cadence leg's mints (`02` §5 :1165, `06` §5).
+    """Executor for the 063 cadence leg's mints (`02` §5 :1165, `06` §5).
 
     Enqueues one `notification` outbox row per push binding. No provider call
     happens here — the sender delivers; this executor only writes rows, so a

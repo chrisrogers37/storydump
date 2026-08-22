@@ -82,7 +82,7 @@ CREATE TABLE public.chat_settings (
 CREATE TABLE public.untouched_by_the_door (id integer PRIMARY KEY);
 """
 
-DOOR = "window_ddl.fn_050_chain_reconciliation()"
+DOOR = "window_ddl.fn_051_chain_reconciliation()"
 
 
 @pytest.fixture()
@@ -134,7 +134,7 @@ def _doors(dsn: str):
 class TestTheDoorDoesItsJob:
     def test_the_window_actor_performs_owner_ddl_through_the_door(self, door_db):
         """The mechanism, end to end: svc_migration holds NO membership and no
-        ownership, and both of 050's ALTERs land."""
+        ownership, and both of 051's ALTERs land."""
         dsn, _as_owner = door_db
         as_svc = as_user(dsn, "svc_migration")
 
@@ -144,7 +144,7 @@ class TestTheDoorDoesItsJob:
             dsn,
             "SELECT NOT EXISTS (SELECT 1 FROM pg_constraint"
             " WHERE conname = 'api_tokens_service_name_token_type_key')",
-        )[0], "050's first postcondition — the orphaned unique is gone"
+        )[0], "051's first postcondition — the orphaned unique is gone"
         assert (
             fetch_one(
                 dsn,
@@ -153,7 +153,7 @@ class TestTheDoorDoesItsJob:
                 " AND column_name = 'caption_style'",
             )[0]
             == "text"
-        ), "050's second postcondition — caption_style is TEXT"
+        ), "051's second postcondition — caption_style is TEXT"
 
     def test_the_window_actor_still_cannot_alter_the_tables_directly(self, door_db):
         """The door is the ONLY path. If the direct statement worked, the door
@@ -193,7 +193,7 @@ class TestTheDoorDoesItsJob:
             " JOIN pg_namespace n ON n.oid = p.pronamespace"
             " JOIN pg_roles r ON r.oid = p.proowner"
             " WHERE n.nspname = 'window_ddl' AND p.proname ="
-            " 'fn_050_chain_reconciliation'",
+            " 'fn_051_chain_reconciliation'",
         )
         assert row == (owner_actor, True)
 
@@ -215,7 +215,7 @@ class TestConditionOneTheRevokeIsTheEntireAccessControl:
             "SELECT coalesce(array_to_string(p.proacl, ','), '<NULL>')"
             " FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace"
             " WHERE n.nspname = 'window_ddl'"
-            "   AND p.proname = 'fn_050_chain_reconciliation'",
+            "   AND p.proname = 'fn_051_chain_reconciliation'",
         )[0]
         assert acl != "<NULL>", (
             "proacl IS NULL means EXECUTE to PUBLIC — the revoke did not run"

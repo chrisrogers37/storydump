@@ -1,6 +1,6 @@
 """F.2.1b — the lineage lane (#746): the corpus replayed ACROSS the boundary.
 
-`04` §0.2's gate, in its own words: *"legacy setup + 001–050, then the 3c
+`04` §0.2's gate, in its own words: *"legacy setup + 001–051, then the 3c
 schema-move file, then the F.2 target files … in one run"*. That run is what
 this file is. `test_migration_gate.py` replays the legacy lineage **up to** the
 boundary and asserts against the schema the running application uses; this
@@ -13,7 +13,7 @@ Three things are asserted here that no other suite can see:
    lineage.** The move leaves `public` empty and that emptiness is the F.2
    files' stated precondition — in CI by replay-from-empty, in production by
    this same file at M.3 step 3c, so the gate and the window are the same act
-   against the same precondition. From migration 053 the emptiness is no longer
+   against the same precondition. From migration 054 the emptiness is no longer
    observable at the END of the lane, because F.2 builds into it; what is
    asserted instead is that `public` holds exactly the tables the target
    lineage implies, which fails on a legacy leftover the same way and on an
@@ -81,11 +81,11 @@ from tests.scripts.conftest import (
 def run_lane(dsn):
     """The §0.2 lineage run: legacy setup applied by hand the way production's
     actually was, then ONE unbounded runner invocation across the boundary —
-    001–050, the move, and the F.2 target files as they land.
+    001–051, the move, and the F.2 target files as they land.
 
     It took an overridable `migrations_dir` while the target lineage was empty,
     for the one control that staged a future increment into a throwaway tree.
-    053 landed that increment for real, so the control and the parameter went
+    054 landed that increment for real, so the control and the parameter went
     with it — the lane now replays the thing itself.
     """
     psql_apply(dsn, [SETUP_SQL])
@@ -191,7 +191,7 @@ def functions_in(dsn, schema):
 
     Deliberately NOT `relations_in`: functions live in `pg_proc`, not
     `pg_class`, so no relation-based probe can see them. That is exactly why
-    migration 052 lands without moving any of the relation-shaped assertions
+    migration 053 lands without moving any of the relation-shaped assertions
     in this file, and why the lane needs its own eyes on the target leg.
     """
     row = fetch_one(
@@ -276,7 +276,7 @@ class TestTheBoundaryIsDerivedAndLoud:
         adding a file above the move is how F.2 advances, so each increment
         should have to say so here once. That is the same shape as the
         disclosure this replaced — `..._is_the_shared_functions_file`, retired
-        by 053 the way 052 retired the emptiness disclosure before it.
+        by 054 the way 053 retired the emptiness disclosure before it.
 
         WHAT THIS SEES THAT ARM (b) CANNOT. The prefix diff in
         `test_advertised_ddl.py` compares STATEMENTS, so a file above the move
@@ -284,8 +284,8 @@ class TestTheBoundaryIsDerivedAndLoud:
         file-level assertion can see that file at all.
 
         ORDER IS THE POINT, not membership: arm (b) is an ordered prefix, so
-        052's shared functions must precede 053's tables — every touch trigger
-        and `ck_ws_tz_valid` calls a function 052 creates.
+        053's shared functions must precede 054's tables — every touch trigger
+        and `ck_ws_tz_valid` calls a function 053 creates.
 
         The boundary is still derived from the runner's own move-marker, not
         from the number 51.
@@ -306,18 +306,18 @@ class TestTheBoundaryIsDerivedAndLoud:
             "058_rls_and_policies.sql",
             "059_security_definer_doors.sql",
             "060_auth_plane_tables.sql",
-            # 061 is the first file PAST F.2: 060 completed the lineage, and
+            # 062 is the first file PAST F.2: 061 completed the lineage, and
             # this one extends the advertised stream rather than consuming a
             # remaining prefix of it (#883).
             "061_intent_self_transition_guard.sql",
-            # 062 extends the stream the same way: the W5e reauth-prompt clock
+            # 063 extends the stream the same way: the W5e reauth-prompt clock
             # leg (#942), advertised in 07 §9 before landing here.
             "062_reauth_prompt_leg.sql",
-            # 063 replaces 062's fn_clock_tick to add the refresh leg's provider
+            # 064 replaces 063's fn_clock_tick to add the refresh leg's provider
             # guard (#982 prerequisite, #978 disclosure). A REPLACEMENT rather
             # than an edit: the runner keys on file-byte checksums, so an applied
-            # file that changes is a hard failure — fix forward. 062 set the
-            # precedent by dropping and recreating what 059 created.
+            # file that changes is a hard failure — fix forward. 063 set the
+            # precedent by dropping and recreating what 060 created.
             "063_refresh_leg_provider_guard.sql",
         ], (
             f"the target lineage is {above}. If you are landing the next F.2"
@@ -349,7 +349,7 @@ class TestTheLaneReplaysAcrossTheBoundary:
         THE PRECONDITION DID NOT CHANGE AND THE ASSERTION DID. "Public is
         empty" is what the MOVE establishes and what the F.2 files then consume
         — it was only ever observable at the end of the lane because nothing
-        above the move created a relation. 053 does, so an emptiness assertion
+        above the move created a relation. 054 does, so an emptiness assertion
         here would now be asserting that F.2 has not started.
 
         What survives, and is the part that was always load-bearing: whatever is
@@ -444,7 +444,7 @@ class TestTheLaneReplaysAcrossTheBoundary:
         THE UNBOUNDED ARM IS NOW BOOTSTRAPPED, and the premise that said it
         need not be has expired. That premise was measured rather than assumed
         — "no migration and no `setup_database.sql` references a service role"
-        — and migration 057 (F.2.6) is the first one that does: its grant
+        — and migration 058 (F.2.6) is the first one that does: its grant
         matrix names all six service roles, so an unbootstrapped replay fails
         with `role "svc_ingress" does not exist` before it can draw any
         contrast. This is the moment the note above anticipated when it said
@@ -452,7 +452,7 @@ class TestTheLaneReplaysAcrossTheBoundary:
         policy-carrying table will need it"; grants got there before policies.
 
         The BOUNDED arm is deliberately still unbootstrapped. It stops below
-        the move and never reaches 057, so it needs no role and paying for the
+        the move and never reaches 058, so it needs no role and paying for the
         teardown would buy nothing — and keeping it roleless preserves the
         contrast this test exists to draw.
         """
@@ -460,7 +460,7 @@ class TestTheLaneReplaysAcrossTheBoundary:
         # replay's declared seed identity, so no superuser replay path
         # survives anywhere in these suites.
         as_owner = as_user(owner_db, owner_actor)
-        # The bounded arm replays through 050, which routes its owner-DDL
+        # The bounded arm replays through 051, which routes its owner-DDL
         # through the step-0 door (#787). The unbounded arm below gets the door
         # from `bootstrapped_db`'s own bootstrap, so `run_lane` must NOT apply
         # it a second time — a re-apply as a different actor would fail on
@@ -470,7 +470,7 @@ class TestTheLaneReplaysAcrossTheBoundary:
         run_lane(bootstrapped_db)
 
         # The contrast is drawn on LEGACY-ONLY table names, not on emptiness:
-        # from 053 the unbounded arm's `public` is populated — by the target
+        # from 054 the unbounded arm's `public` is populated — by the target
         # schema — so "public is empty" no longer separates the two arms, while
         # "the legacy schema is in public" still separates them exactly.
         legacy_only = legacy_declared_tables() - implied_target_tables()
@@ -491,12 +491,12 @@ class TestTheLaneReplaysAcrossTheBoundary:
 
         The lane replays across the boundary in one run, so this asserts the
         end state of that run rather than of `psql` against the file alone:
-        after the move re-creates an empty `public`, 052 lands its two shared
-        functions INTO it and 053 adds the two owner-invariant ones.
+        after the move re-creates an empty `public`, 053 lands its two shared
+        functions INTO it and 054 adds the two owner-invariant ones.
 
         FUNCTIONS ARE THE LANE'S OWN EYES HERE. The parity gate is
         relation-scoped and reads `pg_class`, so it cannot see a function at
-        all; 053's constraint triggers are the "at least one owner" half of an
+        all; 054's constraint triggers are the "at least one owner" half of an
         invariant whose "at most one" half is an index, and only the index side
         is visible to any other check in the suite. Losing a trigger function
         would leave every other assertion in this file green.
@@ -537,7 +537,7 @@ class TestTheLaneReplaysAcrossTheBoundary:
         numbered above it can ever appear in the schema it examines.
 
         Measured before writing this, in an exported tree: a tenant-keyed table
-        with RLS off, landed as `053`, left that suite **fully green** while
+        with RLS off, landed as `054`, left that suite **fully green** while
         this lane's own replay observed it in `public`. So the gap was
         structural, not a matter of degree.
 
@@ -702,13 +702,13 @@ class TestTheLaneReplaysAcrossTheBoundary:
     def test_lane_parity_holds_against_the_target_models(
         self, bootstrapped_db, second_scratch_db
     ):
-        """LANE PARITY IS LOAD-BEARING FROM HERE (#806, migration 053).
+        """LANE PARITY IS LOAD-BEARING FROM HERE (#806, migration 054).
 
         `04` §0.2's parity arm: the replayed `public` compared against
         `create_all` on the TARGET base — the same comparator the legacy gate
-        uses, pointed at the other lineage. It was vacuous through 052 and said
+        uses, pointed at the other lineage. It was vacuous through 053 and said
         so in its own name, because the comparator is relation-scoped on both
-        sides and 052 creates only functions. 053's seven tables are what switch
+        sides and 053 creates only functions. 054's seven tables are what switch
         it on, so that disclosure is retired the way it asked to be: by becoming
         a real comparison rather than by being deleted.
 
@@ -718,7 +718,7 @@ class TestTheLaneReplaysAcrossTheBoundary:
         this gate reports, so a one-pass reading means running it knowingly red
         for five increments.
 
-        THE MODELS SIDE NEEDS 052 FIRST, and that is a real dependency rather
+        THE MODELS SIDE NEEDS 053 FIRST, and that is a real dependency rather
         than a convenience. `ck_ws_tz_valid` calls `fn_safe_tz`, so `create_all`
         cannot execute at all against a database lacking it — a CHECK naming a
         missing function is a hard error, not a skipped constraint. Applying the

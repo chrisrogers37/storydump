@@ -5,9 +5,9 @@ Two declarative bases coexist until the M.3 cutover, deliberately:
 - ``src.config.database.Base`` carries the LEGACY models. The running
   application — services, repositories, the CLI — is built on them and keeps
   running on them, untouched, until cutover. They describe the schema that
-  lives in ``legacy`` from migration 051 on.
+  lives in ``legacy`` from migration 052 on.
 - ``TargetBase`` carries the models for the schema the F.2 migration files
-  create into the empty ``public`` that 051 leaves behind.
+  create into the empty ``public`` that 052 leaves behind.
 
 **Why two bases rather than one base plus a list of target tables.** The lane
 parity check compares ``create_all`` output against the replayed schema, and it
@@ -20,7 +20,7 @@ there is no list, so there is nothing to drift. The check that requires no
 invented input beats the check that requires a correct one.
 
 **Lane parity is LOAD-BEARING from F.2.2 on.** It was vacuous while both sides
-were empty and said so; migration 053 landed 02 §1's seven tables and this
+were empty and said so; migration 054 landed 02 §1's seven tables and this
 module registers their models in the same increment, so the comparison now runs
 on two populated schemas. That coupling is not a convention to remember — the
 gate enforces it, because tables on only one side is exactly the drift it

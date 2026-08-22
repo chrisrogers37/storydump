@@ -1,42 +1,41 @@
--- Migration 063: the refresh leg gets a provider guard (#982 prerequisite, #978
--- disclosure). One clause; the rest of fn_clock_tick is carried forward from 062
--- unchanged.
+-- Migration 063: the reauth-prompt clock leg + the marker it keys on (W5e half
+-- of the credential lifecycle; `02` §5 :1165 declared the leg, nothing
+-- implemented it — reauth_prompt had NO producer anywhere).
 --
--- THE DEFECT IS LATENT, NOT BROKEN — and it goes live on someone else's commit.
--- 062's refresh leg selects due credentials on `state`/`next_refresh_at` with NO
--- provider filter, and `ig_refresh` (credential_lifecycle.py) then builds
--- IG-shaped params against graph.instagram.com unconditionally. Today that is
--- safe BY CONSTRUCTION ONLY: the sole writer into oauth_credentials is
--- `store_credential`, which takes no provider argument and binds the module
--- constant `PROVIDER = "ig_login"` (verified 2026-08-22 — one INSERT site in the
--- whole tree).
+-- Also the arming index note: `store_credential` now arms `next_refresh_at`
+-- at store time (Python side, same change set) — without that, a credential
+-- stored at reconnect is invisible to the refresh leg forever, which is the
+-- second pin of the silent-death landmine this change set pulls.
 --
--- But `ck_credentials_provider` already admits 'gdrive' (054:198), so the row is
--- INSERTABLE the moment a gdrive credential writer lands. An armed gdrive row
--- would have its token posted to Instagram's host, draw a definitive 400, and be
--- wrongly `mark_dead`-ed — both D31 flips, permanent until reconnect. The person
--- who lands that writer must find this ALREADY DONE, which is why it ships ahead
--- of the adapter rather than beside it.
---
--- WHY A NEW FILE RATHER THAN AN EDIT TO 062. The runner keys on SHA256 of file
--- bytes: "an applied file that no longer matches its recorded checksum is a hard
--- failure everywhere: fix forward" (operations/migration-runner.md). Production
--- carries neither fn_clock_tick nor oauth_credentials today, so an edit would be
--- safe HERE — but "safe in the environments I can see" is not the rule, and 062
--- set the precedent by dropping and recreating the function 059 created. Rule and
--- precedent agree.
---
--- The guard makes the coupling EXPLICIT IN SQL and fails closed: a provider whose
--- refresh door does not exist yet is simply never minted, rather than minted and
--- mishandled. Removing the clause is a deliberate act, and
--- tests/scripts/test_w5de_credential_lifecycle.py::
--- TestTheRefreshLegIsProviderGuarded turns it red.
+-- The cadence is `05`'s operational number (reauth-prompt cadence: 1 prompt /
+-- account / week) and is deliberately NOT a parameter: the tick's signature
+-- stays stable, and the number's home is `05`, not a config knob.
 
--- The CREATE bracket is 062's, carried forward for the same reason it gave:
--- `ALTER FUNCTION … OWNER TO` needs the incoming owner to hold CREATE on the
--- schema, and the steady-state grant matrix never leaves CREATE with a door
--- owner. Granted here, revoked below. Dropping this bracket makes the migration
--- fail at the ALTER — 062 records having failed exactly that way.
+ALTER TABLE ig_accounts
+  ADD COLUMN last_reauth_prompt_at TIMESTAMPTZ NULL;
+
+COMMENT ON COLUMN ig_accounts.last_reauth_prompt_at IS
+  'When the reauth-prompt clock leg last minted a prompt for this account. '
+  'NULL = never prompted. Stamped at MINT (not delivery), symmetric with the '
+  'refresh leg re-arming next_refresh_at at mint.';
+
+CREATE INDEX ix_ig_accounts_reauth_due
+  ON ig_accounts (last_reauth_prompt_at)
+  WHERE state = 'reauth_required';
+
+-- 057's matrix gives svc_clock full-table SELECT on ig_accounts and column
+-- UPDATE on exactly next_slot_at (:129); the new marker needs the same
+-- column-scoped shape:
+GRANT UPDATE (last_reauth_prompt_at) ON ig_accounts TO svc_clock;
+
+-- The return shape gains o_reauth_jobs, so this is DROP + CREATE (CREATE OR
+-- REPLACE cannot change a RETURNS TABLE shape). Owner/grants re-established
+-- below, matching 059's posture exactly — including its TRANSIENT, BRACKETED
+-- CREATE grant: ALTER FUNCTION … OWNER TO needs the new owner to hold CREATE
+-- on the schema (membership alone fails with "permission denied for schema
+-- public" — 059's own words, re-confirmed by this migration failing exactly
+-- that way without the bracket). Granted here, revoked below; the
+-- steady-state matrix never carries CREATE for a door owner.
 GRANT CREATE ON SCHEMA public TO svc_clock;
 
 DROP FUNCTION fn_clock_tick(int, interval, jsonb);
@@ -100,7 +99,6 @@ BEGIN
   WITH due AS (
     SELECT id, workspace_id FROM oauth_credentials
      WHERE state = 'active' AND next_refresh_at IS NOT NULL AND next_refresh_at <= now()
-       AND provider = 'ig_login'   -- 063: see the header. Fails CLOSED for any new provider.
      LIMIT rem
   ), ins AS (
     INSERT INTO jobs (kind, workspace_id, lane, serialization_key, run_at, max_attempts, payload)

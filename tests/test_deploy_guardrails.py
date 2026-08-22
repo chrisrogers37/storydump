@@ -5,8 +5,8 @@ window, and the runner's dormancy is what enforces it: nothing invokes
 `scripts.migration_runner` automatically on deploy, so applying migrations to
 production stays a deliberate human act.
 
-**Why this became a test at F.2.1b.** Until migration 051 the worst an armed
-runner could do to production was apply a fix-forward. From 051 on — the 3c
+**Why this became a test at F.2.1b.** Until migration 052 the worst an armed
+runner could do to production was apply a fix-forward. From 052 on — the 3c
 schema move — an armed runner performs the cutover: it renames `public` to
 `legacy` and hands the database to a target schema that does not exist yet.
 The blast radius behind one commented line changed completely, while the line
@@ -68,7 +68,7 @@ def test_no_deploy_config_invokes_the_migration_runner(name, path):
 
     assert armed == [], (
         f"{name} invokes the migration runner on deploy, and the corpus now"
-        f" contains the M.3 cutover (migration 051): {armed}"
+        f" contains the M.3 cutover (migration 052): {armed}"
     )
 
 

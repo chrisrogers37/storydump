@@ -1,4 +1,4 @@
--- Migration: 055_intent_ledger_tables.sql
+-- Migration: 056_intent_ledger_tables.sql
 -- Description: F.2.4 — plan 02 §3's intent ledger. Five tables
 --   (category_post_case_mix, post_intents, audit_events, daily_post_counts,
 --   post_intent_transitions), the 27 seeded legal-edge rows, four trigger

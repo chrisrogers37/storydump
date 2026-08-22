@@ -89,7 +89,7 @@ _TENANCY_IRRELEVANT: tuple[str, ...] = (
     "GRANT ",
     "REVOKE ",
     "INSERT INTO ",
-    # 062 adds two kinds, both provably inert on the four facts: a COMMENT
+    # 063 adds two kinds, both provably inert on the four facts: a COMMENT
     # changes no state at all, and DROP FUNCTION touches no table, policy or
     # RLS bit (the reducing hazards the refusal names are all table-shaped).
     "COMMENT ON ",
@@ -271,7 +271,7 @@ def expected_tenancy(statements) -> dict:
         # other column provably moves none of the four facts. A blanket
         # "ALTER TABLE " prefix would also admit DROP COLUMN workspace_id —
         # the exact reducing case the refusal below exists for — so the match
-        # is on the ADD COLUMN form specifically (062 is the first member).
+        # is on the ADD COLUMN form specifically (063 is the first member).
         #
         # The match is also bounded at the FAR end (#978 review): re.match
         # anchors only the start, so a compound statement — ADD COLUMN foo,

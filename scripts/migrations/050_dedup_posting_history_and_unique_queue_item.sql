@@ -1,4 +1,4 @@
--- Migration: 054_dedup_posting_history_and_unique_queue_item.sql
+-- Migration: 050_dedup_posting_history_and_unique_queue_item.sql
 -- Description: #695 — archive the duplicate posting_history groups, reduce each
 --   to one row, and enforce one history row per queue item from here on.
 --
@@ -92,5 +92,5 @@ CREATE UNIQUE INDEX uq_posting_history_queue_item_id
     WHERE queue_item_id IS NOT NULL;
 
 INSERT INTO schema_version (version, description, applied_at)
-VALUES (54, 'Dedup posting_history + UNIQUE(queue_item_id) partial index (#695)', NOW())
+VALUES (50, 'Dedup posting_history + UNIQUE(queue_item_id) partial index (#695)', NOW())
 ON CONFLICT DO NOTHING;

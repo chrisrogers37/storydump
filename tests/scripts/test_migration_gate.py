@@ -9,7 +9,7 @@
 - Parity: the runner-replayed schema equals the models-built schema.
 
 **Every replay here is bounded to ``LEGACY_LINEAGE_MAX`` (#746, F.2.1b), and
-the bound is load-bearing rather than tidy.** From 051 the corpus holds two
+the bound is load-bearing rather than tidy.** From 052 the corpus holds two
 lineages in one directory: the legacy schema this file guards, and the target
 schema created into the empty ``public`` the 3c move leaves behind. An
 unbounded replay runs the move, so ``public`` ends the run empty and every
@@ -68,11 +68,24 @@ def corpus_versions():
     return [m.version for m in discover_migrations(MIGRATIONS_DIR, LEGACY_LINEAGE_MAX)]
 
 
+def legacy_tail(above, upto=None):
+    """The legacy-lineage versions a world starting at ``above`` still owes.
+
+    Derived, for the reason `conftest`'s LEGACY_LINEAGE_MAX docstring gives
+    about the bound itself: a tail written as a literal is a second
+    enumeration of the corpus — right the day it is typed, and silently wrong
+    the first time anyone renumbers. Inserting a migration at 050 turned
+    ``[50]`` into a two-element tail in four assertions at once, which is the
+    event that argument predicted.
+    """
+    return [v for v in corpus_versions() if v > above and (upto is None or v <= upto)]
+
+
 class TestReplayFromEmpty:
     def test_runner_replays_legacy_lineage_from_empty_as_the_owner(
         self, owner_actor, owner_db
     ):
-        """The lineage-seed semantic: setup + 001–050 as the non-superuser
+        """The lineage-seed semantic: setup + 001–051 as the non-superuser
         owner. This is also the retroactive-tightening battery for the whole
         legacy corpus — a file that silently required superuser fails here."""
         as_owner = as_user(owner_db, owner_actor)
@@ -104,7 +117,7 @@ class TestAdoptProductionShaped:
         window actor: bootstrap as owner, adopt as ``svc_migration`` — the
         probes read through the bootstrap's grants, and the ledger is created
         by (and owned by) the window actor, the production first-contact
-        shape. Only 050 stays pending; the seven data-only floor files enter
+        shape. Only 051 stays pending; the seven data-only floor files enter
         as declared assertions, reported distinctly."""
         as_svc = window_actor(at49_window_db, owner_actor, admin_conn)
 
@@ -113,14 +126,14 @@ class TestAdoptProductionShaped:
         recorded = sorted(m.version for m in report.adopted + report.asserted)
         assert recorded == list(range(1, 50))
         assert [m.version for m in report.asserted] == [18, 22, 24, 27, 36, 39, 44]
-        assert [m.version for m in report.pending] == [50]
+        assert [m.version for m in report.pending] == legacy_tail(49)
 
         # STEP 3b, GREEN, AS THE DECLARED ACTOR (#787). This assertion used to
-        # be `pytest.raises(... "must be owner")`. 050's two ALTERs now run
+        # be `pytest.raises(... "must be owner")`. 051's two ALTERs now run
         # inside the step-0 definer door, owned by the database-owner actor, so
         # svc_migration completes 3b holding neither ownership nor membership.
         after = apply_pending(as_svc, MIGRATIONS_DIR, LEGACY_LINEAGE_MAX)
-        assert [m.version for m in after.applied] == [50]
+        assert [m.version for m in after.applied] == legacy_tail(49)
 
         # ...and the file did its WORK, not merely its exit status: the door
         # could have been a no-op and the apply would still be green.
@@ -162,16 +175,16 @@ class TestAdoptProductionShaped:
         )
 
     def test_at_49_the_owner_world_completes_the_tail(self, at49_db, owner_actor):
-        """The D1-option-(a) world, kept green so 050's apply coverage never
+        """The D1-option-(a) world, kept green so 051's apply coverage never
         lapses while D1 is open: the owner actor runs first contact end to
         end (adopt + tail apply), owning the ledger it creates."""
         as_owner = as_user(at49_db, owner_actor)
 
         report = adopt(as_owner, MIGRATIONS_DIR, MANIFEST, LEGACY_LINEAGE_MAX)
-        assert [m.version for m in report.pending] == [50]
+        assert [m.version for m in report.pending] == legacy_tail(49)
 
         after = apply_pending(as_owner, MIGRATIONS_DIR, LEGACY_LINEAGE_MAX)
-        assert [m.version for m in after.applied] == [50]
+        assert [m.version for m in after.applied] == legacy_tail(49)
 
     def test_at_45_the_tail_stays_pending_then_applies(self, owner_actor, at45_db):
         """The world where 046–049 never ran: adopt records 001–045 and
@@ -185,10 +198,10 @@ class TestAdoptProductionShaped:
 
         recorded = sorted(m.version for m in report.adopted + report.asserted)
         assert recorded == list(range(1, 46))
-        assert [m.version for m in report.pending] == [46, 47, 48, 49, 50]
+        assert [m.version for m in report.pending] == legacy_tail(45)
 
         after = apply_pending(as_owner, MIGRATIONS_DIR, LEGACY_LINEAGE_MAX)
-        assert [m.version for m in after.applied] == [46, 47, 48, 49, 50]
+        assert [m.version for m in after.applied] == legacy_tail(45)
         assert len(fetch_ledger(at45_db)) == len(corpus_versions())
 
     def test_at_45_the_gated_apply_makes_the_world_window_ready_then_3b_is_green(
@@ -196,12 +209,12 @@ class TestAdoptProductionShaped:
     ):
         """D1's other end (#787), and the shape of the answer is the finding.
 
-        At-45 the pending tail is 046–050, and 046/047/049 carry their own
-        legacy `ALTER TABLE`s. **The ruling's door covers 050 and only 050** —
-        050 is the window's one legacy-DDL step (`04`: "3b 050"), and 046–049
+        At-45 the pending tail is 046–051, and 046/047/049 carry their own
+        legacy `ALTER TABLE`s. **The ruling's door covers 051 and only 051** —
+        051 is the window's one legacy-DDL step (`04`: "3b 051"), and 046–049
         are pre-window work. So a database that arrives at the window still at
         45 is not window-ready: the plan's own gated apply, run by the owner
-        actor at first contact, clears the pre-050 tail, and the WINDOW step is
+        actor at first contact, clears the pre-051 tail, and the WINDOW step is
         then green under the declared actor through the door.
 
         **Bound, stated rather than implied:** this arm no longer asserts that
@@ -215,7 +228,7 @@ class TestAdoptProductionShaped:
         as_owner = as_user(at45_window_db, owner_actor)
         adopt(as_svc, MIGRATIONS_DIR, MANIFEST, LEGACY_LINEAGE_MAX)
 
-        # The window actor is still refused on the PRE-050 tail, and that is
+        # The window actor is still refused on the PRE-051 tail, and that is
         # correct rather than a gap — it is what makes the gated apply a real
         # step instead of a formality.
         with pytest.raises(MigrationRunnerError, match="must be owner"):
@@ -226,12 +239,14 @@ class TestAdoptProductionShaped:
         # and not an empty report. The bound is derived from the lineage max,
         # never a literal — nothing in this file names a version.
         gated = apply_pending(as_owner, MIGRATIONS_DIR, LEGACY_LINEAGE_MAX - 1)
-        assert [m.version for m in gated.applied] == [46, 47, 48, 49]
+        assert [m.version for m in gated.applied] == legacy_tail(
+            45, upto=LEGACY_LINEAGE_MAX - 1
+        )
 
         # STEP 3b, GREEN, AS THE DECLARED ACTOR — the same flip as the at-49
         # arm, reached from the other end of the uncertainty.
         after = apply_pending(as_svc, MIGRATIONS_DIR, LEGACY_LINEAGE_MAX)
-        assert [m.version for m in after.applied] == [50]
+        assert [m.version for m in after.applied] == [LEGACY_LINEAGE_MAX]
         assert len(fetch_ledger(at45_window_db)) == len(corpus_versions())
 
     def test_adoption_probes_are_privilege_sensitive_so_the_grants_are_load_bearing(

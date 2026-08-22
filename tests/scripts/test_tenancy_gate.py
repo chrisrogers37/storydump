@@ -79,7 +79,7 @@ class TestAgainstTheLegacyReplay:
     replay" and there are two (#806).
 
     Every replay below is bounded to `LEGACY_LINEAGE_MAX`, which stops BELOW
-    the 051 move. F.2's files are numbered ABOVE it, so nothing this class
+    the 052 move. F.2's files are numbered ABOVE it, so nothing this class
     examines can ever contain one. The target-lineage half is
     `test_lineage_lane.py::test_the_tenancy_gate_runs_against_this_replay_and_can_see_into_it`.
     """
@@ -94,7 +94,7 @@ class TestAgainstTheLegacyReplay:
             psql_apply,
         )
 
-        # LEGACY_STANDUP, not SETUP_SQL: this replay reaches 050, which routes
+        # LEGACY_STANDUP, not SETUP_SQL: this replay reaches 051, which routes
         # its owner-DDL through the step-0 door (#787). Imported from conftest
         # rather than re-exported through test_migration_gate — the symbol has
         # one home, and leaning on another test module to forward it is what
@@ -113,7 +113,7 @@ class TestAgainstTheLegacyReplay:
         workspace-keyed table." It would not. F.2's tables are numbered above
         the move and this replay stops below it, so every table F.2 ever lands
         leaves this green — measured in an exported tree, where a tenant-keyed
-        RLS-less `053` left this whole class passing.
+        RLS-less `054` left this whole class passing.
 
         A disclosure that names a trip condition it cannot reach is worse than
         none: it is read as coverage. What is actually disclosed is that the
@@ -133,7 +133,7 @@ class TestAgainstTheLegacyReplay:
             psql_apply,
         )
 
-        # LEGACY_STANDUP, not SETUP_SQL: this replay reaches 050, which routes
+        # LEGACY_STANDUP, not SETUP_SQL: this replay reaches 051, which routes
         # its owner-DDL through the step-0 door (#787). Imported from conftest
         # rather than re-exported through test_migration_gate — the symbol has
         # one home, and leaning on another test module to forward it is what

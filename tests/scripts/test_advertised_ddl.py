@@ -268,8 +268,8 @@ class TestAgainstTheRealDocs:
         classes = [e.class_ for e in manifest.blocks]
 
         # 21, not 20: `07` §9 adds the #982 refresh-leg provider guard
-        # (migration 063), after the #942 reauth-prompt leg (062) made it 20
-        # and §8's #883 guard (061) made it 19.
+        # (migration 064), after the #942 reauth-prompt leg (063) made it 20
+        # and §8's #883 guard (062) made it 19.
         assert classes.count("normative") == 21
         assert classes.count("illustrative") == 4
 
@@ -343,11 +343,11 @@ class TestF2PrefixReport:
 
 class TestF2AgainstReality:
     def test_the_target_lineage_head_is_the_two_shared_functions(self):
-        """ARM (b) IS LOAD-BEARING FROM HERE (#806, migration 052).
+        """ARM (b) IS LOAD-BEARING FROM HERE (#806, migration 053).
 
         This replaces `test_target_lineage_is_empty_today_disclosed`, which
         asserted the target lineage was empty and was written to go red the
-        moment a file landed. 052 is that file, so the disclosure is retired
+        moment a file landed. 053 is that file, so the disclosure is retired
         by giving arm (b) the real assertion it was holding the place for.
 
         The expectation is derived from the STREAM — the plan documents plus
@@ -357,8 +357,8 @@ class TestF2AgainstReality:
         """
         files = target_lineage_files(MIGRATIONS_DIR_PATH)
         assert files, (
-            "the target lineage is empty — 052 is the head of the advertised"
-            " stream and must be the first file above the 051 move"
+            "the target lineage is empty — 053 is the head of the advertised"
+            " stream and must be the first file above the 052 move"
         )
 
         manifest = load_manifest(REAL_MANIFEST)
@@ -400,7 +400,7 @@ class TestF2AgainstReality:
 
         `ok is True` was the whole assertion while the lineage was empty, and
         an empty prefix is vacuously ok — so this test passed without
-        comparing anything, by design and disclosed as such. Now that 052 has
+        comparing anything, by design and disclosed as such. Now that 053 has
         landed, NON-VACUITY is asserted alongside it. Without that line,
         deleting every target-lineage migration would turn this green again
         rather than red, which is the failure the disclosure existed to

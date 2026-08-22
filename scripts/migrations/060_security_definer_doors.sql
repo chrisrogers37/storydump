@@ -1,4 +1,4 @@
--- Migration: 059_security_definer_doors.sql
+-- Migration: 060_security_definer_doors.sql
 -- Description: F.2.8 — plan 02 §7-DDL's nine SECURITY DEFINER doors, with
 --   their owner/revoke/grant cycles and the transient CREATE bracket that
 --   installing them requires. NO TABLES, NO INDEXES.

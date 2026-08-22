@@ -1,4 +1,4 @@
-"""Plan 02 §2 — the accounts, sources and media models (F.2.3, migration 054).
+"""Plan 02 §2 — the accounts, sources and media models (F.2.3, migration 055).
 
 The mirror of `054_accounts_sources_media_tables.sql`, on the same terms
 `identity_and_tenancy` states: these are not an independent design, they are
@@ -70,7 +70,7 @@ class IgAccount(TargetBase):
     tz = Column(Text, nullable=True)
     next_slot_at = Column(TZ, nullable=True)
     last_posted_at = Column(TZ, nullable=True)
-    # When the reauth-prompt clock leg last minted for this account (062);
+    # When the reauth-prompt clock leg last minted for this account (063);
     # NULL = never prompted. Stamped at mint, symmetric with next_slot_at.
     last_reauth_prompt_at = Column(TZ, nullable=True)
     created_at, updated_at = timestamps()
@@ -83,8 +83,8 @@ class IgAccount(TargetBase):
         CheckConstraint("posts_per_day BETWEEN 1 AND 50", name="ck_iga_ppd"),
         CheckConstraint("posting_hours_start BETWEEN 0 AND 23", name="ck_iga_hs"),
         CheckConstraint("posting_hours_end BETWEEN 0 AND 23", name="ck_iga_he"),
-        # Calls 052's fn_safe_tz. A CHECK naming a missing function is a hard
-        # error, so create_all against a database without 052 cannot run.
+        # Calls 053's fn_safe_tz. A CHECK naming a missing function is a hard
+        # error, so create_all against a database without 053 cannot run.
         CheckConstraint("tz IS NULL OR fn_safe_tz(tz) = tz", name="ck_iga_tz_valid"),
         # Exists to be a composite-FK target, not for its own sake.
         UniqueConstraint("workspace_id", "id", name="uq_ig_accounts_ws_id"),

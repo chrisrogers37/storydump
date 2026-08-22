@@ -73,7 +73,7 @@ _CLAIM_TEMPLATE = (
 CLAIM_SQL = _CLAIM_TEMPLATE.format(guard=" AND state = 'pending'")
 UNGUARDED_CLAIM_SQL = _CLAIM_TEMPLATE.format(guard="")
 
-#: `uq_jobs_serialized_lease`, verbatim from `056` — re-added after its drop.
+#: `uq_jobs_serialized_lease`, verbatim from `057` — re-added after its drop.
 UQ_LEASE_SQL = (
     "CREATE UNIQUE INDEX uq_jobs_serialized_lease ON jobs (serialization_key)"
     " WHERE state = 'leased'"

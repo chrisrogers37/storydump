@@ -58,7 +58,7 @@ WS_B_NAME = "f4-tenant-b"
 LOGINS = ("svc_worker", "svc_ingress")
 T = ("svc_ingress", "svc_worker")  # the tenant-policy TO-list, alphabetical
 
-#: THE ORACLE — every policy in 058/060 at (policy, table, cmd, roles) grain,
+#: THE ORACLE — every policy in 059/061 at (policy, table, cmd, roles) grain,
 #: with its disposition in this module. Asserted equal to pg_policies by
 #: test_the_census_matches_the_catalog_exactly; dispositions are asserted
 #: complete (every row has one) and honest (the disclosed set is pinned).
@@ -265,7 +265,7 @@ GUC_TABLES = sorted(
 #: UPDATE). audit_events is INSERT/SELECT-only for the logins by grant.
 MATRIX_WRITE_TABLES = sorted(set(GUC_TABLES) - {"audit_events"})
 
-#: Governance tables (055's tg_audit_* attach list): mutations need actors.
+#: Governance tables (056's tg_audit_* attach list): mutations need actors.
 GOVERNANCE = {
     "workspaces",
     "workspace_members",
@@ -982,7 +982,7 @@ class TestAuthPlaneMaintenanceOnlyThroughTheSweep:
                 " WHERE token_hash = 'f4-service-survivor'",
             )
             == 1
-        ), "service_tokens sits outside the sweep by design (060's asymmetry)"
+        ), "service_tokens sits outside the sweep by design (061's asymmetry)"
 
 
 class TestZeroNullGates:
@@ -1010,7 +1010,7 @@ class TestZeroNullGates:
         assert nullable == {"jobs", "oauth_states", "service_tokens"}, (
             f"nullable workspace_id: {sorted(nullable)} — sanctioned NULLs are"
             f" jobs' system-kind pairing and the two auth-plane pre-tenant"
-            f" columns (060)"
+            f" columns (061)"
         )
 
     def test_jobs_pairing_check_refuses_both_mismatches(self, target):

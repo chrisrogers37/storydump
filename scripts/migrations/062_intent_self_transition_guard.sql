@@ -1,4 +1,4 @@
--- Migration: 061_intent_self_transition_guard.sql
+-- Migration: 062_intent_self_transition_guard.sql
 -- Description: #883 — refuse a same-state write to post_intents.state, so the
 --   LOSER of a concurrent transition is told it lost instead of being told it
 --   won. Statements 257-258 — the first two past the 257 F.2 landed.

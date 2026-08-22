@@ -1,4 +1,4 @@
--- Migration: 051_schema_move_public_to_legacy.sql
+-- Migration: 052_schema_move_public_to_legacy.sql
 -- Description: The M.3 step-3c schema move (plan 04; shape and rejected
 --   alternatives: D39). Rename the legacy lineage out of public wholesale and
 --   re-create an empty public for the F.2 target schema to land in. One

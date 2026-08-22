@@ -1,7 +1,7 @@
 """L.1 — the intent ledger service (#858, `04` §L.1).
 
 A deliberately thin layer over `post_intents`. Everything that *enforces*
-anything lives in the database: migration `055` ships `trg_intent_guard`,
+anything lives in the database: migration `056` ships `trg_intent_guard`,
 `trg_intent_audit` and `trg_intent_insert_guard`, and `04` §L.1's gate says
 outright that **the trigger, not the service, is the authority**.
 

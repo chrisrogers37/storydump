@@ -97,7 +97,7 @@ def _jobs_of_kind(conn, kind: str) -> list[dict]:
 
 
 class TestTheClockMintsTheReauthLeg:
-    """Migration 062: fn_clock_tick gains the `05` reauth-prompt cadence leg."""
+    """Migration 063: fn_clock_tick gains the `05` reauth-prompt cadence leg."""
 
     def test_a_reauth_required_account_is_prompted_and_an_active_one_is_not(
         self, lane_db, sync_conn
@@ -164,9 +164,9 @@ class TestTheClockMintsTheReauthLeg:
 
 
 class TestTheRefreshLegIsProviderGuarded:
-    """Migration 063 (#982 prerequisite, disclosed on #978).
+    """Migration 064 (#982 prerequisite, disclosed on #978).
 
-    062's refresh leg selected due credentials on `state`/`next_refresh_at` with
+    063's refresh leg selected due credentials on `state`/`next_refresh_at` with
     NO provider filter, and `ig_refresh` then builds IG-shaped params against
     graph.instagram.com unconditionally. That was safe BY CONSTRUCTION ONLY:
     `store_credential` takes no provider argument and binds `PROVIDER =
@@ -180,7 +180,7 @@ class TestTheRefreshLegIsProviderGuarded:
     THE GUARD IS ONLY WORTH ANYTHING IF IT CAN GO RED, so this drives both
     providers through one tick: the ig_login row must still mint (or the guard
     is refusing everything and would pass by breaking the feature), and the
-    gdrive row must not. Deleting `AND provider = 'ig_login'` from 063 turns the
+    gdrive row must not. Deleting `AND provider = 'ig_login'` from 064 turns the
     second assertion red.
     """
 
@@ -394,7 +394,7 @@ class TestRefreshExecutorOnTheRealMachinery:
     async def test_definitive_rejection_flips_both_and_the_cadence_prompts(
         self, lane_db, sync_conn
     ):
-        """The whole W5d→062→W5e arc, end to end on the real schema."""
+        """The whole W5d→063→W5e arc, end to end on the real schema."""
         import uuid as uuidlib
 
         from src.services.target.credential_lifecycle import RefreshRejected
@@ -420,7 +420,7 @@ class TestRefreshExecutorOnTheRealMachinery:
             "a definitive rejection is handled work, not a retry"
         )
 
-        # The 062 leg is the single prompt producer: next tick mints.
+        # The 063 leg is the single prompt producer: next tick mints.
         _tick(sync_conn)
         prompts_minted = _jobs_of_kind(sync_conn, "reauth_prompt")
         assert len(prompts_minted) == 1

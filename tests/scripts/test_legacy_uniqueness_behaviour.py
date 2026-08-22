@@ -189,6 +189,26 @@ def _token(
     )
 
 
+QUEUE_A = "eeee3333-0000-0000-0000-00000000000a"
+
+
+def _history(conn, media=MEDIA_A, queue=QUEUE_A, chat=CHAT_A, story=None):
+    """One posting_history row. `queue` may be None — history outlives the
+    queue rows it came from, which is why the rule below is partial."""
+    _x(
+        conn,
+        "INSERT INTO posting_history (id, media_item_id, queue_item_id,"
+        " queue_created_at, scheduled_for, posted_at, status, success,"
+        " posting_method, chat_settings_id, instagram_story_id)"
+        " VALUES (%s,%s,%s,now(),now(),now(),'posted',true,'instagram_api',%s,%s)",
+        _uuid(),
+        media,
+        queue,
+        chat,
+        story,
+    )
+
+
 def _lock(conn, media=MEDIA_A, until=None):
     _x(
         conn,
@@ -360,6 +380,21 @@ RULES: tuple[Rule, ...] = (
             _media(c, mid=_uuid(), chat=CHAT_A, path="/p/3", ig_id=None),
             _media(c, mid=_uuid(), chat=CHAT_A, path="/p/4", ig_id=None),
         ],
+    ),
+    Rule(
+        index="uq_posting_history_queue_item_id",
+        migration="050",
+        refuses="a second history row for the same queue item — one queue item"
+        " publishes at most once, so a second row is a replayed finalize",
+        permits="a second row for the SAME MEDIA under a DIFFERENT queue item —"
+        " re-posting a media item later is normal, and a rule keyed on the"
+        " media instead of the queue item would refuse it",
+        setup=lambda c: (
+            _media(c, chat=_chat(c)),
+            _history(c, queue=QUEUE_A),
+        ),
+        duplicate=lambda c: _history(c, queue=QUEUE_A),
+        near_miss=lambda c: _history(c, queue=_uuid()),
     ),
     Rule(
         index="unique_permanent_lock_per_media",

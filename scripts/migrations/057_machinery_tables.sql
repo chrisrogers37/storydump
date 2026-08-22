@@ -1,4 +1,4 @@
--- Migration: 056_machinery_tables.sql
+-- Migration: 057_machinery_tables.sql
 -- Description: F.2.5 — plan 02 §5 and §6's execution machinery. Five tables
 --   (jobs, channel_outbox, provider_operations, command_dedup, rate_counters),
 --   three touch triggers and nine indexes, one of which lands on an earlier

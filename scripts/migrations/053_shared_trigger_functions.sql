@@ -1,4 +1,4 @@
--- Migration: 052_shared_trigger_functions.sql
+-- Migration: 053_shared_trigger_functions.sql
 -- Description: The two shared functions every later target-schema table
 --   depends on (plan 02 §0). First file of the F.2 target lineage, and the
 --   head of the advertised stream - so it lands before any table regardless
