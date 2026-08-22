@@ -68,20 +68,39 @@ class TestTheVerdictSurvivesBeingQuotedAlone:
         assert classify_partition(0, 950, 0)[0] == "CLEAN"
 
 
-def _sql_ident_char(ch: str) -> bool:
-    """Is `ch` part of a SQL identifier?
+def _is_word_char_for_this_query(ch: str) -> bool:
+    """Word-character test for parsing `LOCKS_SQL` — and ONLY that query.
 
-    BORROW THE SUBSTRATE'S DEFINITION, NOT THE HOST LANGUAGE'S. The first
-    version of this boundary used `str.isalnum()`, which answers "is this a
-    word character" with PYTHON's notion of a word — and `_` is not alnum. SQL
-    identifiers contain underscores, and every alias in `LOCKS_SQL` uses them,
-    so `rows_from_history` carried a `from` that read as a bounded keyword: the
-    projection truncated at `rows_` and `live_locks` went invisible again.
+    Handles unquoted `[A-Za-z0-9_]` identifiers, which is every alias
+    `LOCKS_SQL` uses. `_` is included because Python's `str.isalnum()` excludes
+    it while SQL identifiers use it constantly: `rows_from_history` once carried
+    a `from` that read as a bounded keyword and truncated the projection at
+    `rows_`, hiding every column after it (#974, #976).
 
-    That is the same defect the boundary was ADDED to fix, reproduced one scope
-    narrower — the gate stopped at the first `FROM`, the fix stopped at a `from`
-    inside a word. **When you add a boundary, ask what the boundary itself is
-    bounded by.**
+    DOES NOT HANDLE — measured on this parser, not presumed. Each still
+    truncates, and a `live_locks` planted after it goes invisible:
+
+        rows$from$history      `$` is legal in an unquoted identifier
+        "rows from history"    a quoted identifier: the DELIMITER decides the
+                               boundary, not the character class
+        "from"                 a bare keyword as a quoted alias
+
+    None is reachable by any alias this query currently uses, which is why #977
+    was a follow-up rather than a block — unlike the underscore hole, which the
+    file's own naming convention walked straight into.
+
+    NAMED FOR ITS SCOPE ON PURPOSE (#977). The previous name claimed SQL's
+    definition of an identifier character and implemented a narrower one. **A
+    visible name that over-claims is worse than an inline expression**, because
+    the next reader trusts it and stops checking — the same failure as a gate
+    that reads as protection and does not protect. Earning the old name means a
+    SQL tokenizer living inside a test helper, to parse a seven-line query it
+    fully controls: more surface than the thing it guards, and a bigger place
+    for holes to live.
+
+    `test_every_alias_stays_inside_this_parsers_domain` keeps the precondition
+    true, so a future alias in an unhandled shape fails loudly here rather than
+    silently shrinking the gate's field of view.
     """
     return ch.isalnum() or ch == "_"
 
@@ -127,8 +146,10 @@ class TestALivenessNameIsBackedByALivenessFilter:
             elif (
                 depth == 0
                 and upper.startswith("FROM", i)
-                and (i == 0 or not _sql_ident_char(body[i - 1]))
-                and (i + 4 >= len(body) or not _sql_ident_char(body[i + 4]))
+                and (i == 0 or not _is_word_char_for_this_query(body[i - 1]))
+                and (
+                    i + 4 >= len(body) or not _is_word_char_for_this_query(body[i + 4])
+                )
             ):
                 end = i
                 break
@@ -208,6 +229,35 @@ class TestALivenessNameIsBackedByALivenessFilter:
                 self.test_the_unfiltered_count_is_not_named_for_a_lifecycle()
         finally:
             mod.LOCKS_SQL = before
+
+    def test_every_alias_stays_inside_this_parsers_domain(self):
+        """Guard the PRECONDITION, rather than pin the limitation.
+
+        `_is_word_char_for_this_query` handles unquoted `[A-Za-z0-9_]` and says
+        so. The risk is not that the bound exists — it is that someone adds an
+        alias outside it and the projection silently truncates there, shrinking
+        the gate's field of view with everything still green.
+
+        So this asserts the INPUT stays in the domain. A test asserting the
+        three unhandled shapes truncate would pin the defect instead, which is
+        what `test_the_negative_control_names_a_module_that_cannot_exist` did
+        on #972 before it was retired for exactly that reason.
+        """
+        raw = mod.LOCKS_SQL
+        offenders = [
+            a
+            for a, _ in self._select_items()
+            if not a or not all(_is_word_char_for_this_query(c) for c in a)
+        ]
+        assert offenders == [], (
+            "these aliases fall outside what this parser handles, so the "
+            "projection may truncate at one of them: " + ", ".join(offenders)
+        )
+        assert '"' not in raw.split("FROM media_posting_locks")[0], (
+            "a quoted identifier appeared in the projection — the delimiter "
+            "decides the boundary there, which this parser does not implement "
+            "(see _is_word_char_for_this_query)"
+        )
 
     def test_an_alias_containing_from_does_not_end_the_projection(self):
         """The boundary's own boundary — virgil's finding, kept as a control.
