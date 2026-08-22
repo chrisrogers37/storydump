@@ -95,6 +95,10 @@ class WorkerDeps:
 
     meta: Any = None
     transit: Any = None
+    #: The Drive read leg (#982) — ONE adapter for W6's listing and W5b's
+    #: bytes, so the two workstreams cannot build divergent copies. Duck-typed
+    #: (`list_files` / `fetch_bytes`); `StubDriveAdapter` until M.3 (#862).
+    drive: Any = None
     media_fetch: Optional[Callable[[dict], Any]] = None
     transport: Optional[Callable[[dict], Any]] = None
     poll: Optional[Callable[..., Any]] = None
@@ -274,6 +278,18 @@ def build_registry(deps: WorkerDeps) -> dict:
             await asyncio.sleep(cfg.poller_interval_seconds)
 
     registry: dict = {kind: Parked(_UNBUILT_REASON) for kind in UNBUILT_KINDS}
+    # W6's two kinds are seam-blocked rather than unbuilt, and the difference is
+    # visible to whoever reads the park reason: an executor that does not exist
+    # needs building, an absent seam needs WIRING. Naming the seam is the
+    # contract W6 parks behind (#982) — a silent park would be indistinguishable
+    # from a kind nobody has started.
+    if deps.drive is None:
+        for _kind in ("sync_media_source", "first_ingest_chunk"):
+            registry[_kind] = Parked(
+                "no Drive read seam configured (WorkerDeps.drive is None;"
+                " build-path #982) — the executor is blocked on the seam, not"
+                " unwritten"
+            )
     registry["plan_slot"] = plan_slot
     registry["reap_expired"] = reap_expired
     registry["reconcile_ambiguous"] = (

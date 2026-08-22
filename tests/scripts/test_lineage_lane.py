@@ -313,6 +313,12 @@ class TestTheBoundaryIsDerivedAndLoud:
             # 062 extends the stream the same way: the W5e reauth-prompt clock
             # leg (#942), advertised in 07 §9 before landing here.
             "062_reauth_prompt_leg.sql",
+            # 063 replaces 062's fn_clock_tick to add the refresh leg's provider
+            # guard (#982 prerequisite, #978 disclosure). A REPLACEMENT rather
+            # than an edit: the runner keys on file-byte checksums, so an applied
+            # file that changes is a hard failure — fix forward. 062 set the
+            # precedent by dropping and recreating what 059 created.
+            "063_refresh_leg_provider_guard.sql",
         ], (
             f"the target lineage is {above}. If you are landing the next F.2"
             " increment, add it here — deliberately, and at the end: arm (b)"

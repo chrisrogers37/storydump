@@ -163,6 +163,88 @@ class TestTheClockMintsTheReauthLeg:
         assert len(_jobs_of_kind(sync_conn, "reauth_prompt")) == 2
 
 
+class TestTheRefreshLegIsProviderGuarded:
+    """Migration 063 (#982 prerequisite, disclosed on #978).
+
+    062's refresh leg selected due credentials on `state`/`next_refresh_at` with
+    NO provider filter, and `ig_refresh` then builds IG-shaped params against
+    graph.instagram.com unconditionally. That was safe BY CONSTRUCTION ONLY:
+    `store_credential` takes no provider argument and binds `PROVIDER =
+    "ig_login"`, and it is the one INSERT site in the tree.
+
+    But `ck_credentials_provider` already admits 'gdrive', so the row is
+    insertable the moment a gdrive writer lands — and an armed gdrive row would
+    have its token posted to Instagram's host, draw a definitive 400, and be
+    wrongly `mark_dead`-ed. Both D31 flips, permanent until reconnect.
+
+    THE GUARD IS ONLY WORTH ANYTHING IF IT CAN GO RED, so this drives both
+    providers through one tick: the ig_login row must still mint (or the guard
+    is refusing everything and would pass by breaking the feature), and the
+    gdrive row must not. Deleting `AND provider = 'ig_login'` from 063 turns the
+    second assertion red.
+    """
+
+    @staticmethod
+    def _arm(conn, chain, provider: str, account_id, token_label: str) -> str:
+        """Insert an ARMED credential directly — bypassing store_credential.
+
+        Deliberate: `store_credential` cannot produce a gdrive row (that is the
+        construction the guard replaces), so a test routed through it could not
+        reach the state under test at all.
+
+        The owner column differs by provider and the schema enforces it —
+        `ck_credentials_one_owner` requires exactly one of `ig_account_id` /
+        `media_source_id`, and `ck_sources_provider` admits only 'gdrive', so a
+        Drive credential is source-owned by construction (D37: a media-source
+        credential's provider equals its source's). Writing it account-owned
+        raises CheckViolation rather than reaching the leg under test.
+        """
+        ig_owned = provider == "ig_login"
+        with conn.cursor() as cur:
+            cur.execute("SET app.actor_kind = 'migration'")
+            cur.execute(
+                "INSERT INTO oauth_credentials"
+                " (workspace_id, ig_account_id, media_source_id, provider,"
+                "  encrypted_payload, state, next_refresh_at)"
+                " VALUES (%s, %s, %s, %s, %s, 'active', now()) RETURNING id",
+                (
+                    chain["ws"],
+                    account_id if ig_owned else None,
+                    None if ig_owned else chain["src"],
+                    provider,
+                    token_label,
+                ),
+            )
+            cred_id = cur.fetchone()[0]
+        conn.commit()
+        return str(cred_id)
+
+    def test_a_gdrive_credential_is_never_minted_for_refresh(self, lane_db, sync_conn):
+        chain = seed_workspace_chain(sync_conn, "w5de-guard")
+        account_id, _ = _account_of(chain, sync_conn)
+
+        ig_id = self._arm(sync_conn, chain, "ig_login", account_id, "ct-ig")
+        gd_id = self._arm(sync_conn, chain, "gdrive", account_id, "ct-gd")
+
+        _tick(sync_conn)
+        minted = {
+            j["payload"].get("credential_id")
+            for j in _jobs_of_kind(sync_conn, "refresh_credential")
+        }
+
+        # POSITIVE CONTROL FIRST: a guard that refused everything would satisfy
+        # the assertion below while silently breaking the refresh leg.
+        assert ig_id in minted, (
+            "the ig_login credential must still mint — without this the next"
+            " assertion passes for a guard that refuses every provider"
+        )
+        assert gd_id not in minted, (
+            "a gdrive credential was minted for refresh. ig_refresh would post"
+            " its token to graph.instagram.com, take a definitive 400, and"
+            " mark_dead it — permanent until reconnect (D31)"
+        )
+
+
 class TestStoreArmsTheTick:
     """The second pin: a stored credential must be visible to the refresh leg."""
 
