@@ -42,6 +42,7 @@ import pytest
 
 from scripts.migration_runner import (
     MigrationRunnerError,
+    _load_manifest,
     adopt,
     apply_pending,
     discover_migrations,
@@ -428,8 +429,9 @@ class TestTheDerivedAdoptionProbesReadBothWays:
     # NOT reached, because it never asks one there. That is the direction below,
     # and it is the one production meets first.
 
-    def test_062_probes_read_false_without_raising_before_the_target_lineage(
-        self, at49_db, owner_actor
+    @pytest.mark.parametrize("version", [62, 63])
+    def test_probes_read_false_without_raising_before_the_target_lineage(
+        self, version, at49_db, owner_actor
     ):
         """The false direction, which is the one that reaches production first.
 
@@ -439,8 +441,38 @@ class TestTheDerivedAdoptionProbesReadBothWays:
         them.
         """
         as_owner = as_user(at49_db, owner_actor)
-        for probe in self._probes(62):
+        for probe in self._probes(version):
             row = fetch_one(as_owner, probe)  # must not raise
             assert row[0] is False, (
-                f"062 probe read true on a database predating 062: {probe}"
+                f"{version:03d} probe read true on a database predating it: {probe}"
             )
+
+
+class TestEveryMigrationCarriesAdoptionEvidence:
+    """#997 — the check whose absence let two files land without any.
+
+    `_load_manifest` already refuses a file in its window carrying neither a
+    manifest entry nor `runner:postcondition` lines. Nothing asked it that
+    question about the corpus at HEAD: every `adopt` call in this file is
+    bounded to ``LEGACY_LINEAGE_MAX``, so 051 onward were never in a window,
+    while production's first contact is UNBOUNDED — the CLI passes no
+    ``max_version``. Two files went green for a day on exactly that gap.
+
+    This needs no database and no fixture, which is the point: it is the
+    cheapest possible gate on the thing that actually broke, and it runs
+    against the real manifest and the real corpus rather than a fixture pair.
+    """
+
+    def test_the_unbounded_corpus_pairs_with_the_manifest(self):
+        corpus = discover_migrations(MIGRATIONS_DIR)
+        try:
+            required_through, entries = _load_manifest(MANIFEST, corpus, corpus)
+        except MigrationRunnerError as exc:
+            raise AssertionError(
+                "a migration in the corpus carries no adoption evidence, so"
+                f" `runner adopt` fails before opening a connection: {exc}"
+            ) from exc
+        assert len(entries) == len(corpus), (
+            "every migration must pair with evidence in an unbounded window"
+        )
+        assert required_through == 45
