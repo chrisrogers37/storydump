@@ -164,6 +164,19 @@ def tenancy_signature(dsn: str) -> dict:
     return sig
 
 
+def _top_level_comma(stmt: str) -> bool:
+    """A comma outside every parenthesis — the mark of a compound ALTER."""
+    depth = 0
+    for ch in stmt:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            return True
+    return False
+
+
 def expected_tenancy(statements) -> dict:
     """The tenancy state a PREFIX of the advertised stream implies, in the same
     dict shape `tenancy_signature` reads off a live catalog.
@@ -259,8 +272,18 @@ def expected_tenancy(statements) -> dict:
         # "ALTER TABLE " prefix would also admit DROP COLUMN workspace_id —
         # the exact reducing case the refusal below exists for — so the match
         # is on the ADD COLUMN form specifically (062 is the first member).
+        #
+        # The match is also bounded at the FAR end (#978 review): re.match
+        # anchors only the start, so a compound statement — ADD COLUMN foo,
+        # DROP COLUMN workspace_id — matches as a prefix and would ride the
+        # continue past the refusal. A single ADD COLUMN never carries a
+        # comma OUTSIDE parentheses (numeric(10,2) legitimately carries one
+        # inside), so a top-level comma means a second action and falls
+        # through to the loud refusal below — whatever the second action is,
+        # including the fact-MOVING ones a verb denylist would have to keep
+        # chasing (ADD COLUMN workspace_id, FORCE ROW LEVEL SECURITY).
         m = re.match(r"ALTER TABLE (?:public\.)?(\w+) ADD COLUMN (\w+)", stmt)
-        if m:
+        if m and not _top_level_comma(stmt):
             if m.group(2) == "workspace_id" and m.group(1) in sig:
                 sig[m.group(1)]["tenant_keyed"] = True
             continue
