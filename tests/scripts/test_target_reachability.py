@@ -96,6 +96,91 @@ class TestTheDenominatorComesFromDisk:
         assert target_modules_on_disk(tmp_path) == set()
 
 
+class TestIsolationRemovesTheSharingNotTheSubtraction:
+    """#986 — one entrypoint per interpreter, so order stops deciding.
+
+    The shared-process version made every number a function of measurement
+    order: the same module measured twice in one process gave 19 target hits
+    and then 0. That under-reported ANY entrypoint whose target modules
+    something earlier imported — the root was merely where it surfaced.
+    """
+
+    def test_the_same_entrypoint_twice_gives_the_same_answer(self):
+        """The defect, stated as its own regression test.
+
+        In-process this is 19 then 0. Under `measure` it must be 19 then 19,
+        because each call is its own interpreter.
+        """
+        root = pathlib.Path(tr.__file__).resolve().parent.parent
+        first = tr.measure("src.worker", root)
+        second = tr.measure("src.worker", root)
+        assert first[1] == second[1] and first[1], (
+            "measuring the same entrypoint twice changed the answer, so "
+            "isolation is not holding"
+        )
+
+    def test_a_failed_probe_RAISES_rather_than_reporting_zero(self, monkeypatch):
+        """The most important property, and the reason for the whole change.
+
+        A probe that failed and returned "0 target modules" would be
+        indistinguishable from the finding #942 rests on. No answer must be a
+        third state, and it must be loud.
+
+        The failure is injected rather than provoked, deliberately: this is a
+        test of the CLASSIFIER — which stderr means finding and which means
+        broken — not of Python's importer. Provoking a real crash would need a
+        module written into the repo tree that raises on import, which is a
+        larger and dirtier fixture for a smaller claim.
+        """
+        root = pathlib.Path(tr.__file__).resolve().parent.parent
+
+        class _Fail:
+            returncode, stdout, stderr = 1, "", "OperationalError: connection refused"
+
+        monkeypatch.setattr(tr.subprocess, "run", lambda *a, **k: _Fail())
+        with pytest.raises(tr.MeasurementFailed):
+            tr.measure("src.worker", root)
+
+    def test_a_probe_that_exits_zero_with_no_result_also_raises(self, monkeypatch):
+        """Exit 0 is not the same as an answer.
+
+        A probe whose output was swallowed would otherwise fall through to
+        whatever the caller does with a missing value — which on this
+        instrument is exactly the zero it must never manufacture.
+        """
+        root = pathlib.Path(tr.__file__).resolve().parent.parent
+
+        class _Silent:
+            returncode, stdout, stderr = 0, "some noise, no result line\n", ""
+
+        monkeypatch.setattr(tr.subprocess, "run", lambda *a, **k: _Silent())
+        with pytest.raises(tr.MeasurementFailed):
+            tr.measure("src.worker", root)
+
+    def test_a_missing_composition_root_stays_a_FINDING_not_an_error(self):
+        """`src.worker` absent means the commit predates W1 — the before half
+        of the before/after this instrument exists to produce. It must remain
+        distinguishable from a broken probe."""
+        root = pathlib.Path(tr.__file__).resolve().parent.parent
+        with pytest.raises(ModuleNotFoundError):
+            tr.measure("src.definitely_absent_module", root)
+
+    def test_the_positive_control_survives_isolation(self):
+        """One of the two musts from the ruling — asserted, not assumed.
+
+        It reads CUMULATIVE `sys.modules`, which was correct in a shared
+        process because settings imports once per process. In a subprocess each
+        measurement has its own process, so it must still be true for every
+        entrypoint — and if it silently went false, the check that catches a
+        walker seeing nothing would be dead.
+        """
+        root = pathlib.Path(tr.__file__).resolve().parent.parent
+        for entry in ("src.main", "src.worker"):
+            assert tr.measure(entry, root)[2] is True, (
+                f"the positive control went false for {entry} under isolation"
+            )
+
+
 class TestTheHitsAreDifferentialNotCumulative:
     """The measurement must not depend on what was imported before it.
 

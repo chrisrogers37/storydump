@@ -64,6 +64,7 @@ import inspect
 import json
 import pathlib
 import pkgutil
+import subprocess
 import sys
 
 OK, ERROR = 0, 2
@@ -169,19 +170,34 @@ CONTROL_NEGATIVE = "src.config.settings"
 def closure_for(entry: str) -> tuple[int, set[str], bool]:
     """Modules `entry` adds to this process, and which of them are target tier.
 
-    METHOD — SEQUENTIAL, ONE PROCESS, and it decides the answer, so it is
-    stated here rather than left to the reader. Every entrypoint is imported
-    into the SAME interpreter in Procfile order, so what is measured is what
-    each one adds GIVEN WHAT CAME BEFORE IT. A fresh process per entrypoint
-    answers a different question and returns different numbers — measured on
-    `92a92e6`, `src.api.app` is +381 sequentially and +1155 fresh, a 3x swing
-    on one commit. #942 §1 was retracted over exactly this distinction.
+    IN-PROCESS PRIMITIVE. Callers do not use this directly — `measure()` runs
+    it in a FRESH INTERPRETER per entrypoint (#986). Kept as its own function
+    because it is what executes inside that subprocess, and because the #972
+    pin is written against it.
 
-    HITS ARE DIFFERENTIAL, and must stay that way. They are computed from
-    `after - before`, never from `after`: the latter attributes an earlier
-    call's target modules to every later one, which fails toward "the deployed
-    entrypoint reaches target code" — the direction nobody re-checks, because
-    it is the answer everyone wants.
+    METHOD — one entrypoint per interpreter, so what is measured is that
+    entrypoint's OWN closure and nothing else. It used to run every entrypoint
+    into the same process in Procfile order, which made every number a function
+    of measurement order: the same module measured twice in one process gives
+    19 target hits and then 0 (measured, #986). That under-reports ANY
+    entrypoint whose target modules something earlier imported — the root was
+    merely where it surfaced, being measured last and reaching the most.
+
+    Isolation removes the SHARING, not the subtraction. Both survive: see
+    below.
+
+    `closure_new` is still not comparable across runs — it counts stdlib and
+    third-party, so it moves with the interpreter and the installed set. Only
+    the target-reach counts and the module NAMES transfer.
+
+    HITS ARE DIFFERENTIAL, and must stay that way even under isolation. They
+    are computed from `after - before`, never from `after`: the latter
+    attributes anything already imported to the entrypoint under measurement,
+    which fails toward "the deployed entrypoint reaches target code" — the
+    direction nobody re-checks, because it is the answer everyone wants (#972:
+    `src.main` reported 14 target hits while importing none). In a fresh
+    interpreter this is a cheap safety net rather than the load-bearing
+    mechanism, and it stays for that reason.
     """
     before = set(sys.modules)
     importlib.import_module(entry)
@@ -194,6 +210,61 @@ def closure_for(entry: str) -> tuple[int, set[str], bool]:
     # the first, since settings is imported once per process — a control that
     # fails on correct behaviour trains its reader to ignore it.
     return len(new), hits, CONTROL_POSITIVE in after
+
+
+class MeasurementFailed(RuntimeError):
+    """A subprocess measurement did not produce an answer.
+
+    RAISED, NEVER DEFAULTED. The whole point of isolation is that this
+    instrument can no longer manufacture a zero, so a failed probe must not
+    return "0 target modules" — that is indistinguishable from the finding
+    #942 rests on. No answer is a third state and it is loud.
+    """
+
+
+_PROBE = """
+import json, sys
+sys.path.insert(0, {root!r})
+from scripts.target_reachability import closure_for
+size, hits, positive_ok = closure_for({entry!r})
+print("__RESULT__" + json.dumps(
+    {{"size": size, "hits": sorted(hits), "positive_ok": positive_ok}}
+))
+"""
+
+
+def measure(entry: str, root: pathlib.Path) -> tuple[int, set[str], bool]:
+    """`entry`'s own closure, measured in a FRESH interpreter (#986).
+
+    One entrypoint per process, so the answer does not depend on what was
+    measured before it. Order becomes IRRELEVANT rather than merely correct —
+    which survives a Procfile reorder, a third process, and the next entrypoint
+    that reaches further. Order-correct survives none of those, and its failure
+    is silent.
+
+    A `ModuleNotFoundError` for `entry` propagates as such, because "this
+    commit predates the composition root" is a FINDING the caller handles, not
+    an error. Anything else is :class:`MeasurementFailed`.
+    """
+    proc = subprocess.run(
+        [sys.executable, "-c", _PROBE.format(root=str(root), entry=entry)],
+        capture_output=True,
+        text=True,
+        cwd=str(root),
+    )
+    if proc.returncode != 0:
+        if "ModuleNotFoundError" in proc.stderr and entry in proc.stderr:
+            raise ModuleNotFoundError(entry)
+        raise MeasurementFailed(
+            f"probe for {entry} exited {proc.returncode}: {proc.stderr[-600:]}"
+        )
+    for line in proc.stdout.splitlines():
+        if line.startswith("__RESULT__"):
+            d = json.loads(line[len("__RESULT__") :])
+            return d["size"], set(d["hits"]), d["positive_ok"]
+    raise MeasurementFailed(
+        f"probe for {entry} exited 0 but printed no result: {proc.stdout[-400:]}"
+    )
 
 
 def target_callables(root: pathlib.Path) -> list[str]:
@@ -317,7 +388,7 @@ def main(argv=None) -> int:
     controls_positive: list[tuple[str, bool]] = []
     deployed = {}
     for proc, mod in procfile_entrypoints(root):
-        size, hits, pos_ok = closure_for(mod)
+        size, hits, pos_ok = measure(mod, root)
         controls_positive.append((proc, pos_ok))
         deployed[proc] = {
             "module": mod,
@@ -329,7 +400,7 @@ def main(argv=None) -> int:
     # error -- this instrument has to run on commits that predate W1, or it
     # cannot produce the before/after it exists to produce.
     try:
-        root_size, root_hits, pos_ok = closure_for("src.worker")
+        root_size, root_hits, pos_ok = measure("src.worker", root)
         controls_positive.append(("src.worker", pos_ok))
         root_present = True
     except ModuleNotFoundError:
