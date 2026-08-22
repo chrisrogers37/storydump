@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import Link from "next/link"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
@@ -110,8 +111,15 @@ export function WaitlistForm({
                 hear from us within a week with setup instructions.
               </p>
               <p className="text-sm text-muted-foreground">
-                While you wait — get your Google Drive folder ready with your
-                story content. That&apos;s all you&apos;ll need to get started.
+                While you wait, get your side ready: a Google Drive folder with
+                your story content, your Instagram switched to a{" "}
+                <Link
+                  href="/setup/instagram"
+                  className="underline underline-offset-4 hover:text-foreground transition-colors"
+                >
+                  Professional account
+                </Link>
+                , and Telegram. That&apos;s the whole list.
               </p>
             </>
           )}
