@@ -1,7 +1,9 @@
 """The target worker — the composition root `04` §Deployment names (#942, #903).
 
-`python -m src.worker` is the process the Procfile's `worker` entry swaps to at
-the M.3 window; until then it runs only against a database branch. It builds
+`python -m src.worker` is the process the deployed `worker` entrypoint runs
+when armed: `src.main` dispatches here on `WORKER_IMPL=target` (#942), so the
+M.3 window flips a service variable, never the Procfile. Until armed it runs
+only against a database branch. It builds
 the engine, the per-lane claim connections, the clock election, the lease
 heartbeat and the injected seams, and dispatches over the `work_loop` registry.
 
