@@ -63,7 +63,10 @@ import importlib
 import inspect
 import json
 import pathlib
+import re
 import pkgutil
+import subprocess
+import sysconfig
 import sys
 
 OK, ERROR = 0, 2
@@ -109,6 +112,50 @@ def assert_root(root: pathlib.Path) -> pathlib.Path:
             f"{root}. Another checkout is shadowing this one on sys.path."
         )
     return resolved
+
+
+def assert_provenance(root: pathlib.Path, modules: dict | None = None) -> None:
+    """Refuse unless every `src` module ACTUALLY LOADED came from `root`.
+
+    `assert_root` checks the package ANCHOR before any measuring happens; this
+    checks the MEASUREMENT after it. They are different objects, and the escape
+    lives at the second one: an editable-install finder satisfies the anchor
+    from the measured tree's own `src/__init__.py`, then backfills SUBMODULES
+    from the checkout that owns the `.pth`. Measured with `-S -E` removed --
+    a silent wrong answer (483 modules, 19 target hits, read from the real
+    repo) with the anchor assertion passing. A backstop that cannot see the one
+    demonstrated escape is not a backstop.
+
+    Containment is `pathlib`, never a string prefix. `/x/root-two/src/w.py`
+    starts with `/x/root`, so a prefix test is satisfied by a SIBLING checkout
+    -- which is the precise thing that produced the original wrong measurement.
+    Same predicate as `assert_root`, not a second copy of it.
+
+    BOUND, stated rather than left to be found: this sees FILE-BACKED modules.
+    A namespace package carries no `__file__` and is invisible to it. `src` is
+    a regular package -- `assert_root` reads `src.__file__` -- so the escape
+    under guard is in scope, but a future `src` without an `__init__.py` would
+    leave this quiet.
+    """
+    mods = sys.modules if modules is None else modules
+    root = pathlib.Path(root).resolve()
+    bad = []
+    # sorted() snapshots: iterating sys.modules live raises if an import
+    # mutates it, and a deterministic order keeps the message diffable.
+    for name in sorted(mods):
+        if name != "src" and not name.startswith("src."):
+            continue
+        origin = getattr(mods[name], "__file__", None)
+        if origin is None:
+            continue
+        resolved = pathlib.Path(origin).resolve()
+        if root not in resolved.parents:
+            bad.append(f"{name} <- {resolved.parent}")
+    if bad:
+        raise RuntimeError(
+            f"refusing: {len(bad)} loaded module(s) resolved outside {root}: "
+            f"{bad[:5]} -- the measurement read another checkout."
+        )
 
 
 def procfile_entrypoints(root: pathlib.Path) -> list[tuple[str, str]]:
@@ -169,19 +216,34 @@ CONTROL_NEGATIVE = "src.config.settings"
 def closure_for(entry: str) -> tuple[int, set[str], bool]:
     """Modules `entry` adds to this process, and which of them are target tier.
 
-    METHOD — SEQUENTIAL, ONE PROCESS, and it decides the answer, so it is
-    stated here rather than left to the reader. Every entrypoint is imported
-    into the SAME interpreter in Procfile order, so what is measured is what
-    each one adds GIVEN WHAT CAME BEFORE IT. A fresh process per entrypoint
-    answers a different question and returns different numbers — measured on
-    `92a92e6`, `src.api.app` is +381 sequentially and +1155 fresh, a 3x swing
-    on one commit. #942 §1 was retracted over exactly this distinction.
+    IN-PROCESS PRIMITIVE. Callers do not use this directly — `measure()` runs
+    it in a FRESH INTERPRETER per entrypoint (#986). Kept as its own function
+    because it is what executes inside that subprocess, and because the #972
+    pin is written against it.
 
-    HITS ARE DIFFERENTIAL, and must stay that way. They are computed from
-    `after - before`, never from `after`: the latter attributes an earlier
-    call's target modules to every later one, which fails toward "the deployed
-    entrypoint reaches target code" — the direction nobody re-checks, because
-    it is the answer everyone wants.
+    METHOD — one entrypoint per interpreter, so what is measured is that
+    entrypoint's OWN closure and nothing else. It used to run every entrypoint
+    into the same process in Procfile order, which made every number a function
+    of measurement order: the same module measured twice in one process gives
+    19 target hits and then 0 (measured, #986). That under-reports ANY
+    entrypoint whose target modules something earlier imported — the root was
+    merely where it surfaced, being measured last and reaching the most.
+
+    Isolation removes the SHARING, not the subtraction. Both survive: see
+    below.
+
+    `closure_new` is still not comparable across runs — it counts stdlib and
+    third-party, so it moves with the interpreter and the installed set. Only
+    the target-reach counts and the module NAMES transfer.
+
+    HITS ARE DIFFERENTIAL, and must stay that way even under isolation. They
+    are computed from `after - before`, never from `after`: the latter
+    attributes anything already imported to the entrypoint under measurement,
+    which fails toward "the deployed entrypoint reaches target code" — the
+    direction nobody re-checks, because it is the answer everyone wants (#972:
+    `src.main` reported 14 target hits while importing none). In a fresh
+    interpreter this is a cheap safety net rather than the load-bearing
+    mechanism, and it stays for that reason.
     """
     before = set(sys.modules)
     importlib.import_module(entry)
@@ -194,6 +256,147 @@ def closure_for(entry: str) -> tuple[int, set[str], bool]:
     # the first, since settings is imported once per process — a control that
     # fails on correct behaviour trains its reader to ignore it.
     return len(new), hits, CONTROL_POSITIVE in after
+
+
+#: The PARENT's site-packages, resolved while site.py is still in effect.
+#: The child cannot work this out for itself under `-S` (see `_PROBE`).
+_PURELIB = sysconfig.get_paths()["purelib"]
+
+#: Generous on purpose: a slow import must not be reported as a broken one.
+PROBE_TIMEOUT_SECONDS = 120
+
+_MISSING_RE = re.compile(r"No module named '([^']+)'")
+
+
+def _missing_module(stderr: str) -> str | None:
+    """The module Python said was missing, or None.
+
+    The LAST occurrence, because an import chain reports the innermost failure
+    last and that is the one that actually did not resolve.
+    """
+    found = _MISSING_RE.findall(stderr)
+    return found[-1] if found else None
+
+
+class MeasurementFailed(RuntimeError):
+    """A subprocess measurement did not produce an answer.
+
+    RAISED, NEVER DEFAULTED. The whole point of isolation is that this
+    instrument can no longer manufacture a zero, so a failed probe must not
+    return "0 target modules" — that is indistinguishable from the finding
+    #942 rests on. No answer is a third state and it is loud.
+    """
+
+
+#: The child runs with `-S -E` and then re-adds site-packages BY HAND. Both
+#: halves are load-bearing and the reason is a mechanism rather than a
+#: preference (#989, astrid).
+#:
+#: An editable install puts a finder on the child's path through a `.pth`
+#: (PEP 660 `__editable__*.pth`) or an `.egg-link` — and BOTH are processed by
+#: `site.py`. When the measured tree LACKS a submodule, `PathFinder` misses,
+#: falls through to that finder, and the REAL repo backfills it. The instrument
+#: then answers about a different tree than the one it was pointed at, silently.
+#:
+#: The blast radius is the historical case exactly: a tree missing submodules is
+#: what "measure a commit that predates W1" means, so every backward-looking
+#: comparison this instrument exists to support is the case it broke on, while
+#: the forward-looking runs we happen to have taken are the ones it got right.
+#:
+#: `-S` skips `site.py`, so no `.pth` and no `.egg-link` is ever processed and
+#: neither finder is installed. `-E` drops `PYTHONPATH`, which is the same
+#: escape by another door. Site-packages is then appended explicitly, which
+#: restores third-party DEPENDENCIES (without it the child cannot import `src`
+#: at all — measured) while restoring none of the path injection, because that
+#: lived in the files `site.py` reads.
+#:
+#: THIS IS ENVIRONMENT-DEPENDENT AND THAT IS THE FINDING. It reproduces in a
+#: PEP 660 venv and does not in a setuptools-develop one; correctness of the
+#: instrument was resting on which pip mode happened to be in use.
+_PROBE = """
+import json, sys
+# Passed IN by the parent, deliberately not computed here: `-S` skips the
+# site.py that makes a venv a venv, so the child's own `sysconfig` resolves to
+# the BASE interpreter and its site-packages -- measured, the child could not
+# import pydantic. The parent runs with site enabled and knows its real one.
+sys.path.append({purelib!r})
+sys.path.insert(0, {root!r})
+from scripts.target_reachability import assert_provenance, assert_root, closure_for
+import pathlib
+# The parent already asserts the tree it was pointed at. The CHILD is the one
+# that actually imports, and it was asserting nothing -- the same guard missing
+# one layer down. Same predicate, not a second copy.
+assert_root(pathlib.Path({root!r}))
+size, hits, positive_ok = closure_for({entry!r})
+# The anchor check above ran BEFORE any submodule was imported. This one runs
+# after, over what was actually loaded -- the object the escape moves. Anchor
+# checks the package; this checks the measurement.
+assert_provenance(pathlib.Path({root!r}))
+print("__RESULT__" + json.dumps(
+    {{"size": size, "hits": sorted(hits), "positive_ok": positive_ok}}
+))
+"""
+
+
+def measure(entry: str, root: pathlib.Path) -> tuple[int, set[str], bool]:
+    """`entry`'s own closure, measured in a FRESH interpreter (#986).
+
+    One entrypoint per process, so the answer does not depend on what was
+    measured before it. Order becomes IRRELEVANT rather than merely correct —
+    which survives a Procfile reorder, a third process, and the next entrypoint
+    that reaches further. Order-correct survives none of those, and its failure
+    is silent.
+
+    A `ModuleNotFoundError` for `entry` propagates as such, because "this
+    commit predates the composition root" is a FINDING the caller handles, not
+    an error. Anything else is :class:`MeasurementFailed`.
+    """
+    try:
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-S",
+                "-E",
+                "-c",
+                _PROBE.format(root=str(root), entry=entry, purelib=_PURELIB),
+            ],
+            capture_output=True,
+            text=True,
+            cwd=str(root),
+            # A hung import is otherwise a SILENT FOURTH STATE alongside
+            # reaches / does-not-reach / raises — an instrument that can
+            # neither answer nor fail is not loud. Today's entrypoints import
+            # cleanly; an import-time DB connect or egress call added to any of
+            # them turns the cutover instrument into a hang. Generous, because
+            # a slow import must not read as a broken one.
+            timeout=PROBE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise MeasurementFailed(
+            f"probe for {entry} did not finish within {PROBE_TIMEOUT_SECONDS}s"
+            " — an import that hangs is no answer, not a zero"
+        ) from exc
+    if proc.returncode != 0:
+        # EXACT match, never substring. `src.worker` is a substring of
+        # `src.worker.does_not_exist`, so a root that merely FAILS TO IMPORT
+        # would route to the predates-W1 finding and print "no composition
+        # root" — this instrument manufacturing #942's literal headline out of
+        # a broken root. That is the same recursion this file closed for the
+        # target axis, one axis over: no-answer-is-loud has to hold on EVERY
+        # axis, not the one where the bug was first noticed.
+        missing = _missing_module(proc.stderr)
+        if missing == entry:
+            raise ModuleNotFoundError(entry)
+        raise MeasurementFailed(
+            f"probe for {entry} exited {proc.returncode}: {proc.stderr[-600:]}"
+        )
+    for line in proc.stdout.splitlines():
+        if line.startswith("__RESULT__"):
+            d = json.loads(line[len("__RESULT__") :])
+            return d["size"], set(d["hits"]), d["positive_ok"]
+    raise MeasurementFailed(
+        f"probe for {entry} exited 0 but printed no result: {proc.stdout[-400:]}"
+    )
 
 
 def target_callables(root: pathlib.Path) -> list[str]:
@@ -317,7 +520,7 @@ def main(argv=None) -> int:
     controls_positive: list[tuple[str, bool]] = []
     deployed = {}
     for proc, mod in procfile_entrypoints(root):
-        size, hits, pos_ok = closure_for(mod)
+        size, hits, pos_ok = measure(mod, root)
         controls_positive.append((proc, pos_ok))
         deployed[proc] = {
             "module": mod,
@@ -329,7 +532,7 @@ def main(argv=None) -> int:
     # error -- this instrument has to run on commits that predate W1, or it
     # cannot produce the before/after it exists to produce.
     try:
-        root_size, root_hits, pos_ok = closure_for("src.worker")
+        root_size, root_hits, pos_ok = measure("src.worker", root)
         controls_positive.append(("src.worker", pos_ok))
         root_present = True
     except ModuleNotFoundError:
@@ -442,9 +645,10 @@ def main(argv=None) -> int:
     print("`closure +N` is NOT COMPARABLE ACROSS RUNS and must not be quoted")
     print("against a figure from another environment. It counts every module")
     print("including stdlib and third-party, so it moves with the interpreter")
-    print("and the installed set; and it is measured sequentially, so it also")
-    print("moves with Procfile order. Only the `target modules reached` counts")
-    print("and the module NAMES transfer between runs.")
+    print("and the installed set. It is no longer order-dependent — each")
+    print("entrypoint is measured in its own interpreter — but that buys")
+    print("nothing about portability. Only the `target modules reached`")
+    print("counts and the module NAMES transfer between runs.")
     print("=" * 78)
     return OK if controls_ok else ERROR
 
