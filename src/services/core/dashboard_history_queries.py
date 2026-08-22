@@ -265,7 +265,7 @@ class HistoryDashboardQueries:
             input_params={"chat_settings_id": chat_settings_id, "slots": slots},
         ) as run_id:
             chat_settings = self.service.settings_service.require_settings_by_id(
-                chat_settings_id
+                chat_settings_id, chat_settings_id=chat_settings_id
             )
 
             if chat_settings.is_paused:

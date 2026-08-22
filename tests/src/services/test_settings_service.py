@@ -46,10 +46,12 @@ class TestSettingsServiceUnit:
         expected = Mock(spec=ChatSettings)
         service.settings_repo.get_by_id.return_value = expected
 
-        result = service.get_settings_by_id(cs_id)
+        result = service.get_settings_by_id(cs_id, chat_settings_id=cs_id)
 
         assert result is expected
-        service.settings_repo.get_by_id.assert_called_once_with(chat_settings_id=cs_id)
+        service.settings_repo.get_by_id.assert_called_once_with(
+            cs_id, chat_settings_id=cs_id
+        )
 
     def test_toggleable_settings_are_defined(self):
         """Verify TOGGLEABLE_SETTINGS contains expected settings."""

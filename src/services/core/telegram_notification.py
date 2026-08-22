@@ -253,7 +253,7 @@ class TelegramNotificationService:
         """
         if queue_item.chat_settings_id:
             chat_settings = self.service.settings_service.get_settings_by_id(
-                str(queue_item.chat_settings_id)
+                str(queue_item.chat_settings_id), chat_settings_id=SYSTEM_SCOPE
             )
             if chat_settings:
                 return chat_settings

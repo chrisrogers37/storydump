@@ -214,11 +214,34 @@ class TelegramSettingsHandlers:
 
         Args:
             data: chat_settings UUID from the callback payload.
+
+        The instance picker only ever offers instances the user belongs to, but
+        the id arrives from the client, so entitlement is **re-derived here
+        rather than inherited from the payload** (#512). The membership read is
+        the same one the picker builds its list from
+        (``get_user_instances`` -> ``membership_repo``), so the two cannot drift
+        into offering one set and honouring another.
+
+        An inactive membership is not entitlement — ``get_membership`` returns
+        rows regardless of ``is_active``, unlike the picker's
+        ``get_for_user(active_only=True)``, so the flag is checked explicitly
+        rather than assumed out of the query.
+
+        A user who is not an active member gets the same answer as a tenant
+        that does not exist, which is also what the repository returns for an
+        unentitled scope: the refusal says nothing about which.
         """
         from src.repositories.chat_settings_repository import ChatSettingsRepository
 
+        membership = self.service.membership_repo.get_membership(
+            str(user.id), chat_settings_id=data
+        )
+        if not membership or not membership.is_active:
+            await query.answer("Instance not found.", show_alert=True)
+            return
+
         with ChatSettingsRepository() as repo:
-            cs = repo.get_by_id(chat_settings_id=data)
+            cs = repo.get_by_id(data, chat_settings_id=data)
 
         if not cs:
             await query.answer("Instance not found.", show_alert=True)

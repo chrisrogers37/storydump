@@ -5,6 +5,7 @@ from unittest.mock import Mock, AsyncMock, patch
 from uuid import uuid4
 
 from src.config import defaults
+from src.repositories.tenant_scope import SYSTEM_SCOPE
 from src.exceptions.google_drive import GoogleDriveAuthError
 from src.services.core.telegram_notification import (
     TelegramNotificationService,
@@ -1031,7 +1032,7 @@ class TestTenantRouting:
         assert result is True
         # Tenant resolved by the queue item's chat_settings_id
         mock_telegram_service.settings_service.get_settings_by_id.assert_called_once_with(
-            str(tenant_cs_id)
+            str(tenant_cs_id), chat_settings_id=SYSTEM_SCOPE
         )
         # The notification lands in the tenant's chat, not the env chat
         send_kwargs = mock_telegram_service.bot.send_photo.call_args.kwargs

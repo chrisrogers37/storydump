@@ -6,6 +6,11 @@ from datetime import datetime
 from sqlalchemy import or_
 
 from src.repositories.base_repository import BaseRepository
+from src.repositories.tenant_scope import (
+    SystemScope,
+    TenantScope,
+    require_tenant_context,
+)
 from src.exceptions.tenancy import TenantResolutionError
 from src.models.chat_settings import ChatSettings
 from src.models.posting_queue import PostingQueue
@@ -35,12 +40,47 @@ class ChatSettingsRepository(BaseRepository):
     fallback after bootstrap.
     """
 
-    def get_by_id(self, *, chat_settings_id: str) -> Optional[ChatSettings]:
-        """Get settings by UUID primary key."""
+    def get_by_id(
+        self, settings_id: str, *, chat_settings_id: TenantScope
+    ) -> Optional[ChatSettings]:
+        """Get a tenant row by primary key, scoped to the acting tenant (#512).
+
+        The parameter names follow every other repository — ``chat_settings_id``
+        is the ACTING scope, as in
+        ``MediaRepository.get_by_id(media_id, chat_settings_id=...)`` — and
+        ``settings_id`` is the row being asked for. Keeping one meaning for
+        ``chat_settings_id`` matters more here than the local convenience of
+        reusing it for the target, because a name that means the scope in nine
+        repositories and the target in the tenth is a fork waiting to be
+        misread.
+
+        **The rule is identity, not a filter, and that is a property of this
+        table rather than a shortcut.** A ``ChatSettings`` row IS its own
+        tenant: there is no ``chat_settings_id`` column to filter on, so
+        ``_apply_tenant_filter`` cannot express the boundary here and the
+        entitlement is "the acting tenant is the row being asked for".
+
+        Fail-closed (F.1/#841): absent context raises rather than widening.
+        ``SYSTEM_SCOPE`` reads any tenant, for callers dereferencing a
+        ``chat_settings_id`` foreign key off a row they already hold. Any other
+        scope reads only itself, and a mismatch returns ``None`` — deliberately
+        the same answer as a row that does not exist, so the caller learns
+        nothing about tenants it is not entitled to. That is the convention
+        ``QueueRepository.delete`` already states for the write side.
+
+        The mismatch refusal happens before the session is touched, so a
+        refused call never checks out a connection — the property
+        ``_tenant_query`` documents for the filtered path.
+        """
+        require_tenant_context(
+            chat_settings_id, where="ChatSettingsRepository.get_by_id"
+        )
+        if not isinstance(chat_settings_id, SystemScope) and str(
+            chat_settings_id
+        ) != str(settings_id):
+            return None
         result = (
-            self.db.query(ChatSettings)
-            .filter(ChatSettings.id == chat_settings_id)
-            .first()
+            self.db.query(ChatSettings).filter(ChatSettings.id == settings_id).first()
         )
         self.end_read_transaction()
         return result

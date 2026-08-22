@@ -96,7 +96,7 @@ async def onboarding_accounts(
         SettingsService() as settings_service,
     ):
         chat_settings = settings_service.require_settings_by_id(
-            auth["chat_settings_id"]
+            auth["chat_settings_id"], chat_settings_id=auth["chat_settings_id"]
         )
         accounts = account_service.list_accounts(chat_settings, include_inactive=False)
         active_account_id = (

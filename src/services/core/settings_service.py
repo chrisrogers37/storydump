@@ -7,6 +7,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from src.services.base_service import BaseService
 from src.repositories.audit_repository import AuditRepository
+from src.repositories.tenant_scope import TenantScope
 from src.exceptions.tenancy import TenantResolutionError
 from src.repositories.chat_settings_repository import ChatSettingsRepository
 from src.config.constants import (
@@ -71,14 +72,23 @@ class SettingsService(BaseService):
         """
         return self.settings_repo.migrate_chat_id(old_chat_id, new_chat_id)
 
-    def get_settings_by_id(self, chat_settings_id: str) -> Optional[ChatSettings]:
+    def get_settings_by_id(
+        self, settings_id: str, *, chat_settings_id: TenantScope
+    ) -> Optional[ChatSettings]:
         """Look up settings by chat_settings UUID (the tenant primary key).
 
         Use this to resolve the owning tenant of a row that carries a
-        chat_settings_id foreign key (queue items, locks, media).
-        Returns None if the referenced tenant no longer exists.
+        chat_settings_id foreign key (queue items, locks, media) — those
+        callers hold the row already and pass ``SYSTEM_SCOPE``. A caller acting
+        for one tenant passes that tenant.
+
+        Returns None if the referenced tenant no longer exists, and equally if
+        the acting scope is not entitled to it (#512) — the repository makes
+        those two answers identical on purpose.
         """
-        return self.settings_repo.get_by_id(chat_settings_id=chat_settings_id)
+        return self.settings_repo.get_by_id(
+            settings_id, chat_settings_id=chat_settings_id
+        )
 
     def resolve_chat_settings_id(self, telegram_chat_id: int) -> str:
         """THE legacy resolution door (`04` F.3, #842): chat -> tenant key.
@@ -97,13 +107,20 @@ class SettingsService(BaseService):
         """Row-or-refuse (#842): delegates to the repo's one raise site."""
         return self.settings_repo.require_by_chat_id(telegram_chat_id)
 
-    def require_settings_by_id(self, chat_settings_id: str) -> ChatSettings:
-        """Row-or-refuse by tenant key — the by-id twin of require_settings."""
-        chat_settings = self.settings_repo.get_by_id(chat_settings_id=chat_settings_id)
+    def require_settings_by_id(
+        self, settings_id: str, *, chat_settings_id: TenantScope
+    ) -> ChatSettings:
+        """Row-or-refuse by tenant key — the by-id twin of require_settings.
+
+        Refuses identically whether the tenant is absent or the acting scope is
+        not entitled to it, so the refusal carries no information about which
+        (#512).
+        """
+        chat_settings = self.settings_repo.get_by_id(
+            settings_id, chat_settings_id=chat_settings_id
+        )
         if chat_settings is None:
-            raise TenantResolutionError(
-                "unknown_binding", f"no tenant {chat_settings_id}"
-            )
+            raise TenantResolutionError("unknown_binding", f"no tenant {settings_id}")
         return chat_settings
 
     def provision(self, telegram_chat_id: int) -> ChatSettings:
@@ -356,7 +373,9 @@ class SettingsService(BaseService):
         """
         from src.config import defaults
 
-        chat_settings = self.require_settings_by_id(chat_settings_id)
+        chat_settings = self.require_settings_by_id(
+            chat_settings_id, chat_settings_id=chat_settings_id
+        )
 
         source_type = (
             chat_settings.media_source_type or defaults.DEFAULT_MEDIA_SOURCE_TYPE
