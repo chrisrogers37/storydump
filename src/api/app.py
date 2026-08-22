@@ -19,6 +19,7 @@ from src.api.routes.onboarding.helpers import MEMBERSHIP_DENIED_DETAIL
 from src.exceptions.tenancy import TenantResolutionError
 from src.api.routes.oauth import router as oauth_router
 from src.api.routes.onboarding import router as onboarding_router
+from src.api.routes.webhooks import router as webhooks_router
 from src.config.settings import settings
 from src.utils.logger import logger
 
@@ -196,6 +197,23 @@ if STATIC_DIR.exists():
 # Register routes
 app.include_router(oauth_router, prefix="/auth")
 app.include_router(onboarding_router, prefix="/api/onboarding")
+
+# Target-side webhook ingress (W4, #942). DORMANT: the route exists but nothing
+# routes traffic to it until `setWebhook` is registered at M.3 step 4, and it
+# refuses every delivery while TELEGRAM_WEBHOOK_SECRET_TOKEN is unset.
+#
+# Mounting this makes `src.services.target.webhook_ingress` reachable from a
+# Procfile entrypoint (`web: uvicorn src.api.app:app`) for the first time, so
+# #942's deployed axis reads non-zero on `web`. That is IMPORTABLE, NOT SERVING:
+# `worker` still reaches zero, the composition root is still not deployed, and
+# the #942 blocker is NOT cleared by this line.
+app.include_router(webhooks_router, prefix="/webhooks")
+
+# The ingress resolution seam (#854). Declared here, beside app.state.limiter,
+# because the file that owns the app is where its collaborators are assigned.
+# None means no dispatcher: the route refuses every delivery BEFORE admitting
+# it, so nothing is consumed that cannot be executed.
+app.state.ingress = None
 
 
 @app.get("/health")

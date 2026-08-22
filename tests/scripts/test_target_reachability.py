@@ -179,3 +179,67 @@ class TestTheHitsAreDifferentialNotCumulative:
             "the negative probe must not be target tier, or a correct walker "
             "would count it and the control would be red on healthy code"
         )
+
+
+class TestTheDeployedLabelCannotOutliveItsOwnPremise:
+    """The label's message must be keyed on the fact it names (#942 review).
+
+    The first version fired on "any entrypoint non-zero" and printed one fixed
+    conclusion: that this is NOT the blocker clearing, because the blocker
+    clears when the worker entrypoint reaches the tier. But the worker is itself
+    a key in `deployed`, so on the day it DID move, the banner would have listed
+    it as non-zero underneath a headline denying the blocker was clearing.
+
+    That is a caveat outliving its premise at the exact moment it matters, which
+    is the failure the label exists to prevent — so both branches are pinned,
+    and the pin is what stops the message and the predicate drifting apart.
+    """
+
+    @staticmethod
+    def _render(deployed, capsys):
+        tr._label_deployed(deployed)
+        return capsys.readouterr().out
+
+    def test_it_is_silent_when_every_entrypoint_reads_zero(self, capsys):
+        """A banner that always fires is one nobody reads."""
+        out = self._render(
+            {"worker": {"target_hits": []}, "web": {"target_hits": []}}, capsys
+        )
+        assert out == ""
+
+    def test_a_non_clearing_entrypoint_moving_is_labelled_not_cleared(self, capsys):
+        out = self._render(
+            {"worker": {"target_hits": []}, "web": {"target_hits": ["x"]}}, capsys
+        )
+        assert "IMPORTABLE, NOT SERVING" in out
+        assert "NOT the #942 blocker clearing" in out
+        assert "Non-zero: web." in out
+
+    def test_the_clearing_entrypoint_moving_gets_a_DIFFERENT_message(self, capsys):
+        """The regression this class exists for.
+
+        With the clearing entrypoint in the non-zero set, the fixed denial is
+        the wrong thing to print — and printing it there is worse than the prose
+        it replaced, because a script carries more authority than a comment.
+        """
+        out = self._render(
+            {"worker": {"target_hits": ["x"]}, "web": {"target_hits": ["x"]}}, capsys
+        )
+        assert "THE CLEARING ENTRYPOINT HAS MOVED" in out
+        assert "NOT the #942 blocker clearing" not in out, (
+            "the label denied the blocker was clearing in the one state where "
+            "its own stated clearing condition had been met"
+        )
+        assert "CANNOT confirm the blocker is cleared" in out
+
+    def test_the_clearing_entrypoint_is_a_real_procfile_entrypoint(self):
+        """A constant naming an entrypoint that does not exist can never fire."""
+        procs = [proc for proc, _mod in tr.procfile_entrypoints(_repo_root())]
+        assert tr.CLEARING_ENTRYPOINT in procs, (
+            f"{tr.CLEARING_ENTRYPOINT!r} is not in the Procfile ({procs}), so the "
+            "clearing branch is unreachable and the label can only ever deny"
+        )
+
+
+def _repo_root():
+    return pathlib.Path(__file__).resolve().parents[2]
