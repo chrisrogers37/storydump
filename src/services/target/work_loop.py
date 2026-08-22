@@ -29,7 +29,7 @@ from typing import Any, Callable, Optional
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from src.services.target import credential_lifecycle
+from src.services.target import credential_lifecycle, media_sync
 
 from src.services.target import (
     jobs,
@@ -103,6 +103,7 @@ class WorkerDeps:
     transport: Optional[Callable[[dict], Any]] = None
     poll: Optional[Callable[..., Any]] = None
     refresh: Optional[Callable[..., Any]] = None
+    drive: Any = None
     engine: Any = None
     config: WorkerConfig = field(default_factory=WorkerConfig)
 
@@ -115,8 +116,6 @@ _UNBUILT_REASON = (
 #: Kinds the tier has never carried an executor for. The registry parks them
 #: unconditionally; the schema-derived completeness test keeps this honest.
 UNBUILT_KINDS = (
-    "sync_media_source",
-    "first_ingest_chunk",
     "offboard_workspace",
     "revoke_workspace_credentials",
     "retention_sweep",
@@ -330,6 +329,23 @@ def build_registry(deps: WorkerDeps) -> dict:
     # No external seam: the prompt writes outbox rows and nothing else, so it
     # is live in every deployment that has an engine at all.
     registry["reauth_prompt"] = reauth_prompt
+
+    async def sync_media_source(session, job):
+        return await media_sync.sync_media_source(deps, session, job)
+
+    async def first_ingest_chunk(session, job):
+        return await media_sync.first_ingest_chunk(deps, session, job)
+
+    _NO_DRIVE = Parked(
+        "no drive door configured (build-path #982); wiring a test fake into"
+        " production is not composition"
+    )
+    registry["sync_media_source"] = (
+        sync_media_source if deps.drive is not None else _NO_DRIVE
+    )
+    registry["first_ingest_chunk"] = (
+        first_ingest_chunk if deps.drive is not None else _NO_DRIVE
+    )
     return registry
 
 

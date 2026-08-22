@@ -128,7 +128,7 @@ class WorkerApp:
 
 
 def compose(
-    *, engine, config: WorkerConfig, env: dict, transport=None, refresh=None
+    *, engine, config: WorkerConfig, env: dict, transport=None, refresh=None, drive=None
 ) -> WorkerApp:
     """Assemble the object graph. Touches no network — the transport arrives
     built (main() constructs it from TARGET_TELEGRAM_BOT_TOKEN) and its
@@ -142,6 +142,7 @@ def compose(
         transport=transport,
         poll=None,
         refresh=refresh if refresh is not None else credential_lifecycle.ig_refresh,
+        drive=drive,
         engine=engine,
         config=config,
     )

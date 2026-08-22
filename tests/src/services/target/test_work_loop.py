@@ -47,6 +47,7 @@ def full_deps(**over):
         transport=_fake_seam,
         poll=_fake_seam,
         refresh=_fake_seam,
+        drive=object(),
         config=WorkerConfig(),
     )
     base.update(over)
@@ -78,6 +79,8 @@ class TestRegistryCoversTheSchema:
             "reap_transit_assets",
             "refresh_credential",
             "reauth_prompt",
+            "sync_media_source",
+            "first_ingest_chunk",
         }
 
     def test_the_unbuilt_kinds_park_even_with_every_seam_supplied(self):
@@ -91,6 +94,8 @@ class TestRegistryCoversTheSchema:
             "reap_transit_assets",
             "refresh_credential",
             "reauth_prompt",
+            "sync_media_source",
+            "first_ingest_chunk",
         }
         assert unbuilt, "denominator went empty — the schema kinds parse broke"
         for kind in unbuilt:
