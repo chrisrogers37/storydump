@@ -1,6 +1,17 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  async redirects() {
+    return [
+      // Retired setup pages. Both walked the reader through registering their
+      // own Meta app or Google Cloud project; credentials are deployment-level
+      // and no surface accepts a tenant-supplied one. Temporary rather than
+      // permanent: what replaces this part of the funnel is still open, and a
+      // 308 is cached by the browser in a way that is awkward to take back.
+      { source: "/setup/meta-developer", destination: "/setup", permanent: false },
+      { source: "/setup/google-drive", destination: "/setup", permanent: false },
+    ];
+  },
   async headers() {
     return [
       // Global security headers
