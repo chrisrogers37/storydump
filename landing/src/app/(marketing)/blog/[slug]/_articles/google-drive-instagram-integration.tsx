@@ -67,21 +67,12 @@ export function GoogleDriveInstagramIntegration() {
 
       <h2>Connecting Drive to the pipeline</h2>
       <p>
-        The technical setup requires a Google Cloud project with the
-        Drive API enabled and OAuth credentials. The{" "}
-        <Link href="/setup/google-drive">Google Drive setup guide</Link>
-        {" "}walks through this step by step, but the short version:
-      </p>
-      <ol>
-        <li>Create a Google Cloud project</li>
-        <li>Enable the Google Drive API</li>
-        <li>Create OAuth 2.0 credentials</li>
-        <li>Authorize with the <code>drive.readonly</code> scope</li>
-      </ol>
-      <p>
-        <code>drive.readonly</code> is the minimum viable scope — your
-        automation can list and download files but never modify or delete
-        them. Your media library stays safe.
+        You connect Drive from inside Storydump — authorize access, then pick
+        your folder. There is no Google Cloud project to create and no OAuth
+        credentials to manage. Storydump requests the{" "}
+        <code>drive.readonly</code> scope, the narrowest one that can list and
+        download files: it can never modify or delete them. Your media library
+        stays safe.
       </p>
 
       <h2>The sync loop</h2>

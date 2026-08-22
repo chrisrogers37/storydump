@@ -107,10 +107,10 @@ export default function InstagramSetup() {
           Overview
         </Link>
         <Link
-          href="/setup/meta-developer"
+          href="/setup/media-organize"
           className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
         >
-          Next: Meta Developer
+          Next: Organize Media
           <ArrowRight className="h-4 w-4" />
         </Link>
       </div>

@@ -7,8 +7,6 @@ import { cn } from "@/lib/utils"
 export const setupSections = [
   { title: "Overview", href: "/setup" },
   { title: "Instagram Account", href: "/setup/instagram" },
-  { title: "Meta Developer", href: "/setup/meta-developer" },
-  { title: "Google Drive", href: "/setup/google-drive" },
   { title: "Organize Media", href: "/setup/media-organize" },
   { title: "Connect Telegram", href: "/setup/connect" },
 ]
