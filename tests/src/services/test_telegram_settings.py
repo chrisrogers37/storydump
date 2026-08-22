@@ -431,6 +431,9 @@ class TestHandleInstanceManage:
         query.from_user = Mock(id=12345)
         query.message.chat.type = "private"
         user = Mock(id=uuid4())
+        mock_settings_handlers.service.membership_repo.get_membership.return_value = (
+            Mock(is_active=True)
+        )
 
         mock_repo = Mock()
         mock_repo.get_by_id.return_value = mock_cs
@@ -445,7 +448,9 @@ class TestHandleInstanceManage:
                 "some-uuid", user, query
             )
 
-        mock_repo.get_by_id.assert_called_once_with(chat_settings_id="some-uuid")
+        mock_repo.get_by_id.assert_called_once_with(
+            "some-uuid", chat_settings_id="some-uuid"
+        )
         query.edit_message_text.assert_called_once()
         call_kwargs = query.edit_message_text.call_args.kwargs
         assert "Quick Setup" in call_kwargs["text"]
@@ -454,6 +459,9 @@ class TestHandleInstanceManage:
         """Test that a missing UUID shows 'Instance not found.' alert."""
         query = AsyncMock()
         user = Mock(id=uuid4())
+        mock_settings_handlers.service.membership_repo.get_membership.return_value = (
+            Mock(is_active=True)
+        )
 
         mock_repo = Mock()
         mock_repo.get_by_id.return_value = None
@@ -468,3 +476,84 @@ class TestHandleInstanceManage:
 
         query.answer.assert_called_once_with("Instance not found.", show_alert=True)
         query.edit_message_text.assert_not_called()
+
+    async def test_a_non_member_is_refused_without_reading_the_tenant(
+        self, mock_settings_handlers
+    ):
+        """#512: entitlement is derived, not inherited from the payload.
+
+        The repository is stubbed to RETURN a row, so a refusal here can only
+        come from the membership check — a handler that read first and refused
+        afterwards would still leak nothing to the user, but it would have
+        performed the cross-tenant read. `assert_not_called` is what
+        distinguishes those two, and it is the whole point.
+        """
+        query = AsyncMock()
+        user = Mock(id=uuid4())
+        mock_settings_handlers.service.membership_repo.get_membership.return_value = (
+            None
+        )
+
+        mock_repo = Mock()
+        mock_repo.get_by_id.return_value = Mock(telegram_chat_id=-100999)
+        mock_repo.__enter__ = Mock(return_value=mock_repo)
+        mock_repo.__exit__ = Mock(return_value=False)
+
+        with patch(
+            "src.repositories.chat_settings_repository.ChatSettingsRepository",
+            return_value=mock_repo,
+        ):
+            await mock_settings_handlers.handle_instance_manage(
+                "another-tenants-uuid", user, query
+            )
+
+        mock_repo.get_by_id.assert_not_called()
+        query.answer.assert_called_once_with("Instance not found.", show_alert=True)
+        query.edit_message_text.assert_not_called()
+
+    async def test_an_inactive_membership_is_not_entitlement(
+        self, mock_settings_handlers
+    ):
+        """`get_membership` returns rows regardless of is_active, unlike the
+        picker's `get_for_user(active_only=True)`. A removed member must not
+        keep access, so the flag is checked rather than assumed.
+        """
+        query = AsyncMock()
+        user = Mock(id=uuid4())
+        mock_settings_handlers.service.membership_repo.get_membership.return_value = (
+            Mock(is_active=False)
+        )
+
+        mock_repo = Mock()
+        mock_repo.get_by_id.return_value = Mock(telegram_chat_id=-100999)
+        mock_repo.__enter__ = Mock(return_value=mock_repo)
+        mock_repo.__exit__ = Mock(return_value=False)
+
+        with patch(
+            "src.repositories.chat_settings_repository.ChatSettingsRepository",
+            return_value=mock_repo,
+        ):
+            await mock_settings_handlers.handle_instance_manage(
+                "some-uuid", user, query
+            )
+
+        mock_repo.get_by_id.assert_not_called()
+        query.answer.assert_called_once_with("Instance not found.", show_alert=True)
+
+    async def test_the_membership_lookup_uses_the_acting_user_and_requested_tenant(
+        self, mock_settings_handlers
+    ):
+        """A membership check keyed on the wrong pair would authorise the wrong
+        thing while still looking like a check."""
+        query = AsyncMock()
+        user_id = uuid4()
+        user = Mock(id=user_id)
+        mock_settings_handlers.service.membership_repo.get_membership.return_value = (
+            None
+        )
+
+        await mock_settings_handlers.handle_instance_manage("tenant-x", user, query)
+
+        mock_settings_handlers.service.membership_repo.get_membership.assert_called_once_with(
+            str(user_id), chat_settings_id="tenant-x"
+        )
