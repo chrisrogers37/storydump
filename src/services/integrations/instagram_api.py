@@ -354,10 +354,31 @@ class InstagramAPIService(BaseService):
             return story_id
 
     def _check_response_errors(self, response: httpx.Response) -> None:
-        """Check API response for errors and raise appropriate exceptions."""
+        """Check API response for errors and raise appropriate exceptions.
+
+        Stamps ``http_status`` onto whatever is raised, rather than asking each
+        raise site below to remember to pass it. Every one of them is reached
+        only after the 200 early-return, so "Instagram answered with this
+        status and refused" is a property of the whole body — and a property
+        held by the body belongs at the boundary, or the next raise site added
+        here is the one that forgets. ``is_publish_definitively_failed`` reads
+        it to tell a refusal (4xx, nothing published) from an outcome we
+        genuinely do not know (#940).
+        """
         if response.status_code == 200:
             return
+        try:
+            self._raise_for_error_body(response)
+        except InstagramAPIError as exc:
+            exc.http_status = response.status_code
+            raise
 
+    def _raise_for_error_body(self, response: httpx.Response) -> None:
+        """Classify a non-200 body into the right exception type.
+
+        Never called directly — ``_check_response_errors`` owns the 200 guard
+        and the ``http_status`` stamp.
+        """
         try:
             data = response.json()
             error = data.get("error", {})

@@ -12,7 +12,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from src.exceptions.instagram import (
     InstagramAPIError,
     MediaUnsupportedError,
-    is_container_confirmed_failed,
+    is_publish_definitively_failed,
     MediaUploadError,
     RateLimitError,
     TokenCorruptError,
@@ -719,7 +719,7 @@ class TelegramAutopostHandler:
         #   - IG-CONFIRMED-DEAD (ERROR/EXPIRED): IG affirmatively says nothing
         #     published, so release the row for retry (below) — never stranded.
         if ctx.container_id is not None:
-            if not is_container_confirmed_failed(e):
+            if not is_publish_definitively_failed(e):
                 # AMBIGUOUS: hold the row stuck; do NOT retry.
                 logger.warning(
                     f"Autopost unconfirmed for {ctx.media_item.file_name} "
