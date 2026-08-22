@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import random
 
 from src.exceptions.google_drive import GoogleDriveAuthError
-from src.exceptions.instagram import is_container_confirmed_failed
+from src.exceptions.instagram import is_publish_definitively_failed
 from src.exceptions.telegram import AmbiguousDeliveryError, ChatMigratedError
 from src.services.base_service import BaseService
 from src.services.core.queue_reap import record_expiry_and_delete
@@ -664,7 +664,7 @@ class SchedulerService(BaseService):
                 )
             except Exception as e:  # noqa: BLE001
                 instagram_story_id = None
-                confirmed_failed = is_container_confirmed_failed(e)
+                confirmed_failed = is_publish_definitively_failed(e)
                 logger.warning(
                     f"Auto-approve Instagram posting failed for "
                     f"{media_item.file_name} [{media_item.category}]: {e}"
