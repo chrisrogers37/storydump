@@ -37,11 +37,14 @@ stood up at step 0 — so both arms now assert the apply SUCCEEDS, and a
 regression in the door surfaces as a red gate rather than as a green one.
 """
 
+import re
+
 import psycopg2
 import pytest
 
 from scripts.migration_runner import (
     MigrationRunnerError,
+    _load_manifest,
     adopt,
     apply_pending,
     discover_migrations,
@@ -385,3 +388,114 @@ class TestLegacyStampParity:
         runner replay too (psycopg2 executes the INSERTs like psql did)."""
         row = fetch_one(replayed_db, "SELECT max(version) FROM schema_version")
         assert row[0] == max(corpus_versions())
+
+
+class TestTheDerivedAdoptionProbesReadBothWays:
+    """#997 — a file above the floor is adopted on evidence derived from its own
+    ``runner:postcondition`` lines, so those lines must answer correctly in BOTH
+    worlds, and a probe that can only ever answer one way is not evidence.
+
+    The predicates are READ FROM THE FILE rather than restated here — one
+    predicate, one home, the same rule that lets adoption derive them at all. A
+    copy in this test could pass while the file the runner actually reads says
+    something else.
+
+    The false direction is the production-safety one and it is about RAISING,
+    not about being wrong. Adopt treats a probe that errors as a hard failure,
+    never as false, so a probe built on ``has_table_privilege`` naming a role
+    that does not exist yet takes down first contact rather than reporting
+    ``not applied``. Catalog reads answer ``false`` on the same database. The
+    assertion below is therefore that these return false *without raising*.
+    """
+
+    @staticmethod
+    def _probes(version: int) -> tuple:
+        migration = next(
+            m for m in discover_migrations(MIGRATIONS_DIR) if m.version == version
+        )
+        assert migration.postconditions, (
+            f"migration {version:03d} carries no runner:postcondition lines, so"
+            " adopt has nothing to derive adoption evidence from (#997)"
+        )
+        return migration.postconditions
+
+    # The TRUE direction is already gated and is deliberately not duplicated
+    # here. `test_lineage_lane.py::run_lane` replays the corpus through ONE
+    # unbounded `apply_pending`, which crosses the schema move and applies 062;
+    # `_run_postconditions` raises unless every line returns exactly true, so a
+    # probe that could not read true where its own file had just applied fails
+    # that lane rather than this file. A copy here would replay the same
+    # lineage a second time to assert the same thing.
+    #
+    # What the lane CANNOT say is what a probe does on a database the file has
+    # NOT reached, because it never asks one there. That is the direction below,
+    # and it is the one production meets first.
+
+    @pytest.mark.parametrize("version", [62])
+    def test_probes_read_false_without_raising_before_the_target_lineage(
+        self, version, at49_db, owner_actor
+    ):
+        """The false direction, which is the one that reaches production first.
+
+        `at49_db` is the shape production is in: legacy lineage only, no target
+        tables, and none of the seven service roles — no migration creates
+        those, so a database that has only ever run migrations cannot have
+        them.
+        """
+        as_owner = as_user(at49_db, owner_actor)
+        for probe in self._probes(version):
+            row = fetch_one(as_owner, probe)  # must not raise
+            assert row[0] is False, (
+                f"{version:03d} probe read true on a database predating it: {probe}"
+            )
+
+
+class TestEveryMigrationCarriesAdoptionEvidence:
+    """#997 — the check whose absence let two files land without any.
+
+    `_load_manifest` already refuses a file in its window carrying neither a
+    manifest entry nor `runner:postcondition` lines. Nothing asked it that
+    question about the corpus at HEAD: every `adopt` call in this file is
+    bounded to ``LEGACY_LINEAGE_MAX``, so 051 onward were never in a window,
+    while production's first contact is UNBOUNDED — the CLI passes no
+    ``max_version``. Two files went green for a day on exactly that gap.
+
+    No database and no fixture, which is the point: the cheapest possible gate
+    on the thing that actually broke, run against the real manifest and the
+    real corpus rather than a fixture pair.
+    """
+
+    #: 063's adoption evidence is PARKED, not forgotten (#997). Its whole delta
+    #: is one clause inside a function body, so no catalog surface distinguishes
+    #: it from 062 — and all four candidate answers were eliminated: probing
+    #: `prosrc` matches a form, a `COMMENT` marker is DDL the design docs do not
+    #: advertise, `asserted` is refused above the floor, and bounding the window
+    #: misses the wrongly-true 050. The open question belongs to whoever owns
+    #: the design docs, and until it is answered 063 has no evidence to carry.
+    PARKED = frozenset({63})
+
+    def test_the_unbounded_corpus_pairs_with_the_manifest(self):
+        corpus = discover_migrations(MIGRATIONS_DIR)
+        unpaired = set()
+        try:
+            _load_manifest(MANIFEST, corpus, corpus)
+        except MigrationRunnerError as exc:
+            unpaired = {int(v) for v in re.findall(r"\b(\d{3})\b", str(exc))}
+            assert unpaired, f"could not parse the unpaired set from: {exc}"
+
+        missing = unpaired - self.PARKED
+        assert not missing, (
+            "migration(s) "
+            + ", ".join(f"{v:03d}" for v in sorted(missing))
+            + " carry no adoption evidence, so `runner adopt` fails before it"
+            " opens a connection — the #997 defect, again"
+        )
+        retired = self.PARKED - unpaired
+        assert not retired, (
+            "migration(s) "
+            + ", ".join(f"{v:03d}" for v in sorted(retired))
+            + " now carry adoption evidence, so the PARKED exemption above is"
+            " spent — DELETE the entry rather than debugging this line. This"
+            " assertion exists so the exemption cannot outlive its cause in"
+            " silence (#997)"
+        )
