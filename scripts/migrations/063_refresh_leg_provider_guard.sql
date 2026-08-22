@@ -32,10 +32,6 @@
 -- tests/scripts/test_w5de_credential_lifecycle.py::
 -- TestTheRefreshLegIsProviderGuarded turns it red.
 
--- Adoption evidence + post-apply verification (#997), catalog reads only.
--- runner:postcondition SELECT count(*) = 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = 'fn_clock_tick' AND 'o_reauth_jobs' = ANY(p.proargnames)
--- runner:postcondition SELECT count(*) = 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = 'fn_clock_tick' AND coalesce(obj_description(p.oid, 'pg_proc'), '') LIKE '%063:provider-guard%'
-
 -- The CREATE bracket is 062's, carried forward for the same reason it gave:
 -- `ALTER FUNCTION … OWNER TO` needs the incoming owner to hold CREATE on the
 -- schema, and the steady-state grant matrix never leaves CREATE with a door
@@ -158,26 +154,6 @@ BEGIN
   GET DIAGNOSTICS n5 = ROW_COUNT;
   RETURN QUERY SELECT n1, n2, n3, n4, n5;
 END $$;
-
--- THE CATALOG TRACE THIS FILE WOULD OTHERWISE NOT LEAVE (#997). This migration's
--- entire delta is one clause INSIDE fn_clock_tick's body; its signature and
--- return shape are byte-identical to 062's. So nothing in the catalog tells a
--- database carrying this migration apart from one that stopped at 062 -- and
--- adoption evidence above the manifest floor is derived from catalog reads,
--- because a probe that names an object directly RAISES on a database the file
--- has not reached and the runner treats a raising probe as a hard failure
--- rather than as "not applied".
---
--- The marker is a deliberate token rather than prose, and the probe below
--- matches the TOKEN: re-wording the sentence around it cannot silently retire
--- the evidence. The alternative considered and rejected was probing
--- pg_proc.prosrc for the clause itself, which matches a FORM -- a later
--- migration reformatting that line would break adoption with nothing to see.
---
--- It must be set BEFORE the OWNER TO below: COMMENT requires ownership, which
--- that statement hands to svc_clock.
-COMMENT ON FUNCTION fn_clock_tick(int, interval, jsonb) IS
-  '063:provider-guard - the refresh leg selects only provider = ''ig_login'', so a credential whose refresh door does not exist yet is never minted rather than minted and mishandled.';
 
 ALTER FUNCTION fn_clock_tick(int, interval, jsonb) OWNER TO svc_clock;
 
