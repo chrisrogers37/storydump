@@ -26,7 +26,7 @@ startup caveats it intentionally does NOT handle.
 - Tests need `ENCRYPTION_KEY` (a Fernet key) in `.env.test`; a generated one is present.
 
 ### Running the services (use the `./venv`)
-- Lint (matches CI): `./venv/bin/ruff check src/ cli/` and `./venv/bin/ruff format --check src/ cli/`.
+- Lint (matches CI): `./venv/bin/ruff check .` and `./venv/bin/ruff format --check .`.
 - Tests: `./venv/bin/pytest` (auto-creates/drops `storydump_test`). ~2240 tests; a handful skip when optional integrations are absent.
 - FastAPI web: `./venv/bin/uvicorn src.api.app:app --host 0.0.0.0 --port 8000` → health at `GET /health`, OpenAPI at `/openapi.json`. Dashboard API under `/api/onboarding/*` requires Telegram WebApp `init_data` (HMAC-signed with `TELEGRAM_BOT_TOKEN`) + an active `UserChatMembership` for the `chat_id`.
 - Next.js landing/dashboard: `npm --prefix landing run dev` → http://localhost:3000 (dashboard BFF proxies to `BACKEND_URL`, the FastAPI service).
