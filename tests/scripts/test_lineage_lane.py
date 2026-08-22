@@ -310,6 +310,9 @@ class TestTheBoundaryIsDerivedAndLoud:
             # this one extends the advertised stream rather than consuming a
             # remaining prefix of it (#883).
             "061_intent_self_transition_guard.sql",
+            # 062 extends the stream the same way: the W5e reauth-prompt clock
+            # leg (#942), advertised in 07 §9 before landing here.
+            "062_reauth_prompt_leg.sql",
         ], (
             f"the target lineage is {above}. If you are landing the next F.2"
             " increment, add it here — deliberately, and at the end: arm (b)"

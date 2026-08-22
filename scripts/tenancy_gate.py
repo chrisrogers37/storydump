@@ -89,6 +89,11 @@ _TENANCY_IRRELEVANT: tuple[str, ...] = (
     "GRANT ",
     "REVOKE ",
     "INSERT INTO ",
+    # 062 adds two kinds, both provably inert on the four facts: a COMMENT
+    # changes no state at all, and DROP FUNCTION touches no table, policy or
+    # RLS bit (the reducing hazards the refusal names are all table-shaped).
+    "COMMENT ON ",
+    "DROP FUNCTION ",
 )
 
 
@@ -157,6 +162,19 @@ def tenancy_signature(dsn: str) -> dict:
     finally:
         conn.close()
     return sig
+
+
+def _top_level_comma(stmt: str) -> bool:
+    """A comma outside every parenthesis — the mark of a compound ALTER."""
+    depth = 0
+    for ch in stmt:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            return True
+    return False
 
 
 def expected_tenancy(statements) -> dict:
@@ -246,6 +264,28 @@ def expected_tenancy(statements) -> dict:
         if m:
             if m.group(1) in sig:
                 sig[m.group(1)]["policies"] += 1
+            continue
+
+        # ADD COLUMN is HANDLED, not allowlisted, because one spelling of it
+        # moves a fact: adding the tenant key itself flips tenant_keyed. Any
+        # other column provably moves none of the four facts. A blanket
+        # "ALTER TABLE " prefix would also admit DROP COLUMN workspace_id —
+        # the exact reducing case the refusal below exists for — so the match
+        # is on the ADD COLUMN form specifically (062 is the first member).
+        #
+        # The match is also bounded at the FAR end (#978 review): re.match
+        # anchors only the start, so a compound statement — ADD COLUMN foo,
+        # DROP COLUMN workspace_id — matches as a prefix and would ride the
+        # continue past the refusal. A single ADD COLUMN never carries a
+        # comma OUTSIDE parentheses (numeric(10,2) legitimately carries one
+        # inside), so a top-level comma means a second action and falls
+        # through to the loud refusal below — whatever the second action is,
+        # including the fact-MOVING ones a verb denylist would have to keep
+        # chasing (ADD COLUMN workspace_id, FORCE ROW LEVEL SECURITY).
+        m = re.match(r"ALTER TABLE (?:public\.)?(\w+) ADD COLUMN (\w+)", stmt)
+        if m and not _top_level_comma(stmt):
+            if m.group(2) == "workspace_id" and m.group(1) in sig:
+                sig[m.group(1)]["tenant_keyed"] = True
             continue
 
         # ALLOWLIST, not a denylist, and the direction is the whole point.
