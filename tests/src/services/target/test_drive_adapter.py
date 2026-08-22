@@ -260,32 +260,54 @@ class TestTheSeamParksLoudly:
         )
         assert "982" in entry.reason, "the park should point at its build-path item"
 
-    def test_wiring_the_seam_does_not_pretend_the_executor_exists(self):
-        """The seam is not the executor, and the two parks must differ.
+    def test_wiring_the_seam_un_parks_only_the_kinds_the_seam_gates(self):
+        """A wired seam must not pretend an executor exists.
 
-        W6's executor is astrid's to write; this issue owns only the door it
-        calls. So with the seam wired the kind is STILL parked — but under the
-        unbuilt reason, not the seam reason. Collapsing the two would tell her
-        the work was done, and telling someone their blocker cleared when it
-        has not is worse than parking.
+        The predecessor of this test asserted that with the seam wired,
+        `sync_media_source` was STILL parked, and declared itself a pin that
+        expires once W6 lands. It expired exactly as designed: the executor
+        was written, the kind went live, and the assertion reported a correct
+        un-park as a defect.
 
-        THIS PIN EXPIRES ON #984, AND THAT IS THE DESIGN. Once W6 lands, a
-        wired seam DOES mean a live executor, and this test goes red — that red
-        is the expiry, not a regression, and whoever rebases second should
-        delete this test rather than debug it. Stated here because a guarantee
-        with no stated end reads as broken the moment it is correctly retired.
+        The property is kept; only the way it is measured is replaced. This
+        form is DIFFERENTIAL — the registry with the seam against the registry
+        without it — so it names no kind as built or unbuilt and cannot expire
+        the next time an executor lands. What it forbids is the seam reaching
+        beyond the kinds it gates, in either direction, which is the failure
+        the pin was really there to catch.
+
+        The gated set IS named, and that is the distinction from what expired:
+        it pins the SEAM'S CONTRACT, which changes only when someone changes
+        the seam, rather than the BUILD STATE, which changes under unrelated
+        work. A new kind arriving behind this door should fail here.
         """
         from src.services.target.work_loop import Parked
 
-        wired = self._registry(drive=StubDriveAdapter())["sync_media_source"]
-        assert isinstance(wired, Parked), (
-            "a wired seam must not un-park a kind whose executor is unwritten"
+        wired = self._registry(drive=StubDriveAdapter())
+        unwired = self._registry()
+
+        def live(registry):
+            return {k for k, e in registry.items() if not isinstance(e, Parked)}
+
+        gated = live(wired) - live(unwired)
+        assert gated == {"sync_media_source", "first_ingest_chunk"}, (
+            f"wiring the drive seam moved kinds it does not gate — got {sorted(gated)}"
         )
-        assert "drive" not in wired.reason.lower(), (
-            "with the seam present the park must stop blaming the seam — "
-            f"got {wired.reason!r}"
+        assert not live(unwired) - live(wired), (
+            "removing the drive seam left MORE kinds live, which is backwards"
         )
-        assert "no executor exists" in wired.reason
+
+        # The other half of the original guard, generalised off the single
+        # kind it named. Its positive control is the test above: those reasons
+        # demonstrably DO exist while the seam is absent.
+        blaming = {
+            k: e.reason
+            for k, e in wired.items()
+            if isinstance(e, Parked) and "drive" in e.reason.lower()
+        }
+        assert not blaming, (
+            f"the seam is wired and these kinds still blame it: {blaming}"
+        )
 
     @pytest.mark.asyncio
     async def test_the_default_page_size_is_a_page_bound_not_a_total(self):
