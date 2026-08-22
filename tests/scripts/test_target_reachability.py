@@ -20,6 +20,9 @@ import json
 import subprocess
 import sys
 import textwrap
+import types
+
+from unittest import mock
 
 import pytest
 
@@ -277,6 +280,113 @@ class TestTheChildCannotEscapeTheRootItWasGiven:
         """
         with pytest.raises(RuntimeError, match="refusing"):
             tr.assert_root(tmp_path)
+
+
+class TestTheProvenanceSweep:
+    """#989 review (astrid) — the belt that could not see the escape.
+
+    `assert_root` validates the `src` ANCHOR and passes; the editable finder
+    backfills SUBMODULES from another checkout afterwards. Astrid measured the
+    silent wrong answer — 483 modules, 19 target hits, read from the real repo
+    — with the anchor assertion green. This sweep observes what the measurement
+    actually loaded, which is the object that moves.
+
+    Driven through an INJECTED module map rather than the live `sys.modules`,
+    for a reason that is the point of the test rather than a convenience: the
+    escape does not reproduce in this install mode (egg-link, not PEP 660), so
+    the environment cannot supply the condition. A test that called
+    `assert_provenance(tmp_path)` against the live map would fire on whatever
+    `src.*` the suite had already imported and pass without exercising the
+    predicate at all — green for a reason unrelated to the fix.
+    """
+
+    @staticmethod
+    def _loaded_from(path: pathlib.Path) -> types.ModuleType:
+        m = types.ModuleType("stand-in")
+        m.__file__ = str(path)
+        return m
+
+    def test_it_fires_on_a_submodule_backfilled_from_another_checkout(self, tmp_path):
+        """The escape itself: anchor satisfied by the measured tree, submodule
+        served from elsewhere. This is the state astrid produced by removing
+        the flags, reconstructed at the level the sweep reads."""
+        root, other = tmp_path / "root", tmp_path / "other"
+        (root / "src").mkdir(parents=True)
+        (other / "src").mkdir(parents=True)
+        mods = {
+            "src": self._loaded_from(root / "src" / "__init__.py"),
+            "src.worker": self._loaded_from(other / "src" / "worker.py"),
+        }
+        with pytest.raises(RuntimeError, match="resolved outside"):
+            tr.assert_provenance(root, modules=mods)
+
+    def test_a_sibling_sharing_the_roots_name_prefix_does_not_pass(self, tmp_path):
+        """The case a string-prefix containment test cannot see.
+
+        `/x/root-two/src/worker.py` starts with `/x/root`, so `startswith`
+        reports a sibling checkout as inside the root — and a sibling checkout
+        on sys.path is the exact thing that produced the original wrong
+        measurement this instrument exists to prevent.
+        """
+        root, sibling = tmp_path / "root", tmp_path / "root-two"
+        (root / "src").mkdir(parents=True)
+        (sibling / "src").mkdir(parents=True)
+        # The fixture must actually construct the trap, or this passes for the
+        # wrong reason on a tmp layout where the names do not share a prefix.
+        assert str(sibling).startswith(str(root)), "fixture built no prefix overlap"
+        mods = {"src.worker": self._loaded_from(sibling / "src" / "worker.py")}
+        with pytest.raises(RuntimeError, match="resolved outside"):
+            tr.assert_provenance(root, modules=mods)
+
+    def test_it_stays_quiet_when_every_src_module_came_from_the_root(self, tmp_path):
+        """Negative control. Without it, a sweep that raised unconditionally —
+        or one whose containment test is inverted — passes both cases above.
+
+        The non-`src` entry is load-bearing too: every stdlib module resolves
+        outside the root, so a sweep that did not scope its prefix would be
+        permanently red and would be switched off within a day.
+        """
+        root = tmp_path / "root"
+        (root / "src").mkdir(parents=True)
+        mods = {
+            "src": self._loaded_from(root / "src" / "__init__.py"),
+            "src.worker": self._loaded_from(root / "src" / "worker.py"),
+            "json": self._loaded_from(tmp_path / "stdlib" / "json.py"),
+        }
+        tr.assert_provenance(root, modules=mods)
+
+    def test_a_module_carrying_no_file_is_skipped_not_crashed_on(self, tmp_path):
+        """The stated bound, pinned so it stays a known gap rather than an
+        AttributeError discovered in the child at measurement time."""
+        root = tmp_path / "root"
+        (root / "src").mkdir(parents=True)
+        tr.assert_provenance(root, modules={"src.ns": types.ModuleType("src.ns")})
+
+    def test_the_child_calls_the_sweep(self):
+        """The CALL, not the name — the same pin as the anchor assertion and
+        for the same measured reason: `assert_provenance` also appears on the
+        probe's import line, so a substring test on the bare name stays green
+        with the call deleted."""
+        assert "assert_provenance(pathlib.Path(" in tr._PROBE, (
+            "the child must CALL the provenance sweep after importing; a"
+            " backstop that is never invoked is not a backstop"
+        )
+
+    def test_the_default_module_map_is_the_live_one(self):
+        """The injected seam must not be the only path that works.
+
+        The child calls `assert_provenance(pathlib.Path(root))` with no map, so
+        the default has to bind to the real `sys.modules`. Tested against the
+        real repo root with one planted stand-in, and matched on that
+        stand-in's NAME — matching the generic message would let an unrelated
+        ambient module satisfy this test.
+        """
+        planted = "src.not_served_by_this_checkout"
+        marker = types.ModuleType(planted)
+        marker.__file__ = str(pathlib.Path("/nowhere/near/here/src/x.py"))
+        with mock.patch.dict(sys.modules, {planted: marker}):
+            with pytest.raises(RuntimeError, match=planted):
+                tr.assert_provenance(REPO)
 
 
 class TestABrokenRootIsLoudNotAbsent:

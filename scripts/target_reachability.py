@@ -114,6 +114,50 @@ def assert_root(root: pathlib.Path) -> pathlib.Path:
     return resolved
 
 
+def assert_provenance(root: pathlib.Path, modules: dict | None = None) -> None:
+    """Refuse unless every `src` module ACTUALLY LOADED came from `root`.
+
+    `assert_root` checks the package ANCHOR before any measuring happens; this
+    checks the MEASUREMENT after it. They are different objects, and the escape
+    lives at the second one: an editable-install finder satisfies the anchor
+    from the measured tree's own `src/__init__.py`, then backfills SUBMODULES
+    from the checkout that owns the `.pth`. Measured with `-S -E` removed --
+    a silent wrong answer (483 modules, 19 target hits, read from the real
+    repo) with the anchor assertion passing. A backstop that cannot see the one
+    demonstrated escape is not a backstop.
+
+    Containment is `pathlib`, never a string prefix. `/x/root-two/src/w.py`
+    starts with `/x/root`, so a prefix test is satisfied by a SIBLING checkout
+    -- which is the precise thing that produced the original wrong measurement.
+    Same predicate as `assert_root`, not a second copy of it.
+
+    BOUND, stated rather than left to be found: this sees FILE-BACKED modules.
+    A namespace package carries no `__file__` and is invisible to it. `src` is
+    a regular package -- `assert_root` reads `src.__file__` -- so the escape
+    under guard is in scope, but a future `src` without an `__init__.py` would
+    leave this quiet.
+    """
+    mods = sys.modules if modules is None else modules
+    root = pathlib.Path(root).resolve()
+    bad = []
+    # sorted() snapshots: iterating sys.modules live raises if an import
+    # mutates it, and a deterministic order keeps the message diffable.
+    for name in sorted(mods):
+        if name != "src" and not name.startswith("src."):
+            continue
+        origin = getattr(mods[name], "__file__", None)
+        if origin is None:
+            continue
+        resolved = pathlib.Path(origin).resolve()
+        if root not in resolved.parents:
+            bad.append(f"{name} <- {resolved.parent}")
+    if bad:
+        raise RuntimeError(
+            f"refusing: {len(bad)} loaded module(s) resolved outside {root}: "
+            f"{bad[:5]} -- the measurement read another checkout."
+        )
+
+
 def procfile_entrypoints(root: pathlib.Path) -> list[tuple[str, str]]:
     """(process name, importable module) for each Procfile line.
 
@@ -277,13 +321,17 @@ import json, sys
 # import pydantic. The parent runs with site enabled and knows its real one.
 sys.path.append({purelib!r})
 sys.path.insert(0, {root!r})
-from scripts.target_reachability import assert_root, closure_for
+from scripts.target_reachability import assert_provenance, assert_root, closure_for
 import pathlib
 # The parent already asserts the tree it was pointed at. The CHILD is the one
 # that actually imports, and it was asserting nothing -- the same guard missing
 # one layer down. Same predicate, not a second copy.
 assert_root(pathlib.Path({root!r}))
 size, hits, positive_ok = closure_for({entry!r})
+# The anchor check above ran BEFORE any submodule was imported. This one runs
+# after, over what was actually loaded -- the object the escape moves. Anchor
+# checks the package; this checks the measurement.
+assert_provenance(pathlib.Path({root!r}))
 print("__RESULT__" + json.dumps(
     {{"size": size, "hits": sorted(hits), "positive_ok": positive_ok}}
 ))
