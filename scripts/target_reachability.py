@@ -545,7 +545,12 @@ def _label_deployed(deployed: dict, gate: dict | None = None) -> None:
                 "step-4 decision, made\n"
                 "  by an operator setting the variable on the service -- "
                 "never by this number\n"
-                "  moving."
+                "  moving.\n"
+                "  ARMING PRESUPPOSES the other half: the target schema "
+                "applied (the migration\n"
+                "  runner ships unarmed -- railway.toml) and TARGET_* config "
+                "set. Without them\n"
+                "  the armed worker fails loudly at boot rather than serving."
             )
         else:
             print(

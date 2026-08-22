@@ -690,6 +690,10 @@ class TestTheDeployedLabelCannotOutliveItsOwnPremise:
         assert "CANNOT confirm the blocker is cleared" in out
         assert "WORKER_IMPL=target" in out
         assert "IMPORTABLE-NOT-SERVING until armed" in out
+        # The schema half rides the SAME banner (rajan, #1005 review): the
+        # operator arming this acts on what THIS text says, not on a PR body.
+        assert "ARMING PRESUPPOSES" in out
+        assert "target schema" in out
         assert "by hand" not in out
 
 
@@ -742,6 +746,7 @@ class TestGateLabel:
         out = self._run()
         assert "IMPORTABLE-NOT-SERVING until armed" in out
         assert "WORKER_IMPL=target" in out
+        assert "ARMING PRESUPPOSES" in out
 
     def test_the_facts_are_silent_when_there_is_nothing_to_label(self):
         """Zero worker hits (a pre-gate commit) must print exactly as before —
