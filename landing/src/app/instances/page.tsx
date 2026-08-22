@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { ImageIcon, Clock, Pause, Play, ChevronRight, MessageCircle } from "lucide-react";
 import type { Instance } from "@/lib/types";
 import { formatLastPost } from "@/lib/utils";
+import { botUrl } from "@/lib/telegram-bot";
 
 export default function InstancePickerPage() {
   const router = useRouter();
@@ -95,15 +96,17 @@ export default function InstancePickerPage() {
               create your first posting instance.
             </p>
           </div>
-          <a
-            href="https://t.me/storydump_bot"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center gap-2 rounded-md bg-primary px-6 py-3 text-sm font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
-          >
-            <MessageCircle className="h-4 w-4" />
-            Open Telegram Bot
-          </a>
+          {botUrl() && (
+            <a
+              href={botUrl()!}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-2 rounded-md bg-primary px-6 py-3 text-sm font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
+            >
+              <MessageCircle className="h-4 w-4" />
+              Open Telegram Bot
+            </a>
+          )}
         </div>
       </div>
     );

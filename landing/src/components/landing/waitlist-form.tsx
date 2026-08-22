@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
 import { trackEvent, UTM_KEYS } from "@/lib/analytics"
+import { botUrl } from "@/lib/telegram-bot"
 
 interface WaitlistFormProps {
   variant?: "hero" | "footer"
@@ -123,14 +124,16 @@ export function WaitlistForm({
               </p>
             </>
           )}
-          <a
-            href="https://t.me/storydump_bot"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-block text-sm text-muted-foreground underline underline-offset-4 hover:text-foreground transition-colors"
-          >
-            Join the Telegram community
-          </a>
+          {botUrl() && (
+            <a
+              href={botUrl()!}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-block text-sm text-muted-foreground underline underline-offset-4 hover:text-foreground transition-colors"
+            >
+              Join the Telegram community
+            </a>
+          )}
         </div>
       </div>
     )
