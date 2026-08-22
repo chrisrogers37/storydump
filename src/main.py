@@ -23,6 +23,26 @@ from src.services.core.loops.transaction_cleanup_loop import transaction_cleanup
 from src.services.core.loops.media_sync_loop import media_sync_loop
 from src.utils.logger import logger
 
+# #942: the target composition root rides the deployed worker artifact.
+# EAGER on purpose, and load-bearing: the import closure is how reachability
+# is measured (scripts/target_reachability.py), a lazy import is invisible to
+# it (#979), and an import failure in the target tier must surface at the
+# next legacy boot and on every CI run — not at the M.3 window. The root's
+# own config (TARGET_DATABASE_URL and friends) is read at RUN time inside
+# src.worker.main, never at import, so this adds no env requirement to a
+# legacy boot (pinned in tests/src/test_worker_impl_gate.py).
+import src.worker as target_worker
+
+# The gate CONTRACT (constants + resolver) lives in src.worker_impl, a
+# stdlib-only leaf, because it has a second consumer with the opposite
+# import budget: scripts/target_reachability.py labels the worker axis with
+# these terms and must not need this module's ~780-module closure to read
+# four strings. This module enforces the contract; the leaf defines it.
+from src.worker_impl import (
+    WORKER_IMPL_TARGET,
+    resolve_worker_impl,
+)
+
 STARTUP_GRACE_SECONDS = 120
 
 
@@ -319,6 +339,16 @@ async def main_async():
 
 def main():
     """Main entry point."""
+    # #942: the dispatch happens before the legacy try-block so each root
+    # runs under its own exit contract — src.worker.main owns its logging,
+    # its asyncio.run and its WorkerTaskDied → exit(1) semantics.
+    if resolve_worker_impl(os.environ) == WORKER_IMPL_TARGET:
+        logger.info(
+            "WORKER_IMPL=target — dispatching to the target composition "
+            "root (src.worker); legacy loops will not start"
+        )
+        target_worker.main()
+        return
     try:
         asyncio.run(main_async())
     except KeyboardInterrupt:

@@ -62,6 +62,7 @@ import argparse
 import importlib
 import inspect
 import json
+import os
 import pathlib
 import re
 import pkgutil
@@ -438,7 +439,53 @@ def parity(callables: list[str]) -> dict:
 CLEARING_ENTRYPOINT = "worker"
 
 
-def _label_deployed(deployed: dict) -> None:
+def worker_gate_facts(deployed: dict) -> dict | None:
+    """The gate on the clearing axis, read from `src.worker_impl` itself.
+
+    When the worker axis reads non-zero through the `src.main` dispatch
+    (#942), the movement has a KNOWN, gated call site — and the label must
+    say so in the gate's own terms rather than sending a reader hunting.
+    The terms are IMPORTED from the contract module the dispatch enforces,
+    never restated here: a copy in this file would be free to drift, and the
+    drift would surface only in the exact state the label exists for — the
+    day someone quotes the moved number. `src.worker_impl` is a stdlib-only
+    leaf, so reading it needs no env floor and touches no measurement (all
+    measuring happens in `-S -E` child interpreters; this import is the
+    parent's).
+
+    Returns None when the worker axis reads zero (nothing to label yet) or
+    when the contract module does not exist (commits predating it, or a
+    worker-axis movement that arrived by some other road) — in both cases
+    `_label_deployed` falls back to its find-the-call-site-by-hand text,
+    which is then the honest instruction.
+    """
+    worker = deployed.get(CLEARING_ENTRYPOINT)
+    if not worker or not worker["target_hits"]:
+        return None
+    try:
+        contract = importlib.import_module("src.worker_impl")
+        var = contract.WORKER_IMPL_VAR
+        default = contract.WORKER_IMPL_LEGACY
+        armed = contract.WORKER_IMPL_TARGET
+        resolve = contract.resolve_worker_impl
+    except (ImportError, AttributeError):
+        return None
+    try:
+        selects = resolve(os.environ)
+    except SystemExit:
+        # The gate refuses garbage; the instrument reports the refusal
+        # rather than inheriting it — a measurement run must not die on the
+        # measuring environment's env hygiene.
+        selects = "REFUSED (invalid value in this run's environment)"
+    return {
+        "var": var,
+        "default": default,
+        "armed_value": armed,
+        "this_run_selects": selects,
+    }
+
+
+def _label_deployed(deployed: dict, gate: dict | None = None) -> None:
     """Print the bound ON THE SAME BLOCK as any non-zero deployed figure.
 
     This exists because prose can always be separated from the number it
@@ -461,6 +508,12 @@ def _label_deployed(deployed: dict) -> None:
 
     Silent when every entrypoint reads zero: there is nothing to misread yet,
     and a banner that always fires is one nobody reads.
+
+    When the clearing entrypoint's movement is the `src.main` GATE (#942),
+    `gate` carries its terms and the by-hand instruction is replaced with the
+    precise answer — the call site is known, dispatch on `WORKER_IMPL`,
+    serving nothing until armed. The by-hand text remains for a movement the
+    gate contract cannot account for, where hunting is the honest advice.
     """
     nonzero = [p for p, d in deployed.items() if d["target_hits"]]
     if not nonzero:
@@ -479,10 +532,26 @@ def _label_deployed(deployed: dict) -> None:
         print(
             "  It establishes import-reachability only -- that the process could import"
         )
-        print(
-            "  target code, never that any call path runs it. Someone has to go find the"
-        )
-        print("  call site by hand before this is reported as resolved.")
+        if gate:
+            print(
+                "  target code, never that any call path runs it. The call site is the"
+            )
+            print(
+                f"  GATE in src.main: it serves target ONLY when "
+                f"{gate['var']}={gate['armed_value']}\n"
+                f"  (default when unset: {gate['default']}; this run's env "
+                f"selects: {gate['this_run_selects']}).\n"
+                "  IMPORTABLE-NOT-SERVING until armed. Arming is the M.3 "
+                "step-4 decision, made\n"
+                "  by an operator setting the variable on the service -- "
+                "never by this number\n"
+                "  moving."
+            )
+        else:
+            print(
+                "  target code, never that any call path runs it. Someone has to go find the"
+            )
+            print("  call site by hand before this is reported as resolved.")
     else:
         print("  IMPORTABLE, NOT SERVING. This is NOT the #942 blocker clearing.")
         print(
@@ -558,6 +627,7 @@ def main(argv=None) -> int:
         },
     }
     controls_ok = controls["positive"]["ok"] and controls["negative"]["ok"]
+    gate = worker_gate_facts(deployed)
 
     if args.json:
         print(
@@ -567,6 +637,7 @@ def main(argv=None) -> int:
                     "src_from": str(resolved.parent),
                     "target_on_disk": sorted(on_disk),
                     "deployed": deployed,
+                    "worker_gate": gate,
                     "src_worker": {
                         "present": root_present,
                         "closure_new": root_size,
@@ -597,7 +668,7 @@ def main(argv=None) -> int:
         )
         for m in d["target_hits"]:
             print(f"      + {m}")
-    _label_deployed(deployed)
+    _label_deployed(deployed, gate)
 
     print("\nTHE TARGET ROOT (src.worker — NOT a Procfile entrypoint)\n" + "-" * 78)
     if not root_present:
