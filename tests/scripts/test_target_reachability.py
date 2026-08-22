@@ -111,8 +111,12 @@ class TestIsolationRemovesTheSharingNotTheSubtraction:
     def test_the_same_entrypoint_twice_gives_the_same_answer(self):
         """The defect, stated as its own regression test.
 
-        In-process this is 19 then 0. Under `measure` it must be 19 then 19,
-        because each call is its own interpreter.
+        In-process the second read collapses to zero. Under `measure` the two
+        reads must AGREE, because each call is its own interpreter. The count
+        itself is deliberately not named here: it tracks whatever the root
+        reaches today, and a literal in this docstring would go stale the next
+        time a module lands in the tier — which is what the assertion below
+        avoids by comparing the two reads rather than pinning either.
         """
         root = pathlib.Path(tr.__file__).resolve().parent.parent
         first = tr.measure("src.worker", root)

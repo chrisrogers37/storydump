@@ -645,9 +645,10 @@ def main(argv=None) -> int:
     print("`closure +N` is NOT COMPARABLE ACROSS RUNS and must not be quoted")
     print("against a figure from another environment. It counts every module")
     print("including stdlib and third-party, so it moves with the interpreter")
-    print("and the installed set; and it is measured sequentially, so it also")
-    print("moves with Procfile order. Only the `target modules reached` counts")
-    print("and the module NAMES transfer between runs.")
+    print("and the installed set. It is no longer order-dependent — each")
+    print("entrypoint is measured in its own interpreter — but that buys")
+    print("nothing about portability. Only the `target modules reached`")
+    print("counts and the module NAMES transfer between runs.")
     print("=" * 78)
     return OK if controls_ok else ERROR
 
