@@ -326,10 +326,21 @@ class TestObligation4TheFailOpenSignatureIsExtinct:
         QueueRepository by-identity mutators collapse into the shared
         ownership-checked `BaseRepository._get_for_write`, whose own
         identity-first read keeps ONE marked site where five were unmarked.
+
+        48 → 49 (#512). `ChatSettingsRepository.get_by_id` becomes tenant-scoped
+        like every other by-id read, so its callers must now name a scope. Three
+        of the four are self-scoped — they ask for the tenant they are already
+        acting as. The fourth, `TelegramNotificationHandlers`' resolution of the
+        tenant that owns a queue item, is a genuine foreign-key dereference off
+        a row the caller already holds: the same shape as
+        `QueueRepository.get_by_id_any_tenant` and `LockRepository`'s by-id
+        read, and it is marked rather than hidden. This is the pin moving UP by
+        exactly the one site that admits it, which is what the paragraph above
+        asks for.
         """
         import ast as _ast
 
-        pinned = 48
+        pinned = 49
         count = 0
         offenders = {}
         for d in ("src", "cli"):
