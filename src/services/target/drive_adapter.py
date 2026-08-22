@@ -52,6 +52,27 @@ The whole mapping is passed rather than destructured parameters, so a later
 config key reaches the door without a signature change and without every caller
 being edited to forward it.
 
+## THE DOOR REFUSES A SHAPELESS CONFIG, AND THE REFUSAL IS THE CONTRACT'S
+
+Being able to CARRY `folder_ref` is not the same as REQUIRING it, and only the
+first was fixed when the config mapping replaced a bare reference. A config of
+`{"v": 1}` with no `folder_ref` still listed successfully — so the wrong answer
+that looks right did not go away, it moved from *inexpressible* to *omittable*.
+Same destination, quieter road: a subfolder source without `folder_ref` lists
+from the drive root and looks correct whether it comes back full or empty.
+`ck_sources_config_v` cannot help — it checks only that `v` is a number, so the
+database will not refuse it either.
+
+:func:`validate_source_config` is therefore a **module-level function and part
+of the adapter contract, not the stub's private behaviour** — and that placement
+is the point. A guard living only in the stub would let a consumer go green
+against a refusal the real door never inherited: the same failure as a sync stub
+defining a shape the real implementation cannot keep. **Every implementation of
+this seam calls it first.** D37 makes config adapter-defined, which makes the
+adapter the owner of validating it.
+
+Terminal, not retryable: retrying a shapeless config cannot fix it.
+
 ## AWAITABLE, because the real door cannot be anything else
 
 Both legs are `async def` even though the stub does no I/O. The real adapter is
@@ -112,6 +133,28 @@ class DriveLostResponse(Exception):
     """
 
 
+def validate_source_config(config: Mapping[str, Any]) -> None:
+    """Refuse a config the door cannot honour. PART OF THE SEAM CONTRACT.
+
+    Every implementation calls this first — the stub here, and the real adapter
+    when it lands. Placed at module level rather than inside the stub so the
+    real door inherits the obligation instead of a consumer going green against
+    a refusal only the stand-in performs.
+
+    Only `folder_ref` is required. `root_name` is genuinely optional (absent
+    means the folder itself), and `v` is the database's business
+    (`ck_sources_config_v`). Deliberately not a schema validator: the failure
+    this closes is an ABSENT LOCATION, which is the one that lists from the
+    wrong place while looking correct.
+    """
+    if "folder_ref" not in config:
+        raise DriveTerminalError(
+            "config carries no folder_ref — refusing to guess a root. A source"
+            " listed from the drive root looks correct whether it comes back"
+            " full or empty, which is why this is a refusal and not a default."
+        )
+
+
 @dataclass(frozen=True)
 class DriveFile:
     """One listed file. `size_bytes`/`modified_at` may be absent upstream."""
@@ -169,6 +212,7 @@ class StubDriveAdapter:
         page_token: Optional[str] = None,
         page_size: int = DEFAULT_PAGE_SIZE,
     ) -> DrivePage:
+        validate_source_config(config)
         idx = len(self.list_calls)
         # Record the FULL config, not just the token: a consumer test asserting
         # that `root_name` reached the door is the only thing standing between

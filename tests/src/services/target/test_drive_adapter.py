@@ -143,6 +143,59 @@ class TestTheDoorReceivesTheSourceConfig:
         assert stub.configs_seen[0]["folder_ref"] == "f"
 
 
+class TestAShapelessConfigIsRefused:
+    """#987 review (astrid): expressible is not the same as required.
+
+    Passing the config mapping fixed the ability to CARRY `folder_ref`. It did
+    not add a refusal to ACCEPT its absence — so the wrong-answer-that-looks-
+    right did not go away, it moved from *inexpressible* to *omittable*. A
+    subfolder source with no `folder_ref` still lists from the drive root and
+    still looks correct whether it comes back full or empty. The database
+    cannot help: `ck_sources_config_v` validates only that `v` is a number.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_config_without_folder_ref_is_refused(self):
+        stub = StubDriveAdapter(pages=[DrivePage(files=_files(1))])
+        with pytest.raises(DriveTerminalError):
+            await stub.list_files({"v": 1})
+
+    @pytest.mark.asyncio
+    async def test_the_refusal_happens_BEFORE_any_listing(self):
+        """A refusal after the work is a warning, not a guard."""
+        stub = StubDriveAdapter(pages=[DrivePage(files=_files(1))])
+        with pytest.raises(DriveTerminalError):
+            await stub.list_files({"v": 1})
+        assert stub.list_calls == [] and stub.configs_seen == [], (
+            "the shapeless config was recorded/served before being refused"
+        )
+
+    def test_the_guard_is_the_CONTRACT_not_the_stubs_private_behaviour(self):
+        """The placement is the finding, not the check.
+
+        A refusal living only inside `StubDriveAdapter` would let a consumer go
+        green against an obligation the real door never inherited — the same
+        failure as a sync stub defining a shape the real implementation cannot
+        keep. So it is a module-level function every implementation calls, and
+        this test fails if someone later inlines it back into the stub.
+        """
+        from src.services.target import drive_adapter as mod
+
+        assert callable(getattr(mod, "validate_source_config", None)), (
+            "the config refusal must be reachable by the real adapter, not "
+            "private to the stand-in"
+        )
+        with pytest.raises(DriveTerminalError):
+            mod.validate_source_config({"v": 1})
+        mod.validate_source_config({"v": 1, "folder_ref": "f"})  # must not raise
+
+    def test_root_name_stays_optional(self):
+        """Guard the guard: over-refusing breaks every source without a subfolder."""
+        from src.services.target import drive_adapter as mod
+
+        mod.validate_source_config({"v": 1, "folder_ref": "f"})
+
+
 class TestEveryStubOutcomeCanBeSelected:
     """A stub whose error paths cannot be reached only ever proves the happy one."""
 
