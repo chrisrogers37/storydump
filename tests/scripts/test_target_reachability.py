@@ -181,6 +181,104 @@ class TestIsolationRemovesTheSharingNotTheSubtraction:
             )
 
 
+class TestTheChildCannotEscapeTheRootItWasGiven:
+    """#989 (astrid) — probes escaped `--root` via an editable install's finder.
+
+    When the measured tree LACKS a submodule, `PathFinder` misses, falls
+    through to the finder an editable install put on the path, and the REAL
+    repo backfills it. The instrument then answers about a different tree than
+    the one it was pointed at, silently — and the blast radius is the
+    historical case exactly, since "a tree missing submodules" is what
+    measuring a commit that predates W1 means.
+
+    **THESE ASSERT THE MECHANISM, NOT THE COLOUR, AND THAT IS DELIBERATE.**
+    The escape is environment-dependent: it reproduces under a PEP 660 venv and
+    does not under a setuptools-develop one. I could not make it go red in my
+    install mode, which is the EXPECTED result and is not evidence the bug is
+    absent — so a test that merely passes here would be decoration. What is
+    checked instead is that the child is started in a way that makes the finder
+    unreachable at all.
+    """
+
+    def test_the_child_is_launched_with_S_and_E(self, monkeypatch):
+        """`-S` skips site.py, so no `.pth` and no `.egg-link` is processed and
+        neither editable finder is installed. `-E` drops PYTHONPATH, the same
+        escape by another door. Asserted on the real argv, because a flag that
+        does not reach `subprocess.run` is a comment."""
+        seen = {}
+        real = tr.subprocess.run
+
+        def _spy(argv, *a, **k):
+            seen["argv"] = argv
+            return real(argv, *a, **k)
+
+        monkeypatch.setattr(tr.subprocess, "run", _spy)
+        tr.measure("src.worker", pathlib.Path(tr.__file__).resolve().parent.parent)
+        assert "-S" in seen["argv"] and "-E" in seen["argv"], seen["argv"]
+
+    def test_a_child_launched_that_way_has_no_editable_finder(self):
+        """The mechanism itself, measured in a real interpreter.
+
+        Anything an editable install adds arrives through a file `site.py`
+        reads. Under `-S` that never runs, so the finder cannot be on
+        `meta_path` — which is the property the fix rests on.
+        """
+        out = tr.subprocess.run(
+            [
+                sys.executable,
+                "-S",
+                "-E",
+                "-c",
+                "import sys;print([type(f).__name__ for f in sys.meta_path])",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert out.returncode == 0, out.stderr
+        assert "editable" not in out.stdout.lower(), out.stdout
+
+    def test_dependencies_still_import_so_the_child_can_work_at_all(self):
+        """The other half: `-S` alone makes the child unable to import `src`.
+
+        Site-packages is re-added by hand, which restores DEPENDENCIES without
+        restoring the path injection — that lived in the files site.py reads.
+        Without this the instrument fails on every probe rather than measuring.
+        """
+        out = tr.subprocess.run(
+            [
+                sys.executable,
+                "-S",
+                "-E",
+                "-c",
+                f"import sys;sys.path.append({tr._PURELIB!r});import pydantic;print('ok')",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert out.returncode == 0 and "ok" in out.stdout, out.stderr[-300:]
+
+    def test_the_child_asserts_the_root_it_was_given(self):
+        """The parent already asserted the tree; the CHILD does the importing
+        and was asserting nothing — the same guard missing one layer down."""
+        # The CALL, not the name. `assert_root` also appears in the probe's
+        # import line, so a substring test passes even when the call is gone --
+        # measured: deleting the call left this test green.
+        assert "assert_root(pathlib.Path(" in tr._PROBE, (
+            "the child must CALL the assertion, not merely import it; the"
+            " parent's assertion says nothing about the child's path"
+        )
+
+    def test_that_assertion_can_actually_fire(self, tmp_path):
+        """The predicate the child calls must be able to refuse.
+
+        Verified directly, since the escape it guards cannot be provoked in
+        this environment: a root that does not own the `src` on the path is
+        refused.
+        """
+        with pytest.raises(RuntimeError, match="refusing"):
+            tr.assert_root(tmp_path)
+
+
 class TestABrokenRootIsLoudNotAbsent:
     """#989 review (astrid) — the recursion surviving one axis over.
 

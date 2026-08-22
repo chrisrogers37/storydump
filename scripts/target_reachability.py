@@ -66,6 +66,7 @@ import pathlib
 import re
 import pkgutil
 import subprocess
+import sysconfig
 import sys
 
 OK, ERROR = 0, 2
@@ -213,6 +214,10 @@ def closure_for(entry: str) -> tuple[int, set[str], bool]:
     return len(new), hits, CONTROL_POSITIVE in after
 
 
+#: The PARENT's site-packages, resolved while site.py is still in effect.
+#: The child cannot work this out for itself under `-S` (see `_PROBE`).
+_PURELIB = sysconfig.get_paths()["purelib"]
+
 #: Generous on purpose: a slow import must not be reported as a broken one.
 PROBE_TIMEOUT_SECONDS = 120
 
@@ -239,10 +244,45 @@ class MeasurementFailed(RuntimeError):
     """
 
 
+#: The child runs with `-S -E` and then re-adds site-packages BY HAND. Both
+#: halves are load-bearing and the reason is a mechanism rather than a
+#: preference (#989, astrid).
+#:
+#: An editable install puts a finder on the child's path through a `.pth`
+#: (PEP 660 `__editable__*.pth`) or an `.egg-link` — and BOTH are processed by
+#: `site.py`. When the measured tree LACKS a submodule, `PathFinder` misses,
+#: falls through to that finder, and the REAL repo backfills it. The instrument
+#: then answers about a different tree than the one it was pointed at, silently.
+#:
+#: The blast radius is the historical case exactly: a tree missing submodules is
+#: what "measure a commit that predates W1" means, so every backward-looking
+#: comparison this instrument exists to support is the case it broke on, while
+#: the forward-looking runs we happen to have taken are the ones it got right.
+#:
+#: `-S` skips `site.py`, so no `.pth` and no `.egg-link` is ever processed and
+#: neither finder is installed. `-E` drops `PYTHONPATH`, which is the same
+#: escape by another door. Site-packages is then appended explicitly, which
+#: restores third-party DEPENDENCIES (without it the child cannot import `src`
+#: at all — measured) while restoring none of the path injection, because that
+#: lived in the files `site.py` reads.
+#:
+#: THIS IS ENVIRONMENT-DEPENDENT AND THAT IS THE FINDING. It reproduces in a
+#: PEP 660 venv and does not in a setuptools-develop one; correctness of the
+#: instrument was resting on which pip mode happened to be in use.
 _PROBE = """
 import json, sys
+# Passed IN by the parent, deliberately not computed here: `-S` skips the
+# site.py that makes a venv a venv, so the child's own `sysconfig` resolves to
+# the BASE interpreter and its site-packages -- measured, the child could not
+# import pydantic. The parent runs with site enabled and knows its real one.
+sys.path.append({purelib!r})
 sys.path.insert(0, {root!r})
-from scripts.target_reachability import closure_for
+from scripts.target_reachability import assert_root, closure_for
+import pathlib
+# The parent already asserts the tree it was pointed at. The CHILD is the one
+# that actually imports, and it was asserting nothing -- the same guard missing
+# one layer down. Same predicate, not a second copy.
+assert_root(pathlib.Path({root!r}))
 size, hits, positive_ok = closure_for({entry!r})
 print("__RESULT__" + json.dumps(
     {{"size": size, "hits": sorted(hits), "positive_ok": positive_ok}}
@@ -265,7 +305,13 @@ def measure(entry: str, root: pathlib.Path) -> tuple[int, set[str], bool]:
     """
     try:
         proc = subprocess.run(
-            [sys.executable, "-c", _PROBE.format(root=str(root), entry=entry)],
+            [
+                sys.executable,
+                "-S",
+                "-E",
+                "-c",
+                _PROBE.format(root=str(root), entry=entry, purelib=_PURELIB),
+            ],
             capture_output=True,
             text=True,
             cwd=str(root),
