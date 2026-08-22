@@ -29,7 +29,8 @@
 -- The guard makes the coupling EXPLICIT IN SQL and fails closed: a provider whose
 -- refresh door does not exist yet is simply never minted, rather than minted and
 -- mishandled. Removing the clause is a deliberate act, and
--- test_refresh_leg_provider_guard.py turns it red.
+-- tests/scripts/test_w5de_credential_lifecycle.py::
+-- TestTheRefreshLegIsProviderGuarded turns it red.
 
 -- The CREATE bracket is 062's, carried forward for the same reason it gave:
 -- `ALTER FUNCTION … OWNER TO` needs the incoming owner to hold CREATE on the

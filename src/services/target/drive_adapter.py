@@ -23,9 +23,9 @@ review).
 
 So exhaustion is carried STRUCTURALLY, not inferred from a count:
 
-    page = adapter.list_files(source_ref)
+    page = await adapter.list_files(source.config)
     while page.next_page_token is not None:      # None == genuinely exhausted
-        page = adapter.list_files(source_ref, page_token=page.next_page_token)
+        page = await adapter.list_files(source.config, page_token=page.next_page_token)
 
 - ``next_page_token is None`` is the ONLY statement that the listing is
   complete. A full page is not that statement, and neither is a short one.
@@ -39,6 +39,26 @@ that cannot be announced through this protocol: it would have to either lie
 (return None and claim exhaustion) or hand back a token it will not honour.
 Whoever needs one should bound the CALLER's loop, where the truncation is the
 caller's own decision and visible in its code.
+
+## The door takes the SOURCE'S CONFIG, not a bare reference
+
+`media_sources.config` is D37's `{v, folder_ref, root_name?}`, and `root_name`
+scopes listing to a subfolder. A door that accepted only a folder reference
+could not express that, so a source configured with a subfolder would be listed
+from the wrong place — quietly, and looking like a correct empty-or-full
+listing either way.
+
+The whole mapping is passed rather than destructured parameters, so a later
+config key reaches the door without a signature change and without every caller
+being edited to forward it.
+
+## AWAITABLE, because the real door cannot be anything else
+
+Both legs are `async def` even though the stub does no I/O. The real adapter is
+egress-floor httpx and `egress.request` is a coroutine, so a sync seam would set
+a contract the real implementation could only keep through an event-loop bridge
+— and the stub would have quietly defined the shape of a door it never has to
+open. The consumer awaits either way.
 
 ## Errors are typed, and the type is the routing
 
@@ -60,7 +80,7 @@ dicts.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Mapping, Optional
 
 #: Provider string, matching `ck_sources_provider` / `ck_credentials_provider`.
 PROVIDER = "gdrive"
@@ -139,17 +159,22 @@ class StubDriveAdapter:
     list_errors: dict[int, Exception] = field(default_factory=dict)
 
     list_calls: list[Optional[str]] = field(default_factory=list)
+    configs_seen: list[dict] = field(default_factory=list)
     fetch_calls: list[str] = field(default_factory=list)
 
-    def list_files(
+    async def list_files(
         self,
-        source_ref: str,
+        config: Mapping[str, Any],
         *,
         page_token: Optional[str] = None,
         page_size: int = DEFAULT_PAGE_SIZE,
     ) -> DrivePage:
         idx = len(self.list_calls)
+        # Record the FULL config, not just the token: a consumer test asserting
+        # that `root_name` reached the door is the only thing standing between
+        # a subfolder-scoped source and being listed from the drive root.
         self.list_calls.append(page_token)
+        self.configs_seen.append(dict(config))
         if idx in self.list_errors:
             raise self.list_errors[idx]
         if not self.pages:
@@ -164,7 +189,7 @@ class StubDriveAdapter:
             )
         return page
 
-    def fetch_bytes(self, file_id: str) -> bytes:
+    async def fetch_bytes(self, file_id: str) -> bytes:
         self.fetch_calls.append(file_id)
         if file_id in self.fetch_errors:
             raise self.fetch_errors[file_id]
