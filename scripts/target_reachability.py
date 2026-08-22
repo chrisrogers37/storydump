@@ -63,6 +63,7 @@ import importlib
 import inspect
 import json
 import pathlib
+import re
 import pkgutil
 import subprocess
 import sys
@@ -212,6 +213,22 @@ def closure_for(entry: str) -> tuple[int, set[str], bool]:
     return len(new), hits, CONTROL_POSITIVE in after
 
 
+#: Generous on purpose: a slow import must not be reported as a broken one.
+PROBE_TIMEOUT_SECONDS = 120
+
+_MISSING_RE = re.compile(r"No module named '([^']+)'")
+
+
+def _missing_module(stderr: str) -> str | None:
+    """The module Python said was missing, or None.
+
+    The LAST occurrence, because an import chain reports the innermost failure
+    last and that is the one that actually did not resolve.
+    """
+    found = _MISSING_RE.findall(stderr)
+    return found[-1] if found else None
+
+
 class MeasurementFailed(RuntimeError):
     """A subprocess measurement did not produce an answer.
 
@@ -246,14 +263,35 @@ def measure(entry: str, root: pathlib.Path) -> tuple[int, set[str], bool]:
     commit predates the composition root" is a FINDING the caller handles, not
     an error. Anything else is :class:`MeasurementFailed`.
     """
-    proc = subprocess.run(
-        [sys.executable, "-c", _PROBE.format(root=str(root), entry=entry)],
-        capture_output=True,
-        text=True,
-        cwd=str(root),
-    )
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", _PROBE.format(root=str(root), entry=entry)],
+            capture_output=True,
+            text=True,
+            cwd=str(root),
+            # A hung import is otherwise a SILENT FOURTH STATE alongside
+            # reaches / does-not-reach / raises — an instrument that can
+            # neither answer nor fail is not loud. Today's entrypoints import
+            # cleanly; an import-time DB connect or egress call added to any of
+            # them turns the cutover instrument into a hang. Generous, because
+            # a slow import must not read as a broken one.
+            timeout=PROBE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise MeasurementFailed(
+            f"probe for {entry} did not finish within {PROBE_TIMEOUT_SECONDS}s"
+            " — an import that hangs is no answer, not a zero"
+        ) from exc
     if proc.returncode != 0:
-        if "ModuleNotFoundError" in proc.stderr and entry in proc.stderr:
+        # EXACT match, never substring. `src.worker` is a substring of
+        # `src.worker.does_not_exist`, so a root that merely FAILS TO IMPORT
+        # would route to the predates-W1 finding and print "no composition
+        # root" — this instrument manufacturing #942's literal headline out of
+        # a broken root. That is the same recursion this file closed for the
+        # target axis, one axis over: no-answer-is-loud has to hold on EVERY
+        # axis, not the one where the bug was first noticed.
+        missing = _missing_module(proc.stderr)
+        if missing == entry:
             raise ModuleNotFoundError(entry)
         raise MeasurementFailed(
             f"probe for {entry} exited {proc.returncode}: {proc.stderr[-600:]}"

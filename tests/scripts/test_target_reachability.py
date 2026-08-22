@@ -181,6 +181,119 @@ class TestIsolationRemovesTheSharingNotTheSubtraction:
             )
 
 
+class TestABrokenRootIsLoudNotAbsent:
+    """#989 review (astrid) — the recursion surviving one axis over.
+
+    `measure()` routed to the predates-W1 FINDING on a SUBSTRING test, so a
+    root that merely fails to import — a typo'd submodule, a deleted-but-still-
+    imported module, merge damage — printed *"no composition root exists"*.
+    That is #942's literal headline, manufactured by the instrument out of a
+    broken root.
+
+    It is this file's own standard violated on the axis nobody was watching:
+    the target axis already refuses to turn a failure into a zero, and the same
+    rule has to hold for root-exists vs root-absent, because those are
+    *different states with different remaining work*.
+
+    The construction below is astrid's, kept as she built it rather than
+    re-derived — she found the break, so her break is the thing that must stay
+    red if someone reverts the fix.
+    """
+
+    @staticmethod
+    def _broken_root(tmp_path: pathlib.Path) -> pathlib.Path:
+        """A root that EXISTS and does not import: three files."""
+        real = pathlib.Path(tr.__file__).resolve().parent.parent
+        (tmp_path / "scripts").symlink_to(real / "scripts")
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "__init__.py").write_text("")
+        (tmp_path / "src" / "worker").mkdir()
+        (tmp_path / "src" / "worker" / "__init__.py").write_text(
+            "import src.worker.does_not_exist\n"
+        )
+        return tmp_path
+
+    def test_a_broken_root_raises_rather_than_reading_as_absent(self, tmp_path):
+        root = self._broken_root(tmp_path)
+        with pytest.raises(tr.MeasurementFailed):
+            tr.measure("src.worker", root)
+
+    def test_it_is_NOT_reported_as_the_predates_W1_finding(self, tmp_path):
+        """The specific misroute, asserted as its own claim.
+
+        A bare `pytest.raises(MeasurementFailed)` would also pass if the code
+        raised for some unrelated reason, so this pins that the finding branch
+        is *not* taken — that is the defect, not the exception type.
+        """
+        root = self._broken_root(tmp_path)
+        try:
+            tr.measure("src.worker", root)
+        except ModuleNotFoundError:  # pragma: no cover - the defect
+            pytest.fail(
+                "a BROKEN root was routed to the predates-W1 finding — the "
+                "instrument just manufactured #942's headline"
+            )
+        except tr.MeasurementFailed:
+            pass
+
+    def test_a_genuinely_absent_root_is_still_the_finding(self, tmp_path):
+        """Guard the guard: over-refusing would destroy the before/after.
+
+        `src.worker` absent is the BEFORE half this instrument exists to
+        produce. If the fix made every failure `MeasurementFailed`, commits
+        predating W1 could no longer be measured at all.
+        """
+        real = pathlib.Path(tr.__file__).resolve().parent.parent
+        (tmp_path / "scripts").symlink_to(real / "scripts")
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "__init__.py").write_text("")
+        with pytest.raises(ModuleNotFoundError):
+            tr.measure("src.worker", tmp_path)
+
+    def test_the_missing_module_is_matched_exactly_not_by_substring(self):
+        assert tr._missing_module("No module named 'src.worker'") == "src.worker"
+        assert (
+            tr._missing_module("No module named 'src.worker.does_not_exist'")
+            == "src.worker.does_not_exist"
+        ), "the inner failure is the one that did not resolve"
+        assert tr._missing_module("some other traceback") is None
+
+
+class TestAHungImportIsNotAnAnswer:
+    """#989 review (astrid) — the silent fourth state.
+
+    `subprocess.run` carried no timeout, so an entrypoint whose import blocks
+    hangs the instrument indefinitely: neither *reaches*, nor *does not reach*,
+    nor *raises*. An instrument that can neither answer nor fail is not loud.
+    """
+
+    def test_a_timeout_becomes_a_loud_failure_not_a_zero(self, monkeypatch):
+        root = pathlib.Path(tr.__file__).resolve().parent.parent
+
+        def _hang(*a, **k):
+            raise tr.subprocess.TimeoutExpired(cmd="probe", timeout=k.get("timeout"))
+
+        monkeypatch.setattr(tr.subprocess, "run", _hang)
+        with pytest.raises(tr.MeasurementFailed):
+            tr.measure("src.worker", root)
+
+    def test_the_probe_actually_passes_a_timeout(self):
+        """The knob has to reach `subprocess.run`, not merely exist."""
+        seen = {}
+        real = tr.subprocess.run
+
+        def _spy(*a, **k):
+            seen.update(k)
+            return real(*a, **k)
+
+        tr.subprocess.run = _spy
+        try:
+            tr.measure("src.worker", pathlib.Path(tr.__file__).resolve().parent.parent)
+        finally:
+            tr.subprocess.run = real
+        assert seen.get("timeout") == tr.PROBE_TIMEOUT_SECONDS
+
+
 class TestTheHitsAreDifferentialNotCumulative:
     """The measurement must not depend on what was imported before it.
 
