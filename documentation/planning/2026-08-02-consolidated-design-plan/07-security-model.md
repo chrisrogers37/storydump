@@ -512,6 +512,18 @@ BEGIN
   RETURN QUERY SELECT n1, n2, n3, n4, n5;
 END $$;
 
+COMMENT ON FUNCTION fn_clock_tick(int, interval, jsonb) IS
+  'The scheduled clock tick: a SECURITY DEFINER producer of due work, owned by '
+  'svc_clock with EXECUTE granted to svc_worker, and pinned to '
+  'search_path = pg_catalog, public. One call runs five legs in order - '
+  'recurring system singletons, due account slots, due credential refreshes, '
+  'due source syncs, and reauth prompts. The legs share one budget: p_max caps '
+  'the first, and each later leg draws only on what the ones before it left, so '
+  'one call mints at most p_max rows. It is NOT the only writer of jobs - '
+  'application services enqueue directly as well. The refresh leg is scoped to '
+  'provider ig_login and fails closed: a provider with no refresh door of its '
+  'own is skipped rather than minted.';
+
 ALTER FUNCTION fn_clock_tick(int, interval, jsonb) OWNER TO svc_clock;
 
 REVOKE CREATE ON SCHEMA public FROM svc_clock;
