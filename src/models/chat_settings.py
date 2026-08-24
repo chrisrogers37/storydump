@@ -32,6 +32,12 @@ class ChatSettings(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
 
     # Chat identification
+    # Production truth: NOT NULL until the relax migration lands (sequenced
+    # behind the #840 renumber). The personal-tenant door
+    # (get_or_create_personal) needs this column nullable — its integration
+    # suite applies the relax to the test schema as the same ALTER the
+    # migration will carry, and this model flips to nullable=True in that
+    # migration's PR so the schema-parity gate moves both sides together.
     telegram_chat_id = Column(BigInteger, nullable=False, unique=True, index=True)
     display_name = Column(String(100), nullable=True)
 

@@ -28,3 +28,22 @@ class TenantResolutionError(StorydumpError):
         super().__init__(
             f"tenant resolution refused: {reason}" + (f" — {detail}" if detail else "")
         )
+
+
+class TenantProvisioningError(StorydumpError):
+    """A tenant MINT was refused — provisioning, deliberately not resolution.
+
+    A separate type rather than a new ``TenantResolutionError`` reason: the
+    resolution vocabulary is a closed contract shared across the two tiers,
+    and a mint precondition failing (``unknown_user`` — the caller asked to
+    provision for a user row that does not exist) is not an identity failing
+    to resolve. Edges that map resolution reasons must not learn provisioning
+    by accident.
+    """
+
+    def __init__(self, reason: str, detail: str = ""):
+        self.reason = reason
+        super().__init__(
+            f"tenant provisioning refused: {reason}"
+            + (f" — {detail}" if detail else "")
+        )

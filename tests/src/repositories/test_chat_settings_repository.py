@@ -167,9 +167,10 @@ class TestChatSettingsRepository:
         result = settings_repo.get_all_active()
 
         assert len(result) == 1
-        # Verify .filter() received 2 conditions (is_paused + or_ clause)
+        # Verify .filter() received 3 conditions (NULL-chat exclusion +
+        # is_paused + or_ clause)
         filter_call = mock_query.filter.call_args
-        assert len(filter_call[0]) == 2
+        assert len(filter_call[0]) == 3
 
     def test_get_all_sync_enabled_returns_sync_chats(self, settings_repo, mock_db):
         """get_all_sync_enabled returns only chats with media_sync_enabled=True."""
