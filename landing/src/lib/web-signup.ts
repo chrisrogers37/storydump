@@ -42,9 +42,25 @@
 
 import type { SessionPayload } from "./session";
 
-/** Off unless a deploy explicitly turns it on. Never NEXT_PUBLIC_*. */
+/**
+ * Is the web sign-up surface on?
+ *
+ * An explicit WEB_SIGNUP_ENABLED wins in both directions. With it unset, the
+ * surface is ON for preview deployments and OFF everywhere else — production
+ * included, which is the property that matters.
+ *
+ * Preview-on exists so these screens can be looked at without a dashboard
+ * change: a branch push produces a preview with the surface live, and reviewing
+ * it is a URL rather than a request to someone with Vercel access. VERCEL_ENV is
+ * set by Vercel itself and is "production" on production, so this cannot leak
+ * there by accident. Never NEXT_PUBLIC_*: an auth-adjacent flag must not reach
+ * the browser bundle.
+ */
 export function webSignupEnabled(): boolean {
-  return process.env.WEB_SIGNUP_ENABLED === "true";
+  const explicit = process.env.WEB_SIGNUP_ENABLED;
+  if (explicit === "true") return true;
+  if (explicit === "false") return false;
+  return process.env.VERCEL_ENV === "preview";
 }
 
 /**
