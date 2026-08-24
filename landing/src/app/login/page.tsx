@@ -1,6 +1,8 @@
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 import { TelegramLoginButton } from "@/components/auth/telegram-login-button";
+import { GoogleLoginButton } from "@/components/auth/google-login-button";
+import { headers } from "next/headers";
 import { webSignupEnabled } from "@/lib/web-signup";
 import { siteConfig } from "@/config/site";
 
@@ -8,8 +10,15 @@ export const metadata = {
   title: `Login — ${siteConfig.name}`,
 };
 
-export default function LoginPage() {
+export default async function LoginPage() {
   const webSignup = webSignupEnabled();
+  // The origin decides whether Google sign-in can complete here at all — see
+  // GoogleLoginButton. Read from the request rather than configured, because
+  // the question is "where is this page being served", not "where should it be".
+  const h = await headers();
+  const host = h.get("host");
+  const proto = h.get("x-forwarded-proto") ?? "https";
+  const origin = host ? `${proto}://${host}` : null;
 
   return (
     <div className="flex min-h-svh flex-col items-center justify-center bg-background px-4">
@@ -23,7 +32,9 @@ export default function LoginPage() {
         </Link>
 
         <div className="space-y-2 text-center">
-          <h1 className="text-2xl font-bold tracking-tight">{siteConfig.name}</h1>
+          <h1 className="text-2xl font-bold tracking-tight">
+            {siteConfig.name}
+          </h1>
           <p className="text-muted-foreground text-sm">
             {webSignup
               ? "Sign in to access your dashboard."
@@ -33,6 +44,7 @@ export default function LoginPage() {
 
         <div className="rounded-lg border bg-card p-6 shadow-sm">
           <TelegramLoginButton />
+          {webSignup && <GoogleLoginButton origin={origin} />}
         </div>
 
         {/*
