@@ -1,4 +1,13 @@
-"""Cloud storage service for temporary media uploads (Cloudinary)."""
+"""Cloud storage service for temporary media uploads (Cloudinary).
+
+LEGACY PATH — serves only under ``WORKER_IMPL`` unset or ``legacy``, i.e. the
+M.3 rollback world (production armed ``target`` on 2026-08-24). It is kept
+correct rather than deleted because legacy is the cutover's designed
+instant-rollback lever and the default on an unset variable; retiring this
+module belongs to legacy retirement (window step 3g), not to a bug fix. The
+target-world equivalent is ``services/target/transit.py``, which sweeps per
+provider resource type (FC-3.3) and never shared this module's bug.
+"""
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -36,7 +45,7 @@ class CloudStorageService(BaseService):
         # result["url"] → Public URL for Instagram API
 
         # Delete after posting
-        service.delete_media(result["public_id"])
+        service.delete_media(result["public_id"], resource_type="image")
     """
 
     def __init__(self):
@@ -202,7 +211,7 @@ class CloudStorageService(BaseService):
         Returns:
             Dict of upload options for cloudinary.uploader.upload()
         """
-        resource_type = self._get_resource_type(path)
+        resource_type = self.resource_type_for(path)
 
         options = {
             "folder": folder,
@@ -218,22 +227,30 @@ class CloudStorageService(BaseService):
 
         return options
 
-    def delete_media(self, public_id: str) -> bool:
+    def delete_media(self, public_id: str, *, resource_type: str) -> bool:
         """
         Delete uploaded media from Cloudinary.
 
         Args:
             public_id: Cloudinary public_id from upload result
+            resource_type: The Cloudinary resource type the upload carried
+                ("image" or "video" — resource_type_for's range). REQUIRED,
+                deliberately (#1019): the SDK defaults to image, so a video
+                destroyed without this matches nothing and returns success —
+                videos were never deleted by any path. A default here would
+                silently re-arm that for the next caller.
 
         Returns:
             True if deleted successfully, False otherwise
         """
         with self.track_execution(
             method_name="delete_media",
-            input_params={"public_id": public_id},
+            input_params={"public_id": public_id, "resource_type": resource_type},
         ) as run_id:
             try:
-                result = cloudinary.uploader.destroy(public_id)
+                result = cloudinary.uploader.destroy(
+                    public_id, resource_type=resource_type
+                )
                 success = result.get("result") == "ok"
 
                 if success:
@@ -250,6 +267,21 @@ class CloudStorageService(BaseService):
                 logger.error(f"Failed to delete from Cloudinary: {e}")
                 self.set_result_summary(run_id, {"success": False, "error": str(e)})
                 return False
+
+    def delete_media_for_item(self, media_item) -> bool:
+        """Delete a media item's Cloudinary upload, deriving its resource type.
+
+        The one place the derive-then-delete idiom lives (#1019 review):
+        derives from ``file_name`` — the display filename, which carries a
+        real extension for every source — deliberately NOT ``file_path``,
+        which is a synthetic extensionless ``provider://id`` for
+        provider-sourced media (e.g. Google Drive) and would fall through to
+        the image default, re-creating the exact bug this fixes.
+        """
+        return self.delete_media(
+            media_item.cloud_public_id,
+            resource_type=self.resource_type_for(Path(media_item.file_name)),
+        )
 
     def get_url(self, public_id: str) -> Optional[str]:
         """
@@ -298,36 +330,47 @@ class CloudStorageService(BaseService):
                 # returns a next_cursor when more exist; without consuming it,
                 # cleanup would silently stop after the first page and leave
                 # orphaned uploads accruing storage cost indefinitely.
-                next_cursor = None
-                while True:
-                    result = cloudinary.api.resources(
-                        type="upload",
-                        prefix=folder,
-                        max_results=CLOUDINARY_RESOURCES_PAGE_SIZE,
-                        next_cursor=next_cursor,
-                    )
+                # One sweep per resource type the app uploads (#1019).
+                # api.resources defaults to image, so a sweep that never says
+                # resource_type cannot even LIST videos — they were invisible
+                # to cleanup, not merely undeleted. "raw" is deliberately not
+                # swept: resource_type_for never produces it, so raw items
+                # under the folder are not this app's to delete.
+                for resource_type in ("image", "video"):
+                    next_cursor = None
+                    while True:
+                        result = cloudinary.api.resources(
+                            type="upload",
+                            resource_type=resource_type,
+                            prefix=folder,
+                            max_results=CLOUDINARY_RESOURCES_PAGE_SIZE,
+                            next_cursor=next_cursor,
+                        )
 
-                    for resource in result.get("resources", []):
-                        # Parse Cloudinary's created_at timestamp
-                        created_at_str = resource.get("created_at", "")
-                        if created_at_str:
-                            try:
-                                # Cloudinary format: "2024-01-11T12:00:00Z"
-                                created_at = datetime.fromisoformat(
-                                    created_at_str.replace("Z", "+00:00")
-                                )
+                        for resource in result.get("resources", []):
+                            # Parse Cloudinary's created_at timestamp
+                            created_at_str = resource.get("created_at", "")
+                            if created_at_str:
+                                try:
+                                    # Cloudinary format: "2024-01-11T12:00:00Z"
+                                    created_at = datetime.fromisoformat(
+                                        created_at_str.replace("Z", "+00:00")
+                                    )
 
-                                if created_at < cutoff:
-                                    if self.delete_media(resource["public_id"]):
-                                        deleted_count += 1
-                            except ValueError:
-                                logger.warning(
-                                    f"Could not parse date for {resource['public_id']}: {created_at_str}"
-                                )
+                                    if created_at < cutoff:
+                                        if self.delete_media(
+                                            resource["public_id"],
+                                            resource_type=resource_type,
+                                        ):
+                                            deleted_count += 1
+                                except ValueError:
+                                    logger.warning(
+                                        f"Could not parse date for {resource['public_id']}: {created_at_str}"
+                                    )
 
-                    next_cursor = result.get("next_cursor")
-                    if not next_cursor:
-                        break
+                        next_cursor = result.get("next_cursor")
+                        if not next_cursor:
+                            break
 
                 logger.info(
                     f"Cleaned up {deleted_count} expired uploads from Cloudinary"
@@ -352,8 +395,13 @@ class CloudStorageService(BaseService):
             ]
         )
 
-    def _get_resource_type(self, path: Path) -> str:
-        """Determine Cloudinary resource type from file extension."""
+    def resource_type_for(self, path: Path) -> str:
+        """Determine Cloudinary resource type from file extension.
+
+        Public because deletion callers need it too (#1019): every removal
+        must carry the same resource_type the upload carried, or the SDK's
+        image default silently deletes nothing.
+        """
         video_extensions = {".mp4", ".mov", ".avi", ".webm", ".mkv"}
         if path.suffix.lower() in video_extensions:
             return "video"

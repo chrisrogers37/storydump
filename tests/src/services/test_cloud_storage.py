@@ -327,17 +327,21 @@ class TestCloudStorageService:
         """Test successful media deletion."""
         mock_cloudinary.uploader.destroy.return_value = {"result": "ok"}
 
-        result = cloud_service.delete_media("storydump/test_image")
+        result = cloud_service.delete_media(
+            "storydump/test_image", resource_type="image"
+        )
 
         assert result is True
-        mock_cloudinary.uploader.destroy.assert_called_once_with("storydump/test_image")
+        mock_cloudinary.uploader.destroy.assert_called_once_with(
+            "storydump/test_image", resource_type="image"
+        )
 
     @patch("src.services.integrations.cloud_storage.cloudinary")
     def test_delete_media_not_found(self, mock_cloudinary, cloud_service):
         """Test delete returns False when image not found."""
         mock_cloudinary.uploader.destroy.return_value = {"result": "not found"}
 
-        result = cloud_service.delete_media("nonexistent")
+        result = cloud_service.delete_media("nonexistent", resource_type="image")
 
         assert result is False
 
@@ -348,9 +352,57 @@ class TestCloudStorageService:
         mock_cloudinary.exceptions.Error = Exception
         mock_cloudinary.uploader.destroy.side_effect = Exception("Delete failed")
 
-        result = cloud_service.delete_media("test_id")
+        result = cloud_service.delete_media("test_id", resource_type="video")
 
         assert result is False
+
+    @patch("src.services.integrations.cloud_storage.cloudinary")
+    def test_delete_video_destroy_carries_video_resource_type(
+        self, mock_cloudinary, cloud_service
+    ):
+        """THE #1019 shape assert: a video's destroy must say resource_type=
+        "video". The SDK defaults to image, so a destroy without it matches
+        nothing, returns success, and the video lives forever. A test that
+        only asserts destroy-was-called passes WITH the bug present — this one
+        asserts the call shape and goes red if the fix is reverted."""
+        mock_cloudinary.uploader.destroy.return_value = {"result": "ok"}
+
+        result = cloud_service.delete_media("fake-video-abc123", resource_type="video")
+
+        assert result is True
+        mock_cloudinary.uploader.destroy.assert_called_once_with(
+            "fake-video-abc123", resource_type="video"
+        )
+
+    def test_delete_media_requires_resource_type(self, cloud_service):
+        """The parameter is deliberately required: an image default would
+        silently re-arm the bug for the next forgetful caller."""
+        with pytest.raises(TypeError):
+            cloud_service.delete_media("fake-id-no-type")
+
+    @patch("src.services.integrations.cloud_storage.cloudinary")
+    def test_delete_media_for_item_derives_from_file_name_not_file_path(
+        self, mock_cloudinary, cloud_service
+    ):
+        """The Drive-shape regression pin (#1019 review finding 1):
+        provider-sourced media carry a synthetic extensionless file_path
+        (provider://id) while file_name holds the real extension. Deriving
+        from file_path silently classifies every Drive video as image and
+        re-creates the exact bug — this goes red if the derivation ever
+        moves back to file_path."""
+        from unittest.mock import Mock as _Mock
+
+        mock_cloudinary.uploader.destroy.return_value = {"result": "ok"}
+        drive_video = _Mock(
+            cloud_public_id="fake-drive-vid-1",
+            file_path="google_drive://fake-identifier",
+            file_name="clip.mp4",
+        )
+
+        assert cloud_service.delete_media_for_item(drive_video) is True
+        mock_cloudinary.uploader.destroy.assert_called_once_with(
+            "fake-drive-vid-1", resource_type="video"
+        )
 
     # ==================== get_url Tests ====================
 
@@ -404,19 +456,26 @@ class TestCloudStorageService:
             "%Y-%m-%dT%H:%M:%SZ"
         )
 
-        mock_cloudinary.api.resources.return_value = {
-            "resources": [
-                {"public_id": "storydump/old_image", "created_at": old_date},
-                {"public_id": "storydump/new_image", "created_at": new_date},
-            ]
-        }
+        def resources_side_effect(**kwargs):
+            if kwargs.get("resource_type") == "image":
+                return {
+                    "resources": [
+                        {"public_id": "storydump/old_image", "created_at": old_date},
+                        {"public_id": "storydump/new_image", "created_at": new_date},
+                    ]
+                }
+            return {"resources": []}
+
+        mock_cloudinary.api.resources.side_effect = resources_side_effect
         mock_cloudinary.uploader.destroy.return_value = {"result": "ok"}
 
         deleted_count = cloud_service.cleanup_expired()
 
         # Only the old resource should be deleted
         assert deleted_count == 1
-        mock_cloudinary.uploader.destroy.assert_called_once_with("storydump/old_image")
+        mock_cloudinary.uploader.destroy.assert_called_once_with(
+            "storydump/old_image", resource_type="image"
+        )
 
     @patch("src.services.integrations.cloud_storage.cloudinary")
     def test_cleanup_expired_no_old_resources(self, mock_cloudinary, cloud_service):
@@ -479,14 +538,22 @@ class TestCloudStorageService:
                 {"public_id": "storydump/old_page2", "created_at": old_date},
             ],
         }
-        mock_cloudinary.api.resources.side_effect = [page_one, page_two]
+        empty_page = {"resources": []}
+
+        def resources_side_effect(**kwargs):
+            if kwargs.get("resource_type") != "image":
+                return empty_page
+            return page_two if kwargs.get("next_cursor") else page_one
+
+        mock_cloudinary.api.resources.side_effect = resources_side_effect
         mock_cloudinary.uploader.destroy.return_value = {"result": "ok"}
 
         deleted_count = cloud_service.cleanup_expired()
 
         # Both pages' expired uploads are deleted, not just the first page.
         assert deleted_count == 2
-        assert mock_cloudinary.api.resources.call_count == 2
+        # 2 image pages + 1 empty video page
+        assert mock_cloudinary.api.resources.call_count == 3
         # The second request must forward the cursor returned by the first.
         second_call_kwargs = mock_cloudinary.api.resources.call_args_list[1][1]
         assert second_call_kwargs["next_cursor"] == "cursor_page_2"
@@ -495,23 +562,72 @@ class TestCloudStorageService:
         }
         assert destroyed == {"storydump/old_page1", "storydump/old_page2"}
 
-    # ==================== _get_resource_type Tests ====================
+    # ==================== resource_type_for Tests ====================
 
     def test_get_resource_type_image_extensions(self, cloud_service):
         """Test resource type detection for image files."""
-        assert cloud_service._get_resource_type(Path("test.jpg")) == "image"
-        assert cloud_service._get_resource_type(Path("test.jpeg")) == "image"
-        assert cloud_service._get_resource_type(Path("test.png")) == "image"
-        assert cloud_service._get_resource_type(Path("test.gif")) == "image"
+        assert cloud_service.resource_type_for(Path("test.jpg")) == "image"
+        assert cloud_service.resource_type_for(Path("test.jpeg")) == "image"
+        assert cloud_service.resource_type_for(Path("test.png")) == "image"
+        assert cloud_service.resource_type_for(Path("test.gif")) == "image"
 
     def test_get_resource_type_video_extensions(self, cloud_service):
         """Test resource type detection for video files."""
-        assert cloud_service._get_resource_type(Path("test.mp4")) == "video"
-        assert cloud_service._get_resource_type(Path("test.mov")) == "video"
-        assert cloud_service._get_resource_type(Path("test.avi")) == "video"
-        assert cloud_service._get_resource_type(Path("test.webm")) == "video"
+        assert cloud_service.resource_type_for(Path("test.mp4")) == "video"
+        assert cloud_service.resource_type_for(Path("test.mov")) == "video"
+        assert cloud_service.resource_type_for(Path("test.avi")) == "video"
+        assert cloud_service.resource_type_for(Path("test.webm")) == "video"
 
     def test_get_resource_type_case_insensitive(self, cloud_service):
         """Test resource type detection is case insensitive."""
-        assert cloud_service._get_resource_type(Path("test.MP4")) == "video"
-        assert cloud_service._get_resource_type(Path("test.JPG")) == "image"
+        assert cloud_service.resource_type_for(Path("test.MP4")) == "video"
+        assert cloud_service.resource_type_for(Path("test.JPG")) == "image"
+
+    @patch("src.services.integrations.cloud_storage.cloudinary")
+    def test_cleanup_expired_sweeps_each_resource_type(
+        self, mock_cloudinary, cloud_service
+    ):
+        """The #1019 sweep half: api.resources defaults to image, so a sweep
+        that never says resource_type cannot even LIST videos. The sweep must
+        run once per type the app uploads (image and video, the range of
+        resource_type_for) and destroy each expired item with its own type."""
+        old = (datetime.now() - timedelta(hours=48)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        def resources_side_effect(**kwargs):
+            rt = kwargs.get("resource_type")
+            assert rt in ("image", "video"), (
+                f"api.resources called without an explicit resource_type "
+                f"(got {rt!r}) — the SDK default is image and videos are "
+                f"never listed"
+            )
+            if rt == "image":
+                return {
+                    "resources": [
+                        {"public_id": "fake-img-1", "created_at": old},
+                    ]
+                }
+            return {
+                "resources": [
+                    {"public_id": "fake-vid-1", "created_at": old},
+                ]
+            }
+
+        mock_cloudinary.api.resources.side_effect = resources_side_effect
+        mock_cloudinary.uploader.destroy.return_value = {"result": "ok"}
+
+        deleted = cloud_service.cleanup_expired(folder="storydump")
+
+        assert deleted == 2
+        listed_types = {
+            c.kwargs.get("resource_type")
+            for c in mock_cloudinary.api.resources.call_args_list
+        }
+        assert listed_types == {"image", "video"}
+        destroy_calls = {
+            (c.args[0], c.kwargs.get("resource_type"))
+            for c in mock_cloudinary.uploader.destroy.call_args_list
+        }
+        assert destroy_calls == {
+            ("fake-img-1", "image"),
+            ("fake-vid-1", "video"),
+        }
