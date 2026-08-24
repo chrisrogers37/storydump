@@ -1058,6 +1058,37 @@ class TestExecuteInstagramPost:
         assert call_kwargs["media_url"] == "https://res.cloudinary.com/test/video.mp4"
         assert call_kwargs["media_type"] == "VIDEO"
 
+    async def test_provider_sourced_video_posts_as_video(
+        self, mock_autopost_handler, make_autopost_ctx
+    ):
+        """The #1024 site pin: Drive-shaped media carry an extensionless
+        file_path (google_drive://id) — the old file_path predicate was
+        always false for them, posting every Drive video as IMAGE (measured
+        140/140). Goes red if the predicate reverts to file_path."""
+        handler = mock_autopost_handler
+        mock_cloud = Mock()
+        mock_ig = Mock()
+        mock_ig.post_story = AsyncMock(return_value={"story_id": "vid456"})
+
+        drive_video = Mock(
+            id=uuid4(),
+            file_path="google_drive://fake-identifier",
+            file_name="story.mp4",
+            source_identifier="fake-identifier",
+            mime_type="video/mp4",
+        )
+
+        ctx = make_autopost_ctx(
+            media_item=drive_video,
+            cloud_service=mock_cloud,
+            instagram_service=mock_ig,
+            cloud_url="https://res.cloudinary.com/test/video.mp4",
+        )
+
+        await handler._execute_instagram_post(ctx)
+
+        assert mock_ig.post_story.call_args.kwargs["media_type"] == "VIDEO"
+
 
 @pytest.mark.unit
 class TestRecordSuccessfulPost:

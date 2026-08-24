@@ -1,6 +1,8 @@
 """Scheduler service - JIT posting schedule with per-slot media selection."""
 
 from datetime import datetime, timedelta, timezone
+
+from src.utils.media_kind import instagram_media_type
 from typing import Optional, List, Union
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import random
@@ -850,12 +852,7 @@ class SchedulerService(BaseService):
                 logger.warning("Auto-approve Cloudinary upload returned no URL")
                 return None
 
-            media_type = (
-                "VIDEO"
-                if media_item.file_path
-                and media_item.file_path.lower().endswith((".mp4", ".mov"))
-                else "IMAGE"
-            )
+            media_type = instagram_media_type(media_item)
             story_url = (
                 cloud_service.get_story_optimized_url(cloud_url)
                 if media_type == "IMAGE"
