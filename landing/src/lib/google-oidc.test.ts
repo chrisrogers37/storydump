@@ -128,10 +128,34 @@ describe("the state cookie", () => {
   });
 
   it("refuses a tampered token", async () => {
+    // TAMPER THE FIRST SIGNATURE CHARACTER, NOT THE LAST, and assert the tamper
+    // actually landed before asserting the rejection.
+    //
+    // The last character is the wrong place: a 43-char base64url HS256
+    // signature carries 258 bits for 256 bits of payload, so the final
+    // character's low 2 bits are PADDING and carry no signature information.
+    // Flipping an "A" to a "B" there decodes to identical bytes and the token
+    // still verifies. Measured: final characters are drawn from exactly 16
+    // values (048AEIMQUYcgkosw), ~6.9% of signatures end in "A", and 275 of 275
+    // such flips produced byte-identical output. That made this test fail
+    // roughly 1 run in 15 — and a security assertion that reds at random gets
+    // muted or retried, at which point it protects nothing. Character 0 carries
+    // six significant bits: 0 no-op tampers in 5000.
+    //
+    // The byte assertion below is the part that keeps this honest. It is a
+    // positive control on the tamper itself, so if anyone changes the technique
+    // to something that silently does not mutate, THIS fails loudly instead of
+    // the test going quietly green for the wrong reason.
     configure();
     const { stateToken } = await beginAuth();
     const [h, p, s] = stateToken.split(".");
-    const flipped = s.slice(0, -1) + (s.endsWith("A") ? "B" : "A");
+    const flipped = (s[0] === "A" ? "B" : "A") + s.slice(1);
+
+    expect(
+      Buffer.from(flipped, "base64url").equals(Buffer.from(s, "base64url")),
+      "the tamper did not change the signature bytes — this test would pass vacuously",
+    ).toBe(false);
+
     expect(await readStateToken(`${h}.${p}.${flipped}`)).toBeNull();
   });
 

@@ -42,7 +42,10 @@ export default async function LoginPage() {
           </p>
         </div>
 
-        <div className="rounded-lg border bg-card p-6 shadow-sm">
+        {/* space-y-3: with two sign-in controls the card has no gap between them
+            and no separator, so a full-bleed Google button butts straight against
+            the Telegram widget's 56px block. Harmless with one child. */}
+        <div className="space-y-3 rounded-lg border bg-card p-6 shadow-sm">
           <TelegramLoginButton />
           {webSignup && <GoogleLoginButton origin={origin} />}
         </div>
