@@ -1366,7 +1366,7 @@ class TestCloudinaryCleanup:
 
         handler._cleanup_cloudinary(ctx)
 
-        mock_cloud.delete_media.assert_called_once_with("instagram_stories/abc")
+        mock_cloud.delete_media_for_item.assert_called_once()
         handler.service.media_repo.update_cloud_info.assert_called_once_with(
             media_id=str(ctx.media_item.id),
             cloud_url=None,
@@ -1410,7 +1410,7 @@ class TestCloudinaryCleanup:
         """Test that when delete_media returns False, DB fields are not cleared."""
         handler = mock_autopost_handler
         mock_cloud = Mock()
-        mock_cloud.delete_media.return_value = False
+        mock_cloud.delete_media_for_item.return_value = False
 
         ctx = make_autopost_ctx(
             cloud_service=mock_cloud,
@@ -1419,7 +1419,7 @@ class TestCloudinaryCleanup:
 
         handler._cleanup_cloudinary(ctx)
 
-        mock_cloud.delete_media.assert_called_once()
+        mock_cloud.delete_media_for_item.assert_called_once()
         handler.service.media_repo.update_cloud_info.assert_not_called()
 
 
@@ -1487,7 +1487,7 @@ class TestCloudinaryCleanupIntegration:
                 mock_cloud,
             )
 
-        mock_cloud.delete_media.assert_called_once_with("instagram_stories/test123")
+        mock_cloud.delete_media_for_item.assert_called_once()
 
     async def test_cleanup_called_after_dry_run(
         self, mock_autopost_handler, make_autopost_ctx
@@ -1510,7 +1510,7 @@ class TestCloudinaryCleanupIntegration:
 
         await handler._handle_dry_run(ctx)
 
-        mock_cloud.delete_media.assert_called_once_with("instagram_stories/abc")
+        mock_cloud.delete_media_for_item.assert_called_once()
 
     async def test_cleanup_called_on_error(
         self, mock_autopost_handler, make_autopost_ctx
@@ -1527,7 +1527,7 @@ class TestCloudinaryCleanupIntegration:
 
         await handler._handle_autopost_error(ctx, Exception("some error"))
 
-        mock_cloud.delete_media.assert_called_once_with("instagram_stories/err")
+        mock_cloud.delete_media_for_item.assert_called_once()
 
     async def test_cleanup_called_on_cancel_after_upload(
         self, mock_autopost_handler, make_autopost_ctx
@@ -1555,7 +1555,7 @@ class TestCloudinaryCleanupIntegration:
             result = await handler._upload_to_cloudinary(ctx)
 
         assert result is False
-        mock_cloud.delete_media.assert_called_once_with("instagram_stories/cancelled")
+        mock_cloud.delete_media_for_item.assert_called_once()
 
     async def test_cleanup_failure_does_not_break_success_flow(
         self, mock_autopost_handler, make_autopost_ctx

@@ -641,7 +641,7 @@ class TelegramAutopostHandler:
             return
 
         try:
-            deleted = ctx.cloud_service.delete_media(ctx.cloud_public_id)
+            deleted = ctx.cloud_service.delete_media_for_item(ctx.media_item)
             if deleted:
                 self.service.media_repo.update_cloud_info(
                     media_id=str(ctx.media_item.id),

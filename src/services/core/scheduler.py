@@ -877,7 +877,7 @@ class SchedulerService(BaseService):
             # must run either way.
             if cloud_public_id:
                 try:
-                    cloud_service.delete_media(cloud_public_id)
+                    cloud_service.delete_media_for_item(media_item)
                 except Exception:
                     pass
             instagram_service.close()
