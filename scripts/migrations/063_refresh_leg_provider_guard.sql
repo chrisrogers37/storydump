@@ -46,8 +46,10 @@
 -- A schema comment outlives everyone who remembers writing it, so this one
 -- states only what was checked against the catalog and the source, and claims no
 -- exclusivity it does not have: fn_clock_tick is NOT the only writer of `jobs`
--- (media_sync, scheduler and work_loop each INSERT directly), and the EXECUTE
--- grant is a grant, not a guarantee that nothing else can call it.
+-- (two services INSERT directly - media_sync chaining an ingest page, and
+-- work_loop re-minting an outbox sender; a naive grep also hits scheduler.py,
+-- but that one is a DOCSTRING quoting this very function's recurring leg), and
+-- the EXECUTE grant is a grant, not a guarantee that nothing else can call it.
 --
 -- The probe therefore tests the comment's PRESENCE, never its text. Matching the
 -- wording would re-create inside this option the form-matching that disqualified
