@@ -32,12 +32,14 @@ class ChatSettings(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
 
     # Chat identification
-    # NULLABLE since 064: a workspace created through web signup has no
-    # Telegram binding. The column is now an OPTIONAL BINDING ATTRIBUTE, not
-    # the tenant's identity -- `id` is the identity and always was. UNIQUE is
-    # kept: Postgres UNIQUE is NULLS DISTINCT, so many unbound workspaces
-    # coexist while a real chat id still collides.
-    telegram_chat_id = Column(BigInteger, nullable=True, unique=True, index=True)
+    # STILL NOT NULL, and it must stay that way until the DDL lands (#1015).
+    # Web signup needs this nullable -- `id` is the tenant identity and this is
+    # an optional binding -- but the drop lives in an UNNUMBERED file
+    # (scripts/migrations/proposed/), so flipping it here alone would make the
+    # model disagree with the corpus. `TestSchemaParity` replays the
+    # migrations and diffs them against these models; it caught exactly that.
+    # The flip ships in the same PR as the numbered migration, never before.
+    telegram_chat_id = Column(BigInteger, nullable=False, unique=True, index=True)
     display_name = Column(String(100), nullable=True)
 
     # Operational settings

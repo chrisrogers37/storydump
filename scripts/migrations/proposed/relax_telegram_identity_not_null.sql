@@ -36,6 +36,16 @@
 -- is inert: `discover_migrations` ignores anything not matching `NNN_*.sql`,
 -- and this lives in a subdirectory besides.
 --
+-- THE SQLALCHEMY MODELS FLIP IN THE SAME PR AS THIS FILE, NEVER BEFORE.
+-- `src/models/user.py` and `src/models/chat_settings.py` still declare
+-- `nullable=False`, deliberately. `TestSchemaParity` replays the corpus and
+-- diffs it against the models, so a model that moves ahead of the DDL reddens
+-- it -- measured, which is how the pairing was found rather than assumed. The
+-- reverse matters too: leaving the models behind after this lands would make
+-- the DDL cosmetic, because the ORM would keep refusing the insert the
+-- database now permits. Both directions are pinned by
+-- `test_chat_settings.py` and `test_user_telegram_identity.py`.
+--
 -- HAS NOT BEEN RUN AGAINST ANY DATABASE. The behaviour below was verified on a
 -- throwaway PostgreSQL 16 container built from 006's DDL — see the PR body.
 

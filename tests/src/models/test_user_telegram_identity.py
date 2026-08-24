@@ -18,14 +18,21 @@ class TestUserTelegramIdentity:
         assert User.id.primary_key is True
         assert User.telegram_user_id.primary_key is False
 
-    def test_telegram_user_id_is_nullable(self):
-        """A user who signed up on the web has no Telegram identity.
+    def test_telegram_user_id_is_not_nullable_yet(self):
+        """The other half of the #1015 lockstep tripwire.
 
-        Must agree with `proposed/relax_telegram_identity_not_null.sql`: a model
-        still declaring `nullable=False` would make that DDL cosmetic, because
-        the ORM would keep refusing the insert the database now permits.
+        `users` had no nullability test at all, so the model/DDL pairing that
+        matters for web signup was pinned on one of the two columns and not the
+        other. It is pinned on both now.
+
+        When `proposed/relax_telegram_identity_not_null.sql` is numbered and
+        lands, this flips WITH the model in that PR. Flipping the model first
+        reddens `TestSchemaParity`, which replays the corpus and diffs it
+        against these models — and leaving the model behind afterwards would
+        make the DDL cosmetic, since the ORM would keep refusing the insert the
+        database now permits. Both directions are covered.
         """
-        assert User.telegram_user_id.nullable is True
+        assert User.telegram_user_id.nullable is False
 
     def test_telegram_user_id_is_still_unique(self):
         """NULLS DISTINCT lets many web-only users coexist while a real

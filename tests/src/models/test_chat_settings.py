@@ -17,31 +17,29 @@ class TestChatSettingsModel:
         assert callable(default_fn)
         assert default_fn.__name__ == "uuid4"
 
-    def test_telegram_chat_id_is_nullable(self):
-        """RE-POINTED, not deleted (#1015).
+    def test_telegram_chat_id_is_not_nullable_yet(self):
+        """The LOCKSTEP tripwire for #1015, not a statement that this is right.
 
-        This asserted `nullable is False` and was correct until the binding
-        stopped being the tenant's identity. A workspace created through web
-        signup has no Telegram chat, so the column is now an OPTIONAL BINDING
-        ATTRIBUTE and `id` carries the identity it always carried.
+        Web signup needs this nullable — `chat_settings.id` is the tenant
+        identity and this is an optional binding. The DDL that drops it is
+        written but UNNUMBERED (`scripts/migrations/proposed/`), because the
+        legacy lineage has no free slot; see that file's header.
 
-        The assertion is inverted rather than removed because the fact is still
-        worth pinning — in the other direction. Restoring `NOT NULL` would make
-        every web workspace unrepresentable, and this is what would say so.
-
-        It also has to agree with the DDL: `proposed/
-        relax_telegram_identity_not_null.sql` drops the constraint, and a model
-        still declaring `nullable=False` would make that DDL cosmetic (the ORM
-        would keep refusing the insert the database now permits).
+        The model must not move ahead of the corpus. `TestSchemaParity` replays
+        the migrations and diffs them against these models, so flipping the
+        model alone reddens it — measured, that is how this pairing was found.
+        When the migration is numbered and lands, this assertion and the model
+        flip in the same PR, and so does its twin in
+        `test_user_telegram_identity.py`.
         """
-        assert ChatSettings.telegram_chat_id.nullable is True
+        assert ChatSettings.telegram_chat_id.nullable is False
 
-    def test_telegram_chat_id_is_still_unique(self):
-        """UNIQUE survives the nullability change, and must.
+    def test_telegram_chat_id_is_unique(self):
+        """UNIQUE must survive the eventual nullability change.
 
-        PostgreSQL UNIQUE is NULLS DISTINCT, so many unbound workspaces coexist
-        while a real chat id still collides — which is the only reason dropping
-        NOT NULL is safe here rather than merely convenient.
+        PostgreSQL UNIQUE is NULLS DISTINCT, so many unbound workspaces will
+        coexist while a real chat id still collides — which is the only reason
+        dropping NOT NULL is safe here rather than merely convenient.
         """
         assert ChatSettings.telegram_chat_id.unique is True
 
