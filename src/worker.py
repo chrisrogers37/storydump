@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from src.services.target import credential_lifecycle, jobs, scheduler, unit_of_work
+from src.services.target import health as health_endpoint
 from src.services.target import prompts as prompts_mod
 from src.services.target.work_loop import (
     Parked,
@@ -389,6 +390,14 @@ async def run(app: WorkerApp, *, stop: asyncio.Event | None = None) -> None:
         except NotImplementedError:  # pragma: no cover - non-unix
             pass
 
+    # BEFORE the first database connection, deliberately. Railway times the
+    # SOCKET, not the program: `main.py` records the previous occurrence of this
+    # exact trap, where slow startup steps ran ahead of the listener and healthy
+    # deploys were marked FAILED. Binding here means the endpoint answers for the
+    # whole of startup however slow the connections and the election turn out to
+    # be, which is also why this root needs no startup-grace constant.
+    health_server = app.health_server = await health_endpoint.serve_health(app)
+
     election_conn = await engine.connect()
     claim_conns = [await engine.connect() for _ in app.loops]
     for wl, conn in zip(app.loops, claim_conns):
@@ -467,6 +476,8 @@ async def run(app: WorkerApp, *, stop: asyncio.Event | None = None) -> None:
             ):
                 logger.error("lane raised during shutdown: %r", result)
         await clock.stop()
+        health_server.close()
+        await health_server.wait_closed()
         await app.heartbeat.stop()
         hb_task.cancel()
         await asyncio.gather(hb_task, return_exceptions=True)
