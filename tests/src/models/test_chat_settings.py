@@ -17,10 +17,30 @@ class TestChatSettingsModel:
         assert callable(default_fn)
         assert default_fn.__name__ == "uuid4"
 
-    def test_telegram_chat_id_not_nullable(self):
+    def test_telegram_chat_id_is_not_nullable_yet(self):
+        """The LOCKSTEP tripwire for #1015, not a statement that this is right.
+
+        Web signup needs this nullable — `chat_settings.id` is the tenant
+        identity and this is an optional binding. The DDL that drops it is
+        written but UNNUMBERED (`scripts/migrations/proposed/`), because the
+        legacy lineage has no free slot; see that file's header.
+
+        The model must not move ahead of the corpus. `TestSchemaParity` replays
+        the migrations and diffs them against these models, so flipping the
+        model alone reddens it — measured, that is how this pairing was found.
+        When the migration is numbered and lands, this assertion and the model
+        flip in the same PR, and so does its twin in
+        `test_user_telegram_identity.py`.
+        """
         assert ChatSettings.telegram_chat_id.nullable is False
 
     def test_telegram_chat_id_is_unique(self):
+        """UNIQUE must survive the eventual nullability change.
+
+        PostgreSQL UNIQUE is NULLS DISTINCT, so many unbound workspaces will
+        coexist while a real chat id still collides — which is the only reason
+        dropping NOT NULL is safe here rather than merely convenient.
+        """
         assert ChatSettings.telegram_chat_id.unique is True
 
     def test_dry_run_mode_defaults_to_false(self):

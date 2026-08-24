@@ -36,6 +36,9 @@ class User(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
 
     # Telegram identity (source of truth)
+    # STILL NOT NULL until the DDL lands (#1015) -- see the note on
+    # ChatSettings.telegram_chat_id. Model and corpus flip together or
+    # TestSchemaParity fails, which is the gate working.
     telegram_user_id = Column(BigInteger, unique=True, nullable=False, index=True)
     telegram_username = Column(String(100))
     telegram_first_name = Column(String(255))
