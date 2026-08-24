@@ -28,6 +28,26 @@ URL_TOKEN_TTL = 3600  # 1 hour
 # fix, not a tolerance to widen.
 CLOCK_SKEW_TOLERANCE = 60  # 1 minute
 
+# Web-session credential (#1015). A BFF-minted credential for a user who has no
+# Telegram identity at all, so nothing about it can be Telegram-shaped: the
+# subject is the platform-neutral `users.id`, the tenant is `chat_settings.id`,
+# and the signing key is its own secret rather than the bot token.
+#
+# WHY A SEPARATE SECRET AND NOT TELEGRAM_BOT_TOKEN. The bot token is the crypto
+# root for both Telegram credentials above. A user who never touches Telegram
+# must not depend on it: rotating the bot token would invalidate web sessions,
+# and a bot-token compromise would mint web credentials. Severing the root is
+# most of the point of this credential existing.
+WEB_TOKEN_TTL = 3600  # 1 hour, matching URL_TOKEN_TTL
+
+# Version prefix, and a separator that CANNOT occur in the payload. UUIDs carry
+# hyphens but never dots, so a dot-delimited web token and a colon-delimited URL
+# token are mutually unparseable rather than merely different -- neither
+# validator can partially consume the other's input and report a misleading
+# reason.
+WEB_TOKEN_PREFIX = "sd1"
+WEB_TOKEN_PARTS = 6
+
 
 def validate_init_data(init_data: str) -> dict:
     """Validate Telegram WebApp initData and extract user info.
@@ -160,3 +180,104 @@ def validate_url_token(token: str) -> dict:
         raise ValueError("Token expired")
 
     return {"user_id": user_id, "chat_id": chat_id}
+
+
+def _web_token_key() -> bytes:
+    """Derive the web-credential signing key, or refuse.
+
+    Fail-closed on an unset secret: an empty key would still produce a valid
+    HMAC, so every deployment that forgot to configure one would silently share
+    the same signing key. Refusing here means an unconfigured deployment mints
+    and accepts nothing rather than accepting everything.
+    """
+    secret = getattr(settings, "WEB_TOKEN_SECRET", None)
+    if not secret:
+        raise ValueError("WEB_TOKEN_SECRET is not configured")
+    return hmac.new(b"WebToken", secret.encode(), hashlib.sha256).digest()
+
+
+def generate_web_token(user_uuid: str, chat_settings_id: str, nonce: str) -> str:
+    """Mint a web-session credential.
+
+    Format: ``sd1.{user_id}.{chat_settings_id}.{timestamp}.{nonce}.{signature}``
+
+    Both subjects are the resolved platform-neutral primary keys, so validation
+    performs no Telegram lookup and the credential names its own tenant.
+
+    ``nonce`` is carried from birth for #587 (single-use replay protection).
+    THIS FUNCTION DOES NOT MAKE THE TOKEN SINGLE-USE -- there is no nonce store
+    yet, and within the TTL a captured token still replays exactly as the
+    Telegram credentials do. The field exists so that adding the store is a
+    change to the validator alone, never a format migration.
+    """
+    for name, value in (
+        ("user_uuid", user_uuid),
+        ("chat_settings_id", chat_settings_id),
+        ("nonce", nonce),
+    ):
+        if not value or "." in str(value):
+            raise ValueError(f"Invalid {name} for a web token")
+    timestamp = int(time.time())
+    payload = f"{WEB_TOKEN_PREFIX}.{user_uuid}.{chat_settings_id}.{timestamp}.{nonce}"
+    signature = hmac.new(_web_token_key(), payload.encode(), hashlib.sha256).hexdigest()
+    return f"{payload}.{signature}"
+
+
+def validate_web_token(token: str) -> dict:
+    """Validate a web-session credential and extract its subjects.
+
+    Returns:
+        dict with ``user_uuid`` (a ``users.id`` UUID string), ``chat_settings_id``
+        (a ``chat_settings.id`` UUID string) and ``nonce``.
+
+        NEITHER KEY COLLIDES WITH THE TELEGRAM VALIDATORS, and that is a safety
+        property rather than a naming preference. Those return ``user_id`` and
+        ``chat_id`` carrying INTEGERS. Reusing ``user_id`` for a UUID string
+        would hand that string to ``is_active_member``, whose repository
+        compares it against a ``BigInteger`` column. Under distinct names a
+        Telegram-shaped caller reading ``user_id``/``chat_id`` off a web result
+        gets ``None`` for both and fails closed, which is the outcome we want
+        from a caller that has not been taught about this credential.
+
+    Raises:
+        ValueError: on a missing secret, a malformed token, a bad signature, or
+            a token that is expired or future-dated.
+    """
+    if not token:
+        raise ValueError("Empty token")
+
+    parts = token.split(".")
+    if len(parts) != WEB_TOKEN_PARTS or parts[0] != WEB_TOKEN_PREFIX:
+        raise ValueError("Invalid token format")
+
+    _, user_uuid, chat_settings_id, timestamp_str, nonce, received_sig = parts
+
+    if not user_uuid or not chat_settings_id or not nonce:
+        raise ValueError("Invalid token values")
+
+    try:
+        timestamp = int(timestamp_str)
+    except (ValueError, TypeError):
+        raise ValueError("Invalid token values")
+
+    payload = f"{WEB_TOKEN_PREFIX}.{user_uuid}.{chat_settings_id}.{timestamp}.{nonce}"
+    computed_sig = hmac.new(
+        _web_token_key(), payload.encode(), hashlib.sha256
+    ).hexdigest()
+
+    if not hmac.compare_digest(computed_sig, received_sig):
+        raise ValueError("Invalid token signature")
+
+    # Bounded in both directions on the same terms as the URL token; see
+    # CLOCK_SKEW_TOLERANCE.
+    age = time.time() - timestamp
+    if age < -CLOCK_SKEW_TOLERANCE:
+        raise ValueError("Token timestamp is in the future")
+    if age > WEB_TOKEN_TTL:
+        raise ValueError("Token expired")
+
+    return {
+        "user_uuid": user_uuid,
+        "chat_settings_id": chat_settings_id,
+        "nonce": nonce,
+    }

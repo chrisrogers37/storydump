@@ -17,10 +17,32 @@ class TestChatSettingsModel:
         assert callable(default_fn)
         assert default_fn.__name__ == "uuid4"
 
-    def test_telegram_chat_id_not_nullable(self):
-        assert ChatSettings.telegram_chat_id.nullable is False
+    def test_telegram_chat_id_is_nullable(self):
+        """RE-POINTED, not deleted (#1015).
 
-    def test_telegram_chat_id_is_unique(self):
+        This asserted `nullable is False` and was correct until the binding
+        stopped being the tenant's identity. A workspace created through web
+        signup has no Telegram chat, so the column is now an OPTIONAL BINDING
+        ATTRIBUTE and `id` carries the identity it always carried.
+
+        The assertion is inverted rather than removed because the fact is still
+        worth pinning — in the other direction. Restoring `NOT NULL` would make
+        every web workspace unrepresentable, and this is what would say so.
+
+        It also has to agree with the DDL: `proposed/
+        relax_telegram_identity_not_null.sql` drops the constraint, and a model
+        still declaring `nullable=False` would make that DDL cosmetic (the ORM
+        would keep refusing the insert the database now permits).
+        """
+        assert ChatSettings.telegram_chat_id.nullable is True
+
+    def test_telegram_chat_id_is_still_unique(self):
+        """UNIQUE survives the nullability change, and must.
+
+        PostgreSQL UNIQUE is NULLS DISTINCT, so many unbound workspaces coexist
+        while a real chat id still collides — which is the only reason dropping
+        NOT NULL is safe here rather than merely convenient.
+        """
         assert ChatSettings.telegram_chat_id.unique is True
 
     def test_dry_run_mode_defaults_to_false(self):

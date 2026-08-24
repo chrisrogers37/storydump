@@ -32,7 +32,12 @@ class ChatSettings(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
 
     # Chat identification
-    telegram_chat_id = Column(BigInteger, nullable=False, unique=True, index=True)
+    # NULLABLE since 064: a workspace created through web signup has no
+    # Telegram binding. The column is now an OPTIONAL BINDING ATTRIBUTE, not
+    # the tenant's identity -- `id` is the identity and always was. UNIQUE is
+    # kept: Postgres UNIQUE is NULLS DISTINCT, so many unbound workspaces
+    # coexist while a real chat id still collides.
+    telegram_chat_id = Column(BigInteger, nullable=True, unique=True, index=True)
     display_name = Column(String(100), nullable=True)
 
     # Operational settings

@@ -11,7 +11,11 @@ from src.services.core.settings_service import SettingsService
 from src.services.core.setup_state_service import SetupStateService
 from src.utils import auth_monitor
 from src.utils.logger import logger
-from src.utils.webapp_auth import validate_init_data, validate_url_token
+from src.utils.webapp_auth import (
+    validate_init_data,
+    validate_url_token,
+    validate_web_token,
+)
 
 # Google Drive folder URL pattern
 GDRIVE_FOLDER_RE = re.compile(
@@ -57,23 +61,35 @@ def _validate_auth(init_data: str, request: Request | None = None) -> dict:
         try:
             return validate_url_token(init_data)
         except ValueError as urltoken_error:
-            ip = _client_ip(request)
-            # Both reasons, attributed to their format.
-            #
-            # The urlToken reason is uninformative for an initData caller: a
-            # real initData querystring URL-encodes its colons as %3A, so it
-            # never presents four colon-separated parts and dies at
-            # validate_url_token's format check before any check can describe
-            # the real problem. Recording that one alone spells every initData
-            # rejection identically, whatever caused it.
-            #
-            # Both are carried rather than picking one by the shape of the
-            # input. Shape is a heuristic, and it would misread precisely the
-            # input worth reading correctly — a malformed initData that
-            # happens to contain a literal colon. Carrying both never guesses.
-            reason = f"initData: {initdata_error}; urlToken: {urltoken_error}"
-            auth_monitor.record_failure(ip, reason)
-            raise HTTPException(status_code=401, detail=AUTH_FAILURE_DETAIL)
+            try:
+                return validate_web_token(init_data)
+            except ValueError as webtoken_error:
+                ip = _client_ip(request)
+                # ALL THREE reasons, each attributed to its format.
+                #
+                # The urlToken reason is uninformative for an initData caller: a
+                # real initData querystring URL-encodes its colons as %3A, so it
+                # never presents four colon-separated parts and dies at
+                # validate_url_token's format check before any check can describe
+                # the real problem. Recording that one alone spells every initData
+                # rejection identically, whatever caused it.
+                #
+                # All are carried rather than picking one by the shape of the
+                # input. Shape is a heuristic, and it would misread precisely the
+                # input worth reading correctly — a malformed initData that
+                # happens to contain a literal colon. Carrying all never guesses.
+                #
+                # The webToken reason is the same story once more: a web token
+                # is dot-delimited, so every non-web credential dies at its
+                # prefix check and reports "Invalid token format" whatever was
+                # actually wrong with it. It is carried, never preferred.
+                reason = (
+                    f"initData: {initdata_error}; "
+                    f"urlToken: {urltoken_error}; "
+                    f"webToken: {webtoken_error}"
+                )
+                auth_monitor.record_failure(ip, reason)
+                raise HTTPException(status_code=401, detail=AUTH_FAILURE_DETAIL)
 
 
 def _validate_request(
@@ -102,8 +118,46 @@ def _validate_request(
     mismatch, an unknown chat, or a missing/inactive membership. On success the
     returned dict carries ``chat_settings_id`` — the resolved tenant key every
     downstream call takes instead of the chat id (#842).
+
+    A **web credential** (#1015) authenticates but is refused 403 here: it
+    names its own tenant rather than a chat, and this door's callers are still
+    chat-keyed. See the comment at the refusal.
     """
     user_info = _validate_auth(init_data, request)
+
+    # A WEB CREDENTIAL IS AUTHENTIC BUT NOT YET ROUTABLE, and it is refused HERE
+    # rather than left to fall through (#1015).
+    #
+    # It would fail closed on its own: a web result carries no "user_id", so
+    # is_active_member(None, ...) returns False and the caller gets a 403. That
+    # is an accident of two unrelated defaults lining up, not a decision, and it
+    # would break silently the moment either changed. Worse, on the way there
+    # the block below would resolve the tenant from the REQUEST's chat_id --
+    # untrusted input -- and discard the tenant the credential actually names.
+    #
+    # The remaining work is at the route layer, not here: handlers still take
+    # body.chat_id and query by it (see routes/onboarding/settings.py), so a web
+    # caller has no way to name its tenant even though its credential carries
+    # one. Until those are keyed on chat_settings_id, admitting a web token
+    # would authorize against one tenant and serve another.
+    #
+    # KEYED ON "user_uuid", DELIBERATELY NOT "chat_settings_id". The tenant key
+    # looks like the natural marker and is the wrong one: THIS FUNCTION WRITES
+    # IT into user_info on the success path below, and validate_init_data's
+    # result is not always a fresh dict -- a caller (or a test fixture) reusing
+    # one gets a Telegram result carrying chat_settings_id from an earlier call,
+    # and this refusal fires on a legitimate Telegram caller. Measured: it
+    # turned an oauth-route 400 into a 403. "user_uuid" is produced by
+    # validate_web_token and by nothing else, so it cannot be back-contaminated.
+    if "user_uuid" in user_info:
+        ip = _client_ip(request)
+        logger.warning(
+            "Web credential presented to a chat-keyed route (user_uuid=%s, ip=%s)",
+            user_info.get("user_uuid"),
+            ip,
+        )
+        auth_monitor.record_failure(ip, "web credential not routable")
+        raise HTTPException(status_code=403, detail=MEMBERSHIP_DENIED_DETAIL)
 
     signed_chat_id = user_info.get("chat_id")
 
