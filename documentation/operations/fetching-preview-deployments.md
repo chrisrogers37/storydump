@@ -5,38 +5,53 @@ returns `302 → vercel.com/sso-api`, so an agent cannot verify a frontend chang
 by looking at it — only by reading code and trusting CI. This note is how to get
 real HTML instead.
 
-## Current status: not yet possible for this project
+## Status: working
 
-**As of 2026-08-24 there is no working bypass for storydump previews.** Measured:
-a storydump preview URL returns `302` both with and without a bypass credential,
-in both the query-parameter and header forms. The same credential and the same
-two forms were also tried against another project on this account and also did
-not open it, so this is not a malformed request — the credential in the fleet
-environment does not authorise this project.
+**Verified 2026-08-24.** Protection Bypass for Automation is enabled on the
+storydump project, and the header form below returns real application HTML.
 
-Following the redirect returns `200`, and that `200` is Vercel's own
-`Login – Vercel` page rather than the app. **Do not read the status code alone.**
-Check the content — a successful fetch contains the app's markup; a failed one
-contains a Vercel login page at `200`.
+Measured on a live preview: a plain request returns `302` with
+`location: vercel.com/sso-api`; the same request carrying the bypass header
+returns the app — `/login` at `200`, ~14 KB, `<title>Login — Storydump</title>`.
 
-### What has to happen first, and who can do it
+## When a correct command still returns 302
 
-Protection Bypass for Automation is generated per project in the Vercel
-dashboard, under **Project Settings → Deployment Protection → Protection Bypass
-for Automation**. It cannot be created from a CI environment without a Vercel API
-token, and the CLI on the fleet has no stored credentials — `vercel whoami`
-starts an interactive device-authorisation flow, which a headless agent cannot
-complete.
+**A `302` while you are sending a bypass credential does NOT mean the bypass is
+off. It usually means your secret is stale.**
 
-So this needs one action from someone with dashboard access:
+This is worth stating plainly because it cost real time. Before the bypass was
+enabled on this project, a `VERCEL_AUTOMATION_BYPASS_SECRET` was already present
+in the fleet environment, left over from an earlier setup. It was stale. So a
+correctly-formed command carrying a correct-looking credential returned `302` —
+which is byte-for-byte what "no bypass exists at all" looks like. The two states
+are indistinguishable from the response.
 
-1. Enable Protection Bypass for Automation on the **storydump** project.
-2. Put the generated value in the fleet environment under the variable name
-   `VERCEL_AUTOMATION_BYPASS_SECRET`, scoped so the bots can read it.
+There is a second way to hold a stale value, and it bites even after the secret
+is fixed: **a running process keeps the environment it started with.** Rotating
+the value in the fleet `.env` does not reach a session that is already up. A
+long-running agent will keep presenting the old secret, and keep getting `302`,
+until it restarts or re-reads the file.
 
-The value is a credential. It belongs in the fleet environment only — never in a
-commit, a PR body, an issue, a doc, or a chat message. This file names the
-variable and nothing else, deliberately.
+### Telling them apart without printing either value
+
+Compare fingerprints, never values:
+
+```bash
+# what this process is actually sending
+printenv VERCEL_AUTOMATION_BYPASS_SECRET | tr -d '\n' | sha256sum | cut -c1-12
+
+# what the fleet environment currently holds
+grep -E '^VERCEL_AUTOMATION_BYPASS_SECRET=' <fleet-env-file> | tail -1 \
+  | sed 's/^[^=]*=//' | tr -d "\"'\n" | sha256sum | cut -c1-12
+```
+
+Different fingerprints mean the process is stale — restart it, or read the value
+from the file for a one-off call. Matching fingerprints mean the secret in play
+is the one on disk, and a `302` then points at the credential itself rather than
+at your process.
+
+`lib/env-tiers.sh` prints the tier files in the order the runtime reads them, if
+you need to find which one holds the key.
 
 ## How to fetch, once it is enabled
 
@@ -62,16 +77,30 @@ curl -sS -b /tmp/jar.txt "https://<deployment>.vercel.app/some/path"
 
 ## Verifying it actually worked
 
-Assert on content, not on the status code:
+Two failure shapes, and neither is caught by a status-code check alone.
+
+**A blocked fetch can return `200`.** Following the SSO redirect lands on
+Vercel's own `Login – Vercel` page, which is a perfectly good `200`.
+
+**A working fetch can return `3xx`.** The app redirects unauthenticated requests
+to `/login`, so a successful bypass often produces a redirect too. What
+distinguishes them is *where it points*:
 
 ```bash
-curl -sS -H "x-vercel-protection-bypass: $VERCEL_AUTOMATION_BYPASS_SECRET" \
-  "https://<deployment>.vercel.app/" -o /tmp/page.html
-grep -q "Login – Vercel" /tmp/page.html && echo "BLOCKED — this is Vercel's login page" || echo "OK"
+loc=$(curl -s -o /tmp/page.html -w '%{redirect_url}' \
+  -H "x-vercel-protection-bypass: $VERCEL_AUTOMATION_BYPASS_SECRET" \
+  "https://<deployment>.vercel.app/welcome")
+
+case "$loc" in
+  *sso-api*) echo "BLOCKED — Vercel protection, check the secret" ;;
+  *)         grep -q "Login – Vercel" /tmp/page.html \
+               && echo "BLOCKED — landed on Vercel's login page" \
+               || echo "OK — app content or an app redirect to $loc" ;;
+esac
 ```
 
-A bypass that is not working returns `200` with a login page, which is
-indistinguishable from success on status code alone.
+Check the redirect target first, then the body. A content-only check reports OK
+on a `302`, because a 15-byte redirect body contains no Vercel login markup.
 
 ## Finding the preview URL for a branch
 
