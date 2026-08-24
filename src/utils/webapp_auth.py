@@ -291,8 +291,6 @@ def validate_web_token(token: str) -> dict:
         raise ValueError("Empty token")
 
     parts = token.split(".")
-    if not parts:
-        raise ValueError("Invalid token format")
 
     # Dispatch on the exact prefix, never on field count: a shape is declared by
     # the minter, never inferred from what survived transit.
