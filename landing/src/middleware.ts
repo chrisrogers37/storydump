@@ -33,6 +33,28 @@ export async function middleware(request: NextRequest) {
     if (!webSignupEnabled()) {
       return NextResponse.redirect(new URL("/instances", request.url));
     }
+
+    // A tenant-less session is admitted to /dashboard only. Every deeper route
+    // is redirected there.
+    //
+    // This has to happen in middleware, and that is measured rather than
+    // assumed: a guard in the dashboard layout does NOT prevent the child page
+    // from running. Next.js renders layout and page segments in parallel, so a
+    // layout that returns without rendering {children} hides the output while
+    // the page still executes its fetches. Measured on a warm route — one
+    // request, one backend call, with the layout guard already in place.
+    //
+    // That call is the one that matters. Those pages fetch with
+    // session.activeChatId, null here; get_by_chat_id(None) compiles to
+    // IS NULL and .first() carries no ORDER BY. Today no NULL-chat row can
+    // exist (chat_settings.telegram_chat_id is NOT NULL, migration 006), so it
+    // returns None and require_by_chat_id refuses typed. Relax that column and
+    // the same call returns an arbitrary tenant-less row instead — and
+    // require_by_chat_id only tests whether the RESULT is None, so it will not
+    // raise. Redirecting before render is what keeps that unreachable from here.
+    if (request.nextUrl.pathname !== "/dashboard") {
+      return NextResponse.redirect(new URL("/dashboard", request.url));
+    }
   }
 
   return NextResponse.next();
