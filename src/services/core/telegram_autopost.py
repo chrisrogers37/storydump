@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+
+from src.utils.media_kind import instagram_media_type
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -486,11 +488,7 @@ class TelegramAutopostHandler:
             caption="⏳ *Posting to Instagram...*", parse_mode="Markdown"
         )
 
-        media_type = (
-            "VIDEO"
-            if ctx.media_item.file_path.lower().endswith((".mp4", ".mov"))
-            else "IMAGE"
-        )
+        media_type = instagram_media_type(ctx.media_item)
 
         if media_type == "IMAGE":
             story_url = ctx.cloud_service.get_story_optimized_url(ctx.cloud_url)

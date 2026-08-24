@@ -1224,6 +1224,61 @@ class TestAutoApproveInstagram:
         mock_ig.post_story.assert_awaited_once()
         mock_cloud.delete_media_for_item.assert_called_once()
 
+    async def test_provider_sourced_video_posts_as_video(self, scheduler_service):
+        """The #1024 site pin (auto-approve path): a Drive-shaped video —
+        extensionless file_path, extension only on file_name — must reach the
+        IG call as media_type=VIDEO. Red if the predicate reverts to
+        file_path."""
+        media = Mock(
+            id=uuid4(),
+            file_name="clip.mp4",
+            file_path="google_drive://fake-identifier",
+            category="memes",
+            times_posted=0,
+            source_identifier="fake-identifier",
+            mime_type="video/mp4",
+        )
+        queue_item = Mock(id=uuid4(), chat_settings_id="cs-1")
+        scheduler_service.queue_repo.create.return_value = queue_item
+        cs = _make_chat_settings(enable_instagram_api=True)
+
+        mock_ig = Mock()
+        mock_ig.safety_check_before_post.return_value = {
+            "safe_to_post": True,
+            "errors": [],
+        }
+        mock_ig.post_story = AsyncMock(
+            return_value={"success": True, "story_id": "17890012345678902"}
+        )
+        mock_cloud = Mock()
+        mock_cloud.upload_media.return_value = {
+            "url": "https://res.cloudinary.com/test/video/upload/clip.mp4",
+            "public_id": "test/clip",
+        }
+
+        mock_provider = Mock()
+        mock_provider.download_file.return_value = b"fake-bytes"
+
+        with (
+            patch("src.services.core.media_lock.MediaLockService"),
+            patch(
+                "src.services.integrations.instagram_api.InstagramAPIService",
+                return_value=mock_ig,
+            ),
+            patch(
+                "src.services.integrations.cloud_storage.CloudStorageService",
+                return_value=mock_cloud,
+            ),
+            patch(
+                "src.services.media_sources.factory.MediaSourceFactory"
+            ) as mock_factory,
+        ):
+            mock_factory.get_provider_for_media_item.return_value = mock_provider
+            result = await scheduler_service._auto_approve(media, cs)
+
+        assert result["posted"] is True
+        assert mock_ig.post_story.call_args.kwargs["media_type"] == "VIDEO"
+
     async def test_surfaces_failure_on_safety_check_failure(self, scheduler_service):
         """Returns posted=False and skips history when safety check fails."""
         media = Mock(
