@@ -174,9 +174,9 @@
       "ordinal": 6
     },
     {
-      "sha256": "06b54a8f3e97afeffb5f93e38755683c0ac18a1dbf4bc5913acc79d4891e2fb3",
+      "sha256": "feddb81ba67e0aa17a6bf493ca80d125a36aba11c683054c1935dd5cffe7ebe4",
       "class": "normative",
-      "label": "\u00a79 refresh-leg provider guard (063, #982) \u2014 fn_clock_tick replace adding AND provider = 'ig_login'",
+      "label": "\u00a79 refresh-leg provider guard (063, #982) \u2014 fn_clock_tick replace adding AND provider = 'ig_login', plus the function comment (#997 adoption evidence)",
       "doc": "07-security-model.md",
       "ordinal": 7
     }

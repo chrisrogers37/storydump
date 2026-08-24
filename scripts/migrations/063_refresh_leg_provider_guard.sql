@@ -32,6 +32,30 @@
 -- tests/scripts/test_w5de_credential_lifecycle.py::
 -- TestTheRefreshLegIsProviderGuarded turns it red.
 
+-- ADOPTION EVIDENCE (#997, ruled on #942). This file's SQL delta over 062 is one
+-- clause INSIDE the function body, and a plpgsql body is stored by Postgres as
+-- opaque text with no parsed catalog form - so there is no semantic surface to
+-- probe and a `prosrc` predicate could only ever match a FORM. The comment below
+-- is what makes the delta catalog-visible, and it is warranted on its own merits
+-- rather than as a probe target: fn_clock_tick is SECURITY DEFINER, owned by
+-- svc_clock with EXECUTE granted to svc_worker, and runs the five scheduled legs
+-- that produce due work, and it carried no comment while a single nullable
+-- timestamp column (062) carries one. Fix the documentation gap; the probe is a
+-- beneficiary, not the reason.
+--
+-- A schema comment outlives everyone who remembers writing it, so this one
+-- states only what was checked against the catalog and the source, and claims no
+-- exclusivity it does not have: fn_clock_tick is NOT the only writer of `jobs`
+-- (two services INSERT directly - media_sync chaining an ingest page, and
+-- work_loop re-minting an outbox sender; a naive grep also hits scheduler.py,
+-- but that one is a DOCSTRING quoting this very function's recurring leg), and
+-- the EXECUTE grant is a grant, not a guarantee that nothing else can call it.
+--
+-- The probe therefore tests the comment's PRESENCE, never its text. Matching the
+-- wording would re-create inside this option the form-matching that disqualified
+-- probing `prosrc`, and would make a later reword break adoption silently.
+-- runner:postcondition SELECT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = 'fn_clock_tick' AND obj_description(p.oid, 'pg_proc') IS NOT NULL)
+
 -- The CREATE bracket is 062's, carried forward for the same reason it gave:
 -- `ALTER FUNCTION … OWNER TO` needs the incoming owner to hold CREATE on the
 -- schema, and the steady-state grant matrix never leaves CREATE with a door
@@ -154,6 +178,18 @@ BEGIN
   GET DIAGNOSTICS n5 = ROW_COUNT;
   RETURN QUERY SELECT n1, n2, n3, n4, n5;
 END $$;
+
+COMMENT ON FUNCTION fn_clock_tick(int, interval, jsonb) IS
+  'The scheduled clock tick: a SECURITY DEFINER producer of due work, owned by '
+  'svc_clock with EXECUTE granted to svc_worker, and pinned to '
+  'search_path = pg_catalog, public. One call runs five legs in order - '
+  'recurring system singletons, due account slots, due credential refreshes, '
+  'due source syncs, and reauth prompts. The legs share one budget: p_max caps '
+  'the first, and each later leg draws only on what the ones before it left, so '
+  'one call mints at most p_max rows. It is NOT the only writer of jobs - '
+  'application services enqueue directly as well. The refresh leg is scoped to '
+  'provider ig_login and fails closed: a provider with no refresh door of its '
+  'own is skipped rather than minted.';
 
 ALTER FUNCTION fn_clock_tick(int, interval, jsonb) OWNER TO svc_clock;
 

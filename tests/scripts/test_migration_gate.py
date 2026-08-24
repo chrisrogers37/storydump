@@ -465,14 +465,15 @@ class TestEveryMigrationCarriesAdoptionEvidence:
     real corpus rather than a fixture pair.
     """
 
-    #: 063's adoption evidence is PARKED, not forgotten (#997). Its whole delta
-    #: is one clause inside a function body, so no catalog surface distinguishes
-    #: it from 062 — and all four candidate answers were eliminated: probing
-    #: `prosrc` matches a form, a `COMMENT` marker is DDL the design docs do not
-    #: advertise, `asserted` is refused above the floor, and bounding the window
-    #: misses the wrongly-true 050. The open question belongs to whoever owns
-    #: the design docs, and until it is answered 063 has no evidence to carry.
-    PARKED = frozenset({63})
+    #: EMPTY, and it must stay that way until a file genuinely has no evidence
+    #: to carry. 063's exemption was spent when the open question it named — is
+    #: a comment on `fn_clock_tick` warranted on its own merits? — was answered
+    #: yes: the function is SECURITY DEFINER, runs the five scheduled legs that
+    #: produce due work, and carried no comment while a single nullable timestamp
+    #: column did. 063 now
+    #: probes that comment's PRESENCE (never its text, which would be `prosrc`
+    #: form-matching wearing a different hat).
+    PARKED = frozenset()
 
     def test_the_unbounded_corpus_pairs_with_the_manifest(self):
         corpus = discover_migrations(MIGRATIONS_DIR)
