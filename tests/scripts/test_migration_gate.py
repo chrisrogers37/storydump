@@ -468,8 +468,9 @@ class TestEveryMigrationCarriesAdoptionEvidence:
     #: EMPTY, and it must stay that way until a file genuinely has no evidence
     #: to carry. 063's exemption was spent when the open question it named — is
     #: a comment on `fn_clock_tick` warranted on its own merits? — was answered
-    #: yes: the function is SECURITY DEFINER, mints every job in the system, and
-    #: carried no comment while a single nullable timestamp column did. 063 now
+    #: yes: the function is SECURITY DEFINER, runs the five scheduled legs that
+    #: produce due work, and carried no comment while a single nullable timestamp
+    #: column did. 063 now
     #: probes that comment's PRESENCE (never its text, which would be `prosrc`
     #: form-matching wearing a different hat).
     PARKED = frozenset()

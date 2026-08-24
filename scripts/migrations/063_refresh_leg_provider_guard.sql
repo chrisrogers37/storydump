@@ -38,9 +38,16 @@
 -- probe and a `prosrc` predicate could only ever match a FORM. The comment below
 -- is what makes the delta catalog-visible, and it is warranted on its own merits
 -- rather than as a probe target: fn_clock_tick is SECURITY DEFINER, owned by
--- svc_clock, executed by svc_worker, and mints every job in the system, and it
--- carried no comment while a single nullable timestamp column (062) carries one.
--- Fix the documentation gap; the probe is a beneficiary, not the reason.
+-- svc_clock with EXECUTE granted to svc_worker, and runs the five scheduled legs
+-- that produce due work, and it carried no comment while a single nullable
+-- timestamp column (062) carries one. Fix the documentation gap; the probe is a
+-- beneficiary, not the reason.
+--
+-- A schema comment outlives everyone who remembers writing it, so this one
+-- states only what was checked against the catalog and the source, and claims no
+-- exclusivity it does not have: fn_clock_tick is NOT the only writer of `jobs`
+-- (media_sync, scheduler and work_loop each INSERT directly), and the EXECUTE
+-- grant is a grant, not a guarantee that nothing else can call it.
 --
 -- The probe therefore tests the comment's PRESENCE, never its text. Matching the
 -- wording would re-create inside this option the form-matching that disqualified
@@ -171,14 +178,16 @@ BEGIN
 END $$;
 
 COMMENT ON FUNCTION fn_clock_tick(int, interval, jsonb) IS
-  'The clock tick: the sole producer of scheduled jobs. Five legs in one '
-  'transaction - recurring system singletons, due account slots, due credential '
-  'refreshes, due source syncs, and reauth prompts - each bounded by the running '
-  'remainder of p_max, so no leg can starve the ones after it. SECURITY DEFINER, '
-  'owned by svc_clock and executable only by svc_worker. The refresh leg is '
-  'restricted to the ig_login provider and FAILS CLOSED: a provider whose '
-  'refresh door does not exist yet is never minted, rather than minted and sent '
-  'to the wrong host.';
+  'The scheduled clock tick: a SECURITY DEFINER producer of due work, owned by '
+  'svc_clock with EXECUTE granted to svc_worker, and pinned to '
+  'search_path = pg_catalog, public. One call runs five legs in order - '
+  'recurring system singletons, due account slots, due credential refreshes, '
+  'due source syncs, and reauth prompts. The legs share one budget: p_max caps '
+  'the first, and each later leg draws only on what the ones before it left, so '
+  'one call mints at most p_max rows. It is NOT the only writer of jobs - '
+  'application services enqueue directly as well. The refresh leg is scoped to '
+  'provider ig_login and fails closed: a provider with no refresh door of its '
+  'own is skipped rather than minted.';
 
 ALTER FUNCTION fn_clock_tick(int, interval, jsonb) OWNER TO svc_clock;
 
