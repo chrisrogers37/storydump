@@ -1222,7 +1222,7 @@ class TestAutoApproveInstagram:
         assert params.posting_method == "instagram_api"
         assert params.instagram_story_id == "17890012345678901"
         mock_ig.post_story.assert_awaited_once()
-        mock_cloud.delete_media.assert_called_once_with("test/meme")
+        mock_cloud.delete_media_for_item.assert_called_once()
 
     async def test_surfaces_failure_on_safety_check_failure(self, scheduler_service):
         """Returns posted=False and skips history when safety check fails."""
@@ -1318,7 +1318,7 @@ class TestAutoApproveInstagram:
         scheduler_service.history_repo.create_idempotent.assert_not_called()
         scheduler_service.media_repo.increment_times_posted.assert_not_called()
         mock_lock_cls.return_value.create_lock.assert_not_called()
-        mock_cloud.delete_media.assert_called_once_with("test/meme")
+        mock_cloud.delete_media_for_item.assert_called_once()
 
     async def test_skips_instagram_when_disabled(self, scheduler_service):
         """Does not attempt Instagram posting when enable_instagram_api is False."""
