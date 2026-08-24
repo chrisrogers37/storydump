@@ -512,6 +512,16 @@ BEGIN
   RETURN QUERY SELECT n1, n2, n3, n4, n5;
 END $$;
 
+COMMENT ON FUNCTION fn_clock_tick(int, interval, jsonb) IS
+  'The clock tick: the sole producer of scheduled jobs. Five legs in one '
+  'transaction - recurring system singletons, due account slots, due credential '
+  'refreshes, due source syncs, and reauth prompts - each bounded by the running '
+  'remainder of p_max, so no leg can starve the ones after it. SECURITY DEFINER, '
+  'owned by svc_clock and executable only by svc_worker. The refresh leg is '
+  'restricted to the ig_login provider and FAILS CLOSED: a provider whose '
+  'refresh door does not exist yet is never minted, rather than minted and sent '
+  'to the wrong host.';
+
 ALTER FUNCTION fn_clock_tick(int, interval, jsonb) OWNER TO svc_clock;
 
 REVOKE CREATE ON SCHEMA public FROM svc_clock;

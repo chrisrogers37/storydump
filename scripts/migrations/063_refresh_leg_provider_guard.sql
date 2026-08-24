@@ -32,6 +32,21 @@
 -- tests/scripts/test_w5de_credential_lifecycle.py::
 -- TestTheRefreshLegIsProviderGuarded turns it red.
 
+-- ADOPTION EVIDENCE (#997, ruled on #942). This file's SQL delta over 062 is one
+-- clause INSIDE the function body, and a plpgsql body is stored by Postgres as
+-- opaque text with no parsed catalog form - so there is no semantic surface to
+-- probe and a `prosrc` predicate could only ever match a FORM. The comment below
+-- is what makes the delta catalog-visible, and it is warranted on its own merits
+-- rather than as a probe target: fn_clock_tick is SECURITY DEFINER, owned by
+-- svc_clock, executed by svc_worker, and mints every job in the system, and it
+-- carried no comment while a single nullable timestamp column (062) carries one.
+-- Fix the documentation gap; the probe is a beneficiary, not the reason.
+--
+-- The probe therefore tests the comment's PRESENCE, never its text. Matching the
+-- wording would re-create inside this option the form-matching that disqualified
+-- probing `prosrc`, and would make a later reword break adoption silently.
+-- runner:postcondition SELECT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = 'fn_clock_tick' AND obj_description(p.oid, 'pg_proc') IS NOT NULL)
+
 -- The CREATE bracket is 062's, carried forward for the same reason it gave:
 -- `ALTER FUNCTION … OWNER TO` needs the incoming owner to hold CREATE on the
 -- schema, and the steady-state grant matrix never leaves CREATE with a door
@@ -154,6 +169,16 @@ BEGIN
   GET DIAGNOSTICS n5 = ROW_COUNT;
   RETURN QUERY SELECT n1, n2, n3, n4, n5;
 END $$;
+
+COMMENT ON FUNCTION fn_clock_tick(int, interval, jsonb) IS
+  'The clock tick: the sole producer of scheduled jobs. Five legs in one '
+  'transaction - recurring system singletons, due account slots, due credential '
+  'refreshes, due source syncs, and reauth prompts - each bounded by the running '
+  'remainder of p_max, so no leg can starve the ones after it. SECURITY DEFINER, '
+  'owned by svc_clock and executable only by svc_worker. The refresh leg is '
+  'restricted to the ig_login provider and FAILS CLOSED: a provider whose '
+  'refresh door does not exist yet is never minted, rather than minted and sent '
+  'to the wrong host.';
 
 ALTER FUNCTION fn_clock_tick(int, interval, jsonb) OWNER TO svc_clock;
 
