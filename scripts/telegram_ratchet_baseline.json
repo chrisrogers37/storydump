@@ -26,6 +26,7 @@
     "src/api/routes/onboarding/helpers.py::_validate_request",
     "src/api/routes/onboarding/setup.py::onboarding_init",
     "src/api/routes/onboarding/setup.py::onboarding_oauth_url",
+    "src/repositories/chat_settings_repository.py::_new_chat_settings",
     "src/repositories/chat_settings_repository.py::get_by_chat_id",
     "src/repositories/chat_settings_repository.py::get_or_create",
     "src/repositories/chat_settings_repository.py::migrate_chat_id",

@@ -11,12 +11,25 @@ from src.repositories.tenant_scope import (
     TenantScope,
     require_tenant_context,
 )
-from src.exceptions.tenancy import TenantResolutionError
+from src.exceptions.tenancy import TenantProvisioningError, TenantResolutionError
 from src.models.chat_settings import ChatSettings
 from src.models.posting_queue import PostingQueue
+from src.models.user import User
+from src.models.user_chat_membership import UserChatMembership
 from src.models.user_interaction import UserInteraction
 from src.config import defaults
 from src.utils.logger import logger
+
+
+def _mint_race_window() -> None:
+    """Test seam: the instant between the personal-tenant lookup and its mint.
+
+    A no-op in production. The concurrency suite replaces it with a barrier so
+    "two requests inside the lookup->mint window" is a constructed fact rather
+    than a timing hope — which is what lets the suite prove the FOR UPDATE
+    serialization deterministically (removed lock -> both threads enter ->
+    double mint -> red).
+    """
 
 
 class ChatIdMigrationConflict(Exception):
@@ -236,6 +249,15 @@ class ChatSettingsRepository(BaseRepository):
 
         This is the primary access method - ensures a record always exists.
         """
+        if telegram_chat_id is None:
+            # SQLAlchemy compiles `== None` to IS NULL, so with the column
+            # nullable a None here would MATCH an arbitrary personal tenant
+            # (or mint a fresh one when none exists) — steal-or-create, never
+            # get-or-create. Personal (chat-less) tenants have their own door.
+            raise ValueError(
+                "get_or_create is keyed on telegram_chat_id; for a personal "
+                "(NULL-chat) tenant use get_or_create_personal(user_id)"
+            )
         existing = (
             self.db.query(ChatSettings)
             .filter(ChatSettings.telegram_chat_id == telegram_chat_id)
@@ -250,7 +272,18 @@ class ChatSettingsRepository(BaseRepository):
         # the scheduler's get_all_active() picks the row up — matches the
         # invariant migration 027 backfilled (bootstrapped rows count as
         # deployment-ready, not half-setup).
-        chat_settings = ChatSettings(
+        chat_settings = self._new_chat_settings(
+            telegram_chat_id=telegram_chat_id, onboarding_completed=True
+        )
+        self.db.add(chat_settings)
+        self.commit_and_refresh(chat_settings)
+        return chat_settings
+
+    def _new_chat_settings(
+        self, *, telegram_chat_id: Optional[int], onboarding_completed: bool
+    ) -> ChatSettings:
+        """The one bootstrap-defaults constructor both mint doors share."""
+        return ChatSettings(
             telegram_chat_id=telegram_chat_id,
             dry_run_mode=defaults.DEFAULT_DRY_RUN_MODE,
             enable_instagram_api=defaults.DEFAULT_ENABLE_INSTAGRAM_API,
@@ -265,11 +298,113 @@ class ChatSettingsRepository(BaseRepository):
             show_verbose_notifications=defaults.DEFAULT_SHOW_VERBOSE_NOTIFICATIONS,
             media_sync_enabled=defaults.DEFAULT_MEDIA_SYNC_ENABLED,
             posting_timezone=defaults.DEFAULT_POSTING_TIMEZONE,
-            onboarding_completed=True,
+            onboarding_completed=onboarding_completed,
         )
-        self.db.add(chat_settings)
-        self.commit_and_refresh(chat_settings)
-        return chat_settings
+
+    def get_or_create_personal(self, user_id: str) -> ChatSettings:
+        """Get-or-mint the user's personal (NULL-chat) tenant, atomically.
+
+        The user_id-keyed provisioning door (tenant-anchor doc §9): a web-only
+        user has no telegram_chat_id, so ``get_or_create``'s identity key does
+        not exist for them and the unique constraint that deduplicates chat
+        tenants is NULLS-DISTINCT — nothing at the schema level prevents two
+        mints. Serialization is therefore this method's job:
+
+        - ``FOR UPDATE`` on the user row is the per-user serialization point:
+          a concurrent call blocks there until the first commit, then finds
+          the minted tenant. The lock also pins the user against deletion for
+          the transaction's life.
+        - Tenant + owner membership are minted in ONE transaction on this
+          repository's session — the ``migrate_chat_id`` layering precedent:
+          a commit between them would strand a tenant no membership reaches.
+        - Contract v1: at most one personal tenant per user, enforced by this
+          serialization (revisit when multi-workspace arrives with the target
+          schema).
+
+        The mint deliberately does NOT mark ``onboarding_completed``: that
+        flag means Telegram-posting-ready and feeds ``get_all_active``. The
+        sweep exclusion for chat-less tenants is structural there regardless.
+
+        Raises ``TenantProvisioningError("unknown_user")`` when no user row
+        exists — provisioning refusal, deliberately not a resolution reason.
+
+        The lock is the WHOLE dedup story, stated so nobody re-adds a net: no
+        IntegrityError recovery exists here because none can fire — the
+        telegram_chat_id unique is NULLS-DISTINCT (never collides for these
+        rows) and racing mints would create distinct chat_settings_id values
+        (the membership unique never collides either). A future path that
+        mints a personal tenant WITHOUT taking this lock re-opens the race
+        the concurrency suite proves; do not weaken the lock on the theory
+        that something else catches the conflict — nothing does.
+        """
+
+        def _owned_personal_tenant() -> Optional[ChatSettings]:
+            return (
+                self.db.query(ChatSettings)
+                .join(
+                    UserChatMembership,
+                    UserChatMembership.chat_settings_id == ChatSettings.id,
+                )
+                .filter(
+                    UserChatMembership.user_id == user_id,
+                    UserChatMembership.instance_role == "owner",
+                    UserChatMembership.is_active == True,  # noqa: E712
+                    ChatSettings.telegram_chat_id.is_(None),
+                )
+                .first()
+            )
+
+        # Fast path: the dominant case (tenant already exists) is one
+        # read-only query with NO lock, so repeat calls never serialize on
+        # the user row.
+        existing = _owned_personal_tenant()
+        if existing is not None:
+            self.end_read_transaction()
+            return existing
+        # End the read transaction before locking: under REPEATABLE READ the
+        # fast-path read would otherwise pin a snapshot that hides a tenant a
+        # concurrent call commits while we wait on the lock, and the re-check
+        # below must see it.
+        self.end_read_transaction()
+
+        locked_user = (
+            self.db.query(User.id).filter(User.id == user_id).with_for_update().first()
+        )
+        if locked_user is None:
+            self.end_read_transaction()
+            raise TenantProvisioningError("unknown_user", f"no user {user_id}")
+
+        # Re-check under the lock: a concurrent call may have minted between
+        # the fast-path miss and lock acquisition.
+        existing = _owned_personal_tenant()
+        if existing is not None:
+            # Commit ends the transaction and releases the user-row lock.
+            self.end_read_transaction()
+            return existing
+
+        _mint_race_window()
+
+        tenant = self._new_chat_settings(
+            telegram_chat_id=None, onboarding_completed=False
+        )
+        self.db.add(tenant)
+        self.db.flush()  # materialize tenant.id for the membership row
+        self.db.add(
+            UserChatMembership(
+                user_id=user_id,
+                chat_settings_id=tenant.id,
+                instance_role="owner",
+            )
+        )
+        # Raw commit rather than the wrapper: a failed mint must RAISE — the
+        # wrapper commit() swallows the error and rolls back, which would hand
+        # the caller a phantom tenant with no row behind it. (Pre-DDL
+        # production hits the live NOT NULL here and refuses loudly, minting
+        # nothing — the intended posture until the relax migration lands.)
+        self.db.commit()
+        self.db.refresh(tenant)
+        self.end_read_transaction()
+        return tenant
 
     def update(self, telegram_chat_id: int, **kwargs) -> ChatSettings:
         """
@@ -327,6 +462,10 @@ class ChatSettingsRepository(BaseRepository):
         result = (
             self.db.query(ChatSettings)
             .filter(
+                # The sweep is definitionally the Telegram posting sweep: a
+                # personal (NULL-chat) tenant can never be swept, whatever its
+                # flags — structural exclusion, not mint-default hygiene.
+                ChatSettings.telegram_chat_id.isnot(None),
                 ChatSettings.is_paused == False,  # noqa: E712
                 or_(
                     ChatSettings.onboarding_completed == True,  # noqa: E712
