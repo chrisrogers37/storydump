@@ -45,8 +45,31 @@ WEB_TOKEN_TTL = 3600  # 1 hour, matching URL_TOKEN_TTL
 # token are mutually unparseable rather than merely different -- neither
 # validator can partially consume the other's input and report a misleading
 # reason.
-WEB_TOKEN_PREFIX = "sd1"
-WEB_TOKEN_PARTS = 6
+# TWO SHAPES, and the tag is in the PREFIX so a parser dispatches on an exact
+# string before it touches a single field:
+#
+#   sd1b.{user_uuid}.{tenant_uuid}.{ts}.{nonce}.{sig}   BOUND   -- names a tenant
+#   sd1u.{user_uuid}.{ts}.{nonce}.{sig}                 UNBOUND -- names none
+#
+# The unbound shape exists because a user EXISTS BEFORE THEY OWN ANYTHING.
+# Tenants are minted lazily at an explicit provisioning door (#842), so a user
+# between sign-in and first workspace has no tenant to name -- and the door
+# itself is reached by an authenticated call, so a credential that could not be
+# minted without a tenant could never reach the door that mints one.
+#
+# This is not a new concept in this codebase: initData is already bound (group
+# launch) or unbound (DM launch), and _validate_request already treats an
+# unbound token's tenant claim as untrusted. This gives the web credential the
+# same two shapes rather than inventing a third idea.
+#
+# THE TENANT SLOT IS ABSENT IN THE UNBOUND SHAPE, NEVER EMPTY. A sentinel -- ""
+# or "-" or "null" -- is a value sitting where a tenant id goes, and every
+# downstream reader then has to remember to special-case it. Absence cannot be
+# coerced into a tenant id by a reader that forgot.
+WEB_TOKEN_PREFIX_BOUND = "sd1b"
+WEB_TOKEN_PREFIX_UNBOUND = "sd1u"
+WEB_TOKEN_PARTS_BOUND = 6
+WEB_TOKEN_PARTS_UNBOUND = 5
 
 
 def validate_init_data(init_data: str) -> dict:
@@ -196,13 +219,28 @@ def _web_token_key() -> bytes:
     return hmac.new(b"WebToken", secret.encode(), hashlib.sha256).digest()
 
 
-def generate_web_token(user_uuid: str, chat_settings_id: str, nonce: str) -> str:
-    """Mint a web-session credential.
+def _web_token_payload(
+    user_uuid: str, chat_settings_id: str | None, timestamp: int
+) -> str:
+    """The signed payload, built in ONE place.
 
-    Format: ``sd1.{user_id}.{chat_settings_id}.{timestamp}.{nonce}.{signature}``
+    Mint and validate must agree byte-for-byte or every token fails, so the
+    shape lives here rather than in two branches that have to be kept in step.
+    The PREFIX is inside it deliberately: that is what makes the two shapes
+    non-interconvertible, since a bound payload re-presented as unbound no
+    longer reproduces its signature.
+    """
+    if chat_settings_id is None:
+        return f"{WEB_TOKEN_PREFIX_UNBOUND}.{user_uuid}.{timestamp}"
+    return f"{WEB_TOKEN_PREFIX_BOUND}.{user_uuid}.{chat_settings_id}.{timestamp}"
 
-    Both subjects are the resolved platform-neutral primary keys, so validation
-    performs no Telegram lookup and the credential names its own tenant.
+
+def generate_web_token(user_uuid: str, chat_settings_id: str | None, nonce: str) -> str:
+    """Mint a web-session credential, bound or unbound.
+
+    ``chat_settings_id`` names the tenant this credential is scoped to, or
+    ``None`` for a user who has none yet (between sign-in and first workspace).
+    The two produce structurally different tokens -- see the prefix constants.
 
     ``nonce`` is carried from birth for #587 (single-use replay protection).
     THIS FUNCTION DOES NOT MAKE THE TOKEN SINGLE-USE -- there is no nonce store
@@ -210,15 +248,15 @@ def generate_web_token(user_uuid: str, chat_settings_id: str, nonce: str) -> str
     Telegram credentials do. The field exists so that adding the store is a
     change to the validator alone, never a format migration.
     """
-    for name, value in (
-        ("user_uuid", user_uuid),
-        ("chat_settings_id", chat_settings_id),
-        ("nonce", nonce),
-    ):
+    fields = [("user_uuid", user_uuid), ("nonce", nonce)]
+    if chat_settings_id is not None:
+        fields.append(("chat_settings_id", chat_settings_id))
+    for name, value in fields:
         if not value or "." in str(value):
             raise ValueError(f"Invalid {name} for a web token")
+
     timestamp = int(time.time())
-    payload = f"{WEB_TOKEN_PREFIX}.{user_uuid}.{chat_settings_id}.{timestamp}.{nonce}"
+    payload = f"{_web_token_payload(user_uuid, chat_settings_id, timestamp)}.{nonce}"
     signature = hmac.new(_web_token_key(), payload.encode(), hashlib.sha256).hexdigest()
     return f"{payload}.{signature}"
 
@@ -227,8 +265,14 @@ def validate_web_token(token: str) -> dict:
     """Validate a web-session credential and extract its subjects.
 
     Returns:
-        dict with ``user_uuid`` (a ``users.id`` UUID string), ``chat_settings_id``
-        (a ``chat_settings.id`` UUID string) and ``nonce``.
+        dict with ``user_uuid`` (a ``users.id`` UUID string) and ``nonce``,
+        plus ``chat_settings_id`` **only when the credential is bound**.
+
+        AN UNBOUND RESULT OMITS THE TENANT KEY RATHER THAN CARRYING A FALSY
+        ONE. A caller reading ``result["chat_settings_id"]`` raises; one reading
+        ``.get(...)`` receives ``None``. Both are survivable. A caller handed
+        ``""`` and passing it on as a tenant id is not, and that is the only
+        outcome this shape makes unavailable.
 
         NEITHER KEY COLLIDES WITH THE TELEGRAM VALIDATORS, and that is a safety
         property rather than a naming preference. Those return ``user_id`` and
@@ -247,12 +291,20 @@ def validate_web_token(token: str) -> dict:
         raise ValueError("Empty token")
 
     parts = token.split(".")
-    if len(parts) != WEB_TOKEN_PARTS or parts[0] != WEB_TOKEN_PREFIX:
+    if not parts:
         raise ValueError("Invalid token format")
 
-    _, user_uuid, chat_settings_id, timestamp_str, nonce, received_sig = parts
+    # Dispatch on the exact prefix, never on field count: a shape is declared by
+    # the minter, never inferred from what survived transit.
+    if parts[0] == WEB_TOKEN_PREFIX_BOUND and len(parts) == WEB_TOKEN_PARTS_BOUND:
+        _, user_uuid, chat_settings_id, timestamp_str, nonce, received_sig = parts
+    elif parts[0] == WEB_TOKEN_PREFIX_UNBOUND and len(parts) == WEB_TOKEN_PARTS_UNBOUND:
+        _, user_uuid, timestamp_str, nonce, received_sig = parts
+        chat_settings_id = None
+    else:
+        raise ValueError("Invalid token format")
 
-    if not user_uuid or not chat_settings_id or not nonce:
+    if not user_uuid or not nonce or chat_settings_id == "":
         raise ValueError("Invalid token values")
 
     try:
@@ -260,7 +312,7 @@ def validate_web_token(token: str) -> dict:
     except (ValueError, TypeError):
         raise ValueError("Invalid token values")
 
-    payload = f"{WEB_TOKEN_PREFIX}.{user_uuid}.{chat_settings_id}.{timestamp}.{nonce}"
+    payload = f"{_web_token_payload(user_uuid, chat_settings_id, timestamp)}.{nonce}"
     computed_sig = hmac.new(
         _web_token_key(), payload.encode(), hashlib.sha256
     ).hexdigest()
@@ -276,8 +328,7 @@ def validate_web_token(token: str) -> dict:
     if age > WEB_TOKEN_TTL:
         raise ValueError("Token expired")
 
-    return {
-        "user_uuid": user_uuid,
-        "chat_settings_id": chat_settings_id,
-        "nonce": nonce,
-    }
+    result = {"user_uuid": user_uuid, "nonce": nonce}
+    if chat_settings_id is not None:
+        result["chat_settings_id"] = chat_settings_id
+    return result

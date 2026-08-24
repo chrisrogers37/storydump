@@ -28,6 +28,7 @@ def web_secret():
 
 @pytest.fixture
 def subjects():
+    """A BOUND credential's subjects: user, tenant, nonce."""
     return str(uuid.uuid4()), str(uuid.uuid4()), uuid.uuid4().hex
 
 
@@ -82,7 +83,49 @@ class TestWebToken:
             with pytest.raises(ValueError, match="not configured"):
                 generate_web_token(*subjects)
             with pytest.raises(ValueError, match="not configured"):
-                validate_web_token("sd1.a.b.1.c.d")
+                validate_web_token("sd1b.a.b.1.c.d")
+
+    def test_an_unbound_credential_omits_the_tenant_key_entirely(self, web_secret):
+        """The shape a user between sign-in and first workspace presents.
+
+        The tenant key must be ABSENT, not empty: a caller handed "" and
+        passing it on as a tenant id is the failure this shape forecloses.
+        """
+        user_uuid, _, nonce = str(uuid.uuid4()), None, uuid.uuid4().hex
+        result = validate_web_token(generate_web_token(user_uuid, None, nonce))
+        assert result == {"user_uuid": user_uuid, "nonce": nonce}
+        assert "chat_settings_id" not in result
+
+    def test_a_bound_credential_cannot_be_downgraded_to_unbound(
+        self, web_secret, subjects
+    ):
+        """Stripping the tenant must not yield a valid tenant-less credential.
+
+        The signature covers the prefix, so a bound payload re-presented in the
+        unbound shape does not verify -- the tenant cannot be dropped to widen
+        what the credential is accepted for.
+        """
+        token = generate_web_token(*subjects)
+        parts = token.split(".")
+        stripped = ".".join(["sd1u", parts[1]] + parts[3:])
+        with pytest.raises(ValueError):
+            validate_web_token(stripped)
+
+    def test_an_unbound_credential_cannot_be_promoted_to_bound(
+        self, web_secret, subjects
+    ):
+        """The inverse, and the one that would matter: forging a tenant."""
+        user_uuid, tenant, nonce = subjects
+        token = generate_web_token(user_uuid, None, nonce)
+        parts = token.split(".")
+        promoted = ".".join(["sd1b", parts[1], tenant] + parts[2:])
+        with pytest.raises(ValueError):
+            validate_web_token(promoted)
+
+    def test_an_empty_tenant_field_is_refused_not_read_as_absent(self, web_secret):
+        """A sentinel in the tenant slot must not be mistaken for either shape."""
+        with pytest.raises(ValueError):
+            generate_web_token(str(uuid.uuid4()), "", uuid.uuid4().hex)
 
     def test_a_url_token_is_not_accepted_as_a_web_token(self, web_secret):
         """The two formats must be mutually unparseable, not merely different."""
