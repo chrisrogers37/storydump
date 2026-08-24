@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 import { getSession } from "@/lib/session";
+import { hasTenant } from "@/lib/web-signup";
 import { backendFetchJson } from "@/lib/backend";
 import { Sidebar } from "@/components/dashboard/sidebar";
 import { DashboardHeader } from "@/components/dashboard/header";
@@ -19,13 +20,16 @@ export default async function DashboardLayout({
   // Hide the Setup Wizard sidebar entry once onboarding is complete —
   // otherwise clicking it server-side redirects to /dashboard (see
   // dashboard/setup/page.tsx), which looks like a broken link (#464).
-  const initData = await backendFetchJson(
-    "init",
-    session.activeChatId!,
-    session.userId,
-    { revalidate: 60 }
-  );
-  const showSetupWizard = !initData?.setup_state?.onboarding_completed;
+  // Without a tenant there is nothing to ask the backend about, and the call
+  // below would pass a null chat id through a non-null assertion.
+  const initData = hasTenant(session)
+    ? await backendFetchJson("init", session.activeChatId!, session.userId, {
+        revalidate: 60,
+      })
+    : null;
+  const showSetupWizard = hasTenant(session)
+    ? !initData?.setup_state?.onboarding_completed
+    : false;
 
   return (
     <div className="flex h-screen bg-background">

@@ -1,5 +1,7 @@
 import { redirect } from "next/navigation";
 import { getSession } from "@/lib/session";
+import { hasTenant } from "@/lib/web-signup";
+import { NoTenantEmptyState } from "@/components/dashboard/no-tenant-empty-state";
 import { backendFetchJson } from "@/lib/backend";
 import { AnalyticsCards } from "@/components/dashboard/analytics-cards";
 import { PostingChart } from "@/components/dashboard/posting-chart";
@@ -10,6 +12,12 @@ export default async function DashboardPage() {
   // Deduped with layout via React cache() — no extra JWT verification
   const session = await getSession();
   if (!session) redirect("/login");
+
+  // A signed-in user with no tenant reaches the dashboard and sees an empty
+  // state, rather than being redirected back into the instance picker. The
+  // tenant-scoped fetches below cannot run without a tenant, so this returns
+  // before them rather than passing a null chat id through a non-null assertion.
+  if (!hasTenant(session)) return <NoTenantEmptyState />;
 
   const { activeChatId, userId } = session;
 
