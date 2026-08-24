@@ -32,6 +32,13 @@ class ChatSettings(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
 
     # Chat identification
+    # STILL NOT NULL, and it must stay that way until the DDL lands (#1015).
+    # Web signup needs this nullable -- `id` is the tenant identity and this is
+    # an optional binding -- but the drop lives in an UNNUMBERED file
+    # (scripts/migrations/proposed/), so flipping it here alone would make the
+    # model disagree with the corpus. `TestSchemaParity` replays the
+    # migrations and diffs them against these models; it caught exactly that.
+    # The flip ships in the same PR as the numbered migration, never before.
     telegram_chat_id = Column(BigInteger, nullable=False, unique=True, index=True)
     display_name = Column(String(100), nullable=True)
 

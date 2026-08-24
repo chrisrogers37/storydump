@@ -101,7 +101,44 @@ class ChatSettingsRepository(BaseRepository):
         return chat_settings
 
     def get_by_chat_id(self, telegram_chat_id: int) -> Optional[ChatSettings]:
-        """Get settings for a specific chat."""
+        """Get settings for a specific chat. Refuses a null chat id.
+
+        THE GUARD BELOW IS LOAD-BEARING AND ITS REASONING IS COUNTERINTUITIVE.
+        Read this before deleting it; the obvious argument for deleting it is
+        correct about SQL and wrong about this code.
+
+        Since 064, ``chat_settings.telegram_chat_id`` is NULLABLE, so rows with
+        a null binding exist. Passing ``None`` here must not return one.
+
+        The tempting argument is that ``= NULL`` matches zero rows in SQL, so a
+        null input is harmless. That is TRUE OF RAW SQL AND FALSE HERE: the ORM
+        does not emit ``= NULL``. SQLAlchemy compiles
+        ``ChatSettings.telegram_chat_id == None`` to ``telegram_chat_id IS
+        NULL`` (measured on this project's SQLAlchemy 2.0.49), which matches
+        EVERY unbound row, and ``.first()`` then returns an arbitrary one --
+        another tenant's.
+
+        AND THE CALLER'S REFUSAL CANNOT CATCH IT. ``require_by_chat_id`` above
+        raises only when the RESULT is None; a row was found, so it returns it.
+        The refusal is keyed on "no row", and a null input now finds one. That
+        is why the check has to be on the INPUT and cannot be moved to the
+        result.
+
+        Before 064 the ``NOT NULL`` constraint made this unreachable -- nothing
+        could match ``IS NULL``. Dropping it is what arms the defect, which is
+        why the guard ships in the same change.
+
+        Raises ``ValueError`` rather than ``TenantResolutionError``: a null chat
+        id is a caller bug, not a tenancy outcome, and it should surface as a
+        loud 500 rather than blend into the ordinary 403 an unknown chat gets.
+        ``TenantResolutionError``'s vocabulary is closed and has no member that
+        means "the caller passed nothing".
+        """
+        if telegram_chat_id is None:
+            raise ValueError(
+                "get_by_chat_id received a null telegram_chat_id; "
+                "an unbound workspace must be resolved by chat_settings.id"
+            )
         result = (
             self.db.query(ChatSettings)
             .filter(ChatSettings.telegram_chat_id == telegram_chat_id)
