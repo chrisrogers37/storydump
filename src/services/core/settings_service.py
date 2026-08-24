@@ -131,6 +131,16 @@ class SettingsService(BaseService):
         """
         return self.settings_repo.get_or_create(telegram_chat_id)
 
+    def provision_personal(self, user_id: str) -> ChatSettings:
+        """The personal-tenant mint: ``provision``'s user_id-keyed sibling.
+
+        For web-only users with no Telegram chat (tenant-anchor doc §9).
+        Idempotent — calling it twice, or twice at once, returns the same
+        tenant. Same doctrine as ``provision``: an explicit act of the first
+        tenant-scoped need, never a side effect of auth or of resolving.
+        """
+        return self.settings_repo.get_or_create_personal(user_id)
+
     def set_paused(
         self, telegram_chat_id: int, paused: bool, user: Optional[User] = None
     ) -> None:
