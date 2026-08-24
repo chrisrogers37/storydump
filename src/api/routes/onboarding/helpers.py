@@ -149,6 +149,13 @@ def _validate_request(
     # and this refusal fires on a legitimate Telegram caller. Measured: it
     # turned an oauth-route 400 into a 403. "user_uuid" is produced by
     # validate_web_token and by nothing else, so it cannot be back-contaminated.
+    #
+    # A SECOND REASON, found by mutation-testing the first: an UNBOUND web
+    # credential (sd1u) carries no tenant key AT ALL, so keying on
+    # chat_settings_id would not catch it either -- it would sail past this
+    # refusal entirely and reach the chat-keyed path below. "user_uuid" is on
+    # both shapes; the tenant key is on only one. Reverting the discriminator
+    # reddens three tests in tests/src/api/test_validate_auth_cascade.py.
     if "user_uuid" in user_info:
         ip = _client_ip(request)
         logger.warning(
