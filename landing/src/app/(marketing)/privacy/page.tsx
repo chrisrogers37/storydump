@@ -290,12 +290,48 @@ export default function PrivacyPolicy() {
                 <tr className="border-b">
                   <td className="py-2 pr-4">
                     <code className="rounded bg-muted px-1.5 py-0.5">
-                      storydump_session
+                      sd_session
                     </code>
                   </td>
                   <td className="py-2 pr-4">HttpOnly cookie</td>
                   <td className="py-2 pr-4">Authenticated session</td>
-                  <td className="py-2">24 hours</td>
+                  <td className="py-2">30 days</td>
+                </tr>
+                <tr className="border-b">
+                  <td className="py-2 pr-4">
+                    <code className="rounded bg-muted px-1.5 py-0.5">
+                      storydump_workspace
+                    </code>
+                  </td>
+                  <td className="py-2 pr-4">Cookie</td>
+                  <td className="py-2 pr-4">
+                    Which workspace the interface is pointed at
+                  </td>
+                  <td className="py-2">30 days</td>
+                </tr>
+                <tr className="border-b">
+                  <td className="py-2 pr-4">
+                    <code className="rounded bg-muted px-1.5 py-0.5">
+                      sd_oauth_nonce
+                    </code>
+                  </td>
+                  <td className="py-2 pr-4">HttpOnly cookie</td>
+                  <td className="py-2 pr-4">
+                    Sign-in request forgery protection
+                  </td>
+                  <td className="py-2">15 minutes</td>
+                </tr>
+                <tr className="border-b">
+                  <td className="py-2 pr-4">
+                    <code className="rounded bg-muted px-1.5 py-0.5">
+                      storydump_invite
+                    </code>
+                  </td>
+                  <td className="py-2 pr-4">HttpOnly cookie</td>
+                  <td className="py-2 pr-4">
+                    Carries an invitation across sign-in
+                  </td>
+                  <td className="py-2">15 minutes</td>
                 </tr>
                 <tr className="border-b">
                   <td className="py-2 pr-4">
