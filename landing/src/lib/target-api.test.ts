@@ -52,14 +52,17 @@ describe("the credential", () => {
       });
     });
 
-    await targetFetch("/auth/session", "sekrit-token");
-    await targetFetch("/auth/google/signin", null, { method: "POST", body: "{}" });
+    await targetFetch("/me", "sekrit-token");
+    await targetFetch("/google", null, { method: "POST", plane: "auth" });
 
     const authed = new Headers(calls[0].headers);
     expect(authed.get("Authorization")).toBe("Bearer sekrit-token");
 
-    // Sign-in is anonymous by construction — there is no session yet. A header
-    // sent here would have to be a token from somewhere else.
+    // The auth plane's pre-auth endpoints are anonymous by construction — there
+    // is no principal yet. A header sent there would have to be a token from
+    // somewhere else. Paths here are REAL ones on purpose: a fixture naming an
+    // endpoint that does not exist teaches the next reader a false contract,
+    // which is how this tier ended up calling four paths the API never served.
     const anon = new Headers(calls[1].headers);
     expect(anon.has("Authorization")).toBe(false);
   });
@@ -72,7 +75,9 @@ describe("error bodies", () => {
       { status: 409, headers: { "Content-Type": "application/json" } },
     ));
 
-    const result = await targetFetch("/invitations/accept", "tok", { method: "POST" });
+    const result = await targetFetch("/invitations/abc123/accept", "tok", {
+      method: "POST",
+    });
 
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("unreachable");

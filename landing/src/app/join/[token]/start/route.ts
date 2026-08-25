@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { TARGET_API_URL } from "@/lib/target-api";
 
 /** Remembered just long enough to survive the round trip to Google. */
 export const INVITE_COOKIE = "storydump_invite";
@@ -22,9 +23,10 @@ export async function GET(
 ) {
   const { token } = await context.params;
 
-  const response = NextResponse.redirect(
-    new URL("/auth/google", request.nextUrl.origin),
-  );
+  // The API owns sign-in, so this hands off to it rather than to a route here.
+  // The invite cookie is set on THIS origin first and survives the round trip,
+  // because the API sends the browser back to /welcome on the same origin.
+  const response = NextResponse.redirect(`${TARGET_API_URL}/auth/google`);
 
   if (token && token.length <= 256) {
     response.cookies.set(INVITE_COOKIE, token, {

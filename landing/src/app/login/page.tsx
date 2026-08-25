@@ -1,8 +1,6 @@
 import Link from "next/link";
-import { headers } from "next/headers";
 import { ArrowLeft } from "lucide-react";
 import { GoogleLoginButton } from "@/components/auth/google-login-button";
-import { googleSigninAvailable } from "@/lib/google-oidc";
 import { siteConfig } from "@/config/site";
 
 export const metadata = {
@@ -27,23 +25,12 @@ export const metadata = {
  * and no second-choice styling. A chooser with one option is a chooser that
  * teaches the reader to look for the other one.
  *
- * AND THE EMPTY CARD IS HANDLED HERE, which it did not have to be before.
- * `GoogleLoginButton` renders null on an origin Google will not redirect back
- * to — correct for the button, and survivable while the Telegram widget sat
- * next to it. With one control, null leaves a bordered card containing nothing:
- * a dead end that tells the visitor neither what is wrong nor what to do. So
- * the page asks the same question the button does and says something either way.
+ * The card can no longer be empty, so the guard that handled that is gone with
+ * it: the button is now an unconditional link to the API's sign-in endpoint
+ * rather than something that renders null when this tier cannot see Google's
+ * credentials. See GoogleLoginButton for why that question moved.
  */
-export default async function LoginPage() {
-  // Read from the request rather than from config: the origin decides whether
-  // Google will accept the redirect back, and a preview deployment has a
-  // different one every branch.
-  const h = await headers();
-  const host = h.get("x-forwarded-host") ?? h.get("host");
-  const proto = h.get("x-forwarded-proto") ?? "https";
-  const origin = host ? `${proto}://${host}` : null;
-  const canSignIn = googleSigninAvailable(origin);
-
+export default function LoginPage() {
   return (
     <div className="flex min-h-svh flex-col items-center justify-center bg-background px-4">
       <div className="w-full max-w-sm space-y-6">
@@ -65,20 +52,12 @@ export default async function LoginPage() {
         </div>
 
         <div className="rounded-lg border bg-card p-6 shadow-sm">
-          {canSignIn ? (
-            <GoogleLoginButton origin={origin} />
-          ) : (
-            <p className="text-center text-sm text-muted-foreground">
-              Sign-in is not available on this deployment.
-            </p>
-          )}
+          <GoogleLoginButton />
         </div>
 
-        {canSignIn && (
-          <p className="text-center text-xs text-muted-foreground">
-            New here? Signing in creates your account.
-          </p>
-        )}
+        <p className="text-center text-xs text-muted-foreground">
+          New here? Signing in creates your account.
+        </p>
       </div>
     </div>
   );

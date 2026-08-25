@@ -86,12 +86,38 @@ describe("resolveSessionToken separates 'nobody' from 'could not ask'", () => {
     );
   });
 
-  it("resolves a live token to a user carrying no workspace", async () => {
-    respond(200, { user_id: "11111111-2222-3333-4444-555555555555", display_name: "Chris" });
+  it("resolves a live token against the API's /me shape", async () => {
+    respond(200, {
+      user: { id: "11111111-2222-3333-4444-555555555555", display_name: "Chris" },
+      workspaces: [],
+      degraded: [],
+    });
     const session = await resolveSessionToken("good");
     expect(session?.userId).toBe("11111111-2222-3333-4444-555555555555");
     // Signed in with no workspace is a NORMAL state, not an error — it is every
-    // user's state between signing in and creating their first one.
+    // user's state between signing in and creating their first one, and the API
+    // says so too: "a user with zero workspaces is the normal first state".
+    expect(session?.workspaces).toEqual([]);
     expect(session?.activeWorkspaceId).toBeNull();
+  });
+
+  it("keeps `workspaces: null` distinct from an empty list", async () => {
+    // The invariant this whole PR argued for, now that the API actually
+    // implements it. `null` means the membership list could not be READ —
+    // flattening it to [] would render "create your first workspace" to
+    // someone who owns six, which is the failure this design exists to stop.
+    respond(200, {
+      user: { id: "11111111-2222-3333-4444-555555555555", display_name: "Chris" },
+      workspaces: null,
+      degraded: ["membership_list_unreadable"],
+    });
+    const session = await resolveSessionToken("good");
+    expect(session?.workspaces).toBeNull();
+    expect(session?.degraded).toContain("membership_list_unreadable");
+  });
+
+  it("treats a body with no user as not signed in", async () => {
+    respond(200, { user: null, workspaces: null, degraded: [] });
+    await expect(resolveSessionToken("good")).resolves.toBeNull();
   });
 });

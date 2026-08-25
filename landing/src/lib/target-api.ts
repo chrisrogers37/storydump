@@ -12,7 +12,7 @@
  * which are held in this PR, and dies with them in the follow-up that ports
  * those screens onto the target router.
  *
- * ── The credential (owner: alex, #1015 D-A) ────────────────────────────────
+ * ── The credential ─────────────────────────────────────────────────────────
  *
  * Every call carries the session token as a bearer credential and NOTHING else.
  * The workspace a call acts on is named in the path, never in the credential —
@@ -30,8 +30,22 @@
 export const TARGET_API_URL =
   process.env.TARGET_API_URL || process.env.BACKEND_URL || "http://localhost:8000";
 
-/** Every target route sits under this prefix. */
-const API_PREFIX = "/api/v1";
+/**
+ * The API mounts TWO prefixes and they are not interchangeable.
+ *
+ * `/api/v1` is the authenticated resource + command surface. `/auth` is the
+ * sign-in plane, which is deliberately outside it because two of its endpoints
+ * are PRE-authentication — there is no principal yet to scope them to.
+ *
+ * Callers name the plane rather than the prefix, so a path can never silently
+ * be assembled against the wrong one.
+ */
+export type ApiPlane = "v1" | "auth";
+
+const PREFIX: Record<ApiPlane, string> = {
+  v1: "/api/v1",
+  auth: "/auth",
+};
 
 export type TargetResult<T> =
   | { ok: true; data: T }
@@ -49,7 +63,7 @@ export type TargetResult<T> =
 export async function targetFetch<T = unknown>(
   path: string,
   sessionToken: string | null,
-  init?: RequestInit & { revalidate?: number },
+  init?: RequestInit & { revalidate?: number; plane?: ApiPlane },
 ): Promise<TargetResult<T>> {
   const headers = new Headers(init?.headers);
   headers.set("Accept", "application/json");
@@ -60,7 +74,7 @@ export async function targetFetch<T = unknown>(
 
   let response: Response;
   try {
-    response = await fetch(`${TARGET_API_URL}${API_PREFIX}${path}`, {
+    response = await fetch(`${TARGET_API_URL}${PREFIX[init?.plane ?? "v1"]}${path}`, {
       ...init,
       headers,
       cache: "no-store",

@@ -64,6 +64,15 @@ export interface SessionUser {
    * `/workspaces` both render in it.
    */
   activeWorkspaceId: string | null;
+  /**
+   * The memberships, or NULL when the API could not read them.
+   *
+   * Null and `[]` are different answers with opposite remedies, which is why
+   * this is not narrowed to an array — see `MeResponse.workspaces`.
+   */
+  workspaces: Array<{ id: string; name: string; role: string; state: string }> | null;
+  /** Reasons the API named for anything it could not fully answer. */
+  degraded: string[];
 }
 
 export const SESSION_COOKIE = "storydump_session";
@@ -97,10 +106,20 @@ export const WORKSPACE_COOKIE_OPTIONS = {
   httpOnly: false,
 };
 
-type ResolvedSession = {
-  user_id: string;
-  display_name?: string;
-  email?: string;
+type MeResponse = {
+  user: { id: string; display_name?: string; primary_email?: string } | null;
+  /**
+   * NULL IS NOT AN EMPTY LIST, and the API is explicit about the difference:
+   * when the membership list cannot be read it answers `null` with the reason
+   * in `degraded`, "so a front end can say 'cannot list your workspaces'
+   * instead of 'you have none'."
+   *
+   * That is the exact invariant this PR argued for before the router existed.
+   * It is honoured here rather than flattened — `?? []` on this field would
+   * undo the API's care at the last hop.
+   */
+  workspaces: Array<{ id: string; name: string; role: string; state: string }> | null;
+  degraded: string[];
 };
 
 /**
@@ -114,14 +133,18 @@ type ResolvedSession = {
 export async function resolveSessionToken(
   token: string,
 ): Promise<SessionUser | null> {
-  const result = await targetFetch<ResolvedSession>("/auth/session", token);
+  const result = await targetFetch<MeResponse>("/me", token);
 
   if (result.ok) {
+    const user = result.data.user;
+    if (!user) return null;
     return {
-      userId: result.data.user_id,
-      displayName: result.data.display_name?.trim() || "",
-      email: result.data.email,
+      userId: user.id,
+      displayName: user.display_name?.trim() || "",
+      email: user.primary_email,
       activeWorkspaceId: null,
+      workspaces: result.data.workspaces,
+      degraded: result.data.degraded ?? [],
     };
   }
 

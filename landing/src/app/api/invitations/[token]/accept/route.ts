@@ -35,10 +35,12 @@ export async function POST(
     return NextResponse.json({ error: "invalid_invitation" }, { status: 400 });
   }
 
+  // The token rides the PATH, not the body. Encoded because it is attacker-
+  // supplied and lands in a URL; the API holds only its SHA256 either way.
   const result = await targetFetch<{ workspace_id: string }>(
-    "/invitations/accept",
+    `/invitations/${encodeURIComponent(token)}/accept`,
     sessionToken,
-    { method: "POST", body: JSON.stringify({ token }) },
+    { method: "POST" },
   );
 
   if (!result.ok) {
