@@ -1,41 +1,74 @@
-"""FastAPI application for Storydump OAuth flows and Mini App."""
+"""The Storydump API — the target tier's web surface (#1028, #1015).
 
+`create_app()` is a factory because the previous module-level singleton is why
+every API test in the repo bound the legacy app: an engine, a settings snapshot
+and a middleware stack assembled at import time cannot be handed a test
+double. The Procfile line is unchanged — ``uvicorn src.api.app:app`` — and the
+module still exports `app`, built once at the bottom.
+
+What it mounts, and why each lives where it does:
+
+- ``/auth`` — sign-in hosted on the API (`07` §1), see `routes/auth.py`.
+- ``/api/v1`` — reads as resources, writes as the `01` vocabulary, see
+  `routes/v1.py`.
+- ``/webhooks/telegram`` — the dormant W4 ingress route, unchanged; W4 arms it
+  (`TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN` + `app.state.ingress`) rather than
+  writing a new one.
+- ``/health`` — Railway's probe (`railway.toml`), which now also says whether
+  a target engine is configured, so a service that would 503 every data route
+  is visible from the probe instead of only from the first request.
+
+What deliberately does not exist any more: the legacy ``/auth`` OAuth router,
+the ``/api/onboarding`` router and its Mini App (`/static`; the Mini App's
+own URL, `/webapp/onboarding`, stays answered — as a redirect to the front
+end, because buttons already sent still navigate there — see
+`routes/retired.py`), all of which read the legacy schema that M.3 froze; the in-memory
+SlowAPI limiter — a process-local mutable singleton (`01` §"what deliberately
+does not exist") — whose only job now, pre-auth admission, is the durable
+`rate_counters` ``preauth_ip`` scope (`02` §6, `05`) inside the auth routes.
+
+The engine comes from `TARGET_DATABASE_URL` and from nothing else. Unset means
+``app.state.engine is None`` and every data route answers 503 naming the
+variable — never the settings-built URL, which on the deployed service points
+at nothing and on a misconfigured one would point at a legacy-shaped database
+(#1010's class of silent misdirection).
+"""
+
+from __future__ import annotations
+
+import os
 import time
-from pathlib import Path
+from typing import Mapping, Optional
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
-from slowapi import _rate_limit_exceeded_handler
-from slowapi.errors import RateLimitExceeded
-from slowapi.middleware import SlowAPIMiddleware
+from fastapi.responses import JSONResponse
+from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp, Receive, Scope, Send
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
-from src.api.rate_limit import limiter
-from src.api.routes.onboarding.helpers import MEMBERSHIP_DENIED_DETAIL
-from src.exceptions.tenancy import TenantResolutionError
-from src.api.routes.oauth import router as oauth_router
-from src.api.routes.onboarding import router as onboarding_router
+from src.api.routes.auth import router as auth_router
+from src.api.routes.retired import router as retired_router
+from src.api.routes.v1 import IDEMPOTENCY_HEADER
+from src.api.routes.v1 import router as v1_router
 from src.api.routes.webhooks import router as webhooks_router
 from src.config.settings import settings
+from src.exceptions.tenancy import TenantResolutionError
+from src.services.target.commands import CommandNotBuilt, CommandRefused
+from src.services.target.invitations import InvitationRefused
+from src.services.target.unit_of_work import create_engine, engine_url_from_env
+from src.services.target.webhook_ingress import AdmissionConflict, DeliveryReplayed
 from src.utils.logger import logger
+
+VERSION = "0.2.0"
+_START_TIME = time.time()
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
-    """Add standard security headers to every response.
-
-    Telegram Mini Apps load inside Telegram's webview/iframe, so /webapp/,
-    /api/onboarding/, and /static/onboarding/ paths need relaxed CSP:
-    - script-src must allow https://telegram.org for the WebApp SDK
-    - frame-ancestors must allow Telegram's web client domains
-    Without the SDK loading, Telegram.WebApp.ready() never fires and
-    the native loading overlay stays on top — freezing all interaction.
-    """
-
-    _MINI_APP_PREFIXES = ("/webapp/", "/api/onboarding/", "/static/onboarding/")
+    """Standard security headers on every response. One strict policy for
+    every path: the Telegram Mini App exemption (frame-ancestors for
+    telegram.org) left with the Mini App."""
 
     async def dispatch(self, request: Request, call_next) -> Response:
         response = await call_next(request)
@@ -44,22 +77,11 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             "max-age=63072000; includeSubDomains"
         )
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-
-        if request.url.path.startswith(self._MINI_APP_PREFIXES):
-            response.headers["Content-Security-Policy"] = (
-                "default-src 'self'; "
-                "script-src 'self' https://telegram.org; "
-                "style-src 'self' 'unsafe-inline'; "
-                "img-src 'self' data:; "
-                "frame-ancestors 'self' https://web.telegram.org https://*.telegram.org"
-            )
-        else:
-            response.headers["X-Frame-Options"] = "DENY"
-            response.headers["Content-Security-Policy"] = (
-                "default-src 'self'; style-src 'self' 'unsafe-inline'; "
-                "img-src 'self' data:; frame-ancestors 'none'"
-            )
-
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data:; frame-ancestors 'none'"
+        )
         return response
 
 
@@ -84,8 +106,7 @@ class DropAmbiguousForwardedForMiddleware:
     path it already takes when there is no X-Forwarded-For header at all.
     Under normal operation behind a single well-behaved proxy this never
     triggers; it exists for the anomalous case, and failing closed to the
-    shared edge IP (pooled, still rate-limited) beats failing open to an
-    attacker-chosen identity. See #765.
+    shared edge IP beats failing open to an attacker-chosen identity. See #765.
     """
 
     _XFF = b"x-forwarded-for"
@@ -114,124 +135,188 @@ class DropAmbiguousForwardedForMiddleware:
         await self.app(scope, receive, send)
 
 
-_START_TIME = time.time()
+#: `TenantResolutionError.reason` → status, for the reasons the web surface can
+#: raise. Session reasons are 401 and the body does not say which (the
+#: distinct reasons exist for the log); a workspace the caller cannot see is
+#: 404, never 403 — the same 404 a workspace that does not exist gets (`07`
+#: §5); below the floor is 403. The chat-side reasons are not in this table
+#: because no web route resolves a chat; reaching the handler with one is a
+#: programming error, and it is answered as one (500 + log), never as a
+#: silently chosen client status.
+_TENANT_STATUS = {
+    "invalid_session": 401,
+    "expired_session": 401,
+    "revoked_session": 401,
+    "disabled_user": 401,
+    "not_a_member": 404,
+    "insufficient_role": 403,
+    # The deployment cannot answer, and says so — never an empty list that
+    # reads as "no workspaces" (the fail-open alex's #1031 named).
+    "membership_list_unreadable": 503,
+}
+_TENANT_DETAIL = {
+    401: "authentication required",
+    404: "not found",
+    403: "forbidden",
+    503: "cannot list your workspaces on this deployment yet",
+}
 
-app = FastAPI(
-    title="Storydump API",
-    description="OAuth and API endpoints for Storydump",
-    version="0.1.0",
-)
+#: `CommandRefused.reason` → status. Pinned TOTAL over `commands.REASONS` by
+#: the factory test, so a new reason cannot ship without a row here.
+_COMMAND_STATUS = {
+    "unknown_command": 404,
+    "not_built": 501,
+    "workspace_required": 400,
+    "invalid_args": 400,
+    "not_found": 404,
+    "illegal_transition": 409,
+    "manual_mode": 409,
+}
 
-
-@app.exception_handler(TenantResolutionError)
-async def _tenant_resolution_refused(request: Request, exc: TenantResolutionError):
-    """A tenant refusal that escapes a route maps like a membership denial.
-
-    Routes normally refuse at `_validate_request` before any service runs;
-    this handler is defense in depth for a refusal raised deeper (#842), so
-    a service never needs to speak HTTP and no refusal can 500.
-    """
-    return JSONResponse(status_code=403, content={"detail": MEMBERSHIP_DENIED_DETAIL})
-
-
-# Security headers — HSTS, CSP, X-Frame-Options, X-Content-Type-Options
-app.add_middleware(SecurityHeadersMiddleware)
-
-# Rate limiting — 30 req/min per IP global default (see src/api/rate_limit.py)
-#
-# MUST be added BEFORE ProxyHeadersMiddleware, which puts it BELOW it on the
-# request path. Starlette's add_middleware prepends, so the middleware added
-# last runs first; running second here means the scope's client has already
-# been corrected when the limiter reads it.
-#
-# The ordering is the control, not the limiter's configuration. SlowAPIMiddleware
-# evaluates the global default limit itself, in its own dispatch, for every route
-# that carries no @limiter.limit decorator of its own. Above ProxyHeadersMiddleware
-# it keys that limit on the raw connecting peer — behind a single edge, every
-# tenant on every undecorated route shares one 30/minute bucket, which is a
-# capacity ceiling on the whole service rather than a per-abuser control. The
-# @limiter.limit decorators were never affected: those evaluate at the endpoint,
-# already inside ProxyHeadersMiddleware. See #776.
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-app.add_middleware(SlowAPIMiddleware)
-
-# Proxy headers — trust X-Forwarded-For/Proto from the edge that fronts us, so
-# request.client.host returns the real client IP rather than the proxy's.
-#
-# Named hosts, never "*": under the wildcard uvicorn honours the header from any
-# peer AND takes its leftmost entry, which the caller writes. Every IP-keyed
-# control downstream — the limiter's key_func, auth_monitor's failure buckets —
-# then partitions on a value the caller chooses. See TRUSTED_PROXY_HOSTS (#726).
-app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=settings.trusted_proxy_hosts)
-
-# Ambiguous X-Forwarded-For — drop it rather than guess which instance is real.
-#
-# ProxyHeadersMiddleware reads headers via dict(scope["headers"]), which keeps
-# only the LAST of a repeated header name. A caller who sends X-Forwarded-For
-# as two headers instead of one comma-joined value can make dict() discard
-# the edge's real value and keep their own — bypassing the fix above. Must
-# run before ProxyHeadersMiddleware on the request path, so it is added AFTER
-# it here: Starlette's add_middleware prepends, so the middleware added last
-# runs first. See #765.
-app.add_middleware(DropAmbiguousForwardedForMiddleware)
-
-# CORS middleware — restrict to our own domain in production
-_cors_origins = (
-    [settings.OAUTH_REDIRECT_BASE_URL]
-    if settings.OAUTH_REDIRECT_BASE_URL
-    else ["http://localhost:8000"]
-)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_cors_origins,
-    allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type"],
-)
-
-# Static files for Mini App
-STATIC_DIR = Path(__file__).parent / "static"
-if STATIC_DIR.exists():
-    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
-
-# Register routes
-app.include_router(oauth_router, prefix="/auth")
-app.include_router(onboarding_router, prefix="/api/onboarding")
-
-# Target-side webhook ingress (W4, #942). DORMANT: the route exists but nothing
-# routes traffic to it until `setWebhook` is registered at M.3 step 4, and it
-# refuses every delivery while TELEGRAM_WEBHOOK_SECRET_TOKEN is unset.
-#
-# Mounting this makes `src.services.target.webhook_ingress` reachable from a
-# Procfile entrypoint (`web: uvicorn src.api.app:app`) for the first time, so
-# #942's deployed axis reads non-zero on `web`. That is IMPORTABLE, NOT SERVING:
-# `worker` still reaches zero, the composition root is still not deployed, and
-# the #942 blocker is NOT cleared by this line.
-app.include_router(webhooks_router, prefix="/webhooks")
-
-# The ingress resolution seam (#854). Declared here, beside app.state.limiter,
-# because the file that owns the app is where its collaborators are assigned.
-# None means no dispatcher: the route refuses every delivery BEFORE admitting
-# it, so nothing is consumed that cannot be executed.
-app.state.ingress = None
+#: `InvitationRefused.reason` → status, total over `invitations.REASONS`.
+_INVITATION_STATUS = {"not_acceptable": 404, "identity_mismatch": 403}
+_INVITATION_DETAIL = {
+    "not_acceptable": "invitation not acceptable",
+    "identity_mismatch": "identity proof mismatch",
+}
 
 
-@app.get("/health")
-async def health_check():
-    """Health check endpoint for Railway. No auth required."""
-    return {
-        "status": "ok",
-        "version": app.version,
-        "uptime_seconds": int(time.time() - _START_TIME),
-    }
+def _unmapped(request: Request, exc: Exception) -> JSONResponse:
+    logger.error("unmapped refusal on %s %s: %s", request.method, request.url.path, exc)
+    return JSONResponse(status_code=500, content={"detail": "internal error"})
 
 
-@app.get("/webapp/onboarding")
-async def serve_onboarding_webapp():
-    """Serve the onboarding Mini App HTML."""
-    html_path = STATIC_DIR / "onboarding" / "index.html"
-    if not html_path.exists():
-        from fastapi import HTTPException
+def _register_handlers(app: FastAPI) -> None:
+    """Service refusals → HTTP, once. No route speaks a status for these."""
 
-        raise HTTPException(status_code=404, detail="Onboarding app not found")
-    return FileResponse(str(html_path), media_type="text/html")
+    @app.exception_handler(TenantResolutionError)
+    async def _tenant(request: Request, exc: TenantResolutionError):
+        status = _TENANT_STATUS.get(exc.reason)
+        if status is None:
+            return _unmapped(request, exc)
+        logger.info("refused %s %s: %s", request.method, request.url.path, exc)
+        content = {"detail": _TENANT_DETAIL[status]}
+        if status == 503:
+            content["reason"] = exc.reason
+        return JSONResponse(status_code=status, content=content)
+
+    @app.exception_handler(CommandRefused)
+    async def _command(request: Request, exc: CommandRefused):
+        status = _COMMAND_STATUS.get(exc.reason)
+        if status is None:
+            return _unmapped(request, exc)
+        content = {"detail": str(exc), "reason": exc.reason}
+        if isinstance(exc, CommandNotBuilt):
+            content = {
+                "command": exc.command,
+                "detail": "not built",
+                "reason": "not_built",
+            }
+        return JSONResponse(status_code=status, content=content)
+
+    @app.exception_handler(InvitationRefused)
+    async def _invitation(request: Request, exc: InvitationRefused):
+        status = _INVITATION_STATUS.get(exc.reason)
+        if status is None:
+            return _unmapped(request, exc)
+        return JSONResponse(
+            status_code=status,
+            content={"detail": _INVITATION_DETAIL[exc.reason], "reason": exc.reason},
+        )
+
+    @app.exception_handler(DeliveryReplayed)
+    async def _replayed(request: Request, exc: DeliveryReplayed):
+        # Acknowledged WITHOUT re-execution — the same key and the same body.
+        return JSONResponse(status_code=200, content={"outcome": "replayed"})
+
+    @app.exception_handler(AdmissionConflict)
+    async def _conflict(request: Request, exc: AdmissionConflict):
+        # Channel-neutral wording: the exception already names the key that
+        # was reused, and which header carried it is the adapter's business.
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": "admission conflict: this key was already used for different content",
+                "reason": "admission_conflict",
+            },
+        )
+
+
+def _engine_from_env(env: Mapping[str, str]) -> Optional[AsyncEngine]:
+    url = engine_url_from_env(env)
+    if url is None:
+        logger.warning(
+            "TARGET_DATABASE_URL is unset: the API has no target engine and every "
+            "data route answers 503 until it is configured"
+        )
+        return None
+    return create_engine(url)
+
+
+def _cors_origins() -> list[str]:
+    """The ONE browser origin admitted (`settings.web_app_origin`); never "*",
+    and with no origin configured no origin is admitted."""
+    return [settings.web_app_origin] if settings.web_app_origin else []
+
+
+def create_app(
+    *, engine: Optional[AsyncEngine] = None, env: Optional[Mapping[str, str]] = None
+) -> FastAPI:
+    """Assemble the app. *engine* injects the target engine (tests, or a
+    composition root that owns the pool); otherwise it comes from *env*
+    (default: the process environment) and from nothing else."""
+    app = FastAPI(
+        title="Storydump API",
+        description="Sign-in, reads and commands for the target tier",
+        version=VERSION,
+    )
+    app.state.engine = (
+        engine
+        if engine is not None
+        else _engine_from_env(os.environ if env is None else env)
+    )
+    # The W4 ingress resolution seam (#854), unchanged: None means the webhook
+    # route refuses every delivery BEFORE admitting it.
+    app.state.ingress = None
+
+    _register_handlers(app)
+
+    # Middleware. Starlette prepends, so the LAST added runs FIRST on the
+    # request path: CORS outermost, then the ambiguous-XFF drop (#765) ahead
+    # of the trusted-proxy walk (#726), then security headers innermost.
+    app.add_middleware(SecurityHeadersMiddleware)
+    app.add_middleware(
+        ProxyHeadersMiddleware, trusted_hosts=settings.trusted_proxy_hosts
+    )
+    app.add_middleware(DropAmbiguousForwardedForMiddleware)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins(),
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Content-Type", "Authorization", IDEMPOTENCY_HEADER],
+    )
+
+    app.include_router(auth_router, prefix="/auth")
+    app.include_router(v1_router, prefix="/api/v1")
+    app.include_router(webhooks_router, prefix="/webhooks")
+    # The Mini App's URL is baked into buttons real users still hold; it
+    # redirects rather than 404s (`routes/retired.py`).
+    app.include_router(retired_router)
+
+    @app.get("/health")
+    async def health_check():
+        """Railway's probe. No auth. `target_database` is configuration
+        presence, not liveness — a probe that opened a connection would take
+        the service down for a database blip no restart repairs."""
+        return {
+            "status": "ok",
+            "version": VERSION,
+            "uptime_seconds": int(time.time() - _START_TIME),
+            "target_database": app.state.engine is not None,
+        }
+
+    return app
+
+
+app = create_app()

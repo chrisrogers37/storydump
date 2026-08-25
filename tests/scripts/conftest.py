@@ -636,43 +636,53 @@ def seed_workspace_chain(conn, name: str) -> dict:
             " VALUES (%s, %s, 'owner')",
             (ws, user),
         )
-        cur.execute(
-            "INSERT INTO media_sources (workspace_id, provider, config)"
-            " VALUES (%s, 'gdrive', '{\"v\": 1}') RETURNING id",
-            (ws,),
-        )
-        src = cur.fetchone()[0]
-        cur.execute(
-            "INSERT INTO ig_accounts (workspace_id, provider_account_ref)"
-            " VALUES (%s, %s) RETURNING id",
-            (ws, f"acct-{name}"),
-        )
-        iga = cur.fetchone()[0]
-        cur.execute(
-            "INSERT INTO media_items"
-            " (workspace_id, source_id, content_hash, file_name, media_kind,"
-            "  provider_file_ref)"
-            " VALUES (%s, %s, %s, 'f.jpg', 'image', %s) RETURNING id",
-            (ws, src, f"hash-{name}", f"ref-{name}"),
-        )
-        mi = cur.fetchone()[0]
-        cur.execute(
-            "INSERT INTO post_intents"
-            " (workspace_id, ig_account_id, media_item_id, provider_account_ref,"
-            "  approval_mode, schedule_slot_at)"
-            " VALUES (%s, %s, %s, %s, 'manual', now()) RETURNING id",
-            (ws, iga, mi, f"acct-{name}"),
-        )
-        intent = cur.fetchone()[0]
+        chain = seed_intent_chain(cur, ws, name)
     conn.commit()
-    return {
-        "user": user,
-        "ws": ws,
-        "src": src,
-        "iga": iga,
-        "media": mi,
-        "intent": intent,
-    }
+    return {"user": user, "ws": ws, **chain}
+
+
+def seed_intent_chain(
+    cur, workspace_id, name: str, *, state: str | None = None
+) -> dict:
+    """The satellite chain one post_intent needs — media source, account, media
+    item, the intent — into an EXISTING workspace, on the caller's cursor and
+    inside the caller's transaction (the caller commits, and has set
+    ``app.actor_kind``). ``state`` overrides the intent's column default
+    (``'scheduled'``) for a suite that needs, say, ``'awaiting_approval'``.
+    Split out of :func:`seed_workspace_chain` so an API-created workspace can
+    be seeded with the same spelling rather than a copy."""
+    cur.execute(
+        "INSERT INTO media_sources (workspace_id, provider, config)"
+        " VALUES (%s, 'gdrive', '{\"v\": 1}') RETURNING id",
+        (workspace_id,),
+    )
+    src = cur.fetchone()[0]
+    cur.execute(
+        "INSERT INTO ig_accounts (workspace_id, provider_account_ref)"
+        " VALUES (%s, %s) RETURNING id",
+        (workspace_id, f"acct-{name}"),
+    )
+    iga = cur.fetchone()[0]
+    cur.execute(
+        "INSERT INTO media_items"
+        " (workspace_id, source_id, content_hash, file_name, media_kind,"
+        "  provider_file_ref)"
+        " VALUES (%s, %s, %s, 'f.jpg', 'image', %s) RETURNING id",
+        (workspace_id, src, f"hash-{name}", f"ref-{name}"),
+    )
+    mi = cur.fetchone()[0]
+    columns = "workspace_id, ig_account_id, media_item_id, provider_account_ref, approval_mode, schedule_slot_at"
+    values = "%s, %s, %s, %s, 'manual', now()"
+    params: tuple = (workspace_id, iga, mi, f"acct-{name}")
+    if state is not None:
+        columns += ", state"
+        values += ", %s"
+        params += (state,)
+    cur.execute(
+        f"INSERT INTO post_intents ({columns}) VALUES ({values}) RETURNING id", params
+    )
+    intent = cur.fetchone()[0]
+    return {"src": src, "iga": iga, "media": mi, "intent": intent}
 
 
 def window_actor(db_dsn: str, owner_actor: str, admin_conn) -> str:

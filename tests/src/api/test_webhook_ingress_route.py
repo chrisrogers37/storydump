@@ -44,6 +44,15 @@ def armed(monkeypatch):
     )
 
 
+@pytest.fixture
+def client():
+    """Bound to the module singleton, because these tests wire the seam on
+    `app.state` — the factory-built client in conftest is a different app."""
+    from fastapi.testclient import TestClient
+
+    return TestClient(app)
+
+
 @pytest.fixture(autouse=True)
 def unwired():
     """Every test starts at the real default: no dispatcher wired.

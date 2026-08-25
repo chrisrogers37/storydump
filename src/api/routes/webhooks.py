@@ -70,7 +70,6 @@ from typing import Any, Awaitable, Callable, Optional
 
 from fastapi import APIRouter, HTTPException, Request
 
-from src.api.rate_limit import limiter
 from src.config.settings import settings
 from src.services.target.webhook_ingress import (
     AdmissionConflict,
@@ -108,19 +107,12 @@ class IngressRuntime:
 
 
 @router.post("/telegram")
-# The budget is DECLARED rather than inherited, because the inherited one is
-# calibrated for browser traffic and this is the app's first machine-driven
-# endpoint. Two facts pull against each other and both are written down rather
-# than resolved by silence: the secret token is the real authentication control,
-# but the route is reachable unauthenticated (a prober gets a 403, having still
-# cost us a request), so some ceiling is wanted; and slowapi keys on client IP
-# while every legitimate delivery arrives from a small set of Telegram-owned
-# addresses, so the whole bot shares one bucket and a ceiling tight enough to
-# bite a prober would also throttle production. 120/minute is chosen to sit well
-# above this deployment's real approval-loop volume and is NOT validated against
-# measured Telegram delivery rates -- there are none yet, the route being
-# dormant. What would validate it: the M.2 rehearsal's delivery counts.
-@limiter.limit("120/minute")
+# No per-IP ceiling on this route. The in-memory SlowAPI limiter that once
+# declared 120/minute here died with the legacy app (#1028): the secret token
+# is the real authentication control, and the number it carried was never
+# validated against measured delivery rates (the route is still dormant). If
+# the M.2 rehearsal shows a ceiling is wanted, it is a durable `rate_counters`
+# scope, sized from those counts -- not a process-local bucket re-added here.
 async def telegram_webhook(request: Request) -> dict[str, str]:
     """Admit one Telegram delivery, exactly once, and dispatch it.
 

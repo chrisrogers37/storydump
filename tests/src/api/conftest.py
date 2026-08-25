@@ -1,72 +1,158 @@
-"""Shared fixtures for API-layer tests."""
+"""Fixtures and helpers for the API layer — the factory, a fake engine, the
+seams, and the two builders every sign-in test needs.
 
+Route unit tests never reach SQL: the engine is a fake whose session refuses
+`execute`, and each test patches the service function its route calls, so a
+route that grows a query without a seam fails loudly here rather than passing
+against nothing. The real database path — sign in, create a workspace, list,
+approve, as the production role on the replayed target schema — is
+`tests/scripts/test_web_router_x2_gate.py`, which imports the same builders.
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+import time
+from contextlib import asynccontextmanager
+
+import httpx
 import pytest
-from unittest.mock import Mock, patch
-
 from fastapi.testclient import TestClient
 
-from src.api.app import app
-from src.api.rate_limit import limiter
+from src.api.app import create_app
+from src.api.principal import Principal, current_principal
+from src.api.routes import v1
+from src.config.settings import settings
+from src.services.target import google_oidc, tenant_resolution
 
-VALID_USER = {"user_id": 12345, "first_name": "Chris"}
-CHAT_ID = -1001234567890
-#: The tenant id the default boundary fixture resolves CHAT_ID to (#842) —
-#: what routes hand to services instead of the chat id.
-TENANT_ID = "cs-test-1"
+PRINCIPAL = Principal(
+    session_id="11111111-1111-1111-1111-111111111111",
+    user_id="22222222-2222-2222-2222-222222222222",
+)
+WS = "33333333-3333-3333-3333-333333333333"
+INTENT = "44444444-4444-4444-4444-444444444444"
+
+#: The configured sign-in world: API host, front-end origin, client id.
+API = "https://api.example.test"
+FRONT = "https://app.example.test"
+CLIENT_ID = "cid"
 
 
-@pytest.fixture(autouse=True)
-def _disable_rate_limits():
-    """Disable SlowAPI rate limiting during tests to avoid cross-test 429s."""
-    limiter.enabled = False
-    yield
-    limiter.enabled = True
+def unsigned_id_token(state: str, **over) -> str:
+    """An ID token as Google would mint it for *state* — claims only, no real
+    signature, which is all `verify_id_token` reads (OIDC Core §3.1.3.7 (6)).
+    Keyword overrides replace or add claims; a `None` override becomes JSON
+    null, so a missing claim is expressible."""
+    now = int(time.time())
+    claims = {
+        "iss": "https://accounts.google.com",
+        "aud": CLIENT_ID,
+        "exp": now + 300,
+        "iat": now,
+        "nonce": google_oidc.nonce_for(state),
+        "sub": "sub-1",
+        "email": "p@example.com",
+        "email_verified": True,
+        "name": "P",
+    }
+    claims.update(over)
+
+    def seg(obj) -> str:
+        return base64.urlsafe_b64encode(json.dumps(obj).encode()).rstrip(b"=").decode()
+
+    return f"{seg({'alg': 'RS256'})}.{seg(claims)}.sig"
 
 
-@pytest.fixture(autouse=True)
-def _authorize_membership_by_default():
-    """Default every API test to an authorized member.
+def cookie_header(resp: httpx.Response, name: str) -> str:
+    """The raw Set-Cookie header for *name* — attributes included, which is
+    what the cookie tests assert on."""
+    for header in resp.headers.get_list("set-cookie"):
+        if header.startswith(name + "="):
+            return header
+    raise AssertionError(f"no {name} cookie in {resp.headers.get_list('set-cookie')}")
 
-    ``_validate_request`` requires an active membership when the auth token
-    carries no bound ``chat_id`` — the DM Mini App case that ``mock_validate``
-    simulates by default. Tests that exercise the membership gate request this
-    fixture and tweak ``is_active_member``; all others assume a real member.
-    """
-    with (
-        patch("src.api.routes.onboarding.helpers.SettingsService") as mock_settings_cls,
-        patch("src.api.routes.onboarding.helpers.MembershipService") as mock_cls,
-    ):
-        settings_svc = service_ctx(mock_settings_cls)
-        settings_svc.resolve_chat_settings_id.return_value = TENANT_ID
-        svc = service_ctx(mock_cls)
-        svc.is_active_member.return_value = True
-        yield mock_cls
+
+def cookie_value(resp: httpx.Response, name: str) -> str:
+    return cookie_header(resp, name).split(";", 1)[0].split("=", 1)[1]
+
+
+class FakeSession:
+    """Refuses SQL. A test that trips this needs a patched seam, not a query."""
+
+    async def execute(self, *args, **kwargs):
+        raise AssertionError(
+            "a route unit test reached SQL — patch the service seam instead"
+        )
+
+
+class FakeEngine:
+    """Only what the routes touch: `begin()` and `connect()`."""
+
+    def __init__(self):
+        self.session = FakeSession()
+
+    @asynccontextmanager
+    async def begin(self):
+        yield self.session
+
+    connect = begin
 
 
 @pytest.fixture
-def client():
+def engine():
+    return FakeEngine()
+
+
+@pytest.fixture
+def app(engine):
+    return create_app(engine=engine)
+
+
+@pytest.fixture
+def client(app):
     return TestClient(app)
 
 
-def mock_validate(return_value=None):
-    """Patch validate_init_data to skip HMAC validation in tests.
-
-    The default return has no chat_id, simulating DM-opened Mini Apps.
-    Pass chat_id in return_value to test group-chat initData.
-    """
-    return patch(
-        "src.api.routes.onboarding.helpers.validate_init_data",
-        return_value=return_value or VALID_USER,
-    )
+@pytest.fixture
+def signed_in(app):
+    """A resolved principal, bypassing the session lookup."""
+    app.dependency_overrides[current_principal] = lambda: PRINCIPAL
+    yield PRINCIPAL
+    app.dependency_overrides.clear()
 
 
-def service_ctx(mock_cls):
-    """Set up __enter__/__exit__ on mock_cls.return_value for context manager use.
+@pytest.fixture
+def google_configured(monkeypatch):
+    monkeypatch.setattr(settings, "GOOGLE_CLIENT_ID", CLIENT_ID, raising=False)
+    monkeypatch.setattr(settings, "GOOGLE_CLIENT_SECRET", "sec", raising=False)
+    monkeypatch.setattr(settings, "OAUTH_REDIRECT_BASE_URL", API, raising=False)
+    monkeypatch.setattr(settings, "WEB_APP_URL", FRONT, raising=False)
 
-    Returns the mock service instance (mock_cls.return_value) configured
-    so that ``with ServiceClass() as svc:`` works in the code under test.
-    """
-    mock_svc = mock_cls.return_value
-    mock_svc.__enter__ = Mock(return_value=mock_svc)
-    mock_svc.__exit__ = Mock(return_value=False)
-    return mock_svc
+
+@pytest.fixture
+def tenant(monkeypatch, engine):
+    """The tenant seam: the unit of work yields the fake session and the gate
+    records what it was asked. ``tenant.refuse`` makes the gate raise."""
+    asked = []
+
+    class Seam(list):
+        refuse = None
+
+    log = Seam()
+
+    @asynccontextmanager
+    async def open_tenant(request, workspace_id, principal):
+        log.append(("uow", workspace_id, principal.user_id))
+        yield engine.session
+
+    async def gate(session, workspace_id, user_id, minimum_role="member"):
+        log.append(("gate", workspace_id, user_id, minimum_role))
+        if log.refuse is not None:
+            raise log.refuse
+        return "owner"
+
+    monkeypatch.setattr(v1, "_open_tenant", open_tenant)
+    monkeypatch.setattr(tenant_resolution, "authorize_member", gate)
+    del asked
+    return log

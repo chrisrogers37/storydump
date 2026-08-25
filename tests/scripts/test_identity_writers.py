@@ -29,11 +29,6 @@ import pytest
 from src.exceptions.identity import IdentityProvisioningError
 from src.exceptions.tenancy import TenantProvisioningError, TenantResolutionError
 from src.services.target.identity_provisioning import upsert_google_identity
-from src.services.target.tenant_resolution import (
-    Membership,
-    resolve_web_session,
-    workspaces_for_user,
-)
 from src.services.target.sync_tx import TransactionRequired
 from src.services.target.web_sessions import (
     SESSION_TTL_DAYS,
@@ -541,37 +536,22 @@ class TestTheThreeWritersCompose:
         conn.commit()
 
         # A tenant-less moment is representable: the token authenticates
-        # without naming any workspace at all.
+        # without naming any workspace at all. Resolving that user INTO the
+        # new workspace is the async lane's gate (`tenant_resolution.
+        # authorize_member`), driven by the X.2 gate and
+        # `test_tenant_resolution.py` through the real API.
         live = authenticate_session(conn, session.token_hash)
         assert live.user_id == identity.user_id
 
-        resolved = resolve_web_session(
-            conn, session.token_hash, made.workspace_id, minimum_role="owner"
-        )
+        # And the tenant leg landed for that user: its owner row is readable
+        # once the workspace is claimed, which is the shape every tenant read
+        # takes past this point.
+        with conn.cursor() as cur:
+            _claim(cur, made.workspace_id)
+            cur.execute(
+                "SELECT role FROM workspace_members"
+                " WHERE workspace_id = %s AND user_id = %s",
+                (made.workspace_id, identity.user_id),
+            )
+            assert cur.fetchone() == ("owner",)
         conn.commit()
-        assert resolved.workspace_id == made.workspace_id
-        assert resolved.user_id == identity.user_id
-        assert resolved.via == "session:owner"
-
-
-class TestTheMembershipListGap:
-    """The read the web surface needs and the printed policies do not serve.
-
-    Pinned GREEN on purpose: the day a sanctioned door lands, this goes red
-    and gets updated deliberately rather than silently continuing to describe
-    a gap that closed.
-    """
-
-    def test_ingress_refuses_rather_than_reporting_no_workspaces(self, world, conn):
-        identity = upsert_google_identity(conn, subject="sub-list")
-        made = create_workspace(conn, name="Listed", owner_user_id=identity.user_id)
-        conn.commit()
-        with pytest.raises(TenantResolutionError) as err:
-            workspaces_for_user(conn, identity.user_id)
-        assert err.value.reason == "membership_list_unreadable"
-        conn.rollback()
-
-        # And the answer it refused to guess at is genuinely non-empty.
-        with txn(world["stream"]) as owner_conn:
-            rows = workspaces_for_user(owner_conn, identity.user_id)
-        assert rows == [Membership(made.workspace_id, "owner")]
