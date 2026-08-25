@@ -13,7 +13,6 @@ resolver door lands this test goes red and gets updated deliberately.
 """
 
 import hashlib
-from contextlib import contextmanager
 
 import psycopg2
 import pytest
@@ -30,6 +29,7 @@ from tests.scripts.conftest import (
     replay_advertised_stream,
     seed_workspace_chain,
     set_test_passwords,
+    txn as _txn,
 )
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
@@ -122,23 +122,6 @@ def world(admin_conn, owner_actor):
         yield {"stream": stream, "ingress": ingress, "a": a, "b": b}
     finally:
         gen.close()
-
-
-@contextmanager
-def _txn(dsn, expect_user=None):
-    """A NON-autocommit connection (SET LOCAL needs a transaction block),
-    subject-gated when a login is named."""
-    conn = psycopg2.connect(dsn)
-    try:
-        if expect_user is not None:
-            with conn.cursor() as cur:
-                cur.execute("SELECT current_user")
-                who = cur.fetchone()[0]
-                assert who == expect_user, f"wrong subject: {who}"
-        yield conn
-        conn.rollback()
-    finally:
-        conn.close()
 
 
 class TestChatResolutionAsAPrivilegedReader:
