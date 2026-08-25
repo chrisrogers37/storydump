@@ -13,30 +13,35 @@ only key that reaches a credential. Resolving from a Drive file id instead would
 be a cross-tenant hazard — Drive ids are global, so one workspace's id would
 happily select another workspace's credential (astrid, #982).
 
-## TODAY THIS ALWAYS REFUSES, AND THAT IS THE HONEST STATE
+## The writer, and the envelope it writes
 
-**Nothing writes a `gdrive` credential yet.** `ig_login_oauth.store_credential`
-binds ``PROVIDER = "ig_login"`` and migration `063`'s header asserts it is the
-only INSERT site into `oauth_credentials`. The schema is ready
-(`ck_credentials_provider` admits `'gdrive'`; `uq_credential_per_source`), the
-writer and the connect flow are not. That is a prerequisite workstream, not a
-detail of this one.
+The credential is written by :mod:`google_drive_oauth` (the Drive connect leg):
+`provider = 'gdrive'`, `media_source_id` set, `ig_account_id` NULL. Its
+`encrypted_payload` is a versioned JSON envelope carrying BOTH tokens — the
+access token issued at connect time and the durable refresh token — because
+the epic's F3 (b) keeps the refresh token for the read path to mint from
+(P5) while, until then, this door hands back the connect-time access token.
+The envelope is decoded by the writer's own :func:`google_drive_oauth.decode_payload`
+so the two modules cannot drift on the shape; a payload that is not a v1
+envelope is refused by name here, never sent onward as a bearer.
 
-So every call here raises :class:`DriveCredentialDead` until that writer lands.
-That is deliberately **not** a crash: `media_sync` classifies it persistent, the
-source flips to ``error``, the disconnect alert fires once under its `alerted_at`
-dedup, and **the job SUCCEEDS** as handled work. A missing credential therefore
-surfaces as a visible source in `error` rather than as a poisoned lane — which is
-why wiring the real door now is safe even though no credential exists.
+A source with no credential still raises :class:`DriveCredentialDead`, and
+that is deliberately **not** a crash: `media_sync` classifies it persistent,
+the source flips to ``error``, the disconnect alert fires once under its
+`alerted_at` dedup, and **the job SUCCEEDS** as handled work — a visible
+source in `error` rather than a poisoned lane.
 
-## There is no Drive refresh door, and an expired token is not silently renewed
+## There is no Drive refresh door YET, and an expired token is not silently renewed
 
-`credential_lifecycle` ships `ig_refresh` and no Google analogue. This module
-therefore hands back the stored token as-is and does not attempt a refresh. An
-expired one is refused HERE when `expires_at` has passed, rather than being sent
-to Google to earn a 401 — same outcome for the source, one less provider call,
-and the reason names expiry instead of a generic rejection. A Drive refresh leg
-lands behind this same function.
+`credential_lifecycle` ships `ig_refresh` and no Google analogue, and the
+refresh clock is fenced to `ig_login` (`063`) by design: gdrive rows carry
+`next_refresh_at = NULL` and are minted on the READ path, not by the clock
+(F3 (b)). Until that minting lands (P5), an expired access token is refused
+HERE when `expires_at` has passed, rather than being sent to Google to earn a
+401 — same outcome for the source, one less provider call, and the reason
+names expiry instead of a generic rejection. P5 lands behind this same
+function, minting from the envelope's refresh token through the egress floor
+(F3a (ii)).
 """
 
 from __future__ import annotations
@@ -46,6 +51,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import text
 
+from src.services.target import google_drive_oauth
 from src.services.target.media_sync import DriveCredentialDead
 
 logger = logging.getLogger(__name__)
@@ -114,7 +120,7 @@ async def token_for_source(engine, source_id: str, *, workspace_id: str) -> str:
             " renew it"
         )
     try:
-        return _ring().decrypt(row["encrypted_payload"])
+        plaintext = _ring().decrypt(row["encrypted_payload"])
     except Exception as exc:
         # Never log ciphertext, and never guess — `07` §3's fail-closed posture.
         # The state flip that ig_login performs here is deliberately NOT done:
@@ -124,6 +130,15 @@ async def token_for_source(engine, source_id: str, *, workspace_id: str) -> str:
         raise DriveCredentialDead(
             f"{PROVIDER} credential for media source {source_id} could not be"
             " decrypted by any ring entry"
+        ) from exc
+    try:
+        return google_drive_oauth.decode_payload(plaintext)["access_token"]
+    except google_drive_oauth.DrivePayloadMalformed as exc:
+        # A row this module can decrypt but not read is refused by name —
+        # never handed to the adapter as a bearer value that is really a blob.
+        raise DriveCredentialDead(
+            f"{PROVIDER} credential for media source {source_id} is not a v1"
+            " Drive credential envelope"
         ) from exc
 
 

@@ -41,15 +41,19 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 
 from src.api.principal import Principal, current_principal, require_engine
+from src.api.routes.auth import drive_configured
 from src.services.target import (
     commands,
+    google_drive_oauth,
     identity,
     invitations,
     provisioning,
+    readers,
     tenant_resolution,
     workspaces,
 )
 from src.services.target.commands import Command, CommandResult
+from src.services.target.ig_login_oauth import issue_state
 from src.services.target.unit_of_work import unit_of_work
 
 router = APIRouter(tags=["v1"])
@@ -461,6 +465,56 @@ async def create_source(
         status_code=201 if created else 200,
         content={"source_id": source_id, "created": created},
     )
+
+
+@router.post("/workspaces/{ws}/sources/{source_id}/connect")
+async def connect_source(
+    ws: uuid.UUID,
+    source_id: uuid.UUID,
+    request: Request,
+    principal: Principal = Depends(current_principal),
+):
+    """Start the Drive grant for one source: mint the state the callback will
+    consume and hand back where the browser goes (the gdrive epic, P3).
+
+    An OAuth leg is a browser redirect, which the command port cannot express,
+    so it lives here as a resource route at the admin floor — the same floor
+    `commands.ROLE_FLOOR["connect_account"]` names — and the executor stays
+    the thin chat-side door (F1 (a)). Per-SOURCE, because a Drive credential
+    is (D37): the state pins the source in `reconnect_target`, `connect` for a
+    source that has never been credentialed and `reconnect` after that, so a
+    stale reconnect state is retired by the next one (last issued wins).
+    """
+    client_id, _, redirect_uri = drive_configured()
+    async with _admin(request, str(ws), principal) as session:
+        source = await readers.row(
+            session,
+            "SELECT id FROM media_sources WHERE id = :s AND workspace_id = :ws",
+            s=str(source_id),
+            ws=str(ws),
+        )
+        if source is None:
+            raise HTTPException(status_code=404, detail="not found")
+        credentialed = await readers.row(
+            session,
+            "SELECT 1 AS present FROM oauth_credentials"
+            " WHERE media_source_id = :s AND provider = :provider",
+            s=str(source_id),
+            provider=google_drive_oauth.PROVIDER,
+        )
+        state = await issue_state(
+            session,
+            purpose="reconnect" if credentialed else "connect",
+            provider=google_drive_oauth.PROVIDER,
+            user_id=principal.user_id,
+            workspace_id=str(ws),
+            reconnect_target=str(source_id),
+        )
+    return {
+        "authorization_url": google_drive_oauth.authorization_url(
+            client_id=client_id, redirect_uri=redirect_uri, state=state
+        )
+    }
 
 
 # --- commands -----------------------------------------------------------
