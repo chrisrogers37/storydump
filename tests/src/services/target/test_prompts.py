@@ -179,18 +179,23 @@ class TestPromptIntent:
             assert "Post now" in str(kwargs["payload"])
         assert {k["binding_id"] for _, k in enqueues} == {"b-1", "b-2"}
 
-    async def test_no_active_binding_means_no_prompt_and_no_transition(
+    async def test_no_active_binding_still_transitions_and_enqueues_nothing(
         self, monkeypatch
     ):
+        """The web queue is a surface (#1033): a workspace with no push binding
+        still has somewhere to act, so the intent leaves `scheduled` and simply
+        gets no card. Before #1033 this case stayed `scheduled` and was reaped —
+        on exactly the Google-only workspaces the product exists for."""
         called = []
 
         async def fake_transition(session, intent_id, to_state):
             called.append(to_state)
 
+        async def fake_enqueue(session, **kwargs):  # pragma: no cover - must not run
+            raise AssertionError("no binding, no card")
+
         monkeypatch.setattr(prompts.intent_ledger, "transition", fake_transition)
+        monkeypatch.setattr(prompts.outbox, "enqueue", fake_enqueue)
         row = {"id": "i-1", "workspace_id": "ws-1", "api_publishing_enabled": False}
         ids = await prompts.prompt_intent(object(), row, [])
-        assert ids == [] and called == [], (
-            "a promptless transition would strand the intent in prompt_pending"
-            " with no card anywhere — the no-surface case stays 'scheduled'"
-        )
+        assert ids == [] and called == ["prompt_pending"]

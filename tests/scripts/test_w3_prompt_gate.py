@@ -1,10 +1,14 @@
 """W3 gate — prompt production against the real machinery (#790, #942).
 
 The `02` §4 matrix edges, driven end to end: a due `scheduled` intent gains
-its card in the same transaction as its transition; delivery advances it to
-`awaiting_approval` (the sweep as the correctness backstop); a card that
-failed on every surface fails the intent; a workspace that cannot publish by
-API gets no Post-now button; and the whole flow is idempotent — a second
+its card in the same transaction as its transition; the intent is actionable
+on the web queue the moment it is prompted (`02` §4 :1008's second disjunct —
+"workspace has web access" — universal since #1033), so it advances to
+`awaiting_approval` in the same pass whether or not a card was delivered, and
+a card that failed on every push surface leaves it actionable rather than
+failing it; a workspace with no push binding at all still reaches
+`awaiting_approval` and simply gets no card; a workspace that cannot publish
+by API gets no Post-now button; and the whole flow is idempotent — a second
 sweep changes nothing.
 """
 
@@ -91,7 +95,10 @@ class TestDueScheduledGainsItsCard:
         try:
             counts = await _sweep(engine)
             assert counts["prompted"] == 1
-            assert _intent_state(sync_conn, chain["intent"]) == "prompt_pending"
+            # The web is a surface: the intent is actionable in the SAME pass,
+            # before the card has been delivered anywhere.
+            assert counts["advanced"] == 1
+            assert _intent_state(sync_conn, chain["intent"]) == "awaiting_approval"
             cards = _cards(sync_conn, chain["intent"])
             assert len(cards) == 1 and cards[0][1] == "pending"
             payload = cards[0][2]
@@ -99,7 +106,7 @@ class TestDueScheduledGainsItsCard:
             assert "Post now" not in str(payload), "api flag is off in this world"
 
             again = await _sweep(engine)
-            assert again["prompted"] == 0, "idempotent: no double card"
+            assert again == {"prompted": 0, "advanced": 0}, "idempotent: no double card"
             assert len(_cards(sync_conn, chain["intent"])) == 1
         finally:
             await engine.dispose()
@@ -117,14 +124,18 @@ class TestDueScheduledGainsItsCard:
             await engine.dispose()
 
 
-class TestDeliveryAdvancesTheIntent:
-    async def test_a_sent_card_moves_prompt_pending_to_awaiting_approval(
-        self, lane_db, sync_conn
-    ):
+class TestTheWebIsASurface:
+    """`02` §4 :1008 — `prompt_pending → awaiting_approval` on "prompt delivered
+    on ≥ 1 binding, or workspace has web access". The second disjunct had no
+    referent until the web queue (#1033); now every workspace has web access
+    by construction, so delivery evidence is no longer what gates the edge."""
+
+    async def test_delivery_after_the_fact_changes_nothing(self, lane_db, sync_conn):
         chain, binding = _seed_world(sync_conn, "w3adv")
         engine = create_async_engine(_async_url(lane_db))
         try:
             await _sweep(engine)
+            assert _intent_state(sync_conn, chain["intent"]) == "awaiting_approval"
             card_id = _cards(sync_conn, chain["intent"])[0][0]
             with sync_conn.cursor() as cur:  # the sender's outcome, minimally
                 cur.execute("SET app.actor_kind = 'migration'")
@@ -135,14 +146,18 @@ class TestDeliveryAdvancesTheIntent:
                 )
             sync_conn.commit()
 
-            counts = await _sweep(engine)
-            assert counts["advanced"] == 1
-            assert _intent_state(sync_conn, chain["intent"]) == "awaiting_approval"
             assert (await _sweep(engine))["advanced"] == 0
+            assert _intent_state(sync_conn, chain["intent"]) == "awaiting_approval"
         finally:
             await engine.dispose()
 
-    async def test_every_card_failed_fails_the_intent(self, lane_db, sync_conn):
+    async def test_every_card_failed_leaves_the_intent_actionable(
+        self, lane_db, sync_conn
+    ):
+        """Before #1033 this FAILED the intent ("no reachable surface"). The
+        web queue is reachable regardless of what Telegram did with the card,
+        so the `prompt_pending → failed` edge has no producer any more — the
+        intent waits for a person, or for `approval_ttl` to expire it."""
         chain, binding = _seed_world(sync_conn, "w3fail")
         engine = create_async_engine(_async_url(lane_db))
         try:
@@ -156,21 +171,24 @@ class TestDeliveryAdvancesTheIntent:
             sync_conn.commit()
 
             counts = await _sweep(engine)
-            assert counts["failed_no_surface"] == 1
-            assert _intent_state(sync_conn, chain["intent"]) == "failed"
+            assert "failed_no_surface" not in counts
+            assert _intent_state(sync_conn, chain["intent"]) == "awaiting_approval"
         finally:
             await engine.dispose()
 
-
-class TestNoSurfaceStaysScheduled:
-    async def test_a_workspace_without_push_bindings_is_not_transitioned(
+    async def test_a_workspace_without_push_bindings_reaches_awaiting_approval(
         self, lane_db, sync_conn
     ):
+        """The Google-only workspace — no Telegram binding, ever. Before #1033
+        its intents never left `scheduled` and the reaper expired them, on the
+        exact workspace milestone 1 exists to serve."""
         chain = seed_workspace_chain(sync_conn, "w3nobind")
         engine = create_async_engine(_async_url(lane_db))
         try:
             counts = await _sweep(engine)
-            assert counts["prompted"] == 0
-            assert _intent_state(sync_conn, chain["intent"]) == "scheduled"
+            assert counts == {"prompted": 1, "advanced": 1}
+            assert _intent_state(sync_conn, chain["intent"]) == "awaiting_approval"
+            assert _cards(sync_conn, chain["intent"]) == [], "no binding, no card"
+            assert (await _sweep(engine)) == {"prompted": 0, "advanced": 0}
         finally:
             await engine.dispose()

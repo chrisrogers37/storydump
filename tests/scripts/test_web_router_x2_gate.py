@@ -121,6 +121,11 @@ def _seed_intent(dsn: str, workspace_id: str, tag: str) -> str:
         with conn.cursor() as cur:
             cur.execute("SET app.actor_kind = 'migration'")
             chain = seed_intent_chain(cur, workspace_id, tag, state="awaiting_approval")
+            # the account column the queue renders (`06` §3): a handle to read back
+            cur.execute(
+                "UPDATE ig_accounts SET handle = %s WHERE id = %s",
+                (f"@{tag}_acct", str(chain["iga"])),
+            )
         conn.commit()
         return str(chain["intent"])
     finally:
@@ -167,14 +172,9 @@ def test_x2_gate_web_only_approval_as_svc_ingress(
             assert got.json()["name"] == "Gate"
             assert got.json()["tz"] == "America/New_York"
             assert got.json()["api_publishing_enabled"] is False
-            # INTERIM (#1033): a new workspace starts in 'auto' so the loop
-            # closes without an approvals surface. When #1033 lands and reverts
-            # this, THIS line is the deliberate flip.
-            assert (
-                got.json()["approval_mode"]
-                == workspaces.INTERIM_APPROVAL_MODE
-                == "auto"
-            )
+            # #1033 landed the approvals surface and reverted the INTERIM
+            # 'auto' with it: a new workspace carries the column's own default.
+            assert got.json()["approval_mode"] == "manual"
             members = await client.get(
                 f"/api/v1/workspaces/{ws}/members", headers=owner
             )
@@ -189,6 +189,8 @@ def test_x2_gate_web_only_approval_as_svc_ingress(
             )
             assert pending.status_code == 200, pending.text
             assert [i["id"] for i in pending.json()["intents"]] == [intent_id]
+            # the queue's account column rides the intent row (#1033)
+            assert pending.json()["intents"][0]["account_handle"] == "@gate_acct"
 
             approve_url = f"/api/v1/workspaces/{ws}/commands/approve"
             manual = await client.post(
@@ -198,6 +200,27 @@ def test_x2_gate_web_only_approval_as_svc_ingress(
             )
             assert manual.status_code == 409, manual.text
             assert manual.json()["reason"] == "manual_mode"
+
+            # Manual mode's own tap, through the real route (#1033): a second
+            # intent is marked posted by hand and terminalizes with no job.
+            by_hand = _seed_intent(world["stream"], ws, "byhand")
+            marked = await client.post(
+                f"/api/v1/workspaces/{ws}/commands/mark_posted",
+                json={"intent_id": by_hand},
+                headers={**owner, "Idempotency-Key": f"mark_posted:{by_hand}"},
+            )
+            assert marked.status_code == 200, marked.text
+            assert marked.json() == {
+                "outcome": "executed",
+                "intent_id": by_hand,
+                "state": "posted",
+                "published_via": "manual",
+            }
+            assert fetch_one(
+                world["stream"],
+                "SELECT state, published_via FROM post_intents WHERE id = %s",
+                (by_hand,),
+            ) == ("posted", "manual")
 
             bad = await client.post(
                 f"/api/v1/workspaces/{ws}/commands/settings_change",
