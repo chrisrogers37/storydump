@@ -6,26 +6,18 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { verifySessionToken, SESSION_COOKIE } from "@/lib/auth";
-import { generateUrlToken } from "@/lib/auth";
-import { BACKEND_URL } from "@/lib/backend";
+import { getSessionToken, isWorkspaceId, WORKSPACE_COOKIE } from "@/lib/session";
+import { TARGET_API_URL } from "@/lib/target-api";
 
 export async function POST(request: NextRequest) {
-  const token = request.cookies.get(SESSION_COOKIE)?.value;
-  if (!token) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const sessionToken = await getSessionToken();
+  if (!sessionToken) {
+    return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
   }
 
-  const session = await verifySessionToken(token);
-  if (!session) {
-    return NextResponse.json({ error: "Invalid session" }, { status: 401 });
-  }
-
-  if (session.activeChatId === null) {
-    return NextResponse.json(
-      { error: "No instance selected" },
-      { status: 422 }
-    );
+  const workspaceId = request.cookies.get(WORKSPACE_COOKIE)?.value;
+  if (!isWorkspaceId(workspaceId)) {
+    return NextResponse.json({ error: "no_workspace_selected" }, { status: 422 });
   }
 
   // Reject oversized uploads before buffering
@@ -38,10 +30,10 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const urlToken = generateUrlToken(session.activeChatId, session.userId);
-  const url = new URL("/api/onboarding/upload-media", BACKEND_URL);
-  url.searchParams.set("init_data", urlToken);
-  url.searchParams.set("chat_id", String(session.activeChatId));
+  const url = new URL(
+    `/api/v1/workspaces/${workspaceId}/upload-media`,
+    TARGET_API_URL,
+  );
 
   // Forward the raw multipart body to FastAPI
   const contentType = request.headers.get("content-type") || "";
@@ -58,7 +50,10 @@ export async function POST(request: NextRequest) {
   try {
     const backendResponse = await fetch(url.toString(), {
       method: "POST",
-      headers: { "Content-Type": contentType },
+      headers: {
+        "Content-Type": contentType,
+        Authorization: `Bearer ${sessionToken}`,
+      },
       body: body,
     });
 

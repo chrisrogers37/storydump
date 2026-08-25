@@ -1,21 +1,28 @@
 import { redirect } from "next/navigation";
 import { getSession } from "@/lib/session";
-import { backendFetchJson } from "@/lib/backend";
+import { workspaceFetch } from "@/lib/workspaces";
+import type { MediaLibraryResponse } from "@/lib/dashboard-payloads";
+import { RouterUnavailable } from "@/components/workspace/router-unavailable";
 import { PoolHealth } from "@/components/dashboard/media/pool-health";
 import { MediaGrid } from "@/components/dashboard/media/media-grid";
 import { MediaUploadWrapper } from "@/components/dashboard/media/media-upload-wrapper";
 
 export default async function MediaLibraryPage() {
-  const session = await getSession();
+  const session = await getSession().catch(() => null);
   if (!session) redirect("/login");
-  const { activeChatId, userId } = session;
-
-  const library = await backendFetchJson(
+  // Middleware already required a selected workspace to reach any route under
+  // /dashboard. Repeated because a page is reachable in tests and in a direct
+  // render without it, and `activeWorkspaceId!` would be a non-null assertion
+  // on a value that is legitimately null for every brand-new user.
+  const workspaceId = session.activeWorkspaceId;
+  if (!workspaceId) redirect("/welcome");
+  const result = await workspaceFetch<MediaLibraryResponse>(
     "media-library?page=1&page_size=20",
-    activeChatId!,
-    userId,
-    { revalidate: 30 }
+    workspaceId,
   );
+  if (!result.ok) return <RouterUnavailable what="Your media library" />;
+
+  const library = result.data;
 
   const poolHealth = library?.pool_health ?? {
     total_active: 0,

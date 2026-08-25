@@ -1,25 +1,36 @@
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
-import { TelegramLoginButton } from "@/components/auth/telegram-login-button";
 import { GoogleLoginButton } from "@/components/auth/google-login-button";
-import { headers } from "next/headers";
-import { webSignupEnabled } from "@/lib/web-signup";
 import { siteConfig } from "@/config/site";
 
 export const metadata = {
-  title: `Login — ${siteConfig.name}`,
+  title: `Sign in — ${siteConfig.name}`,
 };
 
-export default async function LoginPage() {
-  const webSignup = webSignupEnabled();
-  // The origin decides whether Google sign-in can complete here at all — see
-  // GoogleLoginButton. Read from the request rather than configured, because
-  // the question is "where is this page being served", not "where should it be".
-  const h = await headers();
-  const host = h.get("host");
-  const proto = h.get("x-forwarded-proto") ?? "https";
-  const origin = host ? `${proto}://${host}` : null;
-
+/**
+ * Sign in. One way in.
+ *
+ * The Telegram login widget is gone rather than hidden. It signed a credential
+ * with the bot token, which is what made the whole tier Telegram-rooted, and
+ * keeping it as a second option would have kept that root alive underneath a
+ * new button. There is no configuration of this page that brings it back.
+ *
+ * Telegram is not gone from the product — it is a channel you bind to a
+ * workspace, and an identity you can link once signed in. It is no longer a way
+ * to bootstrap an account, because an account is now a `users` row that has no
+ * Telegram column to bootstrap from.
+ *
+ * ONE CONTROL, DELIBERATELY. There is nothing to compare and nothing to choose
+ * between, so the card holds a single full-width button, no separator, no "or",
+ * and no second-choice styling. A chooser with one option is a chooser that
+ * teaches the reader to look for the other one.
+ *
+ * The card can no longer be empty, so the guard that handled that is gone with
+ * it: the button is now an unconditional link to the API's sign-in endpoint
+ * rather than something that renders null when this tier cannot see Google's
+ * credentials. See GoogleLoginButton for why that question moved.
+ */
+export default function LoginPage() {
   return (
     <div className="flex min-h-svh flex-col items-center justify-center bg-background px-4">
       <div className="w-full max-w-sm space-y-6">
@@ -36,34 +47,17 @@ export default async function LoginPage() {
             {siteConfig.name}
           </h1>
           <p className="text-muted-foreground text-sm">
-            {webSignup
-              ? "Sign in to access your dashboard."
-              : "Sign in with your Telegram account to access the dashboard."}
+            Sign in to access your dashboard.
           </p>
         </div>
 
-        {/* space-y-3: with two sign-in controls the card has no gap between them
-            and no separator, so a full-bleed Google button butts straight against
-            the Telegram widget's 56px block. Harmless with one child. */}
-        <div className="space-y-3 rounded-lg border bg-card p-6 shadow-sm">
-          <TelegramLoginButton />
-          {webSignup && <GoogleLoginButton origin={origin} />}
+        <div className="rounded-lg border bg-card p-6 shadow-sm">
+          <GoogleLoginButton />
         </div>
 
-        {/*
-          The authorization claim below is deleted rather than reworded when web
-          sign-up is on: "only users with an active Storydump bot" stops being
-          true, because having a bot ceases to be a precondition for access.
-
-          The Google button is NOT rendered here. It needs GET /auth/google,
-          which is not built and is not this PR's to build — a button that 404s
-          is worse than no button. See src/lib/web-signup.ts, SEAM 1.
-        */}
-        {!webSignup && (
-          <p className="text-center text-xs text-muted-foreground">
-            Only users with an active Storydump bot can access the dashboard.
-          </p>
-        )}
+        <p className="text-center text-xs text-muted-foreground">
+          New here? Signing in creates your account.
+        </p>
       </div>
     </div>
   );

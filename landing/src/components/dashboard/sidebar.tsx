@@ -7,7 +7,6 @@ import {
   CalendarDays,
   ImageIcon,
   LayoutDashboard,
-  Rocket,
   Settings,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -18,24 +17,25 @@ const navItems = [
   { href: "/dashboard/media", label: "Media Library", icon: ImageIcon },
   { href: "/dashboard/media/calendar", label: "Calendar", icon: CalendarDays },
   { href: "/dashboard/settings", label: "Settings", icon: Settings },
-  { href: "/dashboard/setup", label: "Setup Wizard", icon: Rocket },
   { href: "/dashboard/analytics", label: "Analytics", icon: BarChart3 },
 ];
 
-export function Sidebar({
-  mobile,
-  showSetupWizard = true,
-}: {
-  mobile?: boolean;
-  showSetupWizard?: boolean;
-}) {
+/**
+ * The Setup Wizard entry is GONE, along with the flag that used to hide it.
+ *
+ * `/dashboard/setup` was deleted in this change; its replacement,
+ * `/dashboard/connections`, is not built yet. So the entry pointed at nothing —
+ * and it was shown BY DEFAULT to exactly the users this change creates, because
+ * `showSetupWizard` was computed as "onboarding not complete", which is true of
+ * every brand-new workspace by construction. First signup, first click, 404.
+ *
+ * Deleted rather than pointed somewhere placeholder: a nav item is a promise
+ * that a destination exists, and there is no destination. It comes back with
+ * the screen it names.
+ */
+export function Sidebar({ mobile }: { mobile?: boolean }) {
   const pathname = usePathname();
-  // Once onboarding is complete the Setup Wizard page server-redirects to
-  // /dashboard, so the link silently bounces back to Overview. Drop the
-  // entry rather than confuse the user with a no-op nav item (#464).
-  const visibleItems = showSetupWizard
-    ? navItems
-    : navItems.filter((item) => item.href !== "/dashboard/setup");
+  const visibleItems = navItems;
 
   return (
     <aside className={mobile ? "w-56 bg-card" : "hidden w-56 shrink-0 border-r bg-card md:block"}>

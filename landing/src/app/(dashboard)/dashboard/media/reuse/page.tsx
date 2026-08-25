@@ -1,6 +1,8 @@
 import { redirect } from "next/navigation";
 import { getSession } from "@/lib/session";
-import { backendFetchJson } from "@/lib/backend";
+import { workspaceFetch } from "@/lib/workspaces";
+import type { ReuseResponse } from "@/lib/dashboard-payloads";
+import { RouterUnavailable } from "@/components/workspace/router-unavailable";
 import { ReuseChart } from "@/components/dashboard/media/reuse-chart";
 import {
   Card,
@@ -10,16 +12,17 @@ import {
 } from "@/components/ui/card";
 
 export default async function ContentReusePage() {
-  const session = await getSession();
+  const session = await getSession().catch(() => null);
   if (!session) redirect("/login");
-  const { activeChatId, userId } = session;
-
-  const data = await backendFetchJson(
+  const workspaceId = session.activeWorkspaceId;
+  if (!workspaceId) redirect("/welcome");
+  const result = await workspaceFetch<ReuseResponse>(
     "analytics/content-reuse",
-    activeChatId!,
-    userId,
-    { revalidate: 60 }
+    workspaceId,
   );
+  if (!result.ok) return <RouterUnavailable what="Content reuse" />;
+
+  const data = result.data;
 
   const totalActive = data?.total_active ?? 0;
   const reuseRate = Math.round((data?.reuse_rate ?? 0) * 100);
@@ -101,16 +104,7 @@ export default async function ContentReusePage() {
 
       <div className="grid gap-6 lg:grid-cols-2">
         <ReuseChart
-          data={
-            data ?? {
-              total_active: 0,
-              never_posted: 0,
-              posted_once: 0,
-              posted_multiple: 0,
-              reuse_rate: 0,
-              never_posted_by_category: [],
-            }
-          }
+          data={data}
         />
 
         {/* Never-posted by category table */}

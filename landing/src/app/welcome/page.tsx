@@ -1,8 +1,11 @@
 import { redirect } from "next/navigation";
+import { cookies } from "next/headers";
 import Link from "next/link";
-import { Instagram, FolderOpen, Send, ArrowRight } from "lucide-react";
 import { getSession } from "@/lib/session";
-import { webSignupEnabled, hasTenant } from "@/lib/web-signup";
+import { listWorkspaces } from "@/lib/workspaces";
+import { CreateWorkspaceForm } from "@/components/workspace/create-workspace-form";
+import { RouterUnavailable } from "@/components/workspace/router-unavailable";
+import { INVITE_COOKIE } from "@/app/join/[token]/start/route";
 import { siteConfig } from "@/config/site";
 
 export const metadata = {
@@ -10,68 +13,75 @@ export const metadata = {
 };
 
 /**
- * First-run greeting for a signed-in user with no tenant.
+ * First run: name a workspace.
  *
- * This state has never existed in the product: every user until now arrived
- * pre-provisioned through a bot, so nothing has had to greet someone with
- * nothing connected.
+ * ── Why this asks, when the previous version deliberately did not ──────────
  *
- * It deliberately does NOT ask the user to create a workspace. Tenant minting
- * is lazy — sign-up creates a user and nothing else, and the tenant is minted
- * at the first tenant-scoped action through a provisioning door. So this screen
- * orients and hands off; it does not provision.
+ * The version this replaces said: *"It deliberately does NOT ask the user to
+ * create a workspace. Tenant minting is lazy — the tenant is minted at the
+ * first tenant-scoped action."* That was correct for the legacy schema, where a
+ * tenant was a `chat_settings` row keyed on a Telegram chat id — there was
+ * nothing a person could have been asked for, so it had to happen implicitly.
  *
- * Telegram appears here as one optional connected service among three, never as
- * a step, a gate, or a prerequisite. The screen is completable without it.
+ * On the target schema a workspace has a NAME and no chat id, so there is
+ * exactly one thing only the person can supply, and the design plan's own rule
+ * applies: tenant minting is an explicit act at a provisioning door, never a
+ * side effect. Asking is the door.
+ *
+ * ── It is also the single decision on the screen ───────────────────────────
+ *
+ * The previous version offered three connect rows, all disabled. Instagram and
+ * Drive belong to a workspace, so they cannot be offered before one exists —
+ * that is what made them disabled, and three dead controls is a screen that
+ * teaches a new user their first act here is to be refused. They now live in
+ * the workspace, on /dashboard/connections.
  */
 export default async function WelcomePage() {
-  if (!webSignupEnabled()) redirect("/login");
-
-  const session = await getSession();
+  const session = await getSession().catch(() => null);
   if (!session) redirect("/login");
 
-  // Someone who already has a tenant has been here before — the dashboard is
-  // the right home for them, and a returning user should never be greeted.
-  if (hasTenant(session)) redirect("/dashboard");
+  // Signed in on the way to an invitation — finish that instead of greeting
+  // them. The cookie is cleared where it is spent, in the accept handler.
+  const invite = (await cookies()).get(INVITE_COOKIE)?.value;
+  if (invite) redirect(`/join/${encodeURIComponent(invite)}`);
 
-  const name = session.firstName?.trim();
+  const workspaces = await listWorkspaces();
+
+  // Already has one — they have been here before, and a returning user should
+  // never be greeted. /workspaces picks when there is more than one.
+  if (workspaces.ok && workspaces.data.length > 0) {
+    redirect("/workspaces");
+  }
+
+  const name = session.displayName?.trim();
 
   return (
     <div className="flex min-h-svh flex-col items-center justify-center bg-background px-4 py-16">
-      <div className="w-full max-w-lg space-y-8">
+      <div className="w-full max-w-md space-y-8">
         <div className="space-y-3">
           <h1 className="text-3xl font-bold tracking-tight">
             {name ? `Welcome, ${name}.` : "Welcome."}
           </h1>
           <p className="text-muted-foreground">
             Storydump posts your Instagram Stories on a schedule, from a media
-            library you control.
+            library you control. Start by naming a workspace — one brand, one
+            account, one schedule.
           </p>
         </div>
 
-        <div className="rounded-lg border bg-card shadow-sm divide-y">
-          <ConnectRow
-            icon={<Instagram className="h-5 w-5" />}
-            title="Instagram"
-            description="The account your Stories post to."
-            required
-          />
-          <ConnectRow
-            icon={<FolderOpen className="h-5 w-5" />}
-            title="Google Drive"
-            description="Where your media lives."
-            required
-          />
-          <ConnectRow
-            icon={<Send className="h-5 w-5" />}
-            title="Telegram"
-            description="Get approval requests in a chat."
-          />
-        </div>
-
-        <p className="text-xs text-muted-foreground">
-          You can change any of this later in settings.
-        </p>
+        {workspaces.ok ? (
+          <>
+            <div className="rounded-lg border bg-card p-6 shadow-sm">
+              <CreateWorkspaceForm autoFocus />
+            </div>
+            <p className="text-xs text-muted-foreground">
+              You can rename it later, and add Instagram, Drive and Telegram
+              once it exists.
+            </p>
+          </>
+        ) : (
+          <RouterUnavailable what="Creating a workspace" />
+        )}
 
         <Link
           href="/api/auth/logout"
@@ -80,58 +90,6 @@ export default async function WelcomePage() {
           Sign out
         </Link>
       </div>
-    </div>
-  );
-}
-
-/**
- * One connectable service.
- *
- * TENANT_DOOR_REQUIRED — connecting any of these is the first tenant-scoped
- * action, which is where the tenant gets minted. The provisioning door
- * (`ensure_personal_tenant(user_id)`) does not exist yet, and this must not
- * call `get_or_create`: that function is keyed on telegram_chat_id, so for a
- * web tenant it is create-always and would mint a row per request.
- *
- * So the action is rendered as unavailable rather than wired to something that
- * would look like it worked. See src/lib/web-signup.ts, SEAM 2.
- */
-function ConnectRow({
-  icon,
-  title,
-  description,
-  required = false,
-}: {
-  icon: React.ReactNode;
-  title: string;
-  description: string;
-  required?: boolean;
-}) {
-  return (
-    <div className="flex items-center gap-4 p-4">
-      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
-        {icon}
-      </div>
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2">
-          <span className="font-medium">{title}</span>
-          {!required && (
-            <span className="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">
-              Optional
-            </span>
-          )}
-        </div>
-        <p className="text-sm text-muted-foreground">{description}</p>
-      </div>
-      <button
-        type="button"
-        disabled
-        title="Not available yet"
-        className="inline-flex shrink-0 items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm font-medium text-muted-foreground opacity-50"
-      >
-        Connect
-        <ArrowRight className="h-3.5 w-3.5" />
-      </button>
     </div>
   );
 }

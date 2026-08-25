@@ -1,10 +1,7 @@
 import { redirect } from "next/navigation";
 import { getSession } from "@/lib/session";
-import { hasTenant } from "@/lib/web-signup";
-import { backendFetchJson } from "@/lib/backend";
 import { Sidebar } from "@/components/dashboard/sidebar";
 import { DashboardHeader } from "@/components/dashboard/header";
-import { NoTenantEmptyState } from "@/components/dashboard/no-tenant-empty-state";
 
 export const metadata = {
   title: "Dashboard — Storydump",
@@ -18,53 +15,36 @@ export default async function DashboardLayout({
   const session = await getSession();
   if (!session) redirect("/login");
 
-  // Hide the Setup Wizard sidebar entry once onboarding is complete —
-  // otherwise clicking it server-side redirects to /dashboard (see
-  // dashboard/setup/page.tsx), which looks like a broken link (#464).
-  // A tenant-less session gets the empty state for EVERY route under this
-  // layout, and its children are never rendered.
+  // The workspace gate lives in middleware, not here. This layout used to
+  // carry it, and the reasoning it carried is worth keeping because it is what
+  // makes middleware the only correct home: Next.js renders layout and page
+  // segments in PARALLEL, so a layout that returns early hides the output while
+  // the page underneath still runs its fetches. The guard read as effective and
+  // was not. Measured on a warm route — one request, one backend call, with
+  // this guard in place.
   //
-  // The gate lives here rather than on each page because this layout is the
-  // common ancestor of all nine dashboard routes — so a route added tomorrow
-  // inherits it without anyone remembering. A per-page check is an enumeration,
-  // and the tenth page is the one that gets missed.
-  //
-  // It is load-bearing, not cosmetic. Those pages call the backend with
-  // session.activeChatId, which is null here; `get_by_chat_id(None)` compiles
-  // to `IS NULL`, and `.first()` on that has no ORDER BY. Today no NULL-chat
-  // row can exist (chat_settings.telegram_chat_id is NOT NULL, migration 006),
-  // so the lookup returns None and require_by_chat_id refuses typed. The moment
-  // that column is relaxed the same call returns an arbitrary tenant-less row
-  // instead — and require_by_chat_id tests whether the RESULT is None, so it
-  // would not raise. Blocking the render is what keeps that from being reachable
-  // from this UI at all.
-  if (!hasTenant(session)) {
-    return (
-      <div className="flex h-screen bg-background">
-        <Sidebar showSetupWizard={false} />
-        <div className="flex flex-1 flex-col overflow-hidden">
-          <DashboardHeader user={session} showSetupWizard={false} />
-          <main className="flex-1 overflow-y-auto p-6">
-            <NoTenantEmptyState />
-          </main>
-        </div>
-      </div>
-    );
-  }
+  // What that gate protected against is also gone at the source. It existed
+  // because the tenant-scoped pages called the backend with a null chat id,
+  // which compiled to `IS NULL` against a table where no null-chat row could
+  // exist — until someone relaxed the column, at which point the same call
+  // would have returned an arbitrary stranger's row. The target schema has no
+  // chat id on a workspace at all, so there is no null to pass and no `IS NULL`
+  // to land on. The class is retired rather than re-guarded.
 
-  const initData = await backendFetchJson(
-    "init",
-    session.activeChatId!,
-    session.userId,
-    { revalidate: 60 }
-  );
-  const showSetupWizard = !initData?.setup_state?.onboarding_completed;
+  // No fetch here any more. The only thing this layout ever called the router
+  // for was `init`, to decide whether to show a Setup Wizard nav entry — and
+  // that entry pointed at a page this change deletes. The link went, the flag
+  // that gated it went, and the call that computed the flag went with them.
+  //
+  // Removing a request from a layout is worth more than it looks: a layout runs
+  // on every route beneath it, so this was one round trip per dashboard
+  // navigation spent on a boolean nobody can act on.
 
   return (
     <div className="flex h-screen bg-background">
-      <Sidebar showSetupWizard={showSetupWizard} />
+      <Sidebar />
       <div className="flex flex-1 flex-col overflow-hidden">
-        <DashboardHeader user={session} showSetupWizard={showSetupWizard} />
+        <DashboardHeader user={session} />
         <main className="flex-1 overflow-y-auto p-6">{children}</main>
       </div>
     </div>
