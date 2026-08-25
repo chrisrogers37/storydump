@@ -147,16 +147,8 @@ _TENANT_STATUS = {
     "disabled_user": 401,
     "not_a_member": 404,
     "insufficient_role": 403,
-    # The deployment cannot answer, and says so — never an empty list that
-    # reads as "no workspaces" (the fail-open alex's #1031 named).
-    "membership_list_unreadable": 503,
 }
-_TENANT_DETAIL = {
-    401: "authentication required",
-    404: "not found",
-    403: "forbidden",
-    503: "cannot list your workspaces on this deployment yet",
-}
+_TENANT_DETAIL = {401: "authentication required", 404: "not found", 403: "forbidden"}
 
 #: `CommandRefused.reason` → status. Pinned TOTAL over `commands.REASONS` by
 #: the factory test, so a new reason cannot ship without a row here.
@@ -192,10 +184,9 @@ def _register_handlers(app: FastAPI) -> None:
         if status is None:
             return _unmapped(request, exc)
         logger.info("refused %s %s: %s", request.method, request.url.path, exc)
-        content = {"detail": _TENANT_DETAIL[status]}
-        if status == 503:
-            content["reason"] = exc.reason
-        return JSONResponse(status_code=status, content=content)
+        return JSONResponse(
+            status_code=status, content={"detail": _TENANT_DETAIL[status]}
+        )
 
     @app.exception_handler(CommandRefused)
     async def _command(request: Request, exc: CommandRefused):
