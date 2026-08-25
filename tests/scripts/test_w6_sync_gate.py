@@ -270,7 +270,19 @@ class TestTheProviderContentTypeReachesTheColumn:
         _tick(sync_conn)
 
         drive = ScriptedDrive(
-            [([_item("f1", kind="video", name="sunset clip", mime="video/quicktime")], None)]
+            [
+                (
+                    [
+                        _item(
+                            "f1",
+                            kind="video",
+                            name="sunset clip",
+                            mime="video/quicktime",
+                        )
+                    ],
+                    None,
+                )
+            ]
         )
         wl, claimed = await _run_once_w6(lane_db, drive)
         assert claimed is True and wl.processed == 1
