@@ -57,6 +57,7 @@ from src.config.settings import settings
 from src.exceptions.tenancy import TenantResolutionError
 from src.services.target.commands import CommandNotBuilt, CommandRefused
 from src.services.target.invitations import InvitationRefused
+from src.services.target.provisioning import ProvisioningRefused
 from src.services.target.unit_of_work import create_engine, engine_url_from_env
 from src.services.target.webhook_ingress import AdmissionConflict, DeliveryReplayed
 from src.utils.logger import logger
@@ -173,6 +174,23 @@ _COMMAND_STATUS = {
     "manual_mode": 409,
 }
 
+#: `ProvisioningRefused.reason` → status (#1041).
+#:
+#: A caller-supplied value we will not store is 400 and NAMES which one, so a
+#: front end can point at the field rather than say "invalid".
+#:
+#: `slot_not_seeded` is deliberately ABSENT. It is a postcondition on the
+#: seeding invariant with no currently reachable path (measured — see
+#: `provisioning.create_destination`), so reaching it is a programming error
+#: and is answered as one (500 + log) rather than as a client status somebody
+#: chose. Mapping it would turn a broken invariant into a number a front end
+#: renders and nobody investigates.
+_PROVISIONING_STATUS = {
+    "account_ref_required": 400,
+    "account_ref_too_long": 400,
+    "folder_required": 400,
+}
+
 #: `InvitationRefused.reason` → status, total over `invitations.REASONS`.
 _INVITATION_STATUS = {"not_acceptable": 404, "identity_mismatch": 403}
 _INVITATION_DETAIL = {
@@ -213,6 +231,16 @@ def _register_handlers(app: FastAPI) -> None:
                 "reason": "not_built",
             }
         return JSONResponse(status_code=status, content=content)
+
+    @app.exception_handler(ProvisioningRefused)
+    async def _provisioning(request: Request, exc: ProvisioningRefused):
+        status = _PROVISIONING_STATUS.get(exc.reason)
+        if status is None:
+            return _unmapped(request, exc)
+        logger.info("refused %s %s: %s", request.method, request.url.path, exc)
+        return JSONResponse(
+            status_code=status, content={"detail": str(exc), "reason": exc.reason}
+        )
 
     @app.exception_handler(InvitationRefused)
     async def _invitation(request: Request, exc: InvitationRefused):
