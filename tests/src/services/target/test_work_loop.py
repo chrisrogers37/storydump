@@ -168,7 +168,7 @@ class TestPlanSlotAdapterMapsThePayload:
 
         async def fake_sweep(session, *, limit):
             swept.append(limit)
-            return {"prompted": 0, "advanced": 0, "failed_no_surface": 0}
+            return {"prompted": 0, "advanced": 0}
 
         monkeypatch.setattr(work_loop.prompts, "sweep_due_prompts", fake_sweep)
         session = _FakeSession(

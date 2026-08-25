@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { isWorkspaceId, resolveSessionToken, SessionUnavailableError } from "./session";
+import { isUuid, isWorkspaceId, resolveSessionToken, SessionUnavailableError } from "./session";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -119,5 +119,15 @@ describe("resolveSessionToken separates 'nobody' from 'could not ask'", () => {
   it("treats a body with no user as not signed in", async () => {
     respond(200, { user: null, workspaces: null, degraded: [] });
     await expect(resolveSessionToken("good")).resolves.toBeNull();
+  });
+});
+
+describe("isUuid", () => {
+  it("is the shape every forwarded id must have — a UUID or nothing, never a free-form string", () => {
+    expect(isUuid("0b6e5f1a-2f4d-4c1e-9a3b-7d8e9f0a1b2c")).toBe(true);
+    expect(isUuid("0B6E5F1A-2F4D-4C1E-9A3B-7D8E9F0A1B2C")).toBe(true);
+    for (const bad of ["", "not-a-uuid", "0b6e5f1a-2f4d-4c1e-9a3b-7d8e9f0a1b2c ", 42, null, undefined, {}]) {
+      expect(isUuid(bad), String(bad)).toBe(false);
+    }
   });
 });

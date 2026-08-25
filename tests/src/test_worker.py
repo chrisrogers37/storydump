@@ -300,3 +300,62 @@ class TestSweeperObservables:
 
         line = status_line(loops=[_L], clock=None, heartbeat=_H, sweeper=_S)
         assert "sweeps=7" in line and "mints=2" in line
+
+
+class TestPromptSweeperConsumesTheSweep:
+    """The sweep's count vocabulary is the sweeper's contract. #1033 retired
+    the `failed_no_surface` leg (the web queue is a surface every workspace
+    has, so "no reachable surface" cannot occur); a sweeper still reaching
+    for that key would raise INSIDE its own `except Exception` — the sweep
+    itself committed, the counters before the bad read still moved, and the
+    only symptom is a "prompt sweep failed" line on every cadence. So the
+    assertion that carries this test is the log staying silent."""
+
+    async def test_one_sweep_moves_exactly_the_counts_the_sweep_returned(
+        self, monkeypatch, caplog
+    ):
+        import asyncio
+        import logging
+
+        from src import worker
+
+        class _Session:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            def begin(self):
+                return self
+
+        monkeypatch.setattr(
+            worker, "async_sessionmaker", lambda engine, **kw: lambda: _Session()
+        )
+
+        async def fake_gucs(session, **kw):
+            pass
+
+        monkeypatch.setattr(worker.unit_of_work, "apply_gucs", fake_gucs)
+
+        stop = asyncio.Event()
+
+        async def fake_sweep(session, *, limit):
+            stop.set()  # one iteration, then the loop sees the stop
+            return {"prompted": 2, "advanced": 1}  # the whole vocabulary since #1033
+
+        monkeypatch.setattr(worker.prompts_mod, "sweep_due_prompts", fake_sweep)
+
+        class _Config:
+            prompt_sweep_seconds = 0.01
+
+        class _App:
+            engine = object()
+            config = _Config()
+
+        sweeper = worker.PromptSweeper(_App())
+        with caplog.at_level(logging.ERROR, logger="target.worker"):
+            await sweeper.run(stop)
+
+        assert (sweeper.sweeps, sweeper.prompted, sweeper.advanced) == (1, 2, 1)
+        assert "prompt sweep failed" not in caplog.text

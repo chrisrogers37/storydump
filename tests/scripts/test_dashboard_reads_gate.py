@@ -156,7 +156,11 @@ class TestMultiStateIntents:
             str(a["posted"]["intent"]),
             str(a["skipped"]["intent"]),
         }
-        assert len(_read(world, a, workspaces.list_intents)) == 3
+        rows = _read(world, a, workspaces.list_intents)
+        assert len(rows) == 3
+        # the queue's account column (#1033): present on every row, NULL when
+        # the seeded account carries no handle — never a missing key
+        assert all("account_handle" in r and "account_display_name" in r for r in rows)
 
 
 class TestStats:

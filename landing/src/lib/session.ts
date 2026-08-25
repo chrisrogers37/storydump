@@ -223,6 +223,11 @@ export async function getSessionToken(): Promise<string | null> {
  * junk cookie becoming a junk path segment. Membership is the backend's.
  */
 export function isWorkspaceId(value: string | undefined): value is string {
+  return isUuid(value);
+}
+
+/** The one UUID-shape predicate: every id this tier forwards to the API is one or nothing. */
+export function isUuid(value: unknown): value is string {
   return (
     typeof value === "string" &&
     /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
