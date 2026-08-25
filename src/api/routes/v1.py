@@ -45,6 +45,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 
 from src.api.principal import Principal, current_principal, require_engine
+from src.exceptions.tenancy import TenantResolutionError
 from src.services.target import (
     commands,
     identity,
@@ -179,14 +180,31 @@ def _render(result: CommandResult, *, status: Optional[int] = None) -> JSONRespo
 @router.get("/me")
 async def me(request: Request, principal: Principal = Depends(current_principal)):
     """The user, their identities, and their memberships. A user with zero
-    workspaces is the normal first state on the greenfield, not an error."""
+    workspaces is the normal first state on the greenfield, not an error.
+
+    When the membership list cannot be read for this role (`workspaces.
+    list_for_user` refuses rather than answering `[]`), the user half still
+    answers — it is the sign-in spine — and the list is ``null`` with the
+    refusal named in ``degraded``, so a front end can say "cannot list your
+    workspaces" instead of "you have none". `GET /workspaces` has no user
+    half to serve and refuses outright.
+    """
     engine = require_engine(request)
+    degraded: list[str] = []
     async with engine.connect() as conn:
         user = await identity.get_user(conn, user_id=principal.user_id)
-        memberships = await workspaces.list_for_user(conn, user_id=principal.user_id)
+        try:
+            memberships = await workspaces.list_for_user(
+                conn, user_id=principal.user_id
+            )
+        except TenantResolutionError as exc:
+            if exc.reason != "membership_list_unreadable":
+                raise
+            memberships = None
+            degraded.append(exc.reason)
     if user is None:
         raise HTTPException(status_code=404, detail="not found")
-    return {"user": user, "workspaces": memberships}
+    return {"user": user, "workspaces": memberships, "degraded": degraded}
 
 
 @router.get("/workspaces")

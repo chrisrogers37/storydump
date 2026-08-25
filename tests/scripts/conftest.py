@@ -19,6 +19,7 @@ session-wide by ``admin_conn``. It reaches every process that can reach the
 cluster, which is the scope the guarded resource actually has.
 """
 
+import contextlib
 import functools
 import json
 import subprocess
@@ -1117,3 +1118,26 @@ def write_manifest(tmp_path, required_through, entries):
         json.dumps({"required_through": required_through, "entries": entries})
     )
     return path
+
+
+@contextlib.contextmanager
+def txn(dsn, expect_user=None):
+    """A NON-autocommit connection (SET LOCAL needs a transaction block),
+    subject-gated when a login is named.
+
+    ONE spelling for the whole suite — the #852 subject discipline every
+    target-tier suite cites lives in this assertion, and two copies of it is
+    how one file learns a stricter version and the other silently does not.
+    Rolled back on exit unless the test committed.
+    """
+    conn = psycopg2.connect(dsn)
+    try:
+        if expect_user is not None:
+            with conn.cursor() as cur:
+                cur.execute("SELECT current_user")
+                who = cur.fetchone()[0]
+                assert who == expect_user, f"wrong subject: {who}"
+        yield conn
+        conn.rollback()
+    finally:
+        conn.close()

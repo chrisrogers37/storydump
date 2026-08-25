@@ -93,6 +93,22 @@ class TestTenantlessReads:
         body = client.get("/api/v1/me").json()
         assert body["user"]["id"] == PRINCIPAL.user_id
         assert body["workspaces"][0]["role"] == "owner"
+        assert body["degraded"] == []
+
+    def test_an_unreadable_membership_list_is_disclosed_never_empty(
+        self, client, signed_in, user_plane, monkeypatch
+    ):
+        async def list_for_user(conn, *, user_id):
+            raise TenantResolutionError("membership_list_unreadable")
+
+        monkeypatch.setattr(workspaces, "list_for_user", list_for_user)
+        me = client.get("/api/v1/me")
+        assert me.status_code == 200
+        assert me.json()["workspaces"] is None
+        assert me.json()["degraded"] == ["membership_list_unreadable"]
+        listed = client.get("/api/v1/workspaces")
+        assert listed.status_code == 503
+        assert listed.json()["reason"] == "membership_list_unreadable"
 
     def test_workspaces_is_the_membership_list(self, client, signed_in, user_plane):
         assert client.get("/api/v1/workspaces").json() == {

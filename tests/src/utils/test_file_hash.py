@@ -15,7 +15,6 @@ from src.utils.file_hash import calculate_bytes_hash, calculate_file_hash
 _FILE_HASH_WRITERS = (
     "services/integrations/backfill_downloader.py",
     "services/media_sources/google_drive_provider.py",
-    "api/routes/onboarding/dashboard.py",
 )
 
 _DIRECT_HASH_CALL = re.compile(r"hashlib\.(md5|sha1|sha256|sha384|sha512)\s*\(")

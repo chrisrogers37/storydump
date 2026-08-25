@@ -17,11 +17,12 @@ No Telegram binding exists at any point. The provider call is the only stub
 state's); everything else — oauth_states, session_tokens, command_dedup,
 rate_counters, the audit triggers, the intent guard — is the real thing.
 
-The last test pins the one known gap under this role: memberships are not
-listable before a tenant is claimed (`058`'s `p_tenant` on
-`workspace_members`/`workspaces`, no user-plane read path). Strict xfail with
-a positive control as the owner, so the day the `02` §7 door lands the pin
-flips and gets updated deliberately (#1015, the door proposal).
+The last test measures the one known gap under this role: memberships are
+not listable before a tenant is claimed (`058`'s `p_tenant` on
+`workspace_members`/`workspaces`, no user-plane read path), and the surface
+REFUSES by name rather than answering `[]` — with a positive control as the
+owner, so the day the `02` §7 door lands (#1015) the assertions flip
+deliberately.
 """
 
 from __future__ import annotations
@@ -40,6 +41,7 @@ from sqlalchemy.pool import NullPool
 from src.api.app import create_app
 from src.api.principal import COOKIE
 from src.api.routes import auth as auth_routes
+from src.exceptions.tenancy import TenantResolutionError
 from src.services.target import google_oidc, workspaces
 from src.services.target.unit_of_work import asyncpg_url
 from tests.scripts.conftest import (
@@ -300,19 +302,16 @@ def test_a_second_user_sees_404_not_403_and_signout_revokes(
 
 
 class TestMembershipListingUnderTheProductionRole:
-    """The `02` §7 gap, pinned: right SQL, no read path for the role."""
+    """The `02` §7 gap, REFUSED rather than pinned: under a role whose RLS
+    filters `workspace_members`, the list read says so (alex's #1031 rule,
+    adopted in the async lane). The day the memberships door lands, the
+    refusal goes and these assertions flip deliberately."""
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="02 §7 amendment pending: workspace_members/workspaces have no user-plane "
-        "read path for svc_ingress (058 p_tenant only); flips when the memberships door "
-        "lands — #1015, the door proposal",
-    )
-    def test_the_creator_can_list_their_workspace_as_svc_ingress(
+    def test_the_list_refuses_by_name_and_me_discloses_it(
         self, world, google_configured, monkeypatch
     ):
         async def main():
-            async with _api(world["ingress"]) as (client, _):
+            async with _api(world["ingress"]) as (client, ingress):
                 me = await _sign_in(
                     client, monkeypatch, sub="sub-list", email="l@example.test"
                 )
@@ -322,33 +321,24 @@ class TestMembershipListingUnderTheProductionRole:
                     headers={**me, "Idempotency-Key": "l-1"},
                 )
                 ws = created.json()["workspace_id"]
+
                 listed = await client.get("/api/v1/workspaces", headers=me)
-                assert [w["id"] for w in listed.json()["workspaces"]] == [ws]
+                assert listed.status_code == 503, listed.text
+                assert listed.json()["reason"] == "membership_list_unreadable"
 
-        _run(main())
+                whoami = await client.get("/api/v1/me", headers=me)
+                assert whoami.status_code == 200, whoami.text
+                assert whoami.json()["workspaces"] is None
+                assert whoami.json()["degraded"] == ["membership_list_unreadable"]
+                user_id = whoami.json()["user"]["id"]
 
-    def test_positive_control_the_query_is_right_as_the_owner(
-        self, world, google_configured, monkeypatch
-    ):
-        """Same rows, read where RLS does not filter: the SQL finds the
-        membership, so the xfail above is the policy, not the query."""
-
-        async def main():
-            async with _api(world["ingress"]) as (client, ingress):
-                me = await _sign_in(
-                    client, monkeypatch, sub="sub-ctl", email="c@example.test"
-                )
-                created = await client.post(
-                    "/api/v1/workspaces",
-                    json={"name": "C"},
-                    headers={**me, "Idempotency-Key": "c-1"},
-                )
-                ws = created.json()["workspace_id"]
-                user_id = (await client.get("/api/v1/me", headers=me)).json()["user"][
-                    "id"
-                ]
                 async with ingress.connect() as conn:
-                    assert await workspaces.list_for_user(conn, user_id=user_id) == []
+                    with pytest.raises(TenantResolutionError) as err:
+                        await workspaces.list_for_user(conn, user_id=user_id)
+                    assert err.value.reason == "membership_list_unreadable"
+
+            # Positive control: where RLS does not filter, the same query finds
+            # the membership — the refusal is the policy, not the SQL.
             owner = create_async_engine(
                 asyncpg_url(world["stream"]), poolclass=NullPool
             )

@@ -11,14 +11,19 @@ raw-SQL access to it. Two rules decide its shape:
   row's own id, so signup pre-assigns the id and sets `app.tenant_id` to it
   BEFORE the insert (`02` §7: "signup pre-assigns the new id and sets the GUC
   before INSERT"). :func:`create_workspace` does both, in that order.
-- **Every read is workspace-keyed except one, and that one is disclosed.**
-  :func:`list_for_user` reads `workspace_members` by user, across tenants.
-  Under the printed `058` policies `svc_ingress` has no pre-context read of
-  that table, so as ingress it returns NOTHING — the same class as the chat
-  resolver's missing door (`tenant_resolution`), on the user-plane side. It
-  is written as the plan reads (`/me` lists memberships) and the gap is
-  measured by the test, not papered over here; the sanctioned fix is a door
-  or a user-plane policy on `workspace_members`, which is a plan amendment.
+- **Every read is workspace-keyed except one, and that one REFUSES rather
+  than answering wrongly.** :func:`list_for_user` reads `workspace_members`
+  by user, across tenants. Under the printed `058` policies `svc_ingress`
+  has no pre-context read of that table, so as ingress the table reads EMPTY
+  — and an empty list is indistinguishable from the greenfield's normal
+  "signed in, no workspace yet" state, so a user who owns three workspaces
+  would be routed to first-run onboarding (alex's finding, #1031, adopted
+  here in the async lane). The blindness is DETECTED, not reasoned about:
+  `row_security_active('workspace_members')` answers for this connection's
+  own role, and if the policy applies the read refuses with
+  `membership_list_unreadable`. The sanctioned fix is the `02` §7 door
+  proposed on #1015 (`fn_memberships_for_caller`); the day it lands, this
+  reads through it and the refusal goes.
 
 Settings writes go through :func:`change_settings`, whose allowlist is the
 typed-column list of `02` §1's materialization contract — no JSONB, no
@@ -39,6 +44,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
 from src.exceptions.base import StorydumpError
+from src.exceptions.tenancy import TenantResolutionError
 from src.services.target import readers
 from src.services.target._dbapi import driver_candidates
 from src.services.target.unit_of_work import apply_gucs
@@ -166,7 +172,18 @@ async def create_workspace(
 
 async def list_for_user(executor, *, user_id: str) -> list[dict]:
     """The caller's memberships: `[{id, name, state, role}]`. Cross-tenant by
-    nature (see the module docstring for what that costs under RLS)."""
+    nature; refuses by name on a connection whose RLS would make the answer
+    silently partial (module docstring)."""
+    filtered = (
+        await executor.execute(text("SELECT row_security_active('workspace_members')"))
+    ).scalar()
+    if filtered:
+        raise TenantResolutionError(
+            "membership_list_unreadable",
+            "workspace_members is RLS-filtered for this role, so a list read"
+            " here would be silently partial — no sanctioned door enumerates a"
+            " user's memberships yet (02 §7; the door is proposed on #1015)",
+        )
     return await readers.rows(
         executor,
         "SELECT w.id, w.name, w.state, m.role"
