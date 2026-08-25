@@ -5,7 +5,6 @@ import type { MediaLibraryResponse } from "@/lib/dashboard-payloads";
 import { RouterUnavailable } from "@/components/workspace/router-unavailable";
 import { PoolHealth } from "@/components/dashboard/media/pool-health";
 import { MediaGrid } from "@/components/dashboard/media/media-grid";
-import { MediaUploadWrapper } from "@/components/dashboard/media/media-upload-wrapper";
 
 export default async function MediaLibraryPage() {
   const session = await getSession().catch(() => null);
@@ -37,17 +36,14 @@ export default async function MediaLibraryPage() {
     <div className="space-y-6">
       <PoolHealth health={poolHealth} />
 
-      <div className="grid gap-6 lg:grid-cols-[1fr_300px]">
-        <MediaGrid initialData={library ?? {
-          items: [],
-          total: 0,
-          page: 1,
-          page_size: 20,
-          categories: [],
-          pool_health: poolHealth,
-        }} />
-        <MediaUploadWrapper categories={library?.categories ?? []} />
-      </div>
+      <MediaGrid initialData={library ?? {
+        items: [],
+        total: 0,
+        page: 1,
+        page_size: 20,
+        categories: [],
+        pool_health: poolHealth,
+      }} />
     </div>
   );
 }
