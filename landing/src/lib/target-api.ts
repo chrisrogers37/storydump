@@ -107,11 +107,18 @@ export async function targetFetch<T = unknown>(
  *
  * The body of a failed auth call is exactly where a token or a subject ends up
  * if anything upstream is careless, and this value reaches logs and error pages.
+ *
+ * `reason` is the API's one code carrier: its refusals are `{detail}` alone
+ * (tenancy — deliberately code-less) or `{detail, reason}` (the command port
+ * and invitations, `src/api/app.py`). Nothing it sends carries `error`; that
+ * key is what THIS tier's route handlers emit to the browser, and it never
+ * reaches here. The port's 409s are the queue's NORMAL answers — "already
+ * acted on" and "use Posted myself" are different sentences, and `http_409`
+ * names neither.
  */
 async function readError(response: Response): Promise<string> {
   try {
-    const body = await response.json();
-    const reason = (body as { error?: unknown })?.error;
+    const reason = ((await response.json()) as { reason?: unknown })?.reason;
     if (typeof reason === "string" && /^[a-z0-9_]{1,64}$/.test(reason)) {
       return reason;
     }
