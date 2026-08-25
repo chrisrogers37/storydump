@@ -32,7 +32,14 @@ from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from src.services.target import credential_lifecycle, jobs, scheduler, unit_of_work
+from src.services.target import (
+    credential_lifecycle,
+    drive_credentials,
+    google_drive_adapter,
+    jobs,
+    scheduler,
+    unit_of_work,
+)
 from src.services.target import health as health_endpoint
 from src.services.target import prompts as prompts_mod
 from src.services.target.work_loop import (
@@ -495,7 +502,28 @@ def main() -> None:
         from src.channels.telegram_transport import TelegramTransport
 
         transport = TelegramTransport(token)
-    app = compose(engine=engine, config=config, env=env, transport=transport)
+    # The Drive read leg (#982). Armed unconditionally: it needs no env of its
+    # own (the engine carries the credential lookup, the token is per-source),
+    # so an env gate here would be a switch with nothing to switch on.
+    #
+    # Safe to arm before a `gdrive` credential writer exists. A source with no
+    # credential raises DriveCredentialDead, which `media_sync` classifies
+    # persistent — the source flips to `error`, its disconnect alert fires once,
+    # and THE JOB SUCCEEDS. So the failure mode is a visible source in `error`,
+    # not a poisoned lane.
+    #
+    # `media_fetch` is deliberately NOT derived from this. Its parking predicate
+    # is media_fetch-only while the ladder also calls `transit.upload` and
+    # `meta.create_container` (astrid, #982), so wiring it here would unpark
+    # `publish_pipeline` straight into `meta=None` -> AttributeError -> poison.
+    # That wire belongs with milestone 2, gated on media_fetch AND meta AND
+    # transit.
+    drive = google_drive_adapter.GoogleDriveAdapter(
+        token_provider=drive_credentials.provider_from_engine(engine),
+    )
+    app = compose(
+        engine=engine, config=config, env=env, transport=transport, drive=drive
+    )
     try:
         asyncio.run(run(app))
     except WorkerTaskDied:

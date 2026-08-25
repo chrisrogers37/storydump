@@ -312,9 +312,21 @@ async def request(
                     continue
 
                 body = await _read_capped(response, policy)
+                # `aiter_bytes()` yields DECODED bytes, so `body` is plaintext.
+                # Carrying the original `content-encoding` onto the rebuilt
+                # response makes httpx decode it a SECOND time on first read —
+                # `DecodingError: incorrect header check` on every gzip reply,
+                # which is every real provider reply, since httpx advertises
+                # `Accept-Encoding: gzip` by default. `content-length` is a lie
+                # for the same reason: it described the compressed body.
+                # Both are dropped rather than corrected; httpx derives the
+                # length from `content` itself.
+                headers = httpx.Headers(response.headers)
+                headers.pop("content-encoding", None)
+                headers.pop("content-length", None)
                 return httpx.Response(
                     response.status_code,
-                    headers=response.headers,
+                    headers=headers,
                     content=body,
                     request=response.request,
                 )
