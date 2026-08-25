@@ -1,83 +1,75 @@
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { Progress } from "@/components/ui/progress";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
-interface PoolHealth {
+/**
+ * Pool health, as far as `stats` can answer it (#1044).
+ *
+ * ── Two of the four cards are withdrawn, not zeroed ────────────────────────
+ *
+ * "Reuse Rate" needed `posted_multiple` and "Eligible for Posting" needed a
+ * TTL-aware count. Neither has a target-side source (#1048), and both were
+ * RATES — which is what makes defaulting them to 0 worse than dropping them.
+ * `posted_multiple / total` with a zero numerator renders "0%" and reads as a
+ * measured finding: nothing is being reused. That is a claim about the
+ * workspace, made from the absence of a column.
+ *
+ * So the two cards are gone and one line says why. The remaining two are
+ * counted, not derived, and are true.
+ */
+interface PoolHealthView {
   total_active: number;
   never_posted: number;
-  posted_once: number;
-  posted_multiple: number;
-  eligible_for_posting: number;
   by_category: { name: string; count: number }[];
+  posted_once: number | null;
+  posted_multiple: number | null;
+  eligible_for_posting: number | null;
 }
 
-export function PoolHealth({ health }: { health: PoolHealth }) {
+export function PoolHealth({ health }: { health: PoolHealthView }) {
   const total = health.total_active || 1;
-  const reuseRate = Math.round((health.posted_multiple / total) * 100);
-  const eligiblePct = Math.round((health.eligible_for_posting / total) * 100);
+  const withheld = [
+    health.posted_multiple === null ? "reuse rate" : null,
+    health.eligible_for_posting === null ? "eligible-to-post count" : null,
+  ].filter(Boolean);
 
   return (
-    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-      <Card>
-        <CardHeader className="pb-2">
-          <CardTitle className="text-sm font-medium text-muted-foreground">
-            Total Active
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="text-2xl font-bold">{health.total_active}</div>
-          <p className="text-xs text-muted-foreground mt-1">
-            {health.by_category.length} categories
-          </p>
-        </CardContent>
-      </Card>
+    <div className="space-y-3">
+      <div className="grid gap-4 sm:grid-cols-2">
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium text-muted-foreground">
+              Total Active
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">{health.total_active}</div>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {health.by_category.length} categories
+            </p>
+          </CardContent>
+        </Card>
 
-      <Card>
-        <CardHeader className="pb-2">
-          <CardTitle className="text-sm font-medium text-muted-foreground">
-            Eligible for Posting
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="text-2xl font-bold">{health.eligible_for_posting}</div>
-          <Progress value={eligiblePct} className="mt-2 h-1.5" />
-          <p className="text-xs text-muted-foreground mt-1">
-            {eligiblePct}% of library
-          </p>
-        </CardContent>
-      </Card>
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium text-muted-foreground">
+              Never Posted
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">{health.never_posted}</div>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {Math.round((health.never_posted / total) * 100)}% untouched
+            </p>
+          </CardContent>
+        </Card>
+      </div>
 
-      <Card>
-        <CardHeader className="pb-2">
-          <CardTitle className="text-sm font-medium text-muted-foreground">
-            Never Posted
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="text-2xl font-bold">{health.never_posted}</div>
-          <p className="text-xs text-muted-foreground mt-1">
-            {Math.round((health.never_posted / total) * 100)}% untouched
-          </p>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader className="pb-2">
-          <CardTitle className="text-sm font-medium text-muted-foreground">
-            Reuse Rate
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="text-2xl font-bold">{reuseRate}%</div>
-          <p className="text-xs text-muted-foreground mt-1">
-            {health.posted_multiple} posted 2+ times
-          </p>
-        </CardContent>
-      </Card>
+      {withheld.length > 0 && (
+        <p className="text-xs text-muted-foreground">
+          The {withheld.join(" and the ")} are not available from this API yet
+          and are withheld rather than shown as zero — a zero here would read as
+          a measurement of your library rather than a missing column.
+        </p>
+      )}
     </div>
   );
 }
