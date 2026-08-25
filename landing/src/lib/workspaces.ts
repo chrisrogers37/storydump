@@ -8,31 +8,6 @@ export type Workspace = {
   state: "active" | "suspended" | "offboarding";
 };
 
-/** `GET /api/v1/workspaces/{id}` — the `02` §1 config row, typed columns only. */
-export type WorkspaceConfig = {
-  id: string;
-  name: string;
-  state: Workspace["state"];
-  tz: string;
-  posts_per_day: number;
-  posting_hours_start: number;
-  posting_hours_end: number;
-  approval_mode: "manual" | "auto";
-  auto_reapprove_returning: boolean;
-  approval_ttl_minutes: number | null;
-  dry_run_mode: boolean;
-  is_paused: boolean;
-  paused_at: string | null;
-  repost_ttl_days: number | null;
-  skip_ttl_days: number | null;
-  caption_style: string | null;
-  enable_ai_captions: boolean;
-  api_publishing_enabled: boolean;
-  offboarding_at: string | null;
-  created_at: string;
-  updated_at: string;
-};
-
 /**
  * The workspaces this user belongs to, for a server component.
  *
@@ -94,20 +69,4 @@ export async function workspaceFetch<T = unknown>(
   // unreachable router rather than a malformed path.
   const suffix = path ? `/${path}` : "";
   return targetFetch<T>(`/workspaces/${workspaceId}${suffix}`, token);
-}
-
-/**
- * The workspace's own config row, for a server component. Not through
- * `workspaceFetch`, whose path always names a child collection — this is the
- * parent. The queue reads two facts off it: `tz` (every slot renders in the
- * workspace's clock, never UTC) and `api_publishing_enabled` (whether Approve
- * is a button at all, `06` §3).
- */
-export async function getWorkspaceConfig(
-  workspaceId: string,
-): Promise<TargetResult<WorkspaceConfig>> {
-  const token = await getSessionToken();
-  if (!token) return { ok: false, status: 401, error: "unauthenticated" };
-
-  return targetFetch<WorkspaceConfig>(`/workspaces/${workspaceId}`, token);
 }

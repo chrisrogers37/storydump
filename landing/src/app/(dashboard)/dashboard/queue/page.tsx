@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 import { getSession } from "@/lib/session";
-import { getWorkspaceConfig, workspaceFetch } from "@/lib/workspaces";
+import { workspaceFetch } from "@/lib/workspaces";
+import type { WorkspaceConfig } from "@/lib/dashboard-payloads";
 import { NON_TERMINAL_STATES, type IntentsResponse } from "@/lib/intents";
 import { RouterUnavailable } from "@/components/workspace/router-unavailable";
 import { QueueList } from "@/components/dashboard/queue/queue-list";
@@ -34,7 +35,7 @@ export default async function QueuePage() {
   if (!workspaceId) redirect("/welcome");
 
   const [configResult, intentsResult] = await Promise.all([
-    getWorkspaceConfig(workspaceId),
+    workspaceFetch<WorkspaceConfig>("", workspaceId),
     workspaceFetch<IntentsResponse>(
       `intents?state=${NON_TERMINAL_STATES.join(",")}&limit=${QUEUE_LIMIT}`,
       workspaceId,
@@ -53,15 +54,15 @@ export default async function QueuePage() {
       <div>
         <h1 className="text-2xl font-bold tracking-tight">Queue</h1>
         <p className="text-sm text-muted-foreground mt-1">
-          Every post that is not done yet, in slot order. Times are in {config.tz}.
+          Every post that is not done yet, in slot order. Times are in {config.tz ?? "UTC"}.
         </p>
       </div>
 
       <QueueList
         workspaceId={workspaceId}
         intents={intents}
-        tz={config.tz}
-        apiPublishingEnabled={config.api_publishing_enabled}
+        tz={config.tz ?? "UTC"}
+        apiPublishingEnabled={config.api_publishing_enabled === true}
         truncatedAt={intents.length >= limit ? limit : null}
       />
     </div>
