@@ -17,12 +17,10 @@ No Telegram binding exists at any point. The provider call is the only stub
 state's); everything else — oauth_states, session_tokens, command_dedup,
 rate_counters, the audit triggers, the intent guard — is the real thing.
 
-The last test measures the one known gap under this role: memberships are
-not listable before a tenant is claimed (`058`'s `p_tenant` on
-`workspace_members`/`workspaces`, no user-plane read path), and the surface
-REFUSES by name rather than answering `[]` — with a positive control as the
-owner, so the day the `02` §7 door lands (#1015) the assertions flip
-deliberately.
+The last test measures the tenth door (`064`, #1037) under this role: the
+membership list — a cross-tenant question `p_tenant` cannot serve — answers
+through `fn_memberships_for_caller()`, is the caller's alone, and reads
+empty when no caller is claimed.
 """
 
 from __future__ import annotations
@@ -41,7 +39,6 @@ from sqlalchemy.pool import NullPool
 from src.api.app import create_app
 from src.api.principal import COOKIE
 from src.api.routes import auth as auth_routes
-from src.exceptions.tenancy import TenantResolutionError
 from src.services.target import google_oidc, workspaces
 from src.services.target.unit_of_work import asyncpg_url
 from tests.scripts.conftest import (
@@ -302,51 +299,59 @@ def test_a_second_user_sees_404_not_403_and_signout_revokes(
 
 
 class TestMembershipListingUnderTheProductionRole:
-    """The `02` §7 gap, REFUSED rather than pinned: under a role whose RLS
-    filters `workspace_members`, the list read says so (alex's #1031 rule,
-    adopted in the async lane). The day the memberships door lands, the
-    refusal goes and these assertions flip deliberately."""
+    """The tenth door, measured as `svc_ingress`: the list answers, it is the
+    CALLER's list and nobody else's, and a caller that claimed nothing reads
+    nothing — the failure direction is closed, not open."""
 
-    def test_the_list_refuses_by_name_and_me_discloses_it(
+    def test_the_creator_lists_their_workspace_and_only_theirs(
         self, world, google_configured, monkeypatch
     ):
         async def main():
             async with _api(world["ingress"]) as (client, ingress):
-                me = await _sign_in(
-                    client, monkeypatch, sub="sub-list", email="l@example.test"
+                a = await _sign_in(
+                    client, monkeypatch, sub="sub-list-a", email="la@example.test"
                 )
-                created = await client.post(
+                b = await _sign_in(
+                    client, monkeypatch, sub="sub-list-b", email="lb@example.test"
+                )
+                made_a = await client.post(
                     "/api/v1/workspaces",
-                    json={"name": "L"},
-                    headers={**me, "Idempotency-Key": "l-1"},
+                    json={"name": "A"},
+                    headers={**a, "Idempotency-Key": "la-1"},
                 )
-                ws = created.json()["workspace_id"]
+                made_b = await client.post(
+                    "/api/v1/workspaces",
+                    json={"name": "B"},
+                    headers={**b, "Idempotency-Key": "lb-1"},
+                )
+                ws_a, ws_b = (
+                    made_a.json()["workspace_id"],
+                    made_b.json()["workspace_id"],
+                )
 
-                listed = await client.get("/api/v1/workspaces", headers=me)
-                assert listed.status_code == 503, listed.text
-                assert listed.json()["reason"] == "membership_list_unreadable"
+                listed = await client.get("/api/v1/workspaces", headers=a)
+                assert listed.status_code == 200, listed.text
+                assert [(w["id"], w["role"]) for w in listed.json()["workspaces"]] == [
+                    (ws_a, "owner")
+                ]
+                whoami = await client.get("/api/v1/me", headers=a)
+                assert [w["id"] for w in whoami.json()["workspaces"]] == [ws_a]
+                assert [
+                    w["id"]
+                    for w in (await client.get("/api/v1/workspaces", headers=b)).json()[
+                        "workspaces"
+                    ]
+                ] == [ws_b]
 
-                whoami = await client.get("/api/v1/me", headers=me)
-                assert whoami.status_code == 200, whoami.text
-                assert whoami.json()["workspaces"] is None
-                assert whoami.json()["degraded"] == ["membership_list_unreadable"]
-                user_id = whoami.json()["user"]["id"]
-
+                # The door with no caller claimed: nothing, never everything.
                 async with ingress.connect() as conn:
-                    with pytest.raises(TenantResolutionError) as err:
-                        await workspaces.list_for_user(conn, user_id=user_id)
-                    assert err.value.reason == "membership_list_unreadable"
-
-            # Positive control: where RLS does not filter, the same query finds
-            # the membership — the refusal is the policy, not the SQL.
-            owner = create_async_engine(
-                asyncpg_url(world["stream"]), poolclass=NullPool
-            )
-            try:
-                async with owner.connect() as conn:
-                    rows = await workspaces.list_for_user(conn, user_id=user_id)
-                assert [(str(r["id"]), r["role"]) for r in rows] == [(ws, "owner")]
-            finally:
-                await owner.dispose()
+                    who = (await conn.execute(text("SELECT current_user"))).scalar()
+                    assert who == "svc_ingress"
+                    unclaimed = (
+                        await conn.execute(
+                            text("SELECT count(*) FROM fn_memberships_for_caller()")
+                        )
+                    ).scalar()
+                    assert unclaimed == 0
 
         _run(main())

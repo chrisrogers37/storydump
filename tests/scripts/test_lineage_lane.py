@@ -319,6 +319,11 @@ class TestTheBoundaryIsDerivedAndLoud:
             # file that changes is a hard failure — fix forward. 062 set the
             # precedent by dropping and recreating what 059 created.
             "063_refresh_leg_provider_guard.sql",
+            # 064 extends the stream as 061 and 062 did: the memberships door
+            # (#1037), advertised as 07 §10 before landing here — appended,
+            # because the 02 §7-DDL block that prints the first nine doors is
+            # content-addressed and arm (b) never amends it.
+            "064_memberships_for_caller_door.sql",
         ], (
             f"the target lineage is {above}. If you are landing the next F.2"
             " increment, add it here — deliberately, and at the end: arm (b)"
