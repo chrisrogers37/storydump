@@ -171,7 +171,7 @@ class TestTheWebIsASurface:
             sync_conn.commit()
 
             counts = await _sweep(engine)
-            assert "failed_no_surface" not in counts
+            assert counts == {"prompted": 0, "advanced": 0}
             assert _intent_state(sync_conn, chain["intent"]) == "awaiting_approval"
         finally:
             await engine.dispose()

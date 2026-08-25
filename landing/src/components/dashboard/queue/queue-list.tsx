@@ -2,17 +2,20 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
-import { ImageIcon, Loader2, Video } from "lucide-react";
+import { ImageIcon, ListChecks, Loader2, Video } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
+  DialogClose,
   DialogContent,
   DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
+  DialogTrigger,
 } from "@/components/ui/dialog";
+import { EmptyState } from "@/components/dashboard/empty-state";
 import {
   COMMAND_LABELS,
   accountLabel,
@@ -39,20 +42,12 @@ import {
  * lock expires.
  */
 
-const STATE_LABELS: Record<IntentState, string> = {
-  scheduled: "scheduled",
+/** Labels that differ from the state's own name; the badge falls back to the name. */
+const STATE_LABELS: Partial<Record<IntentState, string>> = {
   prompt_pending: "prompting",
   awaiting_approval: "awaiting approval",
-  approved: "approved",
-  publishing: "publishing",
   publishing_ambiguous: "needs attention",
   review_required: "needs attention",
-  posted: "posted",
-  skipped: "skipped",
-  rejected: "rejected",
-  expired: "expired",
-  failed: "failed",
-  cancelled: "cancelled",
 };
 
 const STATE_TONE: Partial<Record<IntentState, string>> = {
@@ -61,6 +56,13 @@ const STATE_TONE: Partial<Record<IntentState, string>> = {
   publishing: "bg-blue-100 text-blue-900",
   publishing_ambiguous: "bg-red-100 text-red-900",
   review_required: "bg-red-100 text-red-900",
+};
+
+const COMMAND_VARIANT: Record<QueueCommand, "default" | "outline" | "destructive"> = {
+  approve: "default",
+  mark_posted: "default",
+  skip: "outline",
+  reject: "destructive",
 };
 
 type Notice = { intentId: string; text: string };
@@ -82,7 +84,6 @@ export function QueueList({
   const router = useRouter();
   const [pending, setPending] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
-  const [rejecting, setRejecting] = useState<Intent | null>(null);
 
   async function run(intent: Intent, command: QueueCommand) {
     setPending(intent.id);
@@ -100,10 +101,7 @@ export function QueueList({
 
       if (!response.ok) {
         const body = await response.json().catch(() => ({}));
-        setNotice({
-          intentId: intent.id,
-          text: refusalCopy(body?.error, response.status),
-        });
+        setNotice({ intentId: intent.id, text: refusalCopy(body?.error) });
         // A refusal about the ROW (already moved on, no longer here) means the
         // list is stale; a refusal about the request or the session does not.
         if (response.status === 409 || response.status === 404) router.refresh();
@@ -112,10 +110,7 @@ export function QueueList({
 
       router.refresh();
     } catch {
-      setNotice({
-        intentId: intent.id,
-        text: refusalCopy("target_router_unreachable", 503),
-      });
+      setNotice({ intentId: intent.id, text: refusalCopy("target_router_unreachable") });
     } finally {
       setPending(null);
     }
@@ -123,12 +118,11 @@ export function QueueList({
 
   if (intents.length === 0) {
     return (
-      <div className="rounded-lg border bg-card p-8 text-center">
-        <p className="font-medium">Nothing is waiting.</p>
-        <p className="text-sm text-muted-foreground mt-1">
-          Posts appear here when their slot arrives.
-        </p>
-      </div>
+      <EmptyState
+        icon={ListChecks}
+        title="Nothing is waiting."
+        description="Posts appear here when their slot arrives."
+      />
     );
   }
 
@@ -137,7 +131,6 @@ export function QueueList({
       <ul className="divide-y rounded-lg border bg-card">
         {intents.map((intent) => {
           const actions = actionsFor(intent.state, apiPublishingEnabled);
-          const busy = pending === intent.id;
           const MediaGlyph = intent.media_kind === "video" ? Video : ImageIcon;
 
           return (
@@ -155,34 +148,62 @@ export function QueueList({
                   </p>
                 </div>
 
-                <Badge variant="secondary" className={STATE_TONE[intent.state] ?? ""}>
+                <Badge variant="secondary" className={STATE_TONE[intent.state]}>
                   {STATE_LABELS[intent.state] ?? intent.state}
                 </Badge>
 
                 {actions.length > 0 && (
                   <div className="flex flex-wrap items-center gap-2">
-                    {busy && (
+                    {pending === intent.id && (
                       <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" aria-hidden />
                     )}
-                    {actions.map((command) => (
-                      <Button
-                        key={command}
-                        size="sm"
-                        variant={
-                          command === "reject"
-                            ? "destructive"
-                            : command === "skip"
-                              ? "outline"
-                              : "default"
-                        }
-                        disabled={pending !== null}
-                        onClick={() =>
-                          command === "reject" ? setRejecting(intent) : run(intent, command)
-                        }
-                      >
-                        {COMMAND_LABELS[command]}
-                      </Button>
-                    ))}
+                    {actions.map((command) =>
+                      command === "reject" ? (
+                        <Dialog key={command}>
+                          <DialogTrigger asChild>
+                            <Button
+                              size="sm"
+                              variant={COMMAND_VARIANT[command]}
+                              disabled={pending !== null}
+                            >
+                              {COMMAND_LABELS[command]}
+                            </Button>
+                          </DialogTrigger>
+                          <DialogContent>
+                            <DialogHeader>
+                              <DialogTitle>Reject this post?</DialogTitle>
+                              <DialogDescription>
+                                {intent.file_name} will never be offered again for{" "}
+                                {accountLabel(intent)}. Skip instead if it should come back later.
+                              </DialogDescription>
+                            </DialogHeader>
+                            <DialogFooter>
+                              <DialogClose asChild>
+                                <Button variant="outline">Keep it</Button>
+                              </DialogClose>
+                              <DialogClose asChild>
+                                <Button
+                                  variant="destructive"
+                                  onClick={() => void run(intent, "reject")}
+                                >
+                                  Reject
+                                </Button>
+                              </DialogClose>
+                            </DialogFooter>
+                          </DialogContent>
+                        </Dialog>
+                      ) : (
+                        <Button
+                          key={command}
+                          size="sm"
+                          variant={COMMAND_VARIANT[command]}
+                          disabled={pending !== null}
+                          onClick={() => void run(intent, command)}
+                        >
+                          {COMMAND_LABELS[command]}
+                        </Button>
+                      ),
+                    )}
                   </div>
                 )}
               </div>
@@ -202,34 +223,6 @@ export function QueueList({
           Showing the first {truncatedAt} posts. More are waiting beyond this page.
         </p>
       )}
-
-      <Dialog open={rejecting !== null} onOpenChange={(open) => !open && setRejecting(null)}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Reject this post?</DialogTitle>
-            <DialogDescription>
-              {rejecting
-                ? `${rejecting.file_name} will never be offered again for ${accountLabel(rejecting)}. Skip instead if it should come back later.`
-                : ""}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setRejecting(null)}>
-              Keep it
-            </Button>
-            <Button
-              variant="destructive"
-              onClick={() => {
-                const intent = rejecting;
-                setRejecting(null);
-                if (intent) void run(intent, "reject");
-              }}
-            >
-              Reject
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }

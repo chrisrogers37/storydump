@@ -39,7 +39,7 @@ from sqlalchemy.pool import NullPool
 from src.api.app import create_app
 from src.api.principal import COOKIE
 from src.api.routes import auth as auth_routes
-from src.services.target import google_oidc, workspaces
+from src.services.target import google_oidc
 from src.services.target.unit_of_work import asyncpg_url
 from tests.scripts.conftest import (
     _scratch,

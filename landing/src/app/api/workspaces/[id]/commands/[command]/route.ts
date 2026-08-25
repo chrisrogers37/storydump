@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSessionToken, isWorkspaceId } from "@/lib/session";
+import { getSessionToken, isUuid, isWorkspaceId } from "@/lib/session";
 import { targetFetch } from "@/lib/target-api";
-import { idempotencyKeyFor, isIntentId, isQueueCommand } from "@/lib/intents";
+import { idempotencyKeyFor, isQueueCommand } from "@/lib/intents";
 
 /**
  * POST /api/workspaces/[id]/commands/[command] — one intent command, forwarded
@@ -15,11 +15,10 @@ import { idempotencyKeyFor, isIntentId, isQueueCommand } from "@/lib/intents";
  * and a refused first try — its dedup row rolled back with everything else —
  * is still retryable.
  *
- * The command segment is checked against the QUEUE's allowlist, not the
- * port's vocabulary: this surface renders a refusal sentence for exactly four
- * commands, and forwarding a fifth would be a button this page does not have.
- * The port re-validates the name, the role floor and the transition itself;
- * nothing is trusted from here.
+ * The command segment is checked against the web adapter's offered set
+ * (`QUEUE_COMMANDS` — the intent-keyed commands this tier fronts), not the
+ * port's whole vocabulary. The port re-validates the name, the role floor and
+ * the transition itself; nothing is trusted from here.
  */
 export async function POST(
   request: NextRequest,
@@ -42,11 +41,11 @@ export async function POST(
   } catch {
     return NextResponse.json({ error: "malformed_body" }, { status: 400 });
   }
-  if (!isIntentId(intentId)) {
+  if (!isUuid(intentId)) {
     return NextResponse.json({ error: "invalid_intent" }, { status: 400 });
   }
 
-  const result = await targetFetch<Record<string, unknown>>(
+  const result = await targetFetch(
     `/workspaces/${id}/commands/${command}`,
     token,
     {

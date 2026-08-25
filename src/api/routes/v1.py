@@ -55,8 +55,10 @@ router = APIRouter(tags=["v1"])
 
 #: `command_dedup.channel` for this adapter (`webhook_ingress.CHANNELS`).
 CHANNEL = "web"
-#: Required on every command. The client owns the value (a UUID per intent to
-#: act); the server owns nothing but the dedup row.
+#: Required on every command. The client owns the value — the web front end
+#: mints it as ``<command>:<intent_id>`` in its route handler, so a repeated
+#: click replays rather than re-executes; the server owns nothing but the
+#: dedup row.
 IDEMPOTENCY_HEADER = "Idempotency-Key"
 IDEMPOTENCY_KEY_MAX = 200
 #: `01` H5: every list is bounded. The clamp is a Query constraint, so an

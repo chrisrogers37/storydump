@@ -330,7 +330,7 @@ class TestPromptSweeperConsumesTheSweep:
                 return self
 
         monkeypatch.setattr(
-            worker, "async_sessionmaker", lambda engine, **kw: (lambda: _Session())
+            worker, "async_sessionmaker", lambda engine, **kw: lambda: _Session()
         )
 
         async def fake_gucs(session, **kw):

@@ -70,9 +70,12 @@ describe("the credential", () => {
 
 describe("error bodies", () => {
   it("returns a reason code, never the upstream body", async () => {
+    // The API's real shape (`src/api/app.py`, `InvitationRefused`): `detail`
+    // is a sentence, `reason` is the code. An earlier fixture here carried an
+    // `{error}` key the API never sends, which taught a false contract.
     stubFetch(async () => new Response(
-      JSON.stringify({ error: "invitation_expired", token: "leaked-secret" }),
-      { status: 409, headers: { "Content-Type": "application/json" } },
+      JSON.stringify({ detail: "invitation not acceptable", reason: "not_acceptable", token: "leaked-secret" }),
+      { status: 404, headers: { "Content-Type": "application/json" } },
     ));
 
     const result = await targetFetch("/invitations/abc123/accept", "tok", {
@@ -81,13 +84,13 @@ describe("error bodies", () => {
 
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("unreachable");
-    expect(result.error).toBe("invitation_expired");
+    expect(result.error).toBe("not_acceptable");
     expect(JSON.stringify(result)).not.toContain("leaked-secret");
   });
 
   it("falls back to the status when the reason is not a plain code", async () => {
     stubFetch(async () => new Response(
-      JSON.stringify({ error: { message: "Bearer eyJhbGciOi...", trace: "x" } }),
+      JSON.stringify({ detail: "internal error", reason: { message: "Bearer eyJhbGciOi...", trace: "x" } }),
       { status: 500, headers: { "Content-Type": "application/json" } },
     ));
 
@@ -120,15 +123,7 @@ describe("a command refusal", () => {
     expect(result.error).toBe("manual_mode");
   });
 
-  it("still prefers `error` when a body carries both, and still refuses a reason that is not a plain code", async () => {
-    stubFetch(async () => new Response(
-      JSON.stringify({ error: "invitation_expired", reason: "manual_mode" }),
-      { status: 409, headers: { "Content-Type": "application/json" } },
-    ));
-    const both = await targetFetch("/x", "tok");
-    if (both.ok) throw new Error("unreachable");
-    expect(both.error).toBe("invitation_expired");
-
+  it("still refuses a reason that is not a plain code", async () => {
     stubFetch(async () => new Response(
       JSON.stringify({ detail: "x", reason: "Bearer eyJhbGciOi..." }),
       { status: 409, headers: { "Content-Type": "application/json" } },

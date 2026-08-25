@@ -17,7 +17,8 @@
  * semantics, not a missing entry in this list.
  */
 
-export const INTENT_STATES = [
+/** The states the queue lists: everything the reaper or worker has not yet closed. */
+export const NON_TERMINAL_STATES = [
   "scheduled",
   "prompt_pending",
   "awaiting_approval",
@@ -25,6 +26,10 @@ export const INTENT_STATES = [
   "publishing",
   "publishing_ambiguous",
   "review_required",
+] as const;
+
+/** Mirrors `command_executors.TERMINAL_STATES` (Python) — the reaper's and worker's edges end here. */
+export const TERMINAL_STATES = [
   "posted",
   "skipped",
   "rejected",
@@ -33,19 +38,12 @@ export const INTENT_STATES = [
   "cancelled",
 ] as const;
 
+/** `ck_intent_state`, the closed set — mirrors `workspaces.INTENT_STATES` (Python); this comment is the grep handle from either side. */
+export const INTENT_STATES = [...NON_TERMINAL_STATES, ...TERMINAL_STATES] as const;
+
 export type IntentState = (typeof INTENT_STATES)[number];
 
-/** The states the queue lists: everything the reaper or worker has not yet closed. */
-export const NON_TERMINAL_STATES: readonly IntentState[] = [
-  "scheduled",
-  "prompt_pending",
-  "awaiting_approval",
-  "approved",
-  "publishing",
-  "publishing_ambiguous",
-  "review_required",
-];
-
+/** One row of `GET /workspaces/{ws}/intents` — mirrors `workspaces._INTENT_COLUMNS` (Python). */
 export type Intent = {
   id: string;
   state: IntentState;
@@ -72,6 +70,14 @@ export type Intent = {
 
 export type IntentsResponse = { intents: Intent[]; limit: number };
 
+/**
+ * The intent-keyed commands the web adapter offers — the four the queue
+ * renders a button and a refusal sentence for. `cancel` takes the same
+ * `{intent_id}` shape but is not offered here (decision 3 on #1033: an
+ * overlay flag the worker honours, no audit row — its own follow-up). The
+ * port re-validates the name, the role floor and the transition; this list
+ * decides what the web tier fronts, nothing more.
+ */
 export const QUEUE_COMMANDS = ["approve", "mark_posted", "skip", "reject"] as const;
 
 export type QueueCommand = (typeof QUEUE_COMMANDS)[number];
@@ -82,14 +88,6 @@ export const COMMAND_LABELS: Record<QueueCommand, string> = {
   skip: "Skip",
   reject: "Reject",
 };
-
-/** The id the browser sends: a UUID or nothing — never a free-form string forwarded into a command. */
-export function isIntentId(value: unknown): value is string {
-  return (
-    typeof value === "string" &&
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
-  );
-}
 
 export function isQueueCommand(value: unknown): value is QueueCommand {
   return (
@@ -126,8 +124,10 @@ export function idempotencyKeyFor(command: QueueCommand, intentId: string): stri
  * A sentence per refusal, because the matrix's 409s are normal answers, not
  * errors: "this post already moved on" and "this workspace posts by hand" send
  * a person to different next moves, and neither is theirs to apologise for.
+ * Keyed on the reason alone: every answer the queue sees comes through its
+ * own route handler, which always names one.
  */
-export function refusalCopy(reason: string, status: number): string {
+export function refusalCopy(reason: unknown): string {
   switch (reason) {
     case "illegal_transition":
       return "This post already moved on — the list has been refreshed.";
@@ -135,12 +135,10 @@ export function refusalCopy(reason: string, status: number): string {
       return "This workspace posts by hand. Post the story on Instagram, then tap Posted myself.";
     case "not_found":
       return "This post is no longer in the queue.";
-  }
-  if (status === 401 || reason === "unauthenticated") {
-    return "That session expired. Sign in again.";
-  }
-  if (status === 503 || reason === "target_router_unreachable") {
-    return "Storydump cannot reach the queue right now. Nothing changed — try again shortly.";
+    case "unauthenticated":
+      return "That session expired. Sign in again.";
+    case "target_router_unreachable":
+      return "Storydump cannot reach the queue right now. Nothing changed — try again shortly.";
   }
   return "That did not work. Nothing changed — try again shortly.";
 }
@@ -156,25 +154,45 @@ export function accountLabel(
   return "Account";
 }
 
+const SLOT_FORMAT: Intl.DateTimeFormatOptions = {
+  weekday: "short",
+  month: "short",
+  day: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+};
+
+/**
+ * One formatter per time zone, for the process. Constructing one costs ~50×
+ * a format call, and the list formats every row on every render — a page of
+ * 200 rows and a click is a few hundred constructions on the client alone.
+ * A time zone Intl does not know (the column is CHECKed, so this is belt and
+ * braces) gets the UTC formatter and is remembered as having fallen back.
+ */
+const slotFormatters = new Map<string, { format: Intl.DateTimeFormat; fellBack: boolean }>();
+
+function slotFormatter(tz: string) {
+  let entry = slotFormatters.get(tz);
+  if (!entry) {
+    try {
+      entry = { format: new Intl.DateTimeFormat("en-US", { ...SLOT_FORMAT, timeZone: tz }), fellBack: false };
+    } catch {
+      entry = { format: new Intl.DateTimeFormat("en-US", { ...SLOT_FORMAT, timeZone: "UTC" }), fellBack: true };
+    }
+    slotFormatters.set(tz, entry);
+  }
+  return entry;
+}
+
 /**
  * The slot in the WORKSPACE's clock — a solo user reads their own time, never
  * UTC. Postgres renders fractional seconds at any width and `Date` only
- * promises three, so the fraction is trimmed first; a time zone Intl does not
- * know (the column is CHECKed, so this is belt and braces) falls back to UTC
- * and says so rather than throwing inside a list render.
+ * promises three, so the fraction is trimmed first; an unknown time zone
+ * renders in UTC and says so rather than throwing inside a list render.
  */
 export function formatSlot(iso: string, tz: string): string {
   const date = new Date(iso.replace(/\.(\d{3})\d+/, ".$1"));
-  const options: Intl.DateTimeFormatOptions = {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  };
-  try {
-    return new Intl.DateTimeFormat("en-US", { ...options, timeZone: tz }).format(date);
-  } catch {
-    return `${new Intl.DateTimeFormat("en-US", { ...options, timeZone: "UTC" }).format(date)} UTC`;
-  }
+  const { format, fellBack } = slotFormatter(tz);
+  const label = format.format(date);
+  return fellBack ? `${label} UTC` : label;
 }

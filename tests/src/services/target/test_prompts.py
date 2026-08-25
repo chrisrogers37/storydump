@@ -167,11 +167,11 @@ class TestPromptIntent:
             "api_publishing_enabled": True,
         }
         bindings = [{"id": "b-1"}, {"id": "b-2"}]
-        ids = await prompts.prompt_intent(object(), row, bindings)
+        await prompts.prompt_intent(object(), row, bindings)
 
         assert order[0] == ("transition", intent["intent_id"], "prompt_pending")
         enqueues = [o for o in order if o[0] == "enqueue"]
-        assert len(enqueues) == 2 and len(ids) == 2
+        assert len(enqueues) == 2
         for _, kwargs in enqueues:
             assert kwargs["kind"] == "approval_prompt"
             assert kwargs["intent_id"] == intent["intent_id"]
@@ -197,5 +197,5 @@ class TestPromptIntent:
         monkeypatch.setattr(prompts.intent_ledger, "transition", fake_transition)
         monkeypatch.setattr(prompts.outbox, "enqueue", fake_enqueue)
         row = {"id": "i-1", "workspace_id": "ws-1", "api_publishing_enabled": False}
-        ids = await prompts.prompt_intent(object(), row, [])
-        assert ids == [] and called == ["prompt_pending"]
+        await prompts.prompt_intent(object(), row, [])
+        assert called == ["prompt_pending"]

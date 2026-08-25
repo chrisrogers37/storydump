@@ -6,9 +6,10 @@ import { RouterUnavailable } from "@/components/workspace/router-unavailable";
 import { QueueList } from "@/components/dashboard/queue/queue-list";
 
 /**
- * `01` H5: every list is bounded, and this is the API's own ceiling
- * (`LIST_LIMIT_MAX`). A queue that reaches it says so rather than rendering
- * the first page as the whole.
+ * `01` H5: every list is bounded. This asks for the API's ceiling
+ * (`LIST_LIMIT_MAX`); the response echoes the limit it actually applied, and
+ * a queue that reaches it says so rather than rendering the first page as
+ * the whole.
  */
 const QUEUE_LIMIT = 200;
 
@@ -45,7 +46,7 @@ export default async function QueuePage() {
   }
 
   const config = configResult.data;
-  const intents = intentsResult.data.intents;
+  const { intents, limit } = intentsResult.data;
 
   return (
     <div className="space-y-6">
@@ -61,7 +62,7 @@ export default async function QueuePage() {
         intents={intents}
         tz={config.tz}
         apiPublishingEnabled={config.api_publishing_enabled}
-        truncatedAt={intents.length >= QUEUE_LIMIT ? QUEUE_LIMIT : null}
+        truncatedAt={intents.length >= limit ? limit : null}
       />
     </div>
   );

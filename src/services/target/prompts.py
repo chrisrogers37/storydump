@@ -118,16 +118,15 @@ def render_card(intent: dict, *, api_publishing_enabled: bool) -> dict:
     }
 
 
-async def prompt_intent(session, intent_row: dict, bindings: list) -> list:
+async def prompt_intent(session, intent_row: dict, bindings: list) -> None:
     """`scheduled → prompt_pending` + one card per active push binding, in
-    the CALLER's transaction. Returns the outbox row ids — empty when there
-    is no push binding, in which case the transition still happened: the web
-    queue is the surface (module docstring).
+    the CALLER's transaction — and the transition happens whether or not a
+    binding exists: the web queue is the surface (module docstring).
     """
     intent_id = str(intent_row["id"])
     await intent_ledger.transition(session, intent_id, "prompt_pending")
     if not bindings:
-        return []
+        return
     payload = render_card(
         {
             "intent_id": intent_id,
@@ -138,19 +137,15 @@ async def prompt_intent(session, intent_row: dict, bindings: list) -> list:
         },
         api_publishing_enabled=bool(intent_row.get("api_publishing_enabled")),
     )
-    out_ids = []
     for binding in bindings:
-        out_ids.append(
-            await outbox.enqueue(
-                session,
-                workspace_id=str(intent_row["workspace_id"]),
-                binding_id=str(binding["id"]),
-                kind="approval_prompt",
-                payload=payload,
-                intent_id=intent_id,
-            )
+        await outbox.enqueue(
+            session,
+            workspace_id=str(intent_row["workspace_id"]),
+            binding_id=str(binding["id"]),
+            kind="approval_prompt",
+            payload=payload,
+            intent_id=intent_id,
         )
-    return out_ids
 
 
 async def push_bindings(session, workspace_id: str) -> list[str]:
@@ -215,9 +210,14 @@ async def sweep_due_prompts(session, *, limit: int = 50) -> dict:
         .mappings()
         .all()
     )
+    bindings_by_workspace: dict[str, list[str]] = {}  # same tx, same answer
     for row in due:
-        binding_ids = await push_bindings(session, str(row["workspace_id"]))
-        await prompt_intent(session, dict(row), [{"id": b} for b in binding_ids])
+        ws = str(row["workspace_id"])
+        if ws not in bindings_by_workspace:
+            bindings_by_workspace[ws] = await push_bindings(session, ws)
+        await prompt_intent(
+            session, dict(row), [{"id": b} for b in bindings_by_workspace[ws]]
+        )
         counts["prompted"] += 1
 
     advanced = (

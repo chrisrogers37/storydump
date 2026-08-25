@@ -7,7 +7,6 @@ import {
   actionsFor,
   formatSlot,
   idempotencyKeyFor,
-  isIntentId,
   isQueueCommand,
   refusalCopy,
 } from "./intents";
@@ -44,7 +43,7 @@ describe("which actions an intent offers", () => {
     }
   });
 
-  it("knows the non-terminal states the page lists, and that they exclude the terminal ones", () => {
+  it("knows the non-terminal states the page lists", () => {
     expect(NON_TERMINAL_STATES).toEqual([
       "scheduled",
       "prompt_pending",
@@ -54,9 +53,6 @@ describe("which actions an intent offers", () => {
       "publishing_ambiguous",
       "review_required",
     ]);
-    for (const terminal of ["posted", "skipped", "rejected", "expired", "failed", "cancelled"]) {
-      expect(NON_TERMINAL_STATES).not.toContain(terminal);
-    }
   });
 });
 
@@ -87,21 +83,23 @@ describe("the idempotency key", () => {
 
 describe("refusal copy", () => {
   it("turns the matrix's normal 409 answers into a sentence, never a raw code", () => {
-    expect(refusalCopy("illegal_transition", 409)).toMatch(/already/i);
-    expect(refusalCopy("manual_mode", 409)).toMatch(/Posted myself/);
-    expect(refusalCopy("not_found", 404)).toMatch(/no longer/i);
+    expect(refusalCopy("illegal_transition")).toMatch(/already/i);
+    expect(refusalCopy("manual_mode")).toMatch(/Posted myself/);
+    expect(refusalCopy("not_found")).toMatch(/no longer/i);
   });
 
   it("separates the person's session from the router being down", () => {
-    expect(refusalCopy("unauthenticated", 401)).toMatch(/sign in/i);
-    expect(refusalCopy("target_router_unreachable", 503)).toMatch(/Storydump/);
+    expect(refusalCopy("unauthenticated")).toMatch(/sign in/i);
+    expect(refusalCopy("target_router_unreachable")).toMatch(/Storydump/);
   });
 
-  it("has a fallback for a reason it does not know, and the fallback names nobody at fault", () => {
-    const copy = refusalCopy("something_new", 500);
-    expect(copy.length).toBeGreaterThan(0);
-    expect(copy).not.toContain("something_new");
-    expect(copy).not.toMatch(/you/i);
+  it("has a fallback for a reason it does not know — or no reason at all — and the fallback names nobody at fault", () => {
+    for (const reason of ["something_new", undefined, 42]) {
+      const copy = refusalCopy(reason);
+      expect(copy.length).toBeGreaterThan(0);
+      expect(copy).not.toContain("something_new");
+      expect(copy).not.toMatch(/you/i);
+    }
   });
 });
 
@@ -135,12 +133,3 @@ describe("the slot, in the workspace's clock", () => {
   });
 });
 
-describe("the intent id the browser sends", () => {
-  it("is a UUID or nothing — the route handler never forwards a free-form string into a command", () => {
-    expect(isIntentId("0b6e5f1a-2f4d-4c1e-9a3b-7d8e9f0a1b2c")).toBe(true);
-    expect(isIntentId("0B6E5F1A-2F4D-4C1E-9A3B-7D8E9F0A1B2C")).toBe(true);
-    for (const bad of ["", "not-a-uuid", "0b6e5f1a-2f4d-4c1e-9a3b-7d8e9f0a1b2c ", 42, null, undefined, {}]) {
-      expect(isIntentId(bad), String(bad)).toBe(false);
-    }
-  });
-});
