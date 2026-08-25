@@ -142,11 +142,13 @@ class TestWorkspaceReads:
     def test_a_non_uuid_workspace_is_refused_before_any_seam(self, client, signed_in):
         assert client.get("/api/v1/workspaces/not-a-uuid").status_code == 422
 
-    def test_list_limit_is_bounded(self, client, signed_in, tenant, monkeypatch):
+    def test_list_limit_is_bounded_and_states_are_a_closed_list(
+        self, client, signed_in, tenant, monkeypatch
+    ):
         seen = {}
 
-        async def list_intents(session, *, workspace_id, state=None, limit=50):
-            seen.update(state=state, limit=limit)
+        async def list_intents(session, *, workspace_id, states=(), limit=50):
+            seen.update(states=list(states), limit=limit)
             return []
 
         monkeypatch.setattr(workspaces, "list_intents", list_intents)
@@ -154,10 +156,61 @@ class TestWorkspaceReads:
             client.get(f"/api/v1/workspaces/{WS}/intents?limit=201").status_code == 422
         )
         assert client.get(f"/api/v1/workspaces/{WS}/intents?limit=0").status_code == 422
-        resp = client.get(f"/api/v1/workspaces/{WS}/intents?state=awaiting_approval")
+        assert (
+            client.get(
+                f"/api/v1/workspaces/{WS}/intents?state=posted,frobnicated"
+            ).status_code
+            == 422
+        )
+        resp = client.get(
+            f"/api/v1/workspaces/{WS}/intents?state=posted, skipped,rejected"
+        )
         assert resp.status_code == 200
-        assert seen == {"state": "awaiting_approval", "limit": 50}
+        assert seen == {"states": ["posted", "skipped", "rejected"], "limit": 50}
         assert resp.json() == {"intents": [], "limit": 50}
+
+    def test_media_reads_pass_the_gate_and_validate_the_state(
+        self, client, signed_in, tenant, monkeypatch
+    ):
+        seen = {}
+
+        async def list_media(
+            session, *, workspace_id, state=None, never_posted=False, limit=50
+        ):
+            seen.update(state=state, never_posted=never_posted, limit=limit)
+            return [{"id": INTENT, "file_name": "f.jpg"}]
+
+        async def get_media(session, *, workspace_id, media_id):
+            return (
+                {"id": media_id, "file_name": "f.jpg"} if media_id == INTENT else None
+            )
+
+        monkeypatch.setattr(workspaces, "list_media", list_media)
+        monkeypatch.setattr(workspaces, "get_media", get_media)
+        assert (
+            client.get(f"/api/v1/workspaces/{WS}/media?state=bogus").status_code == 422
+        )
+        resp = client.get(
+            f"/api/v1/workspaces/{WS}/media?state=available&never_posted=true"
+        )
+        assert resp.status_code == 200
+        assert seen == {"state": "available", "never_posted": True, "limit": 50}
+        assert resp.json()["media"][0]["file_name"] == "f.jpg"
+        assert client.get(f"/api/v1/workspaces/{WS}/media/{INTENT}").status_code == 200
+        assert client.get(f"/api/v1/workspaces/{WS}/media/{WS}").status_code == 404
+        assert ("gate", WS, PRINCIPAL.user_id, "member") in tenant
+
+    def test_stats_is_served_under_the_gate(
+        self, client, signed_in, tenant, monkeypatch
+    ):
+        async def stats(session, *, workspace_id):
+            return {"intents_by_state": {"posted": 2}, "accounts": 1}
+
+        monkeypatch.setattr(workspaces, "stats", stats)
+        resp = client.get(f"/api/v1/workspaces/{WS}/stats")
+        assert resp.status_code == 200
+        assert resp.json()["intents_by_state"] == {"posted": 2}
+        assert ("gate", WS, PRINCIPAL.user_id, "member") in tenant
 
 
 @pytest.fixture
