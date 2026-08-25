@@ -23,8 +23,15 @@
  * cannot resolve. Those sessions already point at nothing; failing to resolve
  * them makes that visible rather than causing it.
  *
- * The cookie NAME is deliberately unchanged, so a fresh sign-in overwrites the
- * old value rather than leaving it beside a new one under a different key.
+ * THE COOKIE NAME IS THE API'S NOW, AND THAT IS A CORRECTION WORTH KEEPING.
+ * This comment used to say the name was "deliberately unchanged, so a fresh
+ * sign-in overwrites the old value rather than leaving it beside a new one".
+ * That was sound while this tier MINTED the session. It no longer does: #1032
+ * moved sign-in to the API and deleted every writer here, but left this constant
+ * naming the old cookie. So the front end read `storydump_session` while the API
+ * wrote `sd_session`, and a completed Google consent minted a real session and
+ * then bounced the user to /login, because the gate could not see it. "Unchanged"
+ * stopped being conservative the moment the writer moved.
  *
  * CORRECTION, and it is worth keeping rather than quietly editing: this comment
  * used to claim a stale JWT "fails to resolve and is cleared". Only the first
@@ -75,7 +82,20 @@ export interface SessionUser {
   degraded: string[];
 }
 
-export const SESSION_COOKIE = "storydump_session";
+/**
+ * The session cookie. The API is its SSOT — `src/api/principal.py` (`COOKIE`).
+ *
+ * This tier READS it and never writes it: sign-in is API-hosted, so the value is
+ * minted, set and revoked there. Two languages, so the name cannot be a shared
+ * import — it is duplicated deliberately, and this comment is the pointer that
+ * makes the duplication greppable from either side.
+ *
+ * The name being right is NECESSARY AND NOT SUFFICIENT. This tier can only read
+ * the cookie when the API sets `SESSION_COOKIE_DOMAIN` to the shared registrable
+ * domain; left at its default the cookie is host-only on the API's host and this
+ * tier's server side cannot see it at all, under any name.
+ */
+export const SESSION_COOKIE = "sd_session";
 
 /**
  * The selected workspace. A PREFERENCE, not a credential.
@@ -89,21 +109,23 @@ export const SESSION_COOKIE = "storydump_session";
  */
 export const WORKSPACE_COOKIE = "storydump_workspace";
 
-/** 30 days, matching `session_tokens.expires_at` (05 seam). */
-const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
+/** 30 days. This tier's own cookie, so this tier owns its lifetime. */
+const WORKSPACE_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
 
-export const SESSION_COOKIE_OPTIONS = {
-  httpOnly: true,
+/**
+ * Not httpOnly — no secret in it, and the client reads it.
+ *
+ * These used to be spread from a `SESSION_COOKIE_OPTIONS` block. That block
+ * described how to WRITE the session cookie, which this tier stopped doing when
+ * sign-in moved to the API. Keeping it would have documented a write that no
+ * longer happens and invited the next author to restore one.
+ */
+export const WORKSPACE_COOKIE_OPTIONS = {
+  httpOnly: false,
   secure: process.env.NODE_ENV === "production",
   sameSite: "lax" as const,
   path: "/",
-  maxAge: SESSION_MAX_AGE_SECONDS,
-};
-
-/** Same options, minus httpOnly — no secret in it, and the client reads it. */
-export const WORKSPACE_COOKIE_OPTIONS = {
-  ...SESSION_COOKIE_OPTIONS,
-  httpOnly: false,
+  maxAge: WORKSPACE_MAX_AGE_SECONDS,
 };
 
 type MeResponse = {

@@ -315,6 +315,13 @@ DOORS = {
         "SELECT * FROM fn_invitation_accept('nope',"
         " '00000000-0000-0000-0000-000000000000'::uuid, 'telegram', NULL, 1, 'web')",
     ),
+    # The tenth door (064, #1037): a user-plane READ, so its exercising call
+    # carries no arguments — the caller is app.actor_user_id, read inside the
+    # body, and an unclaimed session reads zero rows rather than anyone's.
+    "fn_memberships_for_caller": (
+        "svc_ingress",
+        "SELECT * FROM fn_memberships_for_caller()",
+    ),
 }
 
 
@@ -846,6 +853,28 @@ class TestDoorsAreExercisedAndExclusive:
         )
         assert member == 1, "the accepted invitation must have admitted the member"
 
+    def test_fn_memberships_for_caller_answers_for_the_claimed_caller_only(
+        self, target
+    ):
+        """The tenth door, driven as ingress: tenant A's seeded owner claims
+        itself and reads exactly A — B's membership is not in the answer —
+        and a session that claimed nothing reads nothing, the fail-closed
+        half the body's NULLIF on the unset GUC exists for."""
+        conn = psycopg2.connect(target["ingress"])
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SET app.actor_user_id = %s", (str(target["a"]["user"]),))
+                cur.execute(DOORS["fn_memberships_for_caller"][1])
+                listed = [str(r[0]) for r in cur.fetchall()]
+        finally:
+            conn.close()
+        assert listed == [str(target["a"]["ws"])], listed
+        unclaimed = _exec(
+            target["ingress"], DOORS["fn_memberships_for_caller"][1], fetch=True
+        )
+        assert unclaimed == [], "an unclaimed session must read nothing"
+
     @pytest.mark.parametrize("door", sorted(DOORS))
     def test_each_door_is_denied_to_the_other_login(self, target, door):
         """EXECUTE is per-signature, so the denial calls the real signature —
@@ -856,7 +885,7 @@ class TestDoorsAreExercisedAndExclusive:
         with pytest.raises(psycopg2.errors.InsufficientPrivilege):
             _exec(other, call)
 
-    def test_the_catalog_agrees_nine_doors_and_these_grants(self, target):
+    def test_the_catalog_agrees_ten_doors_and_these_grants(self, target):
         rows = _exec(
             target["owner_stream"],
             "SELECT p.proname, r.rolname FROM pg_proc p"
