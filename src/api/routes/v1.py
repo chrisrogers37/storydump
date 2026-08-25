@@ -24,13 +24,9 @@ The shape is #1015's router design (§1–§3), built rather than described:
 
 The tenant-less reads (``/me``, ``/workspaces``) run on a raw connection: the
 unit of work is unconstructible without a tenant by design, and these are
-user-plane reads. **Known, measured, not papered over:** under the production
-role (`svc_ingress`) `workspace_members`/`workspaces` are tenant-keyed RLS
-tables with no user-plane read path, so `list_for_user` returns nothing there
-until a door or policy lands (`02` §7 amendment — see `workspaces.py` and the
-strict-xfail pin in the X.2 gate test). The routes are written as the plan
-reads and the gap is reported, because a route that hid it would be the
-harder bug to find later.
+user-plane reads — the membership list goes through the
+`fn_memberships_for_caller()` door (`064`, #1037), which reads the caller
+from `app.actor_user_id` and answers under the production role.
 """
 
 from __future__ import annotations
@@ -45,7 +41,6 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 
 from src.api.principal import Principal, current_principal, require_engine
-from src.exceptions.tenancy import TenantResolutionError
 from src.services.target import (
     commands,
     identity,
@@ -179,32 +174,16 @@ def _render(result: CommandResult, *, status: Optional[int] = None) -> JSONRespo
 
 @router.get("/me")
 async def me(request: Request, principal: Principal = Depends(current_principal)):
-    """The user, their identities, and their memberships. A user with zero
-    workspaces is the normal first state on the greenfield, not an error.
-
-    When the membership list cannot be read for this role (`workspaces.
-    list_for_user` refuses rather than answering `[]`), the user half still
-    answers — it is the sign-in spine — and the list is ``null`` with the
-    refusal named in ``degraded``, so a front end can say "cannot list your
-    workspaces" instead of "you have none". `GET /workspaces` has no user
-    half to serve and refuses outright.
-    """
+    """The user, their identities, and their memberships (through the
+    memberships door, `064`). A user with zero workspaces is the normal first
+    state on the greenfield, not an error."""
     engine = require_engine(request)
-    degraded: list[str] = []
     async with engine.connect() as conn:
         user = await identity.get_user(conn, user_id=principal.user_id)
-        try:
-            memberships = await workspaces.list_for_user(
-                conn, user_id=principal.user_id
-            )
-        except TenantResolutionError as exc:
-            if exc.reason != "membership_list_unreadable":
-                raise
-            memberships = None
-            degraded.append(exc.reason)
+        memberships = await workspaces.list_for_user(conn, user_id=principal.user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="not found")
-    return {"user": user, "workspaces": memberships, "degraded": degraded}
+    return {"user": user, "workspaces": memberships}
 
 
 @router.get("/workspaces")

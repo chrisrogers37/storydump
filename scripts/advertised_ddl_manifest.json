@@ -4,63 +4,63 @@
     {
       "sha256": "0651ac50229f47f6ec30fdc94ef472d6317c88b41abbab4db1e4e26b8272e205",
       "class": "normative",
-      "label": "\u00a70 trg_touch_updated_at + fn_safe_tz",
+      "label": "§0 trg_touch_updated_at + fn_safe_tz",
       "doc": "02-domain-model.md",
       "ordinal": 1
     },
     {
       "sha256": "8b18e1a4af5d3d7f23a91acfac58f8471ae6987eeda70cf3ecbaa771af08b737",
       "class": "normative",
-      "label": "\u00a71 core identity/tenancy tables",
+      "label": "§1 core identity/tenancy tables",
       "doc": "02-domain-model.md",
       "ordinal": 2
     },
     {
       "sha256": "dace136a92bcf559c9aff6eacf2bada57bed5b87a1eac6a96032b4b01ae52045",
       "class": "normative",
-      "label": "\u00a71 onboarding_sessions",
+      "label": "§1 onboarding_sessions",
       "doc": "02-domain-model.md",
       "ordinal": 3
     },
     {
       "sha256": "46f2aef9578da4abe18b5b0ede57ce8c5ffa729bb0e7ba8fa65ce67f27fbe7e4",
       "class": "normative",
-      "label": "\u00a72 accounts/sources/media tables",
+      "label": "§2 accounts/sources/media tables",
       "doc": "02-domain-model.md",
       "ordinal": 4
     },
     {
       "sha256": "676169adc18103722c21de740394e89ae87d5d2da78106f0e8da610ce6ebd1b3",
       "class": "normative",
-      "label": "\u00a73 post_intents + audit_events + daily_post_counts",
+      "label": "§3 post_intents + audit_events + daily_post_counts",
       "doc": "02-domain-model.md",
       "ordinal": 5
     },
     {
       "sha256": "799ea2a69099fd89fb323f9c358ddd9e183ebf9ead4b9d35d9c33571df087157",
       "class": "normative",
-      "label": "\u00a73 intent uniqueness keys",
+      "label": "§3 intent uniqueness keys",
       "doc": "02-domain-model.md",
       "ordinal": 6
     },
     {
       "sha256": "36133ab238d0281682e28f5024c008c8968e351ff4b2218ba0842580d3e92e1d",
       "class": "normative",
-      "label": "\u00a73 reaper access-path indexes",
+      "label": "§3 reaper access-path indexes",
       "doc": "02-domain-model.md",
       "ordinal": 7
     },
     {
       "sha256": "929343fda1788a0b9568f4c281c2e208c12457dec8bce9475bf323c5b34eaad2",
       "class": "normative",
-      "label": "\u00a74 transitions table + 27-row seed + guard/audit triggers",
+      "label": "§4 transitions table + 27-row seed + guard/audit triggers",
       "doc": "02-domain-model.md",
       "ordinal": 8
     },
     {
       "sha256": "72e99499522487dc479d6e5cc25ef5dd09920084bce49abd2a7dc79f6ad97d5d",
       "class": "illustrative",
-      "label": "\u00a74 approved->publishing transaction (illustrative)",
+      "label": "§4 approved->publishing transaction (illustrative)",
       "doc": "02-domain-model.md",
       "ordinal": 9,
       "reason": "approved->publishing transaction, verbatim shape (BEGIN; + bind params :ws/:acct/...); the installable objects it demonstrates are created normatively elsewhere"
@@ -68,7 +68,7 @@
     {
       "sha256": "fa78c2eac103a46f6f0edb3892a79025d760341703644c8752e6b8c2dc1bc403",
       "class": "illustrative",
-      "label": "\u00a74 resolve-retry transaction (illustrative)",
+      "label": "§4 resolve-retry transaction (illustrative)",
       "doc": "02-domain-model.md",
       "ordinal": 10,
       "reason": "resolve-retry transaction (BEGIN; + bind params); a usage shape, not DDL"
@@ -76,43 +76,43 @@
     {
       "sha256": "4aaf498806eada3afb19f72f9972a1fd6383778976d4c83b3cf02d83d8745f44",
       "class": "normative",
-      "label": "\u00a75 jobs table + claim/lease/retire indexes",
+      "label": "§5 jobs table + claim/lease/retire indexes",
       "doc": "02-domain-model.md",
       "ordinal": 11
     },
     {
       "sha256": "8a4e2cb59905c6f5b06ea9a36ad0db4a051bb0bf1d9221212e1e5814bbafd762",
       "class": "illustrative",
-      "label": "\u00a75 fn_claim_job claim-body shape (illustrative)",
+      "label": "§5 fn_claim_job claim-body shape (illustrative)",
       "doc": "02-domain-model.md",
       "ordinal": 12,
-      "reason": "fn_claim_job claim-body 'verbatim shape' (BEGIN; -- the body of fn_claim_job(:lane)); the real function is created normatively in the \u00a77-DDL door block"
+      "reason": "fn_claim_job claim-body 'verbatim shape' (BEGIN; -- the body of fn_claim_job(:lane)); the real function is created normatively in the §7-DDL door block"
     },
     {
       "sha256": "17b974ec717d121fa3ddae09b8b198decc911b76b1fb1c17b0151ba77f5c865c",
       "class": "normative",
-      "label": "\u00a76 channel_outbox + provider_operations + ix_intents_parked",
+      "label": "§6 channel_outbox + provider_operations + ix_intents_parked",
       "doc": "02-domain-model.md",
       "ordinal": 13
     },
     {
       "sha256": "a54d1787f9856d2e8d43fb316344ad34e07545fbbe845752f71c46a68b127540",
       "class": "normative",
-      "label": "\u00a76 command_dedup",
+      "label": "§6 command_dedup",
       "doc": "02-domain-model.md",
       "ordinal": 14
     },
     {
       "sha256": "4bd227e260dbb4a6913296a33ca83ddf54ce481495517cc9eaa9c85232b1c749",
       "class": "normative",
-      "label": "\u00a76 rate_counters + retire index",
+      "label": "§6 rate_counters + retire index",
       "doc": "02-domain-model.md",
       "ordinal": 15
     },
     {
       "sha256": "055453d2eae8a7118f665ff7507b4554daaa9a730a14f70dd95ef7bf38dd3279",
       "class": "illustrative",
-      "label": "\u00a76 increment-and-check idiom (illustrative)",
+      "label": "§6 increment-and-check idiom (illustrative)",
       "doc": "02-domain-model.md",
       "ordinal": 16,
       "reason": "increment-and-check rate_counters idiom (VALUES (:scope,...) ON CONFLICT); a bind-parameter usage shape over an already-created table"
@@ -120,65 +120,72 @@
     {
       "sha256": "941603968ba7189a41e8acbb1b0eec3eae0a50ea4781839404aa506c5731b484",
       "class": "normative",
-      "label": "\u00a77-DDL grants + RLS enablement + policies (declares the 2 pattern lists)",
+      "label": "§7-DDL grants + RLS enablement + policies (declares the 2 pattern lists)",
       "doc": "02-domain-model.md",
       "ordinal": 17
     },
     {
       "sha256": "fdd4d77d7cb5f8001b00010b0e7efc8e577d6e28b4faba38d116d68807c001f3",
       "class": "normative",
-      "label": "\u00a77-DDL nine SECURITY DEFINER doors",
+      "label": "§7-DDL nine SECURITY DEFINER doors",
       "doc": "02-domain-model.md",
       "ordinal": 18
     },
     {
       "sha256": "54a960cddfa1ecd30a7ba5a94c64772811ea7e00dd38de83277d3a98ba0b9825",
       "class": "normative",
-      "label": "\u00a71 session_tokens + touch trigger",
+      "label": "§1 session_tokens + touch trigger",
       "doc": "07-security-model.md",
       "ordinal": 1
     },
     {
       "sha256": "ac4b2b1cc6aa0c945645832a3ec12cb943cd32122a9df02eab28cf926181b6bb",
       "class": "normative",
-      "label": "\u00a72 oauth_states + touch trigger",
+      "label": "§2 oauth_states + touch trigger",
       "doc": "07-security-model.md",
       "ordinal": 2
     },
     {
       "sha256": "e4ae59358b2203ea6d1e0aa1e6041c83dcb67dbf49969e1ac0784a8ee5c4d675",
       "class": "normative",
-      "label": "\u00a76 service_tokens + touch trigger",
+      "label": "§6 service_tokens + touch trigger",
       "doc": "07-security-model.md",
       "ordinal": 3
     },
     {
       "sha256": "9891ae0df888f7e4529a5c27afec80c57e092edb85506c517680332b8ed63d08",
       "class": "normative",
-      "label": "\u00a76b auth-plane RLS DDL (enable + grants + 6 policies)",
+      "label": "§6b auth-plane RLS DDL (enable + grants + 6 policies)",
       "doc": "07-security-model.md",
       "ordinal": 4
     },
     {
       "sha256": "c1b319d0a35114c9663a1163a9f93ff9ee27a4e50f6c4876a582e05c54af264b",
       "class": "normative",
-      "label": "\u00a78 intent self-transition guard (#883) \u2014 function + BEFORE UPDATE OF state trigger",
+      "label": "§8 intent self-transition guard (#883) — function + BEFORE UPDATE OF state trigger",
       "doc": "07-security-model.md",
       "ordinal": 5
     },
     {
       "sha256": "7d0f2dff2a9c1ed540858fd9c5bf3926fbbae071a314ea881fce165c7d94c5c4",
       "class": "normative",
-      "label": "\u00a79 reauth-prompt clock leg (062, #942) \u2014 marker column + grant + fn_clock_tick five-leg replace",
+      "label": "§9 reauth-prompt clock leg (062, #942) — marker column + grant + fn_clock_tick five-leg replace",
       "doc": "07-security-model.md",
       "ordinal": 6
     },
     {
       "sha256": "feddb81ba67e0aa17a6bf493ca80d125a36aba11c683054c1935dd5cffe7ebe4",
       "class": "normative",
-      "label": "\u00a79 refresh-leg provider guard (063, #982) \u2014 fn_clock_tick replace adding AND provider = 'ig_login', plus the function comment (#997 adoption evidence)",
+      "label": "§9 refresh-leg provider guard (063, #982) — fn_clock_tick replace adding AND provider = 'ig_login', plus the function comment (#997 adoption evidence)",
       "doc": "07-security-model.md",
       "ordinal": 7
+    },
+    {
+      "sha256": "bedab925257ec4b7711541b4e56a5c482e52a864bbb68ff100fe44b123e3da57",
+      "class": "normative",
+      "label": "§10 memberships door (064, #1037) — fn_memberships_for_caller + ix_members_user, the tenth 02 §7 door",
+      "doc": "07-security-model.md",
+      "ordinal": 8
     }
   ],
   "policy_expansion": {

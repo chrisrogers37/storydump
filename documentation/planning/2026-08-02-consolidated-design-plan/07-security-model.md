@@ -533,3 +533,61 @@ REVOKE ALL ON FUNCTION fn_clock_tick(int, interval, jsonb) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION fn_clock_tick(int, interval, jsonb) TO svc_worker;
 ```
 
+### §10. The memberships door — the tenth `02` §7 door (064, #1037)
+
+The web surface's first read after sign-in is "which workspaces am I in", and
+the printed policies cannot answer it: `p_tenant` on `workspace_members` is
+`workspace_id = app.tenant_id`, so with no tenant claimed the table reads
+empty — an answer indistinguishable from the greenfield's normal
+signed-in-with-no-workspace state. Found twice, independently (#1031 on the
+writer side, #1035 on the router side), confirmed one gap, and both lanes
+refused rather than answered `[]` until this door existed. It reads the
+caller from `app.actor_user_id` internally rather than taking a parameter
+(one trust point — the GUC the audit triggers already rely on — and unset
+fails closed), and it carries the `(user_id)` index the read was missing.
+Appends rather than amends: arm (b) is an ordered prefix, and the `02` §7-DDL
+block that prints the first nine doors is content-addressed.
+
+```sql
+-- 10/10 fn_memberships_for_caller — the user-plane door the web surface reads its workspace
+-- list through (#1037; the gap was found twice — #1031 writer-side, #1035 router-side — and
+-- confirmed one gap). p_tenant on workspace_members is workspace_id = app.tenant_id, so "which
+-- workspaces does this user belong to" has no pre-context read path for svc_ingress: with no
+-- tenant set the table reads EMPTY, and an empty list is indistinguishable from the greenfield's
+-- normal signed-in-with-no-workspace state. Both lanes therefore REFUSED
+-- (membership_list_unreadable) until this door existed. The caller is read from
+-- app.actor_user_id INTERNALLY, never taken as a parameter: one trust point — the GUC the
+-- audit triggers already attribute every governance write to — and an unset GUC fails closed
+-- to zero rows. Owned by svc_membership (already USING (true) on workspace_members and SELECT
+-- on workspaces); it returns exactly the four columns the surface renders, never a widened read.
+-- The CREATE bracket is 062's, for the reason it gave: ALTER FUNCTION … OWNER TO needs the
+-- incoming owner to hold CREATE on the schema, and the steady state never leaves it there.
+GRANT CREATE ON SCHEMA public TO svc_membership;
+
+CREATE FUNCTION fn_memberships_for_caller()
+RETURNS TABLE (o_workspace_id uuid, o_name varchar, o_state text, o_role text)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+  SELECT m.workspace_id, w.name, w.state, m.role
+    FROM workspace_members m JOIN workspaces w ON w.id = m.workspace_id
+   WHERE m.user_id = NULLIF(current_setting('app.actor_user_id', true), '')::uuid
+   ORDER BY w.created_at, w.id
+$$;
+
+COMMENT ON FUNCTION fn_memberships_for_caller() IS
+  'The calling user''s workspace memberships: a SECURITY DEFINER user-plane read owned by '
+  'svc_membership with EXECUTE granted to svc_ingress. The caller is app.actor_user_id, read '
+  'internally and never a parameter; unset, it returns no rows. Exists because p_tenant on '
+  'workspace_members cannot answer a cross-tenant question for one user.';
+
+ALTER FUNCTION fn_memberships_for_caller() OWNER TO svc_membership;
+
+REVOKE CREATE ON SCHEMA public FROM svc_membership;
+
+REVOKE ALL ON FUNCTION fn_memberships_for_caller() FROM PUBLIC;
+
+GRANT EXECUTE ON FUNCTION fn_memberships_for_caller() TO svc_ingress;
+
+-- The read the door serves had no index: workspace_members' primary key is (workspace_id,
+-- user_id), so a by-user lookup was a sequential scan.
+CREATE INDEX ix_members_user ON workspace_members (user_id);
+```
