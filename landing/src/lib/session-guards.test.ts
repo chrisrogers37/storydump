@@ -15,16 +15,38 @@ function respond(status: number, body: unknown) {
   );
 }
 
+// Deliberately structured rather than random. An earlier version used a
+// realistic high-entropy UUID here, and GitGuardian's "Generic Password"
+// detector flagged `<uuid>/../other` as a hardcoded secret — a 36-character
+// high-entropy string followed by a slash reads as a URL with an embedded
+// credential. It was a false positive, but the remedy is to reword rather than
+// to add an ignore-file entry: an ignore entry suppresses the detector on this
+// path permanently, so the next REAL finding here would be silent.
+//
+// Nothing is lost. These are shape fixtures — the regex cares about the shape
+// of a UUID, never its entropy — and a fixture that cannot be mistaken for a
+// credential is a better fixture.
+const VALID_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+
 describe("isWorkspaceId", () => {
   it("accepts a UUID and rejects everything that becomes a path segment", () => {
-    expect(isWorkspaceId("3f2a1c44-9b0e-4d21-8a77-1c5e9f0b2d31")).toBe(true);
+    expect(isWorkspaceId(VALID_ID)).toBe(true);
+
+    // Every junk case is DERIVED from the id that passes on its own, so what
+    // the assertion isolates is the mutation rather than the base. Under the
+    // old fixtures a traversal case carried its own unrelated uuid, and a
+    // rejection could have come from a malformed prefix instead of the
+    // traversal — the test would have passed for the wrong reason.
     for (const junk of [
       undefined,
       "",
       "../../etc/passwd",
-      "3f2a1c44-9b0e-4d21-8a77-1c5e9f0b2d31/../other",
+      `${VALID_ID}/../other`,
+      `${VALID_ID}/`,
+      `/${VALID_ID}`,
+      `${VALID_ID}\u0000`,
       "not-a-uuid",
-      "3f2a1c449b0e4d218a771c5e9f0b2d31",
+      VALID_ID.replace(/-/g, ""),
     ]) {
       expect(isWorkspaceId(junk as string | undefined), `for ${junk}`).toBe(false);
     }
