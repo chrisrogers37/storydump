@@ -310,13 +310,21 @@ class TestTheWorkerIdlesVisibly:
         assert app.heartbeat.consecutive_failures == 0
 
         with sync_conn.cursor() as cur:
+            # The slot was due when it was minted, so the W3 fast path prompted
+            # it in the minting pass — and since #1033 the web queue is a
+            # surface every workspace has, so a workspace with no push binding
+            # (this one) still advances to `awaiting_approval` there and then.
+            # Before #1033 this intent parked in `scheduled` for the reaper.
             cur.execute(
                 "SELECT count(*) FROM post_intents WHERE ig_account_id = %s"
-                " AND state = 'scheduled'",
+                " AND state = 'awaiting_approval'",
                 (chain["iga"],),
             )
             minted = cur.fetchone()[0]
-        assert minted >= 1, "clock -> plan_slot -> intent must complete unaided"
+        assert minted >= 1, (
+            "clock -> plan_slot -> intent -> prompted and actionable on the web"
+            " must complete unaided"
+        )
         _assert_no_stranded_lease(sync_conn)
 
 
@@ -374,10 +382,13 @@ class TestJsonbTimestampWidths:
         with sync_conn.cursor() as cur:
             # Assert each CONSTRUCTED slot minted exactly once — the seed
             # chain carries its own intent, so a bare count would be off-by-one.
+            # No state predicate: every slot here is in the past, so the W3
+            # fast path prompts and (since #1033) advances each intent in the
+            # minting pass; the question this test asks is whether it MINTED.
             for width in self.WIDTHS:
                 cur.execute(
                     "SELECT count(*) FROM post_intents WHERE ig_account_id = %s"
-                    " AND state = 'scheduled' AND schedule_slot_at = CAST(%s AS timestamptz)",
+                    " AND schedule_slot_at = CAST(%s AS timestamptz)",
                     (chain["iga"], width),
                 )
                 assert cur.fetchone()[0] == 1, f"width {width!r} did not mint"
