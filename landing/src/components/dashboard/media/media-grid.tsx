@@ -107,7 +107,7 @@ export function MediaGrid({
             <EmptyState
               icon={ImageOff}
               title="No media items found"
-              description="Upload your first image or connect Google Drive to get started."
+              description="Connect Google Drive to sync your content library."
             />
           </div>
         ) : (
