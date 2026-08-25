@@ -98,12 +98,62 @@ class TestFolderRefFrom:
             folder_ref_from(bad)
         assert exc.value.reason == "folder_required"
 
-    def test_a_url_without_the_marker_is_not_silently_accepted_whole(self):
-        """A link that is not a folder URL must not become an id. It has no
-        `/folders/` marker, so the delimiter cut leaves the scheme — which is
-        nonsense as a folder id, and is exactly what the gate's
-        same-folder-same-row test would then fail on."""
-        assert folder_ref_from("https://example.com/x") == "https:"
+    @pytest.mark.parametrize(
+        "markerless",
+        [
+            "https://example.com/x",
+            "https://drive.google.com/open?id=ABC123",
+            "drive.google.com/folderview?id=ABC123",
+            "https://drive.google.com/",
+            "https://drive.google.com",
+        ],
+    )
+    def test_a_url_without_the_marker_is_refused_not_salvaged(self, markerless):
+        """A link with no `/folders/` marker has no id to extract.
+
+        The delimiter cut runs regardless of whether the marker was found, so
+        these used to chew down to `https:` / `drive.google.com` and be RETURNED
+        as folder ids. An earlier version of this test asserted exactly that,
+        which turned the defect into the specification.
+        """
+        with pytest.raises(ProvisioningRefused) as exc:
+            folder_ref_from(markerless)
+        assert exc.value.reason == "folder_not_a_drive_folder"
+
+    def test_two_different_markerless_urls_cannot_collide_on_one_ref(self):
+        """The bite was collision, not just a nonsense id.
+
+        Every markerless URL reduced to the same handful of tokens, so two
+        UNRELATED folders produced one ref, the idempotency key matched, and the
+        second paste silently returned the FIRST source with ``created=False``.
+        One person, two links, one source, no signal.
+
+        Asserted as a property over the pairs rather than as two raises: what
+        must never come back is a shared value, so the test names sameness.
+        """
+        a = "https://drive.google.com/open?id=AAA"
+        b = "https://drive.google.com/open?id=BBB"
+
+        refs = []
+        for url in (a, b):
+            try:
+                refs.append(folder_ref_from(url))
+            except ProvisioningRefused:
+                pass  # refused is the correct outcome; it yields no ref to collide
+
+        assert refs == [], (
+            "distinct folder links produced storable refs "
+            f"{refs!r} — if these are ever equal, two folders become one source"
+        )
+
+    def test_a_bare_id_survives_the_url_shape_guard(self):
+        """The positive control on the guard.
+
+        A denylist that refused too much would make the whole writer unusable,
+        and every other passing test here would still pass — they run through
+        `/folders/` URLs, which strip to the same id.
+        """
+        assert folder_ref_from("1AbCdEfGhIjK-_9") == "1AbCdEfGhIjK-_9"
 
 
 class TestTheRefusalCarriesItsReason:

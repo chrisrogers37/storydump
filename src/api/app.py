@@ -181,6 +181,7 @@ _PROVISIONING_STATUS = {
     "account_ref_required": 400,
     "account_ref_too_long": 400,
     "folder_required": 400,
+    "folder_not_a_drive_folder": 400,
 }
 
 #: `InvitationRefused.reason` → status, total over `invitations.REASONS`.

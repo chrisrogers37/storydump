@@ -16,11 +16,29 @@ that row is invisible to the clock forever. It is asserted here as the
 before-state, so the "after" is attributable to the writer rather than to the
 tick being called at all.
 
-Roles: writes go through `svc_ingress` (the API's production role, under RLS),
-the tick runs as `svc_worker` (the only login `fn_clock_tick` is granted to),
-and ground truth is read back as the schema owner. A single-role version of
-this file would prove the statements run, not that the production identity may
-run them.
+Roles: writes go through `svc_ingress`, the tick runs as `svc_worker` (the only
+login `fn_clock_tick` is granted to), and ground truth is read back as the
+schema owner. A single-role version of this file would prove the statements
+run, not that a least-privilege identity may run them.
+
+**`svc_ingress` is the role the F.4 posture INTENDS, not the one production
+connects as, and the tenant-isolation assertions here therefore do not transfer
+to the deployed configuration.** Measured on production: the API connects as
+`neondb_owner`, which owns all of `ig_accounts`, `media_sources`, `workspaces`
+and `workspace_members` and carries BYPASSRLS; no migration sets FORCE ROW
+LEVEL SECURITY, and nothing in `src/` issues `SET ROLE`. So `p_tenant` is inert
+on the deployed path and `test_a_source_is_not_visible_from_the_other_tenant`
+(and its destination sibling) prove a property of `svc_ingress`, not of
+production. This is ratified, not a new hole — `02-domain-model.md`:1466 allows
+ENABLE without FORCE and #751 tracks the gap, whose compensating control is the
+unbuilt F.4 ("runtime-login + definer-door, no owner role, no BYPASSRLS").
+
+What does hold in production is `tenant_resolution.authorize_member`, which
+binds both keys in its WHERE and documents itself as safe on a privileged
+connection. Isolation on these two endpoints rests on that gate, not on RLS.
+Running this file under `svc_ingress` is still worth doing — it is the only
+place the intended posture is exercised at all — but it must not be read as
+evidence about the running system.
 
 **Not claimed here:** nothing about credentials, Meta, or publishing. A
 destination is not a connection — see `provisioning`'s module docstring.

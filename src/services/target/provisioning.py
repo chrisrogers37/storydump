@@ -207,10 +207,17 @@ async def create_destination(
         # was not visible" as the cause, which is provably wrong:
         #   - workspace absent    → `ig_accounts_workspace_id_fkey` violation
         #     fires first (measured: asyncpg ForeignKeyViolationError).
-        #   - claim ≠ workspace_id → the `p_tenant` WITH CHECK on `ig_accounts`
-        #     refuses first; `workspaces` carries the IDENTICAL `app.tenant_id`
-        #     predicate (058:141), so a visible insert implies a visible
-        #     workspace.
+        #   - claim ≠ workspace_id → refused by `authorize_member`, which binds
+        #     BOTH keys in its WHERE (`workspace_id = :ws AND user_id = :u`)
+        #     and is what actually holds tenant isolation on this route.
+        #     The `p_tenant` WITH CHECK on `ig_accounts` would refuse it too —
+        #     but NOT ON THE DEPLOYED PATH, and that leg is therefore not load
+        #     bearing here: production connects as `neondb_owner`, which owns
+        #     these tables and is BYPASSRLS, and no migration sets FORCE ROW
+        #     LEVEL SECURITY, so the policy is inert (#751; `02-domain-model.md`
+        #     :1466 ratifies ENABLE-without-FORCE). The unbuilt F.4 posture —
+        #     runtime login, definer door, no owner role, no BYPASSRLS — is
+        #     what would make it stand.
         #   - a NULL settings column → `posts_per_day`, `posting_hours_*` and
         #     `tz` are all NOT NULL on `workspaces` (053), and `fn_safe_tz`
         #     degrades a decayed zone to UTC rather than returning NULL.
@@ -236,6 +243,23 @@ def folder_ref_from(value: object) -> str:
     address bar to everyone who has not read the Drive API docs, and storing
     `https://drive.google.com/drive/folders/<id>` as an id would fail much
     later, at the first list call, as something that reads like a Drive fault.
+
+    A URL that is not a folder URL is REFUSED, not salvaged. The delimiter cut
+    below runs whether or not the marker was found, so on a link without
+    `/folders/` there is nothing to cut *from* and it chews the URL down to its
+    scheme — `https://example.com/x` became the id `https:`. That is worse than
+    the failure this function exists to prevent, because it is not one failure
+    per bad paste: every markerless URL reduces to the same few tokens, so two
+    UNRELATED folders collide on the idempotency key and the second paste
+    silently returns the first source. One person, two links, one source, no
+    signal.
+
+    The guard is a denylist of characters no Drive id carries rather than an
+    allowlist of ones it does: Google publishes no guarantee about the id
+    charset, so "this still looks like a URL" is the claim we can actually
+    defend, while an allowlist would risk refusing a legitimate id on a
+    character nobody here anticipated. Refusing costs a person one clear error;
+    accepting costs them a silently merged source.
     """
     if not isinstance(value, str) or not value.strip():
         raise ProvisioningRefused("folder_required")
@@ -249,6 +273,11 @@ def folder_ref_from(value: object) -> str:
         ref = ref.split(delimiter, 1)[0]
     if not ref:
         raise ProvisioningRefused("folder_required")
+    if any(ch in ref for ch in ":. \t\r\n"):
+        raise ProvisioningRefused(
+            "folder_not_a_drive_folder",
+            "expected a Drive folder link or a bare folder id",
+        )
     return ref
 
 
