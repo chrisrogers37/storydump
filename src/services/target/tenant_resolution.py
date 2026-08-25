@@ -41,6 +41,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from src.exceptions.tenancy import TenantResolutionError
+from src.services.target.web_sessions import authenticate_session
 
 #: Channel vocabulary — must match ck_bindings_channel (`02` §1).
 CHAT_CHANNELS = ("telegram_group", "telegram_dm")
@@ -60,6 +61,15 @@ class ResolvedTenant:
     user_id: Optional[str] = None
     channel_binding_id: Optional[str] = None
     via: str = ""
+
+
+@dataclass(frozen=True)
+class Membership:
+    """One row of a user's membership list. A typed pair rather than a bare
+    tuple, matching every other result this tier returns."""
+
+    workspace_id: str
+    role: str
 
 
 def resolve_chat(conn, channel: str, external_ref: str) -> ResolvedTenant:
@@ -102,27 +112,20 @@ def resolve_web_session(
     and a user may belong to many workspaces) — the claim is validated,
     never trusted: membership decides, under the claimed tenant's own RLS
     context.
+
+    The authentication half is `web_sessions.authenticate_session`, not a
+    second copy of the same three-column read. It is the same seam from the
+    other side: that module mints the row, so it owns what the row proves,
+    and a user-plane surface that needs the user WITHOUT claiming a workspace
+    (a freshly signed-in user has none to claim) calls it directly.
     """
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT user_id, expires_at <= now(), revoked_at IS NOT NULL"
-            " FROM session_tokens WHERE token_hash = %s",
-            (token_hash,),
-        )
-        row = cur.fetchone()
-    if row is None:
-        raise TenantResolutionError("invalid_session")
-    user_id, expired, revoked = row
-    if revoked:
-        raise TenantResolutionError("revoked_session")
-    if expired:
-        raise TenantResolutionError("expired_session")
+    session = authenticate_session(conn, token_hash)
     role = authorize_member(
-        conn, str(claimed_workspace_id), str(user_id), minimum_role=minimum_role
+        conn, str(claimed_workspace_id), session.user_id, minimum_role=minimum_role
     )
     return ResolvedTenant(
         workspace_id=str(claimed_workspace_id),
-        user_id=str(user_id),
+        user_id=session.user_id,
         via=f"session:{role}",
     )
 
@@ -158,3 +161,56 @@ def authorize_member(
             "insufficient_role", f"{role} < required {minimum_role}"
         )
     return role
+
+
+def workspaces_for_user(conn, user_id: str) -> list:
+    """Every workspace *user_id* belongs to, as a list of `Membership`.
+
+    THE READ THE WEB SURFACE NEEDS AND THE PRINTED POLICIES DO NOT SERVE, so
+    it refuses rather than answering wrongly. `p_tenant` on
+    ``workspace_members`` is ``workspace_id = app.tenant_id``: with no tenant
+    set the table reads empty, and with one set it reads exactly one row. Both
+    are *filtered* answers to an *unfiltered* question, and the first is the
+    dangerous one — an empty list is indistinguishable from the greenfield's
+    normal "signed in, no workspace yet" state, so a user who owns three
+    workspaces would be routed to first-run onboarding and told to create
+    their first. A fail-open that looks like correct behaviour.
+
+    So the blindness is DETECTED rather than reasoned about:
+    ``row_security_active('workspace_members')`` answers, for this connection's
+    own role, whether the policy applies. If it does, this refuses with
+    ``membership_list_unreadable``; the caller can then say "we cannot list
+    your workspaces" instead of "you have none". It answers truthfully only on
+    a connection RLS does not filter — today an owner/admin connection, and in
+    future a sanctioned door.
+
+    **The missing door is a plan amendment, not an engineering call**, and it
+    is the WEB twin of the chat-half gap this module's header already files:
+    the `02` §7 door list is closed at nine (verified against production), and
+    none of the nine enumerates a user's memberships. Adding a tenth, or
+    widening `p_tenant` with a user-plane branch, is a `02` §7-DDL change plus
+    a migration. This function exists now so the gap has one address and one
+    typed refusal rather than nine call sites each discovering it.
+    """
+    with conn.cursor() as cur:
+        # `row_security_active` answers for THIS connection's own role — false
+        # for an owner, a superuser or BYPASSRLS — which is exactly the
+        # question. The general property, if a second such read ever appears:
+        # a read whose empty result is a legitimate answer cannot infer RLS
+        # filtering from emptiness, so it has to detect it. One instance is
+        # not yet a helper.
+        cur.execute("SELECT row_security_active('workspace_members')")
+        (filtered,) = cur.fetchone()
+        if filtered:
+            raise TenantResolutionError(
+                "membership_list_unreadable",
+                "workspace_members is RLS-filtered for this role, so a list"
+                " read here would be silently partial — no sanctioned door"
+                " enumerates a user's memberships (02 §7 closes at nine)",
+            )
+        cur.execute(
+            "SELECT workspace_id, role FROM workspace_members"
+            " WHERE user_id = %s ORDER BY created_at, workspace_id",
+            (str(user_id),),
+        )
+        return [Membership(str(ws), role) for ws, role in cur.fetchall()]
