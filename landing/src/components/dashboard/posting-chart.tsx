@@ -13,19 +13,26 @@ import { BarChart3 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { EmptyState } from "@/components/dashboard/empty-state";
 
-interface DailyCount {
-  date: string;
-  posted: number;
-  skipped: number;
-  rejected: number;
-  failed?: number;
+/**
+ * One bar per day, from the cap ledger (#1044 `stats.posts_by_day`).
+ *
+ * The legacy chart stacked posted/skipped/rejected per day. `daily_post_counts`
+ * records what was POSTED against the capacity in force when it was written, so
+ * a stack of outcomes is not what this data is — drawing one would need three
+ * series the ledger does not carry. One bar and the day's cap beside it is the
+ * honest reading of the same rows, and the cap is the more useful second number
+ * anyway: it says whether a quiet day was quiet or full.
+ */
+interface DayCount {
+  local_date: string;
+  count: number;
+  cap: number;
 }
 
-export function PostingChart({ data }: { data: DailyCount[] }) {
-  // Format date labels to be shorter
+export function PostingChart({ data }: { data: DayCount[] }) {
   const formatted = data.map((d) => ({
     ...d,
-    label: new Date(d.date).toLocaleDateString("en-US", {
+    label: new Date(d.local_date).toLocaleDateString("en-US", {
       month: "short",
       day: "numeric",
     }),
@@ -53,35 +60,13 @@ export function PostingChart({ data }: { data: DailyCount[] }) {
                 interval="preserveStartEnd"
               />
               <YAxis tick={{ fontSize: 12 }} allowDecimals={false} />
-              <Tooltip />
-              <Bar
-                dataKey="posted"
-                stackId="a"
-                fill="hsl(142, 76%, 36%)"
-                name="Posted"
-                radius={[0, 0, 0, 0]}
+              <Tooltip
+                formatter={(value, name) => [
+                  value as number,
+                  name === "count" ? "posted" : "capacity",
+                ]}
               />
-              <Bar
-                dataKey="skipped"
-                stackId="a"
-                fill="hsl(48, 96%, 53%)"
-                name="Skipped"
-                radius={[0, 0, 0, 0]}
-              />
-              <Bar
-                dataKey="rejected"
-                stackId="a"
-                fill="hsl(0, 84%, 60%)"
-                name="Rejected"
-                radius={[0, 0, 0, 0]}
-              />
-              <Bar
-                dataKey="failed"
-                stackId="a"
-                fill="hsl(0, 70%, 35%)"
-                name="Failed"
-                radius={[4, 4, 0, 0]}
-              />
+              <Bar dataKey="count" fill="hsl(142, 76%, 36%)" radius={[2, 2, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
         )}
