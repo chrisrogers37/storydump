@@ -148,6 +148,35 @@ def async_database_url(database: Optional[str] = None) -> str:
     )
 
 
+def asyncpg_url(url: str) -> str:
+    """A platform-shaped `postgresql://` URL made asyncpg-safe — the deploy door
+    both roots share (worker and api), so the rewrite lives once.
+
+    Rewrites what the asyncpg driver refuses: the dialect suffix, and the
+    libpq-only `sslmode`/`channel_binding` query params (Neon appends both;
+    asyncpg takes `ssl=`).
+    """
+    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+    url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    parts = urlsplit(url)
+    params = dict(parse_qsl(parts.query))
+    sslmode = params.pop("sslmode", None)
+    params.pop("channel_binding", None)
+    if sslmode and "ssl" not in params:
+        params["ssl"] = sslmode
+    return urlunsplit(parts._replace(query=urlencode(params)))
+
+
+def engine_url_from_env(env) -> Optional[str]:
+    """`TARGET_DATABASE_URL` from *env*, asyncpg-safe, or None when unset so
+    :func:`create_engine` falls back to the settings-built URL."""
+    url = env.get("TARGET_DATABASE_URL")
+    if not url:
+        return None
+    return asyncpg_url(url)
+
+
 def create_engine(url: Optional[str] = None) -> AsyncEngine:
     """The async engine, with `max_overflow` pinned to the `05` seam."""
     return create_async_engine(

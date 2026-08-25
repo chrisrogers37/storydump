@@ -10,13 +10,21 @@ The privilege facts are measured here, not narrated: the WEB half runs as
 ``svc_ingress`` under the printed policies, fail-closes on a binding that
 provably exists — the decision-fork evidence, pinned green so the day a
 resolver door lands this test goes red and gets updated deliberately.
+
+The resolver is async (the tier's shape, #1028); seeding stays psycopg2 —
+the seeds are fixtures, the resolver is the subject, and only the subject
+needs the production driver. Each call opens its own asyncpg connection,
+asserts the login it claims, runs in ONE transaction, and rolls back.
 """
 
 import hashlib
-from contextlib import contextmanager
+from contextlib import asynccontextmanager
 
 import psycopg2
 import pytest
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.pool import NullPool
 
 from src.exceptions.tenancy import TenantResolutionError
 from src.services.target.tenant_resolution import (
@@ -124,30 +132,35 @@ def world(admin_conn, owner_actor):
         gen.close()
 
 
-@contextmanager
-def _txn(dsn, expect_user=None):
-    """A NON-autocommit connection (SET LOCAL needs a transaction block),
-    subject-gated when a login is named."""
-    conn = psycopg2.connect(dsn)
+@asynccontextmanager
+async def _txn(dsn, expect_user=None):
+    """ONE asyncpg transaction (SET LOCAL needs a transaction block), subject-
+    gated when a login is named, always rolled back. NullPool + a fresh engine
+    per call: an engine outlives no test, so no connection crosses loops."""
+    engine = create_async_engine(
+        dsn.replace("postgresql://", "postgresql+asyncpg://", 1), poolclass=NullPool
+    )
     try:
-        if expect_user is not None:
-            with conn.cursor() as cur:
-                cur.execute("SELECT current_user")
-                who = cur.fetchone()[0]
-                assert who == expect_user, f"wrong subject: {who}"
-        yield conn
-        conn.rollback()
+        async with engine.connect() as conn:
+            tx = await conn.begin()
+            try:
+                if expect_user is not None:
+                    who = (await conn.execute(text("SELECT current_user"))).scalar()
+                    assert who == expect_user, f"wrong subject: {who}"
+                yield conn
+            finally:
+                await tx.rollback()
     finally:
-        conn.close()
+        await engine.dispose()
 
 
 class TestChatResolutionAsAPrivilegedReader:
     """The resolver's own logic, driven where the binding rows are visible."""
 
-    def test_each_binding_resolves_to_exactly_its_workspace(self, world):
-        with _txn(world["stream"]) as conn:
+    async def test_each_binding_resolves_to_exactly_its_workspace(self, world):
+        async with _txn(world["stream"]) as conn:
             for ids in (world["a"], world["b"]):
-                got = resolve_chat(conn, "telegram_group", ids["external_ref"])
+                got = await resolve_chat(conn, "telegram_group", ids["external_ref"])
                 assert isinstance(got, ResolvedTenant)
                 assert got.workspace_id == str(ids["ws"]), (
                     "resolved to the wrong workspace — identity, not existence"
@@ -156,19 +169,19 @@ class TestChatResolutionAsAPrivilegedReader:
                 assert got.via == "chat"
                 assert got.user_id is None
 
-    def test_revoked_binding_refuses_by_name(self, world):
-        with _txn(world["stream"]) as conn:
+    async def test_revoked_binding_refuses_by_name(self, world):
+        async with _txn(world["stream"]) as conn:
             with pytest.raises(TenantResolutionError) as e:
-                resolve_chat(conn, "telegram_dm", "revoked-ref")
+                await resolve_chat(conn, "telegram_dm", "revoked-ref")
             assert e.value.reason == "revoked_binding"
 
-    def test_unknown_binding_and_unknown_channel_refuse(self, world):
-        with _txn(world["stream"]) as conn:
+    async def test_unknown_binding_and_unknown_channel_refuse(self, world):
+        async with _txn(world["stream"]) as conn:
             with pytest.raises(TenantResolutionError) as e:
-                resolve_chat(conn, "telegram_group", "never-seen")
+                await resolve_chat(conn, "telegram_group", "never-seen")
             assert e.value.reason == "unknown_binding"
             with pytest.raises(TenantResolutionError) as e:
-                resolve_chat(conn, "smoke_signal", "x")
+                await resolve_chat(conn, "smoke_signal", "x")
             assert e.value.reason == "unknown_channel"
 
 
@@ -179,34 +192,34 @@ class TestChatResolutionAsIngressIsFailClosed:
     unknown. Fail-closed, never fallback — and the day a resolver door
     lands, this test goes red and is updated deliberately."""
 
-    def test_existing_active_binding_refuses_as_ingress(self, world):
-        with _txn(world["ingress"], expect_user="svc_ingress") as conn:
+    async def test_existing_active_binding_refuses_as_ingress(self, world):
+        async with _txn(world["ingress"], expect_user="svc_ingress") as conn:
             with pytest.raises(TenantResolutionError) as e:
-                resolve_chat(conn, "telegram_group", world["a"]["external_ref"])
+                await resolve_chat(conn, "telegram_group", world["a"]["external_ref"])
             assert e.value.reason == "unknown_binding"
 
 
 class TestWebSessionResolutionAsIngress:
     """The production path for the web half, end to end as svc_ingress."""
 
-    def test_valid_session_resolves_the_claimed_workspace(self, world):
-        with _txn(world["ingress"], expect_user="svc_ingress") as conn:
-            got = resolve_web_session(conn, _sha("live-a"), world["a"]["ws"])
+    async def test_valid_session_resolves_the_claimed_workspace(self, world):
+        async with _txn(world["ingress"], expect_user="svc_ingress") as conn:
+            got = await resolve_web_session(conn, _sha("live-a"), world["a"]["ws"])
             assert got.workspace_id == str(world["a"]["ws"])
             assert got.user_id == str(world["a"]["user"])
             assert got.via == "session:owner"
 
-    def test_cross_workspace_claim_refuses_not_a_member(self, world):
+    async def test_cross_workspace_claim_refuses_not_a_member(self, world):
         """User A claims workspace B: the gate reads under B's context and
         finds no membership — the two-identity check, refused by name."""
-        with _txn(world["ingress"], expect_user="svc_ingress") as conn:
+        async with _txn(world["ingress"], expect_user="svc_ingress") as conn:
             with pytest.raises(TenantResolutionError) as e:
-                resolve_web_session(conn, _sha("live-a"), world["b"]["ws"])
+                await resolve_web_session(conn, _sha("live-a"), world["b"]["ws"])
             assert e.value.reason == "not_a_member"
 
-    def test_the_other_tenant_resolves_its_own(self, world):
-        with _txn(world["ingress"], expect_user="svc_ingress") as conn:
-            got = resolve_web_session(conn, _sha("live-b"), world["b"]["ws"])
+    async def test_the_other_tenant_resolves_its_own(self, world):
+        async with _txn(world["ingress"], expect_user="svc_ingress") as conn:
+            got = await resolve_web_session(conn, _sha("live-b"), world["b"]["ws"])
             assert got.workspace_id == str(world["b"]["ws"])
             assert got.user_id == str(world["b"]["user"])
 
@@ -218,39 +231,48 @@ class TestWebSessionResolutionAsIngress:
             ("no-such-session", "invalid_session"),
         ],
     )
-    def test_bad_sessions_refuse_by_name(self, world, token, reason):
-        with _txn(world["ingress"], expect_user="svc_ingress") as conn:
+    async def test_bad_sessions_refuse_by_name(self, world, token, reason):
+        async with _txn(world["ingress"], expect_user="svc_ingress") as conn:
             with pytest.raises(TenantResolutionError) as e:
-                resolve_web_session(conn, _sha(token), world["a"]["ws"])
+                await resolve_web_session(conn, _sha(token), world["a"]["ws"])
             assert e.value.reason == reason
 
-    def test_role_ladder_enforced_and_satisfied(self, world):
-        with _txn(world["ingress"], expect_user="svc_ingress") as conn:
+    async def test_role_ladder_enforced_and_satisfied(self, world):
+        async with _txn(world["ingress"], expect_user="svc_ingress") as conn:
             with pytest.raises(TenantResolutionError) as e:
-                resolve_web_session(
+                await resolve_web_session(
                     conn, _sha("member-a"), world["a"]["ws"], minimum_role="admin"
                 )
             assert e.value.reason == "insufficient_role"
-        with _txn(world["ingress"], expect_user="svc_ingress") as conn:
-            got = resolve_web_session(
+        async with _txn(world["ingress"], expect_user="svc_ingress") as conn:
+            got = await resolve_web_session(
                 conn, _sha("live-a"), world["a"]["ws"], minimum_role="admin"
             )
             assert got.via == "session:owner", "owner satisfies admin minimum"
 
-    def test_the_claim_does_not_outlive_the_transaction(self, world):
+    async def test_the_claim_does_not_outlive_the_transaction(self, world):
         """SET LOCAL semantics pinned: after rollback, the same connection
         carries no tenant context (the probe-harness leak class, checked on
         the resolver's own handoff)."""
-        conn = psycopg2.connect(world["ingress"])
+        engine = create_async_engine(
+            world["ingress"].replace("postgresql://", "postgresql+asyncpg://", 1),
+            poolclass=NullPool,
+        )
         try:
-            resolve_web_session(conn, _sha("live-a"), world["a"]["ws"])
-            conn.rollback()
-            with conn.cursor() as cur:
-                cur.execute("SELECT current_setting('app.tenant_id', true)")
-                left = cur.fetchone()[0]
-            assert left in (None, ""), f"claim leaked past the transaction: {left!r}"
+            async with engine.connect() as conn:
+                tx = await conn.begin()
+                await resolve_web_session(conn, _sha("live-a"), world["a"]["ws"])
+                await tx.rollback()
+                left = (
+                    await conn.execute(
+                        text("SELECT current_setting('app.tenant_id', true)")
+                    )
+                ).scalar()
+                assert left in (None, ""), (
+                    f"claim leaked past the transaction: {left!r}"
+                )
         finally:
-            conn.close()
+            await engine.dispose()
 
 
 class TestNoChatIdCrossesTheBoundary:

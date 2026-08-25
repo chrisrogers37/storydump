@@ -251,6 +251,19 @@ class Settings(BaseSettings):
     INSTAGRAM_APP_SECRET: Optional[str] = None  # Instagram Login OAuth (preferred)
     OAUTH_REDIRECT_BASE_URL: Optional[str] = None  # e.g., "https://api.storydump.app"
 
+    # The web front end (#1028). The target API hosts sign-in and the session
+    # cookie; the front end is a separate origin that calls it. WEB_APP_URL is
+    # the ONE browser origin CORS admits (never "*") and where a finished
+    # sign-in lands. Absent = no browser origin is admitted and sign-in lands
+    # on the API's own root, which is the fail-closed reading.
+    WEB_APP_URL: Optional[str] = None
+    # Session cookie scope. None = host-only (the API host, unreadable by the
+    # front end's server side); the shared registrable domain (e.g.
+    # "storydump.app") lets a same-site front end's SSR read it. Secure is on
+    # by default and only a local http dev setup should turn it off.
+    SESSION_COOKIE_DOMAIN: Optional[str] = None
+    SESSION_COOKIE_SECURE: bool = True
+
     # Which peers may set X-Forwarded-For / X-Forwarded-Proto on our behalf.
     #
     # Comma-separated addresses and/or CIDR networks. This is the set of hosts

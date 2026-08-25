@@ -31,16 +31,28 @@ Privilege reality, measured in the tests rather than assumed (`02` §7):
   since adding a resolver door is a plan amendment (`02` §7-DDL + a
   migration), not an engineering call.
 
-Connections are caller-supplied DB-API connections; SET LOCAL is
-transaction-scoped, so the gate's claim never outlives the caller's
-transaction. The L.0 async unit of work adapts this seam; nothing here
-touches ContextVars.
+## Shape: async, executor-first, the tier's own (#1028)
+
+This module was written against sync DB-API cursors and had no caller in
+`src/`; the router that now calls it is async, like every other module in
+`src/services/target/`. It was ported in place rather than duplicated — a
+second async copy of "the one central authorization gate" would be two
+gates. Every function takes the caller's async executor (an `AsyncConnection`
+or `AsyncSession`) and runs in the caller's transaction, so `SET LOCAL` never
+outlives it. The tenant claim is applied through `unit_of_work.apply_gucs`,
+the one spelling of the GUC statement, for the reason that module states.
 """
+
+from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Optional
 
+from sqlalchemy import text
+
 from src.exceptions.tenancy import TenantResolutionError
+from src.services.target import sessions
+from src.services.target.unit_of_work import apply_gucs
 
 #: Channel vocabulary — must match ck_bindings_channel (`02` §1).
 CHAT_CHANNELS = ("telegram_group", "telegram_dm")
@@ -62,7 +74,7 @@ class ResolvedTenant:
     via: str = ""
 
 
-def resolve_chat(conn, channel: str, external_ref: str) -> ResolvedTenant:
+async def resolve_chat(executor, channel: str, external_ref: str) -> ResolvedTenant:
     """Chat inbound → workspace, via the binding table's unique key.
 
     Only ``state='active'`` bindings resolve: a revoked binding refuses
@@ -73,13 +85,15 @@ def resolve_chat(conn, channel: str, external_ref: str) -> ResolvedTenant:
     """
     if channel not in CHAT_CHANNELS:
         raise TenantResolutionError("unknown_channel", channel)
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT id, workspace_id, state FROM channel_bindings"
-            " WHERE channel = %s AND external_ref = %s",
-            (channel, external_ref),
+    row = (
+        await executor.execute(
+            text(
+                "SELECT id, workspace_id, state FROM channel_bindings"
+                " WHERE channel = :channel AND external_ref = :ref"
+            ),
+            {"channel": channel, "ref": external_ref},
         )
-        row = cur.fetchone()
+    ).first()
     if row is None:
         raise TenantResolutionError("unknown_binding")
     binding_id, workspace_id, state = row
@@ -92,8 +106,8 @@ def resolve_chat(conn, channel: str, external_ref: str) -> ResolvedTenant:
     )
 
 
-def resolve_web_session(
-    conn, token_hash: str, claimed_workspace_id: str, minimum_role: str = "member"
+async def resolve_web_session(
+    executor, token_hash: str, claimed_workspace_id: str, minimum_role: str = "member"
 ) -> ResolvedTenant:
     """Web inbound → workspace: authenticate the session, then authorize the
     CLAIMED workspace through the central gate.
@@ -101,34 +115,23 @@ def resolve_web_session(
     A web request names its workspace explicitly (a session is user-scoped
     and a user may belong to many workspaces) — the claim is validated,
     never trusted: membership decides, under the claimed tenant's own RLS
-    context.
+    context. Authentication is `sessions.resolve` (the one reader of
+    `session_tokens`); a user with no workspace is resolved by THAT and never
+    reaches here, which is what makes the tenant-less state a normal one.
     """
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT user_id, expires_at <= now(), revoked_at IS NOT NULL"
-            " FROM session_tokens WHERE token_hash = %s",
-            (token_hash,),
-        )
-        row = cur.fetchone()
-    if row is None:
-        raise TenantResolutionError("invalid_session")
-    user_id, expired, revoked = row
-    if revoked:
-        raise TenantResolutionError("revoked_session")
-    if expired:
-        raise TenantResolutionError("expired_session")
-    role = authorize_member(
-        conn, str(claimed_workspace_id), str(user_id), minimum_role=minimum_role
+    session = await sessions.resolve(executor, token_hash=token_hash)
+    role = await authorize_member(
+        executor, str(claimed_workspace_id), session.user_id, minimum_role=minimum_role
     )
     return ResolvedTenant(
         workspace_id=str(claimed_workspace_id),
-        user_id=str(user_id),
+        user_id=session.user_id,
         via=f"session:{role}",
     )
 
 
-def authorize_member(
-    conn, workspace_id: str, user_id: str, minimum_role: str = "member"
+async def authorize_member(
+    executor, workspace_id: str, user_id: str, minimum_role: str = "member"
 ) -> str:
     """The one central authorization gate (`01` §1): workspace_members role
     check, in one place, never per handler.
@@ -142,14 +145,16 @@ def authorize_member(
     """
     if minimum_role not in ROLE_ORDER:
         raise TenantResolutionError("insufficient_role", f"unknown role {minimum_role}")
-    with conn.cursor() as cur:
-        cur.execute("SET LOCAL app.tenant_id = %s", (str(workspace_id),))
-        cur.execute(
-            "SELECT role FROM workspace_members"
-            " WHERE workspace_id = %s AND user_id = %s",
-            (str(workspace_id), str(user_id)),
+    await apply_gucs(executor, tenant_id=str(workspace_id))
+    row = (
+        await executor.execute(
+            text(
+                "SELECT role FROM workspace_members"
+                " WHERE workspace_id = :ws AND user_id = :u"
+            ),
+            {"ws": str(workspace_id), "u": str(user_id)},
         )
-        row = cur.fetchone()
+    ).first()
     if row is None:
         raise TenantResolutionError("not_a_member")
     role = row[0]

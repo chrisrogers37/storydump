@@ -54,25 +54,11 @@ class WorkerTaskDied(RuntimeError):
 def engine_url_from_env(env: dict):
     """The branch-soak/deploy door: TARGET_DATABASE_URL, made asyncpg-safe.
 
-    Accepts the plain `postgresql://` URL a platform hands out and rewrites
-    what the asyncpg driver refuses: the dialect suffix, and the libpq-only
-    `sslmode`/`channel_binding` query params (Neon appends both; asyncpg
-    takes `ssl=`). Returns None when unset so `unit_of_work.create_engine`
-    falls back to the settings-built URL.
+    The rewrite itself lives in `unit_of_work.engine_url_from_env` now (#1028
+    — the api root needs the same door and a second copy is how the two
+    drift); this name stays because the soak recipes and tests call it here.
     """
-    url = env.get("TARGET_DATABASE_URL")
-    if not url:
-        return None
-    url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
-    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
-
-    parts = urlsplit(url)
-    params = dict(parse_qsl(parts.query))
-    sslmode = params.pop("sslmode", None)
-    params.pop("channel_binding", None)
-    if sslmode and "ssl" not in params:
-        params["ssl"] = sslmode
-    return urlunsplit(parts._replace(query=urlencode(params)))
+    return unit_of_work.engine_url_from_env(env)
 
 
 def _transit_from_env(env):
