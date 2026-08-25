@@ -62,5 +62,11 @@ export async function workspaceFetch<T = unknown>(
   const token = await getSessionToken();
   if (!token) return { ok: false, status: 401, error: "unauthenticated" };
 
-  return targetFetch<T>(`/workspaces/${workspaceId}/${path}`, token);
+  // An EMPTY path means the workspace itself (`GET /workspaces/{ws}`), which
+  // the settings and calendar screens read for the config columns. Without
+  // this the concatenation produces a trailing slash and FastAPI answers a
+  // redirect rather than the row — a failure that would look like an
+  // unreachable router rather than a malformed path.
+  const suffix = path ? `/${path}` : "";
+  return targetFetch<T>(`/workspaces/${workspaceId}${suffix}`, token);
 }
