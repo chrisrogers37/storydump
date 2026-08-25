@@ -39,6 +39,28 @@ SESSION_TTL_SECONDS = 30 * 24 * 3600
 #: allow — a rounding error against a 30-day TTL.
 RENEW_THROTTLE_SECONDS = 60
 
+#: Lookup and slide in ONE statement: the data-modifying CTE runs exactly once
+#: whether or not the outer SELECT reads it, and its WHERE holds the whole
+#: liveness test plus the throttle, so a dead session is read and never
+#: touched. One round trip per authenticated request instead of two.
+_RESOLVE = text(
+    "WITH s AS ("
+    "  SELECT s.id, s.user_id, s.expires_at <= now() AS expired,"
+    "         s.revoked_at IS NOT NULL AS revoked, u.state"
+    "    FROM session_tokens s JOIN users u ON u.id = s.user_id"
+    "   WHERE s.token_hash = :h"
+    "), slide AS ("
+    "  UPDATE session_tokens t"
+    "     SET expires_at = now() + make_interval(secs => :ttl),"
+    "         last_seen_at = now()"
+    "    FROM s"
+    "   WHERE t.id = s.id AND NOT s.expired AND NOT s.revoked"
+    "     AND s.state = 'active'"
+    "     AND (t.last_seen_at IS NULL"
+    "          OR t.last_seen_at < now() - make_interval(secs => :throttle))"
+    ") SELECT id, user_id, expired, revoked, state FROM s"
+)
+
 
 @dataclass(frozen=True)
 class Session:
@@ -58,9 +80,7 @@ def new_token() -> str:
     return secrets.token_urlsafe(32)
 
 
-async def issue(
-    executor, *, user_id: str, ttl_seconds: int = SESSION_TTL_SECONDS
-) -> str:
+async def issue(executor, *, user_id: str) -> str:
     """Mint a session for *user_id* and return the OPAQUE value (the cookie).
 
     The value exists in memory exactly once — here and on the wire; only its
@@ -72,7 +92,7 @@ async def issue(
             "INSERT INTO session_tokens (user_id, token_hash, expires_at)"
             " VALUES (:uid, :h, now() + make_interval(secs => :ttl))"
         ),
-        {"uid": str(user_id), "h": token_hash(value), "ttl": ttl_seconds},
+        {"uid": str(user_id), "h": token_hash(value), "ttl": SESSION_TTL_SECONDS},
     )
     return value
 
@@ -89,13 +109,12 @@ async def resolve(executor, *, token_hash: str) -> Session:
     """
     row = (
         await executor.execute(
-            text(
-                "SELECT s.id, s.user_id, s.expires_at <= now() AS expired,"
-                "       s.revoked_at IS NOT NULL AS revoked, u.state"
-                "  FROM session_tokens s JOIN users u ON u.id = s.user_id"
-                " WHERE s.token_hash = :h"
-            ),
-            {"h": token_hash},
+            _RESOLVE,
+            {
+                "h": token_hash,
+                "ttl": SESSION_TTL_SECONDS,
+                "throttle": RENEW_THROTTLE_SECONDS,
+            },
         )
     ).first()
     if row is None:
@@ -107,22 +126,6 @@ async def resolve(executor, *, token_hash: str) -> Session:
         raise TenantResolutionError("expired_session")
     if user_state != "active":
         raise TenantResolutionError("disabled_user")
-
-    await executor.execute(
-        text(
-            "UPDATE session_tokens"
-            "   SET expires_at = now() + make_interval(secs => :ttl),"
-            "       last_seen_at = now()"
-            " WHERE id = :id"
-            "   AND (last_seen_at IS NULL"
-            "        OR last_seen_at < now() - make_interval(secs => :throttle))"
-        ),
-        {
-            "ttl": SESSION_TTL_SECONDS,
-            "id": session_id,
-            "throttle": RENEW_THROTTLE_SECONDS,
-        },
-    )
     return Session(id=str(session_id), user_id=str(user_id))
 
 

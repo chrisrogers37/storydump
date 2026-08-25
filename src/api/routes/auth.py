@@ -70,7 +70,11 @@ def _configured() -> tuple[str, str, str]:
     missing. Sign-in that is not configured refuses; it never half-works."""
     missing = [
         name
-        for name in ("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "OAUTH_REDIRECT_BASE_URL")
+        for name in (
+            "GOOGLE_CLIENT_ID",
+            "GOOGLE_CLIENT_SECRET",
+            "OAUTH_REDIRECT_BASE_URL",
+        )
         if not getattr(settings, name, None)
     ]
     if missing:
@@ -107,18 +111,17 @@ async def _preauth_guard(conn, request: Request) -> None:
 
 
 def _fail(reason: str) -> Response:
-    if settings.WEB_APP_URL:
-        query = urlencode({"reason": reason})
+    origin = settings.web_app_origin
+    if origin:
         return RedirectResponse(
-            f"{settings.WEB_APP_URL.rstrip('/')}/auth/error?{query}", status_code=302
+            f"{origin}/auth/error?{urlencode({'reason': reason})}", status_code=302
         )
     return JSONResponse(status_code=400, content={"detail": reason})
 
 
 def _landing() -> str:
-    if settings.WEB_APP_URL:
-        return f"{settings.WEB_APP_URL.rstrip('/')}/welcome"
-    return "/"
+    origin = settings.web_app_origin
+    return f"{origin}/welcome" if origin else "/"
 
 
 @router.get("/google")
@@ -131,7 +134,7 @@ async def google_signin(request: Request) -> Response:
         state = await issue_state(
             conn,
             purpose="signin",
-            provider=google_oidc.PROVIDER,
+            provider=identity.PROVIDER_GOOGLE,
             cookie_nonce=cookie_nonce,
         )
     response = RedirectResponse(
@@ -198,11 +201,7 @@ async def google_callback(
     async with engine.begin() as conn:
         try:
             user_id = await identity.upsert_google_identity(
-                conn,
-                sub=who.sub,
-                email=who.email,
-                email_verified=who.email is not None,
-                display_name=who.display_name,
+                conn, sub=who.sub, email=who.email, display_name=who.display_name
             )
         except identity.IdentityCollision:
             return _fail("identity_collision")

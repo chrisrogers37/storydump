@@ -18,11 +18,13 @@ descend from ``StorydumpError``.
 
 Privilege reality, measured in the tests rather than assumed (`02` §7):
 
-- The WEB half runs as ``svc_ingress`` today: ``session_tokens`` is
-  auth-plane ("the door tenant context walks through" — readable before any
-  ``app.tenant_id`` exists), and the membership gate sets its claimed tenant
-  with ``SET LOCAL`` before reading ``workspace_members``, so an absent
-  membership is an empty read → refusal, fail-closed under RLS.
+- The WEB half runs as ``svc_ingress`` today, in two steps the router keeps
+  apart on purpose (a principal with no workspace is a normal state):
+  `sessions.resolve` authenticates on the auth-plane (``session_tokens`` —
+  "the door tenant context walks through", readable before any
+  ``app.tenant_id`` exists), then :func:`authorize_member` sets the claimed
+  tenant with ``SET LOCAL`` before reading ``workspace_members``, so an
+  absent membership is an empty read → refusal, fail-closed under RLS.
 - The CHAT half CANNOT run as ``svc_ingress`` under the printed policies:
   ``channel_bindings`` is tenant-RLS'd with no pre-context read path, and
   the §7 door list is closed at nine. The resolver still fail-closes there
@@ -51,7 +53,6 @@ from typing import Optional
 from sqlalchemy import text
 
 from src.exceptions.tenancy import TenantResolutionError
-from src.services.target import sessions
 from src.services.target.unit_of_work import apply_gucs
 
 #: Channel vocabulary — must match ck_bindings_channel (`02` §1).
@@ -63,10 +64,10 @@ ROLE_ORDER = ("member", "admin", "owner")
 
 @dataclass(frozen=True)
 class ResolvedTenant:
-    """The `01` §1 triple. ``workspace_id`` is always present; the other two
-    depend on the inbound kind (a chat resolution has no user until the
-    command's actor is separately identified; a web resolution has no
-    binding)."""
+    """The `01` §1 triple for a CHAT resolution: ``workspace_id`` always, the
+    binding that resolved it, and no user until the command's actor is
+    separately identified. The web half composes `sessions.resolve` with
+    :func:`authorize_member` and needs no triple."""
 
     workspace_id: str
     user_id: Optional[str] = None
@@ -103,30 +104,6 @@ async def resolve_chat(executor, channel: str, external_ref: str) -> ResolvedTen
         workspace_id=str(workspace_id),
         channel_binding_id=str(binding_id),
         via="chat",
-    )
-
-
-async def resolve_web_session(
-    executor, token_hash: str, claimed_workspace_id: str, minimum_role: str = "member"
-) -> ResolvedTenant:
-    """Web inbound → workspace: authenticate the session, then authorize the
-    CLAIMED workspace through the central gate.
-
-    A web request names its workspace explicitly (a session is user-scoped
-    and a user may belong to many workspaces) — the claim is validated,
-    never trusted: membership decides, under the claimed tenant's own RLS
-    context. Authentication is `sessions.resolve` (the one reader of
-    `session_tokens`); a user with no workspace is resolved by THAT and never
-    reaches here, which is what makes the tenant-less state a normal one.
-    """
-    session = await sessions.resolve(executor, token_hash=token_hash)
-    role = await authorize_member(
-        executor, str(claimed_workspace_id), session.user_id, minimum_role=minimum_role
-    )
-    return ResolvedTenant(
-        workspace_id=str(claimed_workspace_id),
-        user_id=session.user_id,
-        via=f"session:{role}",
     )
 
 

@@ -27,11 +27,13 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
 from src.exceptions.tenancy import TenantResolutionError
+from src.services.target import sessions
 from src.services.target.tenant_resolution import (
     ResolvedTenant,
+    authorize_member,
     resolve_chat,
-    resolve_web_session,
 )
+from src.services.target.unit_of_work import asyncpg_url
 from tests.scripts.conftest import (
     _scratch,
     as_user,
@@ -137,9 +139,7 @@ async def _txn(dsn, expect_user=None):
     """ONE asyncpg transaction (SET LOCAL needs a transaction block), subject-
     gated when a login is named, always rolled back. NullPool + a fresh engine
     per call: an engine outlives no test, so no connection crosses loops."""
-    engine = create_async_engine(
-        dsn.replace("postgresql://", "postgresql+asyncpg://", 1), poolclass=NullPool
-    )
+    engine = create_async_engine(asyncpg_url(dsn), poolclass=NullPool)
     try:
         async with engine.connect() as conn:
             tx = await conn.begin()
@@ -200,28 +200,36 @@ class TestChatResolutionAsIngressIsFailClosed:
 
 
 class TestWebSessionResolutionAsIngress:
-    """The production path for the web half, end to end as svc_ingress."""
+    """The production path for the web half, end to end as svc_ingress: the
+    router composes `sessions.resolve` (auth-plane) with `authorize_member`
+    (the claimed tenant), and keeps them apart because a principal with no
+    workspace is a normal state."""
+
+    @staticmethod
+    async def _resolve(conn, token, ws, minimum_role="member"):
+        session = await sessions.resolve(conn, token_hash=_sha(token))
+        role = await authorize_member(conn, str(ws), session.user_id, minimum_role)
+        return session, role
 
     async def test_valid_session_resolves_the_claimed_workspace(self, world):
         async with _txn(world["ingress"], expect_user="svc_ingress") as conn:
-            got = await resolve_web_session(conn, _sha("live-a"), world["a"]["ws"])
-            assert got.workspace_id == str(world["a"]["ws"])
-            assert got.user_id == str(world["a"]["user"])
-            assert got.via == "session:owner"
+            session, role = await self._resolve(conn, "live-a", world["a"]["ws"])
+            assert session.user_id == str(world["a"]["user"])
+            assert role == "owner"
 
     async def test_cross_workspace_claim_refuses_not_a_member(self, world):
         """User A claims workspace B: the gate reads under B's context and
         finds no membership — the two-identity check, refused by name."""
         async with _txn(world["ingress"], expect_user="svc_ingress") as conn:
             with pytest.raises(TenantResolutionError) as e:
-                await resolve_web_session(conn, _sha("live-a"), world["b"]["ws"])
+                await self._resolve(conn, "live-a", world["b"]["ws"])
             assert e.value.reason == "not_a_member"
 
     async def test_the_other_tenant_resolves_its_own(self, world):
         async with _txn(world["ingress"], expect_user="svc_ingress") as conn:
-            got = await resolve_web_session(conn, _sha("live-b"), world["b"]["ws"])
-            assert got.workspace_id == str(world["b"]["ws"])
-            assert got.user_id == str(world["b"]["user"])
+            session, role = await self._resolve(conn, "live-b", world["b"]["ws"])
+            assert session.user_id == str(world["b"]["user"])
+            assert role == "owner"
 
     @pytest.mark.parametrize(
         "token,reason",
@@ -234,34 +242,46 @@ class TestWebSessionResolutionAsIngress:
     async def test_bad_sessions_refuse_by_name(self, world, token, reason):
         async with _txn(world["ingress"], expect_user="svc_ingress") as conn:
             with pytest.raises(TenantResolutionError) as e:
-                await resolve_web_session(conn, _sha(token), world["a"]["ws"])
+                await self._resolve(conn, token, world["a"]["ws"])
             assert e.value.reason == reason
+
+    async def test_a_live_session_slides_and_a_dead_one_is_not_touched(self, world):
+        """`sessions.resolve` is one statement: the slide is a data-modifying
+        CTE whose WHERE carries the liveness test, so the live row's
+        `last_seen_at` moves and the expired row's does not."""
+        async with _txn(world["ingress"], expect_user="svc_ingress") as conn:
+            await sessions.resolve(conn, token_hash=_sha("live-a"))
+            with pytest.raises(TenantResolutionError):
+                await sessions.resolve(conn, token_hash=_sha("expired-a"))
+            seen = (
+                await conn.execute(
+                    text(
+                        "SELECT token_hash, last_seen_at IS NOT NULL FROM session_tokens"
+                        " WHERE token_hash IN (:live, :dead)"
+                    ),
+                    {"live": _sha("live-a"), "dead": _sha("expired-a")},
+                )
+            ).all()
+            assert dict(seen) == {_sha("live-a"): True, _sha("expired-a"): False}
 
     async def test_role_ladder_enforced_and_satisfied(self, world):
         async with _txn(world["ingress"], expect_user="svc_ingress") as conn:
             with pytest.raises(TenantResolutionError) as e:
-                await resolve_web_session(
-                    conn, _sha("member-a"), world["a"]["ws"], minimum_role="admin"
-                )
+                await self._resolve(conn, "member-a", world["a"]["ws"], "admin")
             assert e.value.reason == "insufficient_role"
         async with _txn(world["ingress"], expect_user="svc_ingress") as conn:
-            got = await resolve_web_session(
-                conn, _sha("live-a"), world["a"]["ws"], minimum_role="admin"
-            )
-            assert got.via == "session:owner", "owner satisfies admin minimum"
+            _, role = await self._resolve(conn, "live-a", world["a"]["ws"], "admin")
+            assert role == "owner", "owner satisfies admin minimum"
 
     async def test_the_claim_does_not_outlive_the_transaction(self, world):
         """SET LOCAL semantics pinned: after rollback, the same connection
         carries no tenant context (the probe-harness leak class, checked on
         the resolver's own handoff)."""
-        engine = create_async_engine(
-            world["ingress"].replace("postgresql://", "postgresql+asyncpg://", 1),
-            poolclass=NullPool,
-        )
+        engine = create_async_engine(asyncpg_url(world["ingress"]), poolclass=NullPool)
         try:
             async with engine.connect() as conn:
                 tx = await conn.begin()
-                await resolve_web_session(conn, _sha("live-a"), world["a"]["ws"])
+                await self._resolve(conn, "live-a", world["a"]["ws"])
                 await tx.rollback()
                 left = (
                     await conn.execute(

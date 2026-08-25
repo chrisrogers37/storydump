@@ -1,6 +1,6 @@
 """The interaction-layer port (`01` §Interaction-layer port, FC-2) — unit gate.
 
-Three properties are pinned here, each for a reason that is NOT "the code
+Four properties are pinned here, each for a reason that is NOT "the code
 should match the doc":
 
 1. **The vocabulary equals the normative list, in both directions.** `01:49`
@@ -18,6 +18,10 @@ should match the doc":
    answers "not built" rather than being missing from the enum. Pinning the set
    means it can only shrink deliberately; a new executor that forgets to leave
    the tuple reddens this test, which is the visibility the doc asks for.
+4. **`ingest` owns the order** — refuse cold, admit, execute — so no adapter
+   re-types it. The seams are the module attributes the port calls through
+   (`tenant_resolution.authorize_member`, `webhook_ingress.admit`, `REGISTRY`),
+   patched the way the rest of the tier's tests patch theirs.
 """
 
 from __future__ import annotations
@@ -27,14 +31,20 @@ import re
 
 import pytest
 
+from src.exceptions.tenancy import TenantResolutionError
 from src.services.target import commands as port
+from src.services.target import tenant_resolution, webhook_ingress
 from src.services.target.commands import (
     Command,
     CommandNotBuilt,
+    CommandRefused,
     CommandResult,
     UnknownCommand,
     execute,
+    ingest,
 )
+from src.services.target.webhook_ingress import DeliveryReplayed
+from src.services.target.workspaces import InvalidWorkspaceArgs
 
 DOC = (
     pathlib.Path(__file__).resolve().parents[4]
@@ -112,6 +122,10 @@ class TestEveryCommandHasAFloorAndAnExecutorSlot:
             if name not in port.UNBUILT:
                 assert callable(fn), name
 
+    def test_a_refusal_reason_outside_the_closed_set_is_a_programming_error(self):
+        with pytest.raises(ValueError):
+            CommandRefused("because")
+
 
 def _cmd(kind="approve", **args) -> Command:
     return Command(
@@ -128,99 +142,83 @@ class _Session:
     it only hands it to the gate and the executor."""
 
 
+@pytest.fixture
+def gate(monkeypatch):
+    """The central gate, recording what it was asked; ``gate.refuse`` makes
+    it raise, ``gate.role`` is what it answers."""
+
+    class Log(list):
+        refuse = None
+        role = "owner"
+
+    log = Log()
+
+    async def authorize_member(session, ws, user, minimum_role="member"):
+        log.append((ws, user, minimum_role))
+        if log.refuse is not None:
+            raise log.refuse
+        return log.role
+
+    monkeypatch.setattr(tenant_resolution, "authorize_member", authorize_member)
+    return log
+
+
+@pytest.fixture
+def executor(monkeypatch):
+    """`approve` (and `settings_change`) answered by a recording executor."""
+    seen = []
+
+    async def run(session, command):
+        seen.append(command)
+        return CommandResult("executed", {"state": "approved"})
+
+    monkeypatch.setitem(port.REGISTRY, "approve", run)
+    monkeypatch.setitem(port.REGISTRY, "settings_change", run)
+    return seen
+
+
 class TestExecuteIsTheOnePath:
-    async def test_unknown_command_is_refused_before_anything_runs(self):
-        calls = []
-
-        async def gate(session, ws, user, minimum_role):
-            calls.append("gate")
-            return "owner"
-
+    async def test_unknown_command_is_refused_before_anything_runs(self, gate):
         with pytest.raises(UnknownCommand):
-            await execute(_Session(), _cmd(kind="frobnicate"), gate=gate)
-        assert calls == []
+            await execute(_Session(), _cmd(kind="frobnicate"))
+        assert gate == []
 
-    async def test_not_built_is_named_and_refused_AFTER_the_gate(self):
+    async def test_not_built_is_named_and_refused_AFTER_the_gate(self, gate):
         """The gate runs first on purpose: a non-member must not learn which
         commands exist by probing 501s on a workspace they cannot see."""
-        calls = []
-
-        async def gate(session, ws, user, minimum_role):
-            calls.append(("gate", ws, user, minimum_role))
-            return "owner"
-
         with pytest.raises(CommandNotBuilt) as exc:
-            await execute(_Session(), _cmd(kind="transfer_ownership"), gate=gate)
+            await execute(_Session(), _cmd(kind="transfer_ownership"))
         assert exc.value.command == "transfer_ownership"
-        assert calls == [("gate", "ws-1", "user-1", "owner")]
+        assert gate == [("ws-1", "user-1", "owner")]
 
-    async def test_gate_refusal_propagates_and_the_executor_never_runs(self):
-        from src.exceptions.tenancy import TenantResolutionError
-
-        ran = []
-
-        async def gate(session, ws, user, minimum_role):
-            raise TenantResolutionError("not_a_member")
-
-        async def executor(session, command):
-            ran.append(command)
-            return CommandResult("executed", {})
-
+    async def test_gate_refusal_propagates_and_the_executor_never_runs(
+        self, gate, executor
+    ):
+        gate.refuse = TenantResolutionError("not_a_member")
         with pytest.raises(TenantResolutionError):
-            await execute(
-                _Session(),
-                _cmd(),
-                gate=gate,
-                registry={**port.REGISTRY, "approve": executor},
-            )
-        assert ran == []
+            await execute(_Session(), _cmd())
+        assert executor == []
 
-    async def test_the_executor_receives_the_command_and_its_result_is_returned(self):
-        seen = []
-
-        async def gate(session, ws, user, minimum_role):
-            return "member"
-
-        async def executor(session, command):
-            seen.append(command)
-            return CommandResult("executed", {"state": "approved"})
-
-        out = await execute(
-            _Session(),
-            _cmd(intent_id="i-1"),
-            gate=gate,
-            registry={**port.REGISTRY, "approve": executor},
-        )
+    async def test_the_executor_receives_the_command_and_its_result_is_returned(
+        self, gate, executor
+    ):
+        out = await execute(_Session(), _cmd(intent_id="i-1"))
         assert out == CommandResult("executed", {"state": "approved"})
-        assert seen[0].args == {"intent_id": "i-1"}
+        assert executor[0].args == {"intent_id": "i-1"}
 
-    async def test_the_gate_is_asked_for_the_commands_own_floor(self):
-        asked = []
+    async def test_the_gate_is_asked_for_the_commands_own_floor(self, gate, executor):
+        await execute(_Session(), _cmd(kind="settings_change"))
+        await execute(_Session(), _cmd(kind="approve"))
+        assert [asked[2] for asked in gate] == ["admin", "member"]
 
-        async def gate(session, ws, user, minimum_role):
-            asked.append(minimum_role)
-            return "owner"
-
-        async def executor(session, command):
-            return CommandResult("executed", {})
-
-        reg = {**port.REGISTRY, "settings_change": executor, "approve": executor}
-        await execute(_Session(), _cmd(kind="settings_change"), gate=gate, registry=reg)
-        await execute(_Session(), _cmd(kind="approve"), gate=gate, registry=reg)
-        assert asked == ["admin", "member"]
-
-    async def test_create_workspace_has_no_membership_to_gate(self):
+    async def test_create_workspace_has_no_membership_to_gate(self, gate, monkeypatch):
         """The one command with no workspace yet: the gate is NOT consulted,
         because there is no workspace_members row to consult."""
-        calls = []
 
-        async def gate(session, ws, user, minimum_role):
-            calls.append("gate")
-            return "owner"
-
-        async def executor(session, command):
+        async def run(session, command):
             return CommandResult("executed", {"workspace_id": "ws-new"})
 
+        monkeypatch.setitem(port.REGISTRY, "create_workspace", run)
         cmd = Command(
             kind="create_workspace",
             workspace_id=None,
@@ -228,38 +226,89 @@ class TestExecuteIsTheOnePath:
             channel="web",
             args={"name": "Mine"},
         )
-        out = await execute(
-            _Session(),
-            cmd,
-            gate=gate,
-            registry={**port.REGISTRY, "create_workspace": executor},
-        )
-        assert calls == []
+        out = await execute(_Session(), cmd)
+        assert gate == []
         assert out.data == {"workspace_id": "ws-new"}
 
-    async def test_a_workspace_command_without_a_workspace_is_refused(self):
-        async def gate(session, ws, user, minimum_role):
-            return "owner"
-
+    async def test_a_workspace_command_without_a_workspace_is_refused(self, gate):
         cmd = Command(
             kind="approve", workspace_id=None, actor_user_id="u", channel="web", args={}
         )
-        with pytest.raises(port.CommandRefused) as exc:
-            await execute(_Session(), cmd, gate=gate)
+        with pytest.raises(CommandRefused) as exc:
+            await execute(_Session(), cmd)
         assert exc.value.reason == "workspace_required"
+        assert gate == []
 
-    async def test_operator_floor_refuses_a_user_principal(self):
+    async def test_operator_floor_refuses_a_user_principal(self, gate):
         """`resolve_review`/`clear_quarantine` are operator-only (`07` §6).
         Until service tokens exist no principal can satisfy the floor, and the
         refusal must be a ROLE refusal — not a 'not built' — so the surface
         does not advertise operator commands to members."""
-        from src.exceptions.tenancy import TenantResolutionError
-
-        async def gate(session, ws, user, minimum_role):
-            raise AssertionError(
-                "the membership gate must not be asked for an operator floor"
-            )
-
         with pytest.raises(TenantResolutionError) as exc:
-            await execute(_Session(), _cmd(kind="clear_quarantine"), gate=gate)
+            await execute(_Session(), _cmd(kind="clear_quarantine"))
         assert exc.value.reason == "insufficient_role"
+        assert gate == [], "the membership gate must not be asked for an operator floor"
+
+    async def test_a_writer_refusal_is_mapped_once_here(self, gate, monkeypatch):
+        async def run(session, command):
+            raise InvalidWorkspaceArgs("tz is not a zone")
+
+        monkeypatch.setitem(port.REGISTRY, "settings_change", run)
+        with pytest.raises(CommandRefused) as exc:
+            await execute(_Session(), _cmd(kind="settings_change"))
+        assert exc.value.reason == "invalid_args"
+
+
+@pytest.fixture
+def admission(monkeypatch):
+    """`webhook_ingress.admit` recorded; ``admission.refuse`` makes it raise."""
+
+    class Log(list):
+        refuse = None
+
+    log = Log()
+
+    async def admit(session, *, channel, external_ref, payload, principal):
+        log.append((channel, external_ref, payload, principal))
+        if log.refuse is not None:
+            raise log.refuse
+
+    monkeypatch.setattr(webhook_ingress, "admit", admit)
+    return log
+
+
+class TestIngestOwnsTheOrder:
+    async def test_unknown_is_refused_before_admission(self, admission, gate):
+        with pytest.raises(UnknownCommand):
+            await ingest(
+                _Session(),
+                _cmd(kind="frobnicate"),
+                external_ref="k-1",
+                principal="sess-1",
+                payload={},
+            )
+        assert admission == [] and gate == []
+
+    async def test_admits_under_the_commands_channel_then_executes(
+        self, admission, gate, executor
+    ):
+        out = await ingest(
+            _Session(),
+            _cmd(intent_id="i-1"),
+            external_ref="k-1",
+            principal="sess-1",
+            payload={"intent_id": "i-1"},
+        )
+        assert admission == [("web", "k-1", {"intent_id": "i-1"}, "sess-1")]
+        assert gate == [("ws-1", "user-1", "member")]
+        assert out.outcome == "executed"
+
+    async def test_a_replay_propagates_and_nothing_executes(
+        self, admission, gate, executor
+    ):
+        admission.refuse = DeliveryReplayed("same key, same body")
+        with pytest.raises(DeliveryReplayed):
+            await ingest(
+                _Session(), _cmd(), external_ref="k-1", principal="sess-1", payload={}
+            )
+        assert gate == [] and executor == []

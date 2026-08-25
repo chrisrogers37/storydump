@@ -41,7 +41,6 @@ from typing import Mapping, Optional
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -54,6 +53,7 @@ from src.api.routes.webhooks import router as webhooks_router
 from src.config.settings import settings
 from src.exceptions.tenancy import TenantResolutionError
 from src.services.target.commands import CommandNotBuilt, CommandRefused
+from src.services.target.invitations import InvitationRefused
 from src.services.target.unit_of_work import create_engine, engine_url_from_env
 from src.services.target.webhook_ingress import AdmissionConflict, DeliveryReplayed
 from src.utils.logger import logger
@@ -132,10 +132,14 @@ class DropAmbiguousForwardedForMiddleware:
         await self.app(scope, receive, send)
 
 
-#: `TenantResolutionError.reason` → status. Session reasons are 401 and the
-#: body does not say which (the distinct reasons exist for the log); a
-#: workspace the caller cannot see is 404, never 403 — the same 404 a
-#: workspace that does not exist gets (`07` §5); below the floor is 403.
+#: `TenantResolutionError.reason` → status, for the reasons the web surface can
+#: raise. Session reasons are 401 and the body does not say which (the
+#: distinct reasons exist for the log); a workspace the caller cannot see is
+#: 404, never 403 — the same 404 a workspace that does not exist gets (`07`
+#: §5); below the floor is 403. The chat-side reasons are not in this table
+#: because no web route resolves a chat; reaching the handler with one is a
+#: programming error, and it is answered as one (500 + log), never as a
+#: silently chosen client status.
 _TENANT_STATUS = {
     "invalid_session": 401,
     "expired_session": 401,
@@ -146,7 +150,8 @@ _TENANT_STATUS = {
 }
 _TENANT_DETAIL = {401: "authentication required", 404: "not found", 403: "forbidden"}
 
-#: `CommandRefused.reason` → status.
+#: `CommandRefused.reason` → status. Pinned TOTAL over `commands.REASONS` by
+#: the factory test, so a new reason cannot ship without a row here.
 _COMMAND_STATUS = {
     "unknown_command": 404,
     "not_built": 501,
@@ -157,26 +162,55 @@ _COMMAND_STATUS = {
     "manual_mode": 409,
 }
 
+#: `InvitationRefused.reason` → status, total over `invitations.REASONS`.
+_INVITATION_STATUS = {"not_acceptable": 404, "identity_mismatch": 403}
+_INVITATION_DETAIL = {
+    "not_acceptable": "invitation not acceptable",
+    "identity_mismatch": "identity proof mismatch",
+}
+
+
+def _unmapped(request: Request, exc: Exception) -> JSONResponse:
+    logger.error("unmapped refusal on %s %s: %s", request.method, request.url.path, exc)
+    return JSONResponse(status_code=500, content={"detail": "internal error"})
+
 
 def _register_handlers(app: FastAPI) -> None:
     """Service refusals → HTTP, once. No route speaks a status for these."""
 
     @app.exception_handler(TenantResolutionError)
     async def _tenant(request: Request, exc: TenantResolutionError):
-        status = _TENANT_STATUS.get(exc.reason, 400)
+        status = _TENANT_STATUS.get(exc.reason)
+        if status is None:
+            return _unmapped(request, exc)
         logger.info("refused %s %s: %s", request.method, request.url.path, exc)
         return JSONResponse(
-            status_code=status,
-            content={"detail": _TENANT_DETAIL.get(status, str(exc))},
+            status_code=status, content={"detail": _TENANT_DETAIL[status]}
         )
 
     @app.exception_handler(CommandRefused)
     async def _command(request: Request, exc: CommandRefused):
-        status = _COMMAND_STATUS.get(exc.reason, 400)
+        status = _COMMAND_STATUS.get(exc.reason)
+        if status is None:
+            return _unmapped(request, exc)
         content = {"detail": str(exc), "reason": exc.reason}
         if isinstance(exc, CommandNotBuilt):
-            content = {"command": exc.command, "detail": "not built", "reason": "not_built"}
+            content = {
+                "command": exc.command,
+                "detail": "not built",
+                "reason": "not_built",
+            }
         return JSONResponse(status_code=status, content=content)
+
+    @app.exception_handler(InvitationRefused)
+    async def _invitation(request: Request, exc: InvitationRefused):
+        status = _INVITATION_STATUS.get(exc.reason)
+        if status is None:
+            return _unmapped(request, exc)
+        return JSONResponse(
+            status_code=status,
+            content={"detail": _INVITATION_DETAIL[exc.reason], "reason": exc.reason},
+        )
 
     @app.exception_handler(DeliveryReplayed)
     async def _replayed(request: Request, exc: DeliveryReplayed):
@@ -185,28 +219,13 @@ def _register_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(AdmissionConflict)
     async def _conflict(request: Request, exc: AdmissionConflict):
+        # Channel-neutral wording: the exception already names the key that
+        # was reused, and which header carried it is the adapter's business.
         return JSONResponse(
             status_code=409,
             content={
-                "detail": f"{IDEMPOTENCY_HEADER} reused with a different body",
-                "reason": "idempotency_conflict",
-            },
-        )
-
-    @app.exception_handler(IntegrityError)
-    async def _integrity(request: Request, exc: IntegrityError):
-        # The database's CHECKs are the authority on values (`workspaces.py`):
-        # a check violation is the caller's 400, a unique/FK violation a 409.
-        cause = getattr(exc.orig, "__cause__", None)
-        constraint = getattr(cause, "constraint_name", None) or ""
-        is_check = type(cause).__name__ == "CheckViolationError"
-        return JSONResponse(
-            status_code=400 if is_check else 409,
-            content={
-                "detail": (
-                    f"invalid value ({constraint})" if is_check else f"conflict ({constraint})"
-                ),
-                "reason": "invalid_args" if is_check else "conflict",
+                "detail": "admission conflict: this key was already used for different content",
+                "reason": "admission_conflict",
             },
         )
 
@@ -223,9 +242,9 @@ def _engine_from_env(env: Mapping[str, str]) -> Optional[AsyncEngine]:
 
 
 def _cors_origins() -> list[str]:
-    """The ONE browser origin admitted, from `WEB_APP_URL`; never "*", and
-    with no origin configured no origin is admitted."""
-    return [settings.WEB_APP_URL.rstrip("/")] if settings.WEB_APP_URL else []
+    """The ONE browser origin admitted (`settings.web_app_origin`); never "*",
+    and with no origin configured no origin is admitted."""
+    return [settings.web_app_origin] if settings.web_app_origin else []
 
 
 def create_app(

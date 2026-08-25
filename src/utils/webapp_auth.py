@@ -28,6 +28,7 @@ URL_TOKEN_TTL = 3600  # 1 hour
 # fix, not a tolerance to widen.
 CLOCK_SKEW_TOLERANCE = 60  # 1 minute
 
+
 def validate_init_data(init_data: str) -> dict:
     """Validate Telegram WebApp initData and extract user info.
 

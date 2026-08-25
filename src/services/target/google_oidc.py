@@ -43,8 +43,6 @@ from src.exceptions.base import StorydumpError
 from src.services.target import egress
 from src.services.target.egress import EgressPolicy
 
-#: `oauth_states.provider` value (`060`'s CHECK admits it).
-PROVIDER = "google"
 AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 #: Already in `egress.DEFAULT_ALLOWED_HOSTS` — no allowlist widening needed.
 TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -64,7 +62,9 @@ class OidcRefused(StorydumpError):
 
     def __init__(self, reason: str, detail: str = ""):
         self.reason = reason
-        super().__init__(f"sign-in refused: {reason}" + (f" — {detail}" if detail else ""))
+        super().__init__(
+            f"sign-in refused: {reason}" + (f" — {detail}" if detail else "")
+        )
 
 
 @dataclass(frozen=True)
@@ -106,19 +106,17 @@ async def exchange_code(
     redirect_uri: str,
     client_id: str,
     client_secret: str,
-    egress_request=egress.request,
 ) -> str:
     """Trade the authorization code for the ID token, through the egress
     floor. Returns the raw ID token string; nothing else in the token response
     is used (no refresh token is requested — sign-in needs none), and the
     response body is never logged because it carries bearer tokens.
 
-    *egress_request* is the seam the unit gate drives; production passes
-    nothing. Provider-side failures surface as ``OidcRefused`` so the route
-    has one refusal type to map; the floor's own refusals (host, budget)
-    propagate as themselves.
+    Provider-side failures surface as ``OidcRefused`` so the route has one
+    refusal type to map; the floor's own refusals (host, budget) propagate as
+    themselves.
     """
-    response = await egress_request(
+    response = await egress.request(
         client,
         "POST",
         TOKEN_URL,

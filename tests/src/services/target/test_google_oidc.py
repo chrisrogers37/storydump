@@ -19,31 +19,21 @@ import httpx
 import pytest
 
 from src.services.target import google_oidc as oidc
+from tests.src.api.conftest import unsigned_id_token
 
 CLIENT_ID = "cid.apps.googleusercontent.com"
 STATE = "state-abc"
 
 
-def _jwt(payload: dict) -> str:
-    seg = lambda o: base64.urlsafe_b64encode(json.dumps(o).encode()).rstrip(b"=")  # noqa: E731
-    return b".".join([seg({"alg": "RS256"}), seg(payload), b"sig"]).decode()
-
-
 def _claims(**over) -> dict:
-    now = int(time.time())
-    base = {
-        "iss": "https://accounts.google.com",
+    """The default claim set as a dict — the shared builder's token, decoded."""
+    defaults = {
         "aud": CLIENT_ID,
-        "exp": now + 300,
-        "iat": now - 5,
-        "nonce": oidc.nonce_for(STATE),
         "sub": "1234567890",
         "email": "Person@Example.com",
-        "email_verified": True,
         "name": "Person",
     }
-    base.update(over)
-    return base
+    return oidc.decode_id_token(unsigned_id_token(STATE, **{**defaults, **over}))
 
 
 class TestAuthorizationUrl:
@@ -139,7 +129,7 @@ class TestVerifyIdToken:
 
 class TestDecodeIdToken:
     def test_round_trips_the_payload(self):
-        assert oidc.decode_id_token(_jwt({"sub": "x"})) == {"sub": "x"}
+        assert oidc.decode_id_token(unsigned_id_token(STATE, sub="x"))["sub"] == "x"
 
     @pytest.mark.parametrize(
         "token",
@@ -158,10 +148,11 @@ class TestDecodeIdToken:
 
 
 class TestExchangeCode:
-    """Driven through the egress seam: the request shape is the contract."""
+    """Driven through the egress seam — `oidc.egress.request`, patched the
+    way the tier's other tests patch it: the request shape is the contract."""
 
     @staticmethod
-    def _capture(status=200, body=None):
+    def _capture(monkeypatch, status=200, body=None):
         seen = {}
 
         async def fake_request(client, method, url, *, policy=None, **kwargs):
@@ -171,17 +162,17 @@ class TestExchangeCode:
                 status, content=content, headers={"content-type": "application/json"}
             )
 
-        return seen, fake_request
+        monkeypatch.setattr(oidc.egress, "request", fake_request)
+        return seen
 
-    async def test_posts_the_code_grant_to_the_token_endpoint(self):
-        seen, fake = self._capture()
+    async def test_posts_the_code_grant_to_the_token_endpoint(self, monkeypatch):
+        seen = self._capture(monkeypatch)
         got = await oidc.exchange_code(
             None,
             code="c0de",
             redirect_uri="https://api.test/auth/google/callback",
             client_id=CLIENT_ID,
             client_secret="s3cret",
-            egress_request=fake,
         )
         assert got == "tok"
         assert (seen["method"], seen["url"]) == ("POST", oidc.TOKEN_URL)
@@ -190,29 +181,19 @@ class TestExchangeCode:
         assert seen["data"]["redirect_uri"] == "https://api.test/auth/google/callback"
         assert seen["policy"].timeout_class == "standard"
 
-    async def test_token_endpoint_error_is_refused_by_name(self):
-        _, fake = self._capture(status=400, body={"error": "invalid_grant"})
+    async def test_token_endpoint_error_is_refused_by_name(self, monkeypatch):
+        self._capture(monkeypatch, status=400, body={"error": "invalid_grant"})
         with pytest.raises(oidc.OidcRefused) as exc:
             await oidc.exchange_code(
-                None,
-                code="c",
-                redirect_uri="r",
-                client_id="i",
-                client_secret="s",
-                egress_request=fake,
+                None, code="c", redirect_uri="r", client_id="i", client_secret="s"
             )
         assert exc.value.reason == "exchange_failed"
 
-    async def test_a_response_without_an_id_token_is_refused(self):
-        _, fake = self._capture(body={"access_token": "only"})
+    async def test_a_response_without_an_id_token_is_refused(self, monkeypatch):
+        self._capture(monkeypatch, body={"access_token": "only"})
         with pytest.raises(oidc.OidcRefused) as exc:
             await oidc.exchange_code(
-                None,
-                code="c",
-                redirect_uri="r",
-                client_id="i",
-                client_secret="s",
-                egress_request=fake,
+                None, code="c", redirect_uri="r", client_id="i", client_secret="s"
             )
         assert exc.value.reason == "no_id_token"
 

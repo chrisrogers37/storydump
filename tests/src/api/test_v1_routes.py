@@ -16,6 +16,7 @@ from src.exceptions.tenancy import TenantResolutionError
 from src.services.target import (
     commands,
     identity,
+    invitations,
     sessions,
     webhook_ingress,
     workspaces,
@@ -116,23 +117,8 @@ class TestWorkspaceReads:
             ("gate", WS, PRINCIPAL.user_id, "member"),
         ]
 
-    def test_non_member_is_404_the_same_as_missing(
-        self, client, signed_in, monkeypatch, engine
-    ):
-        from contextlib import asynccontextmanager
-
-        from src.api.routes import v1
-        from src.services.target import tenant_resolution
-
-        @asynccontextmanager
-        async def open_tenant(request, workspace_id, principal):
-            yield engine.session
-
-        async def gate(session, workspace_id, user_id, minimum_role="member"):
-            raise TenantResolutionError("not_a_member")
-
-        monkeypatch.setattr(v1, "_open_tenant", open_tenant)
-        monkeypatch.setattr(tenant_resolution, "authorize_member", gate)
+    def test_non_member_is_404_the_same_as_missing(self, client, signed_in, tenant):
+        tenant.refuse = TenantResolutionError("not_a_member")
         resp = client.get(f"/api/v1/workspaces/{WS}")
         assert resp.status_code == 404
         assert resp.json() == {"detail": "not found"}
@@ -255,7 +241,7 @@ class TestCommands:
         monkeypatch.setattr(webhook_ingress, "admit", admit)
         resp = client.post(self.URL, json={"intent_id": INTENT}, headers=KEY)
         assert resp.status_code == 409
-        assert resp.json()["reason"] == "idempotency_conflict"
+        assert resp.json()["reason"] == "admission_conflict"
         assert port["execute"] == []
 
     def test_not_built_is_501_naming_the_command(self, client, signed_in, tenant, port):
@@ -329,3 +315,38 @@ class TestCreateWorkspace:
         )
         (cmd,) = port["execute"]
         assert cmd.args["workspace_id"] != WS
+
+
+class TestInvitations:
+    def test_accept_is_the_service_call_and_its_refusals_map(
+        self, client, signed_in, monkeypatch
+    ):
+        seen = {}
+
+        async def accept(conn, *, token, user_id, channel):
+            seen.update(token=token, user_id=user_id, channel=channel)
+            return {"workspace_id": WS, "role": "member", "matched": True}
+
+        monkeypatch.setattr(invitations, "accept", accept)
+        resp = client.post("/api/v1/invitations/tok-1/accept")
+        assert resp.status_code == 200
+        assert resp.json() == {"workspace_id": WS, "role": "member", "matched": True}
+        assert seen == {
+            "token": "tok-1",
+            "user_id": PRINCIPAL.user_id,
+            "channel": "web",
+        }
+
+    @pytest.mark.parametrize(
+        "reason, status", [("not_acceptable", 404), ("identity_mismatch", 403)]
+    )
+    def test_each_refusal_maps_to_its_status(
+        self, client, signed_in, monkeypatch, reason, status
+    ):
+        async def accept(conn, **kw):
+            raise invitations.InvitationRefused(reason)
+
+        monkeypatch.setattr(invitations, "accept", accept)
+        resp = client.post("/api/v1/invitations/tok-1/accept")
+        assert resp.status_code == status
+        assert resp.json()["reason"] == reason

@@ -316,7 +316,6 @@ class TestOAuthCallsitesUseMetaId:
         assert "get_account_by_instagram_id" not in source
 
 
-
 # ---------------------------------------------------------------------------
 # Cross-flow username recovery (re-introduced after the 2026-05-25 incident)
 # ---------------------------------------------------------------------------

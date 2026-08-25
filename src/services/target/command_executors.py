@@ -43,11 +43,10 @@ Every intent edge's side effects are the `02` §4 matrix rows, verbatim:
 shape `fn_clock_tick` mints the baseline one (`059:271`) — same lane, key,
 attempts — and declines to mint a second while one is pending for that
 source, since the serialization key would only queue it behind the first.
+Both job rows go through `jobs.enqueue`, the tier's one INSERT.
 
-Binds inside `jsonb_build_object(...)` carry an explicit `CAST(... AS text)`:
-asyncpg cannot infer a bare parameter's type there and refuses the statement
-(`IndeterminateDatatypeError`), measured on the replayed schema by the X.2
-gate — a shape psycopg2 never surfaces, so it does not show in the sync tests.
+A caller-supplied value the writers refuse (`InvalidWorkspaceArgs`) is not
+caught here: `commands.execute` maps it once, for every executor.
 """
 
 from __future__ import annotations
@@ -57,7 +56,7 @@ from typing import Any
 from sqlalchemy import text
 
 from src.config.defaults import DEFAULT_REPOST_TTL_DAYS, DEFAULT_SKIP_TTL_DAYS
-from src.services.target import intent_ledger, workspaces
+from src.services.target import intent_ledger, jobs, readers, workspaces
 from src.services.target.commands import Command, CommandRefused, CommandResult
 from src.services.target.intent_ledger import IntentTransitionRefused
 
@@ -77,29 +76,23 @@ async def _intent_row(session, command: Command) -> dict[str, Any]:
     """The intent plus the workspace/account facts the effect lists need.
     Workspace-bound in the WHERE, not only by RLS."""
     intent_id = _arg(command, "intent_id")
-    row = (
-        (
-            await session.execute(
-                text(
-                    "SELECT i.id, i.state, i.media_item_id, i.ig_account_id,"
-                    "       i.provider_account_ref,"
-                    "       w.api_publishing_enabled, w.repost_ttl_days, w.skip_ttl_days,"
-                    "       COALESCE(a.posts_per_day, w.posts_per_day) AS eff_ppd,"
-                    "       COALESCE(a.tz, w.tz) AS eff_tz"
-                    "  FROM post_intents i"
-                    "  JOIN workspaces w ON w.id = i.workspace_id"
-                    "  JOIN ig_accounts a ON a.id = i.ig_account_id"
-                    " WHERE i.id = :id AND i.workspace_id = :ws"
-                ),
-                {"id": intent_id, "ws": command.workspace_id},
-            )
-        )
-        .mappings()
-        .first()
+    row = await readers.row(
+        session,
+        "SELECT i.id, i.state, i.media_item_id, i.ig_account_id,"
+        "       i.provider_account_ref,"
+        "       w.api_publishing_enabled, w.repost_ttl_days, w.skip_ttl_days,"
+        "       COALESCE(a.posts_per_day, w.posts_per_day) AS eff_ppd,"
+        "       COALESCE(a.tz, w.tz) AS eff_tz"
+        "  FROM post_intents i"
+        "  JOIN workspaces w ON w.id = i.workspace_id"
+        "  JOIN ig_accounts a ON a.id = i.ig_account_id"
+        " WHERE i.id = :id AND i.workspace_id = :ws",
+        id=intent_id,
+        ws=command.workspace_id,
     )
     if row is None:
         raise CommandRefused("not_found", f"intent {intent_id}")
-    return dict(row)
+    return row
 
 
 async def _flip(session, intent_id: str, to_state: str) -> None:
@@ -123,18 +116,12 @@ async def approve(session, command: Command) -> CommandResult:
             "this workspace publishes manually; use mark_posted after posting by hand",
         )
     await _flip(session, str(intent["id"]), "approved")
-    await session.execute(
-        text(
-            "INSERT INTO jobs (kind, workspace_id, lane, serialization_key, run_at,"
-            " max_attempts, payload)"
-            " VALUES ('publish_pipeline', :ws, 'bulk', :key, now(), 5,"
-            "         jsonb_build_object('v', 1, 'intent_id', CAST(:intent AS text)))"
-        ),
-        {
-            "ws": command.workspace_id,
-            "key": f"ig:{intent['provider_account_ref']}",
-            "intent": str(intent["id"]),
-        },
+    await jobs.enqueue(
+        session,
+        kind="publish_pipeline",
+        workspace_id=command.workspace_id,
+        serialization_key=f"ig:{intent['provider_account_ref']}",
+        payload={"v": 1, "intent_id": str(intent["id"])},
     )
     return CommandResult(
         "enqueued",
@@ -295,33 +282,21 @@ async def sync_now(session, command: Command) -> CommandResult:
     ).first()
     if source is None:
         raise CommandRefused("not_found", f"media source {source_id}")
-    inserted = (
-        await session.execute(
-            text(
-                "INSERT INTO jobs (kind, workspace_id, lane, serialization_key, run_at,"
-                " max_attempts, payload)"
-                " SELECT 'sync_media_source', :ws, 'bulk', :key, now(), 5,"
-                "        jsonb_build_object('v', 1, 'source_id', CAST(:s AS text),"
-                "                           'reason', 'demand')"
-                "  WHERE NOT EXISTS (SELECT 1 FROM jobs"
-                "                     WHERE serialization_key = :key"
-                "                       AND state IN ('ready', 'leased'))"
-                " RETURNING id"
-            ),
-            {"ws": command.workspace_id, "key": f"src:{source_id}", "s": source_id},
-        )
-    ).first()
-    if inserted is None:
+    job_id = await jobs.enqueue(
+        session,
+        kind="sync_media_source",
+        workspace_id=command.workspace_id,
+        serialization_key=f"src:{source_id}",
+        payload={"v": 1, "source_id": source_id, "reason": "demand"},
+        unless_pending=True,
+    )
+    if job_id is None:
         return CommandResult(
             "executed", {"source_id": source_id, "sync": "already_pending"}
         )
     return CommandResult(
         "enqueued",
-        {
-            "source_id": source_id,
-            "job": "sync_media_source",
-            "job_id": str(inserted[0]),
-        },
+        {"source_id": source_id, "job": "sync_media_source", "job_id": job_id},
     )
 
 
@@ -329,13 +304,9 @@ async def settings_change(session, command: Command) -> CommandResult:
     changes = command.args.get("settings")
     if not isinstance(changes, dict):
         raise CommandRefused("invalid_args", "settings must be an object")
-    try:
-        cleaned = workspaces.validate_settings(changes)
-        await workspaces.change_settings(
-            session, workspace_id=command.workspace_id, changes=cleaned
-        )
-    except workspaces.InvalidWorkspaceArgs as exc:
-        raise CommandRefused("invalid_args", str(exc)) from exc
+    cleaned = await workspaces.change_settings(
+        session, workspace_id=command.workspace_id, changes=changes
+    )
     return CommandResult("executed", {"changed": sorted(cleaned)})
 
 
@@ -360,28 +331,22 @@ async def resume_workspace(session, command: Command) -> CommandResult:
 
 
 async def rename_workspace(session, command: Command) -> CommandResult:
-    try:
-        await workspaces.rename(
-            session, workspace_id=command.workspace_id, name=_arg(command, "name")
-        )
-    except workspaces.InvalidWorkspaceArgs as exc:
-        raise CommandRefused("invalid_args", str(exc)) from exc
-    return CommandResult("executed", {"name": command.args["name"].strip()})
+    name = await workspaces.rename(
+        session, workspace_id=command.workspace_id, name=_arg(command, "name")
+    )
+    return CommandResult("executed", {"name": name})
 
 
 async def create_workspace(session, command: Command) -> CommandResult:
     tz = command.args.get("tz")
     if tz is not None and not isinstance(tz, str):
         raise CommandRefused("invalid_args", "tz must be a string")
-    try:
-        ws_id = await workspaces.create_workspace(
-            session,
-            owner_user_id=command.actor_user_id,
-            name=_arg(command, "name"),
-            tz=tz,
-            channel=command.channel,
-            workspace_id=command.args.get("workspace_id"),
-        )
-    except workspaces.InvalidWorkspaceArgs as exc:
-        raise CommandRefused("invalid_args", str(exc)) from exc
+    ws_id = await workspaces.create_workspace(
+        session,
+        owner_user_id=command.actor_user_id,
+        name=_arg(command, "name"),
+        tz=tz,
+        channel=command.channel,
+        workspace_id=command.args.get("workspace_id"),
+    )
     return CommandResult("executed", {"workspace_id": ws_id})

@@ -9,18 +9,18 @@ The shape is #1015's router design (§1–§3), built rather than described:
   the caller is not a member of answers **404, never 403** (`07` §5, no
   existence oracle — the same 404 a workspace that does not exist gets).
 - **Writes are the `01` vocabulary made literal**: one route,
-  ``POST /workspaces/{ws}/commands/{command}``, whose path segment is validated
-  against `commands.VOCABULARY`. The route table therefore cannot drift from
-  the vocabulary, and W4's Telegram adapter will hand the same `Command`
-  objects to the same `commands.execute`. ``create_workspace`` — the one
-  command with no workspace yet — has its own route.
-- **Admission before execution, in one transaction** (`webhook_ingress`'s
-  ordering rule, applied to the second channel it predicted): an unknown
-  command is refused cold, then the ``Idempotency-Key`` is admitted into
-  `command_dedup` keyed on ``(web, session id, key)``, then the port runs. A
-  refusal anywhere rolls the dedup row back with everything else, so a retry
-  re-executes; a true replay answers ``200 {"outcome": "replayed"}`` without
-  running anything; the same key with a different body is a 409.
+  ``POST /workspaces/{ws}/commands/{command}``, whose path segment the port
+  validates against `commands.VOCABULARY`. The route table therefore cannot
+  drift from the vocabulary, and W4's Telegram adapter will hand the same
+  `Command` objects to the same `commands.ingest`. ``create_workspace`` — the
+  one command with no workspace yet — has its own route.
+- **The order is the port's** (`commands.ingest`: refuse cold → admit →
+  execute, one transaction). What this adapter owns is the shape of its key —
+  the ``Idempotency-Key`` header, admitted into `command_dedup` keyed on
+  ``(web, session id, key)`` — and the status each outcome renders: a true
+  replay is ``200 {"outcome": "replayed"}`` without running anything; the
+  same key with a different body is 409; a refusal anywhere rolled the dedup
+  row back with everything else, so a retry re-executes.
 
 The tenant-less reads (``/me``, ``/workspaces``) run on a raw connection: the
 unit of work is unconstructible without a tenant by design, and these are
@@ -35,7 +35,6 @@ harder bug to find later.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import uuid
 from contextlib import asynccontextmanager
@@ -44,15 +43,13 @@ from typing import Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
-from sqlalchemy import text
-from sqlalchemy.exc import DBAPIError
 
 from src.api.principal import Principal, current_principal, require_engine
 from src.services.target import (
     commands,
     identity,
+    invitations,
     tenant_resolution,
-    webhook_ingress,
     workspaces,
 )
 from src.services.target.commands import Command, CommandResult
@@ -97,6 +94,14 @@ async def _member(request: Request, workspace_id: str, principal: Principal):
         yield session
 
 
+async def _collection(
+    request: Request, ws: uuid.UUID, principal: Principal, reader, name: str
+):
+    async with _member(request, str(ws), principal) as session:
+        items = await reader(session, workspace_id=str(ws))
+    return {name: items}
+
+
 def _idempotency_key(request: Request) -> str:
     key = request.headers.get(IDEMPOTENCY_HEADER, "").strip()
     if not key:
@@ -126,14 +131,38 @@ async def _json_object(request: Request) -> dict[str, Any]:
     return body
 
 
-async def _admit(session, principal: Principal, key: str, body: dict) -> None:
-    await webhook_ingress.admit(
-        session,
+async def _dispatch(
+    request: Request,
+    principal: Principal,
+    *,
+    tenant: str,
+    kind: str,
+    workspace_id: Optional[str],
+    extra: Optional[dict[str, Any]] = None,
+) -> CommandResult:
+    """Key, body, one unit of work on *tenant*, then the port's `ingest`.
+
+    The key is checked before the body is read, so a keyless request buffers
+    nothing. The dedup fingerprint is taken over the raw body — never over
+    *extra*, which is what this adapter adds (the pre-assigned workspace id).
+    """
+    key = _idempotency_key(request)
+    body = await _json_object(request)
+    command = Command(
+        kind=kind,
+        workspace_id=workspace_id,
+        actor_user_id=principal.user_id,
         channel=CHANNEL,
-        external_ref=key,
-        payload=body,
-        principal=principal.session_id,
+        args={**body, **(extra or {})},
     )
+    async with _open_tenant(request, tenant, principal) as session:
+        return await commands.ingest(
+            session,
+            command,
+            external_ref=key,
+            principal=principal.session_id,
+            payload=body,
+        )
 
 
 def _render(result: CommandResult, *, status: Optional[int] = None) -> JSONResponse:
@@ -141,13 +170,6 @@ def _render(result: CommandResult, *, status: Optional[int] = None) -> JSONRespo
     return JSONResponse(
         status_code=code,
         content=jsonable_encoder({"outcome": result.outcome, **result.data}),
-    )
-
-
-def _pgcode(exc: DBAPIError) -> Optional[str]:
-    orig = exc.orig
-    return getattr(orig, "pgcode", None) or getattr(
-        getattr(orig, "__cause__", None), "sqlstate", None
     )
 
 
@@ -187,21 +209,15 @@ async def create_workspace(
     needs a tenant to exist at all, and `p_tenant_workspaces` keys on the
     row's own id, so the claim must precede the insert (`02` §7).
     """
-    body = await _json_object(request)
-    key = _idempotency_key(request)
     workspace_id = str(uuid.uuid4())
-    async with _open_tenant(request, workspace_id, principal) as session:
-        await _admit(session, principal, key, body)
-        result = await commands.execute(
-            session,
-            Command(
-                kind="create_workspace",
-                workspace_id=None,
-                actor_user_id=principal.user_id,
-                channel=CHANNEL,
-                args={**body, "workspace_id": workspace_id},
-            ),
-        )
+    result = await _dispatch(
+        request,
+        principal,
+        tenant=workspace_id,
+        kind="create_workspace",
+        workspace_id=None,
+        extra={"workspace_id": workspace_id},
+    )
     return _render(result, status=201)
 
 
@@ -223,45 +239,41 @@ async def get_workspace(
 async def list_members(
     ws: uuid.UUID, request: Request, principal: Principal = Depends(current_principal)
 ):
-    async with _member(request, str(ws), principal) as session:
-        rows = await workspaces.list_members(session, workspace_id=str(ws))
-    return {"members": rows}
+    return await _collection(request, ws, principal, workspaces.list_members, "members")
 
 
 @router.get("/workspaces/{ws}/accounts")
 async def list_accounts(
     ws: uuid.UUID, request: Request, principal: Principal = Depends(current_principal)
 ):
-    async with _member(request, str(ws), principal) as session:
-        rows = await workspaces.list_accounts(session, workspace_id=str(ws))
-    return {"accounts": rows}
+    return await _collection(
+        request, ws, principal, workspaces.list_accounts, "accounts"
+    )
 
 
 @router.get("/workspaces/{ws}/sources")
 async def list_sources(
     ws: uuid.UUID, request: Request, principal: Principal = Depends(current_principal)
 ):
-    async with _member(request, str(ws), principal) as session:
-        rows = await workspaces.list_sources(session, workspace_id=str(ws))
-    return {"sources": rows}
+    return await _collection(request, ws, principal, workspaces.list_sources, "sources")
 
 
 @router.get("/workspaces/{ws}/bindings")
 async def list_bindings(
     ws: uuid.UUID, request: Request, principal: Principal = Depends(current_principal)
 ):
-    async with _member(request, str(ws), principal) as session:
-        rows = await workspaces.list_bindings(session, workspace_id=str(ws))
-    return {"bindings": rows}
+    return await _collection(
+        request, ws, principal, workspaces.list_bindings, "bindings"
+    )
 
 
 @router.get("/workspaces/{ws}/invitations")
 async def list_invitations(
     ws: uuid.UUID, request: Request, principal: Principal = Depends(current_principal)
 ):
-    async with _member(request, str(ws), principal) as session:
-        rows = await workspaces.list_invitations(session, workspace_id=str(ws))
-    return {"invitations": rows}
+    return await _collection(
+        request, ws, principal, workspaces.list_invitations, "invitations"
+    )
 
 
 @router.get("/workspaces/{ws}/intents")
@@ -307,25 +319,13 @@ async def run_command(
     request: Request,
     principal: Principal = Depends(current_principal),
 ):
-    """Refuse cold → admit → gate → execute, one transaction (module doc)."""
-    if command not in commands.ROLE_FLOOR or command == "create_workspace":
-        # Before admission on purpose: nothing about an unknown name is
-        # worth a dedup row, and `create_workspace` has its own route.
+    if command == "create_workspace":
+        # Adapter-local: this command has its own URL, and that is the one
+        # fact the port cannot know. Everything else is the port's order.
         raise HTTPException(status_code=404, detail=f"unknown command {command!r}")
-    body = await _json_object(request)
-    key = _idempotency_key(request)
-    async with _open_tenant(request, str(ws), principal) as session:
-        await _admit(session, principal, key, body)
-        result = await commands.execute(
-            session,
-            Command(
-                kind=command,
-                workspace_id=str(ws),
-                actor_user_id=principal.user_id,
-                channel=CHANNEL,
-                args=body,
-            ),
-        )
+    result = await _dispatch(
+        request, principal, tenant=str(ws), kind=command, workspace_id=str(ws)
+    )
     return _render(result)
 
 
@@ -336,41 +336,10 @@ async def run_command(
 async def accept_invitation(
     token: str, request: Request, principal: Principal = Depends(current_principal)
 ):
-    """The `fn_invitation_accept` door (`059`): possession of the one-shot
-    token accepts; the door resolves the workspace, sets its own actor GUCs,
-    and evaluates D33's identity proof against the caller's verified email.
-    Its two named refusals map here; anything else is a real error."""
+    """Possession of the one-shot token accepts; the door resolves the
+    workspace itself, so this runs tenant-less (`invitations.accept`)."""
     engine = require_engine(request)
-    token_hash = hashlib.sha256(token.encode()).hexdigest()
     async with engine.begin() as conn:
-        user = await identity.get_user(conn, user_id=principal.user_id)
-        email = (user or {}).get("primary_email")
-        try:
-            row = (
-                await conn.execute(
-                    text(
-                        "SELECT o_workspace_id, o_granted_role, o_matched"
-                        "  FROM fn_invitation_accept(:h, :u, 'google', :email, NULL, :ch)"
-                    ),
-                    {
-                        "h": token_hash,
-                        "u": principal.user_id,
-                        "email": email,
-                        "ch": CHANNEL,
-                    },
-                )
-            ).first()
-        except DBAPIError as exc:
-            code = _pgcode(exc)
-            if code == "P0002":  # no_data_found: used, revoked, expired, unknown
-                raise HTTPException(
-                    status_code=404, detail="invitation not acceptable"
-                ) from exc
-            if code == "23514":  # check_violation: identity proof mismatch (D33)
-                raise HTTPException(
-                    status_code=403, detail="identity proof mismatch"
-                ) from exc
-            raise
-    if row is None:
-        raise HTTPException(status_code=404, detail="invitation not acceptable")
-    return {"workspace_id": str(row[0]), "role": row[1], "matched": bool(row[2])}
+        return await invitations.accept(
+            conn, token=token, user_id=principal.user_id, channel=CHANNEL
+        )

@@ -24,7 +24,9 @@ Settings writes go through :func:`change_settings`, whose allowlist is the
 typed-column list of `02` §1's materialization contract — no JSONB, no
 free-form keys — and whose validation is a floor: the database's CHECKs
 (`ck_ws_posts_per_day`, `ck_ws_tz_valid`, …) remain the authority, and a
-`check_violation` surfaces as `invalid_args` rather than a 500.
+`check_violation` from any writer here surfaces as `InvalidWorkspaceArgs`
+(translated once, in :func:`_write`, through the tier's one unwrap —
+`_dbapi.driver_candidates`), which the port maps to `invalid_args`.
 """
 
 from __future__ import annotations
@@ -32,13 +34,26 @@ from __future__ import annotations
 import uuid
 from typing import Any, Mapping, Optional
 
+from asyncpg.exceptions import CheckViolationError
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 
 from src.exceptions.base import StorydumpError
+from src.services.target import readers
+from src.services.target._dbapi import driver_candidates
 from src.services.target.unit_of_work import apply_gucs
 
 #: `workspaces.name` is VARCHAR(100).
 NAME_MAX = 100
+
+#: INTERIM, ratified by Chris (#1033): a new workspace starts in
+#: `approval_mode = 'auto'` so the core loop closes without an approvals
+#: surface — the column's own default is 'manual' (`053:136`), and a
+#: Google-only workspace has no channel to approve on until the web approvals
+#: surface lands. #1033 records that this must be REVERTED when it does; the
+#: X.2 gate pins the value so the revert is a deliberate test flip. A
+#: workspace can still be switched to 'manual' per `settings_change`.
+INTERIM_APPROVAL_MODE = "auto"
 
 #: The typed product-configuration columns (`02` §1) a `settings_change` may
 #: touch, with the Python type each accepts. The database CHECKs bound the
@@ -74,7 +89,20 @@ _CONFIG_COLUMNS = (
 
 
 class InvalidWorkspaceArgs(StorydumpError):
-    """A caller-supplied value the boundary refuses before the database sees it."""
+    """A caller-supplied value the boundary refuses — before the database
+    sees it, or because the database's CHECK refused it."""
+
+
+async def _write(executor, sql: str, **params) -> None:
+    """One writer: a `check_violation` is the caller's value being wrong."""
+    try:
+        await executor.execute(text(sql), params)
+    except DBAPIError as exc:
+        for cause in driver_candidates(exc):
+            if isinstance(cause, CheckViolationError):
+                name = getattr(cause, "constraint_name", None) or "check"
+                raise InvalidWorkspaceArgs(f"invalid value ({name})") from exc
+        raise
 
 
 def _clean_name(name: Any) -> str:
@@ -97,33 +125,35 @@ async def create_workspace(
 ) -> str:
     """Create a workspace owned by *owner_user_id*. Returns the new id.
 
-    Pre-assigns the id (or takes the caller's — the unit of work is
-    unconstructible without a tenant, so an adapter that opened one for the
-    new workspace already holds the id; it is never client-supplied), claims
-    it as the transaction's tenant with the actor GUCs the audit triggers
-    require, then inserts the workspace and its owner row — all inside the
-    CALLER's transaction, which is what makes the deferred owner constraint
-    pass at commit.
+    A caller that passes *workspace_id* has already claimed it: the unit of
+    work is unconstructible without a tenant, so an adapter that opened one
+    for the new workspace holds the id and set the GUCs (it is never
+    client-supplied). Only when THIS function assigns the id does it claim
+    it — with the actor GUCs the audit triggers require — before the insert.
+    Workspace and owner row land in the CALLER's transaction, which is what
+    makes the deferred owner constraint pass at commit.
     """
     name = _clean_name(name)
-    ws_id = str(workspace_id) if workspace_id else str(uuid.uuid4())
-    await apply_gucs(
-        executor,
-        tenant_id=ws_id,
-        actor_kind="user",
-        actor_user_id=str(owner_user_id),
-        channel=channel,
-    )
-    if tz is None:
-        await executor.execute(
-            text("INSERT INTO workspaces (id, name) VALUES (:id, :name)"),
-            {"id": ws_id, "name": name},
-        )
+    if workspace_id:
+        ws_id = str(workspace_id)
     else:
-        await executor.execute(
-            text("INSERT INTO workspaces (id, name, tz) VALUES (:id, :name, :tz)"),
-            {"id": ws_id, "name": name, "tz": tz},
+        ws_id = str(uuid.uuid4())
+        await apply_gucs(
+            executor,
+            tenant_id=ws_id,
+            actor_kind="user",
+            actor_user_id=str(owner_user_id),
+            channel=channel,
         )
+    await _write(
+        executor,
+        "INSERT INTO workspaces (id, name, tz, approval_mode)"
+        " VALUES (:id, :name, COALESCE(:tz, 'UTC'), :mode)",
+        id=ws_id,
+        name=name,
+        tz=tz,
+        mode=INTERIM_APPROVAL_MODE,
+    )
     await executor.execute(
         text(
             "INSERT INTO workspace_members (workspace_id, user_id, role)"
@@ -137,98 +167,80 @@ async def create_workspace(
 async def list_for_user(executor, *, user_id: str) -> list[dict]:
     """The caller's memberships: `[{id, name, state, role}]`. Cross-tenant by
     nature (see the module docstring for what that costs under RLS)."""
-    rows = await executor.execute(
-        text(
-            "SELECT w.id, w.name, w.state, m.role"
-            "  FROM workspace_members m JOIN workspaces w ON w.id = m.workspace_id"
-            " WHERE m.user_id = :u"
-            " ORDER BY w.created_at, w.id"
-        ),
-        {"u": str(user_id)},
+    return await readers.rows(
+        executor,
+        "SELECT w.id, w.name, w.state, m.role"
+        "  FROM workspace_members m JOIN workspaces w ON w.id = m.workspace_id"
+        " WHERE m.user_id = :u"
+        " ORDER BY w.created_at, w.id",
+        u=str(user_id),
     )
-    return [dict(r) for r in rows.mappings()]
 
 
 async def get_workspace(executor, *, workspace_id: str) -> Optional[dict]:
     """The config row (`02` §1's typed columns) plus state, or None."""
-    row = (
-        (
-            await executor.execute(
-                text(f"SELECT {_CONFIG_COLUMNS} FROM workspaces WHERE id = :ws"),
-                {"ws": str(workspace_id)},
-            )
-        )
-        .mappings()
-        .first()
+    return await readers.row(
+        executor,
+        f"SELECT {_CONFIG_COLUMNS} FROM workspaces WHERE id = :ws",
+        ws=str(workspace_id),
     )
-    return dict(row) if row else None
 
 
 async def list_members(executor, *, workspace_id: str) -> list[dict]:
-    rows = await executor.execute(
-        text(
-            "SELECT m.user_id, m.role, m.added_by_user_id, m.created_at,"
-            "       u.primary_email, u.state AS user_state"
-            "  FROM workspace_members m JOIN users u ON u.id = m.user_id"
-            " WHERE m.workspace_id = :ws"
-            " ORDER BY CASE m.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END,"
-            "          m.created_at"
-        ),
-        {"ws": str(workspace_id)},
+    return await readers.rows(
+        executor,
+        "SELECT m.user_id, m.role, m.added_by_user_id, m.created_at,"
+        "       u.primary_email, u.state AS user_state"
+        "  FROM workspace_members m JOIN users u ON u.id = m.user_id"
+        " WHERE m.workspace_id = :ws"
+        " ORDER BY CASE m.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END,"
+        "          m.created_at",
+        ws=str(workspace_id),
     )
-    return [dict(r) for r in rows.mappings()]
 
 
 async def list_accounts(executor, *, workspace_id: str) -> list[dict]:
-    rows = await executor.execute(
-        text(
-            "SELECT id, provider_account_ref, handle, display_name, state,"
-            "       posts_per_day, posting_hours_start, posting_hours_end, tz,"
-            "       next_slot_at, last_posted_at, created_at"
-            "  FROM ig_accounts WHERE workspace_id = :ws ORDER BY created_at, id"
-        ),
-        {"ws": str(workspace_id)},
+    return await readers.rows(
+        executor,
+        "SELECT id, provider_account_ref, handle, display_name, state,"
+        "       posts_per_day, posting_hours_start, posting_hours_end, tz,"
+        "       next_slot_at, last_posted_at, created_at"
+        "  FROM ig_accounts WHERE workspace_id = :ws ORDER BY created_at, id",
+        ws=str(workspace_id),
     )
-    return [dict(r) for r in rows.mappings()]
 
 
 async def list_sources(executor, *, workspace_id: str) -> list[dict]:
-    rows = await executor.execute(
-        text(
-            "SELECT id, provider, state, next_sync_at, last_sync_success_at,"
-            "       alerted_at, created_at"
-            "  FROM media_sources WHERE workspace_id = :ws ORDER BY created_at, id"
-        ),
-        {"ws": str(workspace_id)},
+    return await readers.rows(
+        executor,
+        "SELECT id, provider, state, next_sync_at, last_sync_success_at,"
+        "       alerted_at, created_at"
+        "  FROM media_sources WHERE workspace_id = :ws ORDER BY created_at, id",
+        ws=str(workspace_id),
     )
-    return [dict(r) for r in rows.mappings()]
 
 
 async def list_bindings(executor, *, workspace_id: str) -> list[dict]:
-    rows = await executor.execute(
-        text(
-            "SELECT id, channel, external_ref, state, settings, created_at"
-            "  FROM channel_bindings WHERE workspace_id = :ws ORDER BY created_at, id"
-        ),
-        {"ws": str(workspace_id)},
+    return await readers.rows(
+        executor,
+        "SELECT id, channel, external_ref, state, settings, created_at"
+        "  FROM channel_bindings WHERE workspace_id = :ws ORDER BY created_at, id",
+        ws=str(workspace_id),
     )
-    return [dict(r) for r in rows.mappings()]
 
 
 async def list_invitations(executor, *, workspace_id: str) -> list[dict]:
     """Pending invitations only. The token is never read back — only its hash
     is stored, and the row exposes nothing a caller could present."""
-    rows = await executor.execute(
-        text(
-            "SELECT id, delivery_channel, email, role, state, expires_at,"
-            "       invited_by_user_id, created_at"
-            "  FROM workspace_invitations"
-            " WHERE workspace_id = :ws AND state = 'pending' AND expires_at > now()"
-            " ORDER BY created_at, id"
-        ),
-        {"ws": str(workspace_id)},
+    return await readers.rows(
+        executor,
+        "SELECT id, delivery_channel, email, role, state, expires_at,"
+        "       invited_by_user_id, created_at"
+        "  FROM workspace_invitations"
+        " WHERE workspace_id = :ws AND state = 'pending' AND expires_at > now()"
+        " ORDER BY created_at, id",
+        ws=str(workspace_id),
     )
-    return [dict(r) for r in rows.mappings()]
 
 
 _INTENT_COLUMNS = (
@@ -249,52 +261,46 @@ async def list_intents(
     if state is not None:
         where += " AND i.state = :state"
         params["state"] = state
-    rows = await executor.execute(
-        text(
-            f"SELECT {_INTENT_COLUMNS}"
-            "  FROM post_intents i"
-            "  JOIN media_items m ON m.workspace_id = i.workspace_id AND m.id = i.media_item_id"
-            f" WHERE {where}"
-            " ORDER BY i.schedule_slot_at, i.id LIMIT :lim"
-        ),
-        params,
+    return await readers.rows(
+        executor,
+        f"SELECT {_INTENT_COLUMNS}"
+        "  FROM post_intents i"
+        "  JOIN media_items m ON m.workspace_id = i.workspace_id AND m.id = i.media_item_id"
+        f" WHERE {where}"
+        " ORDER BY i.schedule_slot_at, i.id LIMIT :lim",
+        **params,
     )
-    return [dict(r) for r in rows.mappings()]
 
 
 async def get_intent(executor, *, workspace_id: str, intent_id: str) -> Optional[dict]:
     """One intent — always its CURRENT state (R6: terminal-state-first)."""
-    row = (
-        (
-            await executor.execute(
-                text(
-                    f"SELECT {_INTENT_COLUMNS}"
-                    "  FROM post_intents i"
-                    "  JOIN media_items m ON m.workspace_id = i.workspace_id"
-                    "   AND m.id = i.media_item_id"
-                    " WHERE i.workspace_id = :ws AND i.id = :id"
-                ),
-                {"ws": str(workspace_id), "id": str(intent_id)},
-            )
-        )
-        .mappings()
-        .first()
+    return await readers.row(
+        executor,
+        f"SELECT {_INTENT_COLUMNS}"
+        "  FROM post_intents i"
+        "  JOIN media_items m ON m.workspace_id = i.workspace_id"
+        "   AND m.id = i.media_item_id"
+        " WHERE i.workspace_id = :ws AND i.id = :id",
+        ws=str(workspace_id),
+        id=str(intent_id),
     )
-    return dict(row) if row else None
 
 
-async def rename(executor, *, workspace_id: str, name: str) -> bool:
+async def rename(executor, *, workspace_id: str, name: str) -> str:
+    """Returns the cleaned name that was written."""
     name = _clean_name(name)
-    result = await executor.execute(
-        text("UPDATE workspaces SET name = :name WHERE id = :ws"),
-        {"name": name, "ws": str(workspace_id)},
+    await _write(
+        executor,
+        "UPDATE workspaces SET name = :name WHERE id = :ws",
+        name=name,
+        ws=str(workspace_id),
     )
-    return result.rowcount == 1
+    return name
 
 
 async def set_paused(
     executor, *, workspace_id: str, paused: bool, by_user_id: str
-) -> bool:
+) -> None:
     """`pause_workspace` / `resume_workspace`: the three paused columns move
     together, and resume clears both attribution columns."""
     if paused:
@@ -307,10 +313,7 @@ async def set_paused(
             "UPDATE workspaces SET is_paused = false, paused_at = NULL,"
             " paused_by_user_id = NULL WHERE id = :ws"
         )
-    result = await executor.execute(
-        text(stmt), {"u": str(by_user_id), "ws": str(workspace_id)}
-    )
-    return result.rowcount == 1
+    await executor.execute(text(stmt), {"u": str(by_user_id), "ws": str(workspace_id)})
 
 
 def validate_settings(changes: Mapping[str, Any]) -> dict[str, Any]:
@@ -341,13 +344,16 @@ def validate_settings(changes: Mapping[str, Any]) -> dict[str, Any]:
 
 async def change_settings(
     executor, *, workspace_id: str, changes: Mapping[str, Any]
-) -> bool:
-    """Apply a validated settings map. Column names come from the allowlist
-    (never from the caller's string), values are bound parameters."""
+) -> dict[str, Any]:
+    """Validate and apply a settings map; returns the cleaned map that was
+    written. Column names come from the allowlist (never from the caller's
+    string), values are bound parameters, and the CHECKs decide the values."""
     cleaned = validate_settings(changes)
     assignments = ", ".join(f"{k} = :{k}" for k in cleaned)
-    result = await executor.execute(
-        text(f"UPDATE workspaces SET {assignments} WHERE id = :ws"),
-        {**cleaned, "ws": str(workspace_id)},
+    await _write(
+        executor,
+        f"UPDATE workspaces SET {assignments} WHERE id = :ws",
+        **cleaned,
+        ws=str(workspace_id),
     )
-    return result.rowcount == 1
+    return cleaned

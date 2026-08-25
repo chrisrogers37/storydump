@@ -51,16 +51,6 @@ class WorkerTaskDied(RuntimeError):
     """A supervised background task exited before stop was requested."""
 
 
-def engine_url_from_env(env: dict):
-    """The branch-soak/deploy door: TARGET_DATABASE_URL, made asyncpg-safe.
-
-    The rewrite itself lives in `unit_of_work.engine_url_from_env` now (#1028
-    — the api root needs the same door and a second copy is how the two
-    drift); this name stays because the soak recipes and tests call it here.
-    """
-    return unit_of_work.engine_url_from_env(env)
-
-
 def _transit_from_env(env):
     name = env.get("CLOUDINARY_CLOUD_NAME")
     key = env.get("CLOUDINARY_API_KEY")
@@ -498,7 +488,7 @@ def main() -> None:
     )
     config = WorkerConfig()
     env = dict(os.environ)
-    engine = unit_of_work.create_engine(engine_url_from_env(env))
+    engine = unit_of_work.create_engine(unit_of_work.engine_url_from_env(env))
     transport = None
     token = env.get("TARGET_TELEGRAM_BOT_TOKEN")
     if token:

@@ -33,11 +33,7 @@ class TestEngineConfiguration:
         )
         assert app.state.engine is not None
         assert app.state.engine.url.drivername == "postgresql+asyncpg"
-        assert client_health(app)["target_database"] is True
-
-
-def client_health(app):
-    return TestClient(app).get("/health").json()
+        assert TestClient(app).get("/health").json()["target_database"] is True
 
 
 class TestCors:
@@ -113,3 +109,42 @@ class TestLegacySurfaceIsGone:
         assert "slowapi" not in module.__dict__ and not any(
             "slowapi" in str(getattr(m, "__module__", "")) for m in app.user_middleware
         )
+
+
+class TestRefusalMappingsAreTotal:
+    """Every closed reason a service can raise has a status here — pinned, so
+    a new reason cannot ship as a silently chosen 400 (or, now, a 500)."""
+
+    def test_command_reasons(self):
+        from src.api import app as module
+        from src.services.target import commands
+
+        assert set(module._COMMAND_STATUS) == set(commands.REASONS)
+
+    def test_invitation_reasons(self):
+        from src.api import app as module
+        from src.services.target import invitations
+
+        assert set(module._INVITATION_STATUS) == set(invitations.REASONS)
+
+    def test_tenant_reasons_are_a_subset_of_the_closed_vocabulary(self):
+        from src.api import app as module
+        from src.exceptions.tenancy import TenantResolutionError
+
+        assert set(module._TENANT_STATUS) <= set(TenantResolutionError.REASONS)
+        # the web surface never resolves a chat; those reasons stay unmapped
+        assert "unknown_binding" not in module._TENANT_STATUS
+
+    def test_an_unmapped_reason_is_a_500_not_a_guessed_client_status(
+        self, client, signed_in, monkeypatch
+    ):
+        from src.exceptions.tenancy import TenantResolutionError
+        from src.services.target import identity
+
+        async def get_user(conn, *, user_id):
+            raise TenantResolutionError("unknown_binding")
+
+        monkeypatch.setattr(identity, "get_user", get_user)
+        resp = client.get("/api/v1/me")
+        assert resp.status_code == 500
+        assert resp.json() == {"detail": "internal error"}

@@ -78,6 +78,8 @@ rule, applied one layer up).
 
 from __future__ import annotations
 
+import json
+
 import asyncio
 import logging
 from typing import Any, Awaitable, Callable, Optional
@@ -236,6 +238,56 @@ async def assert_lease(session, job_id, lease_token) -> None:
     """
     if not await lease_is_live(session, job_id, lease_token):
         raise _fenced(job_id)
+
+
+async def enqueue(
+    session,
+    *,
+    kind: str,
+    workspace_id: str,
+    serialization_key: str,
+    payload: dict,
+    lane: str = "bulk",
+    max_attempts: int = 5,
+    unless_pending: bool = False,
+) -> Optional[str]:
+    """Insert one `ready` job in the caller's transaction; returns its id.
+
+    The payload is built in Python and bound ONCE as jsonb — the tier's shape
+    (`outbox.enqueue`, `media_sync`); building JSON inside the statement is
+    what asyncpg cannot type. *unless_pending* declines to mint when a
+    ready/leased job already holds *serialization_key* (the demand-sync case:
+    a second row would only queue behind the first) and returns None. Every
+    bind is cast explicitly because the guarded form is an INSERT … SELECT,
+    whose parameters carry no target-column type.
+    """
+    guard = (
+        " WHERE NOT EXISTS (SELECT 1 FROM jobs WHERE serialization_key = :key"
+        "                     AND state IN ('ready', 'leased'))"
+        if unless_pending
+        else ""
+    )
+    row = (
+        await session.execute(
+            text(
+                "INSERT INTO jobs (kind, workspace_id, lane, serialization_key,"
+                " run_at, max_attempts, payload)"
+                " SELECT CAST(:kind AS text), CAST(:ws AS uuid), CAST(:lane AS text),"
+                "        CAST(:key AS text), now(), CAST(:attempts AS int),"
+                f"        CAST(:p AS jsonb){guard}"
+                " RETURNING id"
+            ),
+            {
+                "kind": kind,
+                "ws": workspace_id,
+                "lane": lane,
+                "key": serialization_key,
+                "attempts": max_attempts,
+                "p": json.dumps(payload),
+            },
+        )
+    ).first()
+    return str(row[0]) if row else None
 
 
 async def reschedule_job(

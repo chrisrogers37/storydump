@@ -276,6 +276,16 @@ class Settings(BaseSettings):
     )
 
     @property
+    def web_app_origin(self) -> Optional[str]:
+        """The front end's origin, normalized (no trailing slash), or None.
+
+        The ONE browser origin CORS admits and the host a finished or failed
+        sign-in lands on — one spelling, so the cookie can never land on a
+        page whose origin CORS refuses.
+        """
+        return self.WEB_APP_URL.rstrip("/") if self.WEB_APP_URL else None
+
+    @property
     def trusted_proxy_hosts(self) -> list[str]:
         """`TRUSTED_PROXY_HOSTS` as the list uvicorn's middleware expects."""
         return [h.strip() for h in self.TRUSTED_PROXY_HOSTS.split(",") if h.strip()]

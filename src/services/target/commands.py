@@ -2,7 +2,7 @@
 
 Every inbound channel — the web/API adapter today, the Telegram webhook (W4)
 next — normalizes what it received into a :class:`Command` and hands it to
-:func:`execute`. Nothing inland sees a chat id, a session cookie, a callback
+:func:`ingest`. Nothing inland sees a chat id, a session cookie, a callback
 payload or an HTTP body: a command carries RESOLVED domain ids and nothing
 else, which is the FC-2 discipline made structural rather than reviewed for.
 
@@ -17,22 +17,19 @@ too — in either direction. A route table would have made the routes the
 vocabulary; here the route (`POST …/commands/{command}`) merely validates
 its path segment against this tuple.
 
-## What lives here and what deliberately does not
+## The order every adapter takes, written once
 
-- **Here:** the vocabulary, the role floor per command (`06` §2/§4/§5's actor
-  tables, collapsed to the `workspace_members` ladder), the executor registry,
-  and :func:`execute` — which runs the ONE central authorization gate
-  (`tenant_resolution.authorize_member`) and then the executor, inside the
-  caller's unit of work.
-- **Not here:** admission. `command_dedup` is written by the ADAPTER before it
-  calls this (`webhook_ingress.admit`, `02` §6), because the idempotency key's
-  shape is channel-specific — a Telegram `update_id`, a web `Idempotency-Key`
-  header, a CLI token — and only the adapter holds it. Both adapters follow the
-  same order: refuse-before-admit, admit-before-execute, all in one transaction
-  so a failed command leaves no dedup row behind and a retry re-executes.
-- **Not here either:** transport answers. R5's "acknowledge fast" is the
-  adapter's; this function returns a :class:`CommandResult` and never speaks
-  HTTP or Telegram.
+:func:`ingest` is refuse-cold → admit → execute, in the caller's ONE
+transaction. `webhook_ingress` states the rule — *a delivery that cannot be
+executed is refused BEFORE admission, never after* — and predicted that the
+second channel would be the moment to stop retyping it per adapter. The web
+adapter is that channel, so the ordering lives here: an unknown name is
+refused before any dedup row exists, admission (`command_dedup`, keyed by
+the adapter's idempotency reference) precedes execution, and because all of
+it shares the adapter's transaction a refusal anywhere rolls the dedup row
+back and a retry re-executes. What stays with the adapter is only the shape
+of its key — a web ``Idempotency-Key``, a Telegram ``update_id`` — and its
+transport answers (R5's "acknowledge fast" is not this module's).
 
 ## Not-built is a named refusal, not an absent name
 
@@ -51,7 +48,8 @@ from typing import Any, Awaitable, Callable, Mapping, Optional
 
 from src.exceptions.base import StorydumpError
 from src.exceptions.tenancy import TenantResolutionError
-from src.services.target.tenant_resolution import authorize_member
+from src.services.target import tenant_resolution, webhook_ingress
+from src.services.target.workspaces import InvalidWorkspaceArgs
 
 #: The closed inbound vocabulary — `01` §Interaction-layer port, verbatim
 #: order. Set-equality with the doc is asserted by the unit gate.
@@ -118,6 +116,18 @@ ROLE_FLOOR: dict[str, str] = {
     "clear_quarantine": "operator",
 }
 
+#: `CommandRefused.reason`, closed. Adapters map it without parsing prose, and
+#: the web adapter's status table is pinned TOTAL over this tuple.
+REASONS: tuple[str, ...] = (
+    "unknown_command",
+    "not_built",
+    "workspace_required",
+    "invalid_args",
+    "illegal_transition",
+    "not_found",
+    "manual_mode",
+)
+
 
 @dataclass(frozen=True)
 class Command:
@@ -142,12 +152,11 @@ class CommandResult:
 
 
 class CommandRefused(StorydumpError):
-    """A command the port will not run. ``reason`` is a closed vocabulary so
-    adapters map it without parsing prose: ``unknown_command`` ·
-    ``not_built`` · ``workspace_required`` · ``invalid_args`` ·
-    ``illegal_transition`` · ``not_found`` · ``manual_mode``."""
+    """A command the port will not run, with a reason from :data:`REASONS`."""
 
     def __init__(self, reason: str, detail: str = ""):
+        if reason not in REASONS:
+            raise ValueError(f"not a refusal reason: {reason!r}")
         self.reason = reason
         super().__init__(
             f"command refused: {reason}" + (f" — {detail}" if detail else "")
@@ -167,7 +176,6 @@ class CommandNotBuilt(CommandRefused):
 
 
 Executor = Callable[[Any, Command], Awaitable[CommandResult]]
-Gate = Callable[[Any, str, str, str], Awaitable[str]]
 
 
 def _build_registry() -> dict[str, Optional[Executor]]:
@@ -203,24 +211,18 @@ REGISTRY: dict[str, Optional[Executor]] = _build_registry()
 UNBUILT: tuple[str, ...] = tuple(k for k in VOCABULARY if REGISTRY[k] is None)
 
 
-async def execute(
-    session,
-    command: Command,
-    *,
-    gate: Gate = authorize_member,
-    registry: Optional[Mapping[str, Optional[Executor]]] = None,
-) -> CommandResult:
+async def execute(session, command: Command) -> CommandResult:
     """Gate, then execute. The ONE path every adapter takes.
 
     *session* is the caller's open unit of work (tenant + actor GUCs already
     applied — `02` §0's writer-identity rule, enforced by the audit triggers).
-    *gate* and *registry* are seams for the unit gate; production callers pass
-    neither.
 
     Order is load-bearing: unknown → refused cold (no gate, nothing to
     authorize against); then the gate; then not-built; then the executor. A
     refusal from the gate propagates as the `TenantResolutionError` it is —
     the adapter already maps that type (not-a-member → 404, below-floor → 403).
+    A caller-supplied value the boundary refuses (`InvalidWorkspaceArgs`, from
+    the writers or from a database CHECK) is one refusal, mapped here once.
     """
     if command.kind not in ROLE_FLOOR:
         raise UnknownCommand(command.kind)
@@ -236,10 +238,38 @@ async def execute(
     if floor != "user":
         if not command.workspace_id:
             raise CommandRefused("workspace_required", command.kind)
-        await gate(session, command.workspace_id, command.actor_user_id, floor)
+        await tenant_resolution.authorize_member(
+            session, command.workspace_id, command.actor_user_id, floor
+        )
 
-    reg = REGISTRY if registry is None else registry
-    executor = reg.get(command.kind)
+    executor = REGISTRY.get(command.kind)
     if executor is None:
         raise CommandNotBuilt(command.kind)
-    return await executor(session, command)
+    try:
+        return await executor(session, command)
+    except InvalidWorkspaceArgs as exc:
+        raise CommandRefused("invalid_args", str(exc)) from exc
+
+
+async def ingest(
+    session, command: Command, *, external_ref: str, principal: str, payload: Any
+) -> CommandResult:
+    """Refuse cold → admit → execute, in the caller's one transaction.
+
+    *external_ref* and *principal* are the adapter's idempotency key
+    (`command_dedup`'s ``(channel, principal, external_ref)``); *payload* is
+    what the fingerprint is taken over — the adapter's raw body, so a replay
+    of the same request matches regardless of what the adapter added to
+    ``command.args``. Admission's own refusals (`DeliveryReplayed`,
+    `AdmissionConflict`) propagate for the adapter to answer.
+    """
+    if command.kind not in ROLE_FLOOR:
+        raise UnknownCommand(command.kind)
+    await webhook_ingress.admit(
+        session,
+        channel=command.channel,
+        external_ref=external_ref,
+        payload=payload,
+        principal=principal,
+    )
+    return await execute(session, command)

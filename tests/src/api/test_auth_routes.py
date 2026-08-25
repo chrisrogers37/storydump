@@ -12,10 +12,7 @@ attributes; sign-out revokes.
 
 from __future__ import annotations
 
-import base64
 import hashlib
-import json
-import time
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -26,17 +23,17 @@ from src.api.routes import auth
 from src.config.settings import settings
 from src.services.target import google_oidc, identity, rate_counters, sessions
 from src.services.target.ig_login_oauth import OAuthStateRefused
-
-API = "https://api.example.test"
-FRONT = "https://app.example.test"
+from tests.src.api.conftest import (
+    API,
+    FRONT,
+    cookie_header,
+    unsigned_id_token,
+)
 
 
 @pytest.fixture
-def configured(monkeypatch):
-    monkeypatch.setattr(settings, "GOOGLE_CLIENT_ID", "cid", raising=False)
-    monkeypatch.setattr(settings, "GOOGLE_CLIENT_SECRET", "sec", raising=False)
-    monkeypatch.setattr(settings, "OAUTH_REDIRECT_BASE_URL", API, raising=False)
-    monkeypatch.setattr(settings, "WEB_APP_URL", FRONT, raising=False)
+def configured(google_configured):
+    """The sign-in world from conftest, under the name these tests read."""
 
 
 @pytest.fixture
@@ -76,26 +73,6 @@ def state_store(monkeypatch):
     return store
 
 
-def _id_token(state, **over):
-    now = int(time.time())
-    claims = {
-        "iss": "https://accounts.google.com",
-        "aud": "cid",
-        "exp": now + 300,
-        "iat": now,
-        "nonce": google_oidc.nonce_for(state),
-        "sub": "sub-1",
-        "email": "p@example.com",
-        "email_verified": True,
-        "name": "P",
-    }
-    claims.update(over)
-    seg = lambda o: (
-        base64.urlsafe_b64encode(json.dumps(o).encode()).rstrip(b"=").decode()
-    )  # noqa: E731
-    return f"{seg({'alg': 'RS256'})}.{seg(claims)}.sig"
-
-
 class TestSignin:
     def test_unconfigured_is_a_503_naming_what_is_missing(self, client, monkeypatch):
         monkeypatch.setattr(settings, "GOOGLE_CLIENT_ID", None, raising=False)
@@ -114,11 +91,7 @@ class TestSignin:
         assert q["state"] == ["st-1"]
         assert q["nonce"] == [google_oidc.nonce_for("st-1")]
         assert q["redirect_uri"] == [f"{API}/auth/google/callback"]
-        cookie = next(
-            c
-            for c in resp.headers.get_list("set-cookie")
-            if c.startswith(auth.NONCE_COOKIE)
-        )
+        cookie = cookie_header(resp, auth.NONCE_COOKIE)
         assert "HttpOnly" in cookie and "Path=/auth/google" in cookie
         assert state_store["nonce"] and state_store["nonce"] in cookie
 
@@ -146,15 +119,7 @@ class TestCallback:
     def _signin(self, client):
         resp = client.get("/auth/google", follow_redirects=False)
         state = parse_qs(urlsplit(resp.headers["location"]).query)["state"][0]
-        nonce = (
-            next(
-                c
-                for c in resp.headers.get_list("set-cookie")
-                if c.startswith(auth.NONCE_COOKIE)
-            )
-            .split(";")[0]
-            .split("=", 1)[1]
-        )
+        nonce = cookie_header(resp, auth.NONCE_COOKIE).split(";")[0].split("=", 1)[1]
         return state, nonce
 
     @pytest.mark.parametrize(
@@ -208,13 +173,13 @@ class TestCallback:
             client_, *, code, redirect_uri, client_id, client_secret
         ):
             seen["exchange"] = (code, redirect_uri, client_id)
-            return _id_token(state)
+            return unsigned_id_token(state)
 
-        async def upsert(conn, *, sub, email, email_verified, display_name):
-            seen["upsert"] = (sub, email, email_verified, display_name)
+        async def upsert(conn, *, sub, email, display_name):
+            seen["upsert"] = (sub, email, display_name)
             return "user-uuid"
 
-        async def issue(conn, *, user_id, ttl_seconds=None):
+        async def issue(conn, *, user_id):
             seen["issue"] = user_id
             return "opaque-value"
 
@@ -230,11 +195,9 @@ class TestCallback:
         assert resp.status_code == 302
         assert resp.headers["location"] == f"{FRONT}/welcome"
         assert seen["exchange"] == ("c0de", f"{API}/auth/google/callback", "cid")
-        assert seen["upsert"] == ("sub-1", "p@example.com", True, "P")
+        assert seen["upsert"] == ("sub-1", "p@example.com", "P")
         assert seen["issue"] == "user-uuid"
-        cookie = next(
-            c for c in resp.headers.get_list("set-cookie") if c.startswith(COOKIE)
-        )
+        cookie = cookie_header(resp, COOKIE)
         assert "opaque-value" in cookie
         for attr in ("HttpOnly", "Secure", "SameSite=lax", "Path=/"):
             assert attr in cookie, attr
@@ -246,7 +209,7 @@ class TestCallback:
         state, nonce = self._signin(client)
 
         async def exchange_code(client_, **kw):
-            return _id_token(state, nonce="somebody-elses")
+            return unsigned_id_token(state, nonce="somebody-elses")
 
         monkeypatch.setattr(google_oidc, "exchange_code", exchange_code)
         resp = client.get(
@@ -262,7 +225,7 @@ class TestCallback:
         state, nonce = self._signin(client)
 
         async def exchange_code(client_, **kw):
-            return _id_token(state)
+            return unsigned_id_token(state)
 
         async def upsert(conn, **kw):
             raise identity.IdentityCollision("held elsewhere")
@@ -293,9 +256,7 @@ class TestSignout:
         resp = client.post("/auth/signout", headers={"Authorization": "Bearer opaque"})
         assert resp.status_code == 200
         assert revoked == [hashlib.sha256(b"opaque").hexdigest()]
-        cookie = next(
-            c for c in resp.headers.get_list("set-cookie") if c.startswith(COOKIE)
-        )
+        cookie = cookie_header(resp, COOKIE)
         assert "Max-Age=0" in cookie or "expires=" in cookie.lower()
 
     def test_without_a_session_it_still_answers_and_touches_nothing(

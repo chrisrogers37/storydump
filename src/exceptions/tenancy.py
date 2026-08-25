@@ -23,7 +23,22 @@ class TenantResolutionError(StorydumpError):
     to run /start).
     """
 
+    REASONS = (
+        "unknown_binding",
+        "revoked_binding",
+        "invalid_session",
+        "expired_session",
+        "revoked_session",
+        "disabled_user",
+        "not_a_member",
+        "insufficient_role",
+        "unknown_channel",
+        "unprovisioned_channel",
+    )
+
     def __init__(self, reason: str, detail: str = ""):
+        if reason not in self.REASONS:
+            raise ValueError(f"not a resolution reason: {reason!r}")
         self.reason = reason
         super().__init__(
             f"tenant resolution refused: {reason}" + (f" — {detail}" if detail else "")

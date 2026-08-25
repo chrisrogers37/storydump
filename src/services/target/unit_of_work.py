@@ -67,6 +67,7 @@ from __future__ import annotations
 import contextvars
 from contextlib import asynccontextmanager
 from typing import Optional
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
@@ -156,8 +157,6 @@ def asyncpg_url(url: str) -> str:
     libpq-only `sslmode`/`channel_binding` query params (Neon appends both;
     asyncpg takes `ssl=`).
     """
-    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
-
     url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
     parts = urlsplit(url)
     params = dict(parse_qsl(parts.query))
@@ -254,7 +253,7 @@ class UnitOfWork:
 async def apply_gucs(
     executor,
     *,
-    tenant_id: Optional[str],
+    tenant_id: str,
     actor_kind: Optional[str] = None,
     actor_user_id: Optional[str] = None,
     channel: Optional[str] = None,
@@ -264,19 +263,17 @@ async def apply_gucs(
     permit path). *executor* is anything with ``.execute`` (AsyncSession or
     AsyncConnection).
 
-    *tenant_id* ``None`` is a USER-PLANE transaction (#1028): the actor GUCs
-    are set and no tenant is claimed. That is the shape of identity writes and
-    of a `SECURITY DEFINER` door that resolves the tenant itself
-    (`fn_invitation_accept`); under RLS every tenant table then reads empty,
-    which is the fail-closed answer, and the UoW itself still refuses to be
-    constructed without a tenant. Kept here rather than as a second helper so
-    the ``is_local`` spelling below stays the only one.
-
     LOCAL (`is_local=true`) rather than SESSION is what makes pool reuse safe:
     the value dies with the transaction, so the next task to borrow the
     connection cannot inherit another tenant's scope. Two hand-rolled copies
     of this call is how a third ships `is_local=false` and leaks tenant scope
     with no gate able to see it — hence one home.
+
+    One statement, not one per GUC: a tenant-scoped request pays this on
+    every unit of work, and four round trips for four `set_config` calls was
+    measured as the largest avoidable cost on the read path (#1028). Only the
+    non-None pairs are sent — `set_config(x, NULL, true)` stores the empty
+    string, and the audit triggers must keep seeing an UNSET actor as unset.
 
     Known coverage note: a raw-connection transaction (the permit path) never
     sets `_IN_TRANSACTION`, so the §5 discipline tripwire does not cover the
@@ -284,20 +281,22 @@ async def apply_gucs(
     so no provider call can happen inside it — named here because this is
     where the next reader will look.
     """
-    if tenant_id is not None:
-        await executor.execute(
-            text("SELECT set_config('app.tenant_id', :v, true)"),
-            {"v": tenant_id},
+    pairs = [("app.tenant_id", tenant_id)] + [
+        (name, value)
+        for name, value in (
+            ("app.actor_kind", actor_kind),
+            ("app.actor_user_id", actor_user_id),
+            ("app.channel", channel),
         )
-    for name, value in (
-        ("app.actor_kind", actor_kind),
-        ("app.actor_user_id", actor_user_id),
-        ("app.channel", channel),
-    ):
-        if value is not None:
-            await executor.execute(
-                text(f"SELECT set_config('{name}', :v, true)"), {"v": value}
-            )
+        if value is not None
+    ]
+    calls = ", ".join(
+        f"set_config('{name}', :v{i}, true)" for i, (name, _) in enumerate(pairs)
+    )
+    await executor.execute(
+        text(f"SELECT {calls}"),
+        {f"v{i}": value for i, (_, value) in enumerate(pairs)},
+    )
 
 
 def unit_of_work(engine: AsyncEngine, tenant_id: str, **gucs) -> UnitOfWork:
