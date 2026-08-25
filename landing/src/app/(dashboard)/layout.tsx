@@ -1,7 +1,5 @@
 import { redirect } from "next/navigation";
 import { getSession } from "@/lib/session";
-import { workspaceFetch } from "@/lib/workspaces";
-import type { InitResponse } from "@/lib/dashboard-payloads";
 import { Sidebar } from "@/components/dashboard/sidebar";
 import { DashboardHeader } from "@/components/dashboard/header";
 
@@ -32,24 +30,21 @@ export default async function DashboardLayout({
   // would have returned an arbitrary stranger's row. The target schema has no
   // chat id on a workspace at all, so there is no null to pass and no `IS NULL`
   // to land on. The class is retired rather than re-guarded.
-  const workspaceId = session.activeWorkspaceId;
 
-  // Sidebar entry is hidden once onboarding is complete — otherwise it points
-  // at a route that redirects, which reads as a broken link (#464). Unknown
-  // means hidden: showing a wizard we cannot confirm is needed is worse than
-  // omitting a link the user can still reach from settings.
-  const initResult = workspaceId
-    ? await workspaceFetch<InitResponse>("init", workspaceId)
-    : null;
-  const showSetupWizard = Boolean(
-    initResult?.ok && !initResult.data.setup_state?.onboarding_completed,
-  );
+  // No fetch here any more. The only thing this layout ever called the router
+  // for was `init`, to decide whether to show a Setup Wizard nav entry — and
+  // that entry pointed at a page this change deletes. The link went, the flag
+  // that gated it went, and the call that computed the flag went with them.
+  //
+  // Removing a request from a layout is worth more than it looks: a layout runs
+  // on every route beneath it, so this was one round trip per dashboard
+  // navigation spent on a boolean nobody can act on.
 
   return (
     <div className="flex h-screen bg-background">
-      <Sidebar showSetupWizard={showSetupWizard} />
+      <Sidebar />
       <div className="flex flex-1 flex-col overflow-hidden">
-        <DashboardHeader user={session} showSetupWizard={showSetupWizard} />
+        <DashboardHeader user={session} />
         <main className="flex-1 overflow-y-auto p-6">{children}</main>
       </div>
     </div>

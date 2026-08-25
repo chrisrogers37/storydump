@@ -30,11 +30,9 @@ import { Sidebar } from "@/components/dashboard/sidebar";
 export function DashboardHeader({
   user,
   workspaceName,
-  showSetupWizard = true,
 }: {
   user: SessionUser;
   workspaceName?: string;
-  showSetupWizard?: boolean;
 }) {
   const router = useRouter();
 
@@ -58,7 +56,7 @@ export function DashboardHeader({
             </Button>
           </SheetTrigger>
           <SheetContent side="left" className="w-64 p-0">
-            <Sidebar showSetupWizard={showSetupWizard} />
+            <Sidebar />
           </SheetContent>
         </Sheet>
 

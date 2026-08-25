@@ -33,10 +33,36 @@ import { SESSION_COOKIE, WORKSPACE_COOKIE, isWorkspaceId } from "@/lib/session";
  * workspace-less session from reaching a workspace-scoped fetch at all.
  */
 export function middleware(request: NextRequest) {
-  const hasSessionCookie = Boolean(request.cookies.get(SESSION_COOKIE)?.value);
+  const cookie = request.cookies.get(SESSION_COOKIE)?.value;
 
-  if (!hasSessionCookie) {
+  if (!cookie) {
     return NextResponse.redirect(new URL("/login", request.url));
+  }
+
+  // A legacy JWT is CLEARED, not just ignored.
+  //
+  // Every browser signed in before the cutover holds one, and it cannot be a
+  // valid session under any circumstance — the session is now an opaque value
+  // resolved server-side, so a self-contained JWT is not stale, it is a token
+  // from a scheme that no longer exists. Without this it would sit in the
+  // browser being re-sent and re-rejected on every request forever.
+  //
+  // This RECOGNISES A FORMAT; it does not validate anything, and the
+  // distinction is the whole safety argument. Resolution needs a call this file
+  // deliberately does not make, so the test has to be something that can be
+  // wrong only in the harmless direction: it fires solely on a value that is
+  // positively JWT-shaped — `eyJ` (base64url of `{"`, the opening of every JWT
+  // header) plus exactly two dots. A random opaque token does not take that
+  // shape, and anything that does was a JWT.
+  //
+  // A stale OPAQUE token is deliberately NOT cleared here. There is no local
+  // test that distinguishes one from a live token, and guessing would sign out
+  // valid users to tidy up invalid ones.
+  if (isLegacyJwt(cookie)) {
+    const response = NextResponse.redirect(new URL("/login", request.url));
+    response.cookies.delete(SESSION_COOKIE);
+    response.cookies.delete(WORKSPACE_COOKIE);
+    return response;
   }
 
   const { pathname } = request.nextUrl;
@@ -53,6 +79,11 @@ export function middleware(request: NextRequest) {
   }
 
   return NextResponse.next();
+}
+
+/** Positively JWT-shaped: `header.payload.signature`, header starting `{"`. */
+export function isLegacyJwt(value: string): boolean {
+  return value.startsWith("eyJ") && value.split(".").length === 3;
 }
 
 export const config = {

@@ -29,14 +29,25 @@ export default async function DashboardPage() {
     workspaceFetch<HistoryResponse>("history-detail?limit=10", workspaceId),
   ]);
 
-  // The overview is analytics. Without them there is no partial version of this
-  // page worth rendering — a header over three empty panels states a fact about
-  // the account that we did not establish.
-  if (!analyticsResult.ok) return <RouterUnavailable what="Your dashboard" />;
+  // EVERY dependency, not just the one that fills the most pixels.
+  //
+  // This guarded only `analyticsResult` and that was wrong for the reason the
+  // rest of this PR exists: with categories or history failing on their own,
+  // the page still rendered — as an empty category breakdown and "no recent
+  // activity". Two silently-empty panels state a fact about the account that we
+  // did not establish, exactly as three would. The defending comment argued the
+  // right principle and then applied it to one of three dependencies.
+  //
+  // Its siblings in this same change already did it correctly
+  // (`media/calendar/page.tsx`, `settings/page.tsx`), which is what makes this
+  // an inconsistency rather than a judgement call.
+  if (!analyticsResult.ok || !categoriesResult.ok || !historyResult.ok) {
+    return <RouterUnavailable what="Your dashboard" />;
+  }
 
   const analytics = analyticsResult.data;
-  const categories = categoriesResult.ok ? categoriesResult.data : null;
-  const history = historyResult.ok ? historyResult.data : null;
+  const categories = categoriesResult.data;
+  const history = historyResult.data;
 
   const summary = analytics?.summary ?? {
     total_posts: 0,

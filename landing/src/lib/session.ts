@@ -23,9 +23,21 @@
  * cannot resolve. Those sessions already point at nothing; failing to resolve
  * them makes that visible rather than causing it.
  *
- * The cookie NAME is deliberately unchanged. A stale JWT presented here fails
- * to resolve and is cleared — whereas a new name would leave the old cookie
- * sitting in the browser, still being sent, belonging to nobody.
+ * The cookie NAME is deliberately unchanged, so a fresh sign-in overwrites the
+ * old value rather than leaving it beside a new one under a different key.
+ *
+ * CORRECTION, and it is worth keeping rather than quietly editing: this comment
+ * used to claim a stale JWT "fails to resolve and is cleared". Only the first
+ * half was true. `resolveSessionToken` turns a 401/403 into null and the page
+ * redirects to /login, which fails closed and is correct — but nothing deleted
+ * the cookie, so it sat in the browser and was re-sent and re-rejected on every
+ * request until an explicit sign-out. "Ignored forever, quietly" is not the
+ * same claim as "cleared", and the difference is checkable: `SESSION_COOKIE` is
+ * deleted in exactly one place, the logout route.
+ *
+ * `middleware.ts` now clears the one population that can be recognised without
+ * a network call — see there. A stale OPAQUE token still cannot be recognised
+ * locally and is still only ignored; that is stated rather than papered over.
  *
  * ── Why the token is not verified locally ──────────────────────────────────
  *
