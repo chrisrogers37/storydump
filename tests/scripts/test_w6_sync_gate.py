@@ -112,8 +112,20 @@ class ScriptedDrive:
         self.pages = list(pages)
         self.calls = []
 
-    async def list_changes(self, config, checkpoint):
-        self.calls.append({"config": dict(config or {}), "checkpoint": checkpoint})
+    async def list_changes(self, config, checkpoint, *, source_id, workspace_id):
+        # Both ids are RECORDED, not just accepted. They are the only channel a
+        # per-source credential can travel on (`oauth_credentials` points at the
+        # source and is RLS-scoped to the workspace), so a fake that swallowed
+        # them would let the adapter resolve the wrong tenant's credential with
+        # every test still green.
+        self.calls.append(
+            {
+                "config": dict(config or {}),
+                "checkpoint": checkpoint,
+                "source_id": source_id,
+                "workspace_id": workspace_id,
+            }
+        )
         step = self.pages.pop(0)
         if isinstance(step, Exception):
             raise step

@@ -16,6 +16,8 @@ leaves every flag on.
 from __future__ import annotations
 
 import asyncio
+import gzip
+import json
 
 import httpx
 import pytest
@@ -447,3 +449,59 @@ class TestTheRedirectRefusalSurvivesAChain:
             f"expected refusal at hop 2, saw {len(hops)} hops — the loop either "
             "stopped early or followed the cross-host hop"
         )
+
+
+class TestAGzipReplyStaysReadableThroughTheFloor:
+    """`aiter_bytes()` yields DECODED bytes, so the rebuilt response must not
+    keep claiming the body is still encoded — httpx would decode a second time
+    and every gzip reply would die on `DecodingError: incorrect header check`.
+
+    That is every real provider reply, because httpx advertises
+    `Accept-Encoding: gzip` by default. The floor's other proofs all use
+    uncompressed bodies, which is exactly why this went unnoticed: nothing here
+    ever handed the floor something that had been decoded on the way in.
+
+    `content-length` is dropped for the same reason rather than corrected — it
+    described the COMPRESSED body, so carrying it onto the plaintext states a
+    length that is simply wrong.
+    """
+
+    PAYLOAD = {"files": [{"id": "f1", "name": "cat.jpg"}]}
+
+    def _gzip_handler(self):
+        raw = gzip.compress(json.dumps(self.PAYLOAD).encode())
+        wire = {}
+
+        async def handler(request):
+            wire["body"] = raw
+            return httpx.Response(
+                200,
+                content=raw,
+                headers={
+                    "content-encoding": "gzip",
+                    "content-type": "application/json",
+                },
+            )
+
+        return handler, wire
+
+    @pytest.mark.asyncio
+    async def test_a_gzip_body_arrives_as_readable_json(self):
+        handler, wire = self._gzip_handler()
+        async with httpx.AsyncClient(transport=_transport(handler)) as client:
+            resp = await request(client, "GET", ALLOWED, policy=EgressPolicy())
+        # The positive control, and it is load-bearing: without it a fake that
+        # quietly sent plaintext would pass this whether or not the floor is
+        # correct, which is the shape that let the defect ship.
+        assert wire["body"][:2] == b"\x1f\x8b", "fixture did not actually gzip"
+        assert resp.json() == self.PAYLOAD
+
+    @pytest.mark.asyncio
+    async def test_the_rebuilt_response_states_no_stale_encoding_or_length(self):
+        """The mechanism itself, pinned where it broke."""
+        handler, _ = self._gzip_handler()
+        async with httpx.AsyncClient(transport=_transport(handler)) as client:
+            resp = await request(client, "GET", ALLOWED, policy=EgressPolicy())
+        assert "content-encoding" not in resp.headers
+        declared = resp.headers.get("content-length")
+        assert declared is None or int(declared) == len(resp.content)

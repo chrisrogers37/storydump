@@ -10,11 +10,18 @@ large first ingest is bounded per job rather than one unbounded crawl.
 ## The drive door (#982) is consumed, never implemented here
 
 The seam is `01` :76's port signature — ``list_changes(config, checkpoint) →
-(items, checkpoint')`` — duck-typed on ``deps.drive``. Production composes
-``None`` until #982's real door lands, which parks both kinds loudly (the
-`media_fetch` posture: wiring a test fake into production is not
-composition). Items carry the adapter's canonical stable ref (D37: the Drive
+(items, checkpoint')`` — duck-typed on ``deps.drive``, plus a keyword-only
+``source_id``. Items carry the adapter's canonical stable ref (D37: the Drive
 file id, never a path), name, kind, and content hash.
+
+``source_id`` is additive to `01` :76 and the reason is structural, not
+convenience: `media_sources` carries **no credential column** — `oauth_credentials`
+points AT the source (`media_source_id`, exclusive per `ck_credentials_one_owner`)
+— so a per-source credential is reachable only from the source's identity, which
+neither the two-argument form nor D37's `config` carries. Putting the id in
+`config` instead would fork the ownership the schema already settled, and a
+lookup by Drive file id inside the adapter would be a cross-tenant hazard
+(astrid, #982). Keyword-only so the two-argument shape stays legible.
 
 ## Failure routing (`02` §2's source state machine)
 
@@ -117,7 +124,10 @@ async def _run_sync(deps, job, *, page_token, reason) -> str:
     # Phase 2 — the provider door, outside any transaction.
     try:
         items, new_checkpoint = await deps.drive.list_changes(
-            dict(row["config"] or {}), checkpoint
+            dict(row["config"] or {}),
+            checkpoint,
+            source_id=source_id,
+            workspace_id=workspace_id,
         )
     except (DriveSourceGone, DriveCredentialDead) as exc:
         async with factory() as s:
