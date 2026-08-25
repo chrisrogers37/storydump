@@ -16,6 +16,7 @@ each stub outcome can go red on its own (the controls-can-fail standard).
 import json
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 import psycopg2
 import pytest
@@ -104,6 +105,23 @@ def _items(conn, ws):
         return cur.fetchall()
 
 
+#: Sentinel so `_item(mime=None)` can mean "the adapter said nothing", which is
+#: a different fixture from "the caller did not choose".
+_UNSET = object()
+
+
+def _media_row(conn, ws, ref):
+    """The columns this gate asserts CONTENT on, by ref."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT file_name, media_kind, mime_type FROM media_items"
+            " WHERE workspace_id = %s AND provider_file_ref = %s",
+            (ws, ref),
+        )
+        r = cur.fetchone()
+    return None if r is None else {"file_name": r[0], "kind": r[1], "mime": r[2]}
+
+
 class ScriptedDrive:
     """The #982 seam, scripted. `pages` is a list of (items, next_page_token);
     an exception instance anywhere in the list is RAISED at that call."""
@@ -133,13 +151,25 @@ class ScriptedDrive:
         return items, {"v": 1, **({"page_token": token} if token else {})}
 
 
-def _item(ref, h=None, kind="image"):
-    return {
+#: What the real adapter emits for each `kind`. Kept beside `_item` so the
+#: fixture's mime and its kind cannot drift into disagreeing.
+_MIME_FOR = {"image": "image/jpeg", "video": "video/mp4"}
+
+
+def _item(ref, h=None, kind="image", name=None, mime=_UNSET):
+    """One `list_changes` item. `mime=None` models an adapter that cannot
+    state a content type; the default models the Drive adapter, which always
+    can (`_kind_for` refuses the entry otherwise)."""
+    item = {
         "ref": ref,
-        "name": f"{ref}.jpg",
+        "name": name if name is not None else f"{ref}.jpg",
         "kind": kind,
         "content_hash": h or f"hash-{ref}",
     }
+    resolved = _MIME_FOR.get(kind) if mime is _UNSET else mime
+    if resolved is not None:
+        item["mime_type"] = resolved
+    return item
 
 
 async def _run_once_w6(lane_db, drive):
@@ -211,6 +241,69 @@ class TestBaselineSyncEndToEnd:
         hashes = [r[1] for r in _items(sync_conn, chain["ws"])]
         assert hashes.count("samehash") == 1, "per-workspace dedup by schema"
         assert _jobs(sync_conn, "sync_media_source")[-1]["state"] == "succeeded"
+
+
+class TestTheProviderContentTypeReachesTheColumn:
+    """`media_items.mime_type` exists in `054` and the media read already
+    serves it. The seam derived `kind` from `mimeType` and then dropped it, so
+    the column was NULL for every provider-sourced row and recoverable only by
+    re-listing the folder.
+
+    Asserted at the DATABASE, not at the adapter: carrying the key one function
+    further and dropping it at the INSERT looks identical from the seam's side.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_mime_lands_on_a_row_whose_name_has_no_extension(
+        self, lane_db, sync_conn
+    ):
+        """The fixture is extensionless BY DESIGN — this is the whole trap.
+
+        Every other item in this gate is named `<ref>.jpg`, and a row like that
+        passes whether or not the content type survived, because the filename
+        carries the answer anyway. A Drive name is whatever a person typed and
+        need not have a suffix, so this is the row that can only be classified
+        from what the provider said.
+        """
+        chain = seed_workspace_chain(sync_conn, "w6-mime")
+        _arm_source(sync_conn, chain["src"])
+        _tick(sync_conn)
+
+        drive = ScriptedDrive(
+            [([_item("f1", kind="video", name="sunset clip", mime="video/quicktime")], None)]
+        )
+        wl, claimed = await _run_once_w6(lane_db, drive)
+        assert claimed is True and wl.processed == 1
+
+        row = _media_row(sync_conn, chain["ws"], "f1")
+        assert row is not None, "the row must exist before its columns mean anything"
+        assert row["mime"] == "video/quicktime"
+        assert row["kind"] == "video"
+        # The control: nothing about this stored name could have produced that
+        # kind, so the value can only have come from the provider.
+        assert row["file_name"] == "sunset clip"
+        assert Path(row["file_name"]).suffix == ""
+
+    @pytest.mark.asyncio
+    async def test_an_adapter_that_states_no_content_type_leaves_it_null(
+        self, lane_db, sync_conn
+    ):
+        """The column is nullable and the port does not require the key. An
+        adapter that cannot know the type must be able to say so and still
+        write a row — absent is NULL, which is exactly the row this wrote
+        before, rather than a crash or an invented default."""
+        chain = seed_workspace_chain(sync_conn, "w6-mime-absent")
+        _arm_source(sync_conn, chain["src"])
+        _tick(sync_conn)
+
+        drive = ScriptedDrive([([_item("f2", mime=None)], None)])
+        wl, claimed = await _run_once_w6(lane_db, drive)
+        assert claimed is True and wl.processed == 1
+
+        row = _media_row(sync_conn, chain["ws"], "f2")
+        assert row is not None
+        assert row["mime"] is None
+        assert row["kind"] == "image"
 
 
 class TestChunkChaining:

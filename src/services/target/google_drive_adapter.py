@@ -212,7 +212,8 @@ class GoogleDriveAdapter:
         if not file_id:
             logger.warning("drive listing returned a file with no id — skipped")
             return None
-        kind = _kind_for(entry.get("mimeType") or "")
+        mime = entry.get("mimeType") or ""
+        kind = _kind_for(mime)
         if kind is None:
             # The query already filters to image/video, so this is the provider
             # disagreeing with its own filter rather than an expected skip.
@@ -236,6 +237,15 @@ class GoogleDriveAdapter:
             "ref": file_id,
             "name": entry.get("name"),
             "kind": kind,
+            # The provider's own content type, carried rather than consumed.
+            # `kind` is the two-value `ck_media_kind` domain and is DERIVED from
+            # this; deriving and then discarding the input leaves `mime_type`
+            # — a column `054` defines and the media read already serves — NULL
+            # for every provider-sourced item, recoverable only by re-listing
+            # the folder. It is also the one classifier input that does not
+            # depend on the file NAME, which for provider media is whatever
+            # someone typed in Drive and need not carry an extension at all.
+            "mime_type": mime,
             "content_hash": content_hash,
             "size_bytes": int(entry["size"]) if entry.get("size") else None,
             "modified_at": entry.get("modifiedTime"),
