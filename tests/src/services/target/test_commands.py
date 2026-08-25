@@ -22,6 +22,11 @@ should match the doc":
    re-types it. The seams are the module attributes the port calls through
    (`tenant_resolution.authorize_member`, `webhook_ingress.admit`, `REGISTRY`),
    patched the way the rest of the tier's tests patch theirs.
+
+**What this file does NOT prove, so nobody reads its green as more than it
+is:** the executors are patched here, so no executor BODY runs. The bodies run
+in `tests/scripts/test_command_executors_gate.py` (every executor, as
+`svc_ingress`, effects read back) and in the X.2 gate.
 """
 
 from __future__ import annotations
