@@ -43,6 +43,11 @@ Every intent edge's side effects are the `02` §4 matrix rows, verbatim:
 shape `fn_clock_tick` mints the baseline one (`059:271`) — same lane, key,
 attempts — and declines to mint a second while one is pending for that
 source, since the serialization key would only queue it behind the first.
+
+Binds inside `jsonb_build_object(...)` carry an explicit `CAST(... AS text)`:
+asyncpg cannot infer a bare parameter's type there and refuses the statement
+(`IndeterminateDatatypeError`), measured on the replayed schema by the X.2
+gate — a shape psycopg2 never surfaces, so it does not show in the sync tests.
 """
 
 from __future__ import annotations
@@ -123,7 +128,7 @@ async def approve(session, command: Command) -> CommandResult:
             "INSERT INTO jobs (kind, workspace_id, lane, serialization_key, run_at,"
             " max_attempts, payload)"
             " VALUES ('publish_pipeline', :ws, 'bulk', :key, now(), 5,"
-            "         jsonb_build_object('v', 1, 'intent_id', :intent))"
+            "         jsonb_build_object('v', 1, 'intent_id', CAST(:intent AS text)))"
         ),
         {
             "ws": command.workspace_id,
@@ -296,7 +301,8 @@ async def sync_now(session, command: Command) -> CommandResult:
                 "INSERT INTO jobs (kind, workspace_id, lane, serialization_key, run_at,"
                 " max_attempts, payload)"
                 " SELECT 'sync_media_source', :ws, 'bulk', :key, now(), 5,"
-                "        jsonb_build_object('v', 1, 'source_id', :s, 'reason', 'demand')"
+                "        jsonb_build_object('v', 1, 'source_id', CAST(:s AS text),"
+                "                           'reason', 'demand')"
                 "  WHERE NOT EXISTS (SELECT 1 FROM jobs"
                 "                     WHERE serialization_key = :key"
                 "                       AND state IN ('ready', 'leased'))"
