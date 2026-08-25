@@ -8,42 +8,46 @@ swap of the legacy door's internals; sharing code between the tiers stays
 forbidden — the tiers agree on the contract, not the implementation.
 """
 
-from src.exceptions.base import StorydumpError
+from src.exceptions.base import RefusalError
 
 
-class TenantResolutionError(StorydumpError):
+class TenantResolutionError(RefusalError):
     """Inbound identity did not resolve — refused, never defaulted.
 
     ``reason`` is a closed vocabulary so callers can route without parsing
     prose: unknown_binding | revoked_binding | invalid_session |
     expired_session | revoked_session | not_a_member | insufficient_role |
+    membership_list_unreadable (the caller asked which workspaces a user
+    belongs to on a connection whose RLS filters that table — a structurally
+    partial answer, refused rather than returned; see
+    ``tenant_resolution.workspaces_for_user``) |
     unknown_channel | unprovisioned_channel (legacy-era: the deployment's
     global notification channel has no settings row — an operator condition,
     deliberately distinct from unknown_binding so no edge tells an operator
     to run /start).
     """
 
-    def __init__(self, reason: str, detail: str = ""):
-        self.reason = reason
-        super().__init__(
-            f"tenant resolution refused: {reason}" + (f" — {detail}" if detail else "")
-        )
+    _prefix = "tenant resolution refused"
 
 
-class TenantProvisioningError(StorydumpError):
+class TenantProvisioningError(RefusalError):
     """A tenant MINT was refused — provisioning, deliberately not resolution.
 
     A separate type rather than a new ``TenantResolutionError`` reason: the
     resolution vocabulary is a closed contract shared across the two tiers,
-    and a mint precondition failing (``unknown_user`` — the caller asked to
-    provision for a user row that does not exist) is not an identity failing
-    to resolve. Edges that map resolution reasons must not learn provisioning
-    by accident.
+    and a mint precondition failing is not an identity failing to resolve.
+    Edges that map resolution reasons must not learn provisioning by accident.
+
+    ``reason``: unknown_user (the caller asked to provision for a user row
+    that does not exist) | missing_owner (no owner was named at all — a
+    different fact from a user that does not exist, and an edge rendering
+    "no such user" for a blank form field is why they are not one
+    reason) | invalid_name (a blank or whitespace-only workspace name).
+
+    Deliberately NOT here: an autocommit connection. That is a caller misusing
+    the transaction substrate rather than a provisioning refusal, and it has
+    its own type (``sync_tx.TransactionRequired``) so an edge mapping these
+    reasons cannot render it as one.
     """
 
-    def __init__(self, reason: str, detail: str = ""):
-        self.reason = reason
-        super().__init__(
-            f"tenant provisioning refused: {reason}"
-            + (f" — {detail}" if detail else "")
-        )
+    _prefix = "tenant provisioning refused"
