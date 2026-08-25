@@ -45,6 +45,7 @@ from src.services.target import (
     commands,
     identity,
     invitations,
+    provisioning,
     tenant_resolution,
     workspaces,
 )
@@ -371,6 +372,97 @@ async def get_intent(
     if row is None:
         raise HTTPException(status_code=404, detail="not found")
     return row
+
+
+# --- provisioning: a destination and a source (#1041, destination half) ---
+#
+# RESOURCE-shaped and NOT `POST …/commands/{command}`, because the vocabulary
+# is closed — `01` §Interaction-layer port is its normative home and has no
+# name for either of these. `connect_account` IS in the vocabulary and is
+# deliberately still unbuilt: it is the CONNECTION (an OAuth grant through
+# Meta), not the DESTINATION, and it is milestone 2. See `provisioning`'s
+# docstring for why only the destination is on the path to a closed loop.
+#
+# Admin floor on both (`06` §4). A member may look at the accounts and sources
+# a workspace posts to and from; deciding what they are is an admin act.
+
+
+@asynccontextmanager
+async def _admin(request: Request, workspace_id: str, principal: Principal):
+    """`_member`, at the admin floor."""
+    async with _open_tenant(request, workspace_id, principal) as session:
+        await tenant_resolution.authorize_member(
+            session, workspace_id, principal.user_id, minimum_role="admin"
+        )
+        yield session
+
+
+@router.post("/workspaces/{ws}/accounts", status_code=201)
+async def create_account(
+    ws: uuid.UUID, request: Request, principal: Principal = Depends(current_principal)
+):
+    """Add a destination — the Instagram handle this workspace schedules for.
+
+    No credential and no Meta call: `ig_accounts` needs only `workspace_id` and
+    `provider_account_ref`, and a workspace with `api_publishing_enabled` false
+    (the default) publishes through a human rather than through the API.
+
+    Creating a destination SCHEDULES it: the posting cursor is seeded so the
+    clock can see the row at all (`provisioning.create_destination` explains
+    why nothing else ever seeds it). What that starts is intents awaiting
+    approval, not posts. Pass ``{"schedule": false}`` for a parked destination.
+
+    Idempotent on the handle: adding one that is already a destination returns
+    the existing row with ``created: false`` rather than a second schedule
+    against one real feed.
+    """
+    body = await _json_object(request)
+    schedule = body.get("schedule", True)
+    if not isinstance(schedule, bool):
+        raise HTTPException(status_code=400, detail="schedule must be a boolean")
+    handle = body.get("handle")
+    async with _admin(request, str(ws), principal) as session:
+        account_id, created = await provisioning.create_destination(
+            session,
+            workspace_id=str(ws),
+            provider_account_ref=body.get("provider_account_ref"),
+            handle=handle if isinstance(handle, str) and handle.strip() else None,
+            schedule=schedule,
+        )
+    return JSONResponse(
+        status_code=201 if created else 200,
+        content={"account_id": account_id, "created": created, "scheduled": schedule},
+    )
+
+
+@router.post("/workspaces/{ws}/sources", status_code=201)
+async def create_source(
+    ws: uuid.UUID, request: Request, principal: Principal = Depends(current_principal)
+):
+    """Add a Drive media source from a folder the person names.
+
+    `ck_sources_provider` is closed to `gdrive` and `media_items.source_id` is
+    NOT NULL, so every media item hangs off a source of this shape. Reading the
+    folder is the Drive seam (#982) and is a separate build; this writes the
+    row that build will consume.
+
+    Idempotent on the folder, atomically — see
+    `provisioning.get_or_create_media_source` for why that needs a lock rather
+    than an `ON CONFLICT`.
+    """
+    body = await _json_object(request)
+    name = body.get("root_name")
+    async with _admin(request, str(ws), principal) as session:
+        source_id, created = await provisioning.get_or_create_media_source(
+            session,
+            workspace_id=str(ws),
+            folder_ref=body.get("folder_ref"),
+            root_name=name if isinstance(name, str) and name.strip() else None,
+        )
+    return JSONResponse(
+        status_code=201 if created else 200,
+        content={"source_id": source_id, "created": created},
+    )
 
 
 # --- commands -----------------------------------------------------------
