@@ -19,8 +19,10 @@ What it mounts, and why each lives where it does:
   is visible from the probe instead of only from the first request.
 
 What deliberately does not exist any more: the legacy ``/auth`` OAuth router,
-the ``/api/onboarding`` router and its Mini App (`/webapp/onboarding`,
-`/static`), all of which read the legacy schema that M.3 froze; the in-memory
+the ``/api/onboarding`` router and its Mini App (`/static`; the Mini App's
+own URL, `/webapp/onboarding`, stays answered — as a redirect to the front
+end, because buttons already sent still navigate there — see
+`routes/retired.py`), all of which read the legacy schema that M.3 froze; the in-memory
 SlowAPI limiter — a process-local mutable singleton (`01` §"what deliberately
 does not exist") — whose only job now, pre-auth admission, is the durable
 `rate_counters` ``preauth_ip`` scope (`02` §6, `05`) inside the auth routes.
@@ -47,6 +49,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from src.api.routes.auth import router as auth_router
+from src.api.routes.retired import router as retired_router
 from src.api.routes.v1 import IDEMPOTENCY_HEADER
 from src.api.routes.v1 import router as v1_router
 from src.api.routes.webhooks import router as webhooks_router
@@ -297,6 +300,9 @@ def create_app(
     app.include_router(auth_router, prefix="/auth")
     app.include_router(v1_router, prefix="/api/v1")
     app.include_router(webhooks_router, prefix="/webhooks")
+    # The Mini App's URL is baked into buttons real users still hold; it
+    # redirects rather than 404s (`routes/retired.py`).
+    app.include_router(retired_router)
 
     @app.get("/health")
     async def health_check():
