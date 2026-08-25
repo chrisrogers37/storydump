@@ -208,15 +208,6 @@ class Settings(BaseSettings):
     # therefore two deliberate acts -- set this, then register -- not one.
     TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN: Optional[str] = None
 
-    # Web-session credential signing secret (#1015). Deliberately NOT derived
-    # from TELEGRAM_BOT_TOKEN: a user with no Telegram identity must not have
-    # their session depend on a Telegram secret. Optional and absent by default,
-    # and the absence is load-bearing the same way the webhook secret's is --
-    # webapp_auth._web_token_key refuses on an unset value, so a deployment that
-    # has not configured one mints and accepts nothing rather than signing every
-    # credential with the same empty key.
-    WEB_TOKEN_SECRET: Optional[str] = None
-
     # Number of Telegram updates processed concurrently (PTB
     # Application.concurrent_updates). Each concurrent callback runs in its own
     # asyncio Task with its own per-task DB session (see BaseRepository), so this

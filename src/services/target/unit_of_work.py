@@ -254,7 +254,7 @@ class UnitOfWork:
 async def apply_gucs(
     executor,
     *,
-    tenant_id: str,
+    tenant_id: Optional[str],
     actor_kind: Optional[str] = None,
     actor_user_id: Optional[str] = None,
     channel: Optional[str] = None,
@@ -263,6 +263,14 @@ async def apply_gucs(
     invariant, shared by the UoW and by raw-connection transactions (the §6
     permit path). *executor* is anything with ``.execute`` (AsyncSession or
     AsyncConnection).
+
+    *tenant_id* ``None`` is a USER-PLANE transaction (#1028): the actor GUCs
+    are set and no tenant is claimed. That is the shape of identity writes and
+    of a `SECURITY DEFINER` door that resolves the tenant itself
+    (`fn_invitation_accept`); under RLS every tenant table then reads empty,
+    which is the fail-closed answer, and the UoW itself still refuses to be
+    constructed without a tenant. Kept here rather than as a second helper so
+    the ``is_local`` spelling below stays the only one.
 
     LOCAL (`is_local=true`) rather than SESSION is what makes pool reuse safe:
     the value dies with the transaction, so the next task to borrow the
@@ -276,10 +284,11 @@ async def apply_gucs(
     so no provider call can happen inside it — named here because this is
     where the next reader will look.
     """
-    await executor.execute(
-        text("SELECT set_config('app.tenant_id', :v, true)"),
-        {"v": tenant_id},
-    )
+    if tenant_id is not None:
+        await executor.execute(
+            text("SELECT set_config('app.tenant_id', :v, true)"),
+            {"v": tenant_id},
+        )
     for name, value in (
         ("app.actor_kind", actor_kind),
         ("app.actor_user_id", actor_user_id),

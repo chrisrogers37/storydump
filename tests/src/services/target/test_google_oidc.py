@@ -1,0 +1,222 @@
+"""Google sign-in — the three legs, unit-gated at zero network cost.
+
+The claim checks are the load-bearing half: OIDC Core §3.1.3.7's `iss`,
+`aud`, `exp`, `nonce` and `sub` each refused by name, and the email only
+carried when Google marked it verified (D32: identity keys on `sub`; the
+email is metadata). The exchange is driven through the egress seam so the
+request shape — endpoint, grant type, redirect URI — is pinned without a
+provider call.
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+import time
+from urllib.parse import parse_qs, urlsplit
+
+import httpx
+import pytest
+
+from src.services.target import google_oidc as oidc
+
+CLIENT_ID = "cid.apps.googleusercontent.com"
+STATE = "state-abc"
+
+
+def _jwt(payload: dict) -> str:
+    seg = lambda o: base64.urlsafe_b64encode(json.dumps(o).encode()).rstrip(b"=")  # noqa: E731
+    return b".".join([seg({"alg": "RS256"}), seg(payload), b"sig"]).decode()
+
+
+def _claims(**over) -> dict:
+    now = int(time.time())
+    base = {
+        "iss": "https://accounts.google.com",
+        "aud": CLIENT_ID,
+        "exp": now + 300,
+        "iat": now - 5,
+        "nonce": oidc.nonce_for(STATE),
+        "sub": "1234567890",
+        "email": "Person@Example.com",
+        "email_verified": True,
+        "name": "Person",
+    }
+    base.update(over)
+    return base
+
+
+class TestAuthorizationUrl:
+    def test_carries_state_and_a_derived_nonce(self):
+        url = oidc.authorization_url(
+            client_id=CLIENT_ID,
+            redirect_uri="https://api.test/auth/google/callback",
+            state=STATE,
+        )
+        parts = urlsplit(url)
+        assert parts.scheme == "https" and parts.netloc == "accounts.google.com"
+        q = parse_qs(parts.query)
+        assert q["response_type"] == ["code"]
+        assert q["client_id"] == [CLIENT_ID]
+        assert q["redirect_uri"] == ["https://api.test/auth/google/callback"]
+        assert q["state"] == [STATE]
+        assert q["nonce"] == [oidc.nonce_for(STATE)]
+        assert set(q["scope"][0].split()) == {"openid", "email", "profile"}
+
+    def test_nonce_is_a_pure_function_of_the_state(self):
+        assert oidc.nonce_for(STATE) == oidc.nonce_for(STATE)
+        assert oidc.nonce_for(STATE) != oidc.nonce_for(STATE + "x")
+
+
+class TestVerifyIdToken:
+    def test_accepts_a_good_token_and_lowercases_the_verified_email(self):
+        who = oidc.verify_id_token(
+            _claims(), client_id=CLIENT_ID, nonce=oidc.nonce_for(STATE)
+        )
+        assert who.sub == "1234567890"
+        assert who.email == "person@example.com"
+        assert who.display_name == "Person"
+
+    def test_both_issuer_spellings_are_google(self):
+        for iss in ("https://accounts.google.com", "accounts.google.com"):
+            oidc.verify_id_token(
+                _claims(iss=iss), client_id=CLIENT_ID, nonce=oidc.nonce_for(STATE)
+            )
+
+    def test_unverified_email_is_dropped_not_trusted(self):
+        who = oidc.verify_id_token(
+            _claims(email_verified=False),
+            client_id=CLIENT_ID,
+            nonce=oidc.nonce_for(STATE),
+        )
+        assert who.email is None
+        assert who.sub == "1234567890"
+
+    def test_audience_may_be_a_list(self):
+        who = oidc.verify_id_token(
+            _claims(aud=["other", CLIENT_ID]),
+            client_id=CLIENT_ID,
+            nonce=oidc.nonce_for(STATE),
+        )
+        assert who.sub
+
+    @pytest.mark.parametrize(
+        "over, reason",
+        [
+            ({"iss": "https://evil.example"}, "issuer"),
+            ({"aud": "someone-else"}, "audience"),
+            ({"exp": int(time.time()) - 3600}, "expired"),
+            ({"iat": int(time.time()) + 3600}, "future"),
+            ({"nonce": "not-ours"}, "nonce"),
+            ({"nonce": None}, "nonce"),
+            ({"sub": ""}, "subject"),
+            ({"sub": None}, "subject"),
+        ],
+    )
+    def test_each_claim_is_refused_by_name(self, over, reason):
+        with pytest.raises(oidc.OidcRefused) as exc:
+            oidc.verify_id_token(
+                _claims(**over), client_id=CLIENT_ID, nonce=oidc.nonce_for(STATE)
+            )
+        assert exc.value.reason == reason
+
+    def test_skew_tolerance_is_bounded(self):
+        now = 1_000_000
+        oidc.verify_id_token(
+            _claims(exp=now - oidc.CLOCK_SKEW_SECONDS + 1, iat=now - 10),
+            client_id=CLIENT_ID,
+            nonce=oidc.nonce_for(STATE),
+            now=now,
+        )
+        with pytest.raises(oidc.OidcRefused):
+            oidc.verify_id_token(
+                _claims(exp=now - oidc.CLOCK_SKEW_SECONDS - 1, iat=now - 10),
+                client_id=CLIENT_ID,
+                nonce=oidc.nonce_for(STATE),
+                now=now,
+            )
+
+
+class TestDecodeIdToken:
+    def test_round_trips_the_payload(self):
+        assert oidc.decode_id_token(_jwt({"sub": "x"})) == {"sub": "x"}
+
+    @pytest.mark.parametrize(
+        "token",
+        [
+            "",
+            "a.b",
+            "a.b.c.d",
+            "a.!!!.c",
+            "a." + base64.urlsafe_b64encode(b"[1]").decode() + ".c",
+        ],
+    )
+    def test_malformed_is_refused(self, token):
+        with pytest.raises(oidc.OidcRefused) as exc:
+            oidc.decode_id_token(token)
+        assert exc.value.reason == "malformed_id_token"
+
+
+class TestExchangeCode:
+    """Driven through the egress seam: the request shape is the contract."""
+
+    @staticmethod
+    def _capture(status=200, body=None):
+        seen = {}
+
+        async def fake_request(client, method, url, *, policy=None, **kwargs):
+            seen.update(method=method, url=url, policy=policy, **kwargs)
+            content = json.dumps({"id_token": "tok"} if body is None else body).encode()
+            return httpx.Response(
+                status, content=content, headers={"content-type": "application/json"}
+            )
+
+        return seen, fake_request
+
+    async def test_posts_the_code_grant_to_the_token_endpoint(self):
+        seen, fake = self._capture()
+        got = await oidc.exchange_code(
+            None,
+            code="c0de",
+            redirect_uri="https://api.test/auth/google/callback",
+            client_id=CLIENT_ID,
+            client_secret="s3cret",
+            egress_request=fake,
+        )
+        assert got == "tok"
+        assert (seen["method"], seen["url"]) == ("POST", oidc.TOKEN_URL)
+        assert seen["data"]["grant_type"] == "authorization_code"
+        assert seen["data"]["code"] == "c0de"
+        assert seen["data"]["redirect_uri"] == "https://api.test/auth/google/callback"
+        assert seen["policy"].timeout_class == "standard"
+
+    async def test_token_endpoint_error_is_refused_by_name(self):
+        _, fake = self._capture(status=400, body={"error": "invalid_grant"})
+        with pytest.raises(oidc.OidcRefused) as exc:
+            await oidc.exchange_code(
+                None,
+                code="c",
+                redirect_uri="r",
+                client_id="i",
+                client_secret="s",
+                egress_request=fake,
+            )
+        assert exc.value.reason == "exchange_failed"
+
+    async def test_a_response_without_an_id_token_is_refused(self):
+        _, fake = self._capture(body={"access_token": "only"})
+        with pytest.raises(oidc.OidcRefused) as exc:
+            await oidc.exchange_code(
+                None,
+                code="c",
+                redirect_uri="r",
+                client_id="i",
+                client_secret="s",
+                egress_request=fake,
+            )
+        assert exc.value.reason == "no_id_token"
+
+    def test_the_token_host_needs_no_allowlist_widening(self):
+        from src.services.target.egress import DEFAULT_ALLOWED_HOSTS
+
+        assert urlsplit(oidc.TOKEN_URL).hostname in DEFAULT_ALLOWED_HOSTS
