@@ -140,15 +140,55 @@ export type SourcesResponse = { sources: SourceRow[] };
 export const HISTORY_STATES = "posted,skipped,rejected";
 
 /**
- * What a queue means: everything before a terminal outcome.
+ * What a queue means: everything before a terminal outcome — all seven.
  *
  * #1044 classifies `queue-detail` as `intents?state=` without naming the set,
- * so this list is MINE and is stated rather than buried — the pre-terminal
- * members of `INTENT_STATES`. `publishing` and `publishing_ambiguous` are in
- * flight rather than queued and are deliberately excluded; if that is wrong it
- * is a one-line correction here and nowhere else.
+ * so this list is MINE. The previous version stated that rule and then broke
+ * it: `publishing`/`publishing_ambiguous` were excluded by name and
+ * `review_required` silently, so "In Queue" undercounted by exactly the number
+ * of stuck intents — a plain label, a confident number, no footnote. A card
+ * that undercounts without disclosing is worse than one that errors, because
+ * nothing on the page invites the reader to doubt it.
+ *
+ * The gap is now ABSENT rather than merely documented: definition and contents
+ * agree, and `intent-states-contract.test.ts` reads the API's own
+ * `INTENT_STATES` and fails unless QUEUE and TERMINAL together account for
+ * every member. Documenting an exclusion only helps a reader of THIS file; the
+ * undercount was read on the dashboard.
+ *
+ * The distinction that `publishing` is "in flight rather than queued" is real,
+ * but it is not one the label "In Queue" draws for a reader, and holding it
+ * cost a wrong number. If the queue should ever exclude a non-terminal state
+ * again, the contract test makes that a deliberate, visible edit.
  */
-export const QUEUE_STATES = "scheduled,prompt_pending,awaiting_approval,approved";
+export const QUEUE_STATES =
+  "scheduled,prompt_pending,awaiting_approval,approved," +
+  "publishing,publishing_ambiguous,review_required";
+
+/**
+ * The terminal outcomes — the other half of the partition. Migration `055`
+ * labels these `TERMINAL` in `ck_intent_state` itself, so this is the schema's
+ * classification rather than one invented here.
+ *
+ * Deliberately a SUPERSET of `HISTORY_STATES`: `expired`, `failed` and
+ * `cancelled` are terminal but are not shown on the history tab, which is
+ * #1044's call and not this file's. Naming them here is what lets the contract
+ * test account for all thirteen states rather than for thirteen minus whatever
+ * the history tab happens to render.
+ */
+export const TERMINAL_STATES =
+  "posted,skipped,rejected,expired,failed,cancelled";
+
+/**
+ * The one queue member an operator has to act on personally.
+ *
+ * Named because the calendar surfaces it separately when non-zero: it is
+ * reached via the G5 poison ladder once publish retries exhaust, it is
+ * operator-owned, and it does not clear itself. Counting it is necessary but
+ * not sufficient — a stuck intent folded anonymously into a queue depth is
+ * accurate and still tells nobody to go and look at it.
+ */
+export const REVIEW_REQUIRED_STATE = "review_required";
 
 /** The schedule strip: only what has a slot. #1044 names this one. */
 export const SCHEDULED_STATES = "scheduled";

@@ -1,8 +1,5 @@
 import { describe, it, expect } from "vitest";
 import {
-  HISTORY_STATES,
-  QUEUE_STATES,
-  SCHEDULED_STATES,
   deriveCategories,
   derivePoolHealth,
   deriveSummary,
@@ -156,39 +153,17 @@ describe("the contested figures stay withheld", () => {
 });
 
 /**
- * The state sets are sent to a route that validates against the closed
- * `ck_intent_state` vocabulary — an unknown member is a 422, so a typo here is
- * a broken screen rather than a quietly short list.
+ * The state sets moved to `intent-states-contract.test.ts`.
+ *
+ * What used to live here was a hand-written copy of the thirteen-member
+ * vocabulary plus two assertions over it — and the copy is the reason it had
+ * to go. It restated a Python tuple in TypeScript, which is the third-copy
+ * problem `session-cookie-contract.test.ts` was written to end, and its own
+ * terminal list had already drifted: it omitted `failed`.
+ *
+ * The assertions were also the wrong shape. Membership ("every name is real")
+ * and one-way exclusion ("no terminal state is queued") both pass with a
+ * non-terminal state missing from the queue entirely, which is exactly the
+ * defect that shipped. The replacement asserts EXHAUSTIVENESS against the
+ * API's own constant, so a set that is valid but short fails loudly.
  */
-describe("the intent state sets", () => {
-  const VOCABULARY = new Set([
-    "scheduled",
-    "prompt_pending",
-    "awaiting_approval",
-    "approved",
-    "publishing",
-    "publishing_ambiguous",
-    "review_required",
-    "posted",
-    "skipped",
-    "rejected",
-    "expired",
-    "failed",
-    "cancelled",
-  ]);
-
-  it("names only real states", () => {
-    for (const set of [HISTORY_STATES, QUEUE_STATES, SCHEDULED_STATES]) {
-      for (const state of set.split(",")) {
-        expect(VOCABULARY.has(state), `${state} in "${set}"`).toBe(true);
-      }
-    }
-  });
-
-  it("does not put a terminal state in the queue", () => {
-    const terminal = ["posted", "skipped", "rejected", "expired", "cancelled"];
-    for (const state of QUEUE_STATES.split(",")) {
-      expect(terminal, `${state} is terminal`).not.toContain(state);
-    }
-  });
-});

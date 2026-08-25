@@ -4,6 +4,7 @@ import { workspaceFetch } from "@/lib/workspaces";
 import {
   HISTORY_STATES,
   QUEUE_STATES,
+  REVIEW_REQUIRED_STATE,
   SCHEDULED_STATES,
   type IntentRow,
   type IntentsResponse,
@@ -99,6 +100,10 @@ export default async function CalendarPage() {
     (a, s) => a + (stats.intents_by_state?.[s] ?? 0),
     0,
   );
+  // Counted in the total above AND named here. Surfaced only above zero: a
+  // permanent "0 need review" line is noise on every healthy workspace, and
+  // the operator action it points at does not exist at zero.
+  const needsReview = stats.intents_by_state?.[REVIEW_REQUIRED_STATE] ?? 0;
 
   // Derived from the workspace's own config rather than served: the posting
   // window divided by the daily target. Null config means no answer, not zero.
@@ -133,6 +138,13 @@ export default async function CalendarPage() {
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold">{inFlight}</div>
+            {needsReview > 0 && (
+              <p className="mt-1 text-xs text-muted-foreground">
+                {needsReview === 1
+                  ? "1 needs review"
+                  : `${needsReview} need review`}
+              </p>
+            )}
           </CardContent>
         </Card>
         <Card>
