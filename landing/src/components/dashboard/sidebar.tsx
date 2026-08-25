@@ -7,6 +7,7 @@ import {
   CalendarDays,
   ImageIcon,
   LayoutDashboard,
+  ListChecks,
   Settings,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -14,6 +15,7 @@ import { siteConfig } from "@/config/site";
 
 const navItems = [
   { href: "/dashboard", label: "Overview", icon: LayoutDashboard },
+  { href: "/dashboard/queue", label: "Queue", icon: ListChecks },
   { href: "/dashboard/media", label: "Media Library", icon: ImageIcon },
   { href: "/dashboard/media/calendar", label: "Calendar", icon: CalendarDays },
   { href: "/dashboard/settings", label: "Settings", icon: Settings },

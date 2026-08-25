@@ -47,15 +47,6 @@ from src.services.target.unit_of_work import apply_gucs
 #: `workspaces.name` is VARCHAR(100).
 NAME_MAX = 100
 
-#: INTERIM, ratified by Chris (#1033): a new workspace starts in
-#: `approval_mode = 'auto'` so the core loop closes without an approvals
-#: surface — the column's own default is 'manual' (`053:136`), and a
-#: Google-only workspace has no channel to approve on until the web approvals
-#: surface lands. #1033 records that this must be REVERTED when it does; the
-#: X.2 gate pins the value so the revert is a deliberate test flip. A
-#: workspace can still be switched to 'manual' per `settings_change`.
-INTERIM_APPROVAL_MODE = "auto"
-
 #: The typed product-configuration columns (`02` §1) a `settings_change` may
 #: touch, with the Python type each accepts. The database CHECKs bound the
 #: values; this table bounds the KEYS.
@@ -148,12 +139,10 @@ async def create_workspace(
         )
     await _write(
         executor,
-        "INSERT INTO workspaces (id, name, tz, approval_mode)"
-        " VALUES (:id, :name, COALESCE(:tz, 'UTC'), :mode)",
+        "INSERT INTO workspaces (id, name, tz) VALUES (:id, :name, COALESCE(:tz, 'UTC'))",
         id=ws_id,
         name=name,
         tz=tz,
-        mode=INTERIM_APPROVAL_MODE,
     )
     await executor.execute(
         text(
@@ -267,11 +256,21 @@ INTENT_STATES: tuple[str, ...] = (
 #: `ck_media_state`.
 MEDIA_STATES: tuple[str, ...] = ("available", "unsupported", "removed")
 
+#: The intent row plus the two joins the queue renders it with: the media it
+#: posts, and the account it posts to (`06` §3 — the handle is how a person
+#: recognises the row; NULL when the account carries none, never absent).
 _INTENT_COLUMNS = (
     "i.id, i.state, i.ig_account_id, i.media_item_id, i.schedule_slot_at,"
     " i.approval_mode, i.published_via, i.publish_step, i.cancel_requested,"
     " i.ig_permalink, i.entered_state_at, i.created_at,"
-    " m.file_name, m.media_kind, m.thumbnail_url, m.caption, m.category"
+    " m.file_name, m.media_kind, m.thumbnail_url, m.caption, m.category,"
+    " a.handle AS account_handle, a.display_name AS account_display_name"
+)
+
+_INTENT_FROM = (
+    "  FROM post_intents i"
+    "  JOIN media_items m ON m.workspace_id = i.workspace_id AND m.id = i.media_item_id"
+    "  JOIN ig_accounts a ON a.workspace_id = i.workspace_id AND a.id = i.ig_account_id"
 )
 
 _MEDIA_COLUMNS = (
@@ -299,10 +298,7 @@ async def list_intents(
         params["states"] = list(states)
     return await readers.rows(
         executor,
-        f"SELECT {_INTENT_COLUMNS}"
-        "  FROM post_intents i"
-        "  JOIN media_items m ON m.workspace_id = i.workspace_id AND m.id = i.media_item_id"
-        f" WHERE {where}"
+        f"SELECT {_INTENT_COLUMNS}{_INTENT_FROM} WHERE {where}"
         " ORDER BY i.schedule_slot_at, i.id LIMIT :lim",
         **params,
     )
@@ -421,11 +417,7 @@ async def get_intent(executor, *, workspace_id: str, intent_id: str) -> Optional
     """One intent — always its CURRENT state (R6: terminal-state-first)."""
     return await readers.row(
         executor,
-        f"SELECT {_INTENT_COLUMNS}"
-        "  FROM post_intents i"
-        "  JOIN media_items m ON m.workspace_id = i.workspace_id"
-        "   AND m.id = i.media_item_id"
-        " WHERE i.workspace_id = :ws AND i.id = :id",
+        f"SELECT {_INTENT_COLUMNS}{_INTENT_FROM} WHERE i.workspace_id = :ws AND i.id = :id",
         ws=str(workspace_id),
         id=str(intent_id),
     )

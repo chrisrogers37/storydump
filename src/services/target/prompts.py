@@ -20,17 +20,19 @@ parses them is the W4 increment, gated on #854.
 `prompt_intent` implements the `02` §4 `scheduled → prompt_pending` edge:
 the transition commits in the SAME transaction as its outbox rows ("outbox
 rows created for active push bindings, same tx"), one card per active push
-binding. The advance and failure edges are implemented on their FIRST
-disjunct only: the spec's `prompt_pending → awaiting_approval` reads
-"delivered on ≥ 1 binding, **or** workspace has web access" and `→ failed`
-mirrors it — the web-access disjunct has no referent anywhere in schema or
-code today (it arrives with X.2's web surface), so the sweep advances and
-fails on delivery evidence alone. Stated here the same way the auto-mode
-and photo-preview deferrals are, so the narrowing is a decision on the
-record, not an overclaim. No active push binding → no transition at all: an intent parked in
-`prompt_pending` with no card anywhere would be unreachable by any tap, so
-the no-surface case stays `scheduled` for a later sweep to retry or the
-reaper to expire.
+binding — and the transition happens whether or not a binding exists. The
+advance edge, `prompt_pending → awaiting_approval`, reads "delivered on ≥ 1
+binding, **or** workspace has web access": since the web queue (#1033)
+every workspace has web access by construction, so the second disjunct is
+always true and the sweep advances every `prompt_pending` intent in the
+same pass, on no delivery evidence at all. Two consequences, both
+deliberate. A workspace with no push binding — the Google-only workspace
+milestone 1 exists for — still reaches `awaiting_approval` and simply gets
+no card; before #1033 its intents never left `scheduled` and the reaper
+expired them. And `prompt_pending → failed` ("no reachable surface") has no
+producer any more: an intent whose every card failed is still actionable on
+the web until a person acts or `approval_ttl` expires it. That edge stays
+seeded in `055`; nothing drives it.
 """
 
 from __future__ import annotations
@@ -118,12 +120,14 @@ def render_card(intent: dict, *, api_publishing_enabled: bool) -> dict:
 
 async def prompt_intent(session, intent_row: dict, bindings: list) -> list:
     """`scheduled → prompt_pending` + one card per active push binding, in
-    the CALLER's transaction. Returns the outbox row ids (empty when there is
-    no surface to prompt on — in which case no transition happened either).
+    the CALLER's transaction. Returns the outbox row ids — empty when there
+    is no push binding, in which case the transition still happened: the web
+    queue is the surface (module docstring).
     """
+    intent_id = str(intent_row["id"])
+    await intent_ledger.transition(session, intent_id, "prompt_pending")
     if not bindings:
         return []
-    intent_id = str(intent_row["id"])
     payload = render_card(
         {
             "intent_id": intent_id,
@@ -134,7 +138,6 @@ async def prompt_intent(session, intent_row: dict, bindings: list) -> list:
         },
         api_publishing_enabled=bool(intent_row.get("api_publishing_enabled")),
     )
-    await intent_ledger.transition(session, intent_id, "prompt_pending")
     out_ids = []
     for binding in bindings:
         out_ids.append(
@@ -176,20 +179,21 @@ async def push_bindings(session, workspace_id: str) -> list[str]:
 
 async def sweep_due_prompts(session, *, limit: int = 50) -> dict:
     """The prompt sweep — the `02` §4 matrix legs, idempotent, in the
-    caller's transaction. Three legs, three counts:
+    caller's transaction. Two legs, two counts:
 
     - ``prompted``: due `scheduled` intents (slot arrived, workspace active
       and unpaused) gain their transition + cards via :func:`prompt_intent`.
       This is also the correctness backstop for the fast path in the
       `plan_slot` adapter — an intent minted before this module existed, or
       whose prompt crashed mid-way, is picked up here.
-    - ``advanced``: `prompt_pending` intents with ≥1 SENT card move to
-      `awaiting_approval` ("prompt delivered on ≥ 1 binding"). The guard
-      makes a lost race benign.
-    - ``failed_no_surface``: `prompt_pending` intents whose cards exist and
-      ALL landed `failed` move to `failed` ("no reachable surface").
+    - ``advanced``: every `prompt_pending` intent moves to
+      `awaiting_approval` — "prompt delivered on ≥ 1 binding, or workspace
+      has web access", and web access is universal (module docstring), so
+      this leg runs in the same pass as ``prompted`` and an intent is
+      actionable the moment it is prompted. The guard makes a lost race
+      benign.
     """
-    counts = {"prompted": 0, "advanced": 0, "failed_no_surface": 0}
+    counts = {"prompted": 0, "advanced": 0}
 
     due = (
         (
@@ -213,11 +217,8 @@ async def sweep_due_prompts(session, *, limit: int = 50) -> dict:
     )
     for row in due:
         binding_ids = await push_bindings(session, str(row["workspace_id"]))
-        minted = await prompt_intent(
-            session, dict(row), [{"id": b} for b in binding_ids]
-        )
-        if minted:
-            counts["prompted"] += 1
+        await prompt_intent(session, dict(row), [{"id": b} for b in binding_ids])
+        counts["prompted"] += 1
 
     advanced = (
         (
@@ -225,10 +226,6 @@ async def sweep_due_prompts(session, *, limit: int = 50) -> dict:
                 text(
                     "SELECT i.id FROM post_intents i"
                     " WHERE i.state = 'prompt_pending'"
-                    "   AND EXISTS (SELECT 1 FROM channel_outbox o"
-                    "                WHERE o.intent_id = i.id"
-                    "                  AND o.kind = 'approval_prompt'"
-                    "                  AND o.state = 'sent')"
                     " LIMIT :lim"
                 ),
                 {"lim": limit},
@@ -243,33 +240,5 @@ async def sweep_due_prompts(session, *, limit: int = 50) -> dict:
             counts["advanced"] += 1
         except intent_ledger.IntentTransitionRefused:
             pass  # raced by the fast path — the state is already right
-
-    dead = (
-        (
-            await session.execute(
-                text(
-                    "SELECT i.id FROM post_intents i"
-                    " WHERE i.state = 'prompt_pending'"
-                    "   AND EXISTS (SELECT 1 FROM channel_outbox o"
-                    "                WHERE o.intent_id = i.id"
-                    "                  AND o.kind = 'approval_prompt')"
-                    "   AND NOT EXISTS (SELECT 1 FROM channel_outbox o"
-                    "                    WHERE o.intent_id = i.id"
-                    "                      AND o.kind = 'approval_prompt'"
-                    "                      AND o.state <> 'failed')"
-                    " LIMIT :lim"
-                ),
-                {"lim": limit},
-            )
-        )
-        .scalars()
-        .all()
-    )
-    for intent_id in dead:
-        try:
-            await intent_ledger.transition(session, str(intent_id), "failed")
-            counts["failed_no_surface"] += 1
-        except intent_ledger.IntentTransitionRefused:
-            pass
 
     return counts

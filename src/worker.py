@@ -260,10 +260,11 @@ class SenderSweeper:
 
 
 class PromptSweeper:
-    """The W3 prompt sweep on its own cadence: due intents gain cards,
-    delivered cards advance their intents, dead cards fail them. Counters
-    ride the status line — the same absence-is-failure control the sender
-    sweeper carries. Runs regardless of channel state: cards enqueued while
+    """The W3 prompt sweep on its own cadence: due intents gain their cards
+    and advance to `awaiting_approval` in the same pass — the web queue is a
+    surface every workspace has (#1033), so delivery is not what gates the
+    edge. Counters ride the status line — the same absence-is-failure
+    control the sender sweeper carries. Runs regardless of channel state: cards enqueued while
     the transport is parked simply wait as `pending` rows."""
 
     def __init__(self, app: "WorkerApp"):
@@ -271,7 +272,6 @@ class PromptSweeper:
         self.sweeps = 0
         self.prompted = 0
         self.advanced = 0
-        self.failed_no_surface = 0
 
     async def run(self, stop: asyncio.Event) -> None:
         maker = async_sessionmaker(self._app.engine, expire_on_commit=False)
@@ -286,7 +286,6 @@ class PromptSweeper:
                         counts = await prompts_mod.sweep_due_prompts(session, limit=50)
                 self.prompted += counts["prompted"]
                 self.advanced += counts["advanced"]
-                self.failed_no_surface += counts["failed_no_surface"]
             except Exception:  # noqa: BLE001 — outlive a blip, loudly
                 logger.exception("prompt sweep failed; retrying on cadence")
             await jobs.wait_or_stop(stop, self._app.config.prompt_sweep_seconds)

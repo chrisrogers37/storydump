@@ -271,14 +271,14 @@ def test_x2_gate_web_only_approval_as_svc_ingress(
                 "SELECT count(*) FROM jobs WHERE workspace_id = %s AND kind = 'publish_pipeline'",
                 (ws,),
             ) == (1,)
-            # create-1, settings-1, approve-1 — and NEITHER approve-0 NOR
-            # settings-0: a refused command rolled back with its dedup row, so
-            # its key is free to retry. That is the one-transaction property,
-            # measured.
+            # create-1, settings-1, approve-1, mark_posted:<by_hand> — and
+            # NEITHER approve-0 NOR settings-0: a refused command rolled back
+            # with its dedup row, so its key is free to retry. That is the
+            # one-transaction property, measured.
             assert fetch_one(
                 world["stream"],
                 "SELECT count(*) FROM command_dedup WHERE channel = 'web'",
-            ) == (3,)
+            ) == (4,)
 
     _run(main())
 

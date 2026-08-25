@@ -101,3 +101,41 @@ describe("error bodies", () => {
     expect(JSON.stringify(result)).not.toContain("eyJhbGciOi");
   });
 });
+
+describe("a command refusal", () => {
+  it("surfaces the port's `reason` as the reason code — the refusal envelope is {detail, reason}, not {error}", async () => {
+    stubFetch(async () => new Response(
+      JSON.stringify({ detail: "this workspace publishes manually; use mark_posted after posting by hand", reason: "manual_mode" }),
+      { status: 409, headers: { "Content-Type": "application/json" } },
+    ));
+
+    const result = await targetFetch("/workspaces/ws/commands/approve", "tok", { method: "POST" });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("unreachable");
+    // Without this the queue would render every 409 as `http_409` and could
+    // not tell "already acted on" from "use Posted myself" — two different
+    // sentences with two different next moves.
+    expect(result.status).toBe(409);
+    expect(result.error).toBe("manual_mode");
+  });
+
+  it("still prefers `error` when a body carries both, and still refuses a reason that is not a plain code", async () => {
+    stubFetch(async () => new Response(
+      JSON.stringify({ error: "invitation_expired", reason: "manual_mode" }),
+      { status: 409, headers: { "Content-Type": "application/json" } },
+    ));
+    const both = await targetFetch("/x", "tok");
+    if (both.ok) throw new Error("unreachable");
+    expect(both.error).toBe("invitation_expired");
+
+    stubFetch(async () => new Response(
+      JSON.stringify({ detail: "x", reason: "Bearer eyJhbGciOi..." }),
+      { status: 409, headers: { "Content-Type": "application/json" } },
+    ));
+    const odd = await targetFetch("/x", "tok");
+    if (odd.ok) throw new Error("unreachable");
+    expect(odd.error).toBe("http_409");
+    expect(JSON.stringify(odd)).not.toContain("eyJhbGciOi");
+  });
+});
