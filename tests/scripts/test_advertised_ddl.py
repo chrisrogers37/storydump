@@ -267,10 +267,11 @@ class TestAgainstTheRealDocs:
         manifest = load_manifest(DEFAULT_MANIFEST)
         classes = [e.class_ for e in manifest.blocks]
 
-        # 21, not 20: `07` §9 adds the #982 refresh-leg provider guard
-        # (migration 063), after the #942 reauth-prompt leg (062) made it 20
-        # and §8's #883 guard (061) made it 19.
-        assert classes.count("normative") == 21
+        # 22, not 21: `07` §10 adds the #1037 memberships door (migration
+        # 064), after §9's #982 refresh-leg provider guard (063) made it 21,
+        # the #942 reauth-prompt leg (062) made it 20 and §8's #883 guard
+        # (061) made it 19.
+        assert classes.count("normative") == 22
         assert classes.count("illustrative") == 4
 
     def test_real_stream_expands_the_fifteen_policies(self):
