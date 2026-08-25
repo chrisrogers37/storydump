@@ -1,6 +1,12 @@
 import { redirect } from "next/navigation";
 import { getSession } from "@/lib/session";
-import { backendFetchJson } from "@/lib/backend";
+import { workspaceFetch } from "@/lib/workspaces";
+import type {
+  HistoryResponse,
+  QueueResponse,
+  ScheduleResponse,
+} from "@/lib/dashboard-payloads";
+import { RouterUnavailable } from "@/components/workspace/router-unavailable";
 import { ContentCalendar } from "@/components/dashboard/media/content-calendar";
 import {
   Card,
@@ -10,21 +16,29 @@ import {
 } from "@/components/ui/card";
 
 export default async function CalendarPage() {
-  const session = await getSession();
+  const session = await getSession().catch(() => null);
   if (!session) redirect("/login");
-  const { activeChatId, userId } = session;
-
-  const [history, queue, schedule] = await Promise.all([
-    backendFetchJson("history-detail?limit=15", activeChatId!, userId, {
-      revalidate: 60,
-    }),
-    backendFetchJson("queue-detail?limit=10", activeChatId!, userId, {
-      revalidate: 30,
-    }),
-    backendFetchJson("analytics/schedule-preview?slots=15", activeChatId!, userId, {
-      revalidate: 60,
-    }),
+  const workspaceId = session.activeWorkspaceId;
+  if (!workspaceId) redirect("/welcome");
+  const [historyResult, queueResult, scheduleResult] = await Promise.all([
+    workspaceFetch<HistoryResponse>("history-detail?limit=15", workspaceId),
+    workspaceFetch<QueueResponse>("queue-detail?limit=10", workspaceId),
+    workspaceFetch<ScheduleResponse>(
+      "analytics/schedule-preview?slots=15",
+      workspaceId,
+    ),
   ]);
+
+  // The calendar is the three of these side by side. One missing leaves a
+  // column of zeros next to real data, which reads as "nothing scheduled"
+  // rather than as "we could not ask".
+  if (!historyResult.ok || !queueResult.ok || !scheduleResult.ok) {
+    return <RouterUnavailable what="Your calendar" />;
+  }
+
+  const history = historyResult.data;
+  const queue = queueResult.data;
+  const schedule = scheduleResult.data;
 
   const historyItems = history?.items ?? [];
   const queueItems = queue?.items ?? [];
