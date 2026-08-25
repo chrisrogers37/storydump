@@ -15,12 +15,32 @@ happily select another workspace's credential (astrid, #982).
 
 ## TODAY THIS ALWAYS REFUSES, AND THAT IS THE HONEST STATE
 
-**Nothing writes a `gdrive` credential yet.** `ig_login_oauth.store_credential`
-binds ``PROVIDER = "ig_login"`` and migration `063`'s header asserts it is the
-only INSERT site into `oauth_credentials`. The schema is ready
-(`ck_credentials_provider` admits `'gdrive'`; `uq_credential_per_source`), the
-writer and the connect flow are not. That is a prerequisite workstream, not a
-detail of this one.
+**Nothing writes a `gdrive` credential yet** — and that is an EMPIRICAL fact
+about the tree today, not a structural one about the schema. The distinction is
+load-bearing: an empirical claim stays true only until someone writes a second
+INSERT, while a structural one would stay true by construction. Nothing here is
+structural.
+
+`ig_login_oauth.store_credential` binds ``PROVIDER = "ig_login"`` and is the
+only INSERT site into `oauth_credentials` in `src/` (re-verified 2026-08-25 —
+one site; three more exist under `tests/`). **The INSERT itself is UNFENCED.**
+`ck_credentials_provider` admits `'gdrive'` (054:198), so a gdrive row is
+insertable the moment anyone writes the statement; no constraint, trigger or
+grant stops it.
+
+**An earlier version of this docstring cited migration `063` as asserting the
+single-INSERT-site property, and that citation was wrong** (navi). `063` guards
+the **refresh-clock query** — one `AND provider = 'ig_login'` clause inside
+`fn_clock_tick`'s due-credential SELECT — and touches no INSERT into this table
+at all. Its header does record a single-writer observation, but as a dated
+verification ("verified 2026-08-22 — one INSERT site in the whole tree") and it
+then says the opposite of a fence in the next paragraph: the row "is INSERTABLE
+the moment a gdrive credential writer lands". Citing it for a structural
+guarantee promised something the schema does not provide.
+
+So the schema is ready (`ck_credentials_provider`, `uq_credential_per_source`)
+and the writer and connect flow are not. That is a prerequisite workstream, not
+a detail of this one.
 
 So every call here raises :class:`DriveCredentialDead` until that writer lands.
 That is deliberately **not** a crash: `media_sync` classifies it persistent, the
@@ -32,7 +52,14 @@ why wiring the real door now is safe even though no credential exists.
 ## There is no Drive refresh door, and an expired token is not silently renewed
 
 `credential_lifecycle` ships `ig_refresh` and no Google analogue. This module
-therefore hands back the stored token as-is and does not attempt a refresh. An
+therefore hands back the stored token as-is and does not attempt a refresh.
+
+**And gdrive being outside `063`'s refresh clock is a DECISION, not the gap the
+paragraph above might read as.** Fork F3 is locked (b): the `063` fence stays
+CLOSED, so `next_refresh_at` is NULL for gdrive rows by design and the scheduled
+refresh leg will never mint for them. Minting happens on the read path instead.
+Read the clause as deliberate exclusion; do not "fix" it by widening the
+provider filter. An
 expired one is refused HERE when `expires_at` has passed, rather than being sent
 to Google to earn a 401 — same outcome for the source, one less provider call,
 and the reason names expiry instead of a generic rejection. A Drive refresh leg

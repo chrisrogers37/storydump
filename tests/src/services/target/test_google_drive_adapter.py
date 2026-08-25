@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from urllib.parse import quote_plus
 
 import httpx
 import pytest
@@ -24,7 +25,10 @@ from src.services.target.drive_adapter import (
     DriveTerminalError,
 )
 from src.services.target.egress import EgressPolicy
-from src.services.target.google_drive_adapter import GoogleDriveAdapter
+from src.services.target.google_drive_adapter import (
+    GoogleDriveAdapter,
+    _listing_query,
+)
 from src.services.target.media_sync import DriveCredentialDead, DriveSourceGone
 from src.utils.media_kind import INSTAGRAM_VIDEO_SUFFIXES
 
@@ -258,6 +262,148 @@ class TestSkips:
             CONFIG, None, source_id=SRC, workspace_id=WS
         )
         assert [i["ref"] for i in items] == ["good"]
+
+
+class TestProbe:
+    """`01`:78's `probe(config) -> ok | error-class`.
+
+    One case per error class plus a healthy folder, per the epic's test plan.
+    The classes are the transport's existing taxonomy — `probe` adds no
+    vocabulary of its own, so these assertions are on the same types
+    `media_sync` already routes on.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_reachable_folder_probes_ok(self):
+        handler, _ = _json_handler({"files": [_file("f1")]})
+        result = await _adapter(handler).probe(CONFIG, source_id=SRC, workspace_id=WS)
+        assert result.ok is True
+        assert result.error is None and result.error_class is None
+
+    @pytest.mark.asyncio
+    async def test_an_empty_folder_probes_ok(self):
+        """Zero files is a reachable folder nobody has filled yet.
+
+        The state machine asks whether the source can be LISTED. Reading empty
+        as a failure would refuse every correctly-configured new source, which
+        is the connect flow's most common state.
+        """
+        handler, _ = _json_handler({"files": []})
+        result = await _adapter(handler).probe(CONFIG, source_id=SRC, workspace_id=WS)
+        assert result.ok is True
+
+    @pytest.mark.asyncio
+    async def test_it_asks_the_same_question_list_changes_asks(self):
+        """The probe must exercise the LISTING door, not a cheaper one.
+
+        A `files.get` on the folder id would pass a source whose listing query
+        is broken — precisely the config error this verb exists to catch. So
+        the `q` is asserted identical to the one `list_changes` builds, and the
+        only intended difference is the page size.
+        """
+        handler, seen = _json_handler({"files": []})
+        await _adapter(handler).probe(CONFIG, source_id=SRC, workspace_id=WS)
+        probe_url = str(seen["request"].url)
+
+        handler2, seen2 = _json_handler({"files": []})
+        await _adapter(handler2).list_changes(
+            CONFIG, None, source_id=SRC, workspace_id=WS
+        )
+        listing_url = str(seen2["request"].url)
+
+        q = "q=" + quote_plus(_listing_query(CONFIG))
+        assert q in probe_url and q in listing_url
+        assert "pageSize=1" in probe_url
+        assert seen["request"].headers["authorization"] == "Bearer tok"
+
+    @pytest.mark.parametrize(
+        "status,body,expected",
+        [
+            (401, {"error": {"message": "Invalid Credentials"}}, DriveCredentialDead),
+            (
+                403,
+                {"error": {"message": "Insufficient permission"}},
+                DriveCredentialDead,
+            ),
+            (
+                403,
+                {"error": {"message": "User Rate Limit Exceeded"}},
+                DriveRetryableError,
+            ),
+            (404, {"error": {"message": "File not found"}}, DriveSourceGone),
+            (429, {"error": {"message": "Too many requests"}}, DriveRetryableError),
+            (503, {"error": {"message": "Backend Error"}}, DriveRetryableError),
+            (400, {"error": {"message": "Invalid query"}}, DriveTerminalError),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_each_status_comes_back_as_its_error_class(
+        self, status, body, expected
+    ):
+        handler, _ = _json_handler(body, status=status)
+        result = await _adapter(handler).probe(CONFIG, source_id=SRC, workspace_id=WS)
+        assert result.ok is False
+        assert isinstance(result.error, expected)
+        assert result.error_class == expected.__name__
+
+    @pytest.mark.asyncio
+    async def test_a_lost_response_propagates_rather_than_becoming_a_verdict(self):
+        """ "We do not know" must not be catchable as "it failed".
+
+        If a dead transport came back as ``ok=False``, a caller branching on
+        `ok` — which is the obvious way to use this — would flip a healthy
+        source to `error` on a network blip. There is no verdict to return when
+        the provider never answered, so this raises.
+        """
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("connection refused")
+
+        with pytest.raises(DriveLostResponse):
+            await _adapter(handler).probe(CONFIG, source_id=SRC, workspace_id=WS)
+
+    @pytest.mark.asyncio
+    async def test_a_config_with_no_folder_ref_is_a_result_not_a_raise(self):
+        """A bad config is exactly what connect validation is asked about."""
+        handler, seen = _json_handler({"files": []})
+        result = await _adapter(handler).probe({"v": 1}, source_id=SRC, workspace_id=WS)
+        assert result.ok is False
+        assert isinstance(result.error, DriveTerminalError)
+        assert "request" not in seen, "a refused config must cost no provider call"
+
+    @pytest.mark.asyncio
+    async def test_probe_and_list_changes_refuse_the_same_config(self):
+        """The shared-preflight property, asserted rather than assumed.
+
+        A probe that accepted a config the sync then refuses would green-light
+        a source into `active` that cannot list, and the failure would surface
+        later as a sync error nobody connects back to the connect form. The
+        two must refuse the same set; the only difference permitted is the
+        SHAPE of the refusal — probe returns it, list_changes raises it.
+        """
+        rooted = {"v": 1, "folder_ref": "FOLDER123", "root_name": "Stories"}
+        handler, _ = _json_handler({"files": []})
+
+        result = await _adapter(handler).probe(rooted, source_id=SRC, workspace_id=WS)
+        assert result.ok is False
+        assert isinstance(result.error, DriveTerminalError)
+
+        handler2, _ = _json_handler({"files": []})
+        with pytest.raises(DriveTerminalError):
+            await _adapter(handler2).list_changes(
+                rooted, None, source_id=SRC, workspace_id=WS
+            )
+
+    @pytest.mark.asyncio
+    async def test_a_dead_credential_is_a_result_not_a_raise(self):
+        """Today's real state: nothing writes a gdrive credential, so the token
+        provider refuses. `probe` must answer with that rather than raise —
+        it is the reading a connect form needs to show."""
+        handler, _ = _json_handler({"files": []})
+        adapter = _adapter(handler, token=DriveCredentialDead("no credential"))
+        result = await adapter.probe(CONFIG, source_id=SRC, workspace_id=WS)
+        assert result.ok is False
+        assert result.error_class == "DriveCredentialDead"
 
 
 class TestErrorRouting:

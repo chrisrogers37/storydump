@@ -78,9 +78,11 @@ import httpx
 
 from src.services.target import egress
 from src.services.target.drive_adapter import (
+    DriveError,
     DriveLostResponse,
     DriveRetryableError,
     DriveTerminalError,
+    ProbeResult,
     validate_source_config,
 )
 from src.services.target.media_sync import DriveCredentialDead, DriveSourceGone
@@ -134,6 +136,25 @@ def _listing_query(config: Mapping[str, Any]) -> str:
     return f"'{folder_ref}' in parents and trashed = false and ({kinds})"
 
 
+def _refuse_unsupported_config(config: Mapping[str, Any]) -> None:
+    """Every refusal a config earns BEFORE a provider call, in one place.
+
+    Shared by `list_changes` and `probe` deliberately. A probe that accepted a
+    config the sync then refuses is worse than no probe: it green-lights a
+    source into `active` that cannot list, and the failure surfaces later as a
+    sync error nobody connects back to the connect form. The two must refuse
+    the same set, which is a property that only holds if there is one set.
+    """
+    validate_source_config(config)
+    if "root_name" in config and config["root_name"]:
+        raise DriveTerminalError(
+            "config carries root_name, which scopes listing to a subfolder"
+            " this door cannot yet resolve. Refusing rather than listing"
+            " the parent, which looks correct whether it comes back full"
+            " or empty."
+        )
+
+
 class GoogleDriveAdapter:
     """`list_changes` against Drive v3, under the egress floor."""
 
@@ -169,14 +190,7 @@ class GoogleDriveAdapter:
         ref (the Drive file id, never a path). `checkpoint'` carries
         ``page_token`` only when the provider said more exist.
         """
-        validate_source_config(config)
-        if "root_name" in config and config["root_name"]:
-            raise DriveTerminalError(
-                "config carries root_name, which scopes listing to a subfolder"
-                " this door cannot yet resolve. Refusing rather than listing"
-                " the parent, which looks correct whether it comes back full"
-                " or empty."
-            )
+        _refuse_unsupported_config(config)
 
         token = await self._token_provider(source_id, workspace_id=workspace_id)
         params = {
@@ -206,6 +220,66 @@ class GoogleDriveAdapter:
         if next_token:
             checkpoint_out["page_token"] = next_token
         return items, checkpoint_out
+
+    async def probe(
+        self,
+        config: Mapping[str, Any],
+        *,
+        source_id: str,
+        workspace_id: str,
+    ) -> ProbeResult:
+        """`01`:78's third port verb — can this source be used, yes or why not.
+
+        Connect/repair validation for `02` §2's `media_sources` state machine.
+        Returns :class:`ProbeResult`; see its docstring for why a refusal is a
+        result rather than a raise, and why the error class is the transport's
+        own exception instead of a probe-specific vocabulary.
+
+        **It exercises the door production actually uses.** The request is the
+        same `files.list` `list_changes` issues, through the same
+        `_refuse_unsupported_config` → token → `_get` path, with `pageSize=1`
+        because the question is reachability rather than contents. A probe that
+        asked a cheaper question — `files.get` on the folder id, say — would
+        pass a config whose LISTING query is broken, which is the failure it
+        exists to catch.
+
+        **An EMPTY folder is `ok`.** Zero files is a legitimate answer from a
+        reachable folder, and the state machine's question is whether the source
+        can be listed, not whether anyone has put anything in it yet. Treating
+        empty as a failure would refuse every correctly-configured new source.
+
+        **`DriveLostResponse` is NOT converted to a result and propagates.** It
+        means no answer exists, and the taxonomy is explicit that "we do not
+        know" must not be catchable as "it failed" — collapsing it into
+        ``ok=False`` would let a network blip flip a healthy source to `error`
+        through a caller that reasonably branches on `ok`. A probe returns a
+        verdict; when the provider never answered there is no verdict to return.
+
+        **Today every gdrive source probes `DriveCredentialDead`**, because
+        nothing writes a gdrive credential yet (`drive_credentials`). That is
+        the honest reading of the current system, not a defect in this verb.
+        """
+        try:
+            _refuse_unsupported_config(config)
+            token = await self._token_provider(source_id, workspace_id=workspace_id)
+            params = {
+                "q": _listing_query(config),
+                "fields": f"files({FILE_FIELDS})",
+                "pageSize": "1",
+                "spaces": "drive",
+                "supportsAllDrives": "true",
+                "includeItemsFromAllDrives": "true",
+            }
+            await self._get(
+                f"{FILES_URL}?{urlencode(params)}", token, source_id=source_id
+            )
+        except (DriveError, DriveSourceGone, DriveCredentialDead) as exc:
+            # Deliberately NOT `except Exception`. An error outside the
+            # taxonomy is a bug in this module, and the pipeline's discipline
+            # is that a crashed run must look crashed rather than be reported
+            # as a tidy negative verdict.
+            return ProbeResult(ok=False, error=exc)
+        return ProbeResult(ok=True)
 
     def _item_for(self, entry: Mapping[str, Any]) -> Optional[dict]:
         file_id = entry.get("id")

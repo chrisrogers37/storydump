@@ -183,6 +183,36 @@ class DrivePage:
         return self.next_page_token is None
 
 
+@dataclass(frozen=True)
+class ProbeResult:
+    """`probe`'s answer: `01`:78's ``ok | error-class``.
+
+    A refusal is a RESULT here, not an exception, because that is the whole
+    difference between `probe` and `list_changes`. `probe` is asked "can this
+    config be used", and "no, the folder is gone" is a complete answer to that
+    question; a caller validating a connect form should not have to catch to
+    learn it.
+
+    THE ERROR CLASS IS THE EXISTING TAXONOMY, NOT A SECOND ONE. `error` holds
+    the very exception the transport raised, so a caller classifies with the
+    same predicate `media_sync` already uses —
+    ``isinstance(result.error, (DriveSourceGone, DriveCredentialDead))`` is
+    persistent, everything else is not. A parallel vocabulary of probe-specific
+    strings would be a second thing to keep in step with `02` §2's state
+    machine, and the two would drift on the first new status code.
+
+    `error_class` is the name, for logging and for anything that has to store
+    the verdict rather than branch on it.
+    """
+
+    ok: bool
+    error: Optional[BaseException] = None
+
+    @property
+    def error_class(self) -> Optional[str]:
+        return None if self.error is None else type(self.error).__name__
+
+
 @dataclass
 class StubDriveAdapter:
     """Scripted adapter for the gate and the composition root until M.3.
