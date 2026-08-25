@@ -9,7 +9,6 @@ import {
 import { RouterUnavailable } from "@/components/workspace/router-unavailable";
 import { PoolHealth } from "@/components/dashboard/media/pool-health";
 import { MediaGrid } from "@/components/dashboard/media/media-grid";
-import { MediaUploadWrapper } from "@/components/dashboard/media/media-upload-wrapper";
 
 /**
  * The library is a bounded read and the bound is stated (`01` H5).
@@ -52,12 +51,7 @@ export default async function MediaLibraryPage() {
     <div className="space-y-6">
       <PoolHealth health={health} />
 
-      <div className="grid gap-6 lg:grid-cols-[1fr_300px]">
-        <MediaGrid items={items} limit={MEDIA_LIMIT} />
-        <MediaUploadWrapper
-          categories={health.by_category.map((c) => c.name)}
-        />
-      </div>
+      <MediaGrid items={items} limit={MEDIA_LIMIT} />
     </div>
   );
 }
