@@ -1,25 +1,32 @@
 /**
- * BFF Proxy — forwards /api/dashboard/* requests to FastAPI backend.
+ * BFF proxy — forwards /api/dashboard/* to the target router.
  *
- * Auth flow:
- *  1. Verify JWT session cookie -> extract activeChatId + userId
- *  2. Reject if activeChatId is null (no instance selected)
- *  3. Generate a signed URL token (same format FastAPI expects)
- *  4. Forward the request to FastAPI's /api/onboarding/* endpoints
+ * ── What this no longer has to do ──────────────────────────────────────────
+ *
+ * The version this replaces carried a membership re-check: it fetched the
+ * user's instances on every proxied call and, if the active chat was no longer
+ * among them, re-minted the session with a null chat id. That existed because a
+ * self-contained JWT cannot be revoked — a user removed from a group kept a
+ * valid token until it expired, so the only defence was to re-ask on every
+ * request and hope the check ran.
+ *
+ * The target session is a `session_tokens` row and every target route
+ * authorizes against `workspace_members` server-side, so removal takes effect
+ * on the next call without anyone re-asking. The check is deleted rather than
+ * ported: a second copy of an authorization decision is one that can disagree
+ * with the first, and this one failed OPEN by design ("backend unreachable —
+ * fall through") in exactly the situation where it mattered.
+ *
+ * What is kept, unchanged, is the path allowlist and the traversal guard. Those
+ * are about which endpoints this door may reach at all, which is still this
+ * tier's question.
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import {
-  verifySessionToken,
-  createSessionToken,
-  SESSION_COOKIE,
-  SESSION_COOKIE_OPTIONS,
-  generateUrlToken,
-} from "@/lib/auth";
-import { BACKEND_URL, fetchUserInstances } from "@/lib/backend";
+import { getSessionToken, isWorkspaceId, WORKSPACE_COOKIE } from "@/lib/session";
+import { TARGET_API_URL } from "@/lib/target-api";
 
-// Allowlisted backend path prefixes the proxy can forward to.
-// Prevents path traversal to arbitrary FastAPI endpoints.
+/** Allowlisted target path prefixes. Prevents traversal to arbitrary routes. */
 const ALLOWED_PATHS = [
   "analytics",
   "accounts",
@@ -51,135 +58,76 @@ const ALLOWED_PATHS = [
 
 async function proxyRequest(
   request: NextRequest,
-  { params }: { params: Promise<{ path: string[] }> }
+  { params }: { params: Promise<{ path: string[] }> },
 ) {
-  const token = request.cookies.get(SESSION_COOKIE)?.value;
-  if (!token) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const sessionToken = await getSessionToken();
+  if (!sessionToken) {
+    return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
   }
 
-  const session = await verifySessionToken(token);
-  if (!session) {
-    return NextResponse.json({ error: "Invalid session" }, { status: 401 });
-  }
-
-  // Require an active instance selection
-  if (session.activeChatId === null) {
-    return NextResponse.json(
-      { error: "No instance selected" },
-      { status: 422 }
-    );
-  }
-
-  // Prevents stale JWTs from granting access after a user is removed from a group.
-  try {
-    const instances = await fetchUserInstances(session.userId);
-    if (
-      instances &&
-      !instances.some((i) => i.telegram_chat_id === session.activeChatId)
-    ) {
-      const freshToken = await createSessionToken({
-        ...session,
-        activeChatId: null,
-      });
-      const resp = NextResponse.json(
-        { error: "Membership no longer active", code: "MEMBERSHIP_INVALID" },
-        { status: 403 }
-      );
-      resp.cookies.set(SESSION_COOKIE, freshToken, SESSION_COOKIE_OPTIONS);
-      return resp;
-    }
-    // instances === null means the backend is unreachable; fall through
-    // and let the proxied request handle auth at the backend level.
-  } catch (err) {
-    console.error("Membership check failed:", err);
+  const workspaceId = request.cookies.get(WORKSPACE_COOKIE)?.value;
+  if (!isWorkspaceId(workspaceId)) {
+    return NextResponse.json({ error: "no_workspace_selected" }, { status: 422 });
   }
 
   const { path } = await params;
 
-  // Reject path traversal attempts
-  if (path.some(segment => segment === ".." || segment === ".")) {
-    return NextResponse.json({ error: "Invalid path" }, { status: 400 });
+  if (path.some((segment) => segment === ".." || segment === ".")) {
+    return NextResponse.json({ error: "invalid_path" }, { status: 400 });
   }
 
-  const backendPath = path.join("/");
-
-  // Validate path against allowlist
   const topSegment = path[0];
   if (!topSegment || !ALLOWED_PATHS.includes(topSegment)) {
-    return NextResponse.json({ error: "Invalid path" }, { status: 400 });
+    return NextResponse.json({ error: "invalid_path" }, { status: 400 });
   }
 
-  const url = new URL(`/api/onboarding/${backendPath}`, BACKEND_URL);
+  const prefix = `/api/v1/workspaces/${workspaceId}/`;
+  const url = new URL(`${prefix}${path.join("/")}`, TARGET_API_URL);
 
-  // Belt-and-suspenders: verify resolved URL stays within /api/onboarding/
-  if (!url.pathname.startsWith("/api/onboarding/")) {
-    return NextResponse.json({ error: "Invalid path" }, { status: 400 });
+  // Belt-and-suspenders: the resolved URL must still sit under this workspace.
+  if (!url.pathname.startsWith(prefix)) {
+    return NextResponse.json({ error: "invalid_path" }, { status: 400 });
   }
 
-  // Forward query params and inject auth
-  const searchParams = new URL(request.url).searchParams;
-  searchParams.forEach((value, key) => {
+  new URL(request.url).searchParams.forEach((value, key) => {
     url.searchParams.set(key, value);
   });
 
-  const urlToken = generateUrlToken(session.activeChatId, session.userId);
-  url.searchParams.set("init_data", urlToken);
-  url.searchParams.set("chat_id", String(session.activeChatId));
+  const headers = new Headers({ Authorization: `Bearer ${sessionToken}` });
+  const fetchOptions: RequestInit = { method: request.method, headers };
 
-  const fetchOptions: RequestInit = {
-    method: request.method,
-  };
-
-  // Only set Content-Type and body for methods that have a body
   if (request.method !== "GET" && request.method !== "HEAD") {
-    let body: Record<string, unknown> = {};
-    try {
-      body = await request.json();
-    } catch {
-      // No JSON body — still inject auth fields
-    }
-    fetchOptions.headers = { "Content-Type": "application/json" };
-    fetchOptions.body = JSON.stringify({
-      ...body,
-      init_data: urlToken,
-      chat_id: session.activeChatId,
-    });
+    // Forwarded verbatim. The credential rides the Authorization header, so
+    // there is nothing to inject into the body — which is what the old proxy
+    // did, and why a body could contradict its own envelope.
+    headers.set("Content-Type", "application/json");
+    fetchOptions.body = await request.text();
   }
 
   try {
-    const backendResponse = await fetch(url.toString(), fetchOptions);
+    const response = await fetch(url.toString(), fetchOptions);
 
-    // Don't leak backend 5xx details to the client
-    if (backendResponse.status >= 500) {
-      console.error("Backend 5xx:", backendResponse.status, url.pathname);
-      return NextResponse.json(
-        { error: "Backend unavailable" },
-        { status: 502 }
-      );
+    if (response.status >= 500) {
+      console.error("target 5xx:", response.status, url.pathname);
+      return NextResponse.json({ error: "upstream_unavailable" }, { status: 502 });
     }
 
-    const contentType = backendResponse.headers.get("content-type") || "";
+    const contentType = response.headers.get("content-type") || "";
     if (contentType.includes("application/json")) {
-      const data = await backendResponse.json();
-      return NextResponse.json(data, { status: backendResponse.status });
+      return NextResponse.json(await response.json(), { status: response.status });
     }
-
-    const text = await backendResponse.text();
-    return new NextResponse(text, {
-      status: backendResponse.status,
+    return new NextResponse(await response.text(), {
+      status: response.status,
       headers: { "Content-Type": contentType },
     });
   } catch (error) {
     console.error("BFF proxy error:", error);
-    return NextResponse.json(
-      { error: "Backend unavailable" },
-      { status: 502 }
-    );
+    return NextResponse.json({ error: "upstream_unreachable" }, { status: 502 });
   }
 }
 
 export const GET = proxyRequest;
 export const POST = proxyRequest;
 export const PUT = proxyRequest;
+export const PATCH = proxyRequest;
 export const DELETE = proxyRequest;

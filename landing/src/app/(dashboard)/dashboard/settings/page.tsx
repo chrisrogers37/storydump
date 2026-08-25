@@ -1,24 +1,33 @@
 import { redirect } from "next/navigation";
 import { getSession } from "@/lib/session";
-import { backendFetchJson } from "@/lib/backend";
+import { workspaceFetch } from "@/lib/workspaces";
+import type { InitResponse, AccountsResponse } from "@/lib/dashboard-payloads";
+import { RouterUnavailable } from "@/components/workspace/router-unavailable";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { GeneralTab } from "@/components/dashboard/settings/general-tab";
 import { AccountsTab } from "@/components/dashboard/settings/accounts-tab";
 import { IntegrationsTab } from "@/components/dashboard/settings/integrations-tab";
 
 export default async function SettingsPage() {
-  const session = await getSession();
+  const session = await getSession().catch(() => null);
   if (!session) redirect("/login");
+  const workspaceId = session.activeWorkspaceId;
+  if (!workspaceId) redirect("/welcome");
 
-  const { activeChatId, userId } = session;
-
-  const [initData, accountsData] = await Promise.all([
-    backendFetchJson("init", activeChatId!, userId, { revalidate: 60 }),
-    backendFetchJson("accounts", activeChatId!, userId, { revalidate: 60 }),
+  const [initResult, accountsResult] = await Promise.all([
+    workspaceFetch<InitResponse>("init", workspaceId),
+    workspaceFetch<AccountsResponse>("accounts", workspaceId),
   ]);
 
-  const setup = initData?.setup_state ?? {};
-  const accounts = accountsData?.accounts ?? [];
+  // Settings is the one screen where a partial render is actively harmful: a
+  // toggle drawn from a default rather than from the workspace shows the wrong
+  // current value, and someone will change it to match what they see.
+  if (!initResult.ok || !accountsResult.ok) {
+    return <RouterUnavailable what="Settings" />;
+  }
+
+  const setup = initResult.data.setup_state ?? {};
+  const accounts = accountsResult.data.accounts ?? [];
 
   return (
     <div className="space-y-6">

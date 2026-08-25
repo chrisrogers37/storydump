@@ -1,8 +1,12 @@
 import { redirect } from "next/navigation";
 import { getSession } from "@/lib/session";
-import { hasTenant } from "@/lib/web-signup";
-import { NoTenantEmptyState } from "@/components/dashboard/no-tenant-empty-state";
-import { backendFetchJson } from "@/lib/backend";
+import { workspaceFetch } from "@/lib/workspaces";
+import type {
+  AnalyticsResponse,
+  CategoriesResponse,
+  HistoryResponse,
+} from "@/lib/dashboard-payloads";
+import { RouterUnavailable } from "@/components/workspace/router-unavailable";
 import { AnalyticsCards } from "@/components/dashboard/analytics-cards";
 import { PostingChart } from "@/components/dashboard/posting-chart";
 import { CategoryBreakdown } from "@/components/dashboard/category-breakdown";
@@ -10,22 +14,29 @@ import { RecentActivity } from "@/components/dashboard/recent-activity";
 
 export default async function DashboardPage() {
   // Deduped with layout via React cache() — no extra JWT verification
-  const session = await getSession();
+  const session = await getSession().catch(() => null);
   if (!session) redirect("/login");
+  // Middleware already required a selected workspace to reach any route under
+  // /dashboard. Repeated because a page is reachable in tests and in a direct
+  // render without it, and `activeWorkspaceId!` would be a non-null assertion
+  // on a value that is legitimately null for every brand-new user.
+  const workspaceId = session.activeWorkspaceId;
+  if (!workspaceId) redirect("/welcome");
 
-  // A signed-in user with no tenant reaches the dashboard and sees an empty
-  // state, rather than being redirected back into the instance picker. The
-  // tenant-scoped fetches below cannot run without a tenant, so this returns
-  // before them rather than passing a null chat id through a non-null assertion.
-  if (!hasTenant(session)) return <NoTenantEmptyState />;
-
-  const { activeChatId, userId } = session;
-
-  const [analytics, categories, history] = await Promise.all([
-    backendFetchJson("analytics", activeChatId!, userId, { revalidate: 60 }),
-    backendFetchJson("analytics/categories?days=30", activeChatId!, userId, { revalidate: 60 }),
-    backendFetchJson("history-detail?limit=10", activeChatId!, userId, { revalidate: 60 }),
+  const [analyticsResult, categoriesResult, historyResult] = await Promise.all([
+    workspaceFetch<AnalyticsResponse>("analytics", workspaceId),
+    workspaceFetch<CategoriesResponse>("analytics/categories?days=30", workspaceId),
+    workspaceFetch<HistoryResponse>("history-detail?limit=10", workspaceId),
   ]);
+
+  // The overview is analytics. Without them there is no partial version of this
+  // page worth rendering — a header over three empty panels states a fact about
+  // the account that we did not establish.
+  if (!analyticsResult.ok) return <RouterUnavailable what="Your dashboard" />;
+
+  const analytics = analyticsResult.data;
+  const categories = categoriesResult.ok ? categoriesResult.data : null;
+  const history = historyResult.ok ? historyResult.data : null;
 
   const summary = analytics?.summary ?? {
     total_posts: 0,

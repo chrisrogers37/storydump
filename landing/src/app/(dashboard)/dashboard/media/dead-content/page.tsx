@@ -1,6 +1,8 @@
 import { redirect } from "next/navigation";
 import { getSession } from "@/lib/session";
-import { backendFetchJson } from "@/lib/backend";
+import { workspaceFetch } from "@/lib/workspaces";
+import type { DeadContentResponse } from "@/lib/dashboard-payloads";
+import { RouterUnavailable } from "@/components/workspace/router-unavailable";
 import { DeadContentChart } from "@/components/dashboard/media/dead-content-chart";
 import {
   Card,
@@ -11,16 +13,17 @@ import {
 import { Progress } from "@/components/ui/progress";
 
 export default async function DeadContentPage() {
-  const session = await getSession();
+  const session = await getSession().catch(() => null);
   if (!session) redirect("/login");
-  const { activeChatId, userId } = session;
-
-  const data = await backendFetchJson(
+  const workspaceId = session.activeWorkspaceId;
+  if (!workspaceId) redirect("/welcome");
+  const result = await workspaceFetch<DeadContentResponse>(
     "analytics/dead-content?min_age_days=30",
-    activeChatId!,
-    userId,
-    { revalidate: 60 }
+    workspaceId,
   );
+  if (!result.ok) return <RouterUnavailable what="Dead content" />;
+
+  const data = result.data;
 
   const totalActive = data?.total_active ?? 0;
   const totalDead = data?.total_dead ?? 0;

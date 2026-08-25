@@ -1,98 +1,188 @@
 /**
- * Session management — Edge Runtime compatible.
+ * Session — an opaque, server-resolved token. Edge Runtime compatible.
  *
- * This module contains only jose + Next.js imports (no Node crypto),
- * so it can be safely imported from middleware (Edge Runtime).
+ * ── What this replaces, and why it is a replacement rather than an edit ─────
+ *
+ * Until now the session was a self-contained HS256 JWT carrying
+ * `{ userId: number, activeChatId: number | null }` — a Telegram user id and a
+ * Telegram chat id, signed with a secret this tier holds.
+ *
+ * The target schema (`session_tokens`, migration 060) specifies the opposite
+ * shape: an opaque value whose SHA256 is a row, with `expires_at` sliding on
+ * use and a `revoked_at` column. Two properties follow that a JWT cannot have
+ * at any price:
+ *
+ *   1. It can be REVOKED. A JWT is valid until it expires because there is
+ *      nothing to mark; sign-out can only delete the cookie, which does nothing
+ *      to a copy of it.
+ *   2. It can name a UUID user. `users.id` is a UUID; `userId: number` cannot
+ *      hold one.
+ *
+ * So there is no edit that turns one into the other, and every session minted
+ * under the old shape names a user id in the `legacy` schema that the target
+ * cannot resolve. Those sessions already point at nothing; failing to resolve
+ * them makes that visible rather than causing it.
+ *
+ * The cookie NAME is deliberately unchanged. A stale JWT presented here fails
+ * to resolve and is cleared — whereas a new name would leave the old cookie
+ * sitting in the browser, still being sent, belonging to nobody.
+ *
+ * ── Why the token is not verified locally ──────────────────────────────────
+ *
+ * There is nothing to verify against: the token is opaque and its hash lives in
+ * a table this tier has no connection to. Resolution is therefore a call, and
+ * that is the point — a revoked token stops working immediately, which is the
+ * property revocation exists for.
  */
 
-import { SignJWT, jwtVerify } from "jose";
 import { cache } from "react";
 import { cookies } from "next/headers";
+import { targetFetch } from "./target-api";
 
-export interface SessionPayload {
-  userId: number;
-  activeChatId: number | null;
-  firstName: string;
-  username?: string;
-  photoUrl?: string;
+export interface SessionUser {
+  /** `users.id` — a UUID. */
+  userId: string;
+  displayName: string;
+  email?: string;
+  /**
+   * The workspace the UI is currently pointed at, or null.
+   *
+   * NULL IS A NORMAL STATE, NOT AN ERROR — it is every user's state between
+   * signing in and creating their first workspace, and `/welcome` and
+   * `/workspaces` both render in it.
+   */
+  activeWorkspaceId: string | null;
 }
 
 export const SESSION_COOKIE = "storydump_session";
 
-const JWT_EXPIRY = "24h";
-const JWT_MAX_AGE_SECONDS = 86400; // must match JWT_EXPIRY
+/**
+ * The selected workspace. A PREFERENCE, not a credential.
+ *
+ * It names a workspace; it does not grant anything. Every target call
+ * authorizes against `workspace_members` server-side, so editing this cookie
+ * by hand gets a 403 rather than access to someone else's workspace. It is
+ * separate from the session token because it is per-browser UI state and
+ * `session_tokens` has no column for it — which is the schema saying the same
+ * thing.
+ */
+export const WORKSPACE_COOKIE = "storydump_workspace";
 
-/** Shared cookie options for the session JWT. */
+/** 30 days, matching `session_tokens.expires_at` (05 seam). */
+const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
+
 export const SESSION_COOKIE_OPTIONS = {
   httpOnly: true,
   secure: process.env.NODE_ENV === "production",
   sameSite: "lax" as const,
   path: "/",
-  maxAge: JWT_MAX_AGE_SECONDS,
+  maxAge: SESSION_MAX_AGE_SECONDS,
 };
 
-// Lazy-initialized: Next.js evaluates modules at build time during page data
-// collection, but env vars aren't available then. Validate on first use.
-let _jwtSecret: Uint8Array | null = null;
+/** Same options, minus httpOnly — no secret in it, and the client reads it. */
+export const WORKSPACE_COOKIE_OPTIONS = {
+  ...SESSION_COOKIE_OPTIONS,
+  httpOnly: false,
+};
 
-function getJwtSecret(): Uint8Array {
-  if (!_jwtSecret) {
-    const raw = process.env.JWT_SECRET;
-    if (!raw || raw.length < 32) {
-      throw new Error(
-        "JWT_SECRET must be set to a random 32+ character string"
-      );
-    }
-    _jwtSecret = new TextEncoder().encode(raw);
-  }
-  return _jwtSecret;
-}
+type ResolvedSession = {
+  user_id: string;
+  display_name?: string;
+  email?: string;
+};
 
-export async function createSessionToken(
-  payload: SessionPayload
-): Promise<string> {
-  return new SignJWT({
-    userId: payload.userId,
-    activeChatId: payload.activeChatId,
-    firstName: payload.firstName,
-    username: payload.username,
-    photoUrl: payload.photoUrl,
-  })
-    .setProtectedHeader({ alg: "HS256" })
-    .setIssuedAt()
-    .setExpirationTime(JWT_EXPIRY)
-    .sign(getJwtSecret());
-}
+/**
+ * Resolve an opaque token to a user, or null.
+ *
+ * NULL MEANS "NOT A VALID SESSION" AND NOTHING ELSE. An unreachable router is
+ * NOT null — it throws, so a caller cannot read "the router is down" as "you
+ * are signed out" and silently bounce a signed-in user to the login page.
+ * Those have opposite remedies and only one of them is the user's problem.
+ */
+export async function resolveSessionToken(
+  token: string,
+): Promise<SessionUser | null> {
+  const result = await targetFetch<ResolvedSession>("/auth/session", token);
 
-export async function verifySessionToken(
-  token: string
-): Promise<SessionPayload | null> {
-  try {
-    const { payload } = await jwtVerify(token, getJwtSecret());
+  if (result.ok) {
     return {
-      userId: payload.userId as number,
-      activeChatId: (payload.activeChatId as number) ?? null,
-      firstName: payload.firstName as string,
-      username: payload.username as string | undefined,
-      photoUrl: payload.photoUrl as string | undefined,
+      userId: result.data.user_id,
+      displayName: result.data.display_name?.trim() || "",
+      email: result.data.email,
+      activeWorkspaceId: null,
     };
-  } catch {
-    return null;
+  }
+
+  // 401/403 — presented and rejected. That is a real "not signed in".
+  if (result.status === 401 || result.status === 403) return null;
+
+  throw new SessionUnavailableError(result.error, result.status);
+}
+
+/** The session could not be resolved — distinct from resolving to nobody. */
+export class SessionUnavailableError extends Error {
+  constructor(
+    readonly reason: string,
+    readonly status: number,
+  ) {
+    super(`session_unavailable: ${reason}`);
+    this.name = "SessionUnavailableError";
   }
 }
 
 /**
- * Get the current session from cookies, deduped per request via React cache().
- * Returns null if no valid session — callers decide whether to redirect.
+ * The current session, deduped per request.
+ *
+ * Returns null when there is no valid session. Throws
+ * `SessionUnavailableError` when the question could not be answered — callers
+ * that want a login redirect should catch it deliberately rather than by
+ * treating every failure as a signed-out user.
  */
-export const getSession = cache(async (): Promise<SessionPayload | null> => {
-  // Dev auth bypass — returns a mock session without cookie validation.
-  if (process.env.DEV_AUTH_BYPASS === "true" && process.env.NODE_ENV !== "production") {
-    // Use userId as activeChatId so dashboard pages can generate valid backend tokens
-    return { userId: 0, activeChatId: 0, firstName: "Dev User", username: "dev" };
-  }
+export const getSession = cache(async (): Promise<SessionUser | null> => {
   const cookieStore = await cookies();
   const token = cookieStore.get(SESSION_COOKIE)?.value;
   if (!token) return null;
-  return verifySessionToken(token);
+
+  const session = await resolveSessionToken(token);
+  if (!session) return null;
+
+  const selected = cookieStore.get(WORKSPACE_COOKIE)?.value;
+  return {
+    ...session,
+    activeWorkspaceId: isWorkspaceId(selected) ? selected : null,
+  };
 });
+
+/** Read the raw token for a call that forwards it. */
+export async function getSessionToken(): Promise<string | null> {
+  const cookieStore = await cookies();
+  return cookieStore.get(SESSION_COOKIE)?.value ?? null;
+}
+
+/**
+ * A UUID, shape only.
+ *
+ * This is not an authorization check and must never be read as one — it stops a
+ * junk cookie becoming a junk path segment. Membership is the backend's.
+ */
+export function isWorkspaceId(value: string | undefined): value is string {
+  return (
+    typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
+  );
+}
+
+/**
+ * Does this session have a workspace to act in?
+ *
+ * Replaces `hasTenant()`, which asked `activeChatId !== null` — a question that
+ * only ever meant "did a Telegram group create you". On the target schema a
+ * workspace has no chat id at all, so the two questions have come apart and
+ * only this one is answerable.
+ *
+ * FALSE IS NOT AN ERROR. It is the state of every user between signing in and
+ * creating their first workspace.
+ */
+export function hasWorkspace(session: SessionUser | null): boolean {
+  return Boolean(session && session.activeWorkspaceId);
+}

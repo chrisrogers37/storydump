@@ -1,34 +1,33 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
   STATE_COOKIE,
-  SUBJECT_STORAGE_AVAILABLE,
   exchangeAndVerify,
   googleSigninAvailable,
   readStateToken,
 } from "@/lib/google-oidc";
-import { webSignupEnabled } from "@/lib/web-signup";
+import { SESSION_COOKIE, SESSION_COOKIE_OPTIONS } from "@/lib/session";
+import { targetFetch } from "@/lib/target-api";
 
 /**
- * GET /auth/google/callback — verify, then STOP at the storage boundary (#1015).
+ * GET /auth/google/callback — verify, then sign in (#1015).
  *
- * Everything up to and including a cryptographically verified OIDC subject is
- * real. What is missing is somewhere to put it: `user_identities` is migration
- * 053 and unadopted, `users` has no subject column, and `users.telegram_user_id`
- * is still NOT NULL so a Google-only row cannot be inserted. See
- * `SUBJECT_STORAGE_AVAILABLE`.
+ * Everything up to a cryptographically verified OIDC subject happens here; the
+ * write happens in the target router, which owns the database. This tier never
+ * holds a connection, which is why the subject is forwarded rather than stored.
  *
- * So this refuses at the write, with a distinct status and reason, rather than
- * minting a session that names nobody. 501 rather than 500: nothing failed, the
- * step is not implemented — and rather than 200-with-an-error, because a caller
- * that cannot distinguish "signed in" from "did not" is the failure this whole
- * surface exists to avoid.
+ * IDENTITY KEYS ON `sub`, NEVER ON EMAIL. `user_identities` is UNIQUE on
+ * (provider, external_id) and that is deliberate: a Google account can change
+ * its address, and two accounts can present the same unverified one. Matching
+ * on email would let a changed address orphan a user from their workspaces, and
+ * an unverified one hand a stranger somebody else's account.
  *
- * The refusal is not reachable through the UI: the button does not render while
- * the boundary stands, for the same reason virgil left it out entirely — a
- * button that cannot complete is worse than no button.
+ * The redirect is always /welcome. It is the one place that decides where a
+ * signed-in user belongs — a returning user with workspaces is forwarded on
+ * from there — so this route does not need to ask, and there is one answer to
+ * keep correct instead of two.
  */
 export async function GET(request: NextRequest) {
-  if (!webSignupEnabled() || !googleSigninAvailable(request.nextUrl.origin)) {
+  if (!googleSigninAvailable(request.nextUrl.origin)) {
     return new NextResponse(null, { status: 404 });
   }
 
@@ -68,29 +67,42 @@ export async function GET(request: NextRequest) {
     return clear(NextResponse.redirect(new URL("/auth/error", url.origin)));
   }
 
-  // ── THE BOUNDARY ─────────────────────────────────────────────────────────
-  // `subject.sub` is verified and correct at this point. There is nowhere to
-  // write it. Deliberately NOT logged — an OIDC subject is a stable personal
-  // identifier, and writing it to logs is the durable storage we just said we
-  // do not have, in the one place nobody is looking after it.
-  if (!SUBJECT_STORAGE_AVAILABLE) {
+  // The subject is verified. Everything from here is the target router's.
+  //
+  // `subject.sub` is deliberately NOT logged: an OIDC subject is a stable
+  // personal identifier, and a log line is durable storage in the one place
+  // nobody is looking after it.
+  const signin = await targetFetch<{ session_token: string }>(
+    "/auth/google/signin",
+    null,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        provider: "google",
+        external_id: subject.sub,
+        email: subject.emailVerified ? subject.email : undefined,
+        display_name: subject.name,
+      }),
+    },
+  );
+
+  if (!signin.ok) {
+    // Distinguishable on purpose. `unavailable` says the router could not be
+    // reached, which is the expected state until it is mounted and is nothing
+    // the visitor did; anything else is a refusal. Collapsing the two would
+    // tell a user to try again when trying again cannot work.
+    const reason =
+      signin.status === 503 ? "unavailable" : "signin_failed";
     return clear(
-      NextResponse.json(
-        {
-          error: "sign_in_incomplete",
-          detail:
-            "Google verified this account, but Storydump cannot yet record it. " +
-            "Awaiting the identity schema change (#1015).",
-        },
-        { status: 501 },
-      ),
+      NextResponse.redirect(new URL(`/auth/error?reason=${reason}`, url.origin)),
     );
   }
 
-  // Unreachable while the boundary stands. The next PR replaces this with
-  // find-or-create on the verified subject, then mints the session — and
-  // mints NO tenant: that is an explicit act at the provisioning door.
-  throw new Error(
-    "unreachable: subject storage reported available but no writer exists",
+  const response = clear(NextResponse.redirect(new URL("/welcome", url.origin)));
+  response.cookies.set(
+    SESSION_COOKIE,
+    signin.data.session_token,
+    SESSION_COOKIE_OPTIONS,
   );
+  return response;
 }

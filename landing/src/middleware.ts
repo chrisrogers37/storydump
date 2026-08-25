@@ -1,59 +1,54 @@
 import { NextRequest, NextResponse } from "next/server";
-import { verifySessionToken, SESSION_COOKIE } from "@/lib/session";
-import { webSignupEnabled, hasTenant } from "@/lib/web-signup";
+import { SESSION_COOKIE, WORKSPACE_COOKIE, isWorkspaceId } from "@/lib/session";
 
-export async function middleware(request: NextRequest) {
-  // Server-side dev auth bypass — never expose via NEXT_PUBLIC_
-  if (process.env.DEV_AUTH_BYPASS === "true" && process.env.NODE_ENV !== "production") {
-    return NextResponse.next();
-  }
+/**
+ * The route gate.
+ *
+ * ── What it deliberately does NOT do: resolve the session ───────────────────
+ *
+ * The session token is opaque, so the only way to learn who holds it is to ask
+ * the target router. Doing that here would put a network call in front of every
+ * gated request, and middleware runs before the cache.
+ *
+ * So this is a PRESENCE gate, and the distinction matters: it tells an
+ * anonymous visitor from a signed-in one, and nothing more. It is not an
+ * authorization check and no route may rely on it as one. Every target call
+ * authorizes server-side against `workspace_members`, which is where the real
+ * answer has to live anyway — a forged cookie gets a 403 from the router, not
+ * access, and it never got access from this file either.
+ *
+ * A revoked or expired token therefore reaches the page, where `getSession()`
+ * resolves it to null and the page redirects. One wasted render for a signed-out
+ * user, versus a round trip on every request for everybody. Revisit when there
+ * is traffic to measure; there is none today.
+ *
+ * ── The workspace redirect ─────────────────────────────────────────────────
+ *
+ * Kept from the previous gate, and its reasoning is unchanged: this has to
+ * happen in middleware rather than in the dashboard layout, because Next.js
+ * renders layout and page segments in PARALLEL. A layout that returns without
+ * rendering {children} hides the output while the page still runs its fetches.
+ * Measured on a warm route — one request, one backend call, with the layout
+ * guard already in place. Redirecting before render is what keeps a
+ * workspace-less session from reaching a workspace-scoped fetch at all.
+ */
+export function middleware(request: NextRequest) {
+  const hasSessionCookie = Boolean(request.cookies.get(SESSION_COOKIE)?.value);
 
-  const token = request.cookies.get(SESSION_COOKIE)?.value;
-
-  if (!token) {
+  if (!hasSessionCookie) {
     return NextResponse.redirect(new URL("/login", request.url));
   }
 
-  const session = await verifySessionToken(token);
-  if (!session) {
-    const response = NextResponse.redirect(new URL("/login", request.url));
-    response.cookies.delete(SESSION_COOKIE);
-    return response;
-  }
+  const { pathname } = request.nextUrl;
 
-  // The gate asks "do you have a tenant?", not "do you have Telegram?". Those
-  // coincided only because every tenant was born from a Telegram group.
-  //
-  // With web sign-up on, a signed-in user with no tenant reaches /dashboard and
-  // sees an empty state there. Sending them to /instances would return them to
-  // the Telegram funnel, which is the behaviour this replaces.
-  //
-  // With the flag off, behaviour is byte-for-byte what it was.
-  if (request.nextUrl.pathname.startsWith("/dashboard") && !hasTenant(session)) {
-    if (!webSignupEnabled()) {
-      return NextResponse.redirect(new URL("/instances", request.url));
-    }
+  if (pathname.startsWith("/dashboard")) {
+    const workspace = request.cookies.get(WORKSPACE_COOKIE)?.value;
 
-    // A tenant-less session is admitted to /dashboard only. Every deeper route
-    // is redirected there.
-    //
-    // This has to happen in middleware, and that is measured rather than
-    // assumed: a guard in the dashboard layout does NOT prevent the child page
-    // from running. Next.js renders layout and page segments in parallel, so a
-    // layout that returns without rendering {children} hides the output while
-    // the page still executes its fetches. Measured on a warm route — one
-    // request, one backend call, with the layout guard already in place.
-    //
-    // That call is the one that matters. Those pages fetch with
-    // session.activeChatId, null here; get_by_chat_id(None) compiles to
-    // IS NULL and .first() carries no ORDER BY. Today no NULL-chat row can
-    // exist (chat_settings.telegram_chat_id is NOT NULL, migration 006), so it
-    // returns None and require_by_chat_id refuses typed. Relax that column and
-    // the same call returns an arbitrary tenant-less row instead — and
-    // require_by_chat_id only tests whether the RESULT is None, so it will not
-    // raise. Redirecting before render is what keeps that unreachable from here.
-    if (request.nextUrl.pathname !== "/dashboard") {
-      return NextResponse.redirect(new URL("/dashboard", request.url));
+    // No workspace selected — the dashboard has nothing to be about. /welcome
+    // is where a first one gets made; it is NOT a Telegram funnel, which is
+    // what the route this replaces used to send people back into.
+    if (!isWorkspaceId(workspace)) {
+      return NextResponse.redirect(new URL("/welcome", request.url));
     }
   }
 
@@ -61,5 +56,5 @@ export async function middleware(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/dashboard/:path*", "/instances"],
+  matcher: ["/dashboard/:path*", "/workspaces"],
 };

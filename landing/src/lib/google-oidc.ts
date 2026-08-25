@@ -1,24 +1,28 @@
 /**
  * Google OIDC sign-in — the entry point half (#1015).
  *
- * WHAT THIS DOES AND DELIBERATELY DOES NOT DO. It starts the flow, verifies
- * what Google returns, and hands back a verified subject. It does NOT create a
- * user, mint a session, or mint a tenant — because there is nowhere to put the
- * subject yet, and pretending otherwise is the failure mode this whole surface
- * is written to avoid.
+ * Starts the flow, verifies what Google returns, and hands back a verified
+ * subject. It does not itself create a user or mint a session — the callback
+ * does that through the target router, which is where the write belongs.
  *
- * ── The storage boundary ────────────────────────────────────────────────────
+ * ── The storage boundary is GONE ────────────────────────────────────────────
  *
- * A returning Google user is recognised by their OIDC `sub`. Storing it needs
- * `user_identities` (migration 053, UNADOPTED) or a column on `users` (which
- * has none: id, telegram_user_id, three telegram name fields, role, is_active,
- * counters, timestamps). `users.telegram_user_id` is also still NOT NULL, so a
- * Google-only row cannot be inserted at all. Both fixes need a migration, and
- * migrations are behind the #840 renumber lock.
+ * It was real and it is worth recording what closed it, because a stale version
+ * of this comment is what kept the button switched off for a day after it
+ * stopped being true.
  *
- * So `SUBJECT_STORAGE_AVAILABLE` is false and `googleSigninAvailable()` returns
- * false with it. The button does not render, and a direct hit on the callback
- * refuses with a typed reason. Nothing half-works.
+ * A returning Google user is recognised by their OIDC `sub`, and until the M.3
+ * cutover there was nowhere to put one: `user_identities` was migration 053 and
+ * unadopted, `users` had no subject column, and `users.telegram_user_id` was
+ * NOT NULL so a Google-only row could not be inserted at all.
+ *
+ * The cutover applied migrations 051-063 on 2026-08-24 at 02:20:14Z. In the
+ * target schema `users` has NO telegram column, and `user_identities` exists
+ * with `provider CHECK IN ('telegram','google')`, `external_id`, and
+ * `UNIQUE (provider, external_id)` — which is precisely a home for a `sub`.
+ *
+ * So `SUBJECT_STORAGE_AVAILABLE` is true, and `googleSigninAvailable()` follows
+ * it as its own comment promised it would.
  *
  * ── Why the state and nonce live in a cookie, not `oauth_states` ────────────
  *
@@ -51,14 +55,16 @@ const STATE_TTL_SECONDS = 600;
 export const CALLBACK_PATH = "/auth/google/callback";
 
 /**
- * FALSE UNTIL THERE IS SOMEWHERE TO WRITE AN OIDC SUBJECT.
+ * TRUE — `user_identities` is live and is where the subject goes.
  *
- * Not a feature flag and not a preference — a statement about the schema. Flip
- * it in the same change that lands the storage, and `googleSigninAvailable()`
- * starts returning true on its own. Greppable on purpose:
- * `grep -rn SUBJECT_STORAGE_AVAILABLE landing/src/`.
+ * Kept as a named constant rather than deleted, because it is the one place
+ * that states WHICH schema fact the sign-in button depends on. It was false for
+ * a real reason and flipped for a real reason; a bare `true` inlined at the
+ * call site would lose both.
+ *
+ * Greppable on purpose: `grep -rn SUBJECT_STORAGE_AVAILABLE landing/src/`.
  */
-export const SUBJECT_STORAGE_AVAILABLE = false;
+export const SUBJECT_STORAGE_AVAILABLE = true;
 
 export type VerifiedSubject = {
   /** The provider's immutable subject. Identity keys on THIS, never email. */

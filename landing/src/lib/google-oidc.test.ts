@@ -88,19 +88,43 @@ describe("googleSigninConfigured", () => {
 });
 
 describe("the storage boundary", () => {
-  it("is closed, and closing it is what keeps the button off", () => {
-    // Pins the boundary itself. When the identity schema lands and this flips,
-    // THIS test is the one that must be updated deliberately — which is the
-    // point: it makes the flip a decision rather than a side effect.
-    expect(SUBJECT_STORAGE_AVAILABLE).toBe(false);
+  it("is OPEN — the M.3 cutover landed `user_identities`", () => {
+    // Updated deliberately, which is what the previous version of this test
+    // asked for in as many words: "when the identity schema lands and this
+    // flips, THIS test is the one that must be updated deliberately — which is
+    // the point: it makes the flip a decision rather than a side effect."
+    //
+    // It landed. Migrations 051-063 applied to production on 2026-08-24 at
+    // 02:20:14Z; `users` has no telegram column and `user_identities` carries
+    // `provider CHECK IN ('telegram','google')` with UNIQUE (provider,
+    // external_id). So there is somewhere to write an OIDC subject, and the
+    // constant remains a statement about the schema rather than a preference.
+    expect(SUBJECT_STORAGE_AVAILABLE).toBe(true);
   });
 
-  it("makes sign-in unavailable even when fully configured on the right origin", () => {
+  it("makes sign-in available when fully configured on the right origin", () => {
     configure();
     expect(googleSigninConfigured()).toBe(true);
     expect(originIsRegistered(REGISTERED)).toBe(true);
-    // Both preconditions hold and it is STILL unavailable. If this ever passes
-    // for the wrong reason, the two assertions above say which one moved.
+    expect(googleSigninAvailable(REGISTERED)).toBe(true);
+  });
+
+  // The gate is open, so the other two conjuncts are the only thing still
+  // holding it shut in a misconfigured deployment. Each is asserted to close it
+  // ON ITS OWN — with one conjunct now constant-true, a single "unavailable"
+  // case could pass while the other conjunct did nothing at all.
+  it("is still closed by an unregistered origin alone", () => {
+    configure();
+    expect(googleSigninConfigured()).toBe(true);
+    expect(
+      googleSigninAvailable("https://not-the-registered-origin.example"),
+    ).toBe(false);
+  });
+
+  it("is still closed by missing configuration alone", () => {
+    configure();
+    delete process.env.GOOGLE_CLIENT_ID;
+    expect(originIsRegistered(REGISTERED)).toBe(true);
     expect(googleSigninAvailable(REGISTERED)).toBe(false);
   });
 });

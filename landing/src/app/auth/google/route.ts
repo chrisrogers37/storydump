@@ -4,7 +4,6 @@ import {
   STATE_COOKIE,
   googleSigninAvailable,
 } from "@/lib/google-oidc";
-import { webSignupEnabled } from "@/lib/web-signup";
 
 /**
  * GET /auth/google — the sign-in entry point (#1015).
@@ -19,7 +18,7 @@ import { webSignupEnabled } from "@/lib/web-signup";
  * true while the flag is off or the storage boundary stands.
  */
 export async function GET(request: NextRequest) {
-  if (!webSignupEnabled() || !googleSigninAvailable(request.nextUrl.origin)) {
+  if (!googleSigninAvailable(request.nextUrl.origin)) {
     return new NextResponse(null, { status: 404 });
   }
 
