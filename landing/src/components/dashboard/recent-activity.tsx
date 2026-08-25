@@ -5,12 +5,20 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/dashboard/empty-state";
 
-interface HistoryItem {
-  posted_at: string;
-  media_name: string;
-  category: string;
-  status: string;
-  posting_method: string;
+/**
+ * Recent activity, from the intent ledger (#1044: a history tab is
+ * `intents?state=posted,skipped,rejected`, one call).
+ *
+ * `entered_state_at` is when the intent reached the state shown, which is what
+ * the legacy `posted_at` meant for a posted row and is the only honest reading
+ * for a skipped or rejected one — those were never "posted" at any time.
+ */
+interface ActivityItem {
+  id: string;
+  state: string;
+  file_name: string;
+  category: string | null;
+  entered_state_at: string;
 }
 
 const statusVariant: Record<string, string> = {
@@ -20,7 +28,7 @@ const statusVariant: Record<string, string> = {
   failed: "bg-red-100 text-red-800",
 };
 
-export function RecentActivity({ items }: { items: HistoryItem[] }) {
+export function RecentActivity({ items }: { items: ActivityItem[] }) {
   return (
     <Card>
       <CardHeader>
@@ -36,16 +44,16 @@ export function RecentActivity({ items }: { items: HistoryItem[] }) {
           />
         ) : (
           <div className="space-y-3">
-            {items.map((item, i) => (
+            {items.map((item) => (
               <div
-                key={`${item.posted_at}-${i}`}
+                key={item.id}
                 className="flex items-center justify-between gap-4 text-sm"
               >
                 <div className="min-w-0 flex-1">
-                  <p className="truncate font-medium">{item.media_name}</p>
+                  <p className="truncate font-medium">{item.file_name}</p>
                   <p className="text-xs text-muted-foreground capitalize">
-                    {item.category} &middot;{" "}
-                    {new Date(item.posted_at).toLocaleDateString("en-US", {
+                    {item.category ? `${item.category} · ` : ""}
+                    {new Date(item.entered_state_at).toLocaleDateString("en-US", {
                       month: "short",
                       day: "numeric",
                       hour: "numeric",
@@ -55,9 +63,9 @@ export function RecentActivity({ items }: { items: HistoryItem[] }) {
                 </div>
                 <Badge
                   variant="secondary"
-                  className={statusVariant[item.status] || ""}
+                  className={statusVariant[item.state] || ""}
                 >
-                  {item.status}
+                  {item.state}
                 </Badge>
               </div>
             ))}

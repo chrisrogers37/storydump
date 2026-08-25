@@ -4,11 +4,14 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
 
+// Dead Content and Content Reuse are GONE, not hidden (#1044). Both were
+// legacy analytics features that are not in the `01` design and not on the
+// #1029 spine, so they are not in the target product yet; their screens are
+// deleted rather than held behind a flag. A tab pointing at a deleted route is
+// the dangling-nav-link defect #1032 already had to fix once.
 const tabs = [
   { href: "/dashboard/media", label: "Library" },
   { href: "/dashboard/media/calendar", label: "Calendar" },
-  { href: "/dashboard/media/dead-content", label: "Dead Content" },
-  { href: "/dashboard/media/reuse", label: "Content Reuse" },
 ];
 
 export function MediaTabs() {

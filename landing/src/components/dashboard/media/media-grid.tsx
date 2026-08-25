@@ -1,49 +1,33 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useMemo, useState } from "react";
 import { ImageOff } from "lucide-react";
-import { getApi } from "@/lib/dashboard-api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/dashboard/empty-state";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { cn } from "@/lib/utils";
+import { Card, CardContent } from "@/components/ui/card";
+import type { MediaRow } from "@/lib/dashboard-payloads";
 
-interface MediaItem {
-  id: string;
-  file_name: string;
-  category: string;
-  mime_type: string;
-  file_size: number;
-  times_posted: number;
-  last_posted_at: string | null;
-  source_type: string;
-  has_thumbnail: boolean;
-  created_at: string;
-}
-
-interface MediaLibraryResponse {
-  items: MediaItem[];
-  total: number;
-  page: number;
-  page_size: number;
-  categories: string[];
-  pool_health: {
-    total_active: number;
-    never_posted: number;
-    posted_once: number;
-    posted_multiple: number;
-    eligible_for_posting: number;
-    by_category: { name: string; count: number }[];
-  };
-}
-
-function formatBytes(bytes: number): string {
+/**
+ * The media pool (#1044 `GET …/media?state=&never_posted=&limit=`).
+ *
+ * ── Server paging is gone because the route has no offset ──────────────────
+ *
+ * The legacy grid paged server-side (`page`, `page_size`, `total`) and filtered
+ * by category server-side. The target route takes `limit` ONLY — no offset, no
+ * category parameter — so neither is expressible against it. Rather than fake
+ * a page count from a bounded list, the grid asks for one bounded page and
+ * SAYS SO: the bound is rendered, not implied. Filtering is over that fetched
+ * set for the same reason, and the label says which set it filtered.
+ *
+ * That is a real reduction in what this screen can do and it is deliberate:
+ * inventing `total` from a truncated list is the "confident wrong figure"
+ * #1044 exists to stop, and a Next button that silently returns the same
+ * twenty items is worse than no Next button. Restoring either needs an offset
+ * and a category filter on the route — noted on #1048.
+ */
+function formatBytes(bytes: number | null): string {
+  if (bytes === null) return "—";
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
@@ -63,79 +47,62 @@ function postingBadge(times: number) {
   if (times === 1)
     return <Badge variant="secondary" className="text-xs">Posted once</Badge>;
   return (
-    <Badge className="text-xs bg-green-600 hover:bg-green-700">
+    <Badge className="bg-green-600 text-xs hover:bg-green-700">
       {times}x posted
     </Badge>
   );
 }
 
 export function MediaGrid({
-  initialData,
+  items,
+  limit,
 }: {
-  initialData: MediaLibraryResponse;
+  items: MediaRow[];
+  limit: number;
 }) {
-  const [data, setData] = useState(initialData);
-  const [poolHealth, setPoolHealth] = useState(initialData.pool_health);
-  const [page, setPage] = useState(initialData.page);
   const [category, setCategory] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
 
-  const fetchPage = useCallback(
-    async (p: number, cat: string | null) => {
-      setLoading(true);
-      try {
-        const params = new URLSearchParams({ page: String(p), page_size: "20" });
-        if (cat) params.set("category", cat);
-        const result = await getApi(`media-library?${params}`);
-        // Pool health is only returned on page 1
-        if (result.pool_health) setPoolHealth(result.pool_health);
-        setData(result);
-        setPage(p);
-      } finally {
-        setLoading(false);
-      }
-    },
-    []
-  );
+  const categories = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const item of items) {
+      if (!item.category) continue;
+      counts.set(item.category, (counts.get(item.category) ?? 0) + 1);
+    }
+    return [...counts.entries()].sort(([a], [b]) => a.localeCompare(b));
+  }, [items]);
 
-  const handleCategoryFilter = (cat: string | null) => {
-    setCategory(cat);
-    fetchPage(1, cat);
-  };
+  const shown = category
+    ? items.filter((i) => i.category === category)
+    : items;
 
-  const totalPages = Math.ceil(data.total / data.page_size);
+  // The list is bounded, so it may be a prefix of the library rather than all
+  // of it. A reader cannot tell those apart from the grid alone.
+  const atBound = items.length >= limit;
 
   return (
     <div className="space-y-4">
-      {/* Category filter */}
       <div className="flex flex-wrap gap-2">
         <Button
           variant={category === null ? "default" : "outline"}
           size="sm"
-          onClick={() => handleCategoryFilter(null)}
+          onClick={() => setCategory(null)}
         >
-          All ({poolHealth.total_active})
+          All ({items.length})
         </Button>
-        {poolHealth.by_category.map((cat) => (
+        {categories.map(([name, count]) => (
           <Button
-            key={cat.name}
-            variant={category === cat.name ? "default" : "outline"}
+            key={name}
+            variant={category === name ? "default" : "outline"}
             size="sm"
-            onClick={() => handleCategoryFilter(cat.name)}
+            onClick={() => setCategory(name)}
           >
-            {cat.name} ({cat.count})
+            {name} ({count})
           </Button>
         ))}
       </div>
 
-      {/* Items grid */}
-      <div
-        className={cn(
-          "grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4",
-          loading && "opacity-50 pointer-events-none"
-        )}
-      >
-        {data.items.length === 0 ? (
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+        {shown.length === 0 ? (
           <div className="col-span-full">
             <EmptyState
               icon={ImageOff}
@@ -144,38 +111,34 @@ export function MediaGrid({
             />
           </div>
         ) : (
-          data.items.map((item) => (
+          shown.map((item) => (
             <Card key={item.id} className="overflow-hidden">
-              <div className="bg-muted h-32 relative flex items-center justify-center text-muted-foreground overflow-hidden">
-                {item.has_thumbnail ? (
+              <div className="relative flex h-32 items-center justify-center overflow-hidden bg-muted text-muted-foreground">
+                {item.thumbnail_url ? (
                   // eslint-disable-next-line @next/next/no-img-element
                   <img
-                    src={`/api/dashboard/media/${item.id}/thumbnail`}
+                    src={item.thumbnail_url}
                     alt={item.file_name}
                     loading="lazy"
                     className="absolute inset-0 h-full w-full object-cover"
                     onError={(e) => {
-                      // Proxy returns 404 when the stored Drive URL has
-                      // rotated; the next sync refreshes it. Fall back to
-                      // the MIME label rather than a broken-image icon.
+                      // A stored Drive URL rotates; the next sync refreshes it.
+                      // Fall back to the kind label rather than a broken image.
                       (e.currentTarget as HTMLImageElement).style.display = "none";
                     }}
                   />
                 ) : null}
-                <span className="text-xs uppercase tracking-wider pointer-events-none">
-                  {item.mime_type?.split("/")[1] || "file"}
+                <span className="pointer-events-none text-xs uppercase tracking-wider">
+                  {item.mime_type?.split("/")[1] || item.media_kind || "file"}
                 </span>
               </div>
-              <CardContent className="p-3 space-y-2">
-                <p
-                  className="text-sm font-medium truncate"
-                  title={item.file_name}
-                >
+              <CardContent className="space-y-2 p-3">
+                <p className="truncate text-sm font-medium" title={item.file_name}>
                   {item.file_name}
                 </p>
                 <div className="flex items-center justify-between">
                   <Badge variant="outline" className="text-xs">
-                    {item.category}
+                    {item.category ?? "uncategorised"}
                   </Badge>
                   {postingBadge(item.times_posted)}
                 </div>
@@ -189,33 +152,14 @@ export function MediaGrid({
         )}
       </div>
 
-      {/* Pagination */}
-      {totalPages > 1 && (
-        <div className="flex items-center justify-between pt-2">
-          <p className="text-sm text-muted-foreground">
-            Showing {(page - 1) * data.page_size + 1}-
-            {Math.min(page * data.page_size, data.total)} of {data.total}
-          </p>
-          <div className="flex gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={page <= 1}
-              onClick={() => fetchPage(page - 1, category)}
-            >
-              Previous
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={page >= totalPages}
-              onClick={() => fetchPage(page + 1, category)}
-            >
-              Next
-            </Button>
-          </div>
-        </div>
-      )}
+      <p className="pt-2 text-xs text-muted-foreground">
+        {category
+          ? `Showing ${shown.length} of ${items.length} loaded items in "${category}".`
+          : `Showing ${items.length} items.`}{" "}
+        {atBound
+          ? `This is the first ${limit} in the library — the API serves a bounded list with no page control, so there may be more.`
+          : "That is the whole library."}
+      </p>
     </div>
   );
 }

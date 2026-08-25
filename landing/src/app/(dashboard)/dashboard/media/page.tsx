@@ -1,10 +1,23 @@
 import { redirect } from "next/navigation";
 import { getSession } from "@/lib/session";
 import { workspaceFetch } from "@/lib/workspaces";
-import type { MediaLibraryResponse } from "@/lib/dashboard-payloads";
+import {
+  derivePoolHealth,
+  type MediaResponse,
+  type StatsResponse,
+} from "@/lib/dashboard-payloads";
 import { RouterUnavailable } from "@/components/workspace/router-unavailable";
 import { PoolHealth } from "@/components/dashboard/media/pool-health";
 import { MediaGrid } from "@/components/dashboard/media/media-grid";
+
+/**
+ * The library is a bounded read and the bound is stated (`01` H5).
+ *
+ * The pool COUNTS come from `stats`, never from this list — an aggregate
+ * derived from a truncated set is a confident wrong number, which is the whole
+ * reason the aggregate route exists.
+ */
+const MEDIA_LIMIT = 100;
 
 export default async function MediaLibraryPage() {
   const session = await getSession().catch(() => null);
@@ -15,35 +28,30 @@ export default async function MediaLibraryPage() {
   // on a value that is legitimately null for every brand-new user.
   const workspaceId = session.activeWorkspaceId;
   if (!workspaceId) redirect("/welcome");
-  const result = await workspaceFetch<MediaLibraryResponse>(
-    "media-library?page=1&page_size=20",
-    workspaceId,
-  );
-  if (!result.ok) return <RouterUnavailable what="Your media library" />;
 
-  const library = result.data;
+  const [mediaResult, statsResult] = await Promise.all([
+    workspaceFetch<MediaResponse>(
+      `media?state=available&limit=${MEDIA_LIMIT}`,
+      workspaceId,
+    ),
+    workspaceFetch<StatsResponse>("stats", workspaceId),
+  ]);
 
-  const poolHealth = library?.pool_health ?? {
-    total_active: 0,
-    never_posted: 0,
-    posted_once: 0,
-    posted_multiple: 0,
-    eligible_for_posting: 0,
-    by_category: [],
-  };
+  // Both, for the same reason the overview gates on all of its own: a pool
+  // header over an empty grid states a fact about the library we did not
+  // establish.
+  if (!mediaResult.ok || !statsResult.ok) {
+    return <RouterUnavailable what="Your media library" />;
+  }
+
+  const items = mediaResult.data.media ?? [];
+  const health = derivePoolHealth(statsResult.data);
 
   return (
     <div className="space-y-6">
-      <PoolHealth health={poolHealth} />
+      <PoolHealth health={health} />
 
-      <MediaGrid initialData={library ?? {
-        items: [],
-        total: 0,
-        page: 1,
-        page_size: 20,
-        categories: [],
-        pool_health: poolHealth,
-      }} />
+      <MediaGrid items={items} limit={MEDIA_LIMIT} />
     </div>
   );
 }
