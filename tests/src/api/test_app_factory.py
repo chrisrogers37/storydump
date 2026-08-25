@@ -88,7 +88,6 @@ class TestLegacySurfaceIsGone:
     @pytest.mark.parametrize(
         "path",
         [
-            "/webapp/onboarding",
             "/api/onboarding/init",
             "/api/onboarding/settings",
             "/static/onboarding/index.html",
@@ -97,6 +96,30 @@ class TestLegacySurfaceIsGone:
     )
     def test_legacy_paths_are_not_routed(self, client, path):
         assert client.get(path).status_code == 404
+
+
+class TestTheRetiredMiniAppLinkStillLands:
+    """Buttons the legacy bot already sent bake `/webapp/onboarding` into the
+    message and navigate client-side, so the path must answer: a redirect to
+    the front end's sign-in, with the legacy chat id dropped; 410 with a
+    sentence when no front end is configured. Never a 404."""
+
+    def test_redirects_to_the_front_end_sign_in_and_drops_the_chat_id(
+        self, client, monkeypatch
+    ):
+        monkeypatch.setattr(
+            settings, "WEB_APP_URL", "https://app.example.test/", raising=False
+        )
+        for path in ("/webapp/onboarding", "/webapp/onboarding?chat_id=-1001234567890"):
+            resp = client.get(path, follow_redirects=False)
+            assert resp.status_code == 302, path
+            assert resp.headers["location"] == "https://app.example.test/login"
+
+    def test_without_a_front_end_it_is_gone_not_missing(self, client, monkeypatch):
+        monkeypatch.setattr(settings, "WEB_APP_URL", None, raising=False)
+        resp = client.get("/webapp/onboarding", follow_redirects=False)
+        assert resp.status_code == 410
+        assert "retired" in resp.text.lower()
 
     def test_the_dormant_webhook_route_is_still_mounted(self, client):
         # 403 is the route refusing an unarmed delivery — it exists.
