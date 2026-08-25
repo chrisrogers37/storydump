@@ -32,4 +32,6 @@ class RefusalError(StorydumpError):
 
     def __init__(self, reason: str, detail: str = ""):
         self.reason = reason
-        super().__init__(f"{self._prefix}: {reason}" + (f" — {detail}" if detail else ""))
+        super().__init__(
+            f"{self._prefix}: {reason}" + (f" — {detail}" if detail else "")
+        )

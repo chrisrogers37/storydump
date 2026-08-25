@@ -151,8 +151,7 @@ class TestTheIdentityWriter:
         again = upsert_google_identity(conn, subject="sub-return", display_name="new")
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT verified_at, display_name FROM user_identities"
-                " WHERE id = %s",
+                "SELECT verified_at, display_name FROM user_identities WHERE id = %s",
                 (first.identity_id,),
             )
             after, display = cur.fetchone()
@@ -176,12 +175,16 @@ class TestTheIdentityWriter:
     def test_primary_email_fills_when_empty_and_never_overwrites(self, conn):
         first = upsert_google_identity(conn, subject="sub-mail")
         with conn.cursor() as cur:
-            cur.execute("SELECT primary_email FROM users WHERE id = %s", (first.user_id,))
+            cur.execute(
+                "SELECT primary_email FROM users WHERE id = %s", (first.user_id,)
+            )
             assert cur.fetchone()[0] is None
         upsert_google_identity(conn, subject="sub-mail", email="filled@example.com")
         upsert_google_identity(conn, subject="sub-mail", email="changed@example.com")
         with conn.cursor() as cur:
-            cur.execute("SELECT primary_email FROM users WHERE id = %s", (first.user_id,))
+            cur.execute(
+                "SELECT primary_email FROM users WHERE id = %s", (first.user_id,)
+            )
             # A provider changing the claim must not repoint a set account.
             assert cur.fetchone()[0] == "filled@example.com"
 
@@ -241,9 +244,10 @@ class TestTheIdentityWriter:
         subject = "sub-race"
         result, failure = {}, {}
 
-        with txn(world["ingress"], "svc_ingress") as a, txn(
-            world["ingress"], "svc_ingress"
-        ) as b:
+        with (
+            txn(world["ingress"], "svc_ingress") as a,
+            txn(world["ingress"], "svc_ingress") as b,
+        ):
             with b.cursor() as cur:
                 cur.execute("SELECT pg_backend_pid()")
                 b_pid = cur.fetchone()[0]
@@ -477,9 +481,7 @@ class TestTheWorkspaceWriter:
         conn.rollback()
         with conn.cursor() as cur:
             _claim(cur, mine)
-            cur.execute(
-                "INSERT INTO workspaces (id, name) VALUES (%s, 'own')", (mine,)
-            )
+            cur.execute("INSERT INTO workspaces (id, name) VALUES (%s, 'own')", (mine,))
         conn.rollback()
 
     def test_an_autocommit_connection_is_refused_by_name(self, world):
@@ -521,9 +523,7 @@ class TestTheWorkspaceWriter:
         conn.commit()
         with conn.cursor() as cur:
             _claim(cur, made.workspace_id)
-            cur.execute(
-                "SELECT tz FROM workspaces WHERE id = %s", (made.workspace_id,)
-            )
+            cur.execute("SELECT tz FROM workspaces WHERE id = %s", (made.workspace_id,))
             assert cur.fetchone()[0] == "America/New_York"
         conn.commit()
 
@@ -537,9 +537,7 @@ class TestTheThreeWritersCompose:
             conn, subject="sub-e2e", email="e2e@example.com", display_name="E"
         )
         session = mint_session(conn, identity.user_id)
-        made = create_workspace(
-            conn, name="E2E", owner_user_id=identity.user_id
-        )
+        made = create_workspace(conn, name="E2E", owner_user_id=identity.user_id)
         conn.commit()
 
         # A tenant-less moment is representable: the token authenticates
@@ -566,9 +564,7 @@ class TestTheMembershipListGap:
 
     def test_ingress_refuses_rather_than_reporting_no_workspaces(self, world, conn):
         identity = upsert_google_identity(conn, subject="sub-list")
-        made = create_workspace(
-            conn, name="Listed", owner_user_id=identity.user_id
-        )
+        made = create_workspace(conn, name="Listed", owner_user_id=identity.user_id)
         conn.commit()
         with pytest.raises(TenantResolutionError) as err:
             workspaces_for_user(conn, identity.user_id)
