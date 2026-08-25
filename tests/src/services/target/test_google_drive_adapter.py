@@ -13,6 +13,7 @@ admitted is part of what these tests certify.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import httpx
 import pytest
@@ -25,6 +26,7 @@ from src.services.target.drive_adapter import (
 from src.services.target.egress import EgressPolicy
 from src.services.target.google_drive_adapter import GoogleDriveAdapter
 from src.services.target.media_sync import DriveCredentialDead, DriveSourceGone
+from src.utils.media_kind import INSTAGRAM_VIDEO_SUFFIXES
 
 CONFIG = {"v": 1, "folder_ref": "FOLDER123"}
 WS = "11111111-1111-1111-1111-111111111111"
@@ -88,13 +90,14 @@ class TestListChanges:
                 "ref": "f1",
                 "name": "cat.jpg",
                 "kind": "image",
+                "mime_type": "image/jpeg",
                 "content_hash": "hash1",
                 "size_bytes": 10,
                 "modified_at": "2026-08-01T00:00:00Z",
             }
         ]
-        # media_sync reads exactly these four; the rest are additive.
-        assert {"ref", "name", "kind", "content_hash"} <= set(items[0])
+        # media_sync reads exactly these five; the rest are additive.
+        assert {"ref", "name", "kind", "mime_type", "content_hash"} <= set(items[0])
         assert checkpoint == {"v": 1}
 
     @pytest.mark.asyncio
@@ -106,6 +109,47 @@ class TestListChanges:
             CONFIG, None, source_id=SRC, workspace_id=WS
         )
         assert items[0]["kind"] == "video"
+
+    @pytest.mark.asyncio
+    async def test_the_provider_mime_survives_a_name_that_carries_no_extension(self):
+        """The fixture is extensionless ON PURPOSE, and a normal-looking name
+        would prove nothing here.
+
+        A Drive file's name is whatever a person typed into Drive; nothing
+        requires a suffix, and `media_sync` writes that name straight into
+        `media_items.file_name`. So for provider media the filename is not a
+        classifier input at all, and `mimeType` is the only authoritative
+        signal the listing carries. Deriving `kind` from it and then dropping it
+        is what left `mime_type` NULL for every Drive row.
+
+        The control is the second assertion, coupled to the shipped suffix set
+        rather than a copy of it: this name is one the IG predicate would call
+        IMAGE, while the provider says video.
+        """
+        handler, _ = _json_handler(
+            {"files": [_file("f9", name="sunset clip", mime="video/quicktime")]}
+        )
+        items, _ = await _adapter(handler).list_changes(
+            CONFIG, None, source_id=SRC, workspace_id=WS
+        )
+        assert items[0]["mime_type"] == "video/quicktime"
+        assert items[0]["kind"] == "video"
+        # Control: the name is inert to every extension-based classifier.
+        assert Path(items[0]["name"]).suffix == ""
+        assert not items[0]["name"].lower().endswith(INSTAGRAM_VIDEO_SUFFIXES)
+
+    @pytest.mark.asyncio
+    async def test_a_skipped_entry_never_reaches_the_item_shape(self):
+        """A positive control on the two probes above: the same helper that
+        builds a carried item also drops one, so a listing coming back empty
+        here is the skip firing rather than the fixture failing to arrive."""
+        handler, _ = _json_handler(
+            {"files": [_file("f10", name="doc", mime="application/pdf")]}
+        )
+        items, _ = await _adapter(handler).list_changes(
+            CONFIG, None, source_id=SRC, workspace_id=WS
+        )
+        assert items == []
 
     @pytest.mark.asyncio
     async def test_exhaustion_is_the_absent_token_not_a_short_page(self):
