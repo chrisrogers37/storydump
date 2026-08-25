@@ -67,6 +67,7 @@ from __future__ import annotations
 import contextvars
 from contextlib import asynccontextmanager
 from typing import Optional
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
@@ -146,6 +147,33 @@ def async_database_url(database: Optional[str] = None) -> str:
         f"postgresql+asyncpg://{settings.DB_USER}:{settings.DB_PASSWORD}"
         f"@{settings.DB_HOST}:{settings.DB_PORT}/{database or settings.DB_NAME}"
     )
+
+
+def asyncpg_url(url: str) -> str:
+    """A platform-shaped `postgresql://` URL made asyncpg-safe — the deploy door
+    both roots share (worker and api), so the rewrite lives once.
+
+    Rewrites what the asyncpg driver refuses: the dialect suffix, and the
+    libpq-only `sslmode`/`channel_binding` query params (Neon appends both;
+    asyncpg takes `ssl=`).
+    """
+    url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    parts = urlsplit(url)
+    params = dict(parse_qsl(parts.query))
+    sslmode = params.pop("sslmode", None)
+    params.pop("channel_binding", None)
+    if sslmode and "ssl" not in params:
+        params["ssl"] = sslmode
+    return urlunsplit(parts._replace(query=urlencode(params)))
+
+
+def engine_url_from_env(env) -> Optional[str]:
+    """`TARGET_DATABASE_URL` from *env*, asyncpg-safe, or None when unset so
+    :func:`create_engine` falls back to the settings-built URL."""
+    url = env.get("TARGET_DATABASE_URL")
+    if not url:
+        return None
+    return asyncpg_url(url)
 
 
 def create_engine(url: Optional[str] = None) -> AsyncEngine:
@@ -241,25 +269,34 @@ async def apply_gucs(
     of this call is how a third ships `is_local=false` and leaks tenant scope
     with no gate able to see it — hence one home.
 
+    One statement, not one per GUC: a tenant-scoped request pays this on
+    every unit of work, and four round trips for four `set_config` calls was
+    measured as the largest avoidable cost on the read path (#1028). Only the
+    non-None pairs are sent — `set_config(x, NULL, true)` stores the empty
+    string, and the audit triggers must keep seeing an UNSET actor as unset.
+
     Known coverage note: a raw-connection transaction (the permit path) never
     sets `_IN_TRANSACTION`, so the §5 discipline tripwire does not cover the
     permit window. Inert today — `acquire_permit` commits before returning,
     so no provider call can happen inside it — named here because this is
     where the next reader will look.
     """
-    await executor.execute(
-        text("SELECT set_config('app.tenant_id', :v, true)"),
-        {"v": tenant_id},
+    pairs = [("app.tenant_id", tenant_id)] + [
+        (name, value)
+        for name, value in (
+            ("app.actor_kind", actor_kind),
+            ("app.actor_user_id", actor_user_id),
+            ("app.channel", channel),
+        )
+        if value is not None
+    ]
+    calls = ", ".join(
+        f"set_config('{name}', :v{i}, true)" for i, (name, _) in enumerate(pairs)
     )
-    for name, value in (
-        ("app.actor_kind", actor_kind),
-        ("app.actor_user_id", actor_user_id),
-        ("app.channel", channel),
-    ):
-        if value is not None:
-            await executor.execute(
-                text(f"SELECT set_config('{name}', :v, true)"), {"v": value}
-            )
+    await executor.execute(
+        text(f"SELECT {calls}"),
+        {f"v{i}": value for i, (_, value) in enumerate(pairs)},
+    )
 
 
 def unit_of_work(engine: AsyncEngine, tenant_id: str, **gucs) -> UnitOfWork:

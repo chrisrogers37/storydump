@@ -60,13 +60,13 @@ class TestEngineUrlFromEnv:
     rewritten (Neon hands out `sslmode=require&channel_binding=require`)."""
 
     def test_plain_postgres_url_gains_the_asyncpg_driver(self):
-        from src.worker import engine_url_from_env
+        from src.services.target.unit_of_work import engine_url_from_env
 
         url = engine_url_from_env({"TARGET_DATABASE_URL": "postgresql://u:p@h/db"})
         assert url == "postgresql+asyncpg://u:p@h/db"
 
     def test_libpq_ssl_params_are_rewritten_for_asyncpg(self):
-        from src.worker import engine_url_from_env
+        from src.services.target.unit_of_work import engine_url_from_env
 
         url = engine_url_from_env(
             {
@@ -77,7 +77,7 @@ class TestEngineUrlFromEnv:
         assert url.endswith("?ssl=require")
 
     def test_absent_env_returns_none_so_settings_decide(self):
-        from src.worker import engine_url_from_env
+        from src.services.target.unit_of_work import engine_url_from_env
 
         assert engine_url_from_env({}) is None
 

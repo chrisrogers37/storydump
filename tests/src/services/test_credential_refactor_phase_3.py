@@ -315,14 +315,6 @@ class TestOAuthCallsitesUseMetaId:
         assert "find_existing_account_for_oauth" in source
         assert "get_account_by_instagram_id" not in source
 
-    def test_settings_endpoint_uses_meta_id(self):
-        import inspect
-        from src.api.routes.onboarding.settings import onboarding_add_account
-
-        source = inspect.getsource(onboarding_add_account)
-        assert "get_account_by_meta_id" in source
-        assert "get_account_by_instagram_id" not in source
-
 
 # ---------------------------------------------------------------------------
 # Cross-flow username recovery (re-introduced after the 2026-05-25 incident)

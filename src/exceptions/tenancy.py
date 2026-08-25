@@ -14,20 +14,42 @@ from src.exceptions.base import RefusalError
 class TenantResolutionError(RefusalError):
     """Inbound identity did not resolve — refused, never defaulted.
 
-    ``reason`` is a closed vocabulary so callers can route without parsing
-    prose: unknown_binding | revoked_binding | invalid_session |
-    expired_session | revoked_session | not_a_member | insufficient_role |
-    membership_list_unreadable (the caller asked which workspaces a user
-    belongs to on a connection whose RLS filters that table — a structurally
-    partial answer, refused rather than returned; see
-    ``tenant_resolution.workspaces_for_user``) |
-    unknown_channel | unprovisioned_channel (legacy-era: the deployment's
-    global notification channel has no settings row — an operator condition,
-    deliberately distinct from unknown_binding so no edge tells an operator
-    to run /start).
+    ``reason`` is the closed vocabulary in :data:`REASONS`, so callers route
+    without parsing prose: unknown_binding | revoked_binding | invalid_session |
+    expired_session | revoked_session | disabled_user | not_a_member |
+    insufficient_role | membership_list_unreadable (the caller asked which
+    workspaces a user belongs to on a connection whose RLS filters that table
+    — a structurally partial answer, refused rather than returned; see
+    ``workspaces.list_for_user``) | unknown_channel | unprovisioned_channel
+    (legacy-era: the deployment's global notification channel has no settings
+    row — an operator condition, deliberately distinct from unknown_binding so
+    no edge tells an operator to run /start).
+
+    A reason outside the vocabulary is a programming error and is refused at
+    construction, so the closed list is closed in practice and not only in
+    prose — the web adapter's status table is pinned against this tuple.
     """
 
     _prefix = "tenant resolution refused"
+
+    REASONS = (
+        "unknown_binding",
+        "revoked_binding",
+        "invalid_session",
+        "expired_session",
+        "revoked_session",
+        "disabled_user",
+        "not_a_member",
+        "insufficient_role",
+        "membership_list_unreadable",
+        "unknown_channel",
+        "unprovisioned_channel",
+    )
+
+    def __init__(self, reason: str, detail: str = ""):
+        if reason not in self.REASONS:
+            raise ValueError(f"not a resolution reason: {reason!r}")
+        super().__init__(reason, detail)
 
 
 class TenantProvisioningError(RefusalError):

@@ -39,7 +39,6 @@ google-auth-oauthlib==1.4.0
 fastapi==0.136.1
 uvicorn==0.47.0
 python-multipart==0.0.31
-slowapi==0.1.9
 
 # Security (Phase 2)
 cryptography==50.0.0
