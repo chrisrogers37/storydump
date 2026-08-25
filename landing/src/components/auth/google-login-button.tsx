@@ -1,56 +1,55 @@
-import { Button } from "@/components/ui/button";
-import { googleSigninAvailable } from "@/lib/google-oidc";
+import { TARGET_API_URL } from "@/lib/target-api";
 
 /**
- * The Google sign-in button — rendered ONLY where it can actually complete.
+ * Sign in with Google.
  *
- * Google matches redirect URIs exactly and forbids wildcards, so on any origin
- * that is not the registered one the flow ends in `redirect_uri_mismatch` —
- * a failure no amount of reading our code explains. And while
- * `SUBJECT_STORAGE_AVAILABLE` is false there is nowhere to record the user even
- * if it did complete.
+ * ── It is a LINK to the API, not a flow this tier runs ─────────────────────
  *
- * So `googleSigninAvailable()` decides, and where it says no this renders
- * nothing at all rather than a disabled control: an unavailable button still
- * says "this is how you sign in", which is the wrong thing to tell someone
- * whose only working option is below it. Same rule virgil applied by leaving it
- * out entirely — a button that cannot complete is worse than no button.
+ * An earlier version of this front end implemented the whole OIDC exchange in
+ * the BFF. The API implements it too, and the API is right: minting a session
+ * means writing a `session_tokens` row, and this tier holds no database
+ * connection. The API's own reasoning is the one that settles it — "no secret
+ * anywhere that could mint a session for an arbitrary user — the reason this
+ * lives here and not on the front end."
  *
- * This is a plain link, not a form: `GET /auth/google` is a redirect, and a
- * fetch would follow it into accounts.google.com inside the page.
+ * So the duplicate is deleted rather than kept behind a preference. What is
+ * left is one anchor to `GET /auth/google`, which redirects to Google,
+ * verifies, sets the session cookie, and sends the browser back to /welcome.
+ *
+ * ── Why there is no availability check any more ────────────────────────────
+ *
+ * The previous button asked `googleSigninAvailable()` — client id, secret, and
+ * an origin Google will redirect back to — and rendered null when any was
+ * missing. That question now belongs entirely to the API: it holds the
+ * credentials, and this tier cannot see them. Asking here would mean keeping a
+ * second copy of the API's configuration, which is a fork that goes stale
+ * silently and answers confidently while it does.
+ *
+ * A misconfigured API therefore surfaces as the API's own error rather than as
+ * a missing button. That is a deliberate trade: a button that fails loudly at
+ * the owner of the problem beats a button that vanishes for a reason this tier
+ * inferred.
  */
-export function GoogleLoginButton({ origin }: { origin: string | null }) {
-  if (!googleSigninAvailable(origin)) return null;
-
-  // The design system's outline variant via `asChild`, NOT a hand-rolled
-  // near-copy of it. The copy differed by shadow-sm vs shadow-xs, a missing
-  // hover:text-accent-foreground, and — the one that showed — the absent
-  // focus-visible ring, so a focused Google button looked unlike every other
-  // button in the app. `asChild` keeps the anchor semantics, which matter: this
-  // is a redirect, not a form submission.
+export function GoogleLoginButton() {
   return (
-    <Button asChild variant="outline" className="w-full gap-2">
-      <a href="/auth/google">
-        <svg className="h-4 w-4" viewBox="0 0 24 24" aria-hidden="true">
-          <path
-            fill="#4285F4"
-            d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1Z"
-          />
-          <path
-            fill="#34A853"
-            d="M12 23c2.97 0 5.46-.98 7.28-2.65l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84A11 11 0 0 0 12 23Z"
-          />
-          <path
-            fill="#FBBC05"
-            d="M5.84 14.11a6.6 6.6 0 0 1 0-4.22V7.05H2.18a11 11 0 0 0 0 9.9l3.66-2.84Z"
-          />
-          <path
-            fill="#EA4335"
-            d="M12 4.75c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 1.46 14.97.5 12 .5A11 11 0 0 0 2.18 7.05l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53Z"
-          />
-        </svg>
-        Continue with Google
-      </a>
-    </Button>
+    <a
+      href={`${TARGET_API_URL}/auth/google`}
+      className="inline-flex w-full items-center justify-center gap-2 rounded-md border bg-background px-4 py-2.5 text-sm font-medium transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+    >
+      <GoogleMark />
+      Continue with Google
+    </a>
+  );
+}
+
+/** Google's mark, inline so the button has no network dependency to render. */
+function GoogleMark() {
+  return (
+    <svg className="h-4 w-4" viewBox="0 0 24 24" aria-hidden focusable="false">
+      <path fill="#4285F4" d="M23.5 12.3c0-.8-.1-1.6-.2-2.3H12v4.5h6.5a5.6 5.6 0 0 1-2.4 3.7v3h3.9c2.3-2.1 3.5-5.2 3.5-8.9z" />
+      <path fill="#34A853" d="M12 24c3.2 0 5.9-1.1 7.9-2.9l-3.9-3c-1.1.7-2.5 1.1-4 1.1-3.1 0-5.7-2.1-6.6-4.9H1.4v3.1A12 12 0 0 0 12 24z" />
+      <path fill="#FBBC05" d="M5.4 14.3a7.2 7.2 0 0 1 0-4.6V6.6H1.4a12 12 0 0 0 0 10.8l4-3.1z" />
+      <path fill="#EA4335" d="M12 4.8c1.8 0 3.3.6 4.5 1.8l3.4-3.4A12 12 0 0 0 1.4 6.6l4 3.1C6.3 6.9 8.9 4.8 12 4.8z" />
+    </svg>
   );
 }

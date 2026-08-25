@@ -1,45 +1,54 @@
 /**
  * The `.tsx` half of the glob fix — and a real test, not a placeholder.
  *
- * `GoogleLoginButton` returns `null` rather than a disabled control when
- * sign-in cannot complete, so the closed case is assertable WITHOUT a DOM:
- * calling the component returns null outright. That keeps `environment: "node"`
- * honest — jsdom is a separate decision for whenever a test genuinely renders.
+ * REWRITTEN, because the contract it pinned no longer exists. The button used
+ * to run the OIDC flow in this tier and return `null` when it could not
+ * complete; the API hosts sign-in now, so there is no local availability
+ * question left to assert and no closed case to render. What replaced it is a
+ * single anchor, which is still assertable WITHOUT a DOM by reading the
+ * returned element's props — so `environment: "node"` stays honest.
  *
  * This file existing under a `.tsx` extension is also what makes
  * `vitest-config.test.ts`'s assertion about something real rather than
  * hypothetical.
  */
 
-import { beforeEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
+import type { ReactElement } from "react";
 import { GoogleLoginButton } from "./google-login-button";
 
-beforeEach(() => {
-  delete process.env.GOOGLE_CLIENT_ID;
-  delete process.env.GOOGLE_CLIENT_SECRET;
-  delete process.env.GOOGLE_SIGNIN_REDIRECT_BASE;
-});
+/** The rendered anchor's props, without a DOM. */
+function anchor(): { href: string; className: string } {
+  const el = GoogleLoginButton() as ReactElement<{
+    href: string;
+    className: string;
+  }>;
+  return el.props;
+}
 
 describe("GoogleLoginButton", () => {
-  it("renders nothing while sign-in cannot complete", () => {
-    // Nothing configured, storage boundary closed: null, not a disabled button.
-    // An unavailable button still says "this is how you sign in", which is the
-    // wrong thing to tell someone whose only working option is above it.
-    expect(GoogleLoginButton({ origin: "https://storydump.app" })).toBeNull();
+  it("links to the API's sign-in endpoint, not to a route in this tier", () => {
+    // The whole point of the collapse. A path under this app's own origin
+    // would mean the BFF was still running a second OIDC flow.
+    expect(anchor().href).toMatch(/\/auth\/google$/);
+    expect(anchor().href).not.toMatch(/\/api\//);
   });
 
-  it("renders nothing on an unregistered origin even when configured", () => {
-    process.env.GOOGLE_CLIENT_ID = "test-client-id.apps.googleusercontent.com";
-    process.env.GOOGLE_CLIENT_SECRET = "test-secret-not-a-real-one";
-    process.env.GOOGLE_SIGNIN_REDIRECT_BASE = "https://storydump.app";
-    expect(
-      GoogleLoginButton({
-        origin: "https://storydump-git-some-branch-chrisrogers37.vercel.app",
-      }),
-    ).toBeNull();
+  it("renders unconditionally — availability is the API's question now", () => {
+    // Deliberately asserted with NOTHING configured in this tier. The previous
+    // button read Google's client id and secret from this environment and
+    // rendered null without them; keeping that check would have meant a second
+    // copy of the API's configuration, which goes stale silently.
+    delete process.env.GOOGLE_CLIENT_ID;
+    delete process.env.GOOGLE_CLIENT_SECRET;
+    delete process.env.GOOGLE_SIGNIN_REDIRECT_BASE;
+    expect(GoogleLoginButton()).not.toBeNull();
+    expect(anchor().href).toMatch(/\/auth\/google$/);
   });
 
-  it("renders nothing when handed no origin at all", () => {
-    expect(GoogleLoginButton({ origin: null })).toBeNull();
+  it("carries a visible focus ring", () => {
+    // It is the only control on the sign-in page, so it is the only thing a
+    // keyboard user can land on. A missing ring here is a dead end, not a nit.
+    expect(anchor().className).toContain("focus-visible:ring-2");
   });
 });

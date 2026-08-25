@@ -33,7 +33,7 @@ free-form keys — and whose validation is a floor: the database's CHECKs
 from __future__ import annotations
 
 import uuid
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, Sequence
 
 from asyncpg.exceptions import CheckViolationError
 from sqlalchemy import text
@@ -246,6 +246,27 @@ async def list_invitations(executor, *, workspace_id: str) -> list[dict]:
     )
 
 
+#: `02` §4's intent states — the closed set `ck_intent_state` admits. The
+#: list filter validates against this so a typo is a 422, not an empty page.
+INTENT_STATES: tuple[str, ...] = (
+    "scheduled",
+    "prompt_pending",
+    "awaiting_approval",
+    "approved",
+    "publishing",
+    "publishing_ambiguous",
+    "review_required",
+    "posted",
+    "skipped",
+    "rejected",
+    "expired",
+    "failed",
+    "cancelled",
+)
+
+#: `ck_media_state`.
+MEDIA_STATES: tuple[str, ...] = ("available", "unsupported", "removed")
+
 _INTENT_COLUMNS = (
     "i.id, i.state, i.ig_account_id, i.media_item_id, i.schedule_slot_at,"
     " i.approval_mode, i.published_via, i.publish_step, i.cancel_requested,"
@@ -253,17 +274,29 @@ _INTENT_COLUMNS = (
     " m.file_name, m.media_kind, m.thumbnail_url, m.caption, m.category"
 )
 
+_MEDIA_COLUMNS = (
+    "id, source_id, provider_file_ref, file_name, media_kind, mime_type, file_size,"
+    " category, title, caption, tags, thumbnail_url, state, times_posted,"
+    " last_posted_at, created_at"
+)
+
 
 async def list_intents(
-    executor, *, workspace_id: str, state: Optional[str] = None, limit: int = 50
+    executor,
+    *,
+    workspace_id: str,
+    states: Sequence[str] = (),
+    limit: int = 50,
 ) -> list[dict]:
     """The ledger read model (X.2: "reads pending approvals from the ledger").
-    Bounded (`01` H5) — *limit* is applied after the caller's clamp."""
+    *states* narrows to any of several states — a history tab is one call —
+    and must already be validated against :data:`INTENT_STATES`. Bounded
+    (`01` H5) — *limit* is applied after the caller's clamp."""
     params: dict[str, Any] = {"ws": str(workspace_id), "lim": int(limit)}
     where = "i.workspace_id = :ws"
-    if state is not None:
-        where += " AND i.state = :state"
-        params["state"] = state
+    if states:
+        where += " AND i.state = ANY(CAST(:states AS text[]))"
+        params["states"] = list(states)
     return await readers.rows(
         executor,
         f"SELECT {_INTENT_COLUMNS}"
@@ -273,6 +306,115 @@ async def list_intents(
         " ORDER BY i.schedule_slot_at, i.id LIMIT :lim",
         **params,
     )
+
+
+async def list_media(
+    executor,
+    *,
+    workspace_id: str,
+    state: Optional[str] = None,
+    never_posted: bool = False,
+    limit: int = 50,
+) -> list[dict]:
+    """The media pool — the workspace's library, not only what has an intent.
+    Media surfaced only through intents until this read existed (#1044)."""
+    params: dict[str, Any] = {"ws": str(workspace_id), "lim": int(limit)}
+    where = "workspace_id = :ws"
+    if state is not None:
+        where += " AND state = :state"
+        params["state"] = state
+    if never_posted:
+        where += " AND times_posted = 0"
+    return await readers.rows(
+        executor,
+        f"SELECT {_MEDIA_COLUMNS} FROM media_items WHERE {where}"
+        " ORDER BY created_at DESC, id LIMIT :lim",
+        **params,
+    )
+
+
+async def get_media(executor, *, workspace_id: str, media_id: str) -> Optional[dict]:
+    return await readers.row(
+        executor,
+        f"SELECT {_MEDIA_COLUMNS} FROM media_items WHERE workspace_id = :ws AND id = :id",
+        ws=str(workspace_id),
+        id=str(media_id),
+    )
+
+
+#: `stats.posts_by_day` looks back this many days of `daily_post_counts`.
+STATS_DAYS = 30
+
+
+async def stats(executor, *, workspace_id: str) -> dict[str, Any]:
+    """Server-side aggregates for the dashboard headline (#1044).
+
+    Every figure is a `count(*)`/`sum` over target tables under the claimed
+    tenant, one statement per section — never a paged list re-summed, because
+    every list here is bounded (`01` H5) and an aggregate derived from a
+    truncated set is a confident wrong number. `posts_by_day` reads the cap
+    ledger (`daily_post_counts`) itself; `cap` is that day's capacity summed
+    across the workspace's accounts.
+    """
+    ws = str(workspace_id)
+
+    async def by(sql: str) -> dict[str, int]:
+        return {
+            (row["k"] if row["k"] is not None else ""): int(row["n"])
+            for row in await readers.rows(executor, sql, ws=ws)
+        }
+
+    intents_by_state = await by(
+        "SELECT state AS k, count(*) AS n FROM post_intents WHERE workspace_id = :ws GROUP BY 1"
+    )
+    media_by_state = await by(
+        "SELECT state AS k, count(*) AS n FROM media_items WHERE workspace_id = :ws GROUP BY 1"
+    )
+    media_by_category = await by(
+        "SELECT category AS k, count(*) AS n FROM media_items WHERE workspace_id = :ws GROUP BY 1"
+    )
+    posted_by_category = await by(
+        "SELECT m.category AS k, count(*) AS n"
+        "  FROM post_intents i"
+        "  JOIN media_items m ON m.workspace_id = i.workspace_id AND m.id = i.media_item_id"
+        " WHERE i.workspace_id = :ws AND i.state = 'posted' GROUP BY 1"
+    )
+    counts = await readers.row(
+        executor,
+        "SELECT (SELECT count(*) FROM media_items"
+        "         WHERE workspace_id = :ws AND state = 'available' AND times_posted = 0)"
+        "         AS media_never_posted,"
+        "       (SELECT count(*) FROM ig_accounts WHERE workspace_id = :ws) AS accounts,"
+        "       (SELECT count(*) FROM media_sources WHERE workspace_id = :ws) AS sources",
+        ws=ws,
+    )
+    posts_by_day = await readers.rows(
+        executor,
+        "SELECT local_date, sum(count) AS count, sum(cap_at_write) AS cap"
+        "  FROM daily_post_counts"
+        " WHERE workspace_id = :ws"
+        "   AND local_date >= current_date - make_interval(days => :days)"
+        " GROUP BY 1 ORDER BY 1",
+        ws=ws,
+        days=STATS_DAYS,
+    )
+    return {
+        "intents_by_state": intents_by_state,
+        "media_by_state": media_by_state,
+        "media_never_posted": int(counts["media_never_posted"]),
+        "media_by_category": media_by_category,
+        "posted_by_category": posted_by_category,
+        "posts_by_day": [
+            {
+                "local_date": r["local_date"],
+                "count": int(r["count"]),
+                "cap": int(r["cap"]),
+            }
+            for r in posts_by_day
+        ],
+        "accounts": int(counts["accounts"]),
+        "sources": int(counts["sources"]),
+    }
 
 
 async def get_intent(executor, *, workspace_id: str, intent_id: str) -> Optional[dict]:

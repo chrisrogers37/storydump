@@ -273,6 +273,19 @@ async def list_invitations(
     )
 
 
+def _states(state: Optional[str]) -> list[str]:
+    """``?state=a,b,c`` → the closed set's members, or a 422 naming the typo."""
+    if not state:
+        return []
+    wanted = [s.strip() for s in state.split(",") if s.strip()]
+    unknown = [s for s in wanted if s not in workspaces.INTENT_STATES]
+    if unknown:
+        raise HTTPException(
+            status_code=422, detail=f"unknown intent state(s): {unknown}"
+        )
+    return wanted
+
+
 @router.get("/workspaces/{ws}/intents")
 async def list_intents(
     ws: uuid.UUID,
@@ -282,12 +295,64 @@ async def list_intents(
     limit: int = Query(LIST_LIMIT_DEFAULT, ge=1, le=LIST_LIMIT_MAX),
 ):
     """The ledger read model — X.2's "reads pending approvals from the ledger"
-    is ``?state=awaiting_approval``."""
+    is ``?state=awaiting_approval``; a history tab is
+    ``?state=posted,skipped,rejected`` (one call, several states)."""
+    states = _states(state)
     async with _member(request, str(ws), principal) as session:
         rows = await workspaces.list_intents(
-            session, workspace_id=str(ws), state=state, limit=limit
+            session, workspace_id=str(ws), states=states, limit=limit
         )
     return {"intents": rows, "limit": limit}
+
+
+@router.get("/workspaces/{ws}/media")
+async def list_media(
+    ws: uuid.UUID,
+    request: Request,
+    principal: Principal = Depends(current_principal),
+    state: Optional[str] = Query(None),
+    never_posted: bool = Query(False),
+    limit: int = Query(LIST_LIMIT_DEFAULT, ge=1, le=LIST_LIMIT_MAX),
+):
+    """The media pool (#1044): the workspace's library, whether or not an
+    intent exists for an item."""
+    if state is not None and state not in workspaces.MEDIA_STATES:
+        raise HTTPException(status_code=422, detail=f"unknown media state {state!r}")
+    async with _member(request, str(ws), principal) as session:
+        rows = await workspaces.list_media(
+            session,
+            workspace_id=str(ws),
+            state=state,
+            never_posted=never_posted,
+            limit=limit,
+        )
+    return {"media": rows, "limit": limit}
+
+
+@router.get("/workspaces/{ws}/media/{media_id}")
+async def get_media(
+    ws: uuid.UUID,
+    media_id: uuid.UUID,
+    request: Request,
+    principal: Principal = Depends(current_principal),
+):
+    async with _member(request, str(ws), principal) as session:
+        row = await workspaces.get_media(
+            session, workspace_id=str(ws), media_id=str(media_id)
+        )
+    if row is None:
+        raise HTTPException(status_code=404, detail="not found")
+    return row
+
+
+@router.get("/workspaces/{ws}/stats")
+async def get_stats(
+    ws: uuid.UUID, request: Request, principal: Principal = Depends(current_principal)
+):
+    """Server-side aggregates (#1044). A bounded list cannot answer an
+    aggregate question, so these are counted where the rows are."""
+    async with _member(request, str(ws), principal) as session:
+        return await workspaces.stats(session, workspace_id=str(ws))
 
 
 @router.get("/workspaces/{ws}/intents/{intent_id}")
