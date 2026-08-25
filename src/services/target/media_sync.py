@@ -176,8 +176,9 @@ async def _run_sync(deps, job, *, page_token, reason) -> str:
             result = await s.execute(
                 text(
                     "INSERT INTO media_items (workspace_id, source_id,"
-                    " content_hash, file_name, media_kind, provider_file_ref)"
-                    " VALUES (:ws, :src, :hash, :name, :kind, :ref)"
+                    " content_hash, file_name, media_kind, mime_type,"
+                    " provider_file_ref)"
+                    " VALUES (:ws, :src, :hash, :name, :kind, :mime, :ref)"
                     " ON CONFLICT ON CONSTRAINT uq_media_dedup DO NOTHING"
                 ),
                 {
@@ -186,6 +187,11 @@ async def _run_sync(deps, job, *, page_token, reason) -> str:
                     "hash": item["content_hash"],
                     "name": item.get("name") or item["ref"],
                     "kind": item["kind"],
+                    # `.get`, not `[...]`: the column is nullable and an adapter
+                    # that cannot know the content type must be able to say so.
+                    # Absent stays NULL — the same row this wrote before — so a
+                    # port without the key is unaffected rather than crashing.
+                    "mime": item.get("mime_type"),
                     "ref": item["ref"],
                 },
             )
