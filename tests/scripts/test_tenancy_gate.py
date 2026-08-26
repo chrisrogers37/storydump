@@ -511,3 +511,73 @@ class TestExpectedTenancyDerivation:
         """
         with pytest.raises(AssertionError, match="does not classify"):
             expected_tenancy(["CREATE SEQUENCE s START 1"])
+
+
+class TestConstraintEditsAreBoundedTheSameWay:
+    """#1061: `065` is the first migration to edit a CHECK constraint, and the
+    derivation had no branch for it — a loud refusal, correctly.
+
+    Handled rather than allowlisted, for the reason the note on
+    `_TENANCY_IRRELEVANT` gives: a blanket ``"ALTER TABLE "`` prefix would
+    admit `DROP COLUMN workspace_id` alongside these. The claim is exhaustive
+    rather than plausible — each of the four facts has exactly one writer in
+    `expected_tenancy` (`tenant_keyed` from ADD COLUMN workspace_id,
+    `rls_enabled` from ENABLE ROW LEVEL SECURITY, `policies` from CREATE
+    POLICY, `rls_forced` never), and a CHECK constraint adds or removes no
+    column, policy or RLS bit.
+
+    These pin the BOUNDS, not the happy path. Widening a refusal is only safe
+    if what it still refuses is asserted, so the reducing statements and both
+    compound-smuggling shapes are the point of the class; the admitted cases
+    are the control that proves the branch is reachable at all.
+    """
+
+    BASE = "CREATE TABLE t ( id uuid, workspace_id uuid )"
+
+    ADMITTED = {
+        "drop_constraint": "ALTER TABLE t DROP CONSTRAINT ck_t_kind",
+        "drop_schema_qualified": "ALTER TABLE public.t DROP CONSTRAINT ck_t_kind",
+        "add_check": "ALTER TABLE t ADD CONSTRAINT ck_t_kind CHECK (id IS NOT NULL)",
+        "add_check_with_inner_commas": (
+            "ALTER TABLE t ADD CONSTRAINT ck_t_kind CHECK (kind IN ('a','b','c'))"
+        ),
+    }
+    REFUSED = {
+        # The reducing cases the refusal exists for — unchanged by this branch.
+        "bare_drop_column": "ALTER TABLE t DROP COLUMN workspace_id",
+        "rename": "ALTER TABLE t RENAME TO other",
+        # Compound smuggling: a constraint edit must not carry a second action.
+        "compound_drop_column": (
+            "ALTER TABLE t DROP CONSTRAINT ck_t_kind, DROP COLUMN workspace_id"
+        ),
+        "compound_force_rls": (
+            "ALTER TABLE t ADD CONSTRAINT c CHECK (id IS NOT NULL),"
+            " FORCE ROW LEVEL SECURITY"
+        ),
+        # Deliberately NOT admitted: inert on these four facts today, but the
+        # narrower claim is the one that stays true, so a new constraint SHAPE
+        # entering the plan stays a review event rather than riding this branch.
+        "add_foreign_key": (
+            "ALTER TABLE t ADD CONSTRAINT fk_ws FOREIGN KEY (workspace_id)"
+            " REFERENCES workspaces(id)"
+        ),
+        "add_unique": "ALTER TABLE t ADD CONSTRAINT uq_t UNIQUE (id)",
+    }
+
+    @pytest.mark.parametrize("name", sorted(ADMITTED))
+    def test_a_single_constraint_edit_is_admitted(self, name):
+        expected_tenancy([self.BASE, self.ADMITTED[name]])
+
+    @pytest.mark.parametrize("name", sorted(REFUSED))
+    def test_everything_else_still_falls_through_to_the_refusal(self, name):
+        with pytest.raises(AssertionError):
+            expected_tenancy([self.BASE, self.REFUSED[name]])
+
+    def test_a_constraint_edit_moves_none_of_the_four_facts(self):
+        """The positive statement behind the admission: the derived signature
+        is identical with and without the constraint edit."""
+        without = expected_tenancy([self.BASE])
+        with_edit = expected_tenancy(
+            [self.BASE, self.ADMITTED["add_check"], self.ADMITTED["drop_constraint"]]
+        )
+        assert with_edit == without

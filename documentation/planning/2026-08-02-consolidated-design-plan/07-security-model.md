@@ -591,3 +591,55 @@ GRANT EXECUTE ON FUNCTION fn_memberships_for_caller() TO svc_ingress;
 -- user_id), so a by-user lookup was a sequential scan.
 CREATE INDEX ix_members_user ON workspace_members (user_id);
 ```
+
+### §11. `alert_stranded_sources` joins the job-kind vocabulary (065, #1061)
+
+A media source that fails persistently is set to `error` and alerted once.
+Recovery to `active` happens only on a successful sync, and `fn_clock_tick`'s
+leg 4 enqueues only `active` sources — so the source is never scheduled again,
+the branch that alerts never runs again, and no second alert ever fires. The
+stuckness was causing the silence, and a workspace whose Drive access was
+revoked saw one message and then nothing, indistinguishable from health. The
+remedy is a recurring system singleton that re-alerts on a bound, which needs a
+job kind; re-arming the source is fork F4 (a) and belongs to the connect flow.
+
+**Two constraints gate that insert, not one.** `ck_jobs_kind` is the vocabulary.
+`ck_jobs_system_kinds` is a biconditional — `(workspace_id IS NULL) = (kind IN
+<system kinds>)` — and the recurring leg inserts singletons with `workspace_id
+NULL`, so widening the vocabulary alone leaves the row refused. Both are widened
+and the kind goes in the system group in both: this beat is one row that sweeps
+every workspace, the `reap_expired` shape rather than the `sync_media_source`
+shape.
+
+**The failure that would otherwise follow is total and fails first.** The
+recurring mint is leg 1 of five inside one `fn_clock_tick` body with no
+`EXCEPTION` section, so it opens no subtransaction — an unhandled error aborts
+every leg, and slot minting, credential refreshes, source syncs and reauth
+prompts all stop. Widening a CHECK is safe on existing rows by construction: any
+row satisfying the narrower predicate satisfies the wider one. Appends rather
+than amends, for the same reason §10 did — the `02` §5 machinery block that
+prints these constraints is content-addressed and arm (b) is an ordered prefix.
+
+```sql
+-- alert_stranded_sources (#1061): a system singleton that re-alerts sources stranded in
+-- `error`. BOTH constraints gate the insert — the vocabulary and the workspace_id
+-- biconditional — so both are widened, and the kind joins the SYSTEM group in each.
+-- fn_clock_tick is deliberately untouched: fork F4 rejected widening what the tick SELECTS,
+-- and adding an allowed VALUE to a constraint is a different act from changing which rows
+-- the tick selects.
+ALTER TABLE jobs DROP CONSTRAINT ck_jobs_kind;
+ALTER TABLE jobs ADD CONSTRAINT ck_jobs_kind CHECK (kind IN (
+  -- tenant kinds (workspace_id NOT NULL):
+  'plan_slot','publish_pipeline','deliver_outbox','sync_media_source',
+  'first_ingest_chunk','refresh_credential','offboard_workspace',
+  'revoke_workspace_credentials','reauth_prompt',
+  -- system kinds (workspace_id NULL):
+  'reconcile_ambiguous','reap_expired','reap_transit_assets','retention_sweep',
+  'reencrypt_credentials','send_email','alert_stranded_sources'));
+
+ALTER TABLE jobs DROP CONSTRAINT ck_jobs_system_kinds;
+ALTER TABLE jobs ADD CONSTRAINT ck_jobs_system_kinds CHECK (
+  (workspace_id IS NULL) = (kind IN
+    ('reconcile_ambiguous','reap_expired','reap_transit_assets','retention_sweep',
+     'reencrypt_credentials','send_email','alert_stranded_sources')));
+```
