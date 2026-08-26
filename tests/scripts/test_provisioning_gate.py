@@ -55,13 +55,11 @@ import uuid
 import psycopg2
 import pytest
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import create_async_engine
-from sqlalchemy.pool import NullPool
 
 from src.services.target import provisioning
 from src.services.target.provisioning import ProvisioningRefused
-from src.services.target.unit_of_work import asyncpg_url, unit_of_work
 from tests.scripts.conftest import (
+    in_tenant,
     _scratch,
     as_user,
     fetch_one,
@@ -112,30 +110,10 @@ def world(admin_conn, owner_actor):
 # --- drivers -----------------------------------------------------------------
 
 
-async def _in_tenant(dsn: str, ws: str, user: str, fn):
-    """Run *fn(session)* in one committed unit of work as `svc_ingress`.
-
-    The role is ASSERTED rather than assumed: a fixture that quietly connected
-    as the owner would bypass RLS, and every isolation claim below would be
-    vacuous while still reading green.
-    """
-    engine = create_async_engine(asyncpg_url(dsn), poolclass=NullPool)
-    try:
-        uow = unit_of_work(
-            engine, ws, actor_kind="user", actor_user_id=user, channel="web"
-        )
-        async with uow.begin() as session:
-            who = (await session.execute(text("SELECT current_user"))).scalar()
-            assert who == "svc_ingress", who
-            return await fn(session)
-    finally:
-        await engine.dispose()
-
-
 def destination(world, *, ids=None, ref: str, handle=None, schedule=True):
     ids = ids or world["a"]
     return asyncio.run(
-        _in_tenant(
+        in_tenant(
             world["ingress"],
             str(ids["ws"]),
             str(ids["user"]),
@@ -153,7 +131,7 @@ def destination(world, *, ids=None, ref: str, handle=None, schedule=True):
 def source(world, *, ids=None, folder: str, root_name=None):
     ids = ids or world["a"]
     return asyncio.run(
-        _in_tenant(
+        in_tenant(
             world["ingress"],
             str(ids["ws"]),
             str(ids["user"]),
@@ -396,7 +374,7 @@ class TestDestinationsAreIdempotentAndTenantBound:
             ).scalar()
 
         seen = asyncio.run(
-            _in_tenant(
+            in_tenant(
                 world["ingress"],
                 str(world["b"]["ws"]),
                 str(world["b"]["user"]),
@@ -493,7 +471,7 @@ class TestSourcesLandInTheShapeTheSchemaDocuments:
             ).scalar()
 
         seen = asyncio.run(
-            _in_tenant(
+            in_tenant(
                 world["ingress"], str(world["b"]["ws"]), str(world["b"]["user"]), read
             )
         )

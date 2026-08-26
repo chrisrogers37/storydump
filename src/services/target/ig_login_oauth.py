@@ -186,8 +186,16 @@ async def consume_state(
     state: str,
     expected_workspace_id=None,
     cookie_nonce: Optional[str] = None,
+    expected_provider: Optional[str] = None,
+    expected_purpose=None,
 ) -> dict[str, Any]:
     """One-shot CAS consume. Returns the row, or raises a NAMED refusal.
+
+    ``expected_provider`` and ``expected_purpose`` (one purpose, or a set of
+    them) refuse BY NAME a state minted for another leg — a sign-in state
+    replayed into the Drive callback, or the reverse — before the caller reads
+    a row it must not act on. The state is consumed either way: a refused
+    replay burns it exactly as a cross-workspace one does.
 
     `07` §2: *"a consumed/expired/unknown state is rejected cold."* The three
     are deliberately NOT distinguished to the caller in one query — the CAS
@@ -221,6 +229,23 @@ async def consume_state(
             "cross-workspace callback: this state was issued for a different "
             "workspace and will not be honoured here"
         )
+
+    if expected_provider is not None and row["provider"] != expected_provider:
+        raise OAuthStateRefused(
+            f"wrong provider: this state was issued for {row['provider']!r},"
+            f" not {expected_provider!r}, and will not be honoured here"
+        )
+    if expected_purpose is not None:
+        allowed = (
+            {expected_purpose}
+            if isinstance(expected_purpose, str)
+            else set(expected_purpose)
+        )
+        if row["purpose"] not in allowed:
+            raise OAuthStateRefused(
+                f"wrong purpose: this state was issued for {row['purpose']!r},"
+                f" not {sorted(allowed)}, and will not be honoured here"
+            )
 
     if row["purpose"] == "signin":
         if cookie_nonce is None or hash_nonce(cookie_nonce) != row["cookie_nonce_hash"]:
@@ -295,9 +320,12 @@ def refresh_params(current_token: str) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
-def _ring():
-    """The ring `main` already ships. `07` §3 is explicit that the plan keeps
-    the shipped env name `ENCRYPTION_KEYS` rather than renaming it."""
+def ring():
+    """The ONE ring door in the tier. Every credential writer and reader —
+    `ig_login`'s here, the Drive leg's in `google_drive_oauth` and
+    `drive_credentials` — encrypts and decrypts through this, so a ring change
+    lands once. `07` §3 keeps the shipped env name `ENCRYPTION_KEYS`; the
+    import is lazy so `cryptography` loads on first use, not at import."""
     from src.utils.encryption import TokenEncryption
 
     return TokenEncryption()
@@ -321,7 +349,7 @@ async def store_credential(
             "ws": str(workspace_id),
             "acct": str(ig_account_id),
             "provider": PROVIDER,
-            "payload": _ring().encrypt(token),
+            "payload": ring().encrypt(token),
             "exp": expires_at,
         },
     )
@@ -343,7 +371,7 @@ async def swap_credential(conn, *, credential_id, token: str, expires_at=None) -
         ),
         {
             "cid": str(credential_id),
-            "payload": _ring().encrypt(token),
+            "payload": ring().encrypt(token),
             "exp": expires_at,
         },
     )
@@ -366,7 +394,7 @@ async def load_credential(conn, *, credential_id) -> str:
     if row is None:
         raise OAuthStateRefused(f"no credential {credential_id}")
     try:
-        return _ring().decrypt(row[0])
+        return ring().decrypt(row[0])
     except Exception as exc:
         # COMMIT the flip before raising. Fail-closed means the state change
         # SURVIVES the failure — if it rides on the caller's transaction it is

@@ -11,15 +11,14 @@ provider call.
 from __future__ import annotations
 
 import base64
-import json
 import time
 from urllib.parse import parse_qs, urlsplit
 
-import httpx
 import pytest
 
 from src.services.target import google_oidc as oidc
 from tests.src.api.conftest import unsigned_id_token
+from tests.src.services.target.conftest import capture_egress
 
 CLIENT_ID = "cid.apps.googleusercontent.com"
 STATE = "state-abc"
@@ -148,25 +147,12 @@ class TestDecodeIdToken:
 
 
 class TestExchangeCode:
-    """Driven through the egress seam — `oidc.egress.request`, patched the
-    way the tier's other tests patch it: the request shape is the contract."""
-
-    @staticmethod
-    def _capture(monkeypatch, status=200, body=None):
-        seen = {}
-
-        async def fake_request(client, method, url, *, policy=None, **kwargs):
-            seen.update(method=method, url=url, policy=policy, **kwargs)
-            content = json.dumps({"id_token": "tok"} if body is None else body).encode()
-            return httpx.Response(
-                status, content=content, headers={"content-type": "application/json"}
-            )
-
-        monkeypatch.setattr(oidc.egress, "request", fake_request)
-        return seen
+    """Driven through the egress seam (`capture_egress`): the request shape is
+    the contract, and it is pinned HERE for both Google legs — the Drive
+    exchange posts through the same `code_grant`."""
 
     async def test_posts_the_code_grant_to_the_token_endpoint(self, monkeypatch):
-        seen = self._capture(monkeypatch)
+        seen = capture_egress(monkeypatch, body={"id_token": "tok"})
         got = await oidc.exchange_code(
             None,
             code="c0de",
@@ -182,7 +168,7 @@ class TestExchangeCode:
         assert seen["policy"].timeout_class == "standard"
 
     async def test_token_endpoint_error_is_refused_by_name(self, monkeypatch):
-        self._capture(monkeypatch, status=400, body={"error": "invalid_grant"})
+        capture_egress(monkeypatch, status=400, body={"error": "invalid_grant"})
         with pytest.raises(oidc.OidcRefused) as exc:
             await oidc.exchange_code(
                 None, code="c", redirect_uri="r", client_id="i", client_secret="s"
@@ -190,7 +176,7 @@ class TestExchangeCode:
         assert exc.value.reason == "exchange_failed"
 
     async def test_a_response_without_an_id_token_is_refused(self, monkeypatch):
-        self._capture(monkeypatch, body={"access_token": "only"})
+        capture_egress(monkeypatch, body={"access_token": "only"})
         with pytest.raises(oidc.OidcRefused) as exc:
             await oidc.exchange_code(
                 None, code="c", redirect_uri="r", client_id="i", client_secret="s"

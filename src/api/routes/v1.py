@@ -41,8 +41,10 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 
 from src.api.principal import Principal, current_principal, require_engine
+from src.api import google_client
 from src.services.target import (
     commands,
+    google_drive_oauth,
     identity,
     invitations,
     provisioning,
@@ -50,6 +52,7 @@ from src.services.target import (
     workspaces,
 )
 from src.services.target.commands import Command, CommandResult
+from src.services.target.ig_login_oauth import issue_state
 from src.services.target.unit_of_work import unit_of_work
 
 router = APIRouter(tags=["v1"])
@@ -463,6 +466,48 @@ async def create_source(
         status_code=201 if created else 200,
         content={"source_id": source_id, "created": created},
     )
+
+
+@router.post("/workspaces/{ws}/sources/{source_id}/connect")
+async def connect_source(
+    ws: uuid.UUID,
+    source_id: uuid.UUID,
+    request: Request,
+    principal: Principal = Depends(current_principal),
+):
+    """Start the Drive grant for one source: mint the state the callback will
+    consume and hand back where the browser goes (the gdrive epic, P3).
+
+    An OAuth leg is a browser redirect, which the command port cannot express,
+    so it lives here as a resource route at the admin floor — the same floor
+    `commands.ROLE_FLOOR["connect_account"]` names — and the executor stays
+    the thin chat-side door (F1 (a)). Per-SOURCE, because a Drive credential
+    is (D37): the state pins the source in `reconnect_target`, `connect` for a
+    source that has never been credentialed and `reconnect` after that, so a
+    stale reconnect state is retired by the next one (last issued wins).
+    """
+    client_id, _, redirect_uri = google_client.configured(
+        google_client.DRIVE_CALLBACK_PATH
+    )
+    async with _admin(request, str(ws), principal) as session:
+        purpose = await google_drive_oauth.connect_purpose(
+            session, workspace_id=str(ws), media_source_id=str(source_id)
+        )
+        if purpose is None:
+            raise HTTPException(status_code=404, detail="not found")
+        state = await issue_state(
+            session,
+            purpose=purpose,
+            provider=google_drive_oauth.PROVIDER,
+            user_id=principal.user_id,
+            workspace_id=str(ws),
+            reconnect_target=str(source_id),
+        )
+    return {
+        "authorization_url": google_drive_oauth.authorization_url(
+            client_id=client_id, redirect_uri=redirect_uri, state=state
+        )
+    }
 
 
 # --- commands -----------------------------------------------------------
