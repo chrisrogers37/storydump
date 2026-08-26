@@ -134,7 +134,15 @@ def compose(
     )
     registry = build_registry(deps)
     live = {k for k, e in registry.items() if not isinstance(e, Parked)}
-    recurring = {"v": 1, "reap_expired": 6 * 3600.0}
+    recurring = {
+        "v": 1,
+        "reap_expired": 6 * 3600.0,
+        # #1061: a source stranded in `error` is never re-scheduled, so the
+        # branch that alerts never runs again. This beat is the only thing
+        # that re-opens its mouth. Cadence is the clock's; the per-source
+        # bound is `cfg.stranded_alert_after_seconds`.
+        "alert_stranded_sources": 6 * 3600.0,
+    }
     if "reap_transit_assets" in live:
         recurring["reap_transit_assets"] = 6 * 3600.0
     assert set(recurring) - {"v"} <= live, "recurring kinds must be runnable here"
