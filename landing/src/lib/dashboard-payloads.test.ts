@@ -55,11 +55,34 @@ describe("deriveSummary", () => {
     expect(s.avg_per_day).toBeCloseTo(4);
   });
 
-  it("does not divide by zero on an empty workspace", () => {
+  /**
+   * REWRITTEN. The previous version asserted BOTH of these were `0`, which
+   * pinned the defect #1090 E1 names: it was written to stop a NaN, and picked
+   * zero as the safe value. Zero is not safe on a rate — `0%` on the card
+   * reads as a verdict on the workspace rather than as there being nothing to
+   * judge. The NaN guard it existed for is kept.
+   */
+  it("withholds both rates on an empty workspace rather than reporting zero", () => {
     const s = deriveSummary(stats());
+    expect(s.success_rate).toBeNull();
+    expect(s.avg_per_day).toBeNull();
+    // The original reason this test exists — no NaN escapes either divisor.
+    expect(Number.isNaN(s.success_rate as number)).toBe(false);
+    expect(Number.isNaN(s.avg_per_day as number)).toBe(false);
+  });
+
+  it("reports a REAL zero rate, which is a different fact from no attempts", () => {
+    // The bound on the change: withholding must not swallow a genuine 0%. A
+    // workspace that attempted twice and failed twice HAS a success rate, and
+    // it is zero — that is a measurement and must render as one.
+    const s = deriveSummary(
+      stats({
+        intents_by_state: { failed: 2 },
+        posts_by_day: [{ local_date: "2026-08-01", count: 0, cap: 5 }],
+      }),
+    );
     expect(s.success_rate).toBe(0);
     expect(s.avg_per_day).toBe(0);
-    expect(Number.isNaN(s.avg_per_day)).toBe(false);
   });
 });
 

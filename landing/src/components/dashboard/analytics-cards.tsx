@@ -27,24 +27,51 @@ interface SummaryView {
   rejected: number;
   failed: number;
   total: number;
-  success_rate: number;
-  avg_per_day: number;
+  success_rate: number | null;
+  avg_per_day: number | null;
 }
+
+/**
+ * What a card shows when the figure would have to be invented.
+ *
+ * The same rule the rest of this dashboard already follows — `pool-health`
+ * omits its withheld cards and says why, `general-tab` renders "Not available
+ * yet" in place of a control. This is the in-place form, because these two
+ * absences are TEMPORARY: a rate with no publish attempts behind it is not a
+ * missing column, it is a workspace that has not published yet, and it starts
+ * reporting on its own the moment one attempt happens. Dropping the card each
+ * time would make the grid change shape as data arrives.
+ *
+ * The reason is printed rather than left blank: "—" alone says a figure is
+ * missing but not that nothing is wrong.
+ */
+const WITHHELD = "—";
 
 export function AnalyticsCards({ summary }: { summary: SummaryView }) {
   const cards = [
     {
       title: "Posts published",
       value: summary.posted,
-      detail: `${summary.avg_per_day.toFixed(1)}/day avg`,
+      detail:
+        summary.avg_per_day === null
+          ? "No posting window yet"
+          : `${summary.avg_per_day.toFixed(1)}/day avg`,
     },
     {
       title: "Publish success rate",
-      value: `${(summary.success_rate * 100).toFixed(0)}%`,
+      // A rate over an empty divisor is not a low rate. `0%` here reads as a
+      // verdict on the workspace, and it is the one figure on this screen a
+      // person would act on.
+      value:
+        summary.success_rate === null
+          ? WITHHELD
+          : `${(summary.success_rate * 100).toFixed(0)}%`,
       detail:
-        summary.failed > 0
-          ? `${summary.posted} posted / ${summary.failed} failed`
-          : `${summary.posted} posted`,
+        summary.success_rate === null
+          ? "No publish attempts yet"
+          : summary.failed > 0
+            ? `${summary.posted} posted / ${summary.failed} failed`
+            : `${summary.posted} posted`,
     },
     {
       title: "Skipped",
