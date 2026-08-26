@@ -59,11 +59,7 @@ from src.services.target.commands import CommandNotBuilt, CommandRefused
 from src.services.target.invitations import InvitationRefused
 from src.services.target.provisioning import ProvisioningRefused
 from src.services.target import scheduling_health
-from src.services.target.unit_of_work import (
-    create_engine,
-    engine_url_from_env,
-    unit_of_work,
-)
+from src.services.target.unit_of_work import create_engine, engine_url_from_env
 from src.services.target.webhook_ingress import AdmissionConflict, DeliveryReplayed
 from src.utils.logger import logger
 
@@ -383,10 +379,24 @@ def create_app(
             raise HTTPException(
                 status_code=503, detail="target database not configured"
             )
-        async with unit_of_work(
-            engine, "", actor_kind="system", channel="monitor"
-        ).begin() as session:
-            return await scheduling_health.scheduling_lag(session)
+        # A DIRECT CONNECTION, not a unit of work, and the empty tenant string
+        # this replaced was not a near-miss — `UnitOfWork.__init__` refuses a
+        # blank tenant at CONSTRUCTION, so the route raised before touching the
+        # database and returned 500 to every caller it ever had.
+        #
+        # The guard is right and must not move. This aggregate is estate-wide
+        # and has no tenant; naming one that does not exist is a lie the guard
+        # correctly refused, and the remedy is the one its own message gives.
+        #
+        # That the estate-wide read ANSWERS rests on the owner bypassing RLS,
+        # which is now measured rather than assumed: production connects as
+        # `neondb_owner`, `058` sets no `FORCE ROW LEVEL SECURITY` and never
+        # reassigns the owner, so `p_tenant` does not apply. Under a role the
+        # policy DOES cover, a tenant-less read returns zero rows — and zero
+        # rows here reads as a healthy estate. Whoever closes #751 must give
+        # this a door; `accounts_active` is what tells the two apart.
+        async with engine.connect() as conn:
+            return await scheduling_health.scheduling_lag(conn)
 
     return app
 
