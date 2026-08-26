@@ -70,6 +70,8 @@ here hardcodes them.
 
 from __future__ import annotations
 
+import logging
+
 from typing import Optional
 
 from sqlalchemy import text
@@ -81,6 +83,9 @@ from src.exceptions.base import StorydumpError
 #: elected worker". Chosen in the application range and never derived from a
 #: name, so two spellings of the same intent cannot elect two clocks.
 CLOCK_ELECTION_KEY = 0x5701_C10C
+
+
+logger = logging.getLogger(__name__)
 
 
 class ClockNotElected(StorydumpError):
@@ -365,8 +370,51 @@ class Clock:
                     recurring=self._recurring,
                 )
                 await session.commit()
-        except Exception:  # noqa: BLE001 — the counter IS the report
+        except Exception as exc:  # noqa: BLE001 — swallowed on purpose; see below
             self.consecutive_failures += 1
+            # The SWALLOW stays and so does the counter: a raising clock is
+            # worse than a failing one, because the loop dies and the election
+            # is never released. What changes is that the exception is no
+            # longer the only artifact naming WHAT failed, and then discarded.
+            #
+            # "The counter IS the report" was true of liveness and false of
+            # diagnosis. A count says the clock is failing; it cannot say which
+            # leg or which kind, and `tick` runs five legs in one transaction
+            # so any one of them aborts all five identically. #1074: a job kind
+            # missing from `ck_jobs_kind` stopped the clock estate-wide and the
+            # only surviving symptom, five layers away, was a worker gate
+            # failing `assert bulk.processed >= 1` on `0 >= 1`.
+            #
+            # `logger.exception` rather than a formatted message: the failing
+            # row is in the DBAPI error's own text, so re-rendering it by hand
+            # is how the offending kind goes missing again. Logged on EVERY
+            # failure, not the first — a clock that recovers and re-breaks is
+            # two incidents, and a once-only log makes the second invisible.
+            # THE RECURRING KINDS ARE NAMED EXPLICITLY, and that is not
+            # belt-and-braces — it is the whole fix. PostgreSQL's CHECK
+            # violation names the CONSTRAINT ("ck_jobs_kind") and puts the
+            # failing VALUE in a separate DETAIL line that SQLAlchemy's str()
+            # does not carry. Logging the traceback alone therefore reports
+            # that a job kind was refused without saying WHICH, which is the
+            # same diagnosis-shaped hole one layer in. Measured: the first
+            # version of this fix printed the constraint and not the kind, and
+            # the test below failed on exactly that.
+            #
+            # `_recurring` is the clock's own configuration, so it needs no
+            # driver introspection and cannot go stale against a wrapped
+            # exception. It names the candidate set; the constraint name in the
+            # traceback says which column refused. Together those are the
+            # answer, in one line, at the moment it happens.
+            detail = getattr(getattr(exc, "orig", None), "detail", None)
+            logger.exception(
+                "clock tick failed (%d consecutive) — NO JOBS WERE MINTED."
+                " All five legs share one transaction, so this aborted every"
+                " leg, not only the one that raised. Recurring kinds this"
+                " clock mints: %s.%s",
+                self.consecutive_failures,
+                ", ".join(sorted(k for k in self._recurring if k != "v")) or "(none)",
+                f" DB detail: {detail}" if detail else "",
+            )
             return None
         self.consecutive_failures = 0
         self.inserts += sum(counts.values())

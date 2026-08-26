@@ -296,6 +296,14 @@ class TestTheWorkerIdlesVisibly:
 
         assert app.clock is not None and app.clock.elected is True
         assert app.clock.ticks >= 3, "the clock must tick on its cadence"
+        # `ticks` counts ATTEMPTS — it increments before the try, so a clock
+        # failing every single tick satisfies the line above (#1074). The
+        # counter that moves when the clock is broken is this one, and the
+        # heartbeat two lines down was already asserted this way while the
+        # clock was not.
+        assert app.clock.consecutive_failures == 0, (
+            "the clock ticked but every tick failed — `ticks` cannot see this"
+        )
         # Positive controls (#958 review): counters whose ABSENCE of movement
         # is a failure — a dead task can no longer hide behind a quiet pass.
         assert app.sweeper is not None and app.sweeper.sweeps >= 2, (

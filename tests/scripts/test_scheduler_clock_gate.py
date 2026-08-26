@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import threading
 import uuid
 
@@ -322,6 +323,134 @@ class TestTheClockElectionIsExclusive:
                 yield session
 
         return _f
+
+
+class TestAFailingTickIsVisibleInBothTheCounterAndTheLog:
+    """#1074. Two defects, neither of them the leg ordering.
+
+    `tick_once` swallowed the exception and kept only a count, and the worker
+    gate asserted `ticks` — which increments BEFORE the try, so it counts
+    ATTEMPTS. A clock failing every single tick satisfied it. That is a check
+    which cannot fail in the direction it exists to detect, and it is why
+    #1069's symptom surfaced five layers away as `assert bulk.processed >= 1`
+    failing `0 >= 1` instead of as a named constraint violation.
+
+    The failure is induced with a recurring kind absent from `ck_jobs_kind`,
+    which is not a contrived fault: it is #1069's defect exactly. The positive
+    control IS the original incident.
+    """
+
+    def _clock(self, engine, clock_db, conn, *, recurring):
+        from contextlib import asynccontextmanager
+
+        from src.services.target.scheduler import Clock
+
+        from sqlalchemy import text as _t
+        from sqlalchemy.ext.asyncio import async_sessionmaker
+
+        maker = async_sessionmaker(engine, expire_on_commit=False)
+
+        @asynccontextmanager
+        async def _factory():
+            async with maker() as session:
+                await session.execute(
+                    _t("SELECT set_config('app.tenant_id', :v, false)"),
+                    {"v": clock_db["ws"]},
+                )
+                yield session
+
+        return Clock(
+            conn,
+            _factory,
+            interval_seconds=0.05,
+            max_inserts=TICK_MAX,
+            refresh_cadence_seconds=REFRESH_CADENCE_S,
+            recurring=recurring,
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_failing_tick_moves_the_counter_the_gate_now_asserts(
+        self, clock_db, caplog
+    ):
+        """BOTH directions, which is the property the old assertion lacked.
+
+        `ticks` is asserted to move TOO — not because that is desirable, but
+        because it is the proof that `ticks >= 3` would have passed here. A
+        test that only showed the new counter moving would leave the reader to
+        take the old one's blindness on trust.
+        """
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        engine = create_async_engine(
+            clock_db["worker"].replace("postgresql://", "postgresql+asyncpg://", 1),
+            pool_size=2,
+            max_overflow=0,
+        )
+        try:
+            async with engine.connect() as conn:
+                clock = self._clock(
+                    engine,
+                    clock_db,
+                    conn,
+                    # Absent from ck_jobs_kind — leg 1 tries to INSERT it and
+                    # the CHECK aborts the whole transaction, all five legs.
+                    recurring={"v": 1, "no_such_job_kind": 3600},
+                )
+                with caplog.at_level(logging.ERROR):
+                    assert await clock.tick_once() is None
+                    assert await clock.tick_once() is None
+
+                assert clock.consecutive_failures == 2, (
+                    "the counter the worker gate now asserts must move"
+                )
+                assert clock.ticks == 2, (
+                    "and `ticks` moved identically — this is exactly why"
+                    " `assert clock.ticks >= 3` passed on a clock that never"
+                    " successfully ticked"
+                )
+                assert clock.inserts == 0, "nothing was minted"
+
+                blob = "\n".join(
+                    r.getMessage() + str(r.exc_info) for r in caplog.records
+                )
+                assert "no_such_job_kind" in blob, (
+                    "the offending kind must survive the swallow — a count"
+                    " cannot say WHICH leg or which value failed, and the"
+                    " five legs share one transaction so any of them aborts"
+                    " all five identically"
+                )
+                assert "ck_jobs_kind" in blob, "and the constraint that refused it"
+        finally:
+            await engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_a_recovering_clock_clears_the_counter(self, clock_db):
+        """The negative half: the counter must not latch, or a clock that
+        recovers reads as permanently broken and the gate's `== 0` becomes
+        unsatisfiable for the wrong reason."""
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        engine = create_async_engine(
+            clock_db["worker"].replace("postgresql://", "postgresql+asyncpg://", 1),
+            pool_size=2,
+            max_overflow=0,
+        )
+        try:
+            async with engine.connect() as conn:
+                broken = self._clock(
+                    engine, clock_db, conn, recurring={"v": 1, "no_such_job_kind": 3600}
+                )
+                assert await broken.tick_once() is None
+                assert broken.consecutive_failures == 1
+
+                # Same election connection, a recurring set the schema admits.
+                healthy = self._clock(
+                    engine, clock_db, conn, recurring={"v": 1, "reap_expired": 3600}
+                )
+                assert await healthy.tick_once() is not None
+                assert healthy.consecutive_failures == 0
+        finally:
+            await engine.dispose()
 
 
 class TestKillingTheClockMidTickLosesNothing:
