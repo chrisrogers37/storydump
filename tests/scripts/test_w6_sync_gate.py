@@ -550,6 +550,92 @@ class TestAStrandedSourceKeepsSayingSo:
         assert _notifications(sync_conn, binding) == []
 
     @pytest.mark.asyncio
+    async def test_the_f4_reconnect_wins_the_row_and_leaves_no_stale_stamp(
+        self, lane_db, sync_conn
+    ):
+        """The F4 seam, exercised as a real interleaving rather than argued.
+
+        astrid's P3 re-arms in the SAME transaction as the credential write:
+        `state='active'`, `alerted_at=NULL`, `next_sync_at=now()`. This beat
+        re-alerts on `error` rows. The two touch one row, so the ordering has
+        to be demonstrated, not reasoned about — and P3 is in draft, so this
+        stands in for it with the statement it will issue.
+
+        Asserted, in order:
+
+        1. While the sweep's transaction is open, P3's UPDATE **blocks** — the
+           single `UPDATE … RETURNING` took the row lock, so the two cannot
+           interleave mid-decision. That is what makes the shape safe rather
+           than the timing.
+        2. After the sweep commits, P3 proceeds and **wins the row**: `active`
+           and `alerted_at IS NULL`. No stale stamp survives a reconnect, so
+           the next strand is not silently deduped against this alert.
+        3. Exactly ONE notification exists — the bounded staleness the module
+           docstring discloses. It is one message naming a state the source
+           was in moments earlier, not an ongoing wrong alert.
+        4. A subsequent sweep alerts NOTHING, because the row is no longer in
+           `error`. The reconnect actually stops the beat.
+        """
+        import psycopg2.extensions
+        from sqlalchemy.ext.asyncio import async_sessionmaker
+
+        from src.services.target import media_sync
+
+        chain = seed_workspace_chain(sync_conn, "w6-f4-race")
+        binding = _bind(sync_conn, chain["ws"])
+        _strand(sync_conn, chain["src"], alerted="NULL")
+
+        # P3's statement, verbatim in shape: re-arm in one transaction.
+        rearm = (
+            "UPDATE media_sources"
+            " SET state = 'active', alerted_at = NULL, next_sync_at = now()"
+            " WHERE id = %s"
+        )
+
+        engine = create_async_engine(_async_url(lane_db))
+        try:
+            factory = async_sessionmaker(engine, expire_on_commit=False)
+            async with factory() as session:
+                alerted = await media_sync.alert_stranded_sources(
+                    session, stale_after_seconds=0, limit=10
+                )
+                assert alerted == 1
+
+                # (1) P3 cannot proceed while the sweep holds the row.
+                blocked = psycopg2.connect(lane_db)
+                try:
+                    with blocked.cursor() as cur:
+                        cur.execute("SET app.actor_kind = 'migration'")
+                        cur.execute("SET statement_timeout = '1500ms'")
+                        with pytest.raises(psycopg2.errors.QueryCanceled):
+                            cur.execute(rearm, (chain["src"],))
+                finally:
+                    blocked.rollback()
+                    blocked.close()
+
+                await session.commit()
+        finally:
+            await engine.dispose()
+
+        # (2) Now P3 runs and wins the row.
+        with sync_conn.cursor() as cur:
+            cur.execute("SET app.actor_kind = 'migration'")
+            cur.execute(rearm, (chain["src"],))
+        sync_conn.commit()
+
+        src = _source_row(sync_conn, chain["src"])
+        assert src["state"] == "active"
+        assert src["alerted_at"] is None, (
+            "a reconnect must clear the stamp, or the next strand dedups"
+            " against an alert about the previous one"
+        )
+
+        # (3) exactly one message, and (4) the beat stops.
+        assert len(_notifications(sync_conn, binding)) == 1
+        assert await _sweep(lane_db, age_seconds=0) == 0
+        assert len(_notifications(sync_conn, binding)) == 1
+
+    @pytest.mark.asyncio
     async def test_only_the_stranded_workspace_is_told(self, lane_db, sync_conn):
         """A second workspace with its own binding hears nothing. Two, not one,
         for the same reason every tenancy assertion needs two: "it went to A"
