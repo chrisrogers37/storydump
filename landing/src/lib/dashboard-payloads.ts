@@ -308,6 +308,104 @@ export function derivePoolHealth(stats: StatsResponse): PoolHealthView {
   };
 }
 
+/**
+ * What the Settings screen can HONESTLY show from the routes that exist (#1063).
+ *
+ * Settings asked `init` for everything. There is no `init` route and there is
+ * no plan for one, so the screen rendered `RouterUnavailable` on every load —
+ * taking the Accounts and Integrations tabs with it.
+ *
+ * ── Why this is a derivation and not four reads spread across the page ──────
+ *
+ * The old page coalesced every field (`setup.X ?? default`). That is the
+ * dangerous half, and it is NOT what the hard bail protects against: the bail
+ * catches a fetch that FAILED, while a defaulted field arrives inside a
+ * response that SUCCEEDED. `media_sync_enabled ?? false` renders "Auto-sync
+ * disabled" — a claim about the workspace manufactured from a missing column,
+ * which is the exact harm `settings/page.tsx` warns about in its own comment.
+ *
+ * So every field is resolved in one place, and a field with no source is
+ * `Unavailable` — never a default. The type is non-optional `null` for the
+ * reason #1051 gave for `configured_ratio`: an optional field invites `?? 0` at
+ * the consumer, while a non-optional null makes the compiler stop at every
+ * consumer until it says what it shows instead. Sourcing one later is then a
+ * VISIBLE type change rather than a silent behaviour change.
+ */
+export type SettingsView = {
+  // ── From the workspace row (`GET /workspaces/{ws}`) ──────────────────────
+  posts_per_day: number | null;
+  posting_hours_start: number | null;
+  posting_hours_end: number | null;
+  is_paused: boolean | null;
+  dry_run_mode: boolean | null;
+  /** The workspace row calls this `api_publishing_enabled`. Renamed once, here. */
+  enable_instagram_api: boolean | null;
+  enable_ai_captions: boolean | null;
+  repost_ttl_days: number | null;
+  skip_ttl_days: number | null;
+  caption_style: string | null;
+
+  // ── From `sources` and `stats` ───────────────────────────────────────────
+  gdrive_connected: boolean;
+  media_source_type: string | null;
+  media_source_state: string | null;
+  media_count: number;
+
+  // ── NO SOURCE ON THE TARGET TIER. `Unavailable`, never a default. ────────
+  //
+  // Greppable on purpose (see `Unavailable`): this list is the Settings half of
+  // what #1063 option 2 has to supply, and it should shrink to nothing.
+  show_verbose_notifications: Unavailable;
+  send_lifecycle_notifications: Unavailable;
+  media_sync_enabled: Unavailable;
+  gdrive_email: Unavailable;
+  media_source_root: Unavailable;
+};
+
+/**
+ * Settings from the four routes that exist, with the gaps left as gaps.
+ *
+ * `media_source_root` is unavailable for a reason worth naming, because it
+ * looks sourceable and is not: it lives in `media_sources.config.root_name`,
+ * and `_SOURCE_COLUMNS` does not return `config`. Reading the provider and
+ * guessing the folder from it would be the defaulting this type exists to stop.
+ */
+export function deriveSettings(
+  config: WorkspaceConfig,
+  sources: SourceRow[],
+  stats: StatsResponse,
+): SettingsView {
+  // The first Drive source, whatever its state. State is carried rather than
+  // flattened into the boolean: "connected but erroring" and "not connected"
+  // are different facts with different remedies.
+  const drive = sources.find((s) => s.provider === "gdrive") ?? null;
+  const byState = stats.media_by_state ?? {};
+
+  return {
+    posts_per_day: config.posts_per_day,
+    posting_hours_start: config.posting_hours_start,
+    posting_hours_end: config.posting_hours_end,
+    is_paused: config.is_paused,
+    dry_run_mode: config.dry_run_mode,
+    enable_instagram_api: config.api_publishing_enabled,
+    enable_ai_captions: config.enable_ai_captions,
+    repost_ttl_days: config.repost_ttl_days,
+    skip_ttl_days: config.skip_ttl_days,
+    caption_style: config.caption_style,
+
+    gdrive_connected: drive !== null,
+    media_source_type: drive?.provider ?? null,
+    media_source_state: drive?.state ?? null,
+    media_count: Object.values(byState).reduce((a, n) => a + n, 0),
+
+    show_verbose_notifications: null,
+    send_lifecycle_notifications: null,
+    media_sync_enabled: null,
+    gdrive_email: null,
+    media_source_root: null,
+  };
+}
+
 export type AccountsResponse = { accounts?: import("./types").InstagramAccount[] };
 
 // ── STILL LEGACY: the settings screen ──────────────────────────────────────

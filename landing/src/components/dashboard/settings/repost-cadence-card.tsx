@@ -9,6 +9,8 @@ import { Label } from "@/components/ui/label";
 import { postApi } from "@/lib/dashboard-api";
 
 interface Props {
+  /** False while the write routes do not exist (#1063). */
+  editable: boolean;
   repostTtlDays: number | null;
   skipTtlDays: number | null;
   onError: (message: string | null) => void;
@@ -18,7 +20,7 @@ interface Props {
  * `SKIP_TTL_DAYS`). The chat_settings row is bootstrapped with those env values,
  * so values arrive here populated for any chat created after migration 029.
  */
-export function RepostCadenceCard({ repostTtlDays, skipTtlDays, onError }: Props) {
+export function RepostCadenceCard({ repostTtlDays, skipTtlDays, editable, onError }: Props) {
   const router = useRouter();
   const [repost, setRepost] = useState<number>(repostTtlDays ?? 30);
   const [skip, setSkip] = useState<number>(skipTtlDays ?? 45);
@@ -55,6 +57,7 @@ export function RepostCadenceCard({ repostTtlDays, skipTtlDays, onError }: Props
             <Label htmlFor="repost-ttl">Repost lock (days)</Label>
             <div className="flex gap-2">
               <Input
+                disabled={!editable}
                 id="repost-ttl"
                 type="number"
                 min={1}
@@ -63,18 +66,19 @@ export function RepostCadenceCard({ repostTtlDays, skipTtlDays, onError }: Props
                 onChange={(e) => setRepost(Number(e.target.value))}
                 className="max-w-[120px]"
               />
-              <Button
+              {editable && <Button
                 onClick={() => save("repost_ttl_days", repost)}
                 disabled={!repostChanged || saving !== null}
               >
                 {saving === "repost" ? "Saving…" : "Save"}
-              </Button>
+              </Button>}
             </div>
           </div>
           <div className="space-y-2">
             <Label htmlFor="skip-ttl">Skip lock (days)</Label>
             <div className="flex gap-2">
               <Input
+                disabled={!editable}
                 id="skip-ttl"
                 type="number"
                 min={1}
@@ -83,12 +87,12 @@ export function RepostCadenceCard({ repostTtlDays, skipTtlDays, onError }: Props
                 onChange={(e) => setSkip(Number(e.target.value))}
                 className="max-w-[120px]"
               />
-              <Button
+              {editable && <Button
                 onClick={() => save("skip_ttl_days", skip)}
                 disabled={!skipChanged || saving !== null}
               >
                 {saving === "skip" ? "Saving…" : "Save"}
-              </Button>
+              </Button>}
             </div>
           </div>
         </div>
