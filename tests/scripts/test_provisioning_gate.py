@@ -495,7 +495,9 @@ def _sources(world, ids=None):
     )
 
 
-def _credential(world, *, source_id, state="active", expires_at=None, ids=None):
+def _credential(
+    world, *, source_id, state="active", expires_at=None, ids=None, provider="gdrive"
+):
     """Insert one gdrive credential straight in. There is no writer to call for
     this in the target tier yet, which is itself why the status field is worth
     testing rather than assuming."""
@@ -507,7 +509,7 @@ def _credential(world, *, source_id, state="active", expires_at=None, ids=None):
                 "INSERT INTO oauth_credentials"
                 " (workspace_id, media_source_id, provider, encrypted_payload,"
                 "  state, expires_at)"
-                " VALUES (:ws, :sid, 'gdrive', :payload, :state, :exp)"
+                " VALUES (:ws, :sid, :provider, :payload, :state, :exp)"
             ),
             {
                 "ws": str(ids["ws"]),
@@ -515,6 +517,7 @@ def _credential(world, *, source_id, state="active", expires_at=None, ids=None):
                 "payload": "not-a-real-token",
                 "state": state,
                 "exp": expires_at,
+                "provider": provider,
             },
         )
 
@@ -576,9 +579,27 @@ class TestSourceCredentialStatus:
         assert row["credential_status"] == "revoked"
 
     def test_the_join_does_not_fan_a_source_into_two_rows(self, world):
+        """A SECOND credential of another provider must not duplicate the source.
+
+        This fixture is the point: `uq_credential_per_source` is UNIQUE on
+        (workspace, source, PROVIDER), and provider equality between a source
+        and its credential is service-enforced rather than a constraint (D37) —
+        `ck_credentials_one_owner` only counts owner columns, so an `ig_login`
+        row hung off a media source is a shape the database accepts. Without
+        `AND c.provider = s.provider` in the join, that stray row silently turns
+        one source into two in the list.
+
+        An earlier version of this test inserted only the gdrive credential and
+        asserted one row. It passed with the provider condition REMOVED — one
+        credential cannot fan anything — so it pinned nothing, while the PR body
+        claimed it did.
+        """
         sid, _ = source(world, folder="stat-onerow")
         _credential(world, source_id=sid)
-        assert len([r for r in _sources(world) if str(r["id"]) == str(sid)]) == 1
+        _credential(world, source_id=sid, provider="ig_login")
+        rows = [r for r in _sources(world) if str(r["id"]) == str(sid)]
+        assert len(rows) == 1
+        assert rows[0]["credential_status"] == "active"
 
     def test_no_token_or_envelope_is_ever_returned(self, world):
         sid, _ = source(world, folder="stat-secret")
