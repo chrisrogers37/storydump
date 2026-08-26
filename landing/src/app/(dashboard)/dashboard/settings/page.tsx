@@ -27,14 +27,19 @@ import { IntegrationsTab } from "@/components/dashboard/settings/integrations-ta
  *
  * All six Settings writes target routes that do not exist (`schedule`,
  * `toggle-setting`, `switch-account`, `remove-account`, `disconnect-gdrive`,
- * `sync-media`), and so do both connect flows (`oauth-url/<provider>`).
+ * `sync-media`). Both connect flows targeted `oauth-url/<provider>` and are
+ * now DELETED rather than gated: they were per-workspace against a
+ * per-source route, so they were never going to be wired as written, and
+ * behind `editable` they would have come back the moment the writes landed.
  * Repointing the reads alone is the one shape #1051 explicitly refused: "the
  * form would show real current values beside a save button that silently 404s,
  * and someone would change a setting to match what they saw."
  *
  * So the values are real and the controls are inert and SAY they are inert.
  * Nothing here is undone by wiring the writes: `editable` becomes true,
- * `Unavailable` fields gain sources. It is a strict subset of that work.
+ * `Unavailable` fields gain sources. It is a strict subset of that work —
+ * and `editable` now gates ONE kind of thing, controls that are pending,
+ * so flipping it cannot resurrect anything that was removed as invalid.
  *
  * ── The bail stays hard, and it still is not the whole guard ────────────────
  *
