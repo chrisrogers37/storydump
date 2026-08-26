@@ -83,6 +83,8 @@ class WorkerConfig:
     reconcile_limit: int = 50
     reconcile_notify_after_seconds: int = 6 * 3600
     transit_reap_older_than_seconds: int = 48 * 3600
+    stranded_alert_after_seconds: int = 24 * 3600  # re-alert cadence (#1061)
+    stranded_alert_limit: int = 200  # rows re-alerted per beat
     clock_interval_seconds: float = 15.0
     clock_max_inserts: int = 500
     refresh_cadence_seconds: int = 7 * 24 * 3600
@@ -203,6 +205,15 @@ def build_registry(deps: WorkerDeps) -> dict:
                 checks=op.get("checks", 0),
             )
 
+    async def alert_stranded_sources(session, job):
+        # Alert-only: nothing here re-arms a source or enqueues a sync. The
+        # re-arm is fork F4 (a) and belongs to the connect flow (#1061).
+        await media_sync.alert_stranded_sources(
+            session,
+            stale_after_seconds=cfg.stranded_alert_after_seconds,
+            limit=cfg.stranded_alert_limit,
+        )
+
     async def reap_transit(session, job):
         await scheduler.execute_reap_transit_assets(
             session,
@@ -290,6 +301,9 @@ def build_registry(deps: WorkerDeps) -> dict:
             )
     registry["plan_slot"] = plan_slot
     registry["reap_expired"] = reap_expired
+    # No `deps.drive` gate: this path makes no provider call, and a fleet with
+    # no adapter wired is exactly the one whose sources are stranded (#1061).
+    registry["alert_stranded_sources"] = alert_stranded_sources
     registry["reconcile_ambiguous"] = (
         reconcile_ambiguous
         if deps.poll is not None

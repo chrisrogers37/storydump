@@ -81,6 +81,7 @@ class TestRegistryCoversTheSchema:
             "reauth_prompt",
             "sync_media_source",
             "first_ingest_chunk",
+            "alert_stranded_sources",
         }
 
     def test_the_unbuilt_kinds_park_even_with_every_seam_supplied(self):
@@ -96,6 +97,7 @@ class TestRegistryCoversTheSchema:
             "reauth_prompt",
             "sync_media_source",
             "first_ingest_chunk",
+            "alert_stranded_sources",
         }
         assert unbuilt, "denominator went empty — the schema kinds parse broke"
         for kind in unbuilt:

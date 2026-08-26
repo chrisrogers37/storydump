@@ -14,10 +14,20 @@ from src.worker import compose
 def test_w1_composition_live_kinds_without_cloudinary():
     # refresh_credential and reauth_prompt are live in EVERY composition:
     # compose always wires the real refresh door (no config needed) and the
-    # prompt executor writes outbox rows only (W5d/W5e).
+    # prompt executor writes outbox rows only (W5d/W5e). alert_stranded_sources
+    # joins them for the same reason and deliberately (#1061): it needs only a
+    # session, and a composition with no drive adapter wired is exactly the one
+    # whose sources are stranded — gating it on deps.drive would silence the
+    # alert precisely where it is needed.
     app = compose(engine=object(), config=WorkerConfig(), env={})
     live = {k for k, e in app.registry.items() if not isinstance(e, Parked)}
-    assert live == {"plan_slot", "reap_expired", "refresh_credential", "reauth_prompt"}
+    assert live == {
+        "plan_slot",
+        "reap_expired",
+        "refresh_credential",
+        "reauth_prompt",
+        "alert_stranded_sources",
+    }
 
 
 def test_cloudinary_config_brings_the_transit_reaper_live():

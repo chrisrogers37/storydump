@@ -288,6 +288,35 @@ def expected_tenancy(statements) -> dict:
                 sig[m.group(1)]["tenant_keyed"] = True
             continue
 
+        # CONSTRAINT edits are HANDLED for the same reason ADD COLUMN is, and
+        # allowlisted for none of them: a blanket "ALTER TABLE " prefix is the
+        # very thing the note on _TENANCY_IRRELEVANT refuses, because it would
+        # admit DROP COLUMN workspace_id alongside these.
+        #
+        # Neither form can move any of the four facts, and the argument is
+        # exhaustive rather than plausible — each fact has exactly one writer
+        # in this function: tenant_keyed only from ADD COLUMN workspace_id,
+        # rls_enabled only from ENABLE ROW LEVEL SECURITY, policies only from
+        # CREATE POLICY, rls_forced never set here at all. A CHECK constraint
+        # adds and removes no column, no policy and no RLS bit, so it cannot
+        # reach any of them.
+        #
+        # ADD is matched only in its CHECK form. FOREIGN KEY / UNIQUE / PRIMARY
+        # KEY are equally inert on these four today, and are deliberately left
+        # to the refusal anyway: the narrower claim is the one that stays true,
+        # and a new constraint SHAPE entering the plan should be a review event
+        # rather than something this branch already waved through. (065 is the
+        # first member — #1061's job kind.)
+        #
+        # Bounded at the far end by the same _top_level_comma guard ADD COLUMN
+        # uses, so a compound `DROP CONSTRAINT x, DROP COLUMN workspace_id`
+        # falls through to the refusal instead of riding this continue.
+        if not _top_level_comma(stmt) and (
+            re.match(r"ALTER TABLE (?:public\.)?\w+ DROP CONSTRAINT \w+", stmt)
+            or re.match(r"ALTER TABLE (?:public\.)?\w+ ADD CONSTRAINT \w+ CHECK", stmt)
+        ):
+            continue
+
         # ALLOWLIST, not a denylist, and the direction is the whole point.
         #
         # What must never happen is a statement that REDUCES tenancy state

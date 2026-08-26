@@ -90,6 +90,116 @@ async def first_ingest_chunk(deps, session, job) -> str:
     )
 
 
+async def alert_stranded_sources(
+    session, *, stale_after_seconds: int, limit: int
+) -> int:
+    """Re-alert every source stranded in ``error``. Returns rows alerted.
+
+    ## The defect this closes (#1061): stuckness caused the silence
+
+    The persistent branch above sets ``state = 'error'`` and enqueues one
+    notification. Recovery to ``active`` happens only on the last page of a
+    SUCCESSFUL sync, and `fn_clock_tick` enqueues only ``state = 'active'``
+    sources. So an errored source is never scheduled again, that branch never
+    runs again, and **no second alert ever fires**. A workspace whose Drive
+    access was revoked gets one message and then silence indefinitely — which
+    reads exactly like a healthy workspace.
+
+    ## This fixes the SILENCE, deliberately not the stuckness
+
+    A source dead for good reasons — folder deleted, access revoked — is
+    allowed to stay dead. It is not allowed to be QUIET about it. So nothing
+    here re-arms a source, enqueues a sync, or touches `next_sync_at`; no
+    provider call happens on this path at all.
+
+    **Re-arming is fork F4 (a) and belongs to the connect/reconnect flow**,
+    which does it in the same transaction as the credential write. Two things
+    racing to re-arm one row is the failure this scope split exists to avoid.
+
+    **Widening the clock to retry `error` sources on a backoff was F4 (b) and
+    lost.** It changes a due-scan every provider shares, and permanently
+    re-polls sources that are dead on purpose. Do not reach for it here.
+
+    ## `paused` is the acknowledgement, and it is why this is not noise
+
+    A recurring alert about a deliberately-dead source would be the same
+    recurring noise (b) was rejected for, so there has to be a way to say
+    "yes, I know". There already is: `ck_sources_state` admits
+    ``('active','paused','error')`` and this scans ``error`` only. Moving a
+    source a human has decided about to ``paused`` stops the alerts without
+    resurrecting it and without a schema change. Silence then means somebody
+    chose it, which is the property the current behaviour destroys.
+
+    ## The F4 seam — one statement, not read-then-write
+
+    Selection and the `alerted_at` stamp are a SINGLE ``UPDATE … RETURNING``,
+    and the notifications ride the same transaction. That is what makes the
+    connect flow safe to run concurrently: it sets ``state='active',
+    alerted_at=NULL``, so a row it has already cleared cannot match this
+    predicate, and a row this statement has locked forces the connect flow's
+    UPDATE to re-evaluate after commit. A read-then-write here would reopen
+    exactly that window.
+
+    **One bounded staleness remains and is not worth more machinery.** If a
+    reconnect commits immediately after this transaction, one already-enqueued
+    alert still sends for a source that is now healthy. It is a single message,
+    it names a real state the source was in moments earlier, and suppressing it
+    would mean reaching into the outbox — more risk than the message costs.
+
+    `alerted_at IS NULL` is included so a row stranded before this code existed
+    is picked up rather than skipped forever; that column is nullable and rows
+    written by paths that never stamped it are the realistic case.
+    """
+    # Local imports, matching `_run_sync` below: these modules reach back into
+    # this one, so a module-level import is a cycle.
+    from src.services.target import outbox, prompts
+
+    rows = (
+        (
+            await session.execute(
+                text(
+                    "UPDATE media_sources SET alerted_at = now()"
+                    " WHERE id IN ("
+                    "   SELECT id FROM media_sources"
+                    "    WHERE state = 'error'"
+                    "      AND (alerted_at IS NULL"
+                    "           OR alerted_at < now() - make_interval(secs => :age))"
+                    "    ORDER BY alerted_at NULLS FIRST"
+                    "    LIMIT :lim"
+                    " ) RETURNING id, workspace_id"
+                ),
+                {"age": float(stale_after_seconds), "lim": int(limit)},
+            )
+        )
+        .mappings()
+        .all()
+    )
+
+    for row in rows:
+        workspace_id = str(row["workspace_id"])
+        bindings = await prompts.push_bindings(session, workspace_id)
+        for binding_id in bindings:
+            await outbox.enqueue(
+                session,
+                workspace_id=workspace_id,
+                binding_id=binding_id,
+                kind="notification",
+                payload={
+                    "v": 1,
+                    "text": (
+                        "⚠️ This workspace's Drive source is still disconnected"
+                        " and has not synced since it failed. Reconnect it to"
+                        " resume syncing, or pause it if this is intended."
+                    ),
+                },
+            )
+    if rows:
+        logger.warning(
+            "stranded-source sweep: re-alerted %d source(s) in error", len(rows)
+        )
+    return len(rows)
+
+
 async def _run_sync(deps, job, *, page_token, reason) -> str:
     from src.services.target import prompts
     from src.services.target.work_loop import poller_session_factory

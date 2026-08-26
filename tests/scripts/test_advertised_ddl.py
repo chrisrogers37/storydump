@@ -271,7 +271,7 @@ class TestAgainstTheRealDocs:
         # 064), after §9's #982 refresh-leg provider guard (063) made it 21,
         # the #942 reauth-prompt leg (062) made it 20 and §8's #883 guard
         # (061) made it 19.
-        assert classes.count("normative") == 22
+        assert classes.count("normative") == 23
         assert classes.count("illustrative") == 4
 
     def test_real_stream_expands_the_fifteen_policies(self):

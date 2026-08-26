@@ -324,6 +324,11 @@ class TestTheBoundaryIsDerivedAndLoud:
             # because the 02 §7-DDL block that prints the first nine doors is
             # content-addressed and arm (b) never amends it.
             "064_memberships_for_caller_door.sql",
+            # 065 extends the stream as 061-064 did: the alert_stranded_sources job
+            # kind (#1061), advertised as 07 §11 before landing here. Appended for
+            # the same reason 064 was — the 02 §5 machinery block that prints these
+            # constraints is content-addressed, and arm (b) never amends.
+            "065_alert_stranded_sources_kind.sql",
         ], (
             f"the target lineage is {above}. If you are landing the next F.2"
             " increment, add it here — deliberately, and at the end: arm (b)"
