@@ -1,11 +1,11 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { postApi, openOAuthWindow } from "@/lib/dashboard-api";
+import { postApi } from "@/lib/dashboard-api";
 import type { SettingsView } from "@/lib/dashboard-payloads";
 
 /**
@@ -48,34 +48,7 @@ export function IntegrationsTab({
   const router = useRouter();
   const [syncing, setSyncing] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
-  const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const oauthPending = useRef(false);
-
-  useEffect(() => {
-    function onVisible() {
-      if (document.visibilityState === "visible" && oauthPending.current) {
-        oauthPending.current = false;
-        router.refresh();
-      }
-    }
-    document.addEventListener("visibilitychange", onVisible);
-    return () => document.removeEventListener("visibilitychange", onVisible);
-  }, [router]);
-
-  async function connectGdrive() {
-    setError(null);
-    setConnecting(true);
-    try {
-      await openOAuthWindow("google-drive");
-      oauthPending.current = true;
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to connect Google Drive");
-    } finally {
-      setConnecting(false);
-    }
-  }
-
   async function disconnectGdrive() {
     setError(null);
     setDisconnecting(true);
@@ -174,22 +147,16 @@ export function IntegrationsTab({
               <p className="text-sm text-muted-foreground mb-4">
                 No Google Drive source is connected to this workspace.
               </p>
-              {editable ? (
-                <Button onClick={connectGdrive} disabled={connecting}>
-                  {connecting ? "Connecting..." : "Connect Google Drive"}
-                </Button>
-              ) : (
-                /*
-                  Removed rather than shown-and-disabled: `openOAuthWindow`
-                  calls `oauth-url/google-drive`, which is not a route on this
-                  API (#1063). A button offering an action the app cannot
-                  perform is the #1050 defect this screen is being made honest
-                  about.
-                */
-                <p className="text-sm text-muted-foreground">
-                  Connecting Google Drive is not available from this screen yet.
-                </p>
-              )}
+              {/*
+                GONE, not gated — same reason as the Instagram button, plus a
+                shape one this file already documents: there is no
+                per-workspace answer to "connect Drive", the route is
+                per-source. Behind `editable` it would have come back the
+                moment P3 flipped that flag (rajan, #1066 review).
+              */}
+              <p className="text-sm text-muted-foreground">
+                Connecting Google Drive is not available from this screen yet.
+              </p>
             </div>
           )}
         </CardContent>

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -15,7 +15,7 @@ import {
   DialogTrigger,
   DialogClose,
 } from "@/components/ui/dialog";
-import { postApi, openOAuthWindow } from "@/lib/dashboard-api";
+import { postApi } from "@/lib/dashboard-api";
 import type { InstagramAccount } from "@/lib/types";
 
 /**
@@ -38,22 +38,8 @@ interface AccountsTabProps {
 export function AccountsTab({ accounts, editable }: AccountsTabProps) {
   const router = useRouter();
   const [loadingAction, setLoadingAction] = useState<string | null>(null);
-  const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [removingDialogOpen, setRemovingDialogOpen] = useState<string | null>(null);
-  const oauthPending = useRef(false);
-
-  useEffect(() => {
-    function onVisible() {
-      if (document.visibilityState === "visible" && oauthPending.current) {
-        oauthPending.current = false;
-        router.refresh();
-      }
-    }
-    document.addEventListener("visibilitychange", onVisible);
-    return () => document.removeEventListener("visibilitychange", onVisible);
-  }, [router]);
-
   async function switchAccount(accountId: string) {
     setError(null);
     setLoadingAction(`switch-${accountId}`);
@@ -78,19 +64,6 @@ export function AccountsTab({ accounts, editable }: AccountsTabProps) {
       setError(e instanceof Error ? e.message : "Failed to remove account");
     } finally {
       setLoadingAction(null);
-    }
-  }
-
-  async function connectInstagram() {
-    setError(null);
-    setConnecting(true);
-    try {
-      await openOAuthWindow("instagram");
-      oauthPending.current = true;
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to connect Instagram");
-    } finally {
-      setConnecting(false);
     }
   }
 
@@ -196,24 +169,19 @@ export function AccountsTab({ accounts, editable }: AccountsTabProps) {
             </p>
           )}
 
-          {editable ? (
-            <div className="mt-4">
-              <Button onClick={connectInstagram} disabled={connecting}>
-                {connecting ? "Connecting..." : "Connect Instagram"}
-              </Button>
-            </div>
-          ) : (
-            /*
-              Removed rather than disabled-with-a-tooltip: `openOAuthWindow`
-              calls `oauth-url/instagram`, which is not a route on this API
-              (#1063). A button offering an action the app cannot perform is
-              the #1050 defect this screen is being made honest about.
-            */
-            <p className="mt-4 text-sm text-muted-foreground">
-              Connecting an Instagram account is not available from this screen
-              yet.
-            </p>
-          )}
+          {/*
+            GONE, not gated. `openOAuthWindow` called `oauth-url/instagram`,
+            which is not a route on this API (#1063), and the button was
+            per-workspace against a per-source flow — it could not be wired as
+            written. It used to sit behind `editable`, which meant P3 flipping
+            that flag would have silently restored it (rajan, #1066 review).
+            `editable` now gates ONE thing: controls that are disabled because
+            they are pending, and that are coming back.
+          */}
+          <p className="mt-4 text-sm text-muted-foreground">
+            Connecting an Instagram account is not available from this screen
+            yet.
+          </p>
         </CardContent>
       </Card>
     </div>
