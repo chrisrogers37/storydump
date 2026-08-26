@@ -17,8 +17,8 @@ export default function ConnectTelegram() {
         Connect to Telegram
       </h1>
       <p className="mt-4 text-lg text-muted-foreground">
-        The final step — link your account to the Storydump Telegram bot and
-        start automating your Stories.
+        Optional — link the Storydump Telegram bot to approve Stories from your
+        phone. You can do everything on the web instead.
       </p>
 
       <div className="mt-10 space-y-10">
@@ -83,57 +83,48 @@ export default function ConnectTelegram() {
           </Callout>
         </StepCard>
 
-        <StepCard number={3} title="Complete the setup wizard">
+        <StepCard number={3} title="Set up your workspace on the web">
           <p>
-            The bot walks you through connecting everything you set up in the
-            previous steps:
+            Setup happens in the dashboard, not in the chat. Sign in and open{" "}
+            <span className="font-medium text-foreground">Settings</span>:
           </p>
           <ol className="mt-2 list-inside list-decimal space-y-1">
             <li>
-              <span className="font-medium text-foreground">
-                Connect Instagram
-              </span>
+              <span className="font-medium text-foreground">Integrations</span>{" "}
+              — add your Drive folder, then set up Google access for it
             </li>
             <li>
-              <span className="font-medium text-foreground">
-                Connect Google Drive
-              </span>
-            </li>
-            <li>
-              <span className="font-medium text-foreground">
-                Select your media folder
-              </span>{" "}
-              — point Storydump to the Drive folder you organized
-            </li>
-            <li>
-              <span className="font-medium text-foreground">
-                Configure your schedule
-              </span>{" "}
-              — set how many Stories per day and your posting window
+              <span className="font-medium text-foreground">General</span> — set
+              how many Stories per day and your posting window
             </li>
           </ol>
+          <Callout type="info" className="mt-3">
+            Connecting an Instagram account is not available from the dashboard
+            yet. If you need one connected, get in touch — see Step 5.
+          </Callout>
         </StepCard>
 
         <StepCard number={4} title="What happens next">
-          <p>Once setup is complete, Storydump will:</p>
+          <p>Once a folder is connected, Storydump will:</p>
           <ul className="mt-2 space-y-2">
             <li className="flex items-start gap-3">
               <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-primary" />
-              <span>Sync your Google Drive media library</span>
+              <span>Sync the media in that Drive folder</span>
             </li>
             <li className="flex items-start gap-3">
               <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-primary" />
-              <span>Create your first 7-day posting schedule</span>
+              <span>Schedule Stories inside your posting window</span>
             </li>
             <li className="flex items-start gap-3">
               <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-primary" />
               <span>
-                Start sending Story previews to your Telegram chat for approval
+                Queue each one for approval — in the dashboard, and in Telegram
+                too if you connected it
               </span>
             </li>
           </ul>
           <p className="mt-3">
-            Approve, skip, or auto-post — it&apos;s all up to you.
+            Approve, skip, or reject — it&apos;s all up to you.
           </p>
         </StepCard>
 
