@@ -36,7 +36,7 @@ export default function DashboardError({
         </CardHeader>
         <CardContent>
           <p className="text-sm text-muted-foreground text-center">
-            We couldn't load this page. This is usually temporary — try
+            We couldn&apos;t load this page. This is usually temporary — try
             refreshing, or head back to the overview.
           </p>
         </CardContent>

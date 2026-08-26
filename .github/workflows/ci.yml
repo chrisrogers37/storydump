@@ -174,6 +174,66 @@ jobs:
           path: bandit-report.json
         if: always()
 
+  front-end:
+    name: Front End
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: landing
+
+    # NO `paths:` FILTER, and that is the load-bearing choice rather than an
+    # omission (#1068/#1052).
+    #
+    # This repository currently path-filters nothing — every job runs on every
+    # PR. A landing-only filter would introduce that hazard here for the first
+    # time: a filtered workflow is never SCHEDULED on a PR that touches no
+    # front-end files, so a check that is also REQUIRED can never arrive and
+    # the PR strands forever. Leaving it unfiltered keeps this check always
+    # PRESENT, which is what makes it safe to require later if anyone decides
+    # to.
+    #
+    # The cost of running it on a backend-only PR is ~90s of runner time in
+    # parallel with `Test`, which takes 335s on a real head. It adds nothing to
+    # the wall-clock a person waits for, and a gate that costs nothing is a
+    # gate nobody routes around.
+    #
+    # NOT REQUIRED, deliberately: `rules/branches/main` declares no
+    # `required_status_checks` at all, so every check on this repo is advisory
+    # today. Making this one the sole required check would be an inconsistency,
+    # and whether the repo should enforce checks is a policy decision about all
+    # of them rather than something to smuggle in under a front-end ticket.
+    #
+    # `next build` is deliberately ABSENT: Vercel already builds every PR, so
+    # duplicating it here buys nothing but minutes.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Pinned rather than floating, and mirrored by `engines` in
+          # landing/package.json so CI and a laptop agree on the contract.
+          node-version: '22'
+          cache: npm
+          # The lockfile is in landing/, not at the repo root; without this the
+          # cache key is computed from a file that does not exist and the
+          # install is uncached on every run.
+          cache-dependency-path: landing/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # The package's own scripts where they exist, so a change to what `test`
+      # or `lint` means follows here without editing this file. `tsc` has no
+      # script and is invoked directly.
+      - name: Run tests
+        run: npm test
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Lint
+        run: npm run lint
+
   changelog-check:
     name: Changelog Check
     runs-on: ubuntu-latest
