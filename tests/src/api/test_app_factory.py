@@ -204,9 +204,7 @@ class TestSchedulingHealthIsASecondSurface:
         app = create_app(env={})
         assert TestClient(app).get("/health").status_code == 200
 
-    def test_it_reaches_the_query_when_an_engine_is_present(
-        self, client, monkeypatch
-    ):
+    def test_it_reaches_the_query_when_an_engine_is_present(self, client, monkeypatch):
         """THE TEST THIS ROUTE WAS MISSING — and the absence is the finding,
         not the 500 it let through.
 
