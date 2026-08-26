@@ -232,7 +232,25 @@ export function SetupWizard({ initialState, initialAccounts = [] }: SetupWizardP
     }
   }
 
-  const isSkippable = step === 1;
+  /*
+   * Steps a user can complete onboarding WITHOUT (#1071).
+   *
+   * Step 1 (Drive) was already skippable; step 0 (Instagram) is added here
+   * because it was not completable at all. Its only satisfier was a Connect
+   * button calling `oauth-url/instagram`, a route that does not exist, so a
+   * user with zero accounts had no way forward — and once #1070 removed that
+   * button (correctly: it was per-workspace against a per-source credential
+   * model) the dead end stopped even 404ing and just became silent.
+   *
+   * Skip rather than a conditional requirement: this file already answers
+   * "this step is optional" one way, for Drive, and a second mechanism for
+   * the same question is how the two drift. A workspace with no destination
+   * simply mints no posts — the scheduler logs a throttled 'no active chats'
+   * and idles (`scheduler_loop.py`:116) rather than erroring, so completing
+   * without one is safe.
+   */
+  const OPTIONAL_STEPS = new Set([0, 1]);
+  const isSkippable = OPTIONAL_STEPS.has(step);
   const progress = ((step + 1) / STEPS.length) * 100;
   const currentStep = STEPS[step];
 
@@ -460,7 +478,13 @@ export function SetupWizard({ initialState, initialAccounts = [] }: SetupWizardP
                 Next
               </Button>
             ) : (
-              <Button onClick={handleComplete} disabled={loading || !instagramConnected}>
+              /*
+                Not gated on `instagramConnected` (#1071). Step 0 is optional
+                above, so requiring it here would let a user skip the step and
+                then find the same condition blocking the last button — the
+                wall moved rather than removed.
+              */
+              <Button onClick={handleComplete} disabled={loading}>
                 {loading ? <Loader2 className="size-4 animate-spin" /> : null}
                 Complete Setup
               </Button>
