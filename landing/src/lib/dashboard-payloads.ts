@@ -213,9 +213,18 @@ export type SummaryView = {
   rejected: number;
   failed: number;
   total: number;
-  /** posted / (posted + failed) — publish outcomes only. */
-  success_rate: number;
-  avg_per_day: number;
+  /**
+   * posted / (posted + failed) — publish outcomes only.
+   *
+   * `Unavailable` when there have been NO publish attempts. A rate over an
+   * empty divisor is not a low rate, and `0%` on this card reads as a verdict
+   * on the workspace rather than as the absence of anything to judge. Same
+   * rule as #1048's columns, different cause: this one resolves itself the
+   * moment one publish is attempted.
+   */
+  success_rate: number | Unavailable;
+  /** `Unavailable` when there is no window to average over — see above. */
+  avg_per_day: number | Unavailable;
 };
 
 export type CategoryView = {
@@ -270,10 +279,12 @@ export function deriveSummary(stats: StatsResponse): SummaryView {
     // Telegram deliveries and reported 1% after a delivery burst (#466/#467);
     // `intents_by_state` cannot make that mistake because Telegram delivery is
     // not an intent state — there is nothing of the other kind in the divisor.
-    success_rate: attempts === 0 ? 0 : posted / attempts,
-    // From the cap ledger, not from a bounded list. Zero days means no window
-    // rather than a zero average, so it reports 0 without dividing.
-    avg_per_day: days === 0 ? 0 : postedOverWindow / days,
+    success_rate: attempts === 0 ? null : posted / attempts,
+    // From the cap ledger, not from a bounded list. The previous version said
+    // in as many words that "zero days means no window rather than a zero
+    // average" — and then returned 0 anyway, which is the fabrication it had
+    // just named. No window is `Unavailable`, like the rate above.
+    avg_per_day: days === 0 ? null : postedOverWindow / days,
   };
 }
 
