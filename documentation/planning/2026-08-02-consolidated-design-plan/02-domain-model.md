@@ -1006,7 +1006,7 @@ Why this and not a separate outcomes table: R3 needs *one immutable terminal rec
 | scheduled | expired | reaper | slot passed unclaimed |
 | scheduled | cancelled | worker | `cancel_requested`, or workspace/account disabled |
 | prompt_pending | awaiting_approval | worker | prompt delivered on ≥ 1 binding, **or** workspace has web access (FC-2) |
-| prompt_pending | failed | worker | no reachable surface (all deliveries failed, no web access) |
+| prompt_pending | failed | worker | no reachable surface (all deliveries failed, no web access). **No producer since #1033**: the web queue is a surface every workspace has, so the disjunct above is always satisfied; the edge stays seeded (`055`) with nothing driving it |
 | prompt_pending | expired | reaper | expiry passed before delivery |
 | prompt_pending | cancelled | worker | `cancel_requested`, or workspace/account disabled (pass-2: this edge was missing — offboarding must be able to terminalize every working state) |
 | awaiting_approval | approved | user or system(auto) | manual command, or `auto_reapprove_returning` policy |

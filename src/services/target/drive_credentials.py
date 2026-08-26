@@ -36,7 +36,12 @@ source in `error` rather than a poisoned lane.
 `credential_lifecycle` ships `ig_refresh` and no Google analogue, and the
 refresh clock is fenced to `ig_login` (`063`) by design: gdrive rows carry
 `next_refresh_at = NULL` and are minted on the READ path, not by the clock
-(F3 (b)). Until that minting lands (P5), an expired access token is refused
+(F3 (b)). Read that clause as a deliberate exclusion, never a gap to "fix" by
+widening the provider filter — and read it precisely: `063` guards the
+refresh-clock query only, one `AND provider = 'ig_login'` inside
+`fn_clock_tick`; it never fenced the INSERT into this table (an earlier version
+of this docstring said it did, and navi corrected it — the schema admits a
+gdrive row wherever a writer lands, which is exactly what the connect leg is). Until that minting lands (P5), an expired access token is refused
 HERE when `expires_at` has passed, rather than being sent to Google to earn a
 401 — same outcome for the source, one less provider call, and the reason
 names expiry instead of a generic rejection. P5 lands behind this same
