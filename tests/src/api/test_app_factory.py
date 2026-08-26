@@ -171,3 +171,34 @@ class TestRefusalMappingsAreTotal:
         resp = client.get("/api/v1/me")
         assert resp.status_code == 500
         assert resp.json() == {"detail": "internal error"}
+
+
+class TestSchedulingHealthIsASecondSurface:
+    """#1090 F1. `/health` is Railway's liveness gate and must not open a
+    connection; this is the dependency-touching check #1026 asked for, and the
+    two being separate endpoints is the design rather than an accident."""
+
+    def test_it_is_not_the_railway_probe(self):
+        """If these were one endpoint, either liveness opens a connection — and a
+        database blip takes the service down for a fault no restart repairs — or
+        the scheduling check touches nothing and reports healthy through any
+        outage, which is #1026 exactly."""
+        app = create_app(env={})
+        paths = {r.path for r in app.routes}
+        assert "/health" in paths
+        assert "/health/scheduling" in paths
+
+    def test_it_refuses_rather_than_reassures_when_it_cannot_look(self):
+        """A monitor must distinguish "scheduling is fine" from "I could not
+        look". Collapsing those is the whole subject of #1090 F1, so an absent
+        engine is a 503 and never a cheerful zero."""
+        app = create_app(env={})
+        assert app.state.engine is None
+        resp = TestClient(app).get("/health/scheduling")
+        assert resp.status_code == 503
+
+    def test_the_railway_probe_still_opens_no_connection(self):
+        """The property that made a second endpoint necessary — pinned here so a
+        later tidy-up cannot merge them."""
+        app = create_app(env={})
+        assert TestClient(app).get("/health").status_code == 200
