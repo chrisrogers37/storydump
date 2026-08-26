@@ -386,12 +386,123 @@ class TestDestinationsAreIdempotentAndTenantBound:
         assert seen == 0
 
 
+class TestATypedHandleBecomesADestination:
+    """#1089 — the settings form's path. It has no Meta id to send, so the port
+    derives a provisional reference. Everything here is about what LANDS."""
+
+    def test_a_handle_alone_creates_a_scheduled_destination(self, world):
+        account_id, created = destination(world, ref=None, handle="@TheHandle")
+        assert created is True
+
+        row = _owner(
+            world,
+            "SELECT provider_account_ref, handle, state, next_slot_at"
+            "  FROM ig_accounts WHERE id = %s",
+            (account_id,),
+        )
+        # NAMESPACED, not the bare handle: shape (b). Bare, the day OAuth
+        # supplies the real Meta id the same feed arrives under a second
+        # reference — two destinations, two schedules, one Instagram account.
+        assert row[0] == "manual:thehandle"
+        # The display column keeps the caller's casing; the `@` does not survive.
+        assert row[1] == "TheHandle"
+        assert row[2] == "active"
+        # Creating a destination is what SCHEDULES it. Without this the clock
+        # cannot see the row at all and the whole path is inert.
+        assert row[3] is not None, "next_slot_at was not seeded"
+
+    def test_two_spellings_of_one_handle_are_ONE_destination(self, world):
+        """The reason `manual_ref_for` case-folds. `uq_ig_account_live` is a
+        byte comparison, so without folding this is two schedules against one
+        real Instagram feed — the exact failure the index exists to prevent."""
+        first, created_first = destination(world, ref=None, handle="@Repeated")
+        second, created_second = destination(world, ref=None, handle="repeated")
+
+        assert created_first is True
+        assert created_second is False
+        assert second == first
+
+    def test_an_explicit_reference_still_wins_over_a_handle(self, world):
+        """The OAuth path is untouched: a caller holding a real Meta id is
+        never second-guessed, and the handle is stored as the display value."""
+        ref = _ref("explicit")
+        account_id, _ = destination(world, ref=ref, handle="thehandle")
+
+        row = _owner(
+            world,
+            "SELECT provider_account_ref, handle FROM ig_accounts WHERE id = %s",
+            (account_id,),
+        )
+        assert row[0] == ref
+        assert row[1] == "thehandle"
+
+    def test_a_typed_handle_is_pickable_by_the_clock(self, world):
+        """End to end, and the point of the whole build: a destination created
+        from a typed handle is one `plan_slot` the dispatcher can mint.
+
+        Asserted against THIS account's own job rather than the tick's count. A
+        count is order-coupled to every other tick in the module and cannot tell
+        "my row minted" from "somebody's did"."""
+        account_id, _ = destination(world, ref=None, handle="clockvisible")
+        _make_due(world, account_id)
+        tick(world)
+
+        row = _owner(
+            world,
+            "SELECT count(*) FROM jobs"
+            " WHERE kind = 'plan_slot' AND serialization_key = %s",
+            (f"acct:{account_id}",),
+        )
+        assert row[0] == 1, "the clock minted no plan_slot for the typed handle"
+
+    def test_an_explicit_reference_is_not_gated_by_its_display_handle(self, world):
+        """REGRESSION (found by review). An earlier revision normalised the
+        handle BEFORE choosing a branch, so a decorative display column could
+        refuse an identity-bearing create whose identity came from OAuth: this
+        call raised `handle_malformed` and wrote nothing."""
+        ref = _ref("decorative")
+        account_id, created = destination(world, ref=ref, handle="two words")
+
+        assert created is True
+        row = _owner(
+            world,
+            "SELECT provider_account_ref, handle FROM ig_accounts WHERE id = %s",
+            (account_id,),
+        )
+        assert row[0] == ref
+        # Stored as given: on this path the handle is decorative and the port
+        # does not own its shape.
+        assert row[1] == "two words"
+
+
 class TestDestinationRefusals:
     @pytest.mark.parametrize("bad", ["", "   ", None, 17841, {"a": 1}])
     def test_a_missing_reference_is_refused_by_name(self, world, bad):
+        """Unchanged by #1089, and that is the point: with no handle supplied
+        every one of these still lands on `account_ref_from`, so a caller who
+        supplies nothing sees the reason this gate already pinned."""
         with pytest.raises(ProvisioningRefused) as exc:
             destination(world, ref=bad)
         assert exc.value.reason == "account_ref_required"
+
+    def test_a_malformed_reference_beside_a_handle_is_REFUSED_not_derived(self, world):
+        """The branch tests whether a reference was SUPPLIED, never whether it
+        is well-formed. An unquoted Meta id is an ordinary JSON mistake, and a
+        shape test here would silently derive `manual:<handle>` for a caller who
+        plainly meant to send a real id — while refusing a too-long string on
+        the same path, two answers to one class of error."""
+        with pytest.raises(ProvisioningRefused) as exc:
+            destination(world, ref=17841, handle="thehandle")
+        assert exc.value.reason == "account_ref_required"
+
+    def test_a_handle_refusal_escapes_before_any_sql_runs(self, world):
+        """ONE case, deliberately. `handle_from`'s whole table is pinned at the
+        unit tier; what this tier adds is the single fact that a refusal
+        propagates out of `create_destination` rather than reaching Postgres,
+        and one case proves that."""
+        with pytest.raises(ProvisioningRefused) as exc:
+            destination(world, ref=None, handle="two words")
+        assert exc.value.reason == "handle_malformed"
 
     def test_an_absurd_reference_is_refused_by_name(self, world):
         with pytest.raises(ProvisioningRefused) as exc:

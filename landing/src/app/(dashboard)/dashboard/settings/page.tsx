@@ -15,7 +15,8 @@ import { AccountsTab } from "@/components/dashboard/settings/accounts-tab";
 import { IntegrationsTab } from "@/components/dashboard/settings/integrations-tab";
 
 /**
- * Settings — General writes; Accounts and Integrations do not yet (#1057/#1063).
+ * Settings — General writes, Accounts writes ONE thing (adding a destination,
+ * #1089), Integrations does not yet (#1057/#1063).
  *
  * It used to ask for `init`, a route that does not exist and is not planned, so
  * the hard bail below fired on EVERY load and this screen rendered
@@ -27,8 +28,11 @@ import { IntegrationsTab } from "@/components/dashboard/settings/integrations-ta
  *
  * All six Settings writes used to target routes that do not exist. Four of
  * them — the `settings_change` controls on General — are now on the command
- * client (epic P3), so that tab is editable. The other two tabs are NOT, and
- * this is one flag passed three times rather than one screen-wide state:
+ * client (epic P3), so that tab is editable. The other two tabs are NOT — and
+ * note `editable` is not the same question as "can this tab write": Accounts
+ * now carries a working destination form (#1089) that is deliberately outside
+ * the flag, because the flag marks controls whose ROUTE does not exist yet.
+ * This is one flag passed three times rather than one screen-wide state:
  * `switch-account` has no target-tier home at all, `remove-account` and
  * `disconnect-gdrive` map to `disconnect_account` which is UNBUILT, and
  * `sync-media` is the epic's P4. Flipping those with General would be exactly
@@ -123,7 +127,11 @@ export default async function SettingsPage() {
           disabled-with-reason per F5 (b) until the epic's P6.
         */}
         <TabsContent value="accounts">
-          <AccountsTab accounts={accounts} editable={false} />
+          <AccountsTab
+            accounts={accounts}
+            editable={false}
+            workspaceId={workspaceId}
+          />
         </TabsContent>
 
         {/*

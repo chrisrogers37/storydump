@@ -185,6 +185,13 @@ _COMMAND_STATUS = {
 _PROVISIONING_STATUS = {
     "account_ref_required": 400,
     "account_ref_too_long": 400,
+    # The typed-handle path (#1089). Mapped for the same reason as the two
+    # above: these are values a person typed into a field, so the answer has to
+    # be a 400 naming which one. An unmapped reason falls through to `_unmapped`
+    # and is answered 500 — correct for a broken invariant, wrong for a typo.
+    "handle_required": 400,
+    "handle_malformed": 400,
+    "handle_too_long": 400,
     "folder_required": 400,
     "folder_not_a_drive_folder": 400,
 }
