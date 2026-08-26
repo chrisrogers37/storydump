@@ -9,6 +9,8 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  addDriveSource,
+  addSourceRefusalCopy,
   connectRefusalCopy,
   isAuthorizationUrl,
   requestSourceConnect,
@@ -136,6 +138,90 @@ describe("requestSourceConnect", () => {
   it("never tells someone a refusal succeeded", () => {
     for (const reason of ["not found", "unreachable", "malformed_authorization_url", "??"]) {
       expect(connectRefusalCopy(reason)).not.toMatch(/\bconnected\b/i);
+    }
+  });
+});
+
+describe("addDriveSource — the folder is a RESOURCE, not a command", () => {
+  it("posts to the sources collection with the folder reference", async () => {
+    stubFetch({ sourceId: SRC, created: true }, 201);
+    const result = await addDriveSource(WS, "https://drive.google.com/drive/folders/abc");
+
+    expect(captured[0].url).toBe(`/api/workspaces/${WS}/sources`);
+    expect(JSON.parse(String(captured[0].init.body))).toEqual({
+      folder_ref: "https://drive.google.com/drive/folders/abc",
+    });
+    expect(result).toEqual({ ok: true, sourceId: SRC, created: true });
+  });
+
+  it("sends NO submission id — the port is idempotent on the FOLDER", async () => {
+    // F1 (b) routes this as REST rather than a command, and there is nothing
+    // for a submission key to add: `get_or_create_media_source` dedups on the
+    // folder under an advisory lock, so a repeat returns the SAME source.
+    stubFetch({ sourceId: SRC, created: true }, 201);
+    await addDriveSource(WS, "abc123");
+    const body = JSON.parse(String(captured[0].init.body));
+    expect(body).not.toHaveProperty("submission_id");
+    const headers = (captured[0].init.headers ?? {}) as Record<string, string>;
+    expect(Object.keys(headers).map((k) => k.toLowerCase())).not.toContain(
+      "idempotency-key",
+    );
+  });
+
+  it("reports created=false distinctly, so a repeat is not called an add", async () => {
+    // The same folder twice returns the same source at 200. Saying "added"
+    // both times would hide that the second click made nothing.
+    stubFetch({ sourceId: SRC, created: false }, 200);
+    const result = await addDriveSource(WS, "abc123");
+    expect(result).toEqual({ ok: true, sourceId: SRC, created: false });
+  });
+
+  it("omits root_name rather than sending an empty one", async () => {
+    stubFetch({ sourceId: SRC, created: true }, 201);
+    await addDriveSource(WS, "abc123", "   ");
+    expect(JSON.parse(String(captured[0].init.body))).toEqual({ folder_ref: "abc123" });
+  });
+
+  it("carries root_name when there is one", async () => {
+    stubFetch({ sourceId: SRC, created: true }, 201);
+    await addDriveSource(WS, "abc123", " Holiday ");
+    expect(JSON.parse(String(captured[0].init.body))).toEqual({
+      folder_ref: "abc123",
+      root_name: "Holiday",
+    });
+  });
+
+  it("does NOT re-implement what a valid folder reference is", async () => {
+    // The port owns that rule (`folder_ref_from`) and refuses by name. A second
+    // copy here is the one that goes stale — and it is a rule with a documented
+    // trap, where a markerless URL once reduced to `https:` and silently merged
+    // two unrelated folders onto one source. So this passes a value the client
+    // cannot judge and lets the port answer.
+    stubFetch({ error: "invalid_args" }, 400);
+    const result = await addDriveSource(WS, "https://example.com/not-a-folder");
+    expect(captured.length).toBe(1);
+    expect(result.ok).toBe(false);
+    expect(addSourceRefusalCopy("invalid_args")).toMatch(/Drive folder link/i);
+  });
+
+  it("refuses a 200 with no source id rather than reporting success", async () => {
+    stubFetch({ created: true }, 200);
+    const result = await addDriveSource(WS, "abc123");
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toBe("malformed_response");
+  });
+
+  it("never tells someone a failed add succeeded", () => {
+    // The property is that no refusal CLAIMS an add happened — not that the
+    // word is absent. "Nothing was added" is the opposite of a success claim,
+    // so a blanket regex flags exactly the sentence that is most correct.
+    // Every occurrence must be negated, which is a scan rather than a
+    // lookaround: the negation here precedes the word.
+    for (const r of ["invalid_args", "unreachable", "folder_required", "??"]) {
+      const copy = addSourceRefusalCopy(r);
+      for (const m of copy.matchAll(/added/gi)) {
+        expect(copy.slice(0, m.index).toLowerCase(), copy).toMatch(/\bnothing was\s+$/);
+      }
     }
   });
 });

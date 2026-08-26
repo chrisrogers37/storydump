@@ -5,9 +5,17 @@ import { useRouter } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { postApi } from "@/lib/dashboard-api";
 import type { SettingsView, SourceRow } from "@/lib/dashboard-payloads";
-import { connectRefusalCopy, requestSourceConnect } from "@/lib/source-connect";
+import {
+  addDriveSource,
+  addSourceRefusalCopy,
+  connectRefusalCopy,
+  requestSourceConnect,
+} from "@/lib/source-connect";
+import { settingsRefusalCopy, submitCommand } from "@/lib/command-client";
 
 /**
  * Integrations, read-only (#1063).
@@ -42,26 +50,29 @@ import { connectRefusalCopy, requestSourceConnect } from "@/lib/source-connect";
  *
  * ── What this card can and cannot say ──────────────────────────────────────
  *
- * `GET /workspaces/{ws}/sources` returns id, provider, state, the sync
- * timestamps and `created_at`. It returns NO credential field, so this tier
- * cannot tell a source that has been granted from one that has not — the
- * server can (`connect_purpose` runs an EXISTS on `oauth_credentials` and
- * answers `connect` before a credential, `reconnect` after), but that answer
- * is not on the wire.
+ * When this card was built, `GET /workspaces/{ws}/sources` returned no
+ * credential field at all, so this tier could not tell a source that had been
+ * granted from one that had not. Two things follow from that, and both are
+ * still what the code does:
  *
- * Two consequences, both deliberate:
- *
- * 1. The button's label is NEUTRAL across both states, because a precise one
- *    would be a guess. The route disambiguates for itself.
+ * 1. The button's label is NEUTRAL across connect and reconnect, because a
+ *    precise one would have been a guess. The route disambiguates for itself.
  * 2. The old "Connected" heading is GONE. It was `drive !== null` — a source
- *    ROW existing — so a folder that had been added and never granted rendered
- *    as "Connected" with a green `active` badge, which is a claim this tier
- *    has no way to make. What is shown now is what is known: a source exists,
- *    and here is its state.
+ *    ROW existing — so a folder added and never granted rendered as
+ *    "Connected" with a green `active` badge, which is a claim this tier had
+ *    no way to make. What is shown is what is known.
  *
- * The fix that would let this say "Connected" truthfully is a credential
- * indicator on the sources payload, mirroring the EXISTS `connect_purpose`
- * already runs. That is a change to the API, not to this file.
+ * **That gap is now CLOSED at the API and not yet consumed here.** #1080 added
+ * `credential_status` to the payload — `none` | `active` | `expired` |
+ * `revoked` — deriving it rather than passing `state` through, precisely
+ * because `media_sources.state` cannot answer "is this connected" (#1078: a
+ * source created and never credentialed is `active` too). `none` versus the
+ * last two are different user actions, connect versus reconnect, which is the
+ * distinction this card could not previously make.
+ *
+ * `SourceRow` in this tier does not declare the field yet and nothing here
+ * reads it. Consuming it is its own change: a precise label, and a heading
+ * that can say "Connected" truthfully for the first time.
  */
 const DISABLED_REASON =
   "Not wired up yet — this action is not available on this API version.";
@@ -79,9 +90,12 @@ export function IntegrationsTab({
   editable: boolean;
 }) {
   const router = useRouter();
-  const [syncing, setSyncing] = useState(false);
+  const [syncingId, setSyncingId] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [disconnecting, setDisconnecting] = useState(false);
   const [connectingId, setConnectingId] = useState<string | null>(null);
+  const [folderRef, setFolderRef] = useState("");
+  const [addingFolder, setAddingFolder] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const driveSources = sources.filter((s) => s.provider === "gdrive");
@@ -100,6 +114,44 @@ export function IntegrationsTab({
    * guessing about when the person came back. #1070 deleted those listeners
    * with the button that needed them; this does not bring them back.
    */
+  /**
+   * Add a Drive folder as a source.
+   *
+   * This closes the dead end #1077 left stated on this screen: the connect
+   * route is per-source, so a workspace with no source had no way to get one
+   * and therefore no button — and the only control that could create one lived
+   * in the setup wizard, which nothing renders (`/dashboard/setup` was deleted
+   * and `sidebar.tsx` says so).
+   *
+   * The confirmation says what the route actually returns. The control this
+   * replaces rendered "N files found" and a category list from the legacy
+   * route; `POST /sources` deliberately does not read the folder — that is the
+   * Drive seam and a separate build — so those numbers do not exist yet and
+   * claiming them would be inventing them.
+   */
+  async function addFolder() {
+    setError(null);
+    setNotice(null);
+    setAddingFolder(true);
+    const result = await addDriveSource(workspaceId, folderRef);
+    setAddingFolder(false);
+
+    if (!result.ok) {
+      setError(addSourceRefusalCopy(result.error));
+      return;
+    }
+    setFolderRef("");
+    // `created` matters to a person: submitting the same folder twice returns
+    // the SAME source rather than making a second one, and saying "added"
+    // both times would hide that.
+    setNotice(
+      result.created
+        ? "Folder added. Set up Google access for it to start syncing."
+        : "That folder is already a source here.",
+    );
+    router.refresh();
+  }
+
   async function connect(sourceId: string) {
     setError(null);
     setConnectingId(sourceId);
@@ -127,17 +179,38 @@ export function IntegrationsTab({
     }
   }
 
-  async function syncMedia() {
+  /**
+   * Sync ONE source, now.
+   *
+   * `sync-media` was a dead BFF path; this is the `sync_now` command. It is
+   * per-SOURCE — the executor reads `source_id` and refuses without it — so
+   * the button carries its row's id, the same shape as Connect.
+   *
+   * The port has THREE answers and only one of them means a sync started:
+   * `enqueued` with a job id, or `executed` carrying `sync: "already_pending"`
+   * when one is already queued for that source (`unless_pending`). Both are
+   * 2xx. Reporting the second as a fresh sync would tell someone their click
+   * did something it did not, so the two are said differently.
+   */
+  async function syncSource(sourceId: string) {
     setError(null);
-    setSyncing(true);
-    try {
-      await postApi("sync-media");
-      router.refresh();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to sync media");
-    } finally {
-      setSyncing(false);
+    setNotice(null);
+    setSyncingId(sourceId);
+    const result = await submitCommand(workspaceId, "sync_now", {
+      source_id: sourceId,
+    });
+    setSyncingId(null);
+
+    if (!result.ok) {
+      setError(settingsRefusalCopy(result.error));
+      return;
     }
+    setNotice(
+      result.data?.sync === "already_pending"
+        ? "A sync is already queued for that folder."
+        : "Sync started.",
+    );
+    router.refresh();
   }
 
   return (
@@ -147,26 +220,19 @@ export function IntegrationsTab({
           {error}
         </div>
       )}
+      {notice && (
+        <div className="mb-4 rounded-md border bg-muted/40 p-3 text-sm">{notice}</div>
+      )}
       <Card>
         <CardHeader>
           <CardTitle className="text-base">Google Drive</CardTitle>
         </CardHeader>
         <CardContent>
           {driveSources.length === 0 ? (
-            <div className="py-4 text-center space-y-1">
-              <p className="text-sm text-muted-foreground">
-                No Google Drive folder is set up for this workspace.
-              </p>
-              {/*
-                No Connect button here, and that is not the same omission
-                #1070 made. The connect route is per-SOURCE: with no source
-                there is nothing to grant access TO, so the missing step is
-                adding a folder, which this screen does not do yet.
-              */}
-              <p className="text-sm text-muted-foreground">
-                Adding one is not available from this screen yet.
-              </p>
-            </div>
+            <p className="py-2 text-sm text-muted-foreground">
+              No Google Drive folder is set up for this workspace yet. Add one
+              below.
+            </p>
           ) : (
             <ul className="divide-y">
               {driveSources.map((source) => (
@@ -201,9 +267,11 @@ export function IntegrationsTab({
                     {/*
                       NOT "Connected". That heading was `drive !== null` — a
                       source ROW existing — so a folder added and never granted
-                      read as connected with a green badge. The sources payload
-                      carries no credential field, so this tier cannot make
-                      that claim; it states what it knows instead.
+                      read as connected with a green badge. This tier still
+                      cannot make that claim: the payload now carries
+                      `credential_status` (#1080) but `SourceRow` does not
+                      declare it and nothing here reads it yet. So this states
+                      what it knows rather than what it would like to say.
                     */}
                     <p className="text-sm text-muted-foreground">
                       {source.last_sync_success_at
@@ -222,14 +290,16 @@ export function IntegrationsTab({
                           ? "Opening Google..."
                           : "Set up Google access"}
                       </Button>
+                      {/* No longer behind `editable`: `sync_now` is a built
+                          executor and this calls it. Only Disconnect is still
+                          pending (epic P6). */}
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={syncMedia}
-                        disabled={!editable || syncing}
-                        title={editable ? undefined : DISABLED_REASON}
+                        onClick={() => syncSource(source.id)}
+                        disabled={syncingId !== null}
                       >
-                        {syncing ? "Syncing..." : "Sync Now"}
+                        {syncingId === source.id ? "Syncing..." : "Sync Now"}
                       </Button>
                       <Button
                         variant="destructive"
@@ -250,7 +320,7 @@ export function IntegrationsTab({
             <div className="space-y-1 pt-3">
               {!editable && (
                 <p className="text-xs text-muted-foreground">
-                  Sync and Disconnect are not wired up yet.
+                  Disconnect is not wired up yet.
                 </p>
               )}
               {/* Once for the card, not once per row: the folder ref lives in
@@ -261,6 +331,30 @@ export function IntegrationsTab({
               </p>
             </div>
           )}
+          <div className="space-y-2 border-t pt-4 mt-4">
+            <Label htmlFor="folder-ref">Add a folder</Label>
+            <div className="flex flex-wrap gap-2">
+              <Input
+                id="folder-ref"
+                value={folderRef}
+                onChange={(e) => setFolderRef(e.target.value)}
+                placeholder="Paste the Drive folder link"
+                className="max-w-md"
+              />
+              <Button onClick={addFolder} disabled={addingFolder || !folderRef.trim()}>
+                {addingFolder ? "Adding..." : "Add folder"}
+              </Button>
+            </div>
+            {/* What a valid reference IS belongs to the port, which takes a
+                folder URL or a bare id and refuses anything else by name. This
+                says the same thing in a sentence rather than re-implementing
+                the rule as a second regex that can disagree with it. */}
+            <p className="text-xs text-muted-foreground">
+              Open the folder in Google Drive and copy the address, or paste its
+              folder id.
+            </p>
+          </div>
+
         </CardContent>
       </Card>
 
