@@ -193,6 +193,11 @@ def _build_registry() -> dict[str, Optional[Executor]]:
             "mark_posted": ex.mark_posted,
             "cancel": ex.cancel,
             "sync_now": ex.sync_now,
+            # gdrive epic P4 — the trio is provider-general (F1 (a)) and
+            # THIN: the OAuth leg is the API route's, these initiate and record.
+            "connect_account": ex.connect_account,
+            "reconnect_account": ex.reconnect_account,
+            "disconnect_account": ex.disconnect_account,
             "settings_change": ex.settings_change,
             "pause_workspace": ex.pause_workspace,
             "resume_workspace": ex.resume_workspace,

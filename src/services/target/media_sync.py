@@ -90,6 +90,54 @@ async def first_ingest_chunk(deps, session, job) -> str:
     )
 
 
+async def rearm_after_connect(session, *, workspace_id: str, source_id: str) -> bool:
+    """F4 (a): make a source eligible again, in the CALLER's transaction.
+
+    Called beside `google_drive_oauth.store_credential` so that "a credential
+    now exists" and "this source is eligible again" are ONE fact. Atomicity is
+    the whole case for (a): two statements in two transactions can drift, and
+    the drift is invisible — a credentialed source that never syncs looks
+    exactly like one that has nothing wrong with it.
+
+    ## Why all three columns, and why `next_sync_at` is the one that matters
+
+    The clock's leg 4 selects `state = 'active' AND next_sync_at IS NOT NULL
+    AND next_sync_at <= now()` (`063:143`) — a CONJUNCTION, and both halves
+    were unsatisfied for a stranded source. `state` alone is not enough:
+    `media_sources.next_sync_at` has no default and the only other writer of a
+    non-NULL value is this module's own post-sync re-arm, so a source that has
+    never completed a sync is `NULL` there whatever its state. Setting state
+    without the cursor produces an `active` source that is permanently not due
+    — the same silence in a different column.
+
+    `alerted_at = NULL` retires the #1061 disconnect alert in the same breath.
+    That is what stops this module's `alert_stranded_sources` beat re-alerting
+    a source that has just recovered: the beat scans `state = 'error'`, so a
+    row this statement has touched no longer matches, and because both run as
+    a single statement inside their own transaction neither can observe the
+    other mid-decision.
+
+    Deliberately NOT filtered on the prior state. A reconnect is the explicit
+    undo of whatever came before — `error` from a fault, `paused` from a
+    deliberate disconnect (F5 (a)) — and a filter would silently no-op on
+    exactly the paused case a user is trying to reverse. Scoped by
+    `workspace_id` as well as id: RLS is inert under the deployed owner role
+    (#751), so the WHERE clause is what actually binds the row to its tenant.
+
+    Returns True when a row moved; False means no such source in this
+    workspace, which the caller may treat as it likes.
+    """
+    result = await session.execute(
+        text(
+            "UPDATE media_sources"
+            "   SET state = 'active', alerted_at = NULL, next_sync_at = now()"
+            " WHERE id = :s AND workspace_id = :ws"
+        ),
+        {"s": str(source_id), "ws": str(workspace_id)},
+    )
+    return bool(result.rowcount)
+
+
 async def alert_stranded_sources(
     session, *, stale_after_seconds: int, limit: int
 ) -> int:
