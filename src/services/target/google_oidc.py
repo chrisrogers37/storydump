@@ -46,6 +46,9 @@ from src.services.target.egress import EgressPolicy
 AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 #: Already in `egress.DEFAULT_ALLOWED_HOSTS` — no allowlist widening needed.
 TOKEN_URL = "https://oauth2.googleapis.com/token"
+#: Google's revocation endpoint. Same host as the token endpoint, so it is
+#: already inside the floor's allowlist — no widening (#1083).
+REVOKE_URL = "https://oauth2.googleapis.com/revoke"
 #: Google issues under both spellings, and the spec lists both.
 ISSUERS = frozenset({"https://accounts.google.com", "accounts.google.com"})
 SCOPE = "openid email profile"
@@ -135,6 +138,37 @@ async def code_grant(
     except ValueError:
         body = None
     return response.status_code, body
+
+
+async def revoke_token(client, *, token: str) -> int:
+    """Ask Google to invalidate a grant. Returns the HTTP status, and raises
+    only what the FLOOR raises.
+
+    Through `egress.request` and deliberately not a library: F3a locked
+    hand-written Google calls because a library doing its own I/O silently
+    voids the allowlist, byte cap, retry budget and private-address block —
+    including for :func:`verify_id_token`, whose claims-not-signature argument
+    rests on this transport having been floored. Nothing about a revoke needs
+    more than one POST.
+
+    The STATUS is handed back rather than a bool, and no refusal is raised,
+    because the only caller is best-effort (F5 (a)) and needs to record WHICH
+    answer it got. Google returns 200 for a successful revoke and 400 for a
+    token that is already invalid — the second is the outcome we wanted, so
+    collapsing them into "failed" would event a false alarm every time a user
+    disconnects twice. The caller decides; this reports.
+
+    The token is sent in the FORM BODY, never the query string: a URL is the
+    thing that reaches proxy logs and error reports.
+    """
+    response = await egress.request(
+        client,
+        "POST",
+        REVOKE_URL,
+        policy=EgressPolicy(timeout_class="standard"),
+        data={"token": token},
+    )
+    return response.status_code
 
 
 async def exchange_code(
