@@ -25,14 +25,3 @@ export async function getApi(path: string) {
   return res.json();
 }
 
-/**
- * Fetch an OAuth URL for the given provider and open it in a new tab.
- * Throws if the backend doesn't return an auth URL.
- */
-export async function openOAuthWindow(provider: string): Promise<void> {
-  const data = await getApi(`oauth-url/${provider}`);
-  if (!data?.auth_url) {
-    throw new Error("No auth URL returned");
-  }
-  window.open(data.auth_url, "_blank", "noopener,noreferrer");
-}

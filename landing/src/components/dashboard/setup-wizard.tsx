@@ -1,8 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useState } from "react";
 import { useRouter } from "next/navigation";
-import { CheckCircle2, Loader2, ExternalLink } from "lucide-react";
+import { CheckCircle2, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -23,7 +23,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { postApi, getApi, openOAuthWindow } from "@/lib/dashboard-api";
+import { postApi, getApi } from "@/lib/dashboard-api";
 import type { InstagramAccount } from "@/lib/types";
 import { CategoryMixCard } from "@/components/dashboard/settings/category-mix-card";
 
@@ -70,7 +70,6 @@ export function SetupWizard({ initialState, initialAccounts = [] }: SetupWizardP
   const [error, setError] = useState<string | null>(null);
   const [accounts, setAccounts] = useState<InstagramAccount[]>(initialAccounts);
   const [accountActionId, setAccountActionId] = useState<string | null>(null);
-  const oauthPending = useRef(false);
 
   // Single source of truth for "Instagram connected" in this component.
   // setup_state.instagram_connected can drift from the accounts list between
@@ -104,19 +103,6 @@ export function SetupWizard({ initialState, initialAccounts = [] }: SetupWizardP
     }
   }, []);
 
-  async function handleOAuth(provider: "instagram" | "google-drive") {
-    setError(null);
-    setLoading(true);
-    try {
-      await openOAuthWindow(provider);
-      oauthPending.current = true;
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Operation failed");
-    } finally {
-      setLoading(false);
-    }
-  }
-
   const refreshAccounts = useCallback(async () => {
     setError(null);
     try {
@@ -126,18 +112,6 @@ export function SetupWizard({ initialState, initialAccounts = [] }: SetupWizardP
       setError(e instanceof Error ? e.message : "Failed to load accounts");
     }
   }, []);
-
-  useEffect(() => {
-    function onVisible() {
-      if (document.visibilityState === "visible" && oauthPending.current) {
-        oauthPending.current = false;
-        refreshState();
-        refreshAccounts();
-      }
-    }
-    document.addEventListener("visibilitychange", onVisible);
-    return () => document.removeEventListener("visibilitychange", onVisible);
-  }, [refreshState, refreshAccounts]);
 
   async function handleRefreshConnection() {
     setLoading(true);
@@ -311,7 +285,6 @@ export function SetupWizard({ initialState, initialAccounts = [] }: SetupWizardP
               accounts={accounts}
               loading={loading}
               accountActionId={accountActionId}
-              onConnect={() => handleOAuth("instagram")}
               onRefresh={handleRefreshConnection}
               onSwitch={handleSwitchAccount}
             />
@@ -323,7 +296,6 @@ export function SetupWizard({ initialState, initialAccounts = [] }: SetupWizardP
               connected={state.gdrive_connected}
               username={state.gdrive_email}
               loading={loading}
-              onConnect={() => handleOAuth("google-drive")}
               onRefresh={handleRefreshConnection}
             />
           )}
@@ -504,14 +476,12 @@ function InstagramConnectStep({
   accounts,
   loading,
   accountActionId,
-  onConnect,
   onRefresh,
   onSwitch,
 }: {
   accounts: InstagramAccount[];
   loading: boolean;
   accountActionId: string | null;
-  onConnect: () => void;
   onRefresh: () => void;
   onSwitch: (accountId: string) => void;
 }) {
@@ -565,10 +535,10 @@ function InstagramConnectStep({
       )}
 
       <div className="flex gap-2">
-        <Button onClick={onConnect} disabled={loading} variant={hasAccounts ? "outline" : "default"}>
-          {loading ? <Loader2 className="size-4 animate-spin" /> : <ExternalLink className="size-4" />}
-          {hasAccounts ? "Connect another account" : "Connect Instagram"}
-        </Button>
+        {/* Connect: GONE, not disabled. It called `oauth-url/instagram`,
+            which is not a route on this API (#1063). Unlike the Settings
+            buttons this one was never gated at all — it was live and broken
+            on a screen nobody was looking at. */}
         <Button variant="outline" onClick={onRefresh} disabled={loading}>
           {loading ? <Loader2 className="size-4 animate-spin" /> : null}
           Refresh
@@ -583,14 +553,12 @@ function OAuthStep({
   connected,
   username,
   loading,
-  onConnect,
   onRefresh,
 }: {
   label: string;
   connected: boolean;
   username?: string | null;
   loading: boolean;
-  onConnect: () => void;
   onRefresh: () => void;
 }) {
   return (
@@ -608,10 +576,11 @@ function OAuthStep({
       </div>
       {!connected && (
         <div className="flex gap-2">
-          <Button onClick={onConnect} disabled={loading}>
-            {loading ? <Loader2 className="size-4 animate-spin" /> : <ExternalLink className="size-4" />}
-            Connect {label}
-          </Button>
+          {/* Connect: GONE, not disabled — `oauth-url/<provider>` is not a
+              route on this API (#1063), and this one was live, not gated. */}
+          <p className="text-sm text-muted-foreground">
+            Connecting {label} is not available from this screen yet.
+          </p>
           <Button variant="outline" onClick={onRefresh} disabled={loading}>
             {loading ? <Loader2 className="size-4 animate-spin" /> : null}
             Refresh
