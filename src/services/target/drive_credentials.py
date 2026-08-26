@@ -13,57 +13,37 @@ only key that reaches a credential. Resolving from a Drive file id instead would
 be a cross-tenant hazard — Drive ids are global, so one workspace's id would
 happily select another workspace's credential (astrid, #982).
 
-## TODAY THIS ALWAYS REFUSES, AND THAT IS THE HONEST STATE
+## The writer, and the envelope it writes
 
-**Nothing writes a `gdrive` credential yet** — and that is an EMPIRICAL fact
-about the tree today, not a structural one about the schema. The distinction is
-load-bearing: an empirical claim stays true only until someone writes a second
-INSERT, while a structural one would stay true by construction. Nothing here is
-structural.
+:mod:`google_drive_oauth` (the Drive connect leg) writes the row and owns the
+payload shape — a versioned envelope carrying both tokens, and why (F3 (b)).
+It is decoded here through the writer's own :func:`google_drive_oauth.decode_payload`
+so the two modules cannot drift, and a payload that is not a v1 envelope is
+refused by name, never sent onward as a bearer. Until P5 mints from the
+refresh token, this door hands back the connect-time access token.
 
-`ig_login_oauth.store_credential` binds ``PROVIDER = "ig_login"`` and is the
-only INSERT site into `oauth_credentials` in `src/` (re-verified 2026-08-25 —
-one site; three more exist under `tests/`). **The INSERT itself is UNFENCED.**
-`ck_credentials_provider` admits `'gdrive'` (054:198), so a gdrive row is
-insertable the moment anyone writes the statement; no constraint, trigger or
-grant stops it.
+A source with no credential still raises :class:`DriveCredentialDead`, and
+that is deliberately **not** a crash: `media_sync` classifies it persistent,
+the source flips to ``error``, the disconnect alert fires once under its
+`alerted_at` dedup, and **the job SUCCEEDS** as handled work — a visible
+source in `error` rather than a poisoned lane.
 
-**An earlier version of this docstring cited migration `063` as asserting the
-single-INSERT-site property, and that citation was wrong** (navi). `063` guards
-the **refresh-clock query** — one `AND provider = 'ig_login'` clause inside
-`fn_clock_tick`'s due-credential SELECT — and touches no INSERT into this table
-at all. Its header does record a single-writer observation, but as a dated
-verification ("verified 2026-08-22 — one INSERT site in the whole tree") and it
-then says the opposite of a fence in the next paragraph: the row "is INSERTABLE
-the moment a gdrive credential writer lands". Citing it for a structural
-guarantee promised something the schema does not provide.
+## There is no Drive refresh door YET, and an expired token is not silently renewed
 
-So the schema is ready (`ck_credentials_provider`, `uq_credential_per_source`)
-and the writer and connect flow are not. That is a prerequisite workstream, not
-a detail of this one.
-
-So every call here raises :class:`DriveCredentialDead` until that writer lands.
-That is deliberately **not** a crash: `media_sync` classifies it persistent, the
-source flips to ``error``, the disconnect alert fires once under its `alerted_at`
-dedup, and **the job SUCCEEDS** as handled work. A missing credential therefore
-surfaces as a visible source in `error` rather than as a poisoned lane — which is
-why wiring the real door now is safe even though no credential exists.
-
-## There is no Drive refresh door, and an expired token is not silently renewed
-
-`credential_lifecycle` ships `ig_refresh` and no Google analogue. This module
-therefore hands back the stored token as-is and does not attempt a refresh.
-
-**And gdrive being outside `063`'s refresh clock is a DECISION, not the gap the
-paragraph above might read as.** Fork F3 is locked (b): the `063` fence stays
-CLOSED, so `next_refresh_at` is NULL for gdrive rows by design and the scheduled
-refresh leg will never mint for them. Minting happens on the read path instead.
-Read the clause as deliberate exclusion; do not "fix" it by widening the
-provider filter. An
-expired one is refused HERE when `expires_at` has passed, rather than being sent
-to Google to earn a 401 — same outcome for the source, one less provider call,
-and the reason names expiry instead of a generic rejection. A Drive refresh leg
-lands behind this same function.
+`credential_lifecycle` ships `ig_refresh` and no Google analogue, and the
+refresh clock is fenced to `ig_login` (`063`) by design: gdrive rows carry
+`next_refresh_at = NULL` and are minted on the READ path, not by the clock
+(F3 (b)). Read that clause as a deliberate exclusion, never a gap to "fix" by
+widening the provider filter — and read it precisely: `063` guards the
+refresh-clock query only, one `AND provider = 'ig_login'` inside
+`fn_clock_tick`; it never fenced the INSERT into this table (an earlier version
+of this docstring said it did, and navi corrected it — the schema admits a
+gdrive row wherever a writer lands, which is exactly what the connect leg is). Until that minting lands (P5), an expired access token is refused
+HERE when `expires_at` has passed, rather than being sent to Google to earn a
+401 — same outcome for the source, one less provider call, and the reason
+names expiry instead of a generic rejection. P5 lands behind this same
+function, minting from the envelope's refresh token through the egress floor
+(F3a (ii)).
 """
 
 from __future__ import annotations
@@ -73,22 +53,18 @@ from datetime import datetime, timezone
 
 from sqlalchemy import text
 
+from src.services.target import google_drive_oauth
+from src.services.target.ig_login_oauth import ring
 from src.services.target.media_sync import DriveCredentialDead
 
 logger = logging.getLogger(__name__)
 
-#: `ck_credentials_provider` / `ck_sources_provider`.
-PROVIDER = "gdrive"
+#: The writer's provider — one spelling, so the read door cannot look for a
+#: row under a name the connect leg does not write.
+PROVIDER = google_drive_oauth.PROVIDER
 
 #: The only state a credential may be used from.
 USABLE_STATE = "active"
-
-
-def _ring():
-    """The shipped ring — `07` §3 keeps the env name `ENCRYPTION_KEYS`."""
-    from src.utils.encryption import TokenEncryption
-
-    return TokenEncryption()
 
 
 async def token_for_source(engine, source_id: str, *, workspace_id: str) -> str:
@@ -125,8 +101,7 @@ async def token_for_source(engine, source_id: str, *, workspace_id: str) -> str:
     if row is None:
         raise DriveCredentialDead(
             f"no {PROVIDER} credential for media source {source_id} — the"
-            " source has never been connected (no credential writer exists"
-            " yet; see the module header)"
+            " source has never been connected"
         )
     if row["state"] != USABLE_STATE:
         raise DriveCredentialDead(
@@ -141,7 +116,7 @@ async def token_for_source(engine, source_id: str, *, workspace_id: str) -> str:
             " renew it"
         )
     try:
-        return _ring().decrypt(row["encrypted_payload"])
+        plaintext = ring().decrypt(row["encrypted_payload"])
     except Exception as exc:
         # Never log ciphertext, and never guess — `07` §3's fail-closed posture.
         # The state flip that ig_login performs here is deliberately NOT done:
@@ -151,6 +126,15 @@ async def token_for_source(engine, source_id: str, *, workspace_id: str) -> str:
         raise DriveCredentialDead(
             f"{PROVIDER} credential for media source {source_id} could not be"
             " decrypted by any ring entry"
+        ) from exc
+    try:
+        return google_drive_oauth.decode_payload(plaintext).access_token
+    except google_drive_oauth.DrivePayloadMalformed as exc:
+        # A row this module can decrypt but not read is refused by name —
+        # never handed to the adapter as a bearer value that is really a blob.
+        raise DriveCredentialDead(
+            f"{PROVIDER} credential for media source {source_id} is not a v1"
+            " Drive credential envelope"
         ) from exc
 
 
