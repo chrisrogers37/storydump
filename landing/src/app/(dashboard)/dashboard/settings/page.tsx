@@ -110,7 +110,7 @@ export default async function SettingsPage() {
         </TabsList>
 
         <TabsContent value="general">
-          <GeneralTab settings={settings} editable={false} />
+          <GeneralTab settings={settings} workspaceId={workspaceId} editable={false} />
         </TabsContent>
 
         <TabsContent value="accounts">

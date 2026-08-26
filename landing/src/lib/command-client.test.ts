@@ -1,0 +1,215 @@
+/**
+ * The F3 property, tested at the layer that owns it.
+ *
+ * P2 built the per-submission mechanism and pinned it structurally, but no real
+ * caller existed, so the property that matters could not be exercised: **a
+ * genuine second edit BACK TO A PREVIOUS VALUE must not be silently deduped.**
+ * That is the failure F3 rejected a content hash to avoid, and it is invisible
+ * — the port answers 200, the UI says saved, the setting does not move.
+ *
+ * These tests run the client's real output through the route's real spec and
+ * the real key derivation, rather than asserting that two UUIDs differ. The
+ * chain is what can break: a client that reuses an id, a spec that keys on
+ * something else, a derivation that collapses two submissions onto one key.
+ * Asserting on the last link tests all three.
+ *
+ * What is NOT proven here: that the port then admits all three. That lives in
+ * `command_dedup` and is proven against a real database in
+ * `tests/scripts/test_p3_settings_idempotency.py`, which consumes keys of this
+ * exact shape.
+ */
+
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { idempotencyKeyFor, parseCommand } from "./commands";
+import {
+  REPLAYED_ERROR,
+  settingsRefusalCopy,
+  submitCommand,
+  submitSettingsChange,
+} from "./command-client";
+
+const WS = "11111111-1111-4111-8111-111111111111";
+
+type Captured = { url: string; init: RequestInit };
+
+let captured: Captured[];
+
+/** Reply with `body` at `status`, recording every call. */
+function stubFetch(body: unknown = {}, status = 200) {
+  captured = [];
+  const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+    captured.push({ url, init });
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      json: async () => body,
+    } as unknown as Response;
+  });
+  vi.stubGlobal("fetch", fetchMock);
+}
+
+/** The body the browser actually sent, parsed back. */
+function sentBody(i: number): Record<string, unknown> {
+  return JSON.parse(String(captured[i].init.body));
+}
+
+/**
+ * The key the PORT would receive for call `i` — derived by running the sent
+ * body through the route's own spec and the one key derivation, not by
+ * re-implementing either.
+ */
+function portKey(i: number, command = "settings_change"): string {
+  const parsed = parseCommand(command, sentBody(i));
+  if (!parsed.ok) throw new Error(`the route would refuse call ${i}: ${parsed.error}`);
+  return idempotencyKeyFor(command, parsed.identity);
+}
+
+beforeEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe("the F3 property — an edit back to a previous value", () => {
+  it("keys three distinct submissions when the value returns to where it started", async () => {
+    stubFetch();
+
+    // The exact sequence F3 names. Not two calls: two of ANY key scheme
+    // usually differ. It is the THIRD, whose content matches the first, that
+    // separates a per-submission key from a content hash.
+    await submitSettingsChange(WS, { caption_style: "enhanced" });
+    await submitSettingsChange(WS, { caption_style: "simple" });
+    await submitSettingsChange(WS, { caption_style: "enhanced" });
+
+    const keys = [portKey(0), portKey(1), portKey(2)];
+    expect(new Set(keys).size).toBe(3);
+
+    // Stated as its own assertion because it is the whole point: calls 0 and 2
+    // carry IDENTICAL content. Under F3's rejected option (b) these two keys
+    // would be equal and the third write would be acknowledged, not executed.
+    expect(sentBody(0).settings).toEqual(sentBody(2).settings);
+    expect(keys[0]).not.toBe(keys[2]);
+  });
+
+  it("keys two identical resubmissions distinctly — a deliberate retry is not a replay", async () => {
+    stubFetch();
+
+    // F3's stated cost, asserted rather than assumed: this scheme dedups a
+    // double-submit of one attempt but NOT a deliberate second one. Someone
+    // pressing Save twice on purpose gets two writes.
+    await submitSettingsChange(WS, { posts_per_day: 3 });
+    await submitSettingsChange(WS, { posts_per_day: 3 });
+
+    expect(portKey(0)).not.toBe(portKey(1));
+  });
+
+  it("mints the identity per CALL, so no caller can hold one across submissions", async () => {
+    stubFetch();
+    await submitSettingsChange(WS, { posts_per_day: 1 });
+    await submitSettingsChange(WS, { posts_per_day: 2 });
+
+    // The structural half of the rule. `submitCommand` takes no id parameter,
+    // so a component cannot pass a `useState` one in — which is exactly how a
+    // mount-scoped id would arrive.
+    expect(sentBody(0).submission_id).not.toBe(sentBody(1).submission_id);
+    expect(submitCommand.length).toBeLessThanOrEqual(3);
+  });
+});
+
+describe("what the browser sends", () => {
+  it("posts to the command route and lets the SERVER set Idempotency-Key", async () => {
+    stubFetch();
+    await submitSettingsChange(WS, { dry_run_mode: true });
+
+    expect(captured[0].url).toBe(`/api/workspaces/${WS}/commands/settings_change`);
+    // The browser must not set the header. The route derives it from the
+    // identity, so a browser-set one would be a second, unvalidated source.
+    const headers = captured[0].init.headers as Record<string, string>;
+    expect(Object.keys(headers).map((k) => k.toLowerCase())).not.toContain(
+      "idempotency-key",
+    );
+  });
+
+  it("wraps the settings map where the port expects it, and adds nothing else", async () => {
+    stubFetch();
+    await submitSettingsChange(WS, { caption_style: "simple" });
+
+    const body = sentBody(0);
+    expect(body.settings).toEqual({ caption_style: "simple" });
+    // submission_id and settings — no client-side copy of the allowlist, no
+    // re-stated workspace id, nothing the port did not ask for.
+    expect(Object.keys(body).sort()).toEqual(["settings", "submission_id"]);
+  });
+
+  it("produces a body the route's own spec accepts", async () => {
+    stubFetch();
+    await submitSettingsChange(WS, { posts_per_day: 4 });
+
+    // The client and the spec are separate files that must agree. This is the
+    // seam a rename would break silently.
+    expect(parseCommand("settings_change", sentBody(0)).ok).toBe(true);
+  });
+});
+
+describe("a replay is reported as a failure, not a success", () => {
+  it("treats 200 outcome=replayed as a refusal", async () => {
+    // The port acknowledges a same-key/same-body call at HTTP 200 WITHOUT
+    // executing it (`app.py:247-250`). For a settings write, reporting that as
+    // success is precisely the F3 harm.
+    stubFetch({ outcome: "replayed" }, 200);
+
+    const result = await submitSettingsChange(WS, { posts_per_day: 5 });
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toBe(REPLAYED_ERROR);
+  });
+
+  it("says the change was not saved, in the copy a person reads", () => {
+    // The one sentence that must never appear for this reason is a reassuring
+    // one. Pinned so a later copy edit cannot soften it into "saved".
+    const copy = settingsRefusalCopy(REPLAYED_ERROR);
+    expect(copy).toMatch(/not saved/i);
+
+    // Every occurrence of "saved" is negated. Written as a scan rather than
+    // one clever regex because the property is about EVERY occurrence, and a
+    // lookaround gets the direction wrong: the negation here precedes the
+    // word, so `(?!.*not)` passes text that reads "Saved, but ... not".
+    const occurrences = [...copy.matchAll(/saved/gi)];
+    expect(occurrences.length).toBeGreaterThan(0);
+    for (const m of occurrences) {
+      expect(copy.slice(0, m.index).toLowerCase()).toMatch(/\bnot\s+$/);
+    }
+  });
+
+  it("passes a normal success through", async () => {
+    stubFetch({ outcome: "executed", settings: { posts_per_day: 5 } }, 200);
+    const result = await submitSettingsChange(WS, { posts_per_day: 5 });
+    expect(result.ok).toBe(true);
+  });
+});
+
+describe("refusals", () => {
+  it("surfaces the port's reason rather than a status code", async () => {
+    stubFetch({ detail: "unknown setting 'is_paused'", reason: "invalid_args" }, 400);
+    const result = await submitSettingsChange(WS, { is_paused: true });
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toBe("invalid_args");
+  });
+
+  it("reports an unreachable app without claiming anything about the write", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new TypeError("network");
+      }),
+    );
+    const result = await submitCommand(WS, "settings_change", { settings: { tz: "UTC" } });
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toBe("unreachable");
+    expect(settingsRefusalCopy("unreachable")).toMatch(/Nothing changed/i);
+  });
+
+  it("does not borrow the queue's sentences", () => {
+    // `intents.ts::refusalCopy` answers about posts and the queue. If these
+    // two ever get folded together, a settings failure starts talking about a
+    // post that moved on.
+    expect(settingsRefusalCopy("illegal_transition")).not.toMatch(/queue|post/i);
+  });
+});
