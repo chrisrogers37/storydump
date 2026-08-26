@@ -19,6 +19,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 from sqlalchemy.exc import DBAPIError
 
+from src.api.routes import auth as auth_routes
 from src.services.target import drive_credentials
 from src.services.target import google_drive_oauth as drive
 from src.services.target.ig_login_oauth import (
@@ -39,7 +40,7 @@ from tests.scripts.conftest import (
     set_test_passwords,
 )
 from tests.src.api import conftest as api_conftest
-from tests.src.api.conftest import API, FRONT, api_client, sign_in
+from tests.src.api.conftest import API, FRONT, api_client, cookie_value, sign_in
 from tests.src.services.target.conftest import drive_grant
 
 google_configured = api_conftest.google_configured
@@ -200,15 +201,24 @@ class TestTheStateRow:
         return _run(in_tenant(world["ingress"], tenant["ws"], tenant["user"], issue))
 
     @staticmethod
-    def _consume(world, tenant, state, **expect) -> dict:
-        return _run(
-            in_tenant(
-                world["ingress"],
-                tenant["ws"],
-                tenant["user"],
-                lambda s: consume_state(s, state=state, **expect),
-            )
-        )
+    def _consume(world, tenant, state, **expect):
+        """Consume as the callback does: a refusal is caught INSIDE the
+        transaction, which therefore commits — so a refused state is burned.
+        A driver that let the refusal unwind the unit of work would roll the
+        CAS back and prove the opposite. Returns the row, or the refusal."""
+
+        async def consume(s):
+            try:
+                return await consume_state(s, state=state, **expect)
+            except OAuthStateRefused as exc:
+                return exc
+
+        return _run(in_tenant(world["ingress"], tenant["ws"], tenant["user"], consume))
+
+    @staticmethod
+    def _refused(result, reason: str) -> None:
+        assert isinstance(result, OAuthStateRefused), result
+        assert reason in str(result), result
 
     def test_a_connect_state_pins_user_workspace_and_source(self, world):
         """Also the positive control for the named refusals below: the
@@ -222,28 +232,30 @@ class TestTheStateRow:
             expected_provider=drive.PROVIDER,
             expected_purpose={"connect", "reconnect"},
         )
+        assert not isinstance(row, OAuthStateRefused), row
         assert row["provider"] == "gdrive"
         assert row["purpose"] == "connect"
         assert str(row["workspace_id"]) == str(a["ws"])
         assert str(row["reconnect_target"]) == str(a["src"])
 
     def test_an_unknown_state_is_refused_by_name(self, world):
-        with pytest.raises(OAuthStateRefused, match="unknown state"):
-            self._consume(world, world["a"], "never-issued")
+        self._refused(self._consume(world, world["a"], "never-issued"), "unknown state")
 
-    def test_a_state_for_another_leg_is_refused_by_name(self, world):
+    def test_a_state_for_another_leg_is_refused_by_name_and_burned(self, world):
         """The callback's expectations are what keep a sign-in state out of
         the Drive leg and a Drive state out of sign-in: each mismatch is its
-        own reason, and the state is burned either way — one-shot."""
+        own reason, and the state is consumed either way — a refused
+        presentation burns it, exactly as a cross-workspace one does."""
         a = world["a"]
         state = self._issue(world, a)
-        with pytest.raises(OAuthStateRefused, match="wrong provider"):
-            self._consume(world, a, state, expected_provider="google")
+        self._refused(
+            self._consume(world, a, state, expected_provider="google"), "wrong provider"
+        )
         state = self._issue(world, a)
-        with pytest.raises(OAuthStateRefused, match="wrong purpose"):
-            self._consume(world, a, state, expected_purpose="signin")
-        with pytest.raises(OAuthStateRefused, match="already consumed"):
-            self._consume(world, a, state)
+        self._refused(
+            self._consume(world, a, state, expected_purpose="signin"), "wrong purpose"
+        )
+        self._refused(self._consume(world, a, state), "already consumed")
 
 
 # --- the route pair, through the real app --------------------------------------
@@ -363,16 +375,31 @@ class TestTheRoutePairAsSvcIngress:
     def test_a_sign_in_state_cannot_be_replayed_into_the_drive_callback(
         self, world, google_configured
     ):
+        """Refused by name at the Drive callback — and BURNED there: the
+        sign-in callback the state was minted for cannot use it afterwards
+        either, nonce cookie and all. One-shot means one presentation."""
+
         async def main():
             async with api_client(world["ingress"]) as (client, _):
                 start = await client.get("/auth/google", follow_redirects=False)
                 state = parse_qs(urlsplit(start.headers["location"]).query)["state"][0]
+                nonce = cookie_value(start, auth_routes.NONCE_COOKIE)
                 done = await client.get(
                     f"/auth/google-drive/callback?state={state}&code=c0de",
                     follow_redirects=False,
                 )
                 assert done.status_code == 302
                 assert done.headers["location"] == _error_page("state_refused")
+                back = await client.get(
+                    f"/auth/google/callback?state={state}&code=c0de",
+                    headers={"Cookie": f"{auth_routes.NONCE_COOKIE}={nonce}"},
+                    follow_redirects=False,
+                )
+                assert back.status_code == 302
+                assert (
+                    back.headers["location"]
+                    == f"{FRONT}/auth/error?reason=state_refused"
+                )
 
         _run(main())
 
