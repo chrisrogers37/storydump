@@ -58,7 +58,7 @@ import psycopg2
 import pytest
 from sqlalchemy import text
 
-from src.services.target import provisioning, workspaces
+from src.services.target import provisioning, scheduling_health, workspaces
 from src.services.target.provisioning import ProvisioningRefused
 from tests.scripts.conftest import (
     in_tenant,
@@ -718,3 +718,119 @@ class TestSourceCredentialStatus:
         row = next(r for r in _sources(world) if str(r["id"]) == str(sid))
         assert "encrypted_payload" not in row
         assert not any("not-a-real-token" == str(v) for v in row.values())
+
+
+# --- #1090 F1: is scheduling still advancing? --------------------------------
+
+
+def _rewind(world, account_id, *, hours):
+    """Put a cursor in the past — the footprint a stopped advance leaves,
+    whatever stopped it. Written directly because no code path produces it:
+    every writer of `next_slot_at` in the schema ADVANCES it."""
+    ids = world["a"]
+
+    async def go(s):
+        await s.execute(
+            text(
+                "UPDATE ig_accounts SET next_slot_at = now() - make_interval(hours => :h)"
+                " WHERE id = :a AND workspace_id = :ws"
+            ),
+            {"h": hours, "a": str(account_id), "ws": str(ids["ws"])},
+        )
+
+    asyncio.run(in_tenant(world["ingress"], str(ids["ws"]), str(ids["user"]), go))
+
+
+def _set_state(world, account_id, state):
+    ids = world["a"]
+
+    async def go(s):
+        await s.execute(
+            text(
+                "UPDATE ig_accounts SET state = :st"
+                " WHERE id = :a AND workspace_id = :ws"
+            ),
+            {"st": state, "a": str(account_id), "ws": str(ids["ws"])},
+        )
+
+    asyncio.run(in_tenant(world["ingress"], str(ids["ws"]), str(ids["user"]), go))
+
+
+def _lag(world, ids=None):
+    ids = ids or world["a"]
+    return asyncio.run(
+        in_tenant(
+            world["ingress"],
+            str(ids["ws"]),
+            str(ids["user"]),
+            lambda s: scheduling_health.scheduling_lag(s),
+        )
+    )
+
+
+class TestSchedulingLagSeesBothOutageShapes:
+    """The detector for #1090 F1, gated against the two real outages.
+
+    Both ran ~18-19 hours with no alert and were found by accident. They have
+    OPPOSITE mechanisms — #1026 killed the worker, today's left it alive while
+    every tick aborted — and exactly one observable in common, which is what
+    these pin. A test that only reproduces one of them would certify the
+    detector that misses the other, which is the whole failure mode here.
+    """
+
+    def test_a_fresh_destination_is_not_stalled(self, world):
+        """The positive control. `create_destination` seeds a cursor in the
+        FUTURE, so a healthy estate reads zero — and a detector that always
+        alarmed would pass every test below without this one."""
+        before = _lag(world)["stalled"]
+        destination(world, ref="lag-fresh")
+        # A DELTA again, and for the same reason the non-active test needs
+        # one: the fixture is module-scoped, so a sibling that rewinds a
+        # cursor leaves a stalled row behind. An absolute `== 0` passed when
+        # this class ran ALONE and failed in the full gate — order-dependent,
+        # and I made the identical mistake twice in this file.
+        assert _lag(world)["stalled"] == before
+
+    def test_a_cursor_left_in_the_past_is_stalled(self, world):
+        """The shape BOTH outages produce, and the only thing they share.
+
+        Whatever stops the advance — a dead worker (#1026) or a tick that runs
+        and aborts (today) — the cursor sits due and unmoved. This asserts the
+        footprint, not either cause, which is why one test covers both.
+        """
+        acct = destination(world, ref="lag-stalled")[0]
+        _rewind(world, acct, hours=3)
+        lag = _lag(world)
+        assert lag["stalled"] >= 1
+        assert lag["max_lag_seconds"] >= 3 * 3600 - 60
+
+    def test_a_non_active_account_is_not_stalled(self, world):
+        """`fn_clock_tick` only selects `state = 'active'`, so an account in any
+        other state is not owed a tick and must not read as an outage —
+        otherwise every deliberately disabled account is a permanent false
+        alarm and someone eventually silences the check, taking the real
+        signal with it.
+
+        `disabled`, not `paused`: `ck_ig_accounts_state` admits
+        active | reauth_required | disabled | moved. `paused` is
+        `media_sources`' vocabulary, and assuming the two tables shared one
+        was my error — caught by running rather than by reading.
+        """
+        acct = destination(world, ref="lag-paused")[0]
+        _rewind(world, acct, hours=5)
+        before = _lag(world)["stalled"]
+        _set_state(world, acct, "disabled")
+        after = _lag(world)["stalled"]
+        # A DELTA, not an absolute: the fixture is module-scoped so earlier
+        # tests leave stalled accounts behind, and `scheduling_lag` returns
+        # aggregates with no identifiers by design. An absolute `== 0` here
+        # would be a tautology dressed as an assertion.
+        assert after == before - 1
+
+    def test_it_distinguishes_nothing_stalled_from_nothing_to_stall(self, world):
+        """An estate with no active accounts is healthy AND unmonitorable, and
+        those must not read the same. `accounts_active` is what tells them
+        apart — without it a zero is ambiguous in the reassuring direction."""
+        lag = _lag(world)
+        assert "accounts_active" in lag
+        assert lag["accounts_active"] >= 1
