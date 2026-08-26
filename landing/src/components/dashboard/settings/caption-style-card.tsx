@@ -12,11 +12,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { postApi } from "@/lib/dashboard-api";
+import { settingsRefusalCopy, submitSettingsChange } from "@/lib/command-client";
 
 interface Props {
-  /** False while the write routes do not exist (#1063). */
+  /** The gate this screen is held behind; not this card's to decide. */
   editable: boolean;
+  workspaceId: string;
   captionStyle: string | null;
   onError: (message: string | null) => void;
 }
@@ -34,7 +35,7 @@ const STYLE_OPTIONS = [
   },
 ];
 
-export function CaptionStyleCard({ captionStyle, editable, onError }: Props) {
+export function CaptionStyleCard({ captionStyle, workspaceId, editable, onError }: Props) {
   const router = useRouter();
   const initial = captionStyle ?? "enhanced";
   const [value, setValue] = useState(initial);
@@ -42,20 +43,28 @@ export function CaptionStyleCard({ captionStyle, editable, onError }: Props) {
 
   const changed = value !== initial;
 
+  /**
+   * `update-string-setting` was one of the 24 BFF paths that resolved to no
+   * route (#1057). It is now a `settings_change` on the one command client,
+   * which carries the `Idempotency-Key` the port requires.
+   *
+   * `caption_style` is sent as the key the PORT names. The old path took a
+   * `setting_name` string and a value; the allowlist lives server-side and
+   * refuses an unknown key by name, so nothing here re-states it.
+   */
   async function save() {
     onError(null);
     setSaving(true);
-    try {
-      await postApi("update-string-setting", {
-        setting_name: "caption_style",
-        value,
-      });
-      router.refresh();
-    } catch (e) {
-      onError(e instanceof Error ? e.message : "Failed to save caption style");
-    } finally {
-      setSaving(false);
+    const result = await submitSettingsChange(workspaceId, { caption_style: value });
+    setSaving(false);
+
+    if (!result.ok) {
+      onError(settingsRefusalCopy(result.error));
+      return;
     }
+    // Re-read rather than trust the submitted value: `initial` comes from the
+    // server, and it is what closes the button again.
+    router.refresh();
   }
 
   return (
