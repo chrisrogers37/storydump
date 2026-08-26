@@ -63,6 +63,8 @@ const DRIVE: SourceRow = {
   last_sync_success_at: null,
   alerted_at: null,
   created_at: "2026-08-01T00:00:00Z",
+  credential_status: "active",
+  credential_connected_at: "2026-08-01T00:05:00Z",
 };
 
 describe("deriveSettings keeps the unsourced fields unsourced", () => {
@@ -106,18 +108,53 @@ describe("deriveSettings keeps the unsourced fields unsourced", () => {
     expect(v.caption_style).toBeNull();
   });
 
-  it("derives the Drive connection from sources, and carries its state", () => {
+  it("derives the Drive connection from the CREDENTIAL, not from the source row", () => {
+    /*
+     * #1081. This assertion used to read `drive !== null` — connected because a
+     * source row existed — and the test asserted that as correct. It was true
+     * the instant someone pasted a folder link, before any credential was
+     * written, so the dashboard reported connected for a source that could not
+     * be read from.
+     */
     const connected = deriveSettings(CONFIG, [DRIVE], STATS);
     expect(connected.gdrive_connected).toBe(true);
     expect(connected.media_source_type).toBe("gdrive");
     expect(connected.media_source_state).toBe("active");
+  });
 
-    // An erroring source is CONNECTED. Collapsing it to "not connected" would
-    // send someone to reconnect a source that is already there.
+  it("a source that exists but was never credentialed is NOT connected", () => {
+    // The case the old derivation got backwards, and the reason for #1078.
+    const uncredentialed = deriveSettings(
+      CONFIG,
+      [{ ...DRIVE, credential_status: "none", credential_connected_at: null }],
+      STATS,
+    );
+    expect(uncredentialed.gdrive_connected).toBe(false);
+    // The SOURCE is still active and still reported honestly — it exists, it is
+    // simply not connected. Those are different facts and both are carried.
+    expect(uncredentialed.media_source_state).toBe("active");
+  });
+
+  it("an erroring source with a live credential is still connected", () => {
+    /*
+     * The half of the old reasoning that was SOUND and is deliberately kept:
+     * collapsing this to "not connected" sends someone to reconnect a source
+     * that is already there. It now turns on the credential rather than on the
+     * existence of the row.
+     */
     const erroring = deriveSettings(CONFIG, [{ ...DRIVE, state: "error" }], STATS);
     expect(erroring.gdrive_connected).toBe(true);
     expect(erroring.media_source_state).toBe("error");
+  });
 
+  it("expired and revoked are not connected — they are reconnect-needed", () => {
+    for (const status of ["expired", "revoked"] as const) {
+      const v = deriveSettings(CONFIG, [{ ...DRIVE, credential_status: status }], STATS);
+      expect(v.gdrive_connected, status).toBe(false);
+    }
+  });
+
+  it("no source at all is not connected", () => {
     const none = deriveSettings(CONFIG, [], STATS);
     expect(none.gdrive_connected).toBe(false);
     expect(none.media_source_state).toBeNull();
