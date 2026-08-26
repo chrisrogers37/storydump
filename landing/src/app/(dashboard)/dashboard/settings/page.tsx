@@ -126,9 +126,20 @@ export default async function SettingsPage() {
           <AccountsTab accounts={accounts} editable={false} />
         </TabsContent>
 
-        {/* Likewise: `sync-media` is P4 and `disconnect-gdrive` is P6. */}
+        {/*
+          `editable` stays false HERE too, and it now gates less than it used
+          to: `sync-media` is P4 and `disconnect-gdrive` is P6, so those two
+          stay disabled. The per-source Connect button is NOT behind it — it
+          calls a route that exists (#1065), so gating it would be the
+          reads-without-writes harm inverted, hiding a control that works.
+        */}
         <TabsContent value="integrations">
-          <IntegrationsTab settings={settings} editable={false} />
+          <IntegrationsTab
+            settings={settings}
+            sources={sourcesResult.data.sources ?? []}
+            workspaceId={workspaceId}
+            editable={false}
+          />
         </TabsContent>
       </Tabs>
     </div>
