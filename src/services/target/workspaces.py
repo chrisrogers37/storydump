@@ -203,11 +203,54 @@ async def list_accounts(executor, *, workspace_id: str) -> list[dict]:
 
 
 async def list_sources(executor, *, workspace_id: str) -> list[dict]:
+    """Sources plus their credential STATUS — presence and freshness, never a token.
+
+    `media_sources.state` cannot answer "is this connected" and must not be used
+    as a proxy for it (#1078): a source with a dead credential flips to `error`,
+    but a source created and never credentialed is `active` too. It separates
+    broken from not-broken and says nothing about whether a credential exists.
+
+    `credential_status` is DERIVED here rather than passed through, because the
+    stored `state` alone would be a field that cannot say the interesting thing.
+    Only `ig_login_oauth` writes `expired`, on the Instagram refresh path;
+    NOTHING transitions a gdrive credential, so a passed-through `state` would
+    read `active` forever and "reconnect needed" would never appear — a value
+    that looks like it answers the question and always answers no.
+
+    So the projection matches the rule `drive_credentials` actually ENFORCES:
+    usable iff state is `active` AND `expires_at` has not passed (a NULL
+    `expires_at` is no known expiry, so it does not refuse). Those two sites are
+    a display/enforcement pair and could drift; they are named in each other so
+    a change to one is findable from the other.
+
+    Values: `none` (never connected) · `active` · `expired` · `revoked`. The
+    first and the last two are DIFFERENT USER ACTIONS — connect versus
+    reconnect — which is the distinction the caller could not previously make.
+
+    The join carries `provider` as well as the source id: `uq_credential_per_source`
+    is UNIQUE(workspace_id, media_source_id, provider), and provider equality
+    between a source and its credential is service-enforced rather than a
+    constraint (D37), so joining without it is one stray row away from fanning
+    a source into two.
+    """
     return await readers.rows(
         executor,
-        "SELECT id, provider, state, next_sync_at, last_sync_success_at,"
-        "       alerted_at, created_at"
-        "  FROM media_sources WHERE workspace_id = :ws ORDER BY created_at, id",
+        "SELECT s.id, s.provider, s.state, s.next_sync_at, s.last_sync_success_at,"
+        "       s.alerted_at, s.created_at,"
+        "       CASE"
+        "         WHEN c.id IS NULL THEN 'none'"
+        "         WHEN c.state <> 'active' THEN c.state"
+        "         WHEN c.expires_at IS NOT NULL AND c.expires_at <= now()"
+        "           THEN 'expired'"
+        "         ELSE 'active'"
+        "       END AS credential_status,"
+        "       c.created_at AS credential_connected_at"
+        "  FROM media_sources s"
+        "  LEFT JOIN oauth_credentials c"
+        "    ON c.workspace_id = s.workspace_id"
+        "   AND c.media_source_id = s.id"
+        "   AND c.provider = s.provider"
+        " WHERE s.workspace_id = :ws ORDER BY s.created_at, s.id",
         ws=str(workspace_id),
     )
 
