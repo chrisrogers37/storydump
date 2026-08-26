@@ -5,6 +5,8 @@ import { useRouter } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
   Dialog,
   DialogContent,
@@ -16,7 +18,13 @@ import {
   DialogClose,
 } from "@/components/ui/dialog";
 import { postApi } from "@/lib/dashboard-api";
-import type { InstagramAccount } from "@/lib/types";
+import {
+  addDestination,
+  addDestinationRefusalCopy,
+  destinationHandle,
+  destinationIsActive,
+} from "@/lib/destination";
+import type { Destination } from "@/lib/types";
 
 /**
  * `switch-account` and `remove-account` are real controls whose routes are not
@@ -32,14 +40,62 @@ const DISABLED_REASON =
 interface AccountsTabProps {
   /** False while the write routes do not exist (#1063). */
   editable: boolean;
-  accounts: InstagramAccount[];
+  accounts: Destination[];
+  workspaceId: string;
 }
 
-export function AccountsTab({ accounts, editable }: AccountsTabProps) {
+export function AccountsTab({ accounts, editable, workspaceId }: AccountsTabProps) {
   const router = useRouter();
   const [loadingAction, setLoadingAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [removingDialogOpen, setRemovingDialogOpen] = useState<string | null>(null);
+  const [handle, setHandle] = useState("");
+  const [adding, setAdding] = useState(false);
+  // Field-level, NOT the shared banner at the top of the tab. That banner is
+  // for switch/remove, which act on a row far from it; a refusal about what was
+  // typed belongs beside the field it is about, and is what `aria-describedby`
+  // can point at. Success and failure therefore land in the same place.
+  const [addOutcome, setAddOutcome] = useState<
+    { ok: true; text: string } | { ok: false; text: string } | null
+  >(null);
+
+  /**
+   * Add the destination. NOT gated on `editable`: that flag marks controls
+   * disabled because their route does not exist yet, and this one's does
+   * (#1089). Wiring a working control behind it would hide the thing this
+   * change exists to deliver.
+   */
+  async function submitHandle(event: React.FormEvent) {
+    event.preventDefault();
+    const typed = handle.trim();
+    if (!typed || adding) return;
+    setAddOutcome(null);
+    setAdding(true);
+    try {
+      const result = await addDestination(workspaceId, typed);
+      if (!result.ok) {
+        setAddOutcome({ ok: false, text: addDestinationRefusalCopy(result.error) });
+        return;
+      }
+      setHandle("");
+      // "Added" and "you already had that one" are different sentences and the
+      // route carries which happened, so say the true one rather than a generic
+      // success that makes a duplicate submit look like a second destination.
+      setAddOutcome({
+        ok: true,
+        text: result.created
+          ? `Added @${typed}. It is now scheduled.`
+          : `@${typed} was already a destination here — nothing changed.`,
+      });
+      router.refresh();
+    } finally {
+      // In a `finally` like the two handlers below it. `addDestination` returns
+      // a union rather than throwing, so this cannot fire today — but a form
+      // stuck disabled is the failure that leaves no way out of the screen.
+      setAdding(false);
+    }
+  }
+
   async function switchAccount(accountId: string) {
     setError(null);
     setLoadingAction(`switch-${accountId}`);
@@ -82,11 +138,14 @@ export function AccountsTab({ accounts, editable }: AccountsTabProps) {
         <CardContent>
           {accounts.length === 0 ? (
             <p className="text-sm text-muted-foreground py-4 text-center">
-              No Instagram accounts connected.
+              No Instagram destination yet. Add the handle you post to below.
             </p>
           ) : (
             <div className="space-y-3">
-              {accounts.map((account) => (
+              {accounts.map((account) => {
+                const handleText = destinationHandle(account.handle);
+                const isActive = destinationIsActive(account.state);
+                return (
                 <div
                   key={account.id}
                   className="flex items-center justify-between gap-4 rounded-lg border p-4"
@@ -94,20 +153,20 @@ export function AccountsTab({ accounts, editable }: AccountsTabProps) {
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
                       <p className="font-medium truncate">
-                        {account.display_name}
+                        {account.display_name ?? handleText ?? "Unnamed destination"}
                       </p>
-                      {account.is_active && (
+                      {isActive && (
                         <Badge variant="secondary" className="bg-green-100 text-green-800">
                           Active
                         </Badge>
                       )}
                     </div>
-                    <p className="text-sm text-muted-foreground">
-                      @{account.instagram_username}
-                    </p>
+                    {handleText && (
+                      <p className="text-sm text-muted-foreground">@{handleText}</p>
+                    )}
                   </div>
                   <div className="flex items-center gap-2">
-                    {!account.is_active && (
+                    {!isActive && (
                         <Button
                           variant="outline"
                           size="sm"
@@ -135,8 +194,10 @@ export function AccountsTab({ accounts, editable }: AccountsTabProps) {
                           <DialogHeader>
                             <DialogTitle>Remove Account</DialogTitle>
                             <DialogDescription>
-                              Remove @{account.instagram_username}? This will
-                              disconnect the account and stop all scheduled posts.
+                              Remove{" "}
+                              {handleText ? `@${handleText}` : "this destination"}? This
+                              will disconnect the account and stop all scheduled
+                              posts.
                             </DialogDescription>
                           </DialogHeader>
                           <DialogFooter>
@@ -157,7 +218,8 @@ export function AccountsTab({ accounts, editable }: AccountsTabProps) {
                       </Dialog>
                   </div>
                 </div>
-              ))}
+                );
+              })}
             </div>
           )}
 
@@ -170,18 +232,68 @@ export function AccountsTab({ accounts, editable }: AccountsTabProps) {
           )}
 
           {/*
-            GONE, not gated. `openOAuthWindow` called `oauth-url/instagram`,
-            which is not a route on this API (#1063), and the button was
-            per-workspace against a per-source flow — it could not be wired as
-            written. It used to sit behind `editable`, which meant P3 flipping
-            that flag would have silently restored it (rajan, #1066 review).
-            `editable` now gates ONE thing: controls that are disabled because
-            they are pending, and that are coming back.
+            The OAuth Connect button is still GONE, not gated: `openOAuthWindow`
+            called `oauth-url/instagram`, which is not a route on this API
+            (#1063), and it was per-workspace against a per-source flow.
+
+            What replaces it is NOT that button. This form adds a DESTINATION —
+            the handle this workspace posts to — which needs no credential and
+            no Meta call, because a workspace with `api_publishing_enabled`
+            false publishes through a person. The OAuth leg is milestone 2 and
+            arrives beside this, not instead of it (#1089).
           */}
-          <p className="mt-4 text-sm text-muted-foreground">
-            Connecting an Instagram account is not available from this screen
-            yet.
-          </p>
+          <form onSubmit={submitHandle} className="mt-6 border-t pt-4">
+            <Label htmlFor="destination-handle">
+              Add the Instagram handle you post to
+            </Label>
+            <p className="mt-1 text-xs text-muted-foreground">
+              No Instagram login needed. Adding it starts the schedule, and
+              what that produces is posts waiting for approval, not posts.
+            </p>
+            <div className="mt-3 flex items-center gap-2">
+              <span
+                aria-hidden="true"
+                className="text-sm text-muted-foreground"
+              >
+                @
+              </span>
+              <Input
+                id="destination-handle"
+                name="handle"
+                value={handle}
+                onChange={(e) => {
+                  setHandle(e.target.value);
+                  // Clear on the first keystroke. A green line lingering over a
+                  // freshly typed handle reads as if THAT one was added.
+                  if (addOutcome) setAddOutcome(null);
+                }}
+                disabled={adding}
+                autoComplete="off"
+                placeholder="yourhandle"
+                aria-describedby={
+                  addOutcome ? "destination-handle-outcome" : "destination-handle-hint"
+                }
+                className="flex-1"
+              />
+              <Button type="submit" size="sm" disabled={adding || !handle.trim()}>
+                {adding ? "Adding..." : "Add"}
+              </Button>
+            </div>
+            <p id="destination-handle-hint" className="sr-only">
+              Just the username, without the at sign.
+            </p>
+            {addOutcome && (
+              <p
+                id="destination-handle-outcome"
+                role="status"
+                className={`mt-3 text-sm ${
+                  addOutcome.ok ? "text-green-700" : "text-red-700"
+                }`}
+              >
+                {addOutcome.text}
+              </p>
+            )}
+          </form>
         </CardContent>
       </Card>
     </div>

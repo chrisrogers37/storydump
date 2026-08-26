@@ -444,7 +444,10 @@ export function deriveSettings(
   };
 }
 
-export type AccountsResponse = { accounts?: import("./types").InstagramAccount[] };
+// The target returns `handle`/`state`, not `instagram_username`/`is_active`.
+// Typed as `InstagramAccount` this compiled and rendered a bare `@` for every
+// row — the type asserted a shape nothing produced (#1048's class, #1089).
+export type AccountsResponse = { accounts?: import("./types").Destination[] };
 
 // ── STILL LEGACY: the settings screen ──────────────────────────────────────
 //

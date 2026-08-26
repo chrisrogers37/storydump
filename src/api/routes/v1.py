@@ -410,6 +410,13 @@ async def create_account(
     `provider_account_ref`, and a workspace with `api_publishing_enabled` false
     (the default) publishes through a human rather than through the API.
 
+    **Two bodies, one row (#1089).** ``{"handle": "..."}`` is the typed path the
+    settings form uses: there is no Meta id to send, so `create_destination`
+    derives a provisional ``manual:<handle>`` reference. ``{"provider_account_ref":
+    "..."}`` is the OAuth path for when a real id exists, and it still wins if
+    both are sent. A request carrying NEITHER is refused as
+    `account_ref_required`, unchanged.
+
     Creating a destination SCHEDULES it: the posting cursor is seeded so the
     clock can see the row at all (`provisioning.create_destination` explains
     why nothing else ever seeds it). What that starts is intents awaiting
@@ -423,13 +430,18 @@ async def create_account(
     schedule = body.get("schedule", True)
     if not isinstance(schedule, bool):
         raise HTTPException(status_code=400, detail="schedule must be a boolean")
-    handle = body.get("handle")
+    # Both values pass through RAW. Coercing a blank handle to None here would
+    # be this route holding a second copy of "what counts as a handle" — the
+    # thing the sibling `sources` route's comment forbids — and the copy already
+    # disagreed: `{"handle": "   "}` answered `account_ref_required` while
+    # `{"handle": "@"}` answered `handle_required`, one user error with two
+    # reasons. `provisioning` owns presence for both columns.
     async with _admin(request, str(ws), principal) as session:
         account_id, created = await provisioning.create_destination(
             session,
             workspace_id=str(ws),
             provider_account_ref=body.get("provider_account_ref"),
-            handle=handle if isinstance(handle, str) and handle.strip() else None,
+            handle=body.get("handle"),
             schedule=schedule,
         )
     return JSONResponse(

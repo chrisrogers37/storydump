@@ -99,6 +99,27 @@ GDRIVE_CONFIG_VERSION = 1
 #: open (054: "the REAL account", opaque to us).
 ACCOUNT_REF_MAX = 255
 
+#: `ig_accounts.handle` is `VARCHAR(50)` (054), so this is the COLUMN's bound
+#: rather than a policy of ours: a longer handle is refused by name here instead
+#: of arriving at Postgres to be rejected as a 500. Deliberately not Instagram's
+#: own 30-character limit — that is a provider rule this tier cannot verify, and
+#: guessing it would refuse a handle the provider accepts.
+HANDLE_MAX = 50
+
+#: The provisional-identity prefix for a destination created from a TYPED handle
+#: rather than from an OAuth connection (#1089, shape (b)).
+#:
+#: `uq_ig_account_live (workspace_id, provider_account_ref)` keys destination
+#: identity on a column 054 calls "the REAL account" — a Meta id. Manual mode has
+#: no Meta id and must still produce one row per feed, so the handle stands in.
+#: Writing it BARE would collide the day OAuth supplies the real id: the same
+#: feed would arrive under a different ref, producing two destinations and two
+#: schedules against one Instagram account — exactly what the uniqueness exists
+#: to prevent. The prefix makes the provisional identity explicit and greppable,
+#: so that reconciliation is a query (`provider_account_ref LIKE 'manual:%'`)
+#: rather than an archaeology exercise. It costs nothing today.
+MANUAL_REF_PREFIX = "manual:"
+
 
 class ProvisioningRefused(StorydumpError):
     """A provisioning step the tier will not take, with the reason NAMED.
@@ -132,11 +153,93 @@ def account_ref_from(value: object) -> str:
     return ref
 
 
+def handle_from(value: object) -> str:
+    """The Instagram handle a person typed, or a NAMED refusal.
+
+    Normalises the two things people actually type — a leading ``@`` and
+    surrounding whitespace — and refuses everything else rather than repairing
+    it. Interior whitespace is a refusal and not a strip: `"two words"` is not a
+    handle with a typo in it, it is not a handle, and silently making it
+    `"twowords"` would create a destination for an account nobody named.
+
+    It does NOT assert Instagram's own character rules. Those are a provider
+    contract this tier cannot check, and a wrong guess refuses a real handle —
+    the same reasoning `ACCOUNT_REF_MAX` records for the reference column.
+    """
+    if not isinstance(value, str) or not value.strip():
+        raise ProvisioningRefused("handle_required")
+    handle = value.strip().lstrip("@").strip()
+    if not handle:
+        raise ProvisioningRefused("handle_required")
+    if any(ch.isspace() for ch in handle):
+        raise ProvisioningRefused("handle_malformed", "no spaces")
+    if len(handle) > HANDLE_MAX:
+        raise ProvisioningRefused("handle_too_long", f"max {HANDLE_MAX}")
+    return handle
+
+
+def manual_ref_for(handle: str) -> str:
+    """The provisional `provider_account_ref` for a typed *handle*.
+
+    Case-folded, and that is the idempotency half rather than tidiness:
+    `uq_ig_account_live` is a byte comparison, so `@Foo` and `@foo` would be two
+    destinations and two schedules against one feed. Instagram resolves a handle
+    case-insensitively, so folding cannot merge two real accounts; not folding
+    demonstrably splits one.
+
+    The DISPLAY handle keeps the caller's own casing — it goes to the `handle`
+    column, which keys nothing.
+    """
+    return f"{MANUAL_REF_PREFIX}{handle.casefold()}"
+
+
+def _identity_for(
+    provider_account_ref: object, handle: object
+) -> tuple[str, Optional[str]]:
+    """`(provider_account_ref, handle)` → the pair that lands in the row.
+
+    Four cases, enumerable on purpose — the shape a signature with two optional
+    arguments cannot state:
+
+    ==========================  ============================================
+    supplied                    result
+    ==========================  ============================================
+    a reference key at all      `account_ref_from` decides — it is the one
+                                owner of what a reference may be, so a
+                                malformed one is REFUSED rather than quietly
+                                replaced by a derived handle. Any handle is
+                                stored AS GIVEN.
+    handle alone                a derived `manual:<handle>`, handle normalised
+    neither                     `account_ref_required`
+    ==========================  ============================================
+
+    **An explicit reference wins for VALIDATION as well as for storage**, and
+    that is the whole reason this is a function. An earlier revision normalised
+    the handle before choosing a branch, which made a decorative display column
+    able to refuse an identity-bearing create whose identity came from OAuth:
+    `create_destination(ref="17841…", handle="two words")` raised
+    `handle_malformed` and wrote nothing. `handle_from` therefore runs INSIDE
+    the manual branch, where the handle is load-bearing, and nowhere else.
+    """
+    # SUPPLIED AT ALL, not supplied-and-well-formed. Testing the shape here
+    # would restate `account_ref_from`'s own precondition, and restate it
+    # weakly: an unquoted Meta id (`provider_account_ref=17841`, an ordinary
+    # JSON mistake) fails an `isinstance` test, so a shape check would silently
+    # DERIVE `manual:<handle>` for a caller who plainly meant to send a real id,
+    # while a too-long string on the same path is refused. One rule, one owner.
+    if provider_account_ref is not None or handle is None:
+        return account_ref_from(provider_account_ref), (
+            handle if isinstance(handle, str) else None
+        )
+    normalised = handle_from(handle)
+    return manual_ref_for(normalised), normalised
+
+
 async def create_destination(
     executor,
     *,
     workspace_id: str,
-    provider_account_ref: str,
+    provider_account_ref: Optional[str] = None,
     handle: Optional[str] = None,
     schedule: bool = True,
 ) -> tuple[str, bool]:
@@ -154,12 +257,17 @@ async def create_destination(
     destination that once moved away and returns gets a NEW row rather than
     reviving a tombstone — 054's stated intent.
 
+    *provider_account_ref* is optional: supply it when a real Meta id is known
+    (the OAuth path), or supply only *handle* and this derives a provisional
+    ``manual:<handle>`` reference — see `MANUAL_REF_PREFIX` for why that is a
+    prefix rather than the bare handle. An explicit reference always wins.
+
     The cursor is seeded in the SAME statement as the insert, not a follow-up
     UPDATE: a destination that exists with a NULL cursor between two statements
     is a destination the clock will never pick up if the second one fails, and
     that failure would leave no trace anywhere.
     """
-    ref = account_ref_from(provider_account_ref)
+    ref, display_handle = _identity_for(provider_account_ref, handle)
     # `fn_next_slot(now(), …)` against 059's effective-settings ladder. Written
     # as a scalar subquery over `workspaces` because the settings live there
     # and the account row does not exist yet to join to.
@@ -185,7 +293,7 @@ async def create_destination(
         {
             "ws": str(workspace_id),
             "ref": ref,
-            "handle": handle,
+            "handle": display_handle,
             # Per-account overrides are not settable at creation; NULL means
             # "inherit the workspace column", which is what 054's schedule
             # columns document NULL to mean.
