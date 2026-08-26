@@ -22,6 +22,7 @@ import psycopg2
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from src.services.target.commands import CommandRefused
 from src.services.target.work_loop import WorkerConfig
 from src.worker import compose
 from tests.scripts.conftest import seed_workspace_chain
@@ -359,6 +360,70 @@ class TestChunkChaining:
         }
 
 
+def _credential(conn, ws, src, state="active"):
+    """A gdrive credential row, so `connect_purpose` reports `reconnect`."""
+    with conn.cursor() as cur:
+        cur.execute("SET app.actor_kind = 'migration'")
+        cur.execute(
+            "INSERT INTO oauth_credentials (workspace_id, media_source_id, provider,"
+            " encrypted_payload, state) VALUES (%s, %s, 'gdrive', %s, %s)",
+            (ws, src, "ciphertext-placeholder", state),
+        )
+    conn.commit()
+
+
+async def _command(lane_db, kind, chain, **args):
+    """Run one command executor against the real database."""
+    from src.services.target import command_executors as ex
+    from src.services.target.commands import Command
+    from src.services.target.unit_of_work import unit_of_work
+
+    # A UoW, not a bare session: `trg_governance_audit` REFUSES an anonymous
+    # write to oauth_credentials, so a bare session does not merely skip the
+    # GUCs — it cannot execute the statement at all. Running the executor any
+    # other way would test a path production never takes.
+    engine = create_async_engine(_async_url(lane_db))
+    try:
+        uow = unit_of_work(
+            engine,
+            str(chain["ws"]),
+            actor_kind="user",
+            actor_user_id=str(chain["user"]),
+            channel="web",
+        )
+        async with uow.begin() as session:
+            cmd = Command(
+                kind=kind,
+                workspace_id=str(chain["ws"]),
+                actor_user_id=str(chain["user"]),
+                channel="web",
+                args={k: str(v) for k, v in args.items()},
+            )
+            result = await getattr(ex, kind)(session, cmd)
+        return result
+    finally:
+        await engine.dispose()
+
+
+async def _rearm(lane_db, workspace_id, source_id) -> bool:
+    """The P4 re-arm against the real database."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.services.target import media_sync
+
+    engine = create_async_engine(_async_url(lane_db))
+    try:
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as session:
+            moved = await media_sync.rearm_after_connect(
+                session, workspace_id=str(workspace_id), source_id=str(source_id)
+            )
+            await session.commit()
+        return moved
+    finally:
+        await engine.dispose()
+
+
 async def _sweep(lane_db, *, age_seconds=0, limit=200) -> int:
     """Run the #1061 re-alert beat against the real database."""
     from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -649,6 +714,227 @@ class TestAStrandedSourceKeepsSayingSo:
         assert await _sweep(lane_db, age_seconds=0) == 1
         assert len(_notifications(sync_conn, bind_a)) == 1
         assert _notifications(sync_conn, bind_b) == []
+
+
+class TestTheConnectReArmMeetsTheAlertingFix:
+    """gdrive epic P4 (F4 (a)) against #1061's beat — the two halves meeting.
+
+    #1069 stopped a stranded source going silent. This is what lets it
+    recover. ari asked for both directions checked now that the re-arm is real
+    code rather than a docstring describing P4 as forthcoming.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_re_arm_makes_the_clock_see_the_source_again(
+        self, lane_db, sync_conn
+    ):
+        """Asserted against the CLOCK, not against the UPDATE.
+
+        The UPDATE is the thing that already existed in spirit; what was broken
+        is that no source ever became DUE. `state` alone would not fix it —
+        leg 4's predicate is a conjunction and `next_sync_at` has no default —
+        so the only assertion that means anything is a real `fn_clock_tick`
+        minting a job for this source.
+        """
+        chain = seed_workspace_chain(sync_conn, "p4-rearm")
+        _strand(sync_conn, chain["src"], alerted="now()")
+        _tick(sync_conn)
+        assert _jobs(sync_conn, "sync_media_source") == [], (
+            "before-state: an errored source is invisible to the clock"
+        )
+
+        assert await _rearm(lane_db, chain["ws"], chain["src"]) is True
+
+        row = _source_row(sync_conn, chain["src"])
+        assert row["state"] == "active"
+        assert row["alerted_at"] is None
+        assert row["next_sync_at"] is not None, (
+            "the cursor is the half that was missing"
+        )
+
+        _tick(sync_conn)
+        minted = _jobs(sync_conn, "sync_media_source")
+        assert len(minted) == 1, "the clock can see it now — this is the whole point"
+        assert minted[0]["payload"]["source_id"] == str(chain["src"])
+
+    @pytest.mark.asyncio
+    async def test_the_beat_cannot_re_alert_a_row_the_re_arm_just_cleared(
+        self, lane_db, sync_conn
+    ):
+        """ari's question 1, now answerable against real code.
+
+        The beat scans `state = 'error'`. The re-arm moves the row out of that
+        set and NULLs the stamp in one statement, so there is no window where
+        a recovered source is still alertable — not because the two are timed,
+        but because neither can observe the other mid-decision.
+        """
+        chain = seed_workspace_chain(sync_conn, "p4-seam")
+        binding = _bind(sync_conn, chain["ws"])
+        _strand(sync_conn, chain["src"], alerted="now() - interval '30 days'")
+
+        assert await _sweep(lane_db, age_seconds=3600) == 1, "overdue before recovery"
+        assert len(_notifications(sync_conn, binding)) == 1
+
+        assert await _rearm(lane_db, chain["ws"], chain["src"]) is True
+
+        assert await _sweep(lane_db, age_seconds=0) == 0, "recovered — nothing to say"
+        assert len(_notifications(sync_conn, binding)) == 1, "no second alert"
+
+    @pytest.mark.asyncio
+    async def test_a_reconnect_leaves_no_orphaned_alert_job(self, lane_db, sync_conn):
+        """ari's question 2, re-verified now the re-arm is real.
+
+        The beat is a SINGLETON — leg 1 keys it on the kind itself, one row for
+        the estate with `workspace_id NULL` — so there has never been a
+        per-source alert job that a recovery could orphan. Asserted rather than
+        restated: after a re-arm, no job anywhere names this source except the
+        sync the clock legitimately minted.
+        """
+        chain = seed_workspace_chain(sync_conn, "p4-orphan")
+        _strand(sync_conn, chain["src"], alerted="NULL")
+        await _sweep(lane_db, age_seconds=0)
+        await _rearm(lane_db, chain["ws"], chain["src"])
+
+        with sync_conn.cursor() as cur:
+            cur.execute(
+                "SELECT kind, workspace_id, payload FROM jobs"
+                " WHERE kind = 'alert_stranded_sources'"
+            )
+            alert_jobs = cur.fetchall()
+        for kind, ws, payload in alert_jobs:
+            assert ws is None, f"{kind} must be a system singleton, not per-workspace"
+            assert "source_id" not in (payload or {}), (
+                "a per-source alert job would be orphaned by this recovery;"
+                " the singleton carries no source and cannot be"
+            )
+
+    @pytest.mark.asyncio
+    async def test_a_paused_source_is_re_armed_too(self, lane_db, sync_conn):
+        """A reconnect is the explicit undo of a deliberate disconnect (F5 (a)
+        leaves the source `paused`), so the re-arm must not filter on `error`.
+        A state filter would no-op on exactly the case a user is reversing."""
+        chain = seed_workspace_chain(sync_conn, "p4-paused")
+        _strand(sync_conn, chain["src"], state="paused", alerted="NULL")
+
+        assert await _rearm(lane_db, chain["ws"], chain["src"]) is True
+        assert _source_row(sync_conn, chain["src"])["state"] == "active"
+
+    @pytest.mark.asyncio
+    async def test_the_re_arm_is_bound_to_its_tenant(self, lane_db, sync_conn):
+        """RLS is inert under the deployed owner role (#751), so the WHERE
+        clause is what binds the row to its workspace. Another tenant's id must
+        move nothing — and the row must be left exactly as it was."""
+        a = seed_workspace_chain(sync_conn, "p4-tenant-a")
+        b = seed_workspace_chain(sync_conn, "p4-tenant-b")
+        _strand(sync_conn, a["src"], alerted="now()")
+
+        assert await _rearm(lane_db, b["ws"], a["src"]) is False
+        row = _source_row(sync_conn, a["src"])
+        assert row["state"] == "error" and row["next_sync_at"] is None
+
+
+class TestTheConnectTrioIsThinAndTenantBound:
+    """gdrive epic P4, F1 (a): the trio is provider-general and the executor is
+    the chat-side door that INITIATES and RECORDS. Exercised against the real
+    database rather than a stand-in session, because every refusal below is a
+    property of the SQL — a fake session would agree with whatever was written.
+    """
+
+    @pytest.mark.asyncio
+    async def test_disconnect_revokes_the_credential_and_pauses_the_source(
+        self, lane_db, sync_conn
+    ):
+        """F5 (a): revoke, KEEP the row, pause. `paused` not `error` — a
+        disconnect is a decision, not a fault."""
+        chain = seed_workspace_chain(sync_conn, "p4-disc")
+        _credential(sync_conn, chain["ws"], chain["src"])
+
+        res = await _command(
+            lane_db, "disconnect_account", chain, source_id=chain["src"]
+        )
+        assert res.outcome == "executed"
+
+        assert _source_row(sync_conn, chain["src"])["state"] == "paused"
+        with sync_conn.cursor() as cur:
+            cur.execute(
+                "SELECT state FROM oauth_credentials WHERE media_source_id = %s",
+                (chain["src"],),
+            )
+            rows = cur.fetchall()
+        assert rows == [("revoked",)], (
+            "the row is KEPT — the FK cascade would erase audit"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_disconnected_source_is_silent_to_the_alerting_beat(
+        self, lane_db, sync_conn
+    ):
+        """Why F5 (a) chose `paused` and why it matters to #1061: the beat
+        scans `error`. A user who disconnects on purpose must not then be
+        alerted daily about it — that is how a real alert gets silenced."""
+        chain = seed_workspace_chain(sync_conn, "p4-disc-quiet")
+        _bind(sync_conn, chain["ws"])
+        _credential(sync_conn, chain["ws"], chain["src"])
+
+        await _command(lane_db, "disconnect_account", chain, source_id=chain["src"])
+        assert await _sweep(lane_db, age_seconds=0) == 0
+
+    @pytest.mark.asyncio
+    async def test_another_tenants_source_is_refused_by_name(self, lane_db, sync_conn):
+        """RLS is inert under the deployed owner role (#751), so the executor's
+        own WHERE is the tenant bind. A source id is a caller-supplied UUID."""
+        a = seed_workspace_chain(sync_conn, "p4-x-a")
+        b = seed_workspace_chain(sync_conn, "p4-x-b")
+        _credential(sync_conn, a["ws"], a["src"])
+
+        with pytest.raises(CommandRefused) as exc:
+            await _command(lane_db, "disconnect_account", b, source_id=a["src"])
+        assert exc.value.reason == "not_found"
+        assert _source_row(sync_conn, a["src"])["state"] == "active", "untouched"
+
+    @pytest.mark.asyncio
+    async def test_connect_on_a_credentialed_source_is_refused_not_silently_reconnected(
+        self, lane_db, sync_conn
+    ):
+        """The split is the SCHEMA's answer, not the caller's. A reconnect run
+        as a connect would skip `issue_state`'s invalidate-prior-states step
+        (`07` §2, last-issued-wins) and leave two live callbacks for one
+        source."""
+        chain = seed_workspace_chain(sync_conn, "p4-wrongway")
+        _credential(sync_conn, chain["ws"], chain["src"])
+
+        with pytest.raises(CommandRefused) as exc:
+            await _command(lane_db, "connect_account", chain, source_id=chain["src"])
+        assert exc.value.reason == "illegal_transition"
+
+    @pytest.mark.asyncio
+    async def test_connect_mints_the_state_the_callback_will_consume(
+        self, lane_db, sync_conn
+    ):
+        """Initiating IS minting the state row — #1065 shipped the callback and
+        no start leg, so until this executor a Drive connect could not begin.
+        The result carries the state and NOT a URL: composing one needs the
+        redirect URI that `src/api/google_client.py` owns, and no service
+        module imports from `src.api`."""
+        chain = seed_workspace_chain(sync_conn, "p4-mint")
+
+        res = await _command(lane_db, "connect_account", chain, source_id=chain["src"])
+        assert res.outcome == "executed"
+        assert res.data["purpose"] == "connect"
+        assert res.data["provider"] == "gdrive"
+        assert res.data["state"] and "http" not in str(res.data.get("state"))
+
+        with sync_conn.cursor() as cur:
+            cur.execute(
+                "SELECT workspace_id, reconnect_target, provider, consumed_at"
+                " FROM oauth_states WHERE state = %s",
+                (res.data["state"],),
+            )
+            row = cur.fetchone()
+        assert row is not None, "the callback has nothing to consume otherwise"
+        assert str(row[0]) == str(chain["ws"])
+        assert str(row[1]) == str(chain["src"])
+        assert row[2] == "gdrive" and row[3] is None
 
 
 class TestFailureRouting:

@@ -61,6 +61,7 @@ from src.services.target import (
     google_drive_oauth,
     google_oidc,
     identity,
+    media_sync,
     rate_counters,
     sessions,
 )
@@ -347,8 +348,15 @@ async def google_drive_callback(
             media_source_id=row["reconnect_target"],
             grant=grant,
         )
-        # P4 re-arms the source HERE, in this same transaction — F4 (a),
-        # `store_credential`'s contract.
+        # F4 (a), in THIS transaction — `store_credential`'s contract. The
+        # target is the state row's, never a client-supplied id: the callback
+        # acts for the workspace and source the issue leg pinned.
+        if row["reconnect_target"] is not None:
+            await media_sync.rearm_after_connect(
+                session,
+                workspace_id=row["workspace_id"],
+                source_id=row["reconnect_target"],
+            )
 
     return RedirectResponse(
         _landing("/dashboard/settings?connected=gdrive"), status_code=302

@@ -106,9 +106,6 @@ class TestEveryCommandHasAFloorAndAnExecutorSlot:
         in the same PR, which is the visible edit the doc asks for."""
         assert set(port.UNBUILT) == {
             "autopost_now",
-            "connect_account",
-            "reconnect_account",
-            "disconnect_account",
             "move_account",
             "offboard_workspace",
             "restore_workspace",
