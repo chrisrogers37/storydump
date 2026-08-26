@@ -55,7 +55,7 @@ describe("every offered command can produce an idempotency key", () => {
     skip: { intent_id: UUID },
     reject: { intent_id: UUID },
     settings_change: { submission_id: UUID, settings: { posts_per_day: 3 } },
-    sync_now: { submission_id: UUID },
+    sync_now: { submission_id: UUID, source_id: UUID2 },
   };
 
   it("covers the whole table, so a new spec cannot skip this check", () => {
@@ -132,9 +132,49 @@ describe("entity-less commands", () => {
     );
   });
 
-  it("sync_now forwards an empty body", () => {
-    const parsed = parseCommand("sync_now", { submission_id: UUID, junk: 1 });
-    expect(parsed).toEqual({ ok: true, body: {}, identity: UUID });
+  /**
+   * REWRITTEN, and not to make a change pass — the previous version asserted
+   * `body: {}`, which pinned a spec that could never succeed. `sync_now` is
+   * per-SOURCE: the executor reads `source_id` and refuses `invalid_args`
+   * without it, so an empty body was a guaranteed refusal at the port. P2 added
+   * the row deliberately unwired, so nothing exercised it until P4 wired the
+   * control.
+   */
+  it("sync_now forwards the source it is syncing, and nothing else", () => {
+    const parsed = parseCommand("sync_now", {
+      submission_id: UUID,
+      source_id: UUID2,
+      junk: 1,
+    });
+    expect(parsed).toEqual({
+      ok: true,
+      body: { source_id: UUID2 },
+      identity: UUID,
+    });
+  });
+
+  it("refuses sync_now with no source, by its own name", () => {
+    // The regression guard for the defect above. A missing source must be
+    // refused HERE, where the reason names the field, rather than at the port
+    // as a generic `invalid_args` after a round trip.
+    expect(parseCommand("sync_now", { submission_id: UUID })).toEqual({
+      ok: false,
+      error: "invalid_source_id",
+    });
+    expect(
+      parseCommand("sync_now", { submission_id: UUID, source_id: "not-a-uuid" }),
+    ).toEqual({ ok: false, error: "invalid_source_id" });
+  });
+
+  it("keys sync_now on the SUBMISSION, not the source", () => {
+    // Two deliberate syncs of one source are two submissions and must not
+    // collapse onto one key — the same property F3 locked for settings.
+    const first = parseCommand("sync_now", { submission_id: UUID, source_id: UUID2 });
+    const second = parseCommand("sync_now", { submission_id: UUID2, source_id: UUID2 });
+    if (!first.ok || !second.ok) throw new Error("expected both ok");
+    expect(idempotencyKeyFor("sync_now", first.identity)).not.toBe(
+      idempotencyKeyFor("sync_now", second.identity),
+    );
   });
 });
 
