@@ -7,27 +7,68 @@ work the registry parks would manufacture parked jobs on its own cadence),
 and the heartbeat/lease numbers agreeing.
 """
 
-from src.services.target.work_loop import Parked, WorkerConfig
+from src.services.target.work_loop import _UNBUILT_REASON, Parked, WorkerConfig
 from src.worker import compose
 
 
-def test_w1_composition_live_kinds_without_cloudinary():
-    # refresh_credential and reauth_prompt are live in EVERY composition:
-    # compose always wires the real refresh door (no config needed) and the
-    # prompt executor writes outbox rows only (W5d/W5e). alert_stranded_sources
-    # joins them for the same reason and deliberately (#1061): it needs only a
-    # session, and a composition with no drive adapter wired is exactly the one
-    # whose sources are stranded — gating it on deps.drive would silence the
-    # alert precisely where it is needed.
-    app = compose(engine=object(), config=WorkerConfig(), env={})
-    live = {k for k, e in app.registry.items() if not isinstance(e, Parked)}
-    assert live == {
-        "plan_slot",
-        "reap_expired",
-        "refresh_credential",
-        "reauth_prompt",
-        "alert_stranded_sources",
+def test_w1_composition_parks_only_for_a_named_reason():
+    """A kind is dead in a bare composition ONLY because something is missing
+    and SAYS SO — never silently.
+
+    This asserted a hardcoded set of five live kinds until #1083. A set literal
+    pins the CURRENT state as correct: it fails the moment anyone adds a job
+    kind, passes again the moment they paste the name in, and never once tests
+    the property the comment above it describes. It had already been updated
+    that way before, and the same literal exists twice more in
+    `test_work_loop.py` — which is how one PR can patch one copy and be red on
+    another.
+
+    So the expectation is DERIVED from the registry's own park reasons instead:
+
+    - `_UNBUILT_REASON` marks a kind with no executor anywhere.
+    - any OTHER reason marks a seam this deployment did not wire.
+
+    The invariant is that those two sets account for EVERY difference between a
+    bare composition and a fully-configured one. A new seam-free kind (#1083's
+    `revoke_workspace_credentials` is one) changes both sides equally and this
+    test does not move. A kind that starts parking for no stated reason does.
+
+    What it deliberately no longer pins: WHICH kinds are live. That was the
+    snapshot, and a snapshot is what made this a maintenance tax rather than a
+    gate.
+    """
+    bare = compose(engine=object(), config=WorkerConfig(), env={}).registry
+    full = compose(
+        engine=object(),
+        config=WorkerConfig(),
+        env={
+            "CLOUDINARY_CLOUD_NAME": "c",
+            "CLOUDINARY_API_KEY": "k",
+            "CLOUDINARY_API_SECRET": "s",
+        },
+    ).registry
+
+    def live_of(reg):
+        return {k for k, e in reg.items() if not isinstance(e, Parked)}
+
+    live_bare, live_full = live_of(bare), live_of(full)
+
+    # A composition that parks everything is a dead worker, and every assertion
+    # below is vacuously true of one. This is the control.
+    assert live_bare, "a bare composition ran nothing at all"
+
+    # Nothing may be live bare and dead when MORE is configured.
+    assert live_bare <= live_full
+
+    # The whole difference is seams, each one named. Not silence.
+    seam_gated = {
+        k
+        for k, e in bare.items()
+        if isinstance(e, Parked) and e.reason != _UNBUILT_REASON
     }
+    assert live_full - live_bare == seam_gated & live_full
+    for kind in seam_gated:
+        assert bare[kind].reason.strip(), f"{kind} parked with an empty reason"
 
 
 def test_cloudinary_config_brings_the_transit_reaper_live():

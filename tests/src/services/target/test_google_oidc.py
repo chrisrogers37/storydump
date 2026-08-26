@@ -187,3 +187,48 @@ class TestExchangeCode:
         from src.services.target.egress import DEFAULT_ALLOWED_HOSTS
 
         assert urlsplit(oidc.TOKEN_URL).hostname in DEFAULT_ALLOWED_HOSTS
+
+
+class TestRevokeToken:
+    """#1083. The outbound half of a disconnect: telling Google, not just us.
+
+    Best-effort lives in the CALLER; this reports and refuses to interpret.
+    """
+
+    async def test_it_posts_the_token_to_googles_revocation_endpoint(self, monkeypatch):
+        seen = capture_egress(monkeypatch, status=200)
+        status = await oidc.revoke_token(None, token="rt-123")
+        assert status == 200
+        assert seen["method"] == "POST"
+        assert seen["url"] == oidc.REVOKE_URL
+
+    async def test_the_token_rides_the_body_never_the_query_string(self, monkeypatch):
+        """A URL is what reaches proxy logs and error reports; a form body is not."""
+        seen = capture_egress(monkeypatch, status=200)
+        await oidc.revoke_token(None, token="rt-secret")
+        assert seen["data"] == {"token": "rt-secret"}
+        assert "rt-secret" not in seen["url"]
+        assert "params" not in seen
+
+    async def test_it_goes_through_the_egress_floor(self, monkeypatch):
+        """F3a (ii): hand-written through the floor, never a library. If this
+        ever stops being true, `verify_id_token`'s claims-not-signature argument
+        stops holding too — it rests on this transport having been floored."""
+        seen = capture_egress(monkeypatch, status=200)
+        await oidc.revoke_token(None, token="t")
+        assert seen["policy"] is not None
+
+    @pytest.mark.parametrize("status", [200, 400, 429, 500])
+    async def test_it_reports_the_status_and_interprets_nothing(
+        self, monkeypatch, status
+    ):
+        """Deliberately not a bool. 400 means the grant was ALREADY invalid —
+        the outcome a revoke wanted — so only the caller can say whether an
+        answer is a failure, and it needs to know which answer it got."""
+        capture_egress(monkeypatch, status=status)
+        assert await oidc.revoke_token(None, token="t") == status
+
+    def test_the_revoke_host_needs_no_allowlist_widening(self):
+        from src.services.target.egress import DEFAULT_ALLOWED_HOSTS
+
+        assert urlsplit(oidc.REVOKE_URL).hostname in DEFAULT_ALLOWED_HOSTS

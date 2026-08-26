@@ -82,6 +82,7 @@ class TestRegistryCoversTheSchema:
             "sync_media_source",
             "first_ingest_chunk",
             "alert_stranded_sources",
+            "revoke_workspace_credentials",
         }
 
     def test_the_unbuilt_kinds_park_even_with_every_seam_supplied(self):
@@ -98,6 +99,7 @@ class TestRegistryCoversTheSchema:
             "sync_media_source",
             "first_ingest_chunk",
             "alert_stranded_sources",
+            "revoke_workspace_credentials",
         }
         assert unbuilt, "denominator went empty — the schema kinds parse broke"
         for kind in unbuilt:

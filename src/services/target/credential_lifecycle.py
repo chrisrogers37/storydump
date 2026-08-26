@@ -40,6 +40,7 @@ The token never appears in any raise, log, or error detail, on any path.
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -48,7 +49,7 @@ import httpx
 from sqlalchemy import text
 
 from src.exceptions.base import StorydumpError
-from src.services.target import egress, outbox
+from src.services.target import egress, google_drive_oauth, google_oidc, outbox
 from src.services.target import ig_login_oauth as oauth
 
 logger = logging.getLogger(__name__)
@@ -115,6 +116,127 @@ async def ig_refresh(
     if resp.status_code in _REJECTED_STATUSES:
         raise RefreshRejected(resp.status_code)
     raise RefreshTransient(resp.status_code)
+
+
+#: Google answers 200 for a revoked grant and 400 for one that was already
+#: invalid. The SECOND IS THE OUTCOME WE WANTED — a user who disconnects twice,
+#: or whose token Google already dropped, ends in exactly the state the revoke
+#: was for. Collapsing them into "failed" would event a false alarm on the
+#: commonest repeat path (#1083).
+_REVOKE_SETTLED = frozenset({200, 400})
+
+
+async def revoke_workspace_credentials(deps, session, job) -> str:
+    """Best-effort Google revoke for a disconnected Drive source (F5 (a), #1083).
+
+    THE GAP THIS CLOSES: `disconnect_account` marks the credential `revoked`
+    locally and stops using it. Google was never told, so the refresh token
+    stayed valid on Google's side — withdrawn from us, live for them, until the
+    user found it in their own Google account. Most never would.
+
+    **Best-effort has three parts and all three are structural here rather than
+    careful.** This runs as a JOB, outside the disconnect's unit of work, which
+    is what makes them true: it cannot roll back the local revoke or the source
+    going `paused` (a different transaction, already committed), it cannot block
+    the user's disconnect (a different request, already returned), and a failure
+    has somewhere to be recorded. The placement is not a preference —
+    `command_executors.disconnect_account` states that a provider call inside a
+    unit of work violates this codebase's checkpoint discipline.
+
+    **The failure is never silent**, which is the requirement that needed
+    deciding rather than implementing. Two dispositions:
+
+    - TERMINAL (the payload will not decrypt): retrying cannot make it readable,
+      so an `revoke_failed` audit row is written and the job SUCCEEDS. The spec's
+      wording is "recorded in audit and abandoned" — abandoning without a record
+      is the swallowed failure this codebase has spent a week removing.
+    - RETRYABLE (a floor refusal, a 5xx, a rate limit): RAISED, so the job's own
+      retry budget runs and a persistent inability lands as a dead job row.
+      Auditing here instead would report a failure on the first blip.
+
+    It reads the token only to spend it, never logs it, and never returns it.
+    """
+    from src.services.target.work_loop import poller_session_factory
+
+    payload = job.get("payload") or {}
+    credential_id = str(payload["credential_id"])
+    workspace_id = str(job["workspace_id"])
+    factory = poller_session_factory(deps.engine, workspace_id)
+
+    # Phase 1 — read and decrypt in its own transaction, committed before any
+    # provider talk. Same ordering as `refresh_credential` and for the same
+    # reason: a held transaction across a network call is a lock on a stranger.
+    async with factory() as s:
+        row = (
+            await s.execute(
+                text(
+                    "SELECT encrypted_payload FROM oauth_credentials"
+                    " WHERE id = :cid AND workspace_id = :ws"
+                ),
+                {"cid": credential_id, "ws": workspace_id},
+            )
+        ).first()
+    if row is None:
+        # The credential is gone — the grant it named cannot be revoked and
+        # nothing is owed. Not a failure.
+        logger.info("revoke_workspace_credentials %s: credential gone", job["id"])
+        return "absent"
+
+    try:
+        refresh_token = google_drive_oauth.decode_payload(
+            oauth.ring().decrypt(row[0])
+        ).refresh_token
+    except Exception:
+        # Deliberately not logging the exception: it can carry ciphertext.
+        await _audit_revoke_failed(
+            factory, workspace_id, credential_id, "undecryptable"
+        )
+        logger.warning(
+            "revoke_workspace_credentials %s: credential %s undecryptable —"
+            " audited and abandoned, the Google grant may still be live",
+            job["id"],
+            credential_id,
+        )
+        return "undecryptable"
+
+    async with httpx.AsyncClient() as client:
+        status = await google_oidc.revoke_token(client, token=refresh_token)
+
+    if status in _REVOKE_SETTLED:
+        return "revoked" if status == 200 else "already_invalid"
+
+    raise RevokeRetryable(status)
+
+
+class RevokeRetryable(StorydumpError):
+    """Google answered something that might succeed later. Carries the status
+    only — never the token, never the body."""
+
+    def __init__(self, status_code: int):
+        self.status_code = status_code
+        super().__init__(f"google revoke answered {status_code}")
+
+
+async def _audit_revoke_failed(factory, workspace_id, credential_id, reason) -> None:
+    """The `revoke_failed` record `06` §lifecycles names. Its own transaction,
+    so the record survives whatever the caller does next."""
+    async with factory() as s:
+        await s.execute(
+            text(
+                "INSERT INTO audit_events (workspace_id, entity_kind, entity_id,"
+                " from_state, to_state, actor_kind, actor_user_id, channel, detail)"
+                " VALUES (:ws, 'oauth_credential', :cid, 'revoked', 'revoked',"
+                "         current_setting('app.actor_kind'),"
+                "         NULLIF(current_setting('app.actor_user_id', true), '')::uuid,"
+                "         NULLIF(current_setting('app.channel', true), ''),"
+                "         CAST(:detail AS jsonb))"
+            ),
+            {
+                "ws": workspace_id,
+                "cid": credential_id,
+                "detail": json.dumps({"event": "revoke_failed", "reason": reason}),
+            },
+        )
 
 
 async def refresh_credential(deps, session, job) -> str:
