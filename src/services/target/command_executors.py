@@ -425,18 +425,21 @@ async def disconnect_account(session, command: Command) -> CommandResult:
     belongs on a job outside this transaction and is not built.
     """
     source_id = await _drive_source(session, command)
-    await session.execute(
-        text(
-            "UPDATE oauth_credentials SET state = 'revoked'"
-            " WHERE workspace_id = :ws AND media_source_id = :s"
-            "   AND provider = :provider AND state <> 'revoked'"
-        ),
-        {
-            "ws": command.workspace_id,
-            "s": source_id,
-            "provider": google_drive_oauth.PROVIDER,
-        },
-    )
+    revoked = (
+        await session.execute(
+            text(
+                "UPDATE oauth_credentials SET state = 'revoked'"
+                " WHERE workspace_id = :ws AND media_source_id = :s"
+                "   AND provider = :provider AND state <> 'revoked'"
+                " RETURNING id"
+            ),
+            {
+                "ws": command.workspace_id,
+                "s": source_id,
+                "provider": google_drive_oauth.PROVIDER,
+            },
+        )
+    ).first()
     await session.execute(
         text(
             "UPDATE media_sources SET state = 'paused', alerted_at = NULL"
@@ -444,6 +447,25 @@ async def disconnect_account(session, command: Command) -> CommandResult:
         ),
         {"s": source_id, "ws": command.workspace_id},
     )
+    # The remote half (#1083), enqueued rather than called. Everything above
+    # is the atomic pair; this rides a separate transaction so a Google that
+    # is slow, angry or absent cannot roll back a disconnect the user has
+    # already been told succeeded — which is what F5 (a)'s "best-effort"
+    # requires and what this file's own docstring said it was waiting for.
+    #
+    # Only when a row actually flipped: a repeat disconnect updates nothing,
+    # and minting a second revoke for a grant already revoked would spend a
+    # provider call to learn that. `unless_pending` covers the racing case.
+    if revoked is not None:
+        await jobs.enqueue(
+            session,
+            kind="revoke_workspace_credentials",
+            workspace_id=command.workspace_id,
+            lane="bulk",
+            serialization_key=f"revoke:{revoked[0]}",
+            payload={"v": 1, "credential_id": str(revoked[0])},
+            unless_pending=True,
+        )
     return CommandResult(
         "executed",
         {"source_id": source_id, "credential": "revoked", "source": "paused"},

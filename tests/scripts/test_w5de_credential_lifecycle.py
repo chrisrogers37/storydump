@@ -13,6 +13,8 @@ leg that minted nothing must sit beside the same leg minting, or the zero
 proves only that the test ran.
 """
 
+import json
+
 import psycopg2
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -503,6 +505,149 @@ class TestRefreshExecutorOnTheRealMachinery:
         assert job["state"] == "succeeded", (
             "retrying an unreadable payload cannot make it readable"
         )
+
+
+class TestTheRevokeDispositionIsDecidedByTheCaller:
+    """#1088 review (rajan): `revoke_workspace_credentials`'s own decision
+    logic had ZERO direct coverage — measured, by mutating the retryable
+    branch to swallow instead of raise and watching 68/68 tests still pass.
+
+    The gap has a precise shape worth naming, because it is not "someone
+    forgot a test". `google_oidc.revoke_token` is tested to REPORT the status
+    and interpret nothing — its own test says "only the caller can say whether
+    an answer is a failure". So the module under test correctly documented
+    that the decision lives elsewhere, and elsewhere was never checked. A
+    disclaimer is not a delegation.
+
+    Follows the sibling disposition trio above (`ig_refresh`: success,
+    definitive rejection, transient retries, undecryptable) and asserts the
+    same observable — the JOB ROW state — rather than the exception type. A
+    swallow returns a value, the job succeeds, and `state == "ready"` fails;
+    an assertion on the raise alone would be satisfied by any raise at all.
+    """
+
+    async def _store_gdrive_cred(self, lane_db, chain) -> str:
+        """A gdrive credential with a REAL Drive v1 envelope.
+
+        `_store_cred` above writes an ig_login payload, and the revoke path
+        decodes with `google_drive_oauth.decode_payload` — so an ig_login row
+        takes the `undecryptable` branch and returns before Google is ever
+        called. My first version of this class did exactly that: the retryable
+        cases failed for the right symptom and the wrong cause, and the
+        SETTLED cases passed for that same wrong cause, because `succeeded` is
+        what the undecryptable branch produces too. The control controlled
+        nothing.
+        """
+        from sqlalchemy import text as sqltext
+
+        from src.services.target import google_drive_oauth as gdrive
+
+        engine = create_async_engine(_async_url(lane_db))
+        try:
+            maker = async_sessionmaker(engine, expire_on_commit=False)
+            async with maker() as session:
+                async with session.begin():
+                    await session.execute(
+                        sqltext("SET LOCAL app.actor_kind = 'migration'")
+                    )
+                    return await gdrive.store_credential(
+                        session,
+                        workspace_id=chain["ws"],
+                        media_source_id=chain["src"],
+                        grant=gdrive.DriveGrant(
+                            access_token="ya29.x",
+                            refresh_token="1//revoke-me",
+                            expires_at=None,
+                        ),
+                    )
+        finally:
+            await engine.dispose()
+
+    def _arm(self, sync_conn, chain, cred_id):
+        """A revoke job for a credential a disconnect has already marked."""
+        with sync_conn.cursor() as cur:
+            cur.execute("SET app.actor_kind = 'migration'")
+            cur.execute(
+                "UPDATE oauth_credentials SET state = 'revoked' WHERE id = %s",
+                (cred_id,),
+            )
+            cur.execute(
+                "INSERT INTO jobs (kind, workspace_id, lane, serialization_key,"
+                " run_at, max_attempts, payload)"
+                " VALUES ('revoke_workspace_credentials', %s, 'bulk', %s, now(), 5,"
+                "         CAST(%s AS jsonb))",
+                (
+                    chain["ws"],
+                    f"cred:{cred_id}",
+                    json.dumps({"v": 1, "credential_id": str(cred_id)}),
+                ),
+            )
+        sync_conn.commit()
+
+    @pytest.mark.parametrize("status", [429, 500, 503])
+    @pytest.mark.asyncio
+    async def test_an_unsettled_status_keeps_the_job_alive_on_the_ladder(
+        self, lane_db, sync_conn, monkeypatch, status
+    ):
+        """THE MUTANT THIS EXISTS TO KILL. Swap the `raise RevokeRetryable`
+        for a return and this goes red: the job finalizes as `succeeded`, and
+        a grant Google never revoked is recorded as revoked."""
+        from src.services.target import google_oidc
+
+        chain = seed_workspace_chain(sync_conn, f"w5d-revoke-{status}")
+        cred_id = await self._store_gdrive_cred(lane_db, chain)
+        self._arm(sync_conn, chain, cred_id)
+
+        called = []
+
+        async def answered(client, *, token):
+            called.append(token)
+            return status
+
+        monkeypatch.setattr(google_oidc, "revoke_token", answered)
+        _wl, claimed = await _run_once_w5(lane_db, None)
+        assert claimed is True
+
+        assert called == ["1//revoke-me"], (
+            "Google must actually have been asked — without this the test"
+            " passes on any branch that returns before the provider call,"
+            " which is how the first version of it fooled itself"
+        )
+        job = _jobs_of_kind(sync_conn, "revoke_workspace_credentials")[0]
+        assert job["state"] == "ready", (
+            f"google answered {status} — the grant may still be live, so the"
+            " job must ride the ladder rather than finalize as done"
+        )
+
+    @pytest.mark.parametrize("status,why", [(200, "revoked"), (400, "already invalid")])
+    @pytest.mark.asyncio
+    async def test_a_settled_status_finalizes_the_job(
+        self, lane_db, sync_conn, monkeypatch, status, why
+    ):
+        """The positive control, and it is what stops the test above passing
+        for the wrong reason: if every status left the job `ready`, the
+        retryable assertion would hold while the logic did nothing. 400 is
+        settled BECAUSE the grant is already invalid — the outcome a revoke
+        wanted."""
+        from src.services.target import google_oidc
+
+        chain = seed_workspace_chain(sync_conn, f"w5d-revoke-ok-{status}")
+        cred_id = await self._store_gdrive_cred(lane_db, chain)
+        self._arm(sync_conn, chain, cred_id)
+
+        called = []
+
+        async def answered(client, *, token):
+            called.append(token)
+            return status
+
+        monkeypatch.setattr(google_oidc, "revoke_token", answered)
+        _wl, claimed = await _run_once_w5(lane_db, None)
+        assert claimed is True
+
+        assert called == ["1//revoke-me"], "the provider call must have happened"
+        job = _jobs_of_kind(sync_conn, "revoke_workspace_credentials")[0]
+        assert job["state"] == "succeeded", f"{status} is settled ({why})"
 
 
 class TestReauthPromptStale:

@@ -118,7 +118,6 @@ _UNBUILT_REASON = (
 #: unconditionally; the schema-derived completeness test keeps this honest.
 UNBUILT_KINDS = (
     "offboard_workspace",
-    "revoke_workspace_credentials",
     "retention_sweep",
     "reencrypt_credentials",
     "send_email",
@@ -334,6 +333,11 @@ def build_registry(deps: WorkerDeps) -> dict:
     async def reauth_prompt(session, job):
         return await credential_lifecycle.reauth_prompt(deps, session, job)
 
+    async def revoke_workspace_credentials(session, job):
+        return await credential_lifecycle.revoke_workspace_credentials(
+            deps, session, job
+        )
+
     registry["refresh_credential"] = (
         refresh_credential
         if deps.refresh is not None
@@ -342,6 +346,10 @@ def build_registry(deps: WorkerDeps) -> dict:
     # No external seam: the prompt writes outbox rows and nothing else, so it
     # is live in every deployment that has an engine at all.
     registry["reauth_prompt"] = reauth_prompt
+    # Needs no `deps` seam: it talks to Google through the egress floor with a
+    # per-call client, the way `ig_refresh` does. Nothing to wire, so nothing
+    # to park behind (#1083).
+    registry["revoke_workspace_credentials"] = revoke_workspace_credentials
 
     async def sync_media_source(session, job):
         return await media_sync.sync_media_source(deps, session, job)
