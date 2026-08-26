@@ -21,7 +21,7 @@ export default function DashboardNotFound() {
         </CardHeader>
         <CardContent>
           <p className="text-sm text-muted-foreground text-center">
-            This dashboard page doesn't exist or has been moved.
+            This dashboard page doesn&apos;t exist or has been moved.
           </p>
         </CardContent>
         <CardFooter className="flex justify-center">

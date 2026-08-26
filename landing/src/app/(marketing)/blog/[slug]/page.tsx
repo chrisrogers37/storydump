@@ -85,12 +85,12 @@ export default async function BlogPost({ params }: { params: Params }) {
           Storydump connects Google Drive, Telegram, and the Instagram API into
           one hands-off pipeline. Free during beta.
         </p>
-        <a
+        <Link
           href="/#waitlist"
           className="mt-4 inline-block rounded-md bg-primary px-6 py-3 text-sm font-medium text-primary-foreground hover:bg-primary/90"
         >
           Get Early Access
-        </a>
+        </Link>
       </footer>
     </article>
   )
