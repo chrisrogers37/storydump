@@ -50,26 +50,29 @@ import { settingsRefusalCopy, submitCommand } from "@/lib/command-client";
  *
  * ── What this card can and cannot say ──────────────────────────────────────
  *
- * `GET /workspaces/{ws}/sources` returns id, provider, state, the sync
- * timestamps and `created_at`. It returns NO credential field, so this tier
- * cannot tell a source that has been granted from one that has not — the
- * server can (`connect_purpose` runs an EXISTS on `oauth_credentials` and
- * answers `connect` before a credential, `reconnect` after), but that answer
- * is not on the wire.
+ * When this card was built, `GET /workspaces/{ws}/sources` returned no
+ * credential field at all, so this tier could not tell a source that had been
+ * granted from one that had not. Two things follow from that, and both are
+ * still what the code does:
  *
- * Two consequences, both deliberate:
- *
- * 1. The button's label is NEUTRAL across both states, because a precise one
- *    would be a guess. The route disambiguates for itself.
+ * 1. The button's label is NEUTRAL across connect and reconnect, because a
+ *    precise one would have been a guess. The route disambiguates for itself.
  * 2. The old "Connected" heading is GONE. It was `drive !== null` — a source
- *    ROW existing — so a folder that had been added and never granted rendered
- *    as "Connected" with a green `active` badge, which is a claim this tier
- *    has no way to make. What is shown now is what is known: a source exists,
- *    and here is its state.
+ *    ROW existing — so a folder added and never granted rendered as
+ *    "Connected" with a green `active` badge, which is a claim this tier had
+ *    no way to make. What is shown is what is known.
  *
- * The fix that would let this say "Connected" truthfully is a credential
- * indicator on the sources payload, mirroring the EXISTS `connect_purpose`
- * already runs. That is a change to the API, not to this file.
+ * **That gap is now CLOSED at the API and not yet consumed here.** #1080 added
+ * `credential_status` to the payload — `none` | `active` | `expired` |
+ * `revoked` — deriving it rather than passing `state` through, precisely
+ * because `media_sources.state` cannot answer "is this connected" (#1078: a
+ * source created and never credentialed is `active` too). `none` versus the
+ * last two are different user actions, connect versus reconnect, which is the
+ * distinction this card could not previously make.
+ *
+ * `SourceRow` in this tier does not declare the field yet and nothing here
+ * reads it. Consuming it is its own change: a precise label, and a heading
+ * that can say "Connected" truthfully for the first time.
  */
 const DISABLED_REASON =
   "Not wired up yet — this action is not available on this API version.";
@@ -264,9 +267,11 @@ export function IntegrationsTab({
                     {/*
                       NOT "Connected". That heading was `drive !== null` — a
                       source ROW existing — so a folder added and never granted
-                      read as connected with a green badge. The sources payload
-                      carries no credential field, so this tier cannot make
-                      that claim; it states what it knows instead.
+                      read as connected with a green badge. This tier still
+                      cannot make that claim: the payload now carries
+                      `credential_status` (#1080) but `SourceRow` does not
+                      declare it and nothing here reads it yet. So this states
+                      what it knows rather than what it would like to say.
                     */}
                     <p className="text-sm text-muted-foreground">
                       {source.last_sync_success_at
