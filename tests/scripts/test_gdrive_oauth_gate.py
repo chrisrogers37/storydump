@@ -12,22 +12,14 @@ the credential row and the read door that #1054 shipped against nothing.
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
+import psycopg2
 from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlsplit
 
-import httpx
-import psycopg2
 import pytest
-from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
-from sqlalchemy.ext.asyncio import create_async_engine
-from sqlalchemy.pool import NullPool
 
-from src.api.app import create_app
-from src.api.principal import COOKIE
-from src.api.routes import auth as auth_routes
-from src.services.target import drive_credentials, google_oidc
+from src.services.target import drive_credentials
 from src.services.target import google_drive_oauth as drive
 from src.services.target.ig_login_oauth import (
     OAuthStateRefused,
@@ -35,23 +27,24 @@ from src.services.target.ig_login_oauth import (
     issue_state,
 )
 from src.services.target.media_sync import DriveCredentialDead
-from src.services.target.unit_of_work import asyncpg_url, unit_of_work
 from tests.scripts.conftest import (
     _scratch,
     as_user,
+    fetch_all,
     fetch_one,
+    in_tenant,
+    ingress_engine,
     replay_advertised_stream,
     seed_workspace_chain,
     set_test_passwords,
 )
 from tests.src.api import conftest as api_conftest
-from tests.src.api.conftest import API, FRONT, cookie_value, unsigned_id_token
+from tests.src.api.conftest import API, FRONT, api_client, sign_in
+from tests.src.services.target.conftest import drive_grant
 
 google_configured = api_conftest.google_configured
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
-
-NOW = datetime(2026, 8, 25, 20, 0, tzinfo=timezone.utc)
 
 
 @pytest.fixture(scope="module")
@@ -79,89 +72,43 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-def _grant(**over) -> drive.DriveGrant:
-    kw = dict(
-        access_token="ya29.access",
-        refresh_token="1//refresh",
-        expires_at=NOW + timedelta(hours=1),
-        scope=drive.SCOPE,
-    )
-    kw.update(over)
-    return drive.DriveGrant(**kw)
+def _error_page(reason: str) -> str:
+    """Every Drive failure lands on the error page with its leg named, so the
+    sign-in-shaped page can render the connect leg's copy."""
+    return f"{FRONT}/auth/error?reason={reason}&flow=drive"
 
 
-async def _in_tenant(dsn: str, ws, user, fn):
-    """One committed unit of work as `svc_ingress`, the role ASSERTED."""
-    engine = create_async_engine(asyncpg_url(dsn), poolclass=NullPool)
-    try:
-        uow = unit_of_work(
-            engine, str(ws), actor_kind="user", actor_user_id=str(user), channel="web"
+def _store(world, tenant, *, source, grant) -> str:
+    """`store_credential` as the callback runs it: one committed unit of work
+    under *tenant*, as its user. Returns the credential id."""
+    return _run(
+        in_tenant(
+            world["ingress"],
+            tenant["ws"],
+            tenant["user"],
+            lambda s: drive.store_credential(
+                s, workspace_id=tenant["ws"], media_source_id=source, grant=grant
+            ),
         )
-        async with uow.begin() as session:
-            who = (await session.execute(text("SELECT current_user"))).scalar()
-            assert who == "svc_ingress", who
-            return await fn(session)
-    finally:
-        await engine.dispose()
+    )
 
 
 async def _token(dsn: str, source_id, workspace_id) -> str:
     """The read door, on an ingress engine — the worker's own shape."""
-    engine = create_async_engine(asyncpg_url(dsn), poolclass=NullPool)
-    try:
+    async with ingress_engine(dsn) as engine:
         return await drive_credentials.token_for_source(
             engine, str(source_id), workspace_id=str(workspace_id)
         )
-    finally:
-        await engine.dispose()
 
 
-def _credential_rows(world, source_id):
-    conn = psycopg2.connect(world["stream"])
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT id, provider, media_source_id, ig_account_id, next_refresh_at,"
-                "       state, expires_at, encrypted_payload"
-                "  FROM oauth_credentials WHERE media_source_id = %s",
-                (str(source_id),),
-            )
-            return cur.fetchall()
-    finally:
-        conn.close()
-
-
-@asynccontextmanager
-async def _api(dsn: str):
-    engine = create_async_engine(asyncpg_url(dsn), poolclass=NullPool)
-    try:
-        app = create_app(engine=engine)
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url=API) as client:
-            yield client, engine
-    finally:
-        await engine.dispose()
-
-
-async def _sign_in(
-    client: httpx.AsyncClient, monkeypatch, *, sub: str, email: str
-) -> dict:
-    start = await client.get("/auth/google", follow_redirects=False)
-    assert start.status_code == 302, start.text
-    state = parse_qs(urlsplit(start.headers["location"]).query)["state"][0]
-    nonce = cookie_value(start, auth_routes.NONCE_COOKIE)
-
-    async def exchange_code(client_, **kw):
-        return unsigned_id_token(state, sub=sub, email=email, name=sub)
-
-    monkeypatch.setattr(google_oidc, "exchange_code", exchange_code)
-    done = await client.get(
-        f"/auth/google/callback?state={state}&code=c0de",
-        headers={"Cookie": f"{auth_routes.NONCE_COOKIE}={nonce}"},
-        follow_redirects=False,
+def _credential_rows(world, source_id) -> list[dict]:
+    return fetch_all(
+        world["stream"],
+        "SELECT id, provider, media_source_id, ig_account_id, next_refresh_at,"
+        "       state, expires_at, encrypted_payload"
+        "  FROM oauth_credentials WHERE media_source_id = %s",
+        (str(source_id),),
     )
-    assert done.status_code == 302, done.text
-    return {"Authorization": f"Bearer {cookie_value(done, COOKIE)}"}
 
 
 # --- the credential row ------------------------------------------------------
@@ -172,58 +119,38 @@ class TestTheCredentialRow:
         self, world
     ):
         a = world["a"]
-        cid = _run(
-            _in_tenant(
-                world["ingress"],
-                a["ws"],
-                a["user"],
-                lambda s: drive.store_credential(
-                    s, workspace_id=a["ws"], media_source_id=a["src"], grant=_grant()
-                ),
-            )
-        )
-        rows = _credential_rows(world, a["src"])
-        assert len(rows) == 1
-        (rid, provider, src, acct, next_refresh, state, expires_at, payload) = rows[0]
-        assert str(rid) == cid
+        cid = _store(world, a, source=a["src"], grant=drive_grant())
+        (row,) = _credential_rows(world, a["src"])
+        assert str(row["id"]) == cid
         # THE invariant a copy of ig_login's writer breaks and the schema
         # cannot catch: provider AND both owner columns, explicitly.
-        assert provider == "gdrive"
-        assert str(src) == str(a["src"])
-        assert acct is None
+        assert row["provider"] == "gdrive"
+        assert str(row["media_source_id"]) == str(a["src"])
+        assert row["ig_account_id"] is None
         # F3 (b): the 063 fence stays closed, so this must be NULL.
-        assert next_refresh is None
-        assert state == "active"
-        assert expires_at is not None
+        assert row["next_refresh_at"] is None
+        assert row["state"] == "active"
+        assert row["expires_at"] is not None
         # ciphertext only — neither token, and no envelope field name, in the clear
         for secret in ("ya29.access", "1//refresh", "refresh_token"):
-            assert secret not in payload
+            assert secret not in row["encrypted_payload"]
         # #1054's read door, which shipped against nothing, answers for the
         # first time — with the ACCESS token, straight into a bearer header.
         assert _run(_token(world["ingress"], a["src"], a["ws"])) == "ya29.access"
 
     def test_a_reconnect_replaces_the_row_in_place(self, world):
         a = world["a"]
-        before = _credential_rows(world, a["src"])
-        assert len(before) == 1
-        cid = _run(
-            _in_tenant(
-                world["ingress"],
-                a["ws"],
-                a["user"],
-                lambda s: drive.store_credential(
-                    s,
-                    workspace_id=a["ws"],
-                    media_source_id=a["src"],
-                    grant=_grant(access_token="ya29.second"),
-                ),
-            )
+        (before,) = _credential_rows(world, a["src"])
+        cid = _store(
+            world, a, source=a["src"], grant=drive_grant(access_token="ya29.second")
         )
-        after = _credential_rows(world, a["src"])
-        assert [str(r[0]) for r in after] == [cid] == [str(before[0][0])], (
+        (after,) = _credential_rows(world, a["src"])
+        assert str(after["id"]) == cid == str(before["id"]), (
             "same row id — no gap, no second row"
         )
-        assert after[0][7] != before[0][7], "the payload moved"
+        assert after["encrypted_payload"] != before["encrypted_payload"], (
+            "the payload moved"
+        )
         assert _run(_token(world["ingress"], a["src"], a["ws"])) == "ya29.second"
 
     def test_the_credential_is_bound_to_its_workspace(self, world):
@@ -233,19 +160,7 @@ class TestTheCredentialRow:
         # makes a cross-workspace credential impossible by construction, and
         # `p_tenant` would hide the source anyway.
         with pytest.raises(DBAPIError):
-            _run(
-                _in_tenant(
-                    world["ingress"],
-                    b["ws"],
-                    b["user"],
-                    lambda s: drive.store_credential(
-                        s,
-                        workspace_id=b["ws"],
-                        media_source_id=a["src"],
-                        grant=_grant(),
-                    ),
-                )
-            )
+            _store(world, b, source=a["src"], grant=drive_grant())
         assert len(_credential_rows(world, a["src"])) == 1
         # Reading A's credential from tenant B: nothing, refused by name —
         # never B reading A's token.
@@ -254,18 +169,13 @@ class TestTheCredentialRow:
 
     def test_an_expired_access_token_is_refused_until_the_read_path_mints(self, world):
         b = world["b"]
-        _run(
-            _in_tenant(
-                world["ingress"],
-                b["ws"],
-                b["user"],
-                lambda s: drive.store_credential(
-                    s,
-                    workspace_id=b["ws"],
-                    media_source_id=b["src"],
-                    grant=_grant(expires_at=NOW - timedelta(days=1)),
-                ),
-            )
+        _store(
+            world,
+            b,
+            source=b["src"],
+            grant=drive_grant(
+                expires_at=datetime.now(timezone.utc) - timedelta(days=1)
+            ),
         )
         with pytest.raises(DriveCredentialDead, match="expired"):
             _run(_token(world["ingress"], b["src"], b["ws"]))
@@ -275,27 +185,42 @@ class TestTheCredentialRow:
 
 
 class TestTheStateRow:
-    def test_a_connect_state_pins_user_workspace_and_source(self, world):
-        a = world["a"]
-
+    @staticmethod
+    def _issue(world, tenant, *, purpose="connect") -> str:
         async def issue(s):
             return await issue_state(
                 s,
-                purpose="connect",
+                purpose=purpose,
                 provider=drive.PROVIDER,
-                user_id=a["user"],
-                workspace_id=a["ws"],
-                reconnect_target=a["src"],
+                user_id=tenant["user"],
+                workspace_id=tenant["ws"],
+                reconnect_target=tenant["src"],
             )
 
-        state = _run(_in_tenant(world["ingress"], a["ws"], a["user"], issue))
-        row = _run(
-            _in_tenant(
+        return _run(in_tenant(world["ingress"], tenant["ws"], tenant["user"], issue))
+
+    @staticmethod
+    def _consume(world, tenant, state, **expect) -> dict:
+        return _run(
+            in_tenant(
                 world["ingress"],
-                a["ws"],
-                a["user"],
-                lambda s: consume_state(s, state=state),
+                tenant["ws"],
+                tenant["user"],
+                lambda s: consume_state(s, state=state, **expect),
             )
+        )
+
+    def test_a_connect_state_pins_user_workspace_and_source(self, world):
+        """Also the positive control for the named refusals below: the
+        expectations the Drive callback passes ADMIT the state it minted."""
+        a = world["a"]
+        state = self._issue(world, a)
+        row = self._consume(
+            world,
+            a,
+            state,
+            expected_provider=drive.PROVIDER,
+            expected_purpose={"connect", "reconnect"},
         )
         assert row["provider"] == "gdrive"
         assert row["purpose"] == "connect"
@@ -303,16 +228,22 @@ class TestTheStateRow:
         assert str(row["reconnect_target"]) == str(a["src"])
 
     def test_an_unknown_state_is_refused_by_name(self, world):
-        a = world["a"]
         with pytest.raises(OAuthStateRefused, match="unknown state"):
-            _run(
-                _in_tenant(
-                    world["ingress"],
-                    a["ws"],
-                    a["user"],
-                    lambda s: consume_state(s, state="never-issued"),
-                )
-            )
+            self._consume(world, world["a"], "never-issued")
+
+    def test_a_state_for_another_leg_is_refused_by_name(self, world):
+        """The callback's expectations are what keep a sign-in state out of
+        the Drive leg and a Drive state out of sign-in: each mismatch is its
+        own reason, and the state is burned either way — one-shot."""
+        a = world["a"]
+        state = self._issue(world, a)
+        with pytest.raises(OAuthStateRefused, match="wrong provider"):
+            self._consume(world, a, state, expected_provider="google")
+        state = self._issue(world, a)
+        with pytest.raises(OAuthStateRefused, match="wrong purpose"):
+            self._consume(world, a, state, expected_purpose="signin")
+        with pytest.raises(OAuthStateRefused, match="already consumed"):
+            self._consume(world, a, state)
 
 
 # --- the route pair, through the real app --------------------------------------
@@ -323,8 +254,8 @@ class TestTheRoutePairAsSvcIngress:
         self, world, google_configured, monkeypatch
     ):
         async def main():
-            async with _api(world["ingress"]) as (client, ingress):
-                owner = await _sign_in(
+            async with api_client(world["ingress"]) as (client, ingress):
+                owner = await sign_in(
                     client, monkeypatch, sub="sub-drive", email="d@example.test"
                 )
                 made = await client.post(
@@ -363,7 +294,7 @@ class TestTheRoutePairAsSvcIngress:
                 # 2. The callback, with only the Drive exchange stubbed.
                 async def exchange_code(client_, **kw):
                     assert kw["code"] == "c0de"
-                    return _grant()
+                    return drive_grant()
 
                 monkeypatch.setattr(drive, "exchange_code", exchange_code)
                 done = await client.get(
@@ -375,14 +306,13 @@ class TestTheRoutePairAsSvcIngress:
                     done.headers["location"]
                     == f"{FRONT}/dashboard/settings?connected=gdrive"
                 )
-                rows = _credential_rows(world, sid)
-                assert len(rows) == 1
+                (row,) = _credential_rows(world, sid)
                 assert (
-                    rows[0][1],
-                    str(rows[0][2]),
-                    rows[0][3],
-                    rows[0][4],
-                    rows[0][5],
+                    row["provider"],
+                    str(row["media_source_id"]),
+                    row["ig_account_id"],
+                    row["next_refresh_at"],
+                    row["state"],
                 ) == ("gdrive", sid, None, None, "active")
                 # the read door, as the worker's adapter would call it
                 assert (
@@ -398,10 +328,7 @@ class TestTheRoutePairAsSvcIngress:
                     follow_redirects=False,
                 )
                 assert again.status_code == 302
-                assert (
-                    again.headers["location"]
-                    == f"{FRONT}/auth/error?reason=state_refused"
-                )
+                assert again.headers["location"] == _error_page("state_refused")
                 assert len(_credential_rows(world, sid)) == 1
 
                 # 4. A reconnect: a 'reconnect' state, and the row replaced in place.
@@ -422,7 +349,7 @@ class TestTheRoutePairAsSvcIngress:
                 )
                 assert redone.status_code == 302, redone.text
                 after = _credential_rows(world, sid)
-                assert [str(r[0]) for r in after] == [str(rows[0][0])]
+                assert [str(r["id"]) for r in after] == [str(row["id"])]
 
                 # 5. A source that is not this workspace's is not found — never 403.
                 stranger = await client.post(
@@ -437,7 +364,7 @@ class TestTheRoutePairAsSvcIngress:
         self, world, google_configured
     ):
         async def main():
-            async with _api(world["ingress"]) as (client, _):
+            async with api_client(world["ingress"]) as (client, _):
                 start = await client.get("/auth/google", follow_redirects=False)
                 state = parse_qs(urlsplit(start.headers["location"]).query)["state"][0]
                 done = await client.get(
@@ -445,10 +372,7 @@ class TestTheRoutePairAsSvcIngress:
                     follow_redirects=False,
                 )
                 assert done.status_code == 302
-                assert (
-                    done.headers["location"]
-                    == f"{FRONT}/auth/error?reason=state_refused"
-                )
+                assert done.headers["location"] == _error_page("state_refused")
 
         _run(main())
 
@@ -456,12 +380,12 @@ class TestTheRoutePairAsSvcIngress:
         self, world, google_configured
     ):
         async def main():
-            async with _api(world["ingress"]) as (client, _):
+            async with api_client(world["ingress"]) as (client, _):
                 done = await client.get(
                     "/auth/google-drive/callback?error=access_denied&state=x",
                     follow_redirects=False,
                 )
                 assert done.status_code == 302
-                assert done.headers["location"] == f"{FRONT}/auth/error?reason=denied"
+                assert done.headers["location"] == _error_page("denied")
 
         _run(main())

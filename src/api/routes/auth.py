@@ -1,4 +1,5 @@
-"""Sign-in, hosted on the API (`07` §1; #1015 §4 of the router design).
+"""Sign-in, hosted on the API (`07` §1; #1015 §4 of the router design), and
+the Drive connect leg's callback — the same shape with a different purpose.
 
 `GET /auth/google` mints an anonymous `oauth_states` row and sends the browser
 to Google; `GET /auth/google/callback` consumes that state one-shot, exchanges
@@ -10,28 +11,31 @@ the front end.
 
 Two transactions bracket the provider call, never one around it (`02` §5):
 the state is consumed and COMMITTED before Google is contacted, so a failed
-exchange costs the person a fresh click and nothing else, and the identity +
-session write opens afterwards. Both pre-auth endpoints debit the durable
-`preauth_ip` counter (`05`: 30/min per client IP) in the same transaction as
-the state work, so a refused request leaves no debit behind.
+exchange costs the person a fresh click and nothing else, and the write opens
+afterwards. Both pre-auth endpoints debit the durable `preauth_ip` counter
+(`05`: 30/min per client IP) in the same transaction as the state work, so a
+refused request leaves no debit behind. That first transaction is
+`_consume_callback`, written once for both callbacks.
+
+`GET /auth/google-drive/callback` is the other half of
+`POST /api/v1/workspaces/{ws}/sources/{id}/connect` (the gdrive epic, P3).
+The state was minted for a signed-in admin and pins the workspace, the user
+and the source, and **the state row is the only thing the callback trusts**:
+it carries no session, a state minted for another leg is refused by name at
+consume, and the credential is written inside a unit of work for THAT
+workspace as THAT user, so the audit trigger names the actor and `p_tenant`
+binds the row. Both legs' redirect URIs come from `google_client`.
 
 Failures redirect to the front end's `/auth/error` with a closed ``reason``
 (virgil's P3 already renders it) when `WEB_APP_URL` is set, and answer JSON
 400 otherwise. Reasons: ``denied`` (the person or Google declined) ·
-``missing_params`` · ``state_refused`` (unknown, expired, consumed, or the
-nonce cookie did not match) · ``exchange_failed`` · ``identity_collision``
-(the verified email belongs to another account — D35, never merged) ·
-``grant_incomplete`` (Drive only: the grant came back without a refresh token
-or without `drive.readonly`, and was refused rather than stored).
-
-`GET /auth/google-drive/callback` is the Drive connect leg's other half (the
-gdrive epic, P3): the same two-transaction bracket around the provider call,
-but the state was minted by `POST /api/v1/workspaces/{ws}/sources/{id}/connect`
-for a signed-in admin, so it pins the workspace, the user and the source, and
-the credential is written inside a unit of work for THAT workspace as THAT
-user — the callback itself carries no session and trusts only the row. Its
-redirect URI is the legacy flow's, byte for byte, so the Google client already
-registers it.
+``missing_params`` · ``state_refused`` (unknown, expired, consumed, minted
+for another leg, or the nonce cookie did not match) · ``exchange_failed`` ·
+``identity_collision`` (sign-in: the verified email belongs to another
+account — D35, never merged) · ``grant_incomplete`` (Drive: Google answered
+with a grant the leg will not keep; `google_drive_oauth.REDIRECT_REASON` maps
+each refusal). A Drive failure also carries ``flow=drive``: the page today is
+sign-in-shaped (title, CTAs), and needs to know which leg it renders for.
 """
 
 from __future__ import annotations
@@ -44,6 +48,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
+from src.api import google_client
 from src.api.principal import (
     clear_session_cookie,
     presented_token,
@@ -51,6 +56,7 @@ from src.api.principal import (
     set_session_cookie,
 )
 from src.config.settings import settings
+from src.exceptions.base import StorydumpError
 from src.services.target import (
     google_drive_oauth,
     google_oidc,
@@ -58,7 +64,6 @@ from src.services.target import (
     rate_counters,
     sessions,
 )
-from src.services.target.egress import EgressRefused, StorydumpError
 from src.services.target.ig_login_oauth import (
     STATE_TTL_SECONDS,
     OAuthStateRefused,
@@ -82,44 +87,8 @@ PREAUTH_LIMIT = 30
 PREAUTH_WINDOW_SECONDS = 60
 PREAUTH_SCOPE = "preauth_ip"
 
-
-#: Where Google sends the browser back for each leg. ONE Google client serves
-#: both (`GOOGLE_CLIENT_ID`), so both URIs are registered on it; the Drive one
-#: is the legacy flow's path unchanged.
-SIGNIN_CALLBACK_PATH = "/auth/google/callback"
-DRIVE_CALLBACK_PATH = "/auth/google-drive/callback"
-
-
-def _configured(callback_path: str = SIGNIN_CALLBACK_PATH) -> tuple[str, str, str]:
-    """(client_id, client_secret, redirect_uri), or a 503 that names what is
-    missing. A leg that is not configured refuses; it never half-works."""
-    missing = [
-        name
-        for name in (
-            "GOOGLE_CLIENT_ID",
-            "GOOGLE_CLIENT_SECRET",
-            "OAUTH_REDIRECT_BASE_URL",
-        )
-        if not getattr(settings, name, None)
-    ]
-    if missing:
-        raise HTTPException(
-            status_code=503,
-            detail=f"google sign-in not configured: set {', '.join(missing)}",
-        )
-    base = settings.OAUTH_REDIRECT_BASE_URL.rstrip("/")
-    return (
-        settings.GOOGLE_CLIENT_ID,
-        settings.GOOGLE_CLIENT_SECRET,
-        f"{base}{callback_path}",
-    )
-
-
-def drive_configured() -> tuple[str, str, str]:
-    """The Drive connect leg's (client_id, client_secret, redirect_uri) — the
-    same client as sign-in, the Drive callback. Read by the connect route in
-    `v1.py` and by the callback below, so the two cannot disagree on the URI."""
-    return _configured(DRIVE_CALLBACK_PATH)
+#: The Drive leg's name on the error page (`flow=`); sign-in carries none.
+DRIVE_FLOW = "drive"
 
 
 def _client_ip(request: Request) -> str:
@@ -142,30 +111,72 @@ async def _preauth_guard(conn, request: Request) -> None:
         raise HTTPException(status_code=429, detail="too many sign-in attempts")
 
 
-def _fail(reason: str) -> Response:
+def _fail(reason: str, *, flow: Optional[str] = None) -> Response:
+    """The error page — or JSON 400 without a front end — with the leg named
+    when it is not sign-in's."""
+    params = {"reason": reason}
+    if flow:
+        params["flow"] = flow
     origin = settings.web_app_origin
     if origin:
         return RedirectResponse(
-            f"{origin}/auth/error?{urlencode({'reason': reason})}", status_code=302
+            f"{origin}/auth/error?{urlencode(params)}", status_code=302
         )
-    return JSONResponse(status_code=400, content={"detail": reason})
+    content = {"detail": reason}
+    if flow:
+        content["flow"] = flow
+    return JSONResponse(status_code=400, content=content)
 
 
-def _landing() -> str:
+def _landing(path: str = "/welcome") -> str:
+    """Where a finished leg lands on the front end: sign-in on `/welcome`, the
+    Drive connect on the settings screen the button that started it lives on.
+    `/` without a front end."""
     origin = settings.web_app_origin
-    return f"{origin}/welcome" if origin else "/"
+    return f"{origin}{path}" if origin else "/"
 
 
-def _connected_landing() -> str:
-    """Where a finished Drive connect lands: the settings screen, which is
-    where the button that started it lives."""
-    origin = settings.web_app_origin
-    return f"{origin}/dashboard/settings?connected=gdrive" if origin else "/"
+async def _consume_callback(
+    request: Request,
+    *,
+    state: Optional[str],
+    code: Optional[str],
+    error: Optional[str],
+    expected_provider: str,
+    expected_purpose,
+    cookie_nonce: Optional[str] = None,
+    flow: Optional[str] = None,
+) -> dict | Response:
+    """The callback preamble both legs share: the provider's own error, the
+    two required params, then the first transaction — the pre-auth debit and
+    the one-shot consume, refusing BY NAME a state minted for another leg.
+    Returns the consumed state row, or the failure response to send as-is."""
+    engine = require_engine(request)
+    if error:
+        return _fail("denied", flow=flow)
+    if not state or not code:
+        return _fail("missing_params", flow=flow)
+    label = "drive connect" if flow == DRIVE_FLOW else "google sign-in"
+    async with engine.begin() as conn:
+        await _preauth_guard(conn, request)
+        try:
+            return await consume_state(
+                conn,
+                state=state,
+                cookie_nonce=cookie_nonce,
+                expected_provider=expected_provider,
+                expected_purpose=expected_purpose,
+            )
+        except OAuthStateRefused as exc:
+            logger.warning("%s: state refused: %s", label, exc)
+            return _fail("state_refused", flow=flow)
 
 
 @router.get("/google")
 async def google_signin(request: Request) -> Response:
-    client_id, _, redirect_uri = _configured()
+    client_id, _, redirect_uri = google_client.configured(
+        google_client.SIGNIN_CALLBACK_PATH
+    )
     engine = require_engine(request)
     cookie_nonce = new_state()
     async with engine.begin() as conn:
@@ -201,21 +212,20 @@ async def google_callback(
     code: Optional[str] = None,
     error: Optional[str] = None,
 ) -> Response:
-    client_id, client_secret, redirect_uri = _configured()
-    engine = require_engine(request)
-    if error:
-        return _fail("denied")
-    if not state or not code:
-        return _fail("missing_params")
-
-    cookie_nonce = request.cookies.get(NONCE_COOKIE)
-    async with engine.begin() as conn:
-        await _preauth_guard(conn, request)
-        try:
-            await consume_state(conn, state=state, cookie_nonce=cookie_nonce)
-        except OAuthStateRefused as exc:
-            logger.warning("google sign-in: state refused: %s", exc)
-            return _fail("state_refused")
+    client_id, client_secret, redirect_uri = google_client.configured(
+        google_client.SIGNIN_CALLBACK_PATH
+    )
+    row = await _consume_callback(
+        request,
+        state=state,
+        code=code,
+        error=error,
+        expected_provider=identity.PROVIDER_GOOGLE,
+        expected_purpose="signin",
+        cookie_nonce=request.cookies.get(NONCE_COOKIE),
+    )
+    if isinstance(row, Response):
+        return row
 
     # The provider call sits between the two transactions, never inside one.
     try:
@@ -232,11 +242,12 @@ async def google_callback(
             client_id=client_id,
             nonce=google_oidc.nonce_for(state),
         )
-    except (google_oidc.OidcRefused, EgressRefused, StorydumpError) as exc:
+    except StorydumpError as exc:
         # The message names the refusal; the token itself is never logged.
         logger.warning("google sign-in: exchange refused: %s", exc)
         return _fail("exchange_failed")
 
+    engine = require_engine(request)
     async with engine.begin() as conn:
         try:
             user_id = await identity.upsert_google_identity(
@@ -275,31 +286,28 @@ async def google_drive_callback(
     error: Optional[str] = None,
 ) -> Response:
     """The Drive connect leg's return: consume the state, exchange the code,
-    write the credential — the gdrive epic's P3, in the sign-in callback's
-    shape. The state row is the ONLY thing trusted: it names the workspace,
-    the user and the source, and a state minted for any other purpose or
-    provider (a sign-in state replayed here, say) is refused as such."""
-    client_id, client_secret, redirect_uri = drive_configured()
-    engine = require_engine(request)
-    if error:
-        return _fail("denied")
-    if not state or not code:
-        return _fail("missing_params")
-
-    async with engine.begin() as conn:
-        await _preauth_guard(conn, request)
-        try:
-            row = await consume_state(conn, state=state)
-        except OAuthStateRefused as exc:
-            logger.warning("drive connect: state refused: %s", exc)
-            return _fail("state_refused")
-    if (
-        row["provider"] != google_drive_oauth.PROVIDER
-        or row["purpose"] not in ("connect", "reconnect")
-        or row["reconnect_target"] is None
-    ):
-        logger.warning("drive connect: state is not a drive connect state")
-        return _fail("state_refused")
+    write the credential — the sign-in callback's shape, trusting the state
+    row alone (the module docstring has what that buys)."""
+    client_id, client_secret, redirect_uri = google_client.configured(
+        google_client.DRIVE_CALLBACK_PATH
+    )
+    row = await _consume_callback(
+        request,
+        state=state,
+        code=code,
+        error=error,
+        expected_provider=google_drive_oauth.PROVIDER,
+        expected_purpose={"connect", "reconnect"},
+        flow=DRIVE_FLOW,
+    )
+    if isinstance(row, Response):
+        return row
+    if row["reconnect_target"] is None:
+        # The schema still admits a target-less connect state (closing that
+        # is a follow-up); this leg cannot act on one — the source IS what
+        # the credential is for.
+        logger.warning("drive connect: state names no source")
+        return _fail("state_refused", flow=DRIVE_FLOW)
 
     # The provider call sits between the two transactions, never inside one.
     try:
@@ -311,18 +319,22 @@ async def google_drive_callback(
                 client_id=client_id,
                 client_secret=client_secret,
             )
-    except google_drive_oauth.DriveOAuthRefused as exc:
-        logger.warning("drive connect: grant refused: %s", exc)
-        incomplete = exc.reason in ("no_refresh_token", "scope_not_granted")
-        return _fail("grant_incomplete" if incomplete else "exchange_failed")
-    except (EgressRefused, StorydumpError) as exc:
+    except StorydumpError as exc:
+        # The message names the refusal; no token rides in it. A Drive
+        # refusal maps through the leg's own table; the floor's (host,
+        # budget) carry no Drive reason and fall to `exchange_failed`.
         logger.warning("drive connect: exchange refused: %s", exc)
-        return _fail("exchange_failed")
+        return _fail(
+            google_drive_oauth.REDIRECT_REASON.get(
+                getattr(exc, "reason", None), "exchange_failed"
+            ),
+            flow=DRIVE_FLOW,
+        )
 
     # The credential lands inside the state's own workspace, as the state's
     # user: the audit trigger names the actor, and `p_tenant` binds the row.
     uow = unit_of_work(
-        engine,
+        require_engine(request),
         str(row["workspace_id"]),
         actor_kind="user",
         actor_user_id=str(row["user_id"]),
@@ -335,7 +347,9 @@ async def google_drive_callback(
             media_source_id=row["reconnect_target"],
             grant=grant,
         )
-        # P4 (epic F4 (a)) re-arms the source HERE, in this same transaction:
-        # state='active', alerted_at=NULL, next_sync_at=now().
+        # P4 re-arms the source HERE, in this same transaction — F4 (a),
+        # `store_credential`'s contract.
 
-    return RedirectResponse(_connected_landing(), status_code=302)
+    return RedirectResponse(
+        _landing("/dashboard/settings?connected=gdrive"), status_code=302
+    )

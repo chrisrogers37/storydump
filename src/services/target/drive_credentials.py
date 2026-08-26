@@ -15,15 +15,12 @@ happily select another workspace's credential (astrid, #982).
 
 ## The writer, and the envelope it writes
 
-The credential is written by :mod:`google_drive_oauth` (the Drive connect leg):
-`provider = 'gdrive'`, `media_source_id` set, `ig_account_id` NULL. Its
-`encrypted_payload` is a versioned JSON envelope carrying BOTH tokens — the
-access token issued at connect time and the durable refresh token — because
-the epic's F3 (b) keeps the refresh token for the read path to mint from
-(P5) while, until then, this door hands back the connect-time access token.
-The envelope is decoded by the writer's own :func:`google_drive_oauth.decode_payload`
-so the two modules cannot drift on the shape; a payload that is not a v1
-envelope is refused by name here, never sent onward as a bearer.
+:mod:`google_drive_oauth` (the Drive connect leg) writes the row and owns the
+payload shape — a versioned envelope carrying both tokens, and why (F3 (b)).
+It is decoded here through the writer's own :func:`google_drive_oauth.decode_payload`
+so the two modules cannot drift, and a payload that is not a v1 envelope is
+refused by name, never sent onward as a bearer. Until P5 mints from the
+refresh token, this door hands back the connect-time access token.
 
 A source with no credential still raises :class:`DriveCredentialDead`, and
 that is deliberately **not** a crash: `media_sync` classifies it persistent,
@@ -57,22 +54,17 @@ from datetime import datetime, timezone
 from sqlalchemy import text
 
 from src.services.target import google_drive_oauth
+from src.services.target.ig_login_oauth import ring
 from src.services.target.media_sync import DriveCredentialDead
 
 logger = logging.getLogger(__name__)
 
-#: `ck_credentials_provider` / `ck_sources_provider`.
-PROVIDER = "gdrive"
+#: The writer's provider — one spelling, so the read door cannot look for a
+#: row under a name the connect leg does not write.
+PROVIDER = google_drive_oauth.PROVIDER
 
 #: The only state a credential may be used from.
 USABLE_STATE = "active"
-
-
-def _ring():
-    """The shipped ring — `07` §3 keeps the env name `ENCRYPTION_KEYS`."""
-    from src.utils.encryption import TokenEncryption
-
-    return TokenEncryption()
 
 
 async def token_for_source(engine, source_id: str, *, workspace_id: str) -> str:
@@ -109,8 +101,7 @@ async def token_for_source(engine, source_id: str, *, workspace_id: str) -> str:
     if row is None:
         raise DriveCredentialDead(
             f"no {PROVIDER} credential for media source {source_id} — the"
-            " source has never been connected (no credential writer exists"
-            " yet; see the module header)"
+            " source has never been connected"
         )
     if row["state"] != USABLE_STATE:
         raise DriveCredentialDead(
@@ -125,7 +116,7 @@ async def token_for_source(engine, source_id: str, *, workspace_id: str) -> str:
             " renew it"
         )
     try:
-        plaintext = _ring().decrypt(row["encrypted_payload"])
+        plaintext = ring().decrypt(row["encrypted_payload"])
     except Exception as exc:
         # Never log ciphertext, and never guess — `07` §3's fail-closed posture.
         # The state flip that ig_login performs here is deliberately NOT done:
@@ -137,7 +128,7 @@ async def token_for_source(engine, source_id: str, *, workspace_id: str) -> str:
             " decrypted by any ring entry"
         ) from exc
     try:
-        return google_drive_oauth.decode_payload(plaintext)["access_token"]
+        return google_drive_oauth.decode_payload(plaintext).access_token
     except google_drive_oauth.DrivePayloadMalformed as exc:
         # A row this module can decrypt but not read is refused by name —
         # never handed to the adapter as a bearer value that is really a blob.

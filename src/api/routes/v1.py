@@ -41,14 +41,13 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 
 from src.api.principal import Principal, current_principal, require_engine
-from src.api.routes.auth import drive_configured
+from src.api import google_client
 from src.services.target import (
     commands,
     google_drive_oauth,
     identity,
     invitations,
     provisioning,
-    readers,
     tenant_resolution,
     workspaces,
 )
@@ -487,26 +486,18 @@ async def connect_source(
     source that has never been credentialed and `reconnect` after that, so a
     stale reconnect state is retired by the next one (last issued wins).
     """
-    client_id, _, redirect_uri = drive_configured()
+    client_id, _, redirect_uri = google_client.configured(
+        google_client.DRIVE_CALLBACK_PATH
+    )
     async with _admin(request, str(ws), principal) as session:
-        source = await readers.row(
-            session,
-            "SELECT id FROM media_sources WHERE id = :s AND workspace_id = :ws",
-            s=str(source_id),
-            ws=str(ws),
+        purpose = await google_drive_oauth.connect_purpose(
+            session, workspace_id=str(ws), media_source_id=str(source_id)
         )
-        if source is None:
+        if purpose is None:
             raise HTTPException(status_code=404, detail="not found")
-        credentialed = await readers.row(
-            session,
-            "SELECT 1 AS present FROM oauth_credentials"
-            " WHERE media_source_id = :s AND provider = :provider",
-            s=str(source_id),
-            provider=google_drive_oauth.PROVIDER,
-        )
         state = await issue_state(
             session,
-            purpose="reconnect" if credentialed else "connect",
+            purpose=purpose,
             provider=google_drive_oauth.PROVIDER,
             user_id=principal.user_id,
             workspace_id=str(ws),

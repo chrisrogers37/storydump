@@ -15,16 +15,20 @@ import base64
 import json
 import time
 from contextlib import asynccontextmanager
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.pool import NullPool
 
 from src.api.app import create_app
-from src.api.principal import Principal, current_principal
-from src.api.routes import v1
+from src.api.principal import COOKIE, Principal, current_principal
+from src.api.routes import auth, v1
 from src.config.settings import settings
 from src.services.target import google_oidc, tenant_resolution
+from src.services.target.unit_of_work import asyncpg_url
 
 PRINCIPAL = Principal(
     session_id="11111111-1111-1111-1111-111111111111",
@@ -156,3 +160,45 @@ def tenant(monkeypatch, engine):
     monkeypatch.setattr(tenant_resolution, "authorize_member", gate)
     del asked
     return log
+
+
+# --- the real app, for the gates ---------------------------------------------
+
+
+@asynccontextmanager
+async def api_client(dsn: str):
+    """The real app over a fresh NullPool engine on *dsn*, as an ASGI client;
+    the engine is disposed with the client. Yields (client, engine). The
+    real-database gates' driver — route unit tests use `client` above."""
+    engine = create_async_engine(asyncpg_url(dsn), poolclass=NullPool)
+    try:
+        app = create_app(engine=engine)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url=API) as client:
+            yield client, engine
+    finally:
+        await engine.dispose()
+
+
+async def sign_in(
+    client: httpx.AsyncClient, monkeypatch, *, sub: str, email: str
+) -> dict:
+    """Drive the real sign-in with only the provider stubbed, assert it lands
+    on `/welcome`, and return the bearer header for the new session."""
+    start = await client.get("/auth/google", follow_redirects=False)
+    assert start.status_code == 302, start.text
+    state = parse_qs(urlsplit(start.headers["location"]).query)["state"][0]
+    nonce = cookie_value(start, auth.NONCE_COOKIE)
+
+    async def exchange_code(client_, **kw):
+        return unsigned_id_token(state, sub=sub, email=email, name=sub)
+
+    monkeypatch.setattr(google_oidc, "exchange_code", exchange_code)
+    done = await client.get(
+        f"/auth/google/callback?state={state}&code=c0de",
+        headers={"Cookie": f"{auth.NONCE_COOKIE}={nonce}"},
+        follow_redirects=False,
+    )
+    assert done.status_code == 302, done.text
+    assert done.headers["location"] == f"{FRONT}/welcome", done.headers["location"]
+    return {"Authorization": f"Bearer {cookie_value(done, COOKIE)}"}
