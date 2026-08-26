@@ -101,3 +101,65 @@ export function connectRefusalCopy(reason: unknown): string {
   }
   return "Could not start the Google sign-in. Nothing changed — try again shortly.";
 }
+
+export type AddSourceResult =
+  | { ok: true; sourceId: string; created: boolean }
+  | { ok: false; error: string; status: number };
+
+/**
+ * Add a Drive folder as a source.
+ *
+ * REST rather than a command, per F1 (b): a folder is a resource and the
+ * vocabulary has no name for creating one. No submission id — the target route
+ * is idempotent on the folder under an advisory lock, so a repeat returns the
+ * SAME source rather than a second one, and `created` says which happened.
+ */
+export async function addDriveSource(
+  workspaceId: string,
+  folderRef: string,
+  rootName?: string,
+): Promise<AddSourceResult> {
+  let response: Response;
+  try {
+    response = await fetch(`/api/workspaces/${workspaceId}/sources`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(
+        rootName?.trim()
+          ? { folder_ref: folderRef, root_name: rootName.trim() }
+          : { folder_ref: folderRef },
+      ),
+    });
+  } catch {
+    return { ok: false, error: "unreachable", status: 0 };
+  }
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = typeof data?.error === "string" ? data.error : `http_${response.status}`;
+    return { ok: false, error, status: response.status };
+  }
+  if (typeof data?.sourceId !== "string") {
+    return { ok: false, error: "malformed_response", status: response.status };
+  }
+  return { ok: true, sourceId: data.sourceId, created: data.created === true };
+}
+
+/** A sentence for a failed folder add. */
+export function addSourceRefusalCopy(reason: unknown): string {
+  switch (reason) {
+    case "folder_required":
+      return "Paste a Google Drive folder link or its folder id.";
+    case "invalid_args":
+      // The port's own refusal for a value `folder_ref_from` will not accept —
+      // a link that is not a folder link is refused rather than salvaged.
+      return "That does not look like a Drive folder link. Open the folder in Drive and copy the address.";
+    case "unauthenticated":
+    case "http_401":
+      return "That session expired. Sign in again.";
+    case "unreachable":
+    case "target_router_unreachable":
+      return "Storydump cannot reach the server right now. Nothing was added — try again shortly.";
+  }
+  return "Could not add that folder. Nothing was added — try again shortly.";
+}
