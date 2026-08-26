@@ -6,7 +6,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { postApi } from "@/lib/dashboard-api";
-import type { SettingsView } from "@/lib/dashboard-payloads";
+import type { SettingsView, SourceRow } from "@/lib/dashboard-payloads";
+import { connectRefusalCopy, requestSourceConnect } from "@/lib/source-connect";
 
 /**
  * Integrations, read-only (#1063).
@@ -27,28 +28,92 @@ import type { SettingsView } from "@/lib/dashboard-payloads";
  * wired yet (#1063 / epic P6, F5 locked (b)) — DISABLED WITH A REASON, not
  * removed: a control that is real and is coming back stays visible and inert.
  *
- * The Connect button is different in kind and is REMOVED. `openOAuthWindow`
- * calls `oauth-url/<provider>`, which is PER-WORKSPACE — and a Drive
- * credential is per-SOURCE (`ck_credentials_one_owner` ties it to a
- * `media_source_id`). So this control is not merely unwired, it is the WRONG
- * SHAPE: there is no per-workspace answer to "connect Drive", because a
- * workspace can hold more than one source. Leaving it disabled would suggest
- * the same button returns, and it does not.
+ * ── The Connect button is BACK, and per SOURCE this time (#1065) ────────────
+ *
+ * #1070 deleted the old one because it was the wrong shape, not merely
+ * unwired: `openOAuthWindow` called `oauth-url/<provider>`, which is
+ * per-WORKSPACE, and a Drive credential is per-SOURCE
+ * (`ck_credentials_one_owner` ties it to a `media_source_id`). There is no
+ * per-workspace answer to "connect Drive", because a workspace holds one
+ * source per Drive folder — `get_or_create_media_source` is idempotent on the
+ * FOLDER and says in as many words that creates for different folders never
+ * contend. So the card is now a LIST, one row per source, and each row's
+ * button carries that row's id.
+ *
+ * ── What this card can and cannot say ──────────────────────────────────────
+ *
+ * `GET /workspaces/{ws}/sources` returns id, provider, state, the sync
+ * timestamps and `created_at`. It returns NO credential field, so this tier
+ * cannot tell a source that has been granted from one that has not — the
+ * server can (`connect_purpose` runs an EXISTS on `oauth_credentials` and
+ * answers `connect` before a credential, `reconnect` after), but that answer
+ * is not on the wire.
+ *
+ * Two consequences, both deliberate:
+ *
+ * 1. The button's label is NEUTRAL across both states, because a precise one
+ *    would be a guess. The route disambiguates for itself.
+ * 2. The old "Connected" heading is GONE. It was `drive !== null` — a source
+ *    ROW existing — so a folder that had been added and never granted rendered
+ *    as "Connected" with a green `active` badge, which is a claim this tier
+ *    has no way to make. What is shown now is what is known: a source exists,
+ *    and here is its state.
+ *
+ * The fix that would let this say "Connected" truthfully is a credential
+ * indicator on the sources payload, mirroring the EXISTS `connect_purpose`
+ * already runs. That is a change to the API, not to this file.
  */
 const DISABLED_REASON =
   "Not wired up yet — this action is not available on this API version.";
 
 export function IntegrationsTab({
   settings,
+  sources,
+  workspaceId,
   editable,
 }: {
   settings: SettingsView;
+  /** The workspace's sources, unflattened — this card renders them per row. */
+  sources: SourceRow[];
+  workspaceId: string;
   editable: boolean;
 }) {
   const router = useRouter();
   const [syncing, setSyncing] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
+  const [connectingId, setConnectingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const driveSources = sources.filter((s) => s.provider === "gdrive");
+  // Only shown when there is something to tell apart. The sources payload
+  // carries no folder name (`config` is not returned), so with two rows the
+  // honest disambiguator is a short id; with one it would be noise.
+  const needsIdentifier = driveSources.length > 1;
+
+  /**
+   * Start the grant for ONE source, then hand the browser to Google.
+   *
+   * `window.location.assign`, not a new tab. The old per-workspace button
+   * opened a popup and polled `visibilitychange` to notice the return; the
+   * callback is a real navigation (`GET /auth/google-drive/callback`) that
+   * lands back in this app, so a same-tab redirect needs no listener and no
+   * guessing about when the person came back. #1070 deleted those listeners
+   * with the button that needed them; this does not bring them back.
+   */
+  async function connect(sourceId: string) {
+    setError(null);
+    setConnectingId(sourceId);
+    const result = await requestSourceConnect(workspaceId, sourceId);
+    if (!result.ok) {
+      setConnectingId(null);
+      setError(connectRefusalCopy(result.error));
+      return;
+    }
+    // Deliberately no `setConnectingId(null)` on success: the page is leaving.
+    // Clearing it would flash the button back to its resting label during the
+    // navigation, which reads as the click having done nothing.
+    window.location.assign(result.authorizationUrl);
+  }
   async function disconnectGdrive() {
     setError(null);
     setDisconnecting(true);
@@ -87,75 +152,112 @@ export function IntegrationsTab({
           <CardTitle className="text-base">Google Drive</CardTitle>
         </CardHeader>
         <CardContent>
-          {settings.gdrive_connected ? (
-            <div className="flex items-center justify-between">
-              <div className="space-y-0.5">
-                <div className="flex items-center gap-2">
-                  <p className="font-medium">Connected</p>
-                  {/* The source's own state, not a hardcoded "Active" badge:
-                      connected-but-erroring and connected-and-healthy are
-                      different facts with different remedies. */}
-                  {settings.media_source_state && (
-                    <Badge
-                      variant="secondary"
-                      className={
-                        settings.media_source_state === "active"
-                          ? "bg-green-100 text-green-800"
-                          : "bg-amber-100 text-amber-900"
-                      }
-                    >
-                      {settings.media_source_state}
-                    </Badge>
-                  )}
-                </div>
-                {settings.gdrive_email && (
-                  <p className="text-sm text-muted-foreground">
-                    {settings.gdrive_email}
-                  </p>
-                )}
-              </div>
-              <div className="flex flex-col items-end gap-1">
-                <div className="flex items-center gap-2">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={syncMedia}
-                    disabled={!editable || syncing}
-                    title={editable ? undefined : DISABLED_REASON}
-                  >
-                    {syncing ? "Syncing..." : "Sync Now"}
-                  </Button>
-                  <Button
-                    variant="destructive"
-                    size="sm"
-                    onClick={disconnectGdrive}
-                    disabled={!editable || disconnecting}
-                    title={editable ? undefined : DISABLED_REASON}
-                  >
-                    {disconnecting ? "Disconnecting..." : "Disconnect"}
-                  </Button>
-                </div>
-                {!editable && (
-                  <p className="text-xs text-muted-foreground">
-                    Not wired up yet
-                  </p>
-                )}
-              </div>
-            </div>
-          ) : (
-            <div className="py-4 text-center">
-              <p className="text-sm text-muted-foreground mb-4">
-                No Google Drive source is connected to this workspace.
+          {driveSources.length === 0 ? (
+            <div className="py-4 text-center space-y-1">
+              <p className="text-sm text-muted-foreground">
+                No Google Drive folder is set up for this workspace.
               </p>
               {/*
-                GONE, not gated — same reason as the Instagram button, plus a
-                shape one this file already documents: there is no
-                per-workspace answer to "connect Drive", the route is
-                per-source. Behind `editable` it would have come back the
-                moment P3 flipped that flag (rajan, #1066 review).
+                No Connect button here, and that is not the same omission
+                #1070 made. The connect route is per-SOURCE: with no source
+                there is nothing to grant access TO, so the missing step is
+                adding a folder, which this screen does not do yet.
               */}
               <p className="text-sm text-muted-foreground">
-                Connecting Google Drive is not available from this screen yet.
+                Adding one is not available from this screen yet.
+              </p>
+            </div>
+          ) : (
+            <ul className="divide-y">
+              {driveSources.map((source) => (
+                <li
+                  key={source.id}
+                  className="flex flex-wrap items-center justify-between gap-3 py-3 first:pt-0 last:pb-0"
+                >
+                  <div className="space-y-0.5">
+                    <div className="flex items-center gap-2">
+                      <p className="font-medium">
+                        Drive folder
+                        {needsIdentifier && (
+                          <span className="ml-2 font-mono text-xs text-muted-foreground">
+                            {source.id.slice(0, 8)}
+                          </span>
+                        )}
+                      </p>
+                      {/* The source's own state, not a hardcoded badge:
+                          erroring and healthy are different facts with
+                          different remedies. */}
+                      <Badge
+                        variant="secondary"
+                        className={
+                          source.state === "active"
+                            ? "bg-green-100 text-green-800"
+                            : "bg-amber-100 text-amber-900"
+                        }
+                      >
+                        {source.state}
+                      </Badge>
+                    </div>
+                    {/*
+                      NOT "Connected". That heading was `drive !== null` — a
+                      source ROW existing — so a folder added and never granted
+                      read as connected with a green badge. The sources payload
+                      carries no credential field, so this tier cannot make
+                      that claim; it states what it knows instead.
+                    */}
+                    <p className="text-sm text-muted-foreground">
+                      {source.last_sync_success_at
+                        ? "Syncing"
+                        : "No sync has completed yet"}
+                    </p>
+                  </div>
+                  <div className="flex flex-col items-end gap-1">
+                    <div className="flex items-center gap-2">
+                      <Button
+                        size="sm"
+                        onClick={() => connect(source.id)}
+                        disabled={connectingId !== null}
+                      >
+                        {connectingId === source.id
+                          ? "Opening Google..."
+                          : "Set up Google access"}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={syncMedia}
+                        disabled={!editable || syncing}
+                        title={editable ? undefined : DISABLED_REASON}
+                      >
+                        {syncing ? "Syncing..." : "Sync Now"}
+                      </Button>
+                      <Button
+                        variant="destructive"
+                        size="sm"
+                        onClick={disconnectGdrive}
+                        disabled={!editable || disconnecting}
+                        title={editable ? undefined : DISABLED_REASON}
+                      >
+                        {disconnecting ? "Disconnecting..." : "Disconnect"}
+                      </Button>
+                    </div>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+          {driveSources.length > 0 && (
+            <div className="space-y-1 pt-3">
+              {!editable && (
+                <p className="text-xs text-muted-foreground">
+                  Sync and Disconnect are not wired up yet.
+                </p>
+              )}
+              {/* Once for the card, not once per row: the folder ref lives in
+                  `media_sources.config`, which the sources route does not
+                  return, so it is omitted rather than guessed. */}
+              <p className="text-xs text-muted-foreground">
+                The folder each source syncs from is not available from this API yet.
               </p>
             </div>
           )}
@@ -180,22 +282,6 @@ export function IntegrationsTab({
                   : "Auto-sync disabled"}
             </p>
           </div>
-          {settings.media_source_type && (
-            <div className="rounded-md border bg-muted/40 p-3 text-sm space-y-1">
-              <div className="flex items-baseline gap-2">
-                <span className="text-muted-foreground">Source</span>
-                <span className="font-medium capitalize">
-                  {settings.media_source_type.replace(/_/g, " ")}
-                </span>
-              </div>
-              {/* The folder ref lives in `media_sources.config`, which the
-                  sources route does not return — so it is omitted rather than
-                  guessed from the provider. */}
-              <p className="text-xs text-muted-foreground pt-1">
-                The folder this syncs from is not available from this API yet.
-              </p>
-            </div>
-          )}
         </CardContent>
       </Card>
     </div>
