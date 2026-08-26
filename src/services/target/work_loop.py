@@ -29,7 +29,7 @@ from typing import Any, Callable, Optional
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from src.services.target import credential_lifecycle, media_sync
+from src.services.target import credential_lifecycle, email_sender, media_sync
 
 from src.services.target import (
     jobs,
@@ -102,6 +102,8 @@ class WorkerDeps:
     #: (`list_files` / `fetch_bytes`); `StubDriveAdapter` until M.3 (#862).
     drive: Any = None
     media_fetch: Optional[Callable[[dict], Any]] = None
+    #: The `07` §1 EmailSender port, or None when no provider is wired (#1092).
+    email: Optional[Any] = None
     transport: Optional[Callable[[dict], Any]] = None
     poll: Optional[Callable[..., Any]] = None
     refresh: Optional[Callable[..., Any]] = None
@@ -120,7 +122,6 @@ UNBUILT_KINDS = (
     "offboard_workspace",
     "retention_sweep",
     "reencrypt_credentials",
-    "send_email",
 )
 
 
@@ -342,6 +343,34 @@ def build_registry(deps: WorkerDeps) -> dict:
         refresh_credential
         if deps.refresh is not None
         else Parked("no refresh door provided (compose wires the real one)")
+    )
+
+    async def send_email(session, job):
+        # Own-transactions, for `run_pipeline`'s reason above plus one of its
+        # own: a provider call cannot run inside an open transaction (`02` §5).
+        sent = await email_sender.execute_send_email(
+            job, sender=deps.email, engine=deps.engine
+        )
+        if sent is None:
+            # The executor rescheduled the job itself, so the loop's finalize
+            # below will not match a leased row and will log a fence warning
+            # ("another owner won") that is not true here. Said plainly on the
+            # line above it, because that warning is what an operator reads to
+            # answer "is the reaper racing my workers". The accounting itself
+            # is the loop's to fix and is filed.
+            logger.info(
+                "send_email %s deferred; the fence warning that follows is the"
+                " deferral, not a lost lease",
+                job["id"],
+            )
+
+    registry["send_email"] = (
+        send_email
+        if deps.email is not None
+        else Parked(
+            "no email provider configured — set RESEND_API_KEY and EMAIL_FROM"
+            " (`07` §1's owner ack on adding Resend is OPEN, #1092)"
+        )
     )
     # No external seam: the prompt writes outbox rows and nothing else, so it
     # is live in every deployment that has an engine at all.

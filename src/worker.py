@@ -35,6 +35,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from src.services.target import (
     credential_lifecycle,
     drive_credentials,
+    email_sender,
     google_drive_adapter,
     jobs,
     scheduler,
@@ -125,6 +126,10 @@ def compose(
         meta=None,
         transit=_transit_from_env(env),
         media_fetch=None,
+        # None until a provider is wired, and that is the honest state rather
+        # than a stub: `07` §1's owner ack on adding Resend is OPEN, so the
+        # kind parks with a reason naming what is missing (#1092).
+        email=email_sender.sender_from_env(env),
         transport=transport,
         poll=None,
         refresh=refresh if refresh is not None else credential_lifecycle.ig_refresh,
