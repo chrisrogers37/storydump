@@ -14,13 +14,25 @@ export function Hero() {
         <h1 className="text-4xl font-bold tracking-tight sm:text-5xl md:text-6xl">
           Instagram Stories on Autopilot
         </h1>
+        {/*
+          "no dashboard logins" was here and is FALSE. Every workspace has web
+          access by construction, and the dashboard is where the queue,
+          settings, Drive connect and sync now live — so the first sentence a
+          visitor read asserted the opposite of the product (#1090 A1).
+
+          The differentiator was never the absence of a dashboard; it is
+          one-tap approval from a chat you already have open, and that is
+          untouched. Telegram moves from "instead of" to "as well as", which is
+          what is true: a workspace with no Telegram binding still reaches
+          `awaiting_approval` and stays actionable on the web.
+        */}
         <p className="mx-auto mt-6 max-w-2xl text-lg text-muted-foreground">
           Your content library, posted to Stories on a schedule you set.
-          Approve every post from Telegram with one tap — no dashboard logins,
-          no manual uploads, no missed days.
+          Approve each post with one tap — no manual uploads, no missed days.
         </p>
         <p className="mt-3 text-sm font-medium text-foreground/80">
-          The only Story tool that lives where you already are — Telegram.
+          The only Story tool that lives where you already are — approve from
+          Telegram, or from your dashboard.
         </p>
         <div className="mt-10">
           <WaitlistForm variant="hero" />
