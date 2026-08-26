@@ -26,21 +26,11 @@ empty when no caller is claimed.
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
-from urllib.parse import parse_qs, urlsplit
 
-import httpx
 import psycopg2
 import pytest
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import create_async_engine
-from sqlalchemy.pool import NullPool
 
-from src.api.app import create_app
-from src.api.principal import COOKIE
-from src.api.routes import auth as auth_routes
-from src.services.target import google_oidc
-from src.services.target.unit_of_work import asyncpg_url
 from tests.scripts.conftest import (
     _scratch,
     as_user,
@@ -50,7 +40,7 @@ from tests.scripts.conftest import (
     set_test_passwords,
 )
 from tests.src.api import conftest as api_conftest
-from tests.src.api.conftest import API, FRONT, cookie_value, unsigned_id_token
+from tests.src.api.conftest import api_client, sign_in
 
 #: The configured sign-in world, registered here as a fixture by assignment.
 google_configured = api_conftest.google_configured
@@ -72,44 +62,6 @@ def world(admin_conn, owner_actor):
 
 def _run(coro):
     return asyncio.run(coro)
-
-
-@asynccontextmanager
-async def _api(dsn: str):
-    """The real app over a fresh NullPool engine on *dsn*, as an ASGI client;
-    the engine is disposed with the client. Yields (client, engine)."""
-    engine = create_async_engine(asyncpg_url(dsn), poolclass=NullPool)
-    try:
-        app = create_app(engine=engine)
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url=API) as client:
-            yield client, engine
-    finally:
-        await engine.dispose()
-
-
-async def _sign_in(
-    client: httpx.AsyncClient, monkeypatch, *, sub: str, email: str
-) -> dict:
-    """Drive the real sign-in with only the provider stubbed. Returns the
-    bearer header for the new session."""
-    start = await client.get("/auth/google", follow_redirects=False)
-    assert start.status_code == 302, start.text
-    state = parse_qs(urlsplit(start.headers["location"]).query)["state"][0]
-    nonce = cookie_value(start, auth_routes.NONCE_COOKIE)
-
-    async def exchange_code(client_, **kw):
-        return unsigned_id_token(state, sub=sub, email=email, name=sub)
-
-    monkeypatch.setattr(google_oidc, "exchange_code", exchange_code)
-    done = await client.get(
-        f"/auth/google/callback?state={state}&code=c0de",
-        headers={"Cookie": f"{auth_routes.NONCE_COOKIE}={nonce}"},
-        follow_redirects=False,
-    )
-    assert done.status_code == 302, done.text
-    assert done.headers["location"] == f"{FRONT}/welcome", done.headers["location"]
-    return {"Authorization": f"Bearer {cookie_value(done, COOKIE)}"}
 
 
 def _seed_intent(dsn: str, workspace_id: str, tag: str) -> str:
@@ -136,13 +88,13 @@ def test_x2_gate_web_only_approval_as_svc_ingress(
     world, google_configured, monkeypatch
 ):
     async def main():
-        async with _api(world["ingress"]) as (client, engine):
+        async with api_client(world["ingress"]) as (client, engine):
             # subject gate: the app really runs as the production role
             async with engine.connect() as conn:
                 who = (await conn.execute(text("SELECT current_user"))).scalar()
                 assert who == "svc_ingress", who
 
-            owner = await _sign_in(
+            owner = await sign_in(
                 client, monkeypatch, sub="sub-owner", email="Owner@Example.test"
             )
             me = await client.get("/api/v1/me", headers=owner)
@@ -287,8 +239,8 @@ def test_a_second_user_sees_404_not_403_and_signout_revokes(
     world, google_configured, monkeypatch
 ):
     async def main():
-        async with _api(world["ingress"]) as (client, _):
-            owner = await _sign_in(
+        async with api_client(world["ingress"]) as (client, _):
+            owner = await sign_in(
                 client, monkeypatch, sub="sub-a", email="a@example.test"
             )
             created = await client.post(
@@ -298,7 +250,7 @@ def test_a_second_user_sees_404_not_403_and_signout_revokes(
             )
             ws = created.json()["workspace_id"]
 
-            other = await _sign_in(
+            other = await sign_in(
                 client, monkeypatch, sub="sub-b", email="b@example.test"
             )
             assert (
@@ -330,11 +282,11 @@ class TestMembershipListingUnderTheProductionRole:
         self, world, google_configured, monkeypatch
     ):
         async def main():
-            async with _api(world["ingress"]) as (client, ingress):
-                a = await _sign_in(
+            async with api_client(world["ingress"]) as (client, ingress):
+                a = await sign_in(
                     client, monkeypatch, sub="sub-list-a", email="la@example.test"
                 )
-                b = await _sign_in(
+                b = await sign_in(
                     client, monkeypatch, sub="sub-list-b", email="lb@example.test"
                 )
                 made_a = await client.post(

@@ -15,6 +15,8 @@ import {
 import { postApi } from "@/lib/dashboard-api";
 
 interface Props {
+  /** False while the write routes do not exist (#1063). */
+  editable: boolean;
   captionStyle: string | null;
   onError: (message: string | null) => void;
 }
@@ -32,7 +34,7 @@ const STYLE_OPTIONS = [
   },
 ];
 
-export function CaptionStyleCard({ captionStyle, onError }: Props) {
+export function CaptionStyleCard({ captionStyle, editable, onError }: Props) {
   const router = useRouter();
   const initial = captionStyle ?? "enhanced";
   const [value, setValue] = useState(initial);
@@ -64,7 +66,7 @@ export function CaptionStyleCard({ captionStyle, onError }: Props) {
       <CardContent className="space-y-4">
         <div className="space-y-2">
           <Label>Telegram notification format</Label>
-          <Select value={value} onValueChange={setValue}>
+          <Select value={value} onValueChange={setValue} disabled={!editable}>
             <SelectTrigger className="w-full sm:w-[260px]">
               <SelectValue />
             </SelectTrigger>
@@ -80,9 +82,11 @@ export function CaptionStyleCard({ captionStyle, onError }: Props) {
             {STYLE_OPTIONS.find((o) => o.value === value)?.description}
           </p>
         </div>
+        {editable && (
         <Button onClick={save} disabled={!changed || saving}>
           {saving ? "Saving…" : "Save"}
         </Button>
+        )}
       </CardContent>
     </Card>
   );

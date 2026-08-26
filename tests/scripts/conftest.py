@@ -30,9 +30,14 @@ from pathlib import Path
 import psycopg2
 import pytest
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
+from psycopg2.extras import RealDictCursor
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.pool import NullPool
 
 from scripts.migration_runner import legacy_lineage_max
 from src.config.settings import settings
+from src.services.target.unit_of_work import asyncpg_url, unit_of_work
 from src.utils.validators import MIGRATIONS_DIR
 from tests.conftest import SESSION_DB_SUFFIX as SESSION_TOKEN
 
@@ -1105,6 +1110,20 @@ def fetch_one(dsn, sql, params=None):
     return row
 
 
+def fetch_all(dsn, sql, params=None):
+    """Every matching row, by column NAME. A multi-column row assertion should
+    read by name: a reordered SELECT cannot then silently shift which column
+    an index meant."""
+    with (
+        psycopg2.connect(dsn) as conn,
+        conn.cursor(cursor_factory=RealDictCursor) as cur,
+    ):
+        cur.execute(sql, params)
+        rows = cur.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
 def probe_table(name):
     return (
         "SELECT EXISTS (SELECT 1 FROM information_schema.tables"
@@ -1141,3 +1160,34 @@ def txn(dsn, expect_user=None):
         conn.rollback()
     finally:
         conn.close()
+
+
+@contextlib.asynccontextmanager
+async def ingress_engine(dsn):
+    """A fresh NullPool async engine on *dsn*, disposed on exit — the shape an
+    asyncio.run-per-call driver needs, since a pooled engine cannot outlive the
+    loop that made it."""
+    engine = create_async_engine(asyncpg_url(dsn), poolclass=NullPool)
+    try:
+        yield engine
+    finally:
+        await engine.dispose()
+
+
+async def in_tenant(dsn, ws, user, fn):
+    """Run *fn(session)* in one committed unit of work as `svc_ingress`.
+
+    The role is ASSERTED rather than assumed: a driver that quietly connected
+    as the owner would bypass RLS, and every isolation claim built on it would
+    be vacuous while still reading green. ONE spelling for the suites that
+    measure under RLS (the provisioning and Drive gates), for the reason `txn`
+    is one spelling.
+    """
+    async with ingress_engine(dsn) as engine:
+        uow = unit_of_work(
+            engine, str(ws), actor_kind="user", actor_user_id=str(user), channel="web"
+        )
+        async with uow.begin() as session:
+            who = (await session.execute(text("SELECT current_user"))).scalar()
+            assert who == "svc_ingress", who
+            return await fn(session)

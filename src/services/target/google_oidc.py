@@ -99,22 +99,23 @@ def authorization_url(*, client_id: str, redirect_uri: str, state: str) -> str:
     return f"{AUTHORIZE_URL}?{urlencode(params)}"
 
 
-async def exchange_code(
+async def code_grant(
     client,
     *,
     code: str,
     redirect_uri: str,
     client_id: str,
     client_secret: str,
-) -> str:
-    """Trade the authorization code for the ID token, through the egress
-    floor. Returns the raw ID token string; nothing else in the token response
-    is used (no refresh token is requested — sign-in needs none), and the
-    response body is never logged because it carries bearer tokens.
+) -> tuple[int, Any]:
+    """POST the authorization-code grant to the token endpoint, through the
+    egress floor, and hand back ``(status, body)`` — the body parsed as JSON,
+    or ``None`` when the endpoint did not answer JSON.
 
-    Provider-side failures surface as ``OidcRefused`` so the route has one
-    refusal type to map; the floor's own refusals (host, budget) propagate as
-    themselves.
+    The one request shape both Google legs share: sign-in (below) and the
+    Drive connect leg (:mod:`google_drive_oauth`). What a non-200 or a missing
+    field MEANS differs per leg, so each caller raises its own refusal; the
+    floor's own refusals (host, budget) propagate as themselves. The body is
+    never logged — it carries bearer tokens.
     """
     response = await egress.request(
         client,
@@ -129,14 +130,37 @@ async def exchange_code(
             "grant_type": "authorization_code",
         },
     )
-    if response.status_code != 200:
-        raise OidcRefused(
-            "exchange_failed", f"token endpoint answered {response.status_code}"
-        )
     try:
         body = response.json()
-    except ValueError as exc:
-        raise OidcRefused("exchange_failed", "token endpoint body is not JSON") from exc
+    except ValueError:
+        body = None
+    return response.status_code, body
+
+
+async def exchange_code(
+    client,
+    *,
+    code: str,
+    redirect_uri: str,
+    client_id: str,
+    client_secret: str,
+) -> str:
+    """Trade the authorization code for the ID token. Returns the raw ID token
+    string; nothing else in the token response is used (no refresh token is
+    requested — sign-in needs none). Provider-side failures surface as
+    ``OidcRefused`` so the route has one refusal type to map.
+    """
+    status, body = await code_grant(
+        client,
+        code=code,
+        redirect_uri=redirect_uri,
+        client_id=client_id,
+        client_secret=client_secret,
+    )
+    if status != 200:
+        raise OidcRefused("exchange_failed", f"token endpoint answered {status}")
+    if body is None:
+        raise OidcRefused("exchange_failed", "token endpoint body is not JSON")
     id_token = body.get("id_token") if isinstance(body, dict) else None
     if not isinstance(id_token, str) or not id_token:
         raise OidcRefused("no_id_token")
