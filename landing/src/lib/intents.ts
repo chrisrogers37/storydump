@@ -110,15 +110,13 @@ export function actionsFor(
     : ["mark_posted", "skip", "reject"];
 }
 
-/**
- * Stable per (command, intent): a double-click is a `200 replayed`, never a
- * second execution, and a refused command — whose dedup row rolled back with
- * everything else — stays retryable under the same key. The API caps the
- * header at 200 characters; a command name plus a UUID is well under.
+/*
+ * `idempotencyKeyFor` used to live here, keyed to `QueueCommand`. It moved to
+ * `@/lib/commands` when the command client stopped being intent-only: the
+ * derivation is the same expression for every command, and two copies of it —
+ * one per dialect — is the shape this epic exists to remove. Not re-exported;
+ * there is one caller and it imports from the new home.
  */
-export function idempotencyKeyFor(command: QueueCommand, intentId: string): string {
-  return `${command}:${intentId}`;
-}
 
 /**
  * A sentence per refusal, because the matrix's 409s are normal answers, not
