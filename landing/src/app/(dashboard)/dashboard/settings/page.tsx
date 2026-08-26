@@ -15,7 +15,7 @@ import { AccountsTab } from "@/components/dashboard/settings/accounts-tab";
 import { IntegrationsTab } from "@/components/dashboard/settings/integrations-tab";
 
 /**
- * Settings, read-only — a WAYPOINT, not a finished screen (#1063).
+ * Settings — General writes; Accounts and Integrations do not yet (#1057/#1063).
  *
  * It used to ask for `init`, a route that does not exist and is not planned, so
  * the hard bail below fired on EVERY load and this screen rendered
@@ -23,23 +23,33 @@ import { IntegrationsTab } from "@/components/dashboard/settings/integrations-ta
  * "Router unavailable" also misdiagnosed: the router was fine; this page was
  * asking it for something it never served.
  *
- * ── Why the screen is read-only rather than repointed ──────────────────────
+ * ── `editable` is per TAB, because readiness is per tab ────────────────────
  *
- * All six Settings writes target routes that do not exist (`schedule`,
- * `toggle-setting`, `switch-account`, `remove-account`, `disconnect-gdrive`,
- * `sync-media`). Both connect flows targeted `oauth-url/<provider>` and are
- * now DELETED rather than gated: they were per-workspace against a
- * per-source route, so they were never going to be wired as written, and
- * behind `editable` they would have come back the moment the writes landed.
- * Repointing the reads alone is the one shape #1051 explicitly refused: "the
- * form would show real current values beside a save button that silently 404s,
- * and someone would change a setting to match what they saw."
+ * All six Settings writes used to target routes that do not exist. Four of
+ * them — the `settings_change` controls on General — are now on the command
+ * client (epic P3), so that tab is editable. The other two tabs are NOT, and
+ * this is one flag passed three times rather than one screen-wide state:
+ * `switch-account` has no target-tier home at all, `remove-account` and
+ * `disconnect-gdrive` map to `disconnect_account` which is UNBUILT, and
+ * `sync-media` is the epic's P4. Flipping those with General would be exactly
+ * the shape #1051 refused — "a save button that silently 404s".
  *
- * So the values are real and the controls are inert and SAY they are inert.
- * Nothing here is undone by wiring the writes: `editable` becomes true,
- * `Unavailable` fields gain sources. It is a strict subset of that work —
- * and `editable` now gates ONE kind of thing, controls that are pending,
- * so flipping it cannot resurrect anything that was removed as invalid.
+ * Both connect flows targeted `oauth-url/<provider>` and were DELETED rather
+ * than gated (#1070): per-workspace against a per-source route, never wirable
+ * as written, and behind `editable` they would have come back the moment this
+ * change landed. That deletion is what makes flipping the flag here safe;
+ * `editable` gates ONE kind of thing, controls that are pending and coming
+ * back, so it cannot resurrect anything removed as invalid.
+ *
+ * ── There is no page-level read-only banner, deliberately ──────────────────
+ *
+ * There was one, and it made a single claim about three tabs. That was true
+ * while all three were read-only and became false the moment one was not. The
+ * two remaining read-only tabs each carry their own notice at the control it
+ * is about (`accounts-tab.tsx`, `integrations-tab.tsx`), which is where a
+ * reader meets it; a page-level restatement could only be a coarser copy of
+ * those, and after this change a WRONG one. If a third tab ever becomes
+ * editable, nothing here needs editing — which is the point.
  *
  * ── The bail stays hard, and it still is not the whole guard ────────────────
  *
@@ -95,18 +105,6 @@ export default async function SettingsPage() {
         </p>
       </div>
 
-      <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
-        <p className="font-medium">These settings are read-only for now.</p>
-        <p className="mt-1">
-          The values below are your workspace&apos;s current settings. Changing
-          them is not wired up yet, so every control is disabled rather than
-          shown as something you can save — a control that looks editable and
-          silently fails is worse than one that says it is not. Some fields have
-          no source on this API yet and are marked unavailable rather than shown
-          as a default.
-        </p>
-      </div>
-
       <Tabs defaultValue="general">
         <TabsList>
           <TabsTrigger value="general">General</TabsTrigger>
@@ -115,13 +113,20 @@ export default async function SettingsPage() {
         </TabsList>
 
         <TabsContent value="general">
-          <GeneralTab settings={settings} editable={false} />
+          <GeneralTab settings={settings} workspaceId={workspaceId} editable />
         </TabsContent>
 
+        {/*
+          NOT flipped with General, and the reason is per-tab. `switch-account`
+          has no target-tier home at all and `remove-account` maps to
+          `disconnect_account`, which is UNBUILT — so these controls stay
+          disabled-with-reason per F5 (b) until the epic's P6.
+        */}
         <TabsContent value="accounts">
           <AccountsTab accounts={accounts} editable={false} />
         </TabsContent>
 
+        {/* Likewise: `sync-media` is P4 and `disconnect-gdrive` is P6. */}
         <TabsContent value="integrations">
           <IntegrationsTab settings={settings} editable={false} />
         </TabsContent>

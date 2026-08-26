@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -14,29 +15,41 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
-import { postApi } from "@/lib/dashboard-api";
+import { settingsRefusalCopy, submitSettingsChange } from "@/lib/command-client";
 import type { SettingsView } from "@/lib/dashboard-payloads";
-import { CategoryMixCard } from "./category-mix-card";
 import { CaptionStyleCard } from "./caption-style-card";
 import { RepostCadenceCard } from "./repost-cadence-card";
 
 /**
- * ── The write targets here are DEAD, and `editable` is what holds them off ──
+ * ── The writes here now reach the port ─────────────────────────────────
  *
- * `postApi("schedule")` and `postApi("toggle-setting")` proxy to
- * `POST /api/v1/workspaces/{ws}/<path>`. Neither route exists (#1063). The
- * calls are kept so the shape of the screen is legible, and are unreachable
- * while `editable` is false.
+ * They used to be `postApi("schedule")` and `postApi("toggle-setting")`,
+ * proxied to `POST /api/v1/workspaces/{ws}/<path>` — routes that do not exist
+ * (#1057). Both are now one `settings_change` on the command client, which
+ * carries the `Idempotency-Key` the port requires and mints a fresh submission
+ * identity per save.
  *
- * FLIPPING `editable` ALONE DOES NOT MAKE THIS WORK. The target tier takes
- * commands, not per-setting endpoints, and `Idempotency-Key` is required
- * server-side — so repointing the paths alone trades a 404 for a 400. The
- * shape these have to take already exists as a worked example:
- * `app/api/workspaces/[id]/commands/[command]/route.ts` (#1059), which mints
- * the key server-side and never lets the browser supply it. Mapping the six
- * onto that is #1063 option 2. Enabling the controls without it re-creates
- * precisely the harm this screen was changed to avoid.
+ * `editable` is unchanged by this and is NOT this file's to decide. It is the
+ * screen-level gate, held in `settings/page.tsx`, and it is being separated
+ * from the removed-control case in its own change. Everything here is written
+ * to be correct in BOTH of its states: false, and the true it becomes.
+ *
+ * ── Not every toggle on this screen is a `settings_change` ──────────────
+ *
+ * Three of the seven are (`dry_run_mode`, `enable_ai_captions`, and the one
+ * this tier calls `enable_instagram_api`, which the workspace row calls
+ * `api_publishing_enabled`). Three others have no source on the target tier at
+ * all and already render `Unavailable` rather than a switch.
+ *
+ * The seventh, `is_paused`, is the one to be careful with: it READS fine, so
+ * it draws a real switch showing a real value, but it is not in the port's
+ * settings allowlist — pausing is `pause_workspace` / `resume_workspace`, two
+ * separate commands this tier does not yet offer. Wiring it to
+ * `settings_change` would send a key the port refuses BY NAME. So it carries
+ * no key, stays inert, and says why. It is not a `settings_change` control and
+ * is out of scope for the change that wired the other three.
  */
+
 const HOUR_OPTIONS = Array.from({ length: 24 }, (_, i) => ({
   value: String(i),
   label: i === 0 ? "12 AM" : i < 12 ? `${i} AM` : i === 12 ? "12 PM" : `${i - 12} PM`,
@@ -51,14 +64,72 @@ type ToggleKey =
   | "send_lifecycle_notifications"
   | "media_sync_enabled";
 
-const TOGGLES: { key: ToggleKey; label: string; description: string }[] = [
-  { key: "is_paused", label: "Pause Posting", description: "Temporarily stop all scheduled posts" },
-  { key: "dry_run_mode", label: "Dry Run Mode", description: "Simulate posting without publishing" },
-  { key: "enable_instagram_api", label: "Instagram API", description: "Use Instagram API for direct posting" },
-  { key: "enable_ai_captions", label: "AI Captions", description: "Auto-generate captions with Claude" },
-  { key: "show_verbose_notifications", label: "Verbose Notifications", description: "Show detailed Telegram notifications" },
-  { key: "send_lifecycle_notifications", label: "Lifecycle Notifications", description: "Receive startup/shutdown messages from the worker" },
-  { key: "media_sync_enabled", label: "Media Sync", description: "Auto-sync media from connected sources" },
+/**
+ * `settingsKey` is the column name the PORT accepts, or null when this toggle
+ * is not a `settings_change` at all. It is what decides whether a switch is
+ * interactive, so the mapping is stated once here rather than inferred at the
+ * call site — and a toggle added without one is inert by default rather than
+ * live and refused.
+ */
+const TOGGLES: {
+  key: ToggleKey;
+  label: string;
+  description: string;
+  settingsKey: string | null;
+  /** Shown instead of the switch being silently dead. Required when null. */
+  inertReason?: string;
+}[] = [
+  {
+    key: "is_paused",
+    label: "Pause Posting",
+    description: "Temporarily stop all scheduled posts",
+    // Not in the port's settings allowlist: pausing is its own command pair.
+    settingsKey: null,
+    inertReason: "Pausing is not wired up yet",
+  },
+  {
+    key: "dry_run_mode",
+    label: "Dry Run Mode",
+    description: "Simulate posting without publishing",
+    settingsKey: "dry_run_mode",
+  },
+  {
+    key: "enable_instagram_api",
+    label: "Instagram API",
+    description: "Use Instagram API for direct posting",
+    // Renamed once at the read seam (`dashboard-payloads.ts`); the port's name
+    // is what goes on the wire.
+    settingsKey: "api_publishing_enabled",
+  },
+  {
+    key: "enable_ai_captions",
+    label: "AI Captions",
+    description: "Auto-generate captions with Claude",
+    settingsKey: "enable_ai_captions",
+  },
+  // The three below have no source on the target tier, so they never draw a
+  // switch at all — `settings[key]` is null and renders `Unavailable`.
+  {
+    key: "show_verbose_notifications",
+    label: "Verbose Notifications",
+    description: "Show detailed Telegram notifications",
+    settingsKey: null,
+    inertReason: "No source on this API yet",
+  },
+  {
+    key: "send_lifecycle_notifications",
+    label: "Lifecycle Notifications",
+    description: "Receive startup/shutdown messages from the worker",
+    settingsKey: null,
+    inertReason: "No source on this API yet",
+  },
+  {
+    key: "media_sync_enabled",
+    label: "Media Sync",
+    description: "Auto-sync media from connected sources",
+    settingsKey: null,
+    inertReason: "No source on this API yet",
+  },
 ];
 
 /** A value with no source is stated as such, never drawn as an off switch. */
@@ -70,11 +141,14 @@ function Unavailable() {
 
 export function GeneralTab({
   settings,
+  workspaceId,
   editable,
 }: {
   settings: SettingsView;
+  workspaceId: string;
   editable: boolean;
 }) {
+  const router = useRouter();
   const [postsPerDay, setPostsPerDay] = useState(settings.posts_per_day ?? 0);
   const [hoursStart, setHoursStart] = useState(
     settings.posting_hours_start === null ? "" : String(settings.posting_hours_start),
@@ -85,20 +159,73 @@ export function GeneralTab({
   const [savingSchedule, setSavingSchedule] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  /**
+   * The switch positions, which move optimistically and are put back if the
+   * port refuses. Seeded from the server values; only the toggles that have a
+   * value at all are ever read from here.
+   */
+  const [toggleState, setToggleState] = useState<Partial<Record<ToggleKey, boolean>>>(
+    () =>
+      Object.fromEntries(
+        TOGGLES.map((t) => [t.key, settings[t.key]]).filter(
+          ([, v]) => typeof v === "boolean",
+        ),
+      ),
+  );
+  const [togglingKey, setTogglingKey] = useState<ToggleKey | null>(null);
+
+  /**
+   * All three schedule fields in ONE command, deliberately.
+   *
+   * They are saved by a single button and the port validates the map as a
+   * unit, so splitting them into three commands would make a refusal of the
+   * end hour leave the other two already written — a half-applied schedule
+   * with no way to name what happened.
+   */
   async function saveSchedule() {
     setError(null);
     setSavingSchedule(true);
-    try {
-      await postApi("schedule", {
-        posts_per_day: postsPerDay,
-        posting_hours_start: Number(hoursStart),
-        posting_hours_end: Number(hoursEnd),
-      });
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to save schedule");
-    } finally {
-      setSavingSchedule(false);
+    const result = await submitSettingsChange(workspaceId, {
+      posts_per_day: postsPerDay,
+      posting_hours_start: Number(hoursStart),
+      posting_hours_end: Number(hoursEnd),
+    });
+    setSavingSchedule(false);
+
+    if (!result.ok) {
+      setError(settingsRefusalCopy(result.error));
+      return;
     }
+    // Re-read rather than keep the submitted values on screen. This card is
+    // not the only thing rendered from `settings`, and a write that updated
+    // only the boxes it was typed into would leave the rest of the tab showing
+    // pre-write state with nothing marking the difference.
+    router.refresh();
+  }
+
+  /**
+   * A toggle sends the value it is moving TO. The dead path it replaces sent
+   * only `setting_name` and let the server flip whatever it found, which is
+   * not expressible as a `settings_change` and is a worse contract anyway: two
+   * clicks racing would flip twice from a state neither of them read.
+   */
+  async function toggle(key: ToggleKey, settingsKey: string, next: boolean) {
+    setError(null);
+    setTogglingKey(key);
+    const previous = toggleState[key];
+    setToggleState((prev) => ({ ...prev, [key]: next }));
+
+    const result = await submitSettingsChange(workspaceId, { [settingsKey]: next });
+    setTogglingKey(null);
+
+    if (!result.ok) {
+      // Put the switch back where it was. Leaving it on the new position
+      // beside an error message shows a state the workspace is not in.
+      setToggleState((prev) => ({ ...prev, [key]: previous }));
+      setError(settingsRefusalCopy(result.error));
+      return;
+    }
+    router.refresh();
   }
 
   return (
@@ -178,34 +305,40 @@ export function GeneralTab({
         </CardContent>
       </Card>
 
-      <CaptionStyleCard captionStyle={settings.caption_style} editable={editable} onError={setError} />
+      <CaptionStyleCard
+        captionStyle={settings.caption_style}
+        workspaceId={workspaceId}
+        editable={editable}
+        onError={setError}
+      />
 
       {/*
-        CategoryMixCard is omitted while read-only rather than rendered empty:
-        it FETCHES its own data from `postApi("category-mix")`, another route
-        that does not exist, so rendering it would put an error banner on a
-        screen whose whole point is that what it shows is true.
+        CategoryMixCard is NOT rendered, and this is the line alex's #1070
+        annotation told a P3 reviewer to treat as a blocker rather than a
+        beneficiary of the flip. It was `{editable && <CategoryMixCard />}`;
+        `editable` is now true for this tab, so leaving it would have brought
+        the card back BROKEN — exactly the silent re-introduction #1070 exists
+        to prevent, one control further along.
 
-        DO NOT LET P3'S FLIP RESTORE THIS ONE. Every other control behind
-        `editable` is pending on P3 — a settings_change or sync_now target
-        that already has a built executor, so flipping the flag is exactly
-        what completes them. This card is pending on DIFFERENT work and
-        would come back broken:
-          - its READ is a POST to a route that does not exist. navi
-            confirmed a genuine read/write split upstream
-            (`get_current_mix_as_dict` vs `set_mix`), so it becomes a GET —
-            that is epic P5, not P3.
-          - its WRITE (`update-category-mix`) has no target-tier home at
-            all: no vocabulary entry and no settings column. An open GAP.
-        So it needs its own condition before `editable` is flipped, and a
-        reviewer of P3 should treat this line as a blocker rather than a
-        beneficiary of that change.
+        It is broken in two independent ways, and P3 fixes neither:
+          - its READ is a POST to a route that does not exist. navi confirmed a
+            genuine read/write split upstream (`get_current_mix_as_dict` vs
+            `set_mix`), so it becomes a GET — epic P5.
+          - its WRITE (`update-category-mix`) has no target-tier home at all:
+            no vocabulary entry, no settings column. An open GAP, and F1 (b)
+            forbids amending the vocabulary to invent one.
+
+        Removed rather than re-gated behind a second flag, which is #1070's own
+        argument: a permanently-false boolean is a lie with a longer half-life
+        than the one being removed, because someone eventually flips it to see
+        what happens. The component file is untouched and P5 re-renders it here
+        once its read is a GET.
       */}
-      {editable && <CategoryMixCard />}
 
       <RepostCadenceCard
         repostTtlDays={settings.repost_ttl_days}
         skipTtlDays={settings.skip_ttl_days}
+        workspaceId={workspaceId}
         editable={editable}
         onError={setError}
       />
@@ -215,16 +348,21 @@ export function GeneralTab({
           <CardTitle className="text-base">Toggles</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
-          {TOGGLES.map((toggle, i) => {
-            const value = settings[toggle.key];
+          {TOGGLES.map((row, i) => {
+            const value = settings[row.key];
+            const position = toggleState[row.key] ?? value;
+            // Two independent reasons a switch does not move, and they are not
+            // the same fact: the screen is read-only, or this particular
+            // setting has no command behind it.
+            const wired = row.settingsKey !== null;
             return (
-              <div key={toggle.key}>
+              <div key={row.key}>
                 {i > 0 && <Separator className="mb-4" />}
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-4">
                   <div className="space-y-0.5">
-                    <Label>{toggle.label}</Label>
+                    <Label>{row.label}</Label>
                     <p className="text-sm text-muted-foreground">
-                      {toggle.description}
+                      {row.description}
                     </p>
                   </div>
                   {/*
@@ -232,14 +370,31 @@ export function GeneralTab({
                     it as unchecked would state that the feature is off for this
                     workspace, which nothing establishes.
                   */}
-                  {value === null ? (
+                  {value === null || typeof position !== "boolean" ? (
                     <Unavailable />
                   ) : (
-                    <Switch
-                      checked={value}
-                      disabled={!editable}
-                      aria-label={toggle.label}
-                    />
+                    <div className="flex items-center gap-3">
+                      {/*
+                        Said only where it is the ACTIVE reason. While the whole
+                        screen is read-only, every switch is inert and naming
+                        one of them specially would imply the others are fine.
+                      */}
+                      {editable && !wired && row.inertReason && (
+                        <span className="text-sm text-muted-foreground">
+                          {row.inertReason}
+                        </span>
+                      )}
+                      <Switch
+                        checked={position}
+                        disabled={!editable || !wired || togglingKey !== null}
+                        aria-label={row.label}
+                        onCheckedChange={
+                          wired
+                            ? (next) => toggle(row.key, row.settingsKey!, next)
+                            : undefined
+                        }
+                      />
+                    </div>
                   )}
                 </div>
               </div>
