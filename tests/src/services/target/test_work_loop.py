@@ -48,6 +48,7 @@ def full_deps(**over):
         poll=_fake_seam,
         refresh=_fake_seam,
         drive=object(),
+        email=object(),
         config=WorkerConfig(),
     )
     base.update(over)
@@ -83,6 +84,9 @@ class TestRegistryCoversTheSchema:
             "first_ingest_chunk",
             "alert_stranded_sources",
             "revoke_workspace_credentials",
+            # #1092: live once a provider is configured, and `full_deps` now
+            # supplies that seam like every other.
+            "send_email",
         }
 
     def test_the_unbuilt_kinds_park_even_with_every_seam_supplied(self):
@@ -100,6 +104,9 @@ class TestRegistryCoversTheSchema:
             "first_ingest_chunk",
             "alert_stranded_sources",
             "revoke_workspace_credentials",
+            # #1092: live once a provider is configured, and `full_deps` now
+            # supplies that seam like every other.
+            "send_email",
         }
         assert unbuilt, "denominator went empty — the schema kinds parse broke"
         for kind in unbuilt:
@@ -111,6 +118,23 @@ class TestSeamAbsenceParksTheDependentKind:
         registry = build_registry(full_deps(transport=None))
         assert isinstance(registry["deliver_outbox"], Parked)
         assert "transport" in registry["deliver_outbox"].reason
+
+    def test_no_email_provider_parks_send_email(self):
+        """#1092. The reason must NAME the config, because this seam is absent
+        for a reason nobody can act on from the code — `07` §1's owner ack on
+        adding Resend is open — and "no email provider configured" without the
+        variable names sends the reader to the wrong place."""
+        registry = build_registry(full_deps(email=None))
+        assert isinstance(registry["send_email"], Parked)
+        reason = registry["send_email"].reason
+        assert "RESEND_API_KEY" in reason and "EMAIL_FROM" in reason
+
+    def test_an_email_provider_makes_send_email_live(self):
+        """The positive control the parked assertion needs: a seam test that
+        never sees the kind become live cannot tell "parks correctly" from
+        "parks always"."""
+        registry = build_registry(full_deps())
+        assert not isinstance(registry["send_email"], Parked)
 
     def test_no_transit_parks_the_transit_reaper(self):
         registry = build_registry(full_deps(transit=None))
