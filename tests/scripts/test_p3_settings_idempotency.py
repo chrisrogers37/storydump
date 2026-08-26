@@ -123,8 +123,27 @@ def _per_submit_key(body: dict) -> str:
     return f"settings_change:{body['submission_id']}"
 
 
+def _hashed_body(caption_style: str) -> dict:
+    """The body under F3's REJECTED option (b).
+
+    It carries NO `submission_id`, and that is the whole of option (b) rather
+    than an incidental difference: the point of a content hash is that no
+    per-submission value is needed, so there is none to send. Modelling the
+    control with one left in is what the first version of this test did, and
+    it made the control fail for the wrong reason — the port fingerprints the
+    RAW body, so a fresh id per call made call 3's content differ from call 1's
+    and the port raised `AdmissionConflict` instead of `DeliveryReplayed`.
+
+    That wrong control was still informative and the finding is kept: a PARTIAL
+    content-hash scheme — hashing the settings while still sending a fresh id —
+    fails LOUDLY at 409. It is the pure scheme that is silent, and only the
+    pure scheme is what F3 rejected.
+    """
+    return {"settings": {"caption_style": caption_style}}
+
+
 def _content_hash_key(body: dict) -> str:
-    """F3's REJECTED option (b), reproduced to serve as the control."""
+    """The key option (b) would derive: a hash of what is being written."""
     payload = json.dumps(body["settings"], sort_keys=True)
     return f"settings_change:{hashlib.sha256(payload.encode()).hexdigest()[:32]}"
 
@@ -159,9 +178,17 @@ class TestTheEditBackToAPreviousValue:
         real table. The third call carries the first's content, so its key
         collides and admission refuses it as a replay: acknowledged at 200 and
         never executed. This is the invisible failure, made visible."""
-        bodies = [_body("enhanced"), _body("simple"), _body("enhanced")]
+        bodies = [
+            _hashed_body("enhanced"),
+            _hashed_body("simple"),
+            _hashed_body("enhanced"),
+        ]
         keys = [_content_hash_key(b) for b in bodies]
         assert keys[0] == keys[2], "the control must actually collide"
+        # Byte-identical, which is what makes the third a REPLAY rather than a
+        # conflict. Asserted because it is the precondition the first version
+        # of this test violated without noticing.
+        assert bodies[0] == bodies[2]
 
         _admit(settings_db, keys[0], bodies[0])
         _admit(settings_db, keys[1], bodies[1])

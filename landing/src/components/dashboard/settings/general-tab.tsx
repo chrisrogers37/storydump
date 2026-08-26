@@ -17,7 +17,6 @@ import {
 import { Separator } from "@/components/ui/separator";
 import { settingsRefusalCopy, submitSettingsChange } from "@/lib/command-client";
 import type { SettingsView } from "@/lib/dashboard-payloads";
-import { CategoryMixCard } from "./category-mix-card";
 import { CaptionStyleCard } from "./caption-style-card";
 import { RepostCadenceCard } from "./repost-cadence-card";
 
@@ -314,27 +313,27 @@ export function GeneralTab({
       />
 
       {/*
-        CategoryMixCard is omitted while read-only rather than rendered empty:
-        it FETCHES its own data from `postApi("category-mix")`, another route
-        that does not exist, so rendering it would put an error banner on a
-        screen whose whole point is that what it shows is true.
+        CategoryMixCard is NOT rendered, and this is the line alex's #1070
+        annotation told a P3 reviewer to treat as a blocker rather than a
+        beneficiary of the flip. It was `{editable && <CategoryMixCard />}`;
+        `editable` is now true for this tab, so leaving it would have brought
+        the card back BROKEN — exactly the silent re-introduction #1070 exists
+        to prevent, one control further along.
 
-        DO NOT LET P3'S FLIP RESTORE THIS ONE. Every other control behind
-        `editable` is pending on P3 — a settings_change or sync_now target
-        that already has a built executor, so flipping the flag is exactly
-        what completes them. This card is pending on DIFFERENT work and
-        would come back broken:
-          - its READ is a POST to a route that does not exist. navi
-            confirmed a genuine read/write split upstream
-            (`get_current_mix_as_dict` vs `set_mix`), so it becomes a GET —
-            that is epic P5, not P3.
-          - its WRITE (`update-category-mix`) has no target-tier home at
-            all: no vocabulary entry and no settings column. An open GAP.
-        So it needs its own condition before `editable` is flipped, and a
-        reviewer of P3 should treat this line as a blocker rather than a
-        beneficiary of that change.
+        It is broken in two independent ways, and P3 fixes neither:
+          - its READ is a POST to a route that does not exist. navi confirmed a
+            genuine read/write split upstream (`get_current_mix_as_dict` vs
+            `set_mix`), so it becomes a GET — epic P5.
+          - its WRITE (`update-category-mix`) has no target-tier home at all:
+            no vocabulary entry, no settings column. An open GAP, and F1 (b)
+            forbids amending the vocabulary to invent one.
+
+        Removed rather than re-gated behind a second flag, which is #1070's own
+        argument: a permanently-false boolean is a lie with a longer half-life
+        than the one being removed, because someone eventually flips it to see
+        what happens. The component file is untouched and P5 re-renders it here
+        once its read is a GET.
       */}
-      {editable && <CategoryMixCard />}
 
       <RepostCadenceCard
         repostTtlDays={settings.repost_ttl_days}
