@@ -134,7 +134,24 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
     }
     return { ok: true, body: { settings: raw.settings } };
   }),
-  sync_now: submissionCommand(() => ({ ok: true, body: {} })),
+  /**
+   * PER-SOURCE, and the empty body this used to send could never succeed.
+   *
+   * The executor reads `source_id` and refuses `invalid_args` without it
+   * (`command_executors.py:274`, via `_arg`), so `{}` made every call fail —
+   * reachable, but not callable. P2 added the row deliberately unwired and
+   * said so; only a real caller could find it, and P4 is that caller.
+   *
+   * The id is validated here as a UUID for the same reason `intent_id` is: it
+   * becomes a database lookup downstream, and a refusal shaped like "this is
+   * not an id" is more useful than one shaped like "no such source".
+   */
+  sync_now: submissionCommand((raw) => {
+    if (!isUuidLike(raw.source_id)) {
+      return { ok: false, error: "invalid_source_id" };
+    }
+    return { ok: true, body: { source_id: raw.source_id } };
+  }),
 };
 
 export function isOfferedCommand(value: unknown): value is string {
