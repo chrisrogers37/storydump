@@ -42,7 +42,10 @@
 -- allowed VALUE to a constraint is a different act from changing which rows the tick selects.
 -- `fn_clock_tick` is not touched here.
 
-BEGIN;
+-- NO BEGIN/COMMIT: the runner owns one transaction per file and every target-lineage
+-- sibling (061-064) carries none. Managing it here would flip this file to the runner's
+-- `self-managed` mode — the LEGACY corpus shape — and add two statements to the
+-- advertised stream that the F.2 prefix check then cannot match.
 
 ALTER TABLE jobs DROP CONSTRAINT ck_jobs_kind;
 ALTER TABLE jobs ADD CONSTRAINT ck_jobs_kind CHECK (kind IN (
@@ -59,8 +62,6 @@ ALTER TABLE jobs ADD CONSTRAINT ck_jobs_system_kinds CHECK (
   (workspace_id IS NULL) = (kind IN
     ('reconcile_ambiguous','reap_expired','reap_transit_assets','retention_sweep',
      'reencrypt_credentials','send_email','alert_stranded_sources')));
-
-COMMIT;
 
 -- Both constraints are asserted, not just the one the defect surfaced through: fixing
 -- `ck_jobs_kind` alone leaves the insert refused by the other, and a postcondition that
