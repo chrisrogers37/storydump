@@ -1,4 +1,4 @@
-"""The two pure parsers in `provisioning` — unit gate, no database.
+"""The pure parsers in `provisioning` — unit gate, no database.
 
 These exist as a fast tier beside `tests/scripts/test_provisioning_gate.py`,
 which is `integration`+`slow` and is skipped wherever Postgres is not
@@ -20,9 +20,13 @@ import pytest
 
 from src.services.target.provisioning import (
     ACCOUNT_REF_MAX,
+    HANDLE_MAX,
+    MANUAL_REF_PREFIX,
     ProvisioningRefused,
     account_ref_from,
     folder_ref_from,
+    handle_from,
+    manual_ref_for,
 )
 
 
@@ -164,3 +168,61 @@ class TestTheRefusalCarriesItsReason:
         assert exc.reason == "folder_required"
         assert "folder_required" in str(exc)
         assert "detail here" in str(exc)
+
+
+class TestHandleFrom:
+    """The typed-handle path (#1089). Same rule as `account_ref_from`: this is
+    the ONLY place a spelling is normalised, and `uq_ig_account_live` is an
+    exact comparison downstream."""
+
+    def test_a_plain_handle_passes_through(self):
+        assert handle_from("thehandle") == "thehandle"
+
+    def test_the_at_sign_people_type_is_dropped(self):
+        assert handle_from("@thehandle") == "thehandle"
+
+    def test_surrounding_whitespace_is_trimmed(self):
+        assert handle_from("  @thehandle\n") == "thehandle"
+
+    @pytest.mark.parametrize("bad", ["", "   ", "@", " @ ", None, 17841, {"a": 1}])
+    def test_an_absent_handle_is_refused_by_name(self, bad):
+        with pytest.raises(ProvisioningRefused) as exc:
+            handle_from(bad)
+        assert exc.value.reason == "handle_required"
+
+    def test_interior_whitespace_is_a_refusal_not_a_repair(self):
+        """`"two words"` is not a handle with a typo in it. Stripping the space
+        would create a destination for an account nobody named."""
+        with pytest.raises(ProvisioningRefused) as exc:
+            handle_from("two words")
+        assert exc.value.reason == "handle_malformed"
+
+    def test_a_handle_longer_than_the_column_is_refused_by_name(self):
+        """`ig_accounts.handle` is VARCHAR(50). Past it, Postgres would answer
+        with a 500 rather than a sentence naming the field."""
+        with pytest.raises(ProvisioningRefused) as exc:
+            handle_from("a" * (HANDLE_MAX + 1))
+        assert exc.value.reason == "handle_too_long"
+
+    def test_exactly_the_column_width_is_accepted(self):
+        assert handle_from("a" * HANDLE_MAX) == "a" * HANDLE_MAX
+
+    def test_instagram_own_character_rules_are_not_asserted(self):
+        """A provider rule this tier cannot verify. Guessing it refuses a handle
+        the provider accepts — the same reasoning `ACCOUNT_REF_MAX` records."""
+        assert handle_from("a.handle_1") == "a.handle_1"
+
+
+class TestManualRefFor:
+    def test_the_reference_is_namespaced(self):
+        """Bare, it would collide the day OAuth supplies the real Meta id: the
+        same feed under two references, two destinations, two schedules."""
+        assert manual_ref_for("thehandle") == f"{MANUAL_REF_PREFIX}thehandle"
+
+    def test_two_spellings_of_one_handle_produce_ONE_reference(self):
+        """The idempotency half. `uq_ig_account_live` compares bytes, so without
+        folding `@Foo` and `@foo` are two destinations against one real feed."""
+        assert manual_ref_for(handle_from("@Foo")) == manual_ref_for(handle_from("foo"))
+
+    def test_a_derived_reference_fits_the_reference_column(self):
+        assert len(manual_ref_for("a" * HANDLE_MAX)) <= ACCOUNT_REF_MAX
