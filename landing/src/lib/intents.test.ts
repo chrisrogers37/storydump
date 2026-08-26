@@ -6,10 +6,10 @@ import {
   accountLabel,
   actionsFor,
   formatSlot,
-  idempotencyKeyFor,
   isQueueCommand,
   refusalCopy,
 } from "./intents";
+import { idempotencyKeyFor } from "./commands";
 
 /**
  * The queue's pure decisions, pinned away from the components that render

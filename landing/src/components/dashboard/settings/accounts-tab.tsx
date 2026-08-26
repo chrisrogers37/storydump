@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -15,32 +15,31 @@ import {
   DialogTrigger,
   DialogClose,
 } from "@/components/ui/dialog";
-import { postApi, openOAuthWindow } from "@/lib/dashboard-api";
+import { postApi } from "@/lib/dashboard-api";
 import type { InstagramAccount } from "@/lib/types";
 
+/**
+ * `switch-account` and `remove-account` are real controls whose routes are not
+ * wired yet (#1063 / epic P6, F5 locked (b)) — DISABLED WITH A REASON, not
+ * removed. The distinction is deliberate: a control that was always a lie gets
+ * deleted (the Connect button below, whose `oauth-url` route does not exist),
+ * while a control that is real and is coming back stays visible and inert, so
+ * the screen does not lose a capability the user is about to get.
+ */
+const DISABLED_REASON =
+  "Not wired up yet — changing accounts is not available on this API version.";
+
 interface AccountsTabProps {
+  /** False while the write routes do not exist (#1063). */
+  editable: boolean;
   accounts: InstagramAccount[];
 }
 
-export function AccountsTab({ accounts }: AccountsTabProps) {
+export function AccountsTab({ accounts, editable }: AccountsTabProps) {
   const router = useRouter();
   const [loadingAction, setLoadingAction] = useState<string | null>(null);
-  const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [removingDialogOpen, setRemovingDialogOpen] = useState<string | null>(null);
-  const oauthPending = useRef(false);
-
-  useEffect(() => {
-    function onVisible() {
-      if (document.visibilityState === "visible" && oauthPending.current) {
-        oauthPending.current = false;
-        router.refresh();
-      }
-    }
-    document.addEventListener("visibilitychange", onVisible);
-    return () => document.removeEventListener("visibilitychange", onVisible);
-  }, [router]);
-
   async function switchAccount(accountId: string) {
     setError(null);
     setLoadingAction(`switch-${accountId}`);
@@ -65,19 +64,6 @@ export function AccountsTab({ accounts }: AccountsTabProps) {
       setError(e instanceof Error ? e.message : "Failed to remove account");
     } finally {
       setLoadingAction(null);
-    }
-  }
-
-  async function connectInstagram() {
-    setError(null);
-    setConnecting(true);
-    try {
-      await openOAuthWindow("instagram");
-      oauthPending.current = true;
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to connect Instagram");
-    } finally {
-      setConnecting(false);
     }
   }
 
@@ -122,58 +108,80 @@ export function AccountsTab({ accounts }: AccountsTabProps) {
                   </div>
                   <div className="flex items-center gap-2">
                     {!account.is_active && (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => switchAccount(account.id)}
-                        disabled={loadingAction === `switch-${account.id}`}
-                      >
-                        {loadingAction === `switch-${account.id}`
-                          ? "Activating..."
-                          : "Make Active"}
-                      </Button>
-                    )}
-                    <Dialog open={removingDialogOpen === account.id} onOpenChange={(open) => setRemovingDialogOpen(open ? account.id : null)}>
-                      <DialogTrigger asChild>
-                        <Button variant="destructive" size="sm">
-                          Remove
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => switchAccount(account.id)}
+                          disabled={!editable || loadingAction === `switch-${account.id}`}
+                          title={editable ? undefined : DISABLED_REASON}
+                        >
+                          {loadingAction === `switch-${account.id}`
+                            ? "Activating..."
+                            : "Make Active"}
                         </Button>
-                      </DialogTrigger>
-                      <DialogContent>
-                        <DialogHeader>
-                          <DialogTitle>Remove Account</DialogTitle>
-                          <DialogDescription>
-                            Remove @{account.instagram_username}? This will
-                            disconnect the account and stop all scheduled posts.
-                          </DialogDescription>
-                        </DialogHeader>
-                        <DialogFooter>
-                          <DialogClose asChild>
-                            <Button variant="outline">Cancel</Button>
-                          </DialogClose>
+                      )}
+                      <Dialog open={removingDialogOpen === account.id} onOpenChange={(open) => setRemovingDialogOpen(open ? account.id : null)}>
+                        <DialogTrigger asChild>
                           <Button
                             variant="destructive"
-                            onClick={() => removeAccount(account.id)}
-                            disabled={loadingAction === `remove-${account.id}`}
+                            size="sm"
+                            disabled={!editable}
+                            title={editable ? undefined : DISABLED_REASON}
                           >
-                            {loadingAction === `remove-${account.id}`
-                              ? "Removing..."
-                              : "Remove"}
+                            Remove
                           </Button>
-                        </DialogFooter>
-                      </DialogContent>
-                    </Dialog>
+                        </DialogTrigger>
+                        <DialogContent>
+                          <DialogHeader>
+                            <DialogTitle>Remove Account</DialogTitle>
+                            <DialogDescription>
+                              Remove @{account.instagram_username}? This will
+                              disconnect the account and stop all scheduled posts.
+                            </DialogDescription>
+                          </DialogHeader>
+                          <DialogFooter>
+                            <DialogClose asChild>
+                              <Button variant="outline">Cancel</Button>
+                            </DialogClose>
+                            <Button
+                              variant="destructive"
+                              onClick={() => removeAccount(account.id)}
+                              disabled={loadingAction === `remove-${account.id}`}
+                            >
+                              {loadingAction === `remove-${account.id}`
+                                ? "Removing..."
+                                : "Remove"}
+                            </Button>
+                          </DialogFooter>
+                        </DialogContent>
+                      </Dialog>
                   </div>
                 </div>
               ))}
             </div>
           )}
 
-          <div className="mt-4">
-            <Button onClick={connectInstagram} disabled={connecting}>
-              {connecting ? "Connecting..." : "Connect Instagram"}
-            </Button>
-          </div>
+          {!editable && (
+            <p className="mt-4 text-xs text-muted-foreground">
+              Switching and removing accounts is not wired up yet — those
+              controls are shown disabled rather than hidden, because they are
+              coming back.
+            </p>
+          )}
+
+          {/*
+            GONE, not gated. `openOAuthWindow` called `oauth-url/instagram`,
+            which is not a route on this API (#1063), and the button was
+            per-workspace against a per-source flow — it could not be wired as
+            written. It used to sit behind `editable`, which meant P3 flipping
+            that flag would have silently restored it (rajan, #1066 review).
+            `editable` now gates ONE thing: controls that are disabled because
+            they are pending, and that are coming back.
+          */}
+          <p className="mt-4 text-sm text-muted-foreground">
+            Connecting an Instagram account is not available from this screen
+            yet.
+          </p>
         </CardContent>
       </Card>
     </div>
