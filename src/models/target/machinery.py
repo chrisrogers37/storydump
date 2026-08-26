@@ -79,7 +79,8 @@ class Job(TargetBase):
             "'sync_media_source','first_ingest_chunk','refresh_credential',"
             "'offboard_workspace','revoke_workspace_credentials','reauth_prompt',"
             "'reconcile_ambiguous','reap_expired','reap_transit_assets',"
-            "'retention_sweep','reencrypt_credentials','send_email')",
+            "'retention_sweep','reencrypt_credentials','send_email',"
+            "'alert_stranded_sources')",
             name="ck_jobs_kind",
         ),
         CheckConstraint("lane IN ('interactive','bulk')", name="ck_jobs_lane"),
@@ -94,7 +95,8 @@ class Job(TargetBase):
         CheckConstraint(
             "(workspace_id IS NULL) = (kind IN"
             " ('reconcile_ambiguous','reap_expired','reap_transit_assets',"
-            "'retention_sweep','reencrypt_credentials','send_email'))",
+            "'retention_sweep','reencrypt_credentials','send_email',"
+            "'alert_stranded_sources'))",
             name="ck_jobs_system_kinds",
         ),
         Index(
