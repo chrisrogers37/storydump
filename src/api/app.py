@@ -40,7 +40,7 @@ import os
 import time
 from typing import Mapping, Optional
 
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -58,7 +58,12 @@ from src.exceptions.tenancy import TenantResolutionError
 from src.services.target.commands import CommandNotBuilt, CommandRefused
 from src.services.target.invitations import InvitationRefused
 from src.services.target.provisioning import ProvisioningRefused
-from src.services.target.unit_of_work import create_engine, engine_url_from_env
+from src.services.target import scheduling_health
+from src.services.target.unit_of_work import (
+    create_engine,
+    engine_url_from_env,
+    unit_of_work,
+)
 from src.services.target.webhook_ingress import AdmissionConflict, DeliveryReplayed
 from src.utils.logger import logger
 
@@ -342,6 +347,46 @@ def create_app(
             "uptime_seconds": int(time.time() - _START_TIME),
             "target_database": app.state.engine is not None,
         }
+
+    @app.get("/health/scheduling")
+    async def scheduling_health_check():
+        """Is scheduling still advancing? (#1090 F1) — a SECOND health surface,
+        deliberately not `/health` above.
+
+        Railway gates deploys on `/health`, whose docstring is explicit that a
+        probe opening a connection would take the service down for a database
+        blip no restart repairs. That is right, and it is exactly why #1026 asked
+        for a separate dependency-touching check: liveness and "is the work
+        happening" are different questions and one endpoint cannot answer both
+        without making one of them wrong.
+
+        NOTHING IS RAISED HERE. This reports; the FLEET alert path polls it and
+        decides. Two independent reasons, and the second is measured:
+
+        1. An alert whose SENDING is performed by the system it monitors cannot
+           fire when that system is down — the same law that kept this detector
+           off the job table, applied to the output side.
+        2. The app's own notification routing has NO WRITER: nothing anywhere
+           writes `channel_bindings`, for any workspace (navi). An alert
+           delivered into it would vanish silently, and we would have built a
+           detector whose output goes nowhere.
+
+        Unauthenticated, so it answers in AGGREGATES ONLY — counts and a lag,
+        never a workspace, an account or a handle.
+
+        503 when the engine is absent, matching every other data route: a
+        monitor must be able to tell "scheduling is fine" from "I could not
+        look", and collapsing those is the failure this whole issue is about.
+        """
+        engine = app.state.engine
+        if engine is None:
+            raise HTTPException(
+                status_code=503, detail="target database not configured"
+            )
+        async with unit_of_work(
+            engine, "", actor_kind="system", channel="monitor"
+        ).begin() as session:
+            return await scheduling_health.scheduling_lag(session)
 
     return app
 
