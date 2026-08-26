@@ -52,11 +52,13 @@ from __future__ import annotations
 import asyncio
 import uuid
 
+from datetime import datetime, timedelta, timezone
+
 import psycopg2
 import pytest
 from sqlalchemy import text
 
-from src.services.target import provisioning
+from src.services.target import provisioning, workspaces
 from src.services.target.provisioning import ProvisioningRefused
 from tests.scripts.conftest import (
     in_tenant,
@@ -476,3 +478,111 @@ class TestSourcesLandInTheShapeTheSchemaDocuments:
             )
         )
         assert seen == 0
+
+
+# --- #1078: the sources payload can say whether a source is CONNECTED ---------
+
+
+def _sources(world, ids=None):
+    ids = ids or world["a"]
+    return asyncio.run(
+        in_tenant(
+            world["ingress"],
+            str(ids["ws"]),
+            str(ids["user"]),
+            lambda s: workspaces.list_sources(s, workspace_id=str(ids["ws"])),
+        )
+    )
+
+
+def _credential(world, *, source_id, state="active", expires_at=None, ids=None):
+    """Insert one gdrive credential straight in. There is no writer to call for
+    this in the target tier yet, which is itself why the status field is worth
+    testing rather than assuming."""
+    ids = ids or world["a"]
+
+    async def go(s):
+        await s.execute(
+            text(
+                "INSERT INTO oauth_credentials"
+                " (workspace_id, media_source_id, provider, encrypted_payload,"
+                "  state, expires_at)"
+                " VALUES (:ws, :sid, 'gdrive', :payload, :state, :exp)"
+            ),
+            {
+                "ws": str(ids["ws"]),
+                "sid": str(source_id),
+                "payload": "not-a-real-token",
+                "state": state,
+                "exp": expires_at,
+            },
+        )
+
+    asyncio.run(in_tenant(world["ingress"], str(ids["ws"]), str(ids["user"]), go))
+
+
+class TestSourceCredentialStatus:
+    """`media_sources.state` CANNOT answer "is this connected" — a source created
+    and never credentialed is `active`, exactly like a healthy one. These pin the
+    distinction the caller could not previously make."""
+
+    def test_a_source_with_no_credential_reads_none_not_active(self, world):
+        sid, _ = source(world, folder="stat-none")
+        row = next(r for r in _sources(world) if str(r["id"]) == str(sid))
+        assert row["credential_status"] == "none"
+        assert row["credential_connected_at"] is None
+        # The trap: the SOURCE is active while the credential does not exist.
+        assert row["state"] == "active"
+
+    def test_a_credentialed_source_reads_active_and_carries_a_connected_at(self, world):
+        sid, _ = source(world, folder="stat-active")
+        _credential(world, source_id=sid)
+        row = next(r for r in _sources(world) if str(r["id"]) == str(sid))
+        assert row["credential_status"] == "active"
+        assert row["credential_connected_at"] is not None
+
+    def test_a_past_expiry_reads_expired_even_though_state_says_active(self, world):
+        """The case a passed-through `state` gets WRONG.
+
+        Nothing in the target tier transitions a gdrive credential — only
+        `ig_login_oauth` writes `expired`, on the Instagram refresh path — so a
+        stored `state` reads `active` forever and "reconnect needed" would never
+        appear. The status is derived from the rule `drive_credentials` enforces.
+        """
+        sid, _ = source(world, folder="stat-expired")
+        _credential(
+            world,
+            source_id=sid,
+            state="active",
+            expires_at=datetime.now(timezone.utc) - timedelta(hours=1),
+        )
+        row = next(r for r in _sources(world) if str(r["id"]) == str(sid))
+        assert row["credential_status"] == "expired"
+
+    def test_a_null_expiry_is_not_an_expiry(self, world):
+        """`drive_credentials` refuses only when `expires_at` HAS PASSED, so an
+        unknown expiry must not read as expired."""
+        sid, _ = source(world, folder="stat-noexp")
+        _credential(world, source_id=sid, state="active", expires_at=None)
+        row = next(r for r in _sources(world) if str(r["id"]) == str(sid))
+        assert row["credential_status"] == "active"
+
+    def test_a_revoked_credential_reads_revoked_not_none(self, world):
+        """Revoked and never-connected are different user actions — reconnect
+        versus connect — and collapsing them is the defect this field fixes."""
+        sid, _ = source(world, folder="stat-revoked")
+        _credential(world, source_id=sid, state="revoked")
+        row = next(r for r in _sources(world) if str(r["id"]) == str(sid))
+        assert row["credential_status"] == "revoked"
+
+    def test_the_join_does_not_fan_a_source_into_two_rows(self, world):
+        sid, _ = source(world, folder="stat-onerow")
+        _credential(world, source_id=sid)
+        assert len([r for r in _sources(world) if str(r["id"]) == str(sid)]) == 1
+
+    def test_no_token_or_envelope_is_ever_returned(self, world):
+        sid, _ = source(world, folder="stat-secret")
+        _credential(world, source_id=sid)
+        row = next(r for r in _sources(world) if str(r["id"]) == str(sid))
+        assert "encrypted_payload" not in row
+        assert not any("not-a-real-token" == str(v) for v in row.values())
