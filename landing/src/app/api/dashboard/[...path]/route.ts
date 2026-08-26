@@ -45,7 +45,6 @@ const ALLOWED_PATHS = [
   "update-category-mix",
   "switch-account",
   "sync-media",
-  "oauth-url",
   "init",
   "schedule",
   "complete",

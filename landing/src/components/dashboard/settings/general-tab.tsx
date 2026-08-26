@@ -318,6 +318,21 @@ export function GeneralTab({
         it FETCHES its own data from `postApi("category-mix")`, another route
         that does not exist, so rendering it would put an error banner on a
         screen whose whole point is that what it shows is true.
+
+        DO NOT LET P3'S FLIP RESTORE THIS ONE. Every other control behind
+        `editable` is pending on P3 — a settings_change or sync_now target
+        that already has a built executor, so flipping the flag is exactly
+        what completes them. This card is pending on DIFFERENT work and
+        would come back broken:
+          - its READ is a POST to a route that does not exist. navi
+            confirmed a genuine read/write split upstream
+            (`get_current_mix_as_dict` vs `set_mix`), so it becomes a GET —
+            that is epic P5, not P3.
+          - its WRITE (`update-category-mix`) has no target-tier home at
+            all: no vocabulary entry and no settings column. An open GAP.
+        So it needs its own condition before `editable` is flipped, and a
+        reviewer of P3 should treat this line as a blocker rather than a
+        beneficiary of that change.
       */}
       {editable && <CategoryMixCard />}
 
