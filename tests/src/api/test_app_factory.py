@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from src.api.app import create_app
 from src.config.settings import settings
+from src.services.target import scheduling_health
 
 
 class TestEngineConfiguration:
@@ -202,3 +203,41 @@ class TestSchedulingHealthIsASecondSurface:
         later tidy-up cannot merge them."""
         app = create_app(env={})
         assert TestClient(app).get("/health").status_code == 200
+
+    def test_it_reaches_the_query_when_an_engine_is_present(
+        self, client, monkeypatch
+    ):
+        """THE TEST THIS ROUTE WAS MISSING — and the absence is the finding,
+        not the 500 it let through.
+
+        Both tests above build `create_app(env={})`, so `app.state.engine` is
+        None and both return at the 503 branch — ONE LINE ABOVE the code that
+        runs in production. The query underneath was mutation-tested against a
+        real database and was never the problem. The route was, and every green
+        signal it ever produced was true about a path that does not execute.
+
+        So this one takes the other branch. It needs no real database, and that
+        is exactly the point: the defect raised at `UnitOfWork` construction
+        before any SQL, so ANY non-None engine would have caught it — and none
+        of the coverage supplied one.
+        """
+        seen = []
+
+        async def fake_lag(executor):
+            seen.append(executor)
+            return {"stalled": 0, "accounts_active": 7, "max_lag_seconds": None}
+
+        monkeypatch.setattr(scheduling_health, "scheduling_lag", fake_lag)
+        resp = client.get("/health/scheduling")
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {
+            "stalled": 0,
+            "accounts_active": 7,
+            "max_lag_seconds": None,
+        }
+        assert seen, "the route answered without ever reaching its seam"
+        # `scheduling_lag` names its parameter `executor`, not `session`, so a
+        # connection is a legal argument. Pinned because that duck type is what
+        # lets the route drop the unit of work at all.
+        assert hasattr(seen[0], "execute")
