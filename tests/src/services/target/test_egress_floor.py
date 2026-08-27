@@ -16,12 +16,16 @@ leaves every flag on.
 from __future__ import annotations
 
 import asyncio
+import datetime
 import gzip
 import json
+import socket
+import ssl
 
 import httpx
 import pytest
 
+from src.services.target import egress as egress_mod
 from src.services.target.egress import (
     TIMEOUT_CLASSES,
     EgressBudgetExhausted,
@@ -214,14 +218,16 @@ class TestProofFourARedirectTowardAPrivateAddressIsRefused:
         policy = EgressPolicy(allowed_hosts=frozenset({"graph.instagram.com"})).without(
             enforce_private_address_block=False
         )
-        assert (
-            validate_target(
-                ALLOWED,
-                policy,
-                resolver=self._resolver({"graph.instagram.com": ["10.0.0.5"]}),
-            )
-            == "graph.instagram.com"
+        approved = validate_target(
+            ALLOWED,
+            policy,
+            resolver=self._resolver({"graph.instagram.com": ["10.0.0.5"]}),
         )
+        assert approved.host == "graph.instagram.com"
+        # Nothing was RESOLVED, so there is nothing to pin (#871). Empty here
+        # means "not checked", never "checked and found none" — a host that
+        # resolves to no addresses is refused, and that is a separate proof.
+        assert approved.addresses == ()
 
     @pytest.mark.parametrize(
         "addr", ["127.0.0.1", "10.0.0.5", "192.168.1.1", "169.254.169.254", "::1"]
@@ -298,14 +304,15 @@ class TestTheHostAllowlist:
             validate_target("https://evil.example/x", EgressPolicy())
 
     def test_with_the_allowlist_disabled_the_same_host_is_accepted(self):
-        assert (
-            validate_target(
-                "https://evil.example/x",
-                EgressPolicy().without(enforce_host_allowlist=False),
-                resolver=lambda h: ["93.184.216.34"],
-            )
-            == "evil.example"
+        approved = validate_target(
+            "https://evil.example/x",
+            EgressPolicy().without(enforce_host_allowlist=False),
+            resolver=lambda h: ["93.184.216.34"],
         )
+        assert approved.host == "evil.example"
+        # The address block is still on, so the approved address comes back for
+        # `request` to pin to.
+        assert approved.addresses == ("93.184.216.34",)
 
 
 class TestTransactionDisciplineIsEnforcedAtTheEgressPoint:
@@ -505,3 +512,387 @@ class TestAGzipReplyStaysReadableThroughTheFloor:
         assert "content-encoding" not in resp.headers
         declared = resp.headers.get("content-length")
         assert declared is None or int(declared) == len(resp.content)
+
+
+# ---------------------------------------------------------------------------
+# S.3 / #871 — the validated address is PINNED to the connection.
+#
+# The gap these close is that validation and connection used to resolve
+# INDEPENDENTLY, so a resolver answering public-then-private opened a
+# TOCTOU/DNS-rebind window. A happy-path test proves nothing about that: the
+# defect is precisely that a SECOND resolution can differ from the first, so
+# every proof below is built to be false if the second resolution can still
+# happen.
+# ---------------------------------------------------------------------------
+
+PINNED_HOST = "pinned-target.invalid"
+PINNED_TLS_HOST = "pinned-tls.invalid"
+
+
+def _name_cannot_resolve(name: str) -> bool:
+    """Is *name* genuinely unresolvable on THIS machine?
+
+    The rebind proofs below rest entirely on this being true — they work by
+    guaranteeing that any second resolution FAILS, so that success can only mean
+    no second resolution happened. A captive DNS or a wildcard resolver would
+    make them vacuous while still green, so the property is measured rather than
+    assumed. RFC 2606 reserves `.invalid` for exactly this.
+    """
+    try:
+        socket.getaddrinfo(name, None, proto=socket.IPPROTO_TCP)
+    except socket.gaierror:
+        return True
+    return False
+
+
+async def _serve_once(ssl_context=None):
+    """A real HTTP/1.1 server on 127.0.0.1. Returns (port, stop, hits)."""
+    hits = []
+
+    async def handle(reader, writer):
+        try:
+            request_line = await reader.readline()
+            headers = {}
+            while True:
+                line = await reader.readline()
+                if line in (b"\r\n", b"\n", b""):
+                    break
+                k, _, v = line.decode("latin-1").partition(":")
+                headers[k.strip().lower()] = v.strip()
+            hits.append((request_line.decode("latin-1").strip(), headers))
+            body = b'{"ok":true}'
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body
+            )
+            await writer.drain()
+        finally:
+            writer.close()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0, ssl=ssl_context)
+    port = server.sockets[0].getsockname()[1]
+
+    async def stop():
+        server.close()
+        await server.wait_closed()
+
+    return port, stop, hits
+
+
+def _self_signed(hostname: str, tmp_path):
+    """A cert valid for *hostname* only — never for the IP we connect to.
+
+    That asymmetry is the whole proof in the TLS test: the handshake can only
+    succeed if verification was performed against the NAME while the socket went
+    to the address.
+    """
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, hostname)])
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(
+            datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=1)
+        )
+        .not_valid_after(
+            datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=1)
+        )
+        .add_extension(
+            x509.SubjectAlternativeName([x509.DNSName(hostname)]), critical=False
+        )
+        .sign(key, hashes.SHA256())
+    )
+    cert_pem = tmp_path / "cert.pem"
+    key_pem = tmp_path / "key.pem"
+    cert_pem.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    key_pem.write_bytes(
+        key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.TraditionalOpenSSL,
+            serialization.NoEncryption(),
+        )
+    )
+    return cert_pem, key_pem
+
+
+class TestTheConnectionGoesToTheValidatedAddress:
+    """The structural half: the transport is handed an ADDRESS, never a name.
+
+    If the transport never sees a hostname, no second resolution is possible —
+    that is the mechanism, and it is what these assert. A version that validated
+    and then handed `httpx` the hostname passes every behavioural test in this
+    file and fails every test in this class.
+    """
+
+    def _policy(self):
+        return EgressPolicy(allowed_hosts=frozenset({"graph.instagram.com"}))
+
+    async def test_the_transport_receives_an_ip_literal_not_the_hostname(self):
+        seen = []
+
+        def handler(request):
+            seen.append(request)
+            return httpx.Response(200, json={"ok": True})
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        async with client:
+            await request(
+                client,
+                "GET",
+                "https://graph.instagram.com/v1/me",
+                policy=self._policy(),
+                resolver=lambda h: ["93.184.216.34"],
+            )
+
+        assert seen[0].url.host == "93.184.216.34", (
+            "the transport was handed a NAME, so it can still resolve it a "
+            "second time — the #871 window is open"
+        )
+        # Everything else about the request is untouched.
+        assert seen[0].url.path == "/v1/me"
+        assert seen[0].url.scheme == "https"
+
+    async def test_sni_and_host_still_carry_the_original_name(self):
+        seen = []
+
+        def handler(request):
+            seen.append(request)
+            return httpx.Response(200, json={"ok": True})
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        async with client:
+            await request(
+                client,
+                "GET",
+                "https://graph.instagram.com/v1/me",
+                policy=self._policy(),
+                resolver=lambda h: ["93.184.216.34"],
+            )
+
+        # httpcore 1.0.9 reads this at `_async/connection.py:107` and passes it
+        # as `server_hostname` to `start_tls` (`:151`). Without it the handshake
+        # would be performed against the IP — SNI wrong and the certificate
+        # verified against the wrong identity, which would be a WORSE outcome
+        # than the gap being closed.
+        assert seen[0].extensions["sni_hostname"] == "graph.instagram.com"
+        # httpx synthesises `Host` from the URL only when absent
+        # (`_models.py:450-456`), so this override is what stops the server
+        # seeing an IP.
+        assert seen[0].headers["host"] == "graph.instagram.com"
+
+    async def test_the_caller_is_shown_the_name_it_asked_for(self):
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda r: httpx.Response(200, json={}))
+        )
+        async with client:
+            response = await request(
+                client,
+                "GET",
+                "https://graph.instagram.com/v1/me",
+                policy=self._policy(),
+                resolver=lambda h: ["93.184.216.34"],
+            )
+        assert response.request.url.host == "graph.instagram.com"
+
+    async def test_with_the_address_block_off_nothing_is_pinned(self):
+        """The guard flags stay independent. Nothing was resolved, so there is
+        nothing to pin, and the call must look exactly as it did before S.3."""
+        seen = []
+
+        def handler(request):
+            seen.append(request)
+            return httpx.Response(200, json={})
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        async with client:
+            await request(
+                client,
+                "GET",
+                "https://graph.instagram.com/v1/me",
+                policy=self._policy().without(enforce_private_address_block=False),
+                resolver=lambda h: ["93.184.216.34"],
+            )
+        assert seen[0].url.host == "graph.instagram.com"
+        assert "sni_hostname" not in seen[0].extensions
+
+
+class TestTheSecondResolutionCannotHappen:
+    """The rebind half, and the reason it is not vacuous.
+
+    A mock transport never resolves anything, so a mock can only ever prove the
+    SHAPE of the request. These use the REAL `httpx` transport against a REAL
+    socket, and choose a hostname that CANNOT resolve — so any second resolution
+    is guaranteed to fail. Success therefore proves no second resolution
+    occurred. That is the only construction found that a rebind-shaped resolver
+    cannot pass with the bug still present.
+    """
+
+    async def test_the_unresolvable_name_is_reached_anyway_because_it_is_pinned(
+        self, monkeypatch
+    ):
+        # POSITIVE CONTROL ON THE CONTROL: if a captive or wildcard DNS resolves
+        # `.invalid`, the whole construction is vacuous while still green.
+        assert _name_cannot_resolve(PINNED_HOST), (
+            f"{PINNED_HOST} resolves on this machine, so 'the second lookup "
+            "would fail' is not true here and this proof means nothing"
+        )
+
+        port, stop, hits = await _serve_once()
+        try:
+            # The loopback server is the point; the address-class check is
+            # proven by its own pair elsewhere in this file.
+            monkeypatch.setattr(egress_mod, "_is_forbidden", lambda addr: False)
+            calls = []
+
+            def resolver(host):
+                calls.append(host)
+                # A REBINDING resolver: public first, private second. With the
+                # window open the second answer is what `httpx` would act on.
+                return ["127.0.0.1"] if len(calls) == 1 else ["169.254.169.254"]
+
+            client = httpx.AsyncClient()
+            async with client:
+                response = await request(
+                    client,
+                    "GET",
+                    f"http://{PINNED_HOST}:{port}/x",
+                    policy=EgressPolicy(allowed_hosts=frozenset({PINNED_HOST})),
+                    resolver=resolver,
+                )
+            assert response.status_code == 200
+            assert response.json() == {"ok": True}
+            # Resolved ONCE. A second lookup is the window; there is no second.
+            assert calls == [PINNED_HOST]
+            # And the server saw the NAME, not the address it was reached at.
+            assert hits[0][1]["host"] == f"{PINNED_HOST}:{port}"
+        finally:
+            await stop()
+
+    async def test_without_the_pin_the_same_call_cannot_connect(self, monkeypatch):
+        """The other half of the pair, and the thing that makes the test above
+        evidence rather than decoration.
+
+        Same server, same unresolvable name — but the address block is off, so
+        nothing is pinned and `httpx` is handed the name. It must fail to
+        connect. If this passed, the test above would be proving nothing,
+        because the name would have been reachable either way.
+        """
+        assert _name_cannot_resolve(PINNED_HOST)
+        port, stop, _ = await _serve_once()
+        try:
+            policy = EgressPolicy(
+                allowed_hosts=frozenset({PINNED_HOST}), max_attempts=1
+            ).without(enforce_private_address_block=False)
+            client = httpx.AsyncClient()
+            async with client:
+                with pytest.raises(EgressBudgetExhausted):
+                    await request(
+                        client,
+                        "GET",
+                        f"http://{PINNED_HOST}:{port}/x",
+                        policy=policy,
+                        resolver=lambda h: ["127.0.0.1"],
+                    )
+        finally:
+            await stop()
+
+
+class TestTlsSurvivesThePin:
+    """`Done requires` #2 — SNI and certificate verification unchanged.
+
+    The certificate is valid for the NAME and never for the address, so a
+    successful handshake is only possible if verification was performed against
+    the name while the socket went to the pinned address. A version that pinned
+    by rewriting the URL and forgot `sni_hostname` fails here, which is the
+    failure mode worth catching: it would be a silent weakening of TLS shipped
+    under the banner of an SSRF fix.
+    """
+
+    async def test_a_real_handshake_verifies_against_the_name(
+        self, tmp_path, monkeypatch
+    ):
+        assert _name_cannot_resolve(PINNED_TLS_HOST)
+        cert_pem, key_pem = _self_signed(PINNED_TLS_HOST, tmp_path)
+
+        server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server_ctx.load_cert_chain(str(cert_pem), str(key_pem))
+        port, stop, hits = await _serve_once(ssl_context=server_ctx)
+        try:
+            monkeypatch.setattr(egress_mod, "_is_forbidden", lambda addr: False)
+            # The client trusts the self-signed cert as a CA and NOTHING else —
+            # `verify` is a real verification context, not disabled.
+            client = httpx.AsyncClient(verify=str(cert_pem))
+            async with client:
+                response = await request(
+                    client,
+                    "GET",
+                    f"https://{PINNED_TLS_HOST}:{port}/x",
+                    policy=EgressPolicy(allowed_hosts=frozenset({PINNED_TLS_HOST})),
+                    resolver=lambda h: ["127.0.0.1"],
+                )
+            assert response.status_code == 200
+            assert hits[0][1]["host"] == f"{PINNED_TLS_HOST}:{port}"
+        finally:
+            await stop()
+
+
+class TestRetriesStayInsideTheApprovedSet:
+    async def test_attempts_rotate_through_the_validated_addresses(self):
+        seen = []
+
+        def handler(request):
+            seen.append(request.url.host)
+            raise httpx.ConnectError("down", request=request)
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        async with client:
+            with pytest.raises(EgressBudgetExhausted):
+                await request(
+                    client,
+                    "GET",
+                    "https://graph.instagram.com/v1/me",
+                    policy=EgressPolicy(
+                        allowed_hosts=frozenset({"graph.instagram.com"}),
+                        max_attempts=3,
+                    ),
+                    resolver=lambda h: ["93.184.216.34", "93.184.216.35"],
+                )
+        # Rotated, and never outside the approved set — a retry must not become
+        # a fresh lookup, which is the window reopening one attempt later.
+        assert seen == ["93.184.216.34", "93.184.216.35", "93.184.216.34"]
+
+    async def test_a_single_resolution_serves_every_attempt(self):
+        calls = []
+
+        def resolver(host):
+            calls.append(host)
+            return ["93.184.216.34"]
+
+        def handler(request):
+            raise httpx.ConnectError("down", request=request)
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        async with client:
+            with pytest.raises(EgressBudgetExhausted):
+                await request(
+                    client,
+                    "GET",
+                    "https://graph.instagram.com/v1/me",
+                    policy=EgressPolicy(
+                        allowed_hosts=frozenset({"graph.instagram.com"}),
+                        max_attempts=3,
+                    ),
+                    resolver=resolver,
+                )
+        assert calls == ["graph.instagram.com"], (
+            "three attempts caused more than one resolution — each extra lookup "
+            "is another chance for the answer to change (#871)"
+        )
