@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import gzip
+import ipaddress
 import json
 import socket
 import ssl
@@ -545,8 +546,31 @@ def _name_cannot_resolve(name: str) -> bool:
     return False
 
 
-async def _serve_once(ssl_context=None):
-    """A real HTTP/1.1 server on 127.0.0.1. Returns (port, stop, hits)."""
+#: The SHIPPED address-class predicate, captured before any test patches it.
+_REAL_IS_FORBIDDEN = egress_mod._is_forbidden
+
+
+def _forbidden_except_loopback(addr: str) -> bool:
+    """The real class check with loopback exempted, and nothing else changed.
+
+    A live server has to bind a loopback address, so a real-socket proof cannot
+    run under the shipped predicate unmodified. `lambda addr: False` would do it
+    — and would also make every "this address is refused" assertion vacuous,
+    since a stub that agrees with everything cannot disagree with anything.
+    This defers to the SHIPPED predicate for every address that is not the
+    harness's own loopback, so a test asserting `169.254.169.254` is refused is
+    exercising the real rule.
+    """
+    return not ipaddress.ip_address(addr).is_loopback and _REAL_IS_FORBIDDEN(addr)
+
+
+async def _serve(host="127.0.0.1", port=0, ssl_context=None, respond=None):
+    """A real HTTP/1.1 server. Returns (port, stop, hits).
+
+    *respond* builds the raw response bytes from (request_line, headers); the
+    default is a 200 with a JSON body. It exists so a hop can answer 302 and a
+    dead address can answer nothing at all.
+    """
     hits = []
 
     async def handle(reader, writer):
@@ -559,24 +583,28 @@ async def _serve_once(ssl_context=None):
                     break
                 k, _, v = line.decode("latin-1").partition(":")
                 headers[k.strip().lower()] = v.strip()
-            hits.append((request_line.decode("latin-1").strip(), headers))
-            body = b'{"ok":true}'
-            writer.write(
-                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
-                b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body
-            )
+            line_text = request_line.decode("latin-1").strip()
+            hits.append((line_text, headers))
+            if respond is not None:
+                writer.write(respond(line_text, headers))
+            else:
+                body = b'{"ok":true}'
+                writer.write(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                    b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body
+                )
             await writer.drain()
         finally:
             writer.close()
 
-    server = await asyncio.start_server(handle, "127.0.0.1", 0, ssl=ssl_context)
-    port = server.sockets[0].getsockname()[1]
+    server = await asyncio.start_server(handle, host, port, ssl=ssl_context)
+    bound = server.sockets[0].getsockname()[1]
 
     async def stop():
         server.close()
         await server.wait_closed()
 
-    return port, stop, hits
+    return bound, stop, hits
 
 
 def _self_signed(hostname: str, tmp_path):
@@ -745,11 +773,11 @@ class TestTheSecondResolutionCannotHappen:
             "would fail' is not true here and this proof means nothing"
         )
 
-        port, stop, hits = await _serve_once()
+        port, stop, hits = await _serve()
         try:
             # The loopback server is the point; the address-class check is
             # proven by its own pair elsewhere in this file.
-            monkeypatch.setattr(egress_mod, "_is_forbidden", lambda addr: False)
+            monkeypatch.setattr(egress_mod, "_is_forbidden", _forbidden_except_loopback)
             calls = []
 
             def resolver(host):
@@ -786,7 +814,7 @@ class TestTheSecondResolutionCannotHappen:
         because the name would have been reachable either way.
         """
         assert _name_cannot_resolve(PINNED_HOST)
-        port, stop, _ = await _serve_once()
+        port, stop, _ = await _serve()
         try:
             policy = EgressPolicy(
                 allowed_hosts=frozenset({PINNED_HOST}), max_attempts=1
@@ -824,9 +852,9 @@ class TestTlsSurvivesThePin:
 
         server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         server_ctx.load_cert_chain(str(cert_pem), str(key_pem))
-        port, stop, hits = await _serve_once(ssl_context=server_ctx)
+        port, stop, hits = await _serve(ssl_context=server_ctx)
         try:
-            monkeypatch.setattr(egress_mod, "_is_forbidden", lambda addr: False)
+            monkeypatch.setattr(egress_mod, "_is_forbidden", _forbidden_except_loopback)
             # The client trusts the self-signed cert as a CA and NOTHING else —
             # `verify` is a real verification context, not disabled.
             client = httpx.AsyncClient(verify=str(cert_pem))
@@ -896,3 +924,250 @@ class TestRetriesStayInsideTheApprovedSet:
             "three attempts caused more than one resolution — each extra lookup "
             "is another chance for the answer to change (#871)"
         )
+
+
+# ---------------------------------------------------------------------------
+# #1109 — the review probes, ported into the suite.
+#
+# rajan and navi each built real-socket probes while reviewing #1108 and ran
+# them against mutants. Nothing below is a defect fix: every property here was
+# already correct. What was missing is that the probes lived in review comments,
+# so the next person to touch `egress.py` had no net under exactly the parts
+# that matter — and a review body is not a regression test.
+#
+# Each is mutation-tested here for the same reason the originals were: a ported
+# probe that passes without the mechanism present is worse than no probe, being
+# a green tick over an untested path.
+# ---------------------------------------------------------------------------
+
+REDIRECT_HOST = "pinned-hop.invalid"
+POOL_HOST = "pinned-pool.invalid"
+
+
+def _free_port_on_both_loopbacks() -> int:
+    """A port free on 127.0.0.1 AND 127.0.0.2, so two servers can share it.
+
+    Two servers on the same PORT and different ADDRESSES is what makes the pool
+    proof sharp: if httpx keyed its pool on `host:port` from the original URL,
+    the second call would reuse the first connection and the second server would
+    never be hit.
+    """
+    for _ in range(20):
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+        second = socket.socket()
+        try:
+            second.bind(("127.0.0.2", port))
+            return port
+        except OSError:
+            continue
+        finally:
+            second.close()
+    pytest.skip("no port free on both loopback addresses")
+
+
+class TestARetryCannotRebind:
+    """navi's concrete follow-up from the #1108 review, and the sharpest gap.
+
+    The shipped rebind proof succeeds on attempt 1, so the retry loop body runs
+    exactly ONCE — which makes "does `validate_target` sit inside the loop?"
+    unobservable there. navi found that by mutation: moving the call into the
+    loop killed only the `MockTransport` call-count check, not the real-socket
+    proof, so the evidence was thinner than the count implied.
+
+    This forces a SECOND iteration on a real socket by refusing the first pinned
+    address, which is what makes that mutation observable.
+    """
+
+    async def test_the_second_attempt_uses_the_second_APPROVED_address(
+        self, monkeypatch
+    ):
+        assert _name_cannot_resolve(PINNED_HOST)
+        port, stop, hits = await _serve()  # listening on 127.0.0.1 ONLY
+        try:
+            monkeypatch.setattr(egress_mod, "_is_forbidden", _forbidden_except_loopback)
+            calls = []
+
+            def resolver(host):
+                calls.append(host)
+                # First answer: a dead address then a live one, so attempt 0
+                # fails at connect and attempt 1 must rotate.
+                # Any SECOND answer is the rebind — a real metadata endpoint,
+                # which the shipped class check refuses.
+                if len(calls) == 1:
+                    return ["127.0.0.2", "127.0.0.1"]
+                return ["169.254.169.254"]
+
+            client = httpx.AsyncClient()
+            async with client:
+                response = await request(
+                    client,
+                    "GET",
+                    f"http://{PINNED_HOST}:{port}/x",
+                    policy=EgressPolicy(
+                        allowed_hosts=frozenset({PINNED_HOST}), max_attempts=3
+                    ),
+                    resolver=resolver,
+                )
+
+            assert response.status_code == 200
+            # THE ASSERTION THIS CLASS EXISTS FOR. A retry that re-resolved
+            # would get the rebind answer and be refused, so a 200 here is only
+            # possible if the retry stayed inside the addresses approved once.
+            assert calls == [PINNED_HOST], (
+                "the retry re-resolved — that is the #871 window reopening one "
+                "attempt later"
+            )
+            # Rotation, on a real socket rather than through MockTransport:
+            # attempt 0 went to the dead address and never reached this server,
+            # attempt 1 went to the live one.
+            assert len(hits) == 1
+            assert hits[0][1]["host"] == f"{PINNED_HOST}:{port}"
+        finally:
+            await stop()
+
+
+class TestARedirectHopIsPinnedToItsOwnValidation:
+    """rajan's redirect probes. No shipped test asserted that a HOP connects via
+    a pinned address rather than the redirected-to hostname — grepped and
+    confirmed during that review.
+
+    Two live servers, one 302 between them, under a hostname that cannot resolve
+    so nothing can short-circuit through real DNS. The hops share a name and
+    differ only in port, which keeps the cross-host block out of the way and
+    leaves the hop's own validation as the only thing deciding.
+    """
+
+    def _hop_one(self, port_two):
+        def respond(request_line, headers):
+            location = f"http://{REDIRECT_HOST}:{port_two}/hop2"
+            return (
+                b"HTTP/1.1 302 Found\r\nLocation: "
+                + location.encode()
+                + b"\r\nContent-Length: 0\r\n\r\n"
+            )
+
+        return respond
+
+    async def test_a_hop_resolving_to_a_forbidden_address_is_refused(self, monkeypatch):
+        assert _name_cannot_resolve(REDIRECT_HOST)
+        port_two, stop_two, hits_two = await _serve(host="127.0.0.2")
+        port_one, stop_one, _ = await _serve(respond=self._hop_one(port_two))
+        try:
+            monkeypatch.setattr(egress_mod, "_is_forbidden", _forbidden_except_loopback)
+            calls = []
+
+            def resolver(host):
+                calls.append(host)
+                # Hop 1 is fine; hop 2's OWN resolution is a link-local
+                # metadata address, refused by the SHIPPED predicate.
+                return ["127.0.0.1"] if len(calls) == 1 else ["169.254.169.254"]
+
+            client = httpx.AsyncClient()
+            async with client:
+                with pytest.raises(EgressRefused, match="non-public address"):
+                    await request(
+                        client,
+                        "GET",
+                        f"http://{REDIRECT_HOST}:{port_one}/hop1",
+                        policy=EgressPolicy(allowed_hosts=frozenset({REDIRECT_HOST})),
+                        resolver=resolver,
+                    )
+            # Refused BEFORE the hop was touched — the check is not something
+            # the connection discovers afterwards.
+            assert hits_two == []
+            # Exactly two: one per hop. A hop that inherited approval would
+            # resolve once; a hop that re-resolved per attempt would exceed two.
+            assert calls == [REDIRECT_HOST, REDIRECT_HOST]
+        finally:
+            await stop_one()
+            await stop_two()
+
+    async def test_a_hop_resolving_ELSEWHERE_is_reached_at_its_own_address(
+        self, monkeypatch
+    ):
+        """The other half. Without it, the refusal above could be a hop that is
+        never reached for some unrelated reason."""
+        assert _name_cannot_resolve(REDIRECT_HOST)
+        port_two, stop_two, hits_two = await _serve(host="127.0.0.2")
+        port_one, stop_one, hits_one = await _serve(respond=self._hop_one(port_two))
+        try:
+            monkeypatch.setattr(egress_mod, "_is_forbidden", _forbidden_except_loopback)
+            calls = []
+
+            def resolver(host):
+                calls.append(host)
+                # A DIFFERENT allowed address per hop. Carrying hop 1's address
+                # forward would dial 127.0.0.1 at hop 2's port, where nothing
+                # is listening.
+                return ["127.0.0.1"] if len(calls) == 1 else ["127.0.0.2"]
+
+            client = httpx.AsyncClient()
+            async with client:
+                response = await request(
+                    client,
+                    "GET",
+                    f"http://{REDIRECT_HOST}:{port_one}/hop1",
+                    policy=EgressPolicy(allowed_hosts=frozenset({REDIRECT_HOST})),
+                    resolver=resolver,
+                )
+            assert response.status_code == 200
+            assert len(hits_one) == 1 and len(hits_two) == 1
+            # The hop server saw the NAME, so the hop was pinned rather than
+            # dialed by hostname — which under `.invalid` could not connect.
+            assert hits_two[0][1]["host"] == f"{REDIRECT_HOST}:{port_two}"
+            assert calls == [REDIRECT_HOST, REDIRECT_HOST]
+            # And the caller is still shown the hop it ended on, by NAME.
+            assert response.request.url.host == REDIRECT_HOST
+        finally:
+            await stop_one()
+            await stop_two()
+
+
+class TestAPooledClientDoesNotReuseAStaleAddress:
+    """rajan's pool probe. Two live servers on THE SAME PORT at two different
+    loopback addresses, one client reused across two top-level calls to an
+    identical `host:port`, with the resolution legitimately changing between
+    them.
+
+    If httpx keyed its pool on the original hostname, the second call would ride
+    the first connection and the second server would never be hit. It keys on
+    the connect URL, which is already an IP literal — so this passes for a
+    reason, and the reason is the pin.
+    """
+
+    async def test_two_calls_to_one_name_reach_two_different_addresses(
+        self, monkeypatch
+    ):
+        assert _name_cannot_resolve(POOL_HOST)
+        port = _free_port_on_both_loopbacks()
+        _, stop_a, hits_a = await _serve(host="127.0.0.1", port=port)
+        _, stop_b, hits_b = await _serve(host="127.0.0.2", port=port)
+        try:
+            monkeypatch.setattr(egress_mod, "_is_forbidden", _forbidden_except_loopback)
+            calls = []
+
+            def resolver(host):
+                calls.append(host)
+                return ["127.0.0.1"] if len(calls) == 1 else ["127.0.0.2"]
+
+            policy = EgressPolicy(allowed_hosts=frozenset({POOL_HOST}))
+            url = f"http://{POOL_HOST}:{port}/x"
+            client = httpx.AsyncClient()
+            async with client:  # ONE client, so its pool persists across both
+                first = await request(
+                    client, "GET", url, policy=policy, resolver=resolver
+                )
+                second = await request(
+                    client, "GET", url, policy=policy, resolver=resolver
+                )
+
+            assert first.status_code == second.status_code == 200
+            assert len(hits_a) == 1, "the first server was reused for both calls"
+            assert len(hits_b) == 1, "the second call never reached its own address"
+            assert calls == [POOL_HOST, POOL_HOST]
+        finally:
+            await stop_a()
+            await stop_b()
