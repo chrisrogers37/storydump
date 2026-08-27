@@ -41,32 +41,51 @@ Three independent refusals, because each catches what the others cannot:
   attacker-controlled URL, so validating only the original target would make
   the allowlist decorative.
 
-**KNOWN GAP, DEFERRED TO S.3 AND NAMED HERE RATHER THAN IMPLIED AWAY:
-validation and connection resolve independently.** :func:`validate_target`
-resolves the host and checks every address; ``httpx`` then performs its **own**
-resolution when it opens the connection, and nothing pins the validated
-addresses to that connection. So the address-class check proves *"this hostname
-resolved to a public address at that moment"*, **not** *"this connection went
-to a public address"* — a TOCTOU / DNS-rebind window. Verified against httpx
-0.28.1: the transport passes ``host=request.url.raw_host`` to the pool and
-exposes no resolver hook, so closing this needs a custom transport that
-resolves, pins, and still gets TLS SNI and verification right.
+**The validated address is PINNED to the connection (S.3/#871).** Validation and
+connection used to resolve independently: :func:`validate_target` checked every
+address a host resolved to, and then ``httpx`` performed its **own** resolution
+when it opened the socket. The address-class check therefore proved *"this
+hostname resolved to a public address at that moment"* and not *"this connection
+went to a public address"* — a TOCTOU / DNS-rebind window.
 
-Two consequences, both stated so no reader infers more than is true:
+The second resolution no longer happens. :func:`validate_target` returns the
+addresses it approved, and :func:`request` connects to one of *those*, by handing
+the transport a URL whose host is an **IP literal**. There is no hostname left
+for the transport to look up, which is why this closes the window rather than
+narrowing it: a resolver that answered public and then answers private is not
+consulted a second time at all.
 
-1. **The host allowlist is the control actually holding here**, not the address
-   check. Six closed, high-reputation provider hostnames means an attacker
-   would need DNS control over Meta, Telegram or Google — not an injectable
-   target. That is why this is deferred rather than blocking, and it is also
-   why the allowlist must not be widened casually: admitting anything less
-   trusted moves this from theoretical to reachable.
-2. **It is scoped to S.3 and tracked as #871**, which `04` already charters
-   with *"SSRF-safe streaming"* and *"the full hostile-fake battery"* — the
-   plan doc names this specific carried item, so it is deferred visibly rather
-   than forgotten.
+Getting that right without weakening TLS is the whole difficulty, and it is
+solved by two overrides rather than by a custom transport:
 
-The address-class check is kept regardless: it is real defence in depth against
-a misconfigured or compromised-at-rest allowlist entry, and it costs nothing.
+- ``extensions["sni_hostname"]`` carries the ORIGINAL hostname. ``httpcore``
+  1.0.9 reads it at ``_async/connection.py:107`` and passes it as
+  ``server_hostname`` to ``start_tls`` (``:151``), falling back to the origin
+  host only when it is absent. So SNI is sent for the hostname and the
+  certificate is verified against the hostname, while the socket goes to the
+  pinned address.
+- An explicit ``Host`` header carries the original ``host:port``. ``httpx``
+  synthesises ``Host`` from the URL **only when the header is absent**
+  (``_models.py:450-456``), so the override wins and the server sees the name it
+  is expecting rather than an IP.
+
+Neither ``verify`` nor the SSL context is touched.
+
+**Retries rotate through the approved addresses rather than re-resolving.** A
+provider with four A records and one dead host still recovers, and the recovery
+path cannot reach an address the floor never approved.
+
+**A redirect re-pins from its own validation.** The logical URL keeps the
+hostname throughout so a ``Location`` is joined against the name the provider
+used; only the per-attempt connect URL carries an IP.
+
+**What this does NOT do**, stated so no reader infers more than is true: it does
+not make the address-class check the load-bearing control. The check now decides
+what the connection is allowed to reach rather than merely observing a moment,
+which is a real strengthening — but the host allowlist is still what keeps an
+attacker from naming a target at all, and widening it still admits whatever that
+host resolves to at the instant of the call. The pin closes the window between
+the two resolutions; it does not vouch for the host.
 
 ## Transaction discipline is enforced from here
 
@@ -82,7 +101,7 @@ import ipaddress
 import socket
 import time
 from dataclasses import dataclass, field, replace
-from typing import Optional
+from typing import NamedTuple, Optional
 
 import httpx
 
@@ -191,8 +210,70 @@ def _is_forbidden(addr: str) -> bool:
     )
 
 
-def validate_target(url: str, policy: EgressPolicy, *, resolver=_resolve_addresses):
-    """Refuse a URL the floor will not allow. Returns the parsed host."""
+class ValidatedTarget(NamedTuple):
+    """What validation approved: the host, and the addresses it approved it AT.
+
+    *addresses* is empty when ``enforce_private_address_block`` is off — nothing
+    was resolved, so there is nothing to pin, and :func:`request` then behaves
+    exactly as it did before pinning existed. Empty means "not checked", never
+    "checked and found none": a host that resolves to nothing is refused above.
+    """
+
+    host: str
+    addresses: tuple
+
+
+def _pinned(url: httpx.URL, address: str) -> httpx.URL:
+    """The same URL, addressed to *address* instead of to a name.
+
+    The transport receives an IP literal, so there is no name left for it to
+    resolve — which is the mechanism, not an optimisation. `httpx` brackets an
+    IPv6 literal for us once the host is handed over bracketed; path, query and
+    port are carried through untouched.
+    """
+    literal = f"[{address}]" if ":" in address else address
+    return url.copy_with(host=literal)
+
+
+def _pin_call(url: str, target: ValidatedTarget, attempt: int, kwargs: dict):
+    """(URL to hand the transport, kwargs carrying the Host and SNI overrides).
+
+    Returns the call UNCHANGED when there is nothing to pin, so a policy with
+    the address block switched off behaves exactly as it did before S.3 — the
+    guard flags stay independent of one another.
+
+    Attempts rotate through the approved addresses. A provider with four A
+    records and one dead host still recovers, and the recovery cannot reach an
+    address the floor never approved, because the list is the one validation
+    returned rather than a fresh lookup.
+    """
+    if not target.addresses:
+        return url, kwargs
+    parsed = httpx.URL(url)
+    address = target.addresses[attempt % len(target.addresses)]
+    # The caller's own headers and extensions are MERGED, never replaced: this
+    # function owns exactly two keys and must not silently drop an adapter's
+    # auth header or timeout extension.
+    headers = httpx.Headers(kwargs.get("headers"))
+    headers["Host"] = parsed.netloc.decode("ascii")
+    extensions = dict(kwargs.get("extensions") or {})
+    extensions["sni_hostname"] = target.host
+    return (
+        str(_pinned(parsed, address)),
+        {**kwargs, "headers": headers, "extensions": extensions},
+    )
+
+
+def validate_target(
+    url: str, policy: EgressPolicy, *, resolver=_resolve_addresses
+) -> ValidatedTarget:
+    """Refuse a URL the floor will not allow. Returns the host and its addresses.
+
+    The addresses are RETURNED rather than merely inspected, because a check
+    whose result is discarded is what made this a TOCTOU window in the first
+    place (#871): the caller has to be able to connect to the very addresses
+    that were approved.
+    """
     parsed = httpx.URL(url)
     host = parsed.host
     if not host:
@@ -218,7 +299,8 @@ def validate_target(url: str, policy: EgressPolicy, *, resolver=_resolve_address
                     f"{host!r} resolves to non-public address {addr} — refused "
                     "(L.0/#857 SSRF floor)"
                 )
-    return host
+        return ValidatedTarget(host, tuple(addrs))
+    return ValidatedTarget(host, ())
 
 
 async def _read_capped(response: httpx.Response, policy: EgressPolicy) -> bytes:
@@ -265,7 +347,7 @@ async def request(
             "call the provider (L.0/#857)"
         )
 
-    validate_target(url, policy, resolver=resolver)
+    target = validate_target(url, policy, resolver=resolver)
 
     deadline = time.monotonic() + policy.total_budget_s
     last_exc = None
@@ -282,6 +364,10 @@ async def request(
             if policy.enforce_budget
             else policy.timeout_s
         )
+        # `url` stays the LOGICAL, named URL for the whole loop; only the
+        # per-attempt connect URL carries an address. A `Location` must be
+        # joined against the name the provider used, not against an IP.
+        connect_url, call_kwargs = _pin_call(url, target, attempt, kwargs)
         try:
             # STREAMED, not buffered. `client.request()` reads the whole body
             # before returning (httpx 0.28.1 `Client.send`: `if not stream:
@@ -291,24 +377,30 @@ async def request(
             # read be abandoned mid-body. `httpx.Limits` carries no
             # response-size concept to lean on instead; checked.
             async with client.stream(
-                method, url, timeout=timeout, follow_redirects=False, **kwargs
+                method,
+                connect_url,
+                timeout=timeout,
+                follow_redirects=False,
+                **call_kwargs,
             ) as response:
                 if response.is_redirect:
                     # Headers arrive before the body; a redirect's body is
                     # never read.
                     location = response.headers.get("location", "")
-                    target = httpx.URL(url).join(location)
+                    next_url = httpx.URL(url).join(location)
                     if (
                         policy.enforce_cross_host_redirect_block
-                        and target.host != httpx.URL(url).host
+                        and next_url.host != httpx.URL(url).host
                     ):
                         raise EgressRefused(
                             f"cross-host redirect {httpx.URL(url).host!r} -> "
-                            f"{target.host!r} refused (L.0/#857)"
+                            f"{next_url.host!r} refused (L.0/#857)"
                         )
-                    # Same-host hop: re-validate, never inherit approval.
-                    validate_target(str(target), policy, resolver=resolver)
-                    url = str(target)
+                    # Same-host hop: re-validate, never inherit approval —
+                    # and re-pin from THAT validation, so the hop connects to
+                    # an address the hop itself approved.
+                    target = validate_target(str(next_url), policy, resolver=resolver)
+                    url = str(next_url)
                     continue
 
                 body = await _read_capped(response, policy)
@@ -328,7 +420,14 @@ async def request(
                     response.status_code,
                     headers=headers,
                     content=body,
-                    request=response.request,
+                    # The NAMED url, not the pinned one. `egress.request` is the
+                    # single door every provider call passes through, so a
+                    # caller reading `response.request.url` must see the target
+                    # it asked for; the address is an implementation detail of
+                    # how the socket got there.
+                    request=httpx.Request(
+                        method, url, headers=response.request.headers
+                    ),
                 )
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             last_exc = exc
