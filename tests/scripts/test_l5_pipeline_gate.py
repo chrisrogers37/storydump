@@ -898,6 +898,12 @@ class TestDefinitiveFailureClassification:
         assert outcome == RETRY_SCHEDULED
         row = _intent_row(pipe_db, intent)
         assert row["publish_step"] == "transit_uploaded"
+        # #938: the rewound row carries no container id. The dead one is not
+        # merely unused — it is a pointer to a resource that no longer exists,
+        # and the next reader is a human. The id itself is not lost: the
+        # container_create op records it in `response_ref` under its own
+        # generation, which is also where the ladder reads generations from.
+        assert row["ig_container_id"] is None
         job2 = _reclaim(pipe_db, job["id"])
         assert (
             _run(run_publish_pipeline(job2, **_deps(pipe_db, meta, transit))) == POSTED
@@ -910,6 +916,65 @@ class TestDefinitiveFailureClassification:
             (2, "succeeded"),
         ]
         assert len(transit.upload_calls) == 1
+
+
+class TestADeadContainerIdDoesNotOutliveItsContainer:
+    """#938. The issue frames the stale id as living "between two instants" —
+    the step-back and the next run. Measured, that is only the RETRY path.
+
+    On the POISON path the early `return POISONED` means the step-back UPDATE is
+    never reached at all, and nothing that is currently wired transitions out of
+    `review_required` (`publish_cap.resolve_retry` is the only implementation
+    and has no production caller). So the poisoned row keeps the dead id
+    indefinitely, which is the case an operator actually reads — and the fix the
+    issue prescribes, one column on the step-back UPDATE, does not touch it.
+    """
+
+    def test_a_dead_container_that_exhausts_attempts_poisons_without_the_dead_id(
+        self, pipe_db
+    ):
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=5, max_attempts=5)
+        meta = StubMetaAdapter(status_script=["ERROR"])
+        transit = FakeTransit()
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, meta, transit)))
+        assert outcome == POISONED
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "review_required"
+        assert row["ig_container_id"] is None
+        # `publish_step` is deliberately NOT rewound here. It records how far
+        # the ladder got, which is what an operator resolving the intent needs;
+        # the container id is a pointer to a live resource, and there is no
+        # longer one. A NULL says that honestly where a dead id claims the
+        # opposite.
+        assert row["publish_step"] == "container_created"
+        containers = [
+            o for o in _ops(pipe_db, intent) if o["op_kind"] == "container_create"
+        ]
+        # The id is recorded where the history belongs, so clearing the row
+        # column loses nothing forensic.
+        assert containers and containers[0]["response"]["container_id"]
+
+    def test_a_poison_that_did_NOT_rewind_keeps_its_container_id(self, pipe_db):
+        """The guard that stops this becoming a blanket clear.
+
+        Poison is shared by every retryable class. A poison after a failed
+        PUBLISH leaves a container that is still LIVE and reusable — nulling its
+        id there would throw away a valid pointer, and the resulting row would
+        be no more honest than the one #938 is about, only wrong in the other
+        direction. Only a caller that rewound past the container rung is saying
+        the container is gone.
+        """
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=5, max_attempts=5)
+        meta = StubMetaAdapter(publish_outcomes=["retryable"])
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, meta)))
+        assert outcome == POISONED
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "review_required"
+        assert row["ig_container_id"] is not None, (
+            "the container was never abandoned — this poison did not rewind"
+        )
 
 
 class TestRoutingAndCancel:

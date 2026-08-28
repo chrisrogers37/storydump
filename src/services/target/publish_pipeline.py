@@ -519,12 +519,24 @@ async def _retry_or_poison(
                 outcome="failed",
                 response_ref=resolve_response,
             )
+        # `step_back_to` is the caller saying the artifacts BEYOND that rung are
+        # abandoned — today only the dead-container paths pass it. So it is also
+        # the signal for whether `ig_container_id` still points at anything, and
+        # it is the right discriminator on BOTH branches below.
+        #
+        # It must NOT be a blanket clear on poison. Poison is shared by every
+        # retryable class: a poison after a failed PUBLISH leaves a container
+        # that is still live and reusable, and nulling its id there would throw
+        # away a valid pointer. Only a caller that rewound past the container
+        # rung is telling us the container is gone (#938).
+        drop_container = ", ig_container_id = NULL" if step_back_to else ""
         if exhausted:
             moved = (
                 await session.execute(
                     text(
                         "UPDATE post_intents SET state = 'review_required'"
-                        " WHERE id = :intent AND state = 'publishing' RETURNING id"
+                        + drop_container
+                        + " WHERE id = :intent AND state = 'publishing' RETURNING id"
                     ),
                     {"intent": ctx.intent_id},
                 )
@@ -541,7 +553,8 @@ async def _retry_or_poison(
             await session.execute(
                 text(
                     "UPDATE post_intents SET publish_step = :step"
-                    " WHERE id = :intent AND state = 'publishing'"
+                    + drop_container
+                    + " WHERE id = :intent AND state = 'publishing'"
                 ),
                 {"step": step_back_to, "intent": ctx.intent_id},
             )
