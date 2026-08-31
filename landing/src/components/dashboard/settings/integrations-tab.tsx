@@ -173,6 +173,13 @@ export function IntegrationsTab({
    * beside it says what it does NOT do; a control that looks like data loss is
    * one people will not press, and an unpressed disconnect is the same
    * public-commitment gap one step later.
+   *
+   * The copy says "asked Google to revoke", never "revoked", and the distinction
+   * is the mechanism's not a hedge: the local revocation is immediate and
+   * certain, while the Google-side call is a BEST-EFFORT background job and is
+   * deliberately not performed here (`command_executors.py:419`) so a provider
+   * outage cannot block the user's disconnect. Claiming it has happened would be
+   * a misleadingly-specific promise where an honestly-generic one is available.
    */
   async function disconnectSource(sourceId: string) {
     setError(null);
@@ -188,7 +195,7 @@ export function IntegrationsTab({
       return;
     }
     setNotice(
-      "Disconnected. Google access was withdrawn and syncing is paused — the folder and everything already synced are still here.",
+      "Disconnected. Syncing is paused and access is revoked here — we have also asked Google to revoke it on their side. Your folder and everything already synced stay where they are.",
     );
     router.refresh();
   }
@@ -334,8 +341,9 @@ export function IntegrationsTab({
           {driveSources.length > 0 && (
             <div className="space-y-1 pt-3">
               <p className="text-xs text-muted-foreground">
-                Disconnecting withdraws Google&apos;s access and pauses syncing. Your
-                folder and everything already synced stay where they are.
+                Disconnecting pauses syncing and revokes access here, and asks Google
+                to revoke it on their side. Your folder and everything already synced
+                stay where they are.
               </p>
               {/* Once for the card, not once per row: the folder ref lives in
                   `media_sources.config`, which the sources route does not
