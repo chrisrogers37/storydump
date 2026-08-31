@@ -141,9 +141,11 @@ export const TOGGLES: {
     // opposite reason: turning it on does too much, not nothing. `approve`
     // stops refusing `manual_mode` and mints a `publish_pipeline` job that
     // PARKS — production composes `media_fetch=None` (W5b unbuilt) — while
-    // `prompts.render_card` swaps the card to `_ACTIONS_API`, so the person
-    // also loses the manual-mode actions that do work. Enabling it degrades
-    // the product rather than extending it.
+    // `prompts.render_card` swaps the card to `_ACTIONS_API`, which is a
+    // SUPERSET of `_ACTIONS_MANUAL`: it ADDS a "Post now" button and takes
+    // none away (`intents.ts:100`: "keeps the manual buttons beside Approve").
+    // So enabling it removes no capability — it grows a NEW dead control,
+    // which is this file's own defect appearing one screen over.
     inertReason: "Direct posting is not built yet",
   },
   {
