@@ -165,6 +165,23 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
     return { ok: true, body: { name: raw.name.trim() } };
   }),
 
+  /**
+   * Disconnect a Drive source. Same shape as `sync_now` and for the same
+   * reason: the executor reads `source_id` and refuses `invalid_args` without
+   * one, and the id becomes a database lookup, so "this is not an id" is a
+   * more useful refusal than "no such source".
+   *
+   * Built since #1083 — command, executor, and the background Google revoke —
+   * and unreachable because this table did not list it, while
+   * `storydump.app/privacy` §13 committed to it publicly.
+   */
+  disconnect_account: submissionCommand((raw) => {
+    if (!isUuidLike(raw.source_id)) {
+      return { ok: false, error: "invalid_source_id" };
+    }
+    return { ok: true, body: { source_id: raw.source_id } };
+  }),
+
   sync_now: submissionCommand((raw) => {
     if (!isUuidLike(raw.source_id)) {
       return { ok: false, error: "invalid_source_id" };
