@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { idempotencyKeyFor } from "@/lib/commands";
 import { getSessionToken } from "@/lib/session";
 import { targetFetch } from "@/lib/target-api";
 
@@ -55,9 +56,22 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "invalid_name" }, { status: 400 });
   }
 
+  // `Idempotency-Key` is REQUIRED, not optional. `POST /workspaces` reaches the
+  // port through `_dispatch`, whose first statement refuses a keyless command
+  // (`v1.py:104-109`) — before the body is even read. Omitting it here returned a
+  // 400 that `messageFor` could not name, so the first real user saw only "That
+  // did not work. This one is on us." and nothing was written.
+  //
+  // Identity is the trimmed NAME, which is the only thing stable across a retry
+  // of this submission — the workspace id is minted server-side per request, so
+  // it cannot serve. Dedup is scoped `(channel, principal, external_ref)`, so the
+  // name never collides across users, and `principal` is the SESSION: a
+  // double-click replays, while a deliberate second workspace of the same name
+  // later is a new session and is created.
   const result = await targetFetch<Workspace>("/workspaces", token, {
     method: "POST",
     body: JSON.stringify({ name: trimmed }),
+    headers: { "Idempotency-Key": idempotencyKeyFor("create_workspace", trimmed) },
   });
 
   if (!result.ok) {
