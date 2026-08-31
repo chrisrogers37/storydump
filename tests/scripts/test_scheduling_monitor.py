@@ -23,6 +23,9 @@ from scripts.scheduling_monitor import (
     RENOTICE_NO_SIGNAL_AFTER_S,
     STALLED,
     UNREACHABLE,
+    WORKER_DOWN,
+    WORKER_UNKNOWN,
+    Verdict,
     classify,
     decide,
     announce,
@@ -48,10 +51,25 @@ def step(verdict, prior, now):
     return state, msg
 
 
-def body(stalled=0, active=0, lag=None):
-    return json.dumps(
-        {"stalled": stalled, "accounts_active": active, "max_lag_seconds": lag}
-    )
+#: A worker axis that is provably alive — what a current app serves (#1120).
+#: Kept as the DEFAULT so the cursor-axis tests below go on testing the cursor:
+#: without it every empty-estate case would answer `WORKER_UNKNOWN`, which is
+#: correct for a payload lacking the axis and is covered by its own test.
+ALIVE_WORKER = {
+    "succeeded_ever": 78,
+    "last_success_age_seconds": 3600,
+    "overdue_ready": 0,
+    "max_overdue_seconds": None,
+}
+
+
+def body(stalled=0, active=0, lag=None, worker=ALIVE_WORKER):
+    """The endpoint payload. `worker=None` omits the axis, which is what an app
+    older than this poller serves."""
+    data = {"stalled": stalled, "accounts_active": active, "max_lag_seconds": lag}
+    if worker is not None:
+        data["worker"] = worker
+    return json.dumps(data)
 
 
 class TestNothingToSeeIsNotTheSameAsNothingWrong:
@@ -321,3 +339,196 @@ class TestMainEndToEnd:
             == EXIT_QUIET
         )
         assert NO_SIGNAL in capsys.readouterr().out
+
+
+# ── #1120: the worker-liveness axis ──────────────────────────────────────────
+#
+# `NO_SIGNAL` is the honest answer for the CURSOR axis on an empty estate, and
+# it is also the answer a DEAD WORKER produces there. These tests pin the
+# separation.
+
+
+def test_a_dead_worker_is_reported_even_when_no_destination_exists():
+    """THE test this axis exists for.
+
+    Zero active destinations makes the cursor axis answer `no-signal` — true,
+    and the same answer whether the worker is healthy or dead. Production sat
+    in exactly this state for seven days. A stale worker here must surface as
+    an outage, not as the standing "nothing to watch" notice.
+    """
+    verdict = classify(
+        200,
+        body(active=0, worker={**ALIVE_WORKER, "last_success_age_seconds": 90000}),
+        threshold_s=T,
+    )
+
+    assert verdict.state == WORKER_DOWN, verdict
+    assert verdict.state != NO_SIGNAL
+
+
+def test_worker_down_pages_on_the_very_first_reading():
+    """An outage, treated like `STALLED` and deliberately not like `UNREACHABLE`.
+
+    `UNREACHABLE` waits for a second reading because one failed request is a
+    dropped packet. This is not a request failure — the endpoint answered, and
+    what it said is that no system job has finished. There is no dropped-packet
+    reading of that, so waiting a cadence only lengthens an outage.
+    """
+    verdict = Verdict(WORKER_DOWN, "no system job has finished for 90000s")
+
+    _, msg = decide(verdict, {}, now=1000.0)
+
+    assert msg is not None, "a dead worker stayed silent on its first reading"
+    assert "FLEET ALERT" in msg
+
+
+def test_worker_unknown_is_a_notice_and_never_pages():
+    """Blind is not broken. It must be SAID — repeatedly, so it cannot fade —
+    but it is not an outage and must not wake anyone."""
+    verdict = Verdict(WORKER_UNKNOWN, "no baseline")
+
+    _, msg = decide(verdict, {}, now=1000.0)
+
+    assert msg is not None, "total blindness said nothing at all"
+    assert "FLEET ALERT" not in msg
+
+
+class TestTheWorkerAxisIsNotAllowedToReadAsHealthyWhenItCannotTell:
+    """Every one of these is a way the axis could quietly answer "fine".
+
+    The instrument was built because instruments over empty populations return
+    their reassuring value. It must not be an instance of its own defect, so
+    each blind condition gets a state of its own here.
+    """
+
+    def test_an_app_that_does_not_serve_the_axis_is_unknown_not_no_signal(self):
+        """A poller newer than the app. The axis is simply absent, and reading
+        that as the old `NO_SIGNAL` would silently lose the coverage this PR
+        adds — failing toward good news at exactly the moment of a deploy."""
+        v = classify(200, body(active=0, worker=None), threshold_s=T)
+        assert v.state == WORKER_UNKNOWN
+        assert v.state not in (HEALTHY, NO_SIGNAL)
+
+    def test_a_database_where_nothing_has_ever_run_is_unknown(self):
+        """No baseline and no backlog. Genuinely unknowable — and the reading
+        is identical to a healthy idle estate, which is why it needs its own
+        state rather than a large invented age."""
+        v = classify(
+            200,
+            body(
+                active=0,
+                worker={
+                    **ALIVE_WORKER,
+                    "succeeded_ever": 0,
+                    "last_success_age_seconds": None,
+                },
+            ),
+            threshold_s=T,
+        )
+        assert v.state == WORKER_UNKNOWN
+
+    def test_a_worker_block_that_is_not_an_object_is_unreachable(self):
+        """Distinct from the mistyped-field case below, and found by mutation:
+        the first version of this class only exercised the field type-check, so
+        swapping the not-a-dict guard to `absent` survived every test. A block
+        that is present and structurally wrong is a BROKEN instrument, which
+        must not degrade into the milder "this app does not serve the axis"."""
+        v = classify(200, body(active=0, worker="not-an-object"), threshold_s=T)
+        assert v.state == UNREACHABLE
+        assert v.state != WORKER_UNKNOWN
+
+    def test_a_malformed_worker_block_is_unreachable_never_healthy(self):
+        """Same strictness the cursor axis already applies. A broken instrument
+        is not a clean bill of health."""
+        v = classify(
+            200,
+            body(active=0, worker={**ALIVE_WORKER, "overdue_ready": "lots"}),
+            threshold_s=T,
+        )
+        assert v.state == UNREACHABLE
+
+
+class TestTheTwoWorkerSignalsCoverEachOthersBlindSpot:
+    """Staleness catches "nothing was ever enqueued"; backlog catches "enqueued
+    and never worked". Neither alone catches both."""
+
+    def test_a_backlog_is_a_dead_worker_even_when_a_success_is_recent(self):
+        """The stuck-lane shape: other kinds still finish, so the age signal
+        stays quiet while due jobs pile up unclaimed. Staleness alone is blind
+        here."""
+        v = classify(
+            200,
+            body(
+                active=0,
+                worker={
+                    **ALIVE_WORKER,
+                    "last_success_age_seconds": 60,
+                    "overdue_ready": 3,
+                    "max_overdue_seconds": 4000,
+                },
+            ),
+            threshold_s=T,
+        )
+        assert v.state == WORKER_DOWN
+
+    def test_a_dead_worker_is_reported_even_while_the_cursor_looks_healthy(self):
+        """Closes the bound `scheduling_lag` names about itself: it "cannot see
+        a failure PAST the mint". Cursors keep advancing while nothing is
+        worked, so a healthy cursor must not certify the worker."""
+        v = classify(
+            200,
+            body(
+                active=5,
+                lag=0,
+                worker={**ALIVE_WORKER, "last_success_age_seconds": 90000},
+            ),
+            threshold_s=T,
+        )
+        assert v.state == WORKER_DOWN
+
+
+def test_a_live_worker_does_not_mask_a_stalled_cursor():
+    """Precedence guard. The worker axis is consulted first, so it must not
+    swallow the axis that already worked."""
+    v = classify(200, body(stalled=2, active=5, lag=9999), threshold_s=T)
+    assert v.state == STALLED
+
+
+def test_the_worker_thresholds_are_reachable_from_the_command_line(
+    monkeypatch, tmp_path
+):
+    """Adding the flags and forgetting to thread them into `classify` is the
+    ordinary way this breaks: the defaults keep every test green while the
+    operator's setting silently does nothing.
+
+    So this drives `main` with an age that is healthy under the DEFAULT and an
+    outage only under the flag. It can only pass if the value travelled.
+    """
+    import scripts.scheduling_monitor as m
+
+    sent = []
+    raw = body(
+        active=0,
+        worker={**ALIVE_WORKER, "last_success_age_seconds": 4000},
+    )
+    monkeypatch.setattr(m, "fetch", lambda url, timeout: (200, raw))
+    monkeypatch.setattr(m, "notify", lambda cmd, msg: sent.append(msg) or True)
+
+    # 4000s is well inside the 13h default — nothing to say.
+    assert m.classify(200, raw, threshold_s=T).state == NO_SIGNAL
+
+    rc = m.main(
+        [
+            "--url",
+            "http://x/health/scheduling",
+            "--state-file",
+            str(tmp_path / "s.json"),
+            "--notify-command",
+            "/bin/true",
+            "--worker-stale-threshold",
+            "60",
+        ]
+    )
+
+    assert rc == EXIT_SPOKE, "the flag did not reach classify"
+    assert sent and "WORKER IS NOT ADVANCING" in sent[0]

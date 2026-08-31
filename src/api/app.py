@@ -396,7 +396,19 @@ def create_app(
         # rows here reads as a healthy estate. Whoever closes #751 must give
         # this a door; `accounts_active` is what tells the two apart.
         async with engine.connect() as conn:
-            return await scheduling_health.scheduling_lag(conn)
+            # TWO AXES, ONE PAYLOAD (#1120). The cursor axis is empty whenever
+            # no destination is active, and `no-signal` is then the answer
+            # whether the worker is healthy or DEAD — so the one monitored axis
+            # covered nothing at all until the first tenant arrived. The worker
+            # axis reads system jobs, whose population is tenant-independent.
+            #
+            # Same endpoint rather than a sibling, deliberately: a second URL
+            # would need a second poller invocation enrolled on the fleet host,
+            # a unit change, to close a hole the existing poller can already
+            # reach. The cursor keys keep their names and meanings, so a poller
+            # predating this change reads the payload exactly as before.
+            lag = await scheduling_health.scheduling_lag(conn)
+            return {**lag, "worker": await scheduling_health.worker_freshness(conn)}
 
     return app
 
