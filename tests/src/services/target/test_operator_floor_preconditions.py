@@ -39,6 +39,7 @@ nothing in this change moves it.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from pathlib import Path
 
@@ -55,6 +56,35 @@ def _service_sources() -> list[Path]:
     files = sorted(SERVICES.rglob("*.py"))
     assert files, f"no service sources under {SERVICES} — the path went stale"
     return files
+
+
+class _NullSession:
+    """Enough session for the executor's own statements; the seams are stubbed.
+
+    The executor runs `apply_gucs` and the notify branch against this; neither
+    is the subject here, and a real database would make a reachability test
+    depend on data.
+    """
+
+    async def execute(self, *a, **k):
+        class _R:
+            def mappings(self):
+                return self
+
+            def first(self):
+                return None
+
+            def all(self):
+                return []
+
+            @property
+            def rowcount(self):
+                return 0
+
+        return _R()
+
+    async def commit(self):
+        return None
 
 
 def test_nothing_writes_provider_quarantine_so_there_is_nothing_to_clear():
@@ -79,24 +109,84 @@ def test_nothing_writes_provider_quarantine_so_there_is_nothing_to_clear():
     )
 
 
-def test_the_review_producers_park_under_the_production_seam_set():
+def test_the_review_producers_cannot_park_under_the_production_seam_set():
     """The STRUCTURAL half, and the one that does not move when a setting does.
 
     Both `review_required` producers sit behind worker seams that production
-    composes as None, so even a workspace with `api_publishing_enabled` on mints
-    a `publish_pipeline` job that parks. Asserted behaviourally against the real
-    registry rather than by grep, and paired with the composition-root constant
-    that makes the default the deployed reality.
+    composes as None. Asserted behaviourally against the real registry rather
+    than by grep, and paired with the composition-root constant that makes the
+    default the deployed reality.
+
+    **RE-POINTED, not relaxed (#1132).** This asserted that BOTH kinds are
+    `Parked`. #1132 gave `reconcile_ambiguous` an executor under every seam set,
+    deliberately: its sweep returns two row kinds and only one of them needs a
+    provider poll, so parking the whole kind parked a half that depends on
+    nothing the deployment lacks — and production runs `poll=None`, which is why
+    `06` §5's customer notification could never fire.
+
+    So the tripwire fired correctly and its stated conclusion did not follow.
+    `Parked` was a PROXY for the property; the property is *no intent can reach
+    `review_required`*, and that still holds — measured, not argued:
+
+    * `_park_review_required` has exactly one caller, `reconcile_intent`;
+    * `reconcile_intent` has exactly one production caller, the `ladder_due`
+      branch of `reconcile_ambiguous`, which is SKIPPED when `deps.poll is
+      None`;
+    * and a `ladder_due` row requires a `publishing_ambiguous` intent, which
+      only the publish pipeline mints — and that still parks on
+      `media_fetch=None`.
+
+    The assertion below therefore tests the parking PATH rather than the kind's
+    registration, which is strictly stronger for this producer: the old form
+    could not tell "the kind cannot run" from "the kind runs but cannot park",
+    and those have different remedies. It fires the moment anyone wires
+    `deps.poll` — a smaller and likelier change than before, which is worth
+    knowing and is recorded on #1124.
+
+    `publish_pipeline` keeps the `Parked` assertion unchanged: for it the kind
+    and the path are still the same thing.
     """
     from src.services.target.work_loop import Parked, WorkerDeps, build_registry
 
     registry = build_registry(WorkerDeps())
-    for kind in ("publish_pipeline", "reconcile_ambiguous"):
-        assert isinstance(registry[kind], Parked), (
-            f"{kind} now has an executor under the default seam set — an intent"
-            " can reach `review_required`, so `resolve_review` has parked items"
-            " to resolve. Reopen #1090 D6 (#1124)."
+
+    assert isinstance(registry["publish_pipeline"], Parked), (
+        "publish_pipeline now has an executor under the default seam set — an"
+        " intent can reach `review_required`, so `resolve_review` has parked"
+        " items to resolve. Reopen #1090 D6 (#1124)."
+    )
+
+    # The parking path, driven. A ladder-due row is the only input that can
+    # reach `_park_review_required`; under the production seam set the branch
+    # that would consume it is skipped, so nothing parks.
+    from src.services.target import reconciler as _rec
+
+    reached: list[str] = []
+
+    async def _sweep(session, *, limit, notify_after_seconds):
+        return [{"intent_id": "i", "workspace_id": "w", "reason": "ladder_due"}]
+
+    async def _reconcile(session, **kw):
+        reached.append("reconcile_intent")
+        return "review_required"
+
+    original = (_rec.sweep_due, _rec.reconcile_intent)
+    _rec.sweep_due, _rec.reconcile_intent = _sweep, _reconcile
+    try:
+        asyncio.run(
+            registry["reconcile_ambiguous"](
+                _NullSession(),
+                {"id": "j", "kind": "reconcile_ambiguous", "workspace_id": None},
+            )
         )
+    finally:
+        _rec.sweep_due, _rec.reconcile_intent = original
+
+    assert not reached, (
+        "reconcile_ambiguous reached `reconcile_intent` under the default seam"
+        " set, so an intent can now be parked into `review_required` and"
+        " `resolve_review` has items to resolve. Reopen #1090 D6 (#1124)."
+    )
 
     worker = (SERVICES.parent / "worker.py").read_text()
     for seam in ("media_fetch=None", "poll=None"):
