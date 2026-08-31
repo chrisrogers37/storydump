@@ -44,6 +44,11 @@ export function CreateWorkspaceForm({
     setPending(true);
     setError(null);
 
+    // The try covers the CREATE ONLY. Everything after it runs in a world where
+    // the workspace exists, and nothing there may report a failure to the person:
+    // telling someone the create failed when it succeeded is the worst outcome
+    // this flow has, and it is a scoping bug rather than a wording one.
+    let created: { outcome?: string; workspace_id?: string } | null = null;
     try {
       const response = await fetch("/api/workspaces", {
         method: "POST",
@@ -58,14 +63,45 @@ export function CreateWorkspaceForm({
         return;
       }
 
-      const workspace = await response.json();
-      await fetch(`/api/workspaces/${workspace.id}/select`, { method: "POST" });
-      router.push("/dashboard");
-      router.refresh();
+      created = await response.json().catch(() => null);
     } catch {
       setError("We could not reach Storydump. This one is on us.");
       setPending(false);
+      return;
     }
+
+    // ── The workspace exists from here down. ────────────────────────────────
+    //
+    // The port answers `workspace_id`, not `id` — `_render` spreads the command
+    // result, and `create_workspace` returns `{"workspace_id": …}`. Reading `id`
+    // put `undefined` in the select URL, which `isWorkspaceId` refused with a
+    // 400, so no workspace cookie was set and the person was bounced back out of
+    // a workspace that had just been created for them.
+    //
+    // A REPLAY carries no id at all: a deduped command answers
+    // `200 {"outcome": "replayed"}` and nothing else. That is not an error — the
+    // workspace is real — so it needs a destination rather than a failure, and
+    // the id it would need cannot be recovered from the response.
+    const workspaceId = created?.workspace_id;
+    let selected = false;
+
+    if (workspaceId) {
+      try {
+        const select = await fetch(`/api/workspaces/${workspaceId}/select`, {
+          method: "POST",
+        });
+        selected = select.ok;
+      } catch {
+        // Selection is a cookie convenience. Losing it costs a click, not data.
+      }
+    }
+
+    // `/dashboard` only when the cookie is actually set: the route gate sends a
+    // workspace-less session straight back out, so pushing there hopefully is
+    // how the original bounce looked to the user. `/workspaces` lists what they
+    // have and always renders.
+    router.push(destinationAfterCreate(created, selected));
+    router.refresh();
   }
 
   return (
@@ -103,4 +139,22 @@ export function CreateWorkspaceForm({
       </button>
     </form>
   );
+}
+
+/**
+ * Where a person goes once the create has SUCCEEDED.
+ *
+ * Extracted because all three of this flow's defects live in this decision and
+ * none of them is visible from the component: the port answers `workspace_id`
+ * (not `id`), a deduped create answers `{outcome: "replayed"}` with no id at
+ * all, and `/dashboard` bounces a session whose workspace cookie was never set.
+ *
+ * `/workspaces` is the fallback rather than an error because by this point the
+ * workspace EXISTS. It lists what they have and always renders.
+ */
+export function destinationAfterCreate(
+  created: { outcome?: string; workspace_id?: string } | null,
+  selected: boolean,
+): "/dashboard" | "/workspaces" {
+  return created?.workspace_id && selected ? "/dashboard" : "/workspaces";
 }
