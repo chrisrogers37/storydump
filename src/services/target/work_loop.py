@@ -93,6 +93,7 @@ class WorkerConfig:
     offboard_grace_seconds: int = 30 * 24 * 3600  # 05: grace window 30 days
     offboard_drain_timeout_seconds: int = 15 * 60  # 05: publish-drain 15 min
     offboard_drain_recheck_seconds: int = 60  # provisional: 05 states no cadence
+    offboard_drain_limit: int = 500  # provisional: 05 states no bound
 
 
 @dataclass
@@ -378,7 +379,13 @@ def build_registry(deps: WorkerDeps) -> dict:
     # No external seam: the prompt writes outbox rows and nothing else, so it
     # is live in every deployment that has an engine at all.
     async def offboard_workspace(session, job):
-        return await offboarding.execute_offboard(deps, session, job)
+        # The loop DISCARDS a handler's return value, so without this line the
+        # outcome, the counts and the transit seam's "left to TTL" report reach
+        # nobody in production — three docstrings would claim an observability
+        # that only the gate had. Same shape as `run_pipeline` above.
+        outcome = await offboarding.execute_offboard(deps, session, job)
+        logger.info("offboard_workspace %s -> %s", job["id"], outcome)
+        return outcome
 
     # No seam gate. Leg 3 is the only leg with a provider seam and it degrades
     # to `06` §1's documented TTL backstop when `deps.transit` is None, so

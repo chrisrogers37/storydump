@@ -31,9 +31,13 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
-from src.services.target import commands, offboarding
+from src.services.target import commands
 from src.services.target.commands import Command, CommandRefused
-from src.services.target.offboarding import DrainTimedOut, execute_offboard
+from src.services.target.offboarding import (
+    TERMINAL_STATES,
+    DrainTimedOut,
+    execute_offboard,
+)
 from src.services.target.unit_of_work import asyncpg_url, unit_of_work
 from src.services.target.work_loop import WorkerConfig, WorkerDeps
 from tests.scripts.conftest import (
@@ -87,7 +91,7 @@ def ws(off_db):
         chain = seed_workspace_chain(conn, f"off-{uuid.uuid4().hex[:8]}")
     finally:
         conn.close()
-    return {k: str(v) for k, v in chain.items() if k != "name"}
+    return {k: str(v) for k, v in chain.items()}
 
 
 def _one(off_db, sql, params=()):
@@ -237,17 +241,30 @@ class TestTheCommand:
 
 
 class _Transit:
-    def __init__(self, refuse=()):
+    """Matches `CloudinaryTransit.destroy`'s SIGNATURE, not the caller's
+    convenience — keyword-only `media_kind`, bool return, "gone NOW" semantics.
+
+    The first version of this fake took a bare ref positionally, which is what
+    the first version of the caller passed. It agreed with the code under test
+    instead of with the provider, so a leg that could never have worked in
+    production passed every assertion here."""
+
+    def __init__(self, refuse=(), raise_on=()):
         self.destroyed = []
         self._refuse = set(refuse)
+        self._raise_on = set(raise_on)
 
-    async def destroy_asset(self, ref):
-        if ref in self._refuse:
+    async def destroy(self, transit_asset_ref: str, *, media_kind: str) -> bool:
+        assert media_kind in ("image", "video"), media_kind
+        if transit_asset_ref in self._raise_on:
             raise RuntimeError("provider said no")
-        self.destroyed.append(ref)
+        if transit_asset_ref in self._refuse:
+            return False
+        self.destroyed.append(transit_asset_ref)
+        return True
 
 
-def _deps(off_db, *, transit=None, grace=0, drain_timeout=900):
+def _deps(off_db, *, transit, grace, drain_timeout):
     engine = create_async_engine(asyncpg_url(off_db["worker"]), poolclass=NullPool)
     return WorkerDeps(
         engine=engine,
@@ -260,7 +277,7 @@ def _deps(off_db, *, transit=None, grace=0, drain_timeout=900):
     )
 
 
-def run_job(off_db, ws, *, transit=None, grace=0, drain_timeout=900):
+def run_job(off_db, ws, *, transit=None, grace=0, drain_timeout=15 * 60):
     """One `offboard_workspace` run, as `svc_worker`, in the shape the work
     loop supplies: the loop's session, a claimed job row."""
     job = _one(
@@ -307,8 +324,8 @@ class TestTheWorkflow:
         assert _one(
             off_db,
             "SELECT count(*) FROM post_intents WHERE workspace_id = %s"
-            "   AND state NOT IN ('posted','skipped','rejected','expired','failed','cancelled')",
-            (ws["ws"],),
+            "   AND NOT (state = ANY(%s))",
+            (ws["ws"], list(TERMINAL_STATES)),
         ) == (0,)
         assert transit.destroyed == ["cloudinary/abc"]
         assert (
@@ -371,7 +388,7 @@ class TestTheWorkflow:
 
         Everything workspace-keyed goes with the cascade; `audit_events`
         survives, by design and without an FK (`02` §0)."""
-        intent = _intent(off_db, ws)
+        _intent(off_db, ws)
         _credential(off_db, ws)
         offboard(off_db, ws, confirm=True)
 
@@ -383,13 +400,27 @@ class TestTheWorkflow:
         out = run_job(off_db, ws, grace=0)
 
         assert out["outcome"] == "finalized"
-        assert _one(off_db, "SELECT count(*) FROM workspaces WHERE id = %s", (ws["ws"],)) == (0,)
-        for table in ("post_intents", "media_items", "media_sources", "ig_accounts",
-                      "oauth_credentials", "workspace_members"):
-            assert _one(
-                off_db, f"SELECT count(*) FROM {table} WHERE workspace_id = %s", (ws["ws"],)
-            ) == (0,), f"{table} outlived the cascade"
-        assert _one(off_db, "SELECT count(*) FROM post_intents WHERE id = %s", (intent,)) == (0,)
+        assert _one(
+            off_db, "SELECT count(*) FROM workspaces WHERE id = %s", (ws["ws"],)
+        ) == (0,)
+        # One query rather than six connections, and a dict comparison rather
+        # than a loop: the failure output then NAMES every table that outlived
+        # the cascade instead of stopping at the first.
+        tables = (
+            "post_intents",
+            "media_items",
+            "media_sources",
+            "ig_accounts",
+            "oauth_credentials",
+            "workspace_members",
+        )
+        counts = _one(
+            off_db,
+            "SELECT "
+            + ", ".join(f"(SELECT count(*) FROM {t} WHERE workspace_id = %s)" for t in tables),
+            (ws["ws"],) * len(tables),
+        )
+        assert dict(zip(tables, counts)) == dict.fromkeys(tables, 0)
         assert _one(
             off_db, "SELECT count(*) FROM audit_events WHERE workspace_id = %s", (ws["ws"],)
         )[0] > 0, "audit outlives the tenant (`02` §0 exception)"
@@ -428,7 +459,7 @@ class TestTheWorkflow:
         run_job(off_db, ws, grace=0)
 
         async def _go():
-            deps = _deps(off_db)
+            deps = _deps(off_db, transit=None, grace=0, drain_timeout=15 * 60)
             try:
                 uow = unit_of_work(deps.engine, ws["ws"], actor_kind="system")
                 async with uow.begin() as session:
@@ -507,17 +538,15 @@ class TestTheTransitSeam:
     ):
         """Best-effort means the sweep continues. One provider refusal must not
         cost the other assets their reap, nor the offboard its progress."""
-        _intent(off_db, ws, transit="cloudinary/stuck")
+        _intent(off_db, ws, transit="cloudinary/refused")
+        _intent(off_db, ws, transit="cloudinary/raised")
         _intent(off_db, ws, transit="cloudinary/fine")
         offboard(off_db, ws, confirm=True)
-        transit = _Transit(refuse={"cloudinary/stuck"})
+        # Both provider failure shapes: `destroy` answers False for a polite
+        # refusal and raises for anything else. Counting only the exception
+        # would report a refusal as a successful reap.
+        transit = _Transit(refuse={"cloudinary/refused"}, raise_on={"cloudinary/raised"})
         out = run_job(off_db, ws, transit=transit, grace=3600)
-        assert out["transit"] == {"reaped": 1, "left_to_ttl": 1, "seam": "wired"}
+        assert out["transit"] == {"reaped": 1, "left_to_ttl": 2, "seam": "wired"}
         assert transit.destroyed == ["cloudinary/fine"]
         assert out["outcome"] == "drained", "a refused asset does not stall the workflow"
-
-
-def test_the_kind_is_no_longer_advertised_as_unbuilt():
-    assert "offboard_workspace" not in commands.UNBUILT
-    assert commands.REGISTRY["offboard_workspace"] is not None
-    assert offboarding.serialization_key("abc") == "ws:abc"

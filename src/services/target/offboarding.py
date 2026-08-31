@@ -70,6 +70,7 @@ from typing import Any, Optional
 
 from sqlalchemy import text
 
+from src.exceptions.base import StorydumpError
 from src.services.target import intent_ledger, jobs
 from src.services.target.intent_ledger import IntentTransitionRefused
 
@@ -78,9 +79,14 @@ logger = logging.getLogger(__name__)
 #: `02` §5 registry — lane and serialization key for the kind.
 LANE = "bulk"
 
-#: `02` §4 terminal intent states. A cancel is legal from every WORKING state
-#: except the two publishing ones, which must drain rather than be flipped.
-TERMINAL_STATES = ("posted", "skipped", "rejected", "expired", "failed", "cancelled")
+#: `02` §4 terminal intent states, from the one Python home. This module and
+#: `fn_offboard_finalize` MUST agree on this set: leg 1 cancels `NOT terminal`
+#: and the door refuses while any `NOT terminal` row survives, so a private copy
+#: that drifted would mint successors forever.
+TERMINAL_STATES = intent_ledger.TERMINAL_STATES
+
+#: A cancel is legal from every WORKING state except these two, which `06` §1
+#: says must DRAIN rather than be flipped.
 DRAINING_STATES = ("publishing", "publishing_ambiguous")
 
 
@@ -88,7 +94,7 @@ def serialization_key(workspace_id: str) -> str:
     return f"ws:{workspace_id}"
 
 
-class DrainTimedOut(Exception):
+class DrainTimedOut(StorydumpError):
     """`06` §1 leg 1's park: live publishing work outlived `05`'s drain
     timeout, so the workflow stops here rather than revoking under it."""
 
@@ -106,7 +112,7 @@ async def _live_publishing(session, workspace_id: str) -> int:
     return int(row[0])
 
 
-async def drain(session, workspace_id: str) -> dict[str, Any]:
+async def drain(session, workspace_id: str, *, limit: int) -> dict[str, Any]:
     """Leg 1 — terminalize every live intent, with credentials still alive.
 
     The cancel goes through `intent_ledger.transition` rather than a bulk
@@ -123,11 +129,13 @@ async def drain(session, workspace_id: str) -> dict[str, Any]:
                 "   AND NOT (state = ANY(:terminal))"
                 "   AND NOT (state = ANY(:draining))"
                 " ORDER BY id"
+                " LIMIT :lim"
             ),
             {
                 "ws": workspace_id,
                 "terminal": list(TERMINAL_STATES),
                 "draining": list(DRAINING_STATES),
+                "lim": limit,
             },
         )
     ).all()
@@ -176,47 +184,69 @@ async def revoke_credentials(session, workspace_id: str) -> int:
     return len(revoked)
 
 
-async def reap_transit(session, workspace_id: str, *, destroy) -> dict[str, Any]:
+async def reap_transit(session, workspace_id: str, *, transit) -> dict[str, Any]:
     """Leg 3 — destroy this workspace's live transit assets (FC-3.5).
 
-    *destroy* is the injected `deps.transit.destroy_asset`, or None when no
-    transit store is configured. With none, the refs are LEFT and reported:
-    `06` §1 names the FC-3.6 TTL sweep as the backstop and the assets are
-    TTL-bounded in minutes regardless, so a missing seam delays nothing that
-    the offboard is responsible for. Reporting rather than silently passing is
-    the difference between a documented backstop and an unnoticed skip.
+    *transit* is `deps.transit`, or None when no transit store is configured.
+    With none, the refs are LEFT and reported: `06` §1 names the FC-3.6 TTL
+    sweep as the backstop and the assets are TTL-bounded in minutes regardless,
+    so a missing seam delays nothing the offboard is responsible for. Reporting
+    rather than silently passing is the difference between a documented
+    backstop and an unnoticed skip.
+
+    **`destroy(ref, media_kind=…)`, not `destroy_asset(row)`** — the two doors
+    are not interchangeable and picking the wrong one is silent. `destroy_asset`
+    takes a `list_stale` ROW (`{"public_id", "resource_type"}`) and is the
+    FC-3.6 sweep's deleter; `destroy` takes a bare ref plus the media kind and
+    is the FC-3.5 per-asset door, which is the one `06` §1 leg 3 cites by name.
+    The first version of this leg passed a ref string to `destroy_asset`, whose
+    body immediately does `asset["public_id"]` — a `TypeError` per asset, caught
+    by the best-effort `except` below, logged as "refused; left to TTL". The leg
+    would have been a permanent no-op that reported itself as a provider
+    problem, and the fake in the gate agreed with the CALLER rather than the
+    provider, so nothing went red.
+
+    `media_kind` is joined from `media_items` because `_resource_type` needs it
+    and `ck_media_kind` is closed; a ref without it cannot be addressed.
 
     **The ref column is not cleared, and cannot be.** Leg 1 has already
     terminalized every intent and `trg_intent_terminal_freeze` makes a terminal
-    row immutable — the first version of this leg NULLed the ref after a
-    successful destroy and the gate answered "post_intent … is terminal
-    (cancelled) and immutable". Nor does it need clearing: the row dies at leg
-    5 either way, and the only thing the column buys after that is the handle
-    itself. The cost is that a re-run re-attempts a destroy the provider has
-    already done, which is one no-op call per asset on the normal two-run path
-    and is why this leg is deliberately excluded from the caller's "did this run
-    change anything" test — counting it would schedule a successor forever.
+    row immutable — an earlier version NULLed the ref after a successful
+    destroy and the gate answered "post_intent … is terminal (cancelled) and
+    immutable". Nor does it need clearing: the row dies at leg 5 either way. The
+    cost is that a re-run re-attempts a destroy the provider has already done,
+    which is one no-op call per asset on the normal two-run path — and is why
+    this leg is deliberately excluded from the caller's "did this run change
+    anything" test, since counting it would schedule a successor forever.
     """
     rows = (
         await session.execute(
             text(
-                "SELECT id::text, transit_asset_ref FROM post_intents"
-                " WHERE workspace_id = :ws AND transit_asset_ref IS NOT NULL"
+                "SELECT i.transit_asset_ref, m.media_kind"
+                "  FROM post_intents i"
+                "  JOIN media_items m ON m.id = i.media_item_id"
+                " WHERE i.workspace_id = :ws AND i.transit_asset_ref IS NOT NULL"
             ),
             {"ws": workspace_id},
         )
     ).all()
-    if destroy is None:
+    if transit is None:
         return {"reaped": 0, "left_to_ttl": len(rows), "seam": "absent"}
     reaped, failed = 0, 0
-    for _intent_id, ref in rows:
+    for ref, media_kind in rows:
         try:
-            await destroy(ref)
+            # A False answer is a refusal, not an error: `destroy` returns True
+            # iff the asset is gone NOW, and counts "not found" as gone.
+            gone = await transit.destroy(ref, media_kind=media_kind)
         except Exception:  # noqa: BLE001 — best-effort; the TTL sweep backstops
-            logger.warning("offboard transit reap: %s refused; left to TTL", ref)
+            logger.warning("offboard transit reap: %s raised; left to TTL", ref)
             failed += 1
             continue
-        reaped += 1
+        if gone:
+            reaped += 1
+        else:
+            logger.warning("offboard transit reap: %s refused; left to TTL", ref)
+            failed += 1
     return {"reaped": reaped, "left_to_ttl": failed, "seam": "wired"}
 
 
@@ -313,10 +343,25 @@ async def execute_offboard(deps, session, job) -> dict[str, Any]:
 
     cfg = deps.config
     workspace_id = str(job["workspace_id"])
+    # One read, both deadlines. `now()` is `transaction_timestamp()` and does
+    # not advance inside a transaction, so separate reads could not have
+    # disagreed — but they were two near-identical four-line blocks and a
+    # fetched-then-discarded column, which is a puzzle for the next reader.
     row = (
         await session.execute(
-            text("SELECT state, offboarding_at FROM workspaces WHERE id = :ws"),
-            {"ws": workspace_id},
+            text(
+                "SELECT state,"
+                "  offboarding_at + (interval '1 second' * CAST(:d AS bigint))"
+                "    <= now() AS drain_expired,"
+                "  offboarding_at + (interval '1 second' * CAST(:g AS bigint))"
+                "    <= now() AS grace_elapsed"
+                " FROM workspaces WHERE id = :ws"
+            ),
+            {
+                "ws": workspace_id,
+                "d": cfg.offboard_drain_timeout_seconds,
+                "g": cfg.offboard_grace_seconds,
+            },
         )
     ).first()
     if row is None:
@@ -329,19 +374,10 @@ async def execute_offboard(deps, session, job) -> dict[str, Any]:
         # what `06` §1's restore semantics say (state + mandatory reconnect).
         return {"outcome": "not_offboarding", "state": row[0]}
 
-    drained = await drain(session, workspace_id)
+    drained = await drain(session, workspace_id, limit=cfg.offboard_drain_limit)
     still_publishing = await _live_publishing(session, workspace_id)
     if still_publishing:
-        expired = (
-            await session.execute(
-                text(
-                    "SELECT offboarding_at + (interval '1 second' * CAST(:d AS bigint))"
-                    "       <= now() FROM workspaces WHERE id = :ws"
-                ),
-                {"ws": workspace_id, "d": cfg.offboard_drain_timeout_seconds},
-            )
-        ).scalar()
-        if expired:
+        if row[1]:  # drain_expired
             # `06` §1: park, do not revoke under live work. There is no operator
             # alert channel in this tier — `06` §5's producers are unbuilt and
             # the notification route has no writer — so the loudest durable
@@ -373,21 +409,7 @@ async def execute_offboard(deps, session, job) -> dict[str, Any]:
         }
 
     revoked = await revoke_credentials(session, workspace_id)
-    transit = await reap_transit(
-        session,
-        workspace_id,
-        destroy=getattr(deps.transit, "destroy_asset", None),
-    )
-
-    elapsed = (
-        await session.execute(
-            text(
-                "SELECT offboarding_at + (interval '1 second' * CAST(:g AS bigint))"
-                "       <= now() FROM workspaces WHERE id = :ws"
-            ),
-            {"ws": workspace_id, "g": cfg.offboard_grace_seconds},
-        )
-    ).scalar()
+    transit = await reap_transit(session, workspace_id, transit=deps.transit)
 
     # **The finalizer is always a LATER run, even when the window has already
     # closed.** Legs 1-3 wrote in the loop's session, which is still open; leg 5
@@ -400,7 +422,7 @@ async def execute_offboard(deps, session, job) -> dict[str, Any]:
     # Transit is excluded on purpose — see `reap_transit`: it cannot record
     # its own completion, so counting it here never converges.
     changed = bool(drained["cancelled"] or revoked)
-    if changed or not elapsed:
+    if changed or not row[2]:  # grace_elapsed
         successor = await _mint_successor(
             session,
             job,

@@ -43,7 +43,11 @@ Every intent edge's side effects are the `02` §4 matrix rows, verbatim:
 shape `fn_clock_tick` mints the baseline one (`059:271`) — same lane, key,
 attempts — and declines to mint a second while one is pending for that
 source, since the serialization key would only queue it behind the first.
-Both job rows go through `jobs.enqueue`, the tier's one INSERT.
+Both job rows go through `jobs.enqueue`, which is this module's only INSERT
+into `jobs` — not the tier's, as an earlier version of this line claimed:
+`media_sync`, `work_loop.ensure_sender_jobs` and `offboarding._mint_successor`
+each write the table directly where the shape needs SQL `enqueue` cannot
+carry.
 
 A caller-supplied value the writers refuse (`InvalidWorkspaceArgs`) is not
 caught here: `commands.execute` maps it once, for every executor.
@@ -69,8 +73,9 @@ from src.services.target.commands import Command, CommandRefused, CommandResult
 from src.services.target.intent_ledger import IntentTransitionRefused
 
 #: `02` §4 terminal states — the reaper/worker own every edge INTO these; a
-#: user command on a terminal intent renders it and acts on nothing (R6).
-TERMINAL_STATES = ("posted", "skipped", "rejected", "expired", "failed", "cancelled")
+#: user command on a terminal intent renders it and acts on nothing (R6). Re-
+#: exported from `intent_ledger`, which owns the one Python copy.
+TERMINAL_STATES = intent_ledger.TERMINAL_STATES
 
 
 def _arg(command: Command, name: str) -> str:
