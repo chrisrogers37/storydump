@@ -115,12 +115,31 @@ above proves inspection is not enough, because a present token and an
 authorised token look identical in the file.
 
 ```bash
-# Exactly the environment systemd gives it. rc=0 means DELIVERED; rc=2 is a
-# missing chat id, rc=3 is a rejected send (wrong or unauthorised token).
+# Exactly the environment systemd gives it. rc=0 means DELIVERED. Every other
+# code is a NON-delivery and they have different remedies:
+#   1  TELEGRAM_STATE_DIR points at a dir with no .env  (reachable via the very
+#      variable this section tells you to set — check the path before the token)
+#   2  TELEGRAM_GROUP_CHAT_ID unset                     (fails before the network)
+#   3  the send was REJECTED by Telegram                (token wrong/unauthorised)
+# `%h` is a UNIT-FILE specifier and does NOT expand in systemd-run — using it
+# here yields a wrong path and a confusing failure while following the doc.
 systemd-run --user --wait --collect --pipe --quiet \
   -p Environment=TELEGRAM_GROUP_CHAT_ID=<id> \
   -p Environment=TELEGRAM_STATE_DIR=<dir> \
-  %h/claudlobby/lib/tg-post.sh "scheduling-monitor notify probe"; echo "rc=$?"
+  "$HOME/claudlobby/lib/tg-post.sh" "scheduling-monitor notify probe"; echo "rc=$?"
+```
+
+```ini
+# ~/.config/systemd/user/storydump-scheduling-monitor.timer
+[Unit]
+Description=poll storydump scheduling health every 5 minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target
 ```
 
 `--notify-command` is given the message as its single argument. It is
@@ -153,6 +172,16 @@ and production has no workspaces and no destinations. Every path here is
 exercised against captured payloads, mutation checks, and the live endpoint's
 `no-signal` answer — but **the `stalled` path has never seen a real stalled
 cursor.**
+
+**The same is true of `worker-down`, and the two verdict paths are now in
+DIFFERENT states — which is the distinction to carry rather than a single
+caveat.** The alert path itself is proven end to end: on 2026-08-31 the monitor
+had something to say, could not deliver it (exit `11`), and after the unit's
+environment was repaired a real send was verified delivered. But that firing was
+a `worker-unknown`. **No `worker-down` verdict has ever reached a human**,
+because inducing a dead worker is a production write. So what is established is
+that the pager works, not that the dead-clock verdict arrives — necessary, and
+not sufficient.
 
 That is a bound on this work, not a defect in it. A later reader must not mistake
 *tested* for *seen in production*. The first real destination is what turns this
