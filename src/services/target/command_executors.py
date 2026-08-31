@@ -488,6 +488,50 @@ async def settings_change(session, command: Command) -> CommandResult:
     return CommandResult("executed", {"changed": sorted(cleaned)})
 
 
+async def account_settings_change(session, command: Command) -> CommandResult:
+    """One account's schedule overrides (#1175 / `06` §3).
+
+    **What this closes.** `054` gives every account its own `posts_per_day`,
+    `posting_hours_start/end` and `tz`, `06` §3 ratifies the account as "the
+    unit of scheduling", and `fn_clock_tick` already resolves the ladder per
+    row on every tick. Nothing could write those four columns. The only
+    statements that touched an account at all set `last_posted_at`,
+    `state`, `last_no_media_notice_at` or upserted `handle`, and provisioning
+    uses a supplied schedule ONLY to compute the opening `next_slot_at` —
+    never to store it. So a second account was addable and, having no way to
+    differ from the first, silently inherited every default.
+
+    **A separate kind rather than a scope on `settings_change`** — the gate
+    reads `ROLE_FLOOR[command.kind]` with no scope parameter, so the scoped
+    form would have to move authorization into this function, which
+    `01-target-architecture.md:39` rules out by name ("one central
+    authorization gate ... one place, not per handler").
+
+    **Nothing here recomputes `next_slot_at`.** The cursor advances through
+    `fn_next_slot(a.next_slot_at, eff_tz, eff_start, eff_end, eff_ppd)` with
+    the effective values re-read each tick, so a change lands on the NEXT
+    advance by itself. The slot already on the row was computed under the old
+    settings and still fires at its old time; the new cadence governs from the
+    one after. Recomputing here would be a second scheduling authority beside
+    the clock, which is the thing `06` §3 gives the clock alone.
+    """
+    account_id = _arg(command, "ig_account_id")
+    changes = command.args.get("settings")
+    if not isinstance(changes, dict):
+        raise CommandRefused("invalid_args", "settings must be an object")
+    cleaned = await workspaces.change_account_settings(
+        session,
+        workspace_id=command.workspace_id,
+        ig_account_id=account_id,
+        changes=changes,
+    )
+    if cleaned is None:
+        raise CommandRefused("not_found", f"account {account_id}")
+    return CommandResult(
+        "executed", {"ig_account_id": account_id, "changed": sorted(cleaned)}
+    )
+
+
 async def pause_workspace(session, command: Command) -> CommandResult:
     await workspaces.set_paused(
         session,
