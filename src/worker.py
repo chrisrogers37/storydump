@@ -147,6 +147,12 @@ def compose(
         # that re-opens its mouth. Cadence is the clock's; the per-source
         # bound is `cfg.stranded_alert_after_seconds`.
         "alert_stranded_sources": 6 * 3600.0,
+        # 05: "Reconciler cadence + budget | sweep every 60 s, LIMIT 50".
+        # Nothing minted this kind before, so the door shipped in 059 was never
+        # walked and #1090 D4's customer notification had no beat to ride. The
+        # kind is now live regardless of the poll seam (its notify half needs
+        # none), so it satisfies the `recurring <= live` assert below.
+        "reconcile_ambiguous": 60.0,
     }
     if "reap_transit_assets" in live:
         recurring["reap_transit_assets"] = 6 * 3600.0
@@ -505,7 +511,12 @@ def main() -> None:
         level=os.environ.get("WORKER_LOG_LEVEL", "INFO"),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
-    config = WorkerConfig()
+    # `05` numbers come from the dataclass defaults; the web origin is
+    # deployment config, so it is read from settings at the composition root
+    # rather than duplicated as a worker env var.
+    from src.config.settings import settings as _settings
+
+    config = WorkerConfig(web_app_origin=_settings.web_app_origin)
     env = dict(os.environ)
     engine = unit_of_work.create_engine(unit_of_work.engine_url_from_env(env))
     transport = None

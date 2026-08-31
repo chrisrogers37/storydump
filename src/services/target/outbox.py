@@ -129,6 +129,60 @@ class OutboxPaced(StorydumpError):
     """
 
 
+#: An executor returns this when it did its work and reached NO delivery
+#: surface — the workspace has no active push binding, so nobody could have
+#: been told. The job finalizes `review_required` rather than `succeeded`.
+#:
+#: **This exists because "nothing to deliver to" was recorded as success.**
+#: `credential_lifecycle` logs a warning and returns `"no-surface"`; the sweep
+#: in `media_sync` iterates an empty binding list with no warning at all. In
+#: both, the customer is told nothing and the ledger records a clean run, so
+#: the weekly reauth cadence re-prompts into the void forever and nothing can
+#: count it. A run nobody could have received must not look like a delivered
+#: one — that is the same failure as an instrument over an empty population
+#: returning its reassuring value.
+#:
+#: `review_required` and not `failed`: `failed` reschedules on the R8 backoff,
+#: and retrying cannot conjure a binding — it would trade a silent success for
+#: a poison loop. `review_required` is terminal, is already in `ck_jobs_state`
+#: (no migration), is covered by `ix_jobs_retire`, and is the `02` §5 state
+#: meaning a human has to look. It is also countable, which "log and succeed"
+#: never was: `SELECT count(*) FROM jobs WHERE state = 'review_required'`.
+UNDELIVERABLE = "no-delivery-surface"
+
+
+async def fanout_notification(
+    session, *, workspace_id, bindings, text: str, intent_id=None
+) -> int:
+    """Write one `notification` row per binding. Returns rows written.
+
+    `06` §5 routes every customer-visible failure to "the workspace's
+    bindings", and the loop that does it had been copied to five call sites —
+    each re-deciding the `kind`, the `{v: 1, text}` envelope and the str()
+    coercions. One home, so a change to the envelope is one edit rather than a
+    hunt.
+
+    It deliberately does NOT resolve the bindings itself. Each producer must
+    decide what an EMPTY set means before it gets here — `outbox.UNDELIVERABLE`
+    versus an ordinary quiet beat — and a helper that both fetched and iterated
+    would make "nobody to tell" a zero-length loop again, which is the exact
+    silence this module's `UNDELIVERABLE` exists to break.
+
+    Remaining callers to move: `media_sync` (two sites) and
+    `credential_lifecycle` (one). They belong to #1090 D1/D2 rather than here.
+    """
+    for binding_id in bindings:
+        await enqueue(
+            session,
+            workspace_id=str(workspace_id),
+            binding_id=binding_id,
+            kind="notification",
+            intent_id=None if intent_id is None else str(intent_id),
+            payload={"v": 1, "text": text},
+        )
+    return len(bindings)
+
+
 async def enqueue(
     session,
     *,

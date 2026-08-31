@@ -72,7 +72,8 @@ from __future__ import annotations
 
 import logging
 
-from typing import Optional
+from dataclasses import dataclass
+from typing import Optional, Union
 
 from sqlalchemy import text
 
@@ -192,6 +193,115 @@ def _json(value) -> str:
     return json.dumps(value)
 
 
+@dataclass(frozen=True)
+class SlotOutcome:
+    """What one `plan_slot` execution did — the intent, and what it SAID.
+
+    The two are independent and the executor needs both: `intent_id` is None
+    for a duplicate slot AND for an empty library, while `notice` is set only
+    when the empty library could not be reported to anyone. Collapsing them
+    back into a single `Optional[str]` is what would hide an undeliverable
+    notice behind an ordinary "nothing minted".
+    """
+
+    intent_id: Optional[str] = None
+    #: `outbox.UNDELIVERABLE` when nobody could have been told; else None.
+    notice: Optional[str] = None
+
+
+async def _notice_no_media(
+    session, *, workspace_id: str, ig_account_id: str, dedup_after_seconds: int
+) -> Union[int, str]:
+    """Tell the workspace one of its slots found no media.
+
+    Returns the number of outbox rows written, or `outbox.UNDELIVERABLE` when
+    there was no surface to write to.
+
+    `06` §5's slot-missed row: the slot lapses, and "a 'no media available'
+    notification fires at most once per `05` window when selection returns
+    empty". `05` sets that window at 24 h.
+
+    **The dedup is an atomic claim, not a read-then-write.** The UPDATE both
+    tests the window and stamps it in one statement, so two workers racing the
+    same starved account produce one notice, not two. A `SELECT ... IF stale
+    THEN UPDATE` would be correct in a test and wrong under the second worker
+    — the #883 shape `execute_plan_slot` already avoids on the minting edge.
+
+    **An empty binding set is NOT a success, and not a bare `0` either.**
+    A workspace with no push binding has nowhere for this to land (#1090 D5 —
+    `push_bindings` selects active `telegram%` rows only, so a web-born
+    workspace has none), so it returns `outbox.UNDELIVERABLE` and the job
+    finalizes `review_required`. Returning `0` would collapse "told nobody,
+    because there is nobody" into "told nobody, because they were told
+    yesterday" — two facts with opposite remedies, and the reassuring one wins
+    every time they are collapsed. That collapse is live in two producers
+    today (`credential_lifecycle` logs and succeeds; `media_sync` iterates an
+    empty list in silence), which is exactly why this one does not copy them.
+
+    **The marker still stamps on the undeliverable attempt.** It records WHEN
+    this account last tried to say it, not whether anyone heard — and because
+    it is a 24 h *window* rather than a latch, a workspace that later gains a
+    binding is told at its next slot. Skipping the stamp instead would park a
+    `review_required` job on every planned slot for as long as the condition
+    stands, which buries the signal it is meant to raise.
+    """
+    # Local imports, matching `media_sync` and `_run_sync`: these modules reach
+    # back into this one, so a module-level import is a cycle.
+    from src.services.target import outbox, prompts
+
+    claimed = (
+        await session.execute(
+            text(
+                "UPDATE ig_accounts SET last_no_media_notice_at = now()"
+                " WHERE id = :acct AND workspace_id = :ws"
+                "   AND (last_no_media_notice_at IS NULL"
+                "        OR last_no_media_notice_at"
+                "           < now() - make_interval(secs => :age))"
+                " RETURNING handle"
+            ),
+            {
+                "acct": str(ig_account_id),
+                "ws": str(workspace_id),
+                "age": float(dedup_after_seconds),
+            },
+        )
+    ).first()
+    if claimed is None:
+        # Inside the window: already said, nothing owed. A real success, and
+        # the common case — which is why the binding lookup sits below it.
+        return 0
+
+    bindings = await prompts.push_bindings(session, workspace_id)
+    if not bindings:
+        logger.warning(
+            "plan_slot: no media for account %s and its workspace has NO push"
+            " binding — nobody was told (#1090 D5)",
+            ig_account_id,
+        )
+        return outbox.UNDELIVERABLE
+
+    # Name the account: a multi-account workspace cannot act on "a slot", and
+    # `06` §3 already requires the queue card to name its account for the same
+    # reason. `handle` is nullable, so the fallback is a phrase, not a blank.
+    label = f"@{claimed[0]}" if claimed[0] else "one of this workspace's accounts"
+    await outbox.fanout_notification(
+        session,
+        workspace_id=workspace_id,
+        bindings=bindings,
+        text=(
+            f"\U0001f4ed No media was available for {label}'s scheduled slot,"
+            " so nothing was queued. Add media to this workspace's Drive"
+            " source, or pause the account if that is intended."
+        ),
+    )
+    logger.info(
+        "plan_slot: no media for account %s — notified %d binding(s)",
+        ig_account_id,
+        len(bindings),
+    )
+    return len(bindings)
+
+
 async def execute_plan_slot(
     session,
     *,
@@ -200,11 +310,29 @@ async def execute_plan_slot(
     slot_at,
     provider_account_ref: str,
     approval_mode: str,
-) -> Optional[str]:
+    no_media_notice_after_seconds: int,
+) -> "SlotOutcome":
     """The `plan_slot` executor: mint the intent for one slot, or nothing.
 
-    Returns the intent id, or **None** when the slot already had one or no
-    media was available. Both Nones are ordinary outcomes, not failures.
+    Returns a :class:`SlotOutcome`. Its `intent_id` is None when the slot
+    already had one or no media was available — both ordinary outcomes, not
+    failures — and its `notice` reports whether an empty library went
+    unreported for want of a delivery surface.
+
+    **The two Nones are not the same fact, and only one of them speaks.** A
+    slot that already had an intent is the idempotency guard doing its job and
+    the customer has nothing to learn from it; a slot that found no media is
+    `06` §5's "slot missed" row, which the customer is owed a notice about
+    ("you are told once — not silently nothing", #1090 D3). The return value
+    stays `Optional[str]` because no caller needs to tell them apart — the
+    notice is emitted here, where the empty case already lives — and its
+    fate rides back on `SlotOutcome.notice`, because the caller finalizes the
+    job and a notice nobody received must not finalize as a success.
+
+    *no_media_notice_after_seconds* is `05`'s dedup window (24 h) and is
+    **required, not defaulted**: a dedup window that can be silently omitted is
+    how a once-a-day notice becomes either a flood or a silence, and there is
+    exactly one production caller to pass it.
 
     **Idempotent by key 1, not by checking first.** The insert carries
     ``ON CONFLICT … DO NOTHING`` against `uq_intent_slot`, so a duplicate
@@ -241,7 +369,17 @@ async def execute_plan_slot(
         )
     ).first()
     if media is None:
-        return None
+        from src.services.target import outbox
+
+        said = await _notice_no_media(
+            session,
+            workspace_id=workspace_id,
+            ig_account_id=ig_account_id,
+            dedup_after_seconds=no_media_notice_after_seconds,
+        )
+        # `said` is a row count on an ordinary beat and the sentinel when
+        # nobody could be told; only the second is a verdict worth carrying.
+        return SlotOutcome(notice=said if said == outbox.UNDELIVERABLE else None)
 
     row = (
         await session.execute(
@@ -262,7 +400,7 @@ async def execute_plan_slot(
             },
         )
     ).first()
-    return None if row is None else str(row[0])
+    return SlotOutcome(intent_id=None if row is None else str(row[0]))
 
 
 async def execute_reap_expired(
