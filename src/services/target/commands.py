@@ -203,6 +203,11 @@ def _build_registry() -> dict[str, Optional[Executor]]:
             "resume_workspace": ex.resume_workspace,
             "create_workspace": ex.create_workspace,
             "rename_workspace": ex.rename_workspace,
+            # `06` §1's offboarding entry edge. The DOOR that finishes the job
+            # (`fn_offboard_finalize`) has existed since `059` with nothing
+            # calling it, and the job kind since `056` with nothing minting it
+            # (#1090 H1).
+            "offboard_workspace": ex.offboard_workspace,
         }
     )
     return registry

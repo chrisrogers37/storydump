@@ -60,6 +60,7 @@ from src.services.target import (
     google_drive_oauth,
     intent_ledger,
     jobs,
+    offboarding,
     readers,
     workspaces,
 )
@@ -522,3 +523,69 @@ async def create_workspace(session, command: Command) -> CommandResult:
         workspace_id=command.args.get("workspace_id"),
     )
     return CommandResult("executed", {"workspace_id": ws_id})
+
+
+async def offboard_workspace(session, command: Command) -> CommandResult:
+    """`06` §1's entry edge, owner-only (`ROLE_FLOOR`). Two writes and a job.
+
+    The flip and the job are one transaction on purpose: a workspace left
+    `offboarding` with nothing scheduled to finish the job would sit invisible
+    to the clock forever, which is worse than not having started.
+
+    **`confirm` is required, and it is the port's half of `06` §1's "owner
+    (explicit, confirmed)".** The dialog is the front end's; what the port can
+    enforce is that the destructive intent was stated rather than arrived at.
+    This is the one command in the vocabulary whose effect is irreversible
+    after the grace window, and a `POST` with an empty body should not start
+    it.
+
+    **A second offboard is refused rather than absorbed.** `06` §1's table
+    admits `active/suspended → offboarding` and nothing else into that state,
+    and re-stamping `offboarding_at` would silently restart a 30-day clock the
+    owner believes is already running — moving a deletion date is not a no-op.
+    """
+    if command.args.get("confirm") is not True:
+        raise CommandRefused(
+            "invalid_args",
+            "offboarding deletes this workspace and everything in it after the"
+            " grace window; pass confirm=true to start it",
+        )
+    row = (
+        await session.execute(
+            text(
+                "UPDATE workspaces SET state = 'offboarding', offboarding_at = now()"
+                " WHERE id = :ws AND state IN ('active', 'suspended')"
+                " RETURNING offboarding_at"
+            ),
+            {"ws": command.workspace_id},
+        )
+    ).first()
+    if row is None:
+        state = await readers.row(
+            session,
+            "SELECT state FROM workspaces WHERE id = :ws",
+            ws=command.workspace_id,
+        )
+        if state is None:
+            raise CommandRefused("not_found", f"workspace {command.workspace_id}")
+        raise CommandRefused(
+            "illegal_transition",
+            f"workspace is {state['state']}, not active or suspended",
+        )
+    job_id = await jobs.enqueue(
+        session,
+        kind="offboard_workspace",
+        workspace_id=command.workspace_id,
+        lane=offboarding.LANE,
+        serialization_key=offboarding.serialization_key(command.workspace_id),
+        payload={"v": 1},
+    )
+    return CommandResult(
+        "enqueued",
+        {
+            "state": "offboarding",
+            "offboarding_at": row[0],
+            "job": "offboard_workspace",
+            "job_id": job_id,
+        },
+    )
