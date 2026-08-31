@@ -160,7 +160,6 @@ export default async function SettingsPage() {
             settings={settings}
             sources={sourcesResult.data.sources ?? []}
             workspaceId={workspaceId}
-            editable={false}
           />
         </TabsContent>
       </Tabs>

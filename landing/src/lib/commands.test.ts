@@ -57,6 +57,7 @@ describe("every offered command can produce an idempotency key", () => {
     settings_change: { submission_id: UUID, settings: { posts_per_day: 3 } },
     sync_now: { submission_id: UUID, source_id: UUID2 },
     rename_workspace: { submission_id: UUID, name: "Northside Coffee" },
+    disconnect_account: { submission_id: UUID, source_id: UUID2 },
   };
 
   it("covers the whole table, so a new spec cannot skip this check", () => {
@@ -247,5 +248,40 @@ describe("rename_workspace", () => {
       ok: false,
       error: "invalid_submission_id",
     });
+  });
+});
+
+describe("disconnect_account", () => {
+  // #1155: built at all three layers since #1083 — command, executor, and the
+  // background Google revoke — and unreachable because this table did not list
+  // it. `storydump.app/privacy` §13 committed to the disconnect publicly the
+  // whole time. Third instance of built-unreachable-and-promised.
+  const spec = COMMAND_SPECS.disconnect_account;
+
+  it("is offered at all — that was the entire defect", () => {
+    expect(isOfferedCommand("disconnect_account")).toBe(true);
+  });
+
+  it("carries the source id the executor refuses without", () => {
+    expect(spec.parse({ submission_id: UUID, source_id: UUID2 })).toEqual({
+      ok: true,
+      body: { source_id: UUID2 },
+      identity: UUID,
+    });
+  });
+
+  it("refuses a non-id before it becomes a database lookup", () => {
+    for (const bad of ["", "not-a-uuid", 7, null, undefined]) {
+      expect(spec.parse({ submission_id: UUID, source_id: bad })).toEqual({
+        ok: false,
+        error: "invalid_source_id",
+      });
+    }
+  });
+
+  it("shares sync_now's shape, since they take the same argument", () => {
+    const a = spec.parse({ submission_id: UUID, source_id: UUID2 });
+    const b = COMMAND_SPECS.sync_now.parse({ submission_id: UUID, source_id: UUID2 });
+    expect(a).toEqual(b);
   });
 });

@@ -7,7 +7,6 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { postApi } from "@/lib/dashboard-api";
 import type { SettingsView, SourceRow } from "@/lib/dashboard-payloads";
 import {
   addDriveSource,
@@ -22,7 +21,7 @@ import { settingsRefusalCopy, submitCommand } from "@/lib/command-client";
  *
  * Every action on this tab targets a route that does not exist —
  * `disconnect-gdrive`, `sync-media`, and `oauth-url/google-drive` behind the
- * connect button. They are held off by `editable` rather than left to fail.
+ * connect button. All three are wired now; nothing on this card is held off.
  *
  * The connection facts are now real: `gdrive_connected` and the source's own
  * `state` come from `GET /workspaces/{ws}/sources`, and the media count from
@@ -74,25 +73,20 @@ import { settingsRefusalCopy, submitCommand } from "@/lib/command-client";
  * reads it. Consuming it is its own change: a precise label, and a heading
  * that can say "Connected" truthfully for the first time.
  */
-const DISABLED_REASON =
-  "Not wired up yet — this action is not available on this API version.";
-
 export function IntegrationsTab({
   settings,
   sources,
   workspaceId,
-  editable,
 }: {
   settings: SettingsView;
   /** The workspace's sources, unflattened — this card renders them per row. */
   sources: SourceRow[];
   workspaceId: string;
-  editable: boolean;
 }) {
   const router = useRouter();
   const [syncingId, setSyncingId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [disconnecting, setDisconnecting] = useState(false);
+  const [disconnectingId, setDisconnectingId] = useState<string | null>(null);
   const [connectingId, setConnectingId] = useState<string | null>(null);
   const [folderRef, setFolderRef] = useState("");
   const [addingFolder, setAddingFolder] = useState(false);
@@ -166,17 +160,37 @@ export function IntegrationsTab({
     // navigation, which reads as the click having done nothing.
     window.location.assign(result.authorizationUrl);
   }
-  async function disconnectGdrive() {
+  /**
+   * Disconnect a Drive source — REVOKE AND PAUSE, never a delete.
+   *
+   * The executor revokes the credential, KEEPS the row, and sets the source
+   * `paused` rather than `error` (`command_executors.py:405`): a disconnect is
+   * a decision, not a fault, and `error` is reserved for faults so the stranded
+   * -source alert stays meaningful. Nothing is deleted — `oauth_credentials`
+   * cascades from the source, so removing it would erase an audit trail.
+   *
+   * The button is styled destructive because it withdraws access, and the copy
+   * beside it says what it does NOT do; a control that looks like data loss is
+   * one people will not press, and an unpressed disconnect is the same
+   * public-commitment gap one step later.
+   */
+  async function disconnectSource(sourceId: string) {
     setError(null);
-    setDisconnecting(true);
-    try {
-      await postApi("disconnect-gdrive");
-      router.refresh();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to disconnect Google Drive");
-    } finally {
-      setDisconnecting(false);
+    setNotice(null);
+    setDisconnectingId(sourceId);
+    const result = await submitCommand(workspaceId, "disconnect_account", {
+      source_id: sourceId,
+    });
+    setDisconnectingId(null);
+
+    if (!result.ok) {
+      setError(settingsRefusalCopy(result.error, result.status));
+      return;
     }
+    setNotice(
+      "Disconnected. Google access was withdrawn and syncing is paused — the folder and everything already synced are still here.",
+    );
+    router.refresh();
   }
 
   /**
@@ -290,9 +304,9 @@ export function IntegrationsTab({
                           ? "Opening Google..."
                           : "Set up Google access"}
                       </Button>
-                      {/* No longer behind `editable`: `sync_now` is a built
-                          executor and this calls it. Only Disconnect is still
-                          pending (epic P6). */}
+                      {/* Neither is behind `editable` now: both `sync_now` and
+                          `disconnect_account` are built executors and these call
+                          them. Nothing on this card is pending any more. */}
                       <Button
                         variant="outline"
                         size="sm"
@@ -304,11 +318,12 @@ export function IntegrationsTab({
                       <Button
                         variant="destructive"
                         size="sm"
-                        onClick={disconnectGdrive}
-                        disabled={!editable || disconnecting}
-                        title={editable ? undefined : DISABLED_REASON}
+                        onClick={() => disconnectSource(source.id)}
+                        disabled={disconnectingId !== null}
                       >
-                        {disconnecting ? "Disconnecting..." : "Disconnect"}
+                        {disconnectingId === source.id
+                          ? "Disconnecting..."
+                          : "Disconnect"}
                       </Button>
                     </div>
                   </div>
@@ -318,11 +333,10 @@ export function IntegrationsTab({
           )}
           {driveSources.length > 0 && (
             <div className="space-y-1 pt-3">
-              {!editable && (
-                <p className="text-xs text-muted-foreground">
-                  Disconnect is not wired up yet.
-                </p>
-              )}
+              <p className="text-xs text-muted-foreground">
+                Disconnecting withdraws Google&apos;s access and pauses syncing. Your
+                folder and everything already synced stay where they are.
+              </p>
               {/* Once for the card, not once per row: the folder ref lives in
                   `media_sources.config`, which the sources route does not
                   return, so it is omitted rather than guessed. */}
