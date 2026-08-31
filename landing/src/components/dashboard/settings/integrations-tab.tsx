@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { sourceCredentialBadge } from "@/lib/source-credential";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import type { SettingsView, SourceRow } from "@/lib/dashboard-payloads";
@@ -274,11 +275,36 @@ export function IntegrationsTab({
                       {/* The source's own state, not a hardcoded badge:
                           erroring and healthy are different facts with
                           different remedies. */}
+                      {/* GREEN BELONGS TO THE CREDENTIAL, NEVER TO `state`.
+                          `state` is NOT NULL DEFAULT 'active' (054), so a folder
+                          added and never granted is `active` — colouring that
+                          green is what told the first real user an unauthorised
+                          folder was connected. `state` still renders, because it
+                          answers a real question (is this source operating), but
+                          it is unremarkable when normal and only coloured when
+                          it is a problem. */}
+                      {(() => {
+                        const cred = sourceCredentialBadge(source.credential_status);
+                        return (
+                          <Badge
+                            variant="secondary"
+                            className={
+                              cred.tone === "active"
+                                ? "bg-green-100 text-green-800"
+                                : cred.tone === "attention"
+                                  ? "bg-amber-100 text-amber-900"
+                                  : "bg-muted text-muted-foreground"
+                            }
+                          >
+                            {cred.label}
+                          </Badge>
+                        );
+                      })()}
                       <Badge
                         variant="secondary"
                         className={
                           source.state === "active"
-                            ? "bg-green-100 text-green-800"
+                            ? "bg-muted text-muted-foreground"
                             : "bg-amber-100 text-amber-900"
                         }
                       >
@@ -286,13 +312,15 @@ export function IntegrationsTab({
                       </Badge>
                     </div>
                     {/*
-                      NOT "Connected". That heading was `drive !== null` — a
-                      source ROW existing — so a folder added and never granted
-                      read as connected with a green badge. This tier still
-                      cannot make that claim: the payload now carries
-                      `credential_status` (#1080) but `SourceRow` does not
-                      declare it and nothing here reads it yet. So this states
-                      what it knows rather than what it would like to say.
+                      This line says what SYNC has done; the badge above says
+                      whether we can reach Google at all. Two questions, two
+                      answers — collapsing them is how "added" came to read as
+                      "connected".
+
+                      The comment that stood here said `SourceRow` did not
+                      declare `credential_status` and nothing read it. The first
+                      half had already stopped being true; the second is what
+                      this change fixes.
                     */}
                     <p className="text-sm text-muted-foreground">
                       {source.last_sync_success_at
