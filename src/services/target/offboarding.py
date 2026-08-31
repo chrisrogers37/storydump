@@ -278,7 +278,9 @@ async def _audit(factory, workspace_id: str, event: str, detail: dict) -> None:
         await session.commit()
 
 
-async def _mint_successor(session, job, workspace_id: str, run_at_sql: str, params: dict) -> Optional[str]:
+async def _mint_successor(
+    session, job, workspace_id: str, run_at_sql: str, params: dict
+) -> Optional[str]:
     """The next run of this workflow. `jobs.enqueue` cannot express a future
     `run_at` (it hardcodes `now()`, which is right for every other producer),
     and `unless_pending` cannot be used at all here because THIS job holds the

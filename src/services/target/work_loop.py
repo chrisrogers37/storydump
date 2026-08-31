@@ -376,6 +376,7 @@ def build_registry(deps: WorkerDeps) -> dict:
             " (`07` §1's owner ack on adding Resend is OPEN, #1092)"
         )
     )
+
     # No external seam: the prompt writes outbox rows and nothing else, so it
     # is live in every deployment that has an engine at all.
     async def offboard_workspace(session, job):

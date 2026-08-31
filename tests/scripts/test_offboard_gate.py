@@ -188,7 +188,9 @@ class TestTheCommand:
             (ws["ws"],),
         ) == ("active", None)
         assert (
-            _one(off_db, "SELECT count(*) FROM jobs WHERE workspace_id = %s", (ws["ws"],))[0]
+            _one(
+                off_db, "SELECT count(*) FROM jobs WHERE workspace_id = %s", (ws["ws"],)
+            )[0]
             == 0
         )
 
@@ -307,9 +309,7 @@ def run_job(off_db, ws, *, transit=None, grace=0, drain_timeout=15 * 60):
 
 
 class TestTheWorkflow:
-    def test_the_first_run_drains_revokes_and_schedules_the_finalizer(
-        self, off_db, ws
-    ):
+    def test_the_first_run_drains_revokes_and_schedules_the_finalizer(self, off_db, ws):
         live = _intent(off_db, ws, transit="cloudinary/abc")
         credential = _credential(off_db, ws)
         offboard(off_db, ws, confirm=True)
@@ -374,12 +374,16 @@ class TestTheWorkflow:
         _credential(off_db, ws)
         offboard(off_db, ws, confirm=True)
         run_job(off_db, ws, grace=3600)
-        before = _one(off_db, "SELECT count(*) FROM jobs WHERE workspace_id = %s", (ws["ws"],))
+        before = _one(
+            off_db, "SELECT count(*) FROM jobs WHERE workspace_id = %s", (ws["ws"],)
+        )
         out = run_job(off_db, ws, grace=3600)
         assert out["outcome"] == "grace"
         assert out["cancelled"] == 0 and out["revoked"] == 0
         assert (
-            _one(off_db, "SELECT count(*) FROM jobs WHERE workspace_id = %s", (ws["ws"],))
+            _one(
+                off_db, "SELECT count(*) FROM jobs WHERE workspace_id = %s", (ws["ws"],)
+            )
             == before
         ), "no second successor and no second revoke job"
 
@@ -417,13 +421,20 @@ class TestTheWorkflow:
         counts = _one(
             off_db,
             "SELECT "
-            + ", ".join(f"(SELECT count(*) FROM {t} WHERE workspace_id = %s)" for t in tables),
+            + ", ".join(
+                f"(SELECT count(*) FROM {t} WHERE workspace_id = %s)" for t in tables
+            ),
             (ws["ws"],) * len(tables),
         )
         assert dict(zip(tables, counts)) == dict.fromkeys(tables, 0)
-        assert _one(
-            off_db, "SELECT count(*) FROM audit_events WHERE workspace_id = %s", (ws["ws"],)
-        )[0] > 0, "audit outlives the tenant (`02` §0 exception)"
+        assert (
+            _one(
+                off_db,
+                "SELECT count(*) FROM audit_events WHERE workspace_id = %s",
+                (ws["ws"],),
+            )[0]
+            > 0
+        ), "audit outlives the tenant (`02` §0 exception)"
 
     def test_the_job_row_is_erased_by_the_cascade_it_triggers(self, off_db, ws):
         """Why the finalize leg owns its transaction. `jobs.workspace_id`
@@ -451,7 +462,9 @@ class TestTheWorkflow:
         )
         out = run_job(off_db, ws, grace=0)
         assert out == {"outcome": "not_offboarding", "state": "active"}
-        assert _one(off_db, "SELECT count(*) FROM workspaces WHERE id = %s", (ws["ws"],)) == (1,)
+        assert _one(
+            off_db, "SELECT count(*) FROM workspaces WHERE id = %s", (ws["ws"],)
+        ) == (1,)
 
     def test_an_already_finalized_workspace_is_not_an_error(self, off_db, ws):
         offboard(off_db, ws, confirm=True)
@@ -464,7 +477,9 @@ class TestTheWorkflow:
                 uow = unit_of_work(deps.engine, ws["ws"], actor_kind="system")
                 async with uow.begin() as session:
                     return await execute_offboard(
-                        deps, session, {"id": str(uuid.uuid4()), "workspace_id": ws["ws"]}
+                        deps,
+                        session,
+                        {"id": str(uuid.uuid4()), "workspace_id": ws["ws"]},
                     )
             finally:
                 await deps.engine.dispose()
@@ -481,18 +496,22 @@ class TestTheDrainPark:
         _intent(off_db, ws, state="publishing_ambiguous")
         return _credential(off_db, ws)
 
-    def test_inside_the_timeout_it_waits_and_leaves_credentials_alive(
-        self, off_db, ws
-    ):
+    def test_inside_the_timeout_it_waits_and_leaves_credentials_alive(self, off_db, ws):
         credential = self._publishing(off_db, ws)
         offboard(off_db, ws, confirm=True)
         out = run_job(off_db, ws, grace=0, drain_timeout=900)
         assert out["outcome"] == "draining" and out["publishing"] == 1
         assert (
-            _one(off_db, "SELECT state FROM oauth_credentials WHERE id = %s", (credential,))[0]
+            _one(
+                off_db,
+                "SELECT state FROM oauth_credentials WHERE id = %s",
+                (credential,),
+            )[0]
             == "active"
         ), "credentials must stay alive while publishing work drains"
-        assert _one(off_db, "SELECT count(*) FROM workspaces WHERE id = %s", (ws["ws"],)) == (1,)
+        assert _one(
+            off_db, "SELECT count(*) FROM workspaces WHERE id = %s", (ws["ws"],)
+        ) == (1,)
         assert out["successor"], "a recheck is scheduled rather than the job dying"
 
     def test_past_the_timeout_it_parks_loudly_and_the_record_survives_the_raise(
@@ -506,19 +525,22 @@ class TestTheDrainPark:
         with pytest.raises(DrainTimedOut):
             run_job(off_db, ws, grace=0, drain_timeout=0)
         assert (
-            _one(off_db, "SELECT state FROM oauth_credentials WHERE id = %s", (credential,))[0]
-            == "active"
-        ), "the park must not revoke under live work"
-        assert _one(off_db, "SELECT count(*) FROM workspaces WHERE id = %s", (ws["ws"],)) == (1,)
-        assert (
             _one(
                 off_db,
-                "SELECT count(*) FROM audit_events WHERE workspace_id = %s"
-                "   AND detail->>'event' = 'offboard_drain_timeout'",
-                (ws["ws"],),
-            )
-            == (1,)
-        )
+                "SELECT state FROM oauth_credentials WHERE id = %s",
+                (credential,),
+            )[0]
+            == "active"
+        ), "the park must not revoke under live work"
+        assert _one(
+            off_db, "SELECT count(*) FROM workspaces WHERE id = %s", (ws["ws"],)
+        ) == (1,)
+        assert _one(
+            off_db,
+            "SELECT count(*) FROM audit_events WHERE workspace_id = %s"
+            "   AND detail->>'event' = 'offboard_drain_timeout'",
+            (ws["ws"],),
+        ) == (1,)
 
 
 class TestTheTransitSeam:
@@ -545,8 +567,12 @@ class TestTheTransitSeam:
         # Both provider failure shapes: `destroy` answers False for a polite
         # refusal and raises for anything else. Counting only the exception
         # would report a refusal as a successful reap.
-        transit = _Transit(refuse={"cloudinary/refused"}, raise_on={"cloudinary/raised"})
+        transit = _Transit(
+            refuse={"cloudinary/refused"}, raise_on={"cloudinary/raised"}
+        )
         out = run_job(off_db, ws, transit=transit, grace=3600)
         assert out["transit"] == {"reaped": 1, "left_to_ttl": 2, "seam": "wired"}
         assert transit.destroyed == ["cloudinary/fine"]
-        assert out["outcome"] == "drained", "a refused asset does not stall the workflow"
+        assert out["outcome"] == "drained", (
+            "a refused asset does not stall the workflow"
+        )
