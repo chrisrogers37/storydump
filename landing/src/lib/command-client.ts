@@ -121,6 +121,11 @@ export function submitSettingsChange(
  * "This post is no longer in the queue" on a form about posting hours. Two
  * disjoint vocabularies, not two copies of one decision.
  */
+/** Rename the workspace. `submitCommand` mints the submission id. */
+export function submitRenameWorkspace(workspaceId: string, name: string) {
+  return submitCommand(workspaceId, "rename_workspace", { name });
+}
+
 export function settingsRefusalCopy(reason: unknown): string {
   switch (reason) {
     case REPLAYED_ERROR:
@@ -130,6 +135,8 @@ export function settingsRefusalCopy(reason: unknown): string {
       return "That change was not saved — the app sent it under a key the server had already seen. Reload and try again; report it if it repeats.";
     case "invalid_settings":
       return "Nothing to save — no setting changed.";
+    case "invalid_name":
+      return "Give the workspace a name.";
     case "unauthenticated":
       return "That session expired. Sign in again.";
     case "unreachable":

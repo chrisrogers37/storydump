@@ -15,7 +15,11 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
-import { settingsRefusalCopy, submitSettingsChange } from "@/lib/command-client";
+import {
+  settingsRefusalCopy,
+  submitRenameWorkspace,
+  submitSettingsChange,
+} from "@/lib/command-client";
 import type { SettingsView } from "@/lib/dashboard-payloads";
 import { CaptionStyleCard } from "./caption-style-card";
 import { RepostCadenceCard } from "./repost-cadence-card";
@@ -142,13 +146,17 @@ function Unavailable() {
 export function GeneralTab({
   settings,
   workspaceId,
+  workspaceName,
   editable,
 }: {
   settings: SettingsView;
   workspaceId: string;
+  workspaceName: string;
   editable: boolean;
 }) {
   const router = useRouter();
+  const [name, setName] = useState(workspaceName);
+  const [savingName, setSavingName] = useState(false);
   const [postsPerDay, setPostsPerDay] = useState(settings.posts_per_day ?? 0);
   const [hoursStart, setHoursStart] = useState(
     settings.posting_hours_start === null ? "" : String(settings.posting_hours_start),
@@ -182,6 +190,32 @@ export function GeneralTab({
    * end hour leave the other two already written — a half-applied schedule
    * with no way to name what happened.
    */
+  /**
+   * The workspace's own name.
+   *
+   * Its own card and its own command — NOT folded into the schedule save. A
+   * rename is identity, the rest of this tab is posting behaviour, and the port
+   * takes them as different commands with different floors (`rename_workspace`
+   * is `admin`, `settings_change` is not). One button for both would refuse the
+   * pair on the stricter of the two and leave the person unable to tell which
+   * half was rejected.
+   */
+  async function saveName() {
+    setError(null);
+    setSavingName(true);
+    const result = await submitRenameWorkspace(workspaceId, name);
+    setSavingName(false);
+
+    if (!result.ok) {
+      setError(settingsRefusalCopy(result.error));
+      return;
+    }
+    // Re-read: the name is rendered in the header and the workspace switcher
+    // too, and leaving those showing the old one would be the same half-written
+    // screen the schedule save avoids.
+    router.refresh();
+  }
+
   async function saveSchedule() {
     setError(null);
     setSavingSchedule(true);
@@ -235,6 +269,32 @@ export function GeneralTab({
           {error}
         </div>
       )}
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Workspace</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="workspace-name">Workspace name</Label>
+            <Input
+              id="workspace-name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              maxLength={100}
+              placeholder="e.g. Northside Coffee"
+            />
+          </div>
+          <Button
+            onClick={saveName}
+            disabled={
+              savingName || name.trim().length === 0 || name.trim() === workspaceName
+            }
+          >
+            {savingName ? "Saving..." : "Save Name"}
+          </Button>
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader>
