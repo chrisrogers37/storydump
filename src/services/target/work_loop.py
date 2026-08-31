@@ -33,6 +33,7 @@ from src.services.target import credential_lifecycle, email_sender, media_sync
 
 from src.services.target import (
     jobs,
+    offboarding,
     outbox,
     prompts,
     publish_pipeline,
@@ -89,6 +90,10 @@ class WorkerConfig:
     clock_max_inserts: int = 500
     refresh_cadence_seconds: int = 7 * 24 * 3600
     heartbeat_interval_seconds: float = 20.0
+    offboard_grace_seconds: int = 30 * 24 * 3600  # 05: grace window 30 days
+    offboard_drain_timeout_seconds: int = 15 * 60  # 05: publish-drain 15 min
+    offboard_drain_recheck_seconds: int = 60  # provisional: 05 states no cadence
+    offboard_drain_limit: int = 500  # provisional: 05 states no bound
 
 
 @dataclass
@@ -119,7 +124,6 @@ _UNBUILT_REASON = (
 #: Kinds the tier has never carried an executor for. The registry parks them
 #: unconditionally; the schema-derived completeness test keeps this honest.
 UNBUILT_KINDS = (
-    "offboard_workspace",
     "retention_sweep",
     "reencrypt_credentials",
 )
@@ -372,8 +376,23 @@ def build_registry(deps: WorkerDeps) -> dict:
             " (`07` §1's owner ack on adding Resend is OPEN, #1092)"
         )
     )
+
     # No external seam: the prompt writes outbox rows and nothing else, so it
     # is live in every deployment that has an engine at all.
+    async def offboard_workspace(session, job):
+        # The loop DISCARDS a handler's return value, so without this line the
+        # outcome, the counts and the transit seam's "left to TTL" report reach
+        # nobody in production — three docstrings would claim an observability
+        # that only the gate had. Same shape as `run_pipeline` above.
+        outcome = await offboarding.execute_offboard(deps, session, job)
+        logger.info("offboard_workspace %s -> %s", job["id"], outcome)
+        return outcome
+
+    # No seam gate. Leg 3 is the only leg with a provider seam and it degrades
+    # to `06` §1's documented TTL backstop when `deps.transit` is None, so
+    # parking the whole workflow for a missing transit store would strand an
+    # offboard over the one leg that is allowed to skip.
+    registry["offboard_workspace"] = offboard_workspace
     registry["reauth_prompt"] = reauth_prompt
     # Needs no `deps` seam: it talks to Google through the egress floor with a
     # per-call client, the way `ig_refresh` does. Nothing to wire, so nothing
