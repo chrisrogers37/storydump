@@ -76,11 +76,57 @@ Description=storydump scheduling-outage monitor
 
 [Service]
 Type=oneshot
+# THE NOTIFY COMMAND NEEDS AN ENVIRONMENT AND A systemd --user UNIT HAS ALMOST
+# NONE. This is not optional decoration: a `oneshot` under `systemd --user`
+# inherits neither the shell profile nor `bot.conf`, so a notify command that
+# reads its destination and its credential from the environment finds neither.
+#
+# TWO variables, with UNRELATED causes -- and the second was found only by
+# RUNNING the notify path, after the first had been applied and the unit looked
+# fixed. Measured on the fleet host 2026-08-31:
+#
+#   (1) no chat id     -> tg-post.sh exits 2, before any network call.
+#   (2) chat id set,    -> tg-post.sh exits 3: "send REJECTED -- message NOT
+#       wrong token         delivered (ok=<none>; error: Unauthorized)".
+#
+# (2) is the one that reads as fixed. With no TELEGRAM_STATE_DIR, tg-post.sh
+# falls back to the GENERIC channel dir, whose token is not authorised for the
+# group -- so a token resolves, and resolving is not the same as working.
+# Probing the file for a token line cannot tell these apart; only a real send
+# can. Point TELEGRAM_STATE_DIR at a channel dir whose token is authorised for
+# the destination chat.
+#
+# NOT `EnvironmentFile=bot.conf`. Every line there is `export KEY=value`, and
+# systemd does not strip the keyword -- it would create a variable literally
+# named `export TELEGRAM_GROUP_CHAT_ID` (measured: 53 of 60 lines).
+Environment=TELEGRAM_GROUP_CHAT_ID=<the operator group chat id>
+Environment=TELEGRAM_STATE_DIR=<a channel dir whose token is authorised there>
 ExecStart=/usr/bin/python3 %h/ops/storydump/scripts/scheduling_monitor.py \
   --url https://<api-host>/health/scheduling \
   --state-file %h/.local/state/storydump-scheduling-monitor.json \
   --notify-command %h/claudlobby/lib/tg-post.sh
 SuccessExitStatus=0 10
+```
+
+**Verify the notify path by SENDING, before trusting the unit.** The monitor
+cannot tell you its pager is broken until it already has something urgent to
+say, which is the worst possible moment to find out — and the second failure
+above proves inspection is not enough, because a present token and an
+authorised token look identical in the file.
+
+```bash
+# Exactly the environment systemd gives it. rc=0 means DELIVERED. Every other
+# code is a NON-delivery and they have different remedies:
+#   1  TELEGRAM_STATE_DIR points at a dir with no .env  (reachable via the very
+#      variable this section tells you to set — check the path before the token)
+#   2  TELEGRAM_GROUP_CHAT_ID unset                     (fails before the network)
+#   3  the send was REJECTED by Telegram                (token wrong/unauthorised)
+# `%h` is a UNIT-FILE specifier and does NOT expand in systemd-run — using it
+# here yields a wrong path and a confusing failure while following the doc.
+systemd-run --user --wait --collect --pipe --quiet \
+  -p Environment=TELEGRAM_GROUP_CHAT_ID=<id> \
+  -p Environment=TELEGRAM_STATE_DIR=<dir> \
+  "$HOME/claudlobby/lib/tg-post.sh" "scheduling-monitor notify probe"; echo "rc=$?"
 ```
 
 ```ini
@@ -126,6 +172,16 @@ and production has no workspaces and no destinations. Every path here is
 exercised against captured payloads, mutation checks, and the live endpoint's
 `no-signal` answer — but **the `stalled` path has never seen a real stalled
 cursor.**
+
+**The same is true of `worker-down`, and the two verdict paths are now in
+DIFFERENT states — which is the distinction to carry rather than a single
+caveat.** The alert path itself is proven end to end: on 2026-08-31 the monitor
+had something to say, could not deliver it (exit `11`), and after the unit's
+environment was repaired a real send was verified delivered. But that firing was
+a `worker-unknown`. **No `worker-down` verdict has ever reached a human**,
+because inducing a dead worker is a production write. So what is established is
+that the pager works, not that the dead-clock verdict arrives — necessary, and
+not sufficient.
 
 That is a bound on this work, not a defect in it. A later reader must not mistake
 *tested* for *seen in production*. The first real destination is what turns this
