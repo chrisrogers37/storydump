@@ -1,12 +1,12 @@
 "use client";
 
-import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { Menu } from "lucide-react";
 import type { SessionUser } from "@/lib/session";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import { Sidebar } from "@/components/dashboard/sidebar";
+import { SignOutButton } from "@/components/auth/sign-out-button";
 
 /**
  * The dashboard header.
@@ -34,13 +34,6 @@ export function DashboardHeader({
   user: SessionUser;
   workspaceName?: string;
 }) {
-  const router = useRouter();
-
-  async function handleLogout() {
-    await fetch("/api/auth/logout", { method: "POST" });
-    router.push("/login");
-  }
-
   return (
     <header className="flex h-14 shrink-0 items-center justify-between gap-4 border-b bg-background px-4 lg:px-6">
       <div className="flex min-w-0 items-center gap-3">
@@ -72,12 +65,7 @@ export function DashboardHeader({
         <span className="truncate text-sm text-muted-foreground">
           {user.displayName || user.email}
         </span>
-        <button
-          onClick={handleLogout}
-          className="shrink-0 text-xs text-muted-foreground transition-colors hover:text-foreground"
-        >
-          Sign out
-        </button>
+        <SignOutButton className="shrink-0 text-xs text-muted-foreground transition-colors hover:text-foreground" />
       </div>
     </header>
   );
