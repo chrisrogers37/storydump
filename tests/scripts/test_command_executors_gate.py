@@ -24,6 +24,7 @@ exactly one job while one is pending, and a fresh one once it is not.
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 
 import psycopg2
@@ -33,7 +34,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
 from src.config.defaults import DEFAULT_REPOST_TTL_DAYS, DEFAULT_SKIP_TTL_DAYS
-from src.services.target import commands
+from src.services.target import commands, invitations, sessions
 from src.services.target.commands import Command, CommandRefused
 from src.services.target.unit_of_work import asyncpg_url, unit_of_work
 from tests.scripts.conftest import (
@@ -473,3 +474,232 @@ class TestAnotherTenantsIntent:
         assert _one(
             world, "SELECT state FROM post_intents WHERE id = %s", (i["id"],)
         ) == ("awaiting_approval",)
+
+
+# --- invite_member: the mint half of `06` §2 ---------------------------------
+
+
+ORIGIN = "https://app.invite-gate.test"
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _web_origin():
+    """`invite_member` refuses without a front-end origin, by design. The suite
+    inherits no `WEB_APP_URL`, so the gate supplies one and restores it — and
+    `TestInviteMember` asserts the refusal directly rather than relying on the
+    ambient absence, which is exactly the coverage a fixture like this can
+    silently delete."""
+    from src.config.settings import settings
+
+    before = settings.WEB_APP_URL
+    settings.WEB_APP_URL = ORIGIN
+    yield
+    settings.WEB_APP_URL = before
+
+
+async def _accept(dsn: str, token: str, user: str):
+    engine = create_async_engine(asyncpg_url(dsn), poolclass=NullPool)
+    try:
+        async with engine.begin() as conn:
+            return await invitations.accept(conn, token=token, user_id=user, channel="web")
+    finally:
+        await engine.dispose()
+
+
+class TestInviteMember:
+    """The half that did not exist: `fn_invitation_accept` has been callable
+    since `059`, so until now the surface could consume an invitation that
+    nothing could create (#1090 G1). Every assertion here is read back from the
+    database as the migration actor, never from the return value alone."""
+
+    def _address(self, tag: str) -> str:
+        return f"invitee-{tag}-{uuid.uuid4().hex[:8]}@example.test"
+
+    def _row(self, world, invitation_id: str):
+        return _one(
+            world,
+            "SELECT workspace_id::text, email, role, state, delivery_channel,"
+            "       token_hash, invited_by_user_id::text,"
+            "       expires_at > now() + interval '6 days',"
+            "       expires_at < now() + interval '8 days'"
+            "  FROM workspace_invitations WHERE id = %s",
+            (invitation_id,),
+        )
+
+    def test_mints_a_pending_row_and_queues_the_mail(self, world):
+        ws, owner = str(world["a"]["ws"]), str(world["a"]["user"])
+        address = self._address("mint")
+        out = run(world, "invite_member", email=address.upper(), role="admin")
+
+        # `executed`, not `enqueued`: the offer exists on return.
+        assert out.outcome == "executed"
+        assert out.data["email"] == address, "the address is stored lowercased"
+        assert out.data["role"] == "admin"
+
+        row = self._row(world, out.data["invitation_id"])
+        assert row[:5] == (ws, address, "admin", "pending", "email")
+        assert row[6] == owner, "the inviter is recorded"
+        assert row[7] and row[8], "expiry is the `05` seven-day window"
+
+        job = _one(
+            world,
+            "SELECT kind, state, lane, workspace_id, payload FROM jobs WHERE id = %s",
+            (out.data["job_id"],),
+        )
+        assert job[0] == "send_email" and job[1] == "ready"
+        assert job[2] == "interactive", "`07` §1 — the inviter is mid-flow"
+        assert job[3] is None, "send_email is a system kind; ck_jobs_system_kinds"
+        assert job[4]["to"] == address and job[4]["template"] == "invitation"
+        # Read the name back rather than pinning "exec-a": TestPauseResumeRename
+        # renames this workspace, so a literal here asserts test ORDER, not the
+        # property — that the mail names the workspace the invite is into.
+        assert job[4]["params"]["workspace_name"] == _one(
+            world, "SELECT name FROM workspaces WHERE id = %s", (ws,)
+        )[0]
+
+        audit = _one(
+            world,
+            "SELECT entity_kind, to_state, actor_kind, channel, detail"
+            "  FROM audit_events WHERE entity_id = %s",
+            (out.data["invitation_id"],),
+        )
+        assert audit[:4] == ("member", "invited", "user", "web")
+        assert audit[4] == {"v": 1, "event": "invited", "role": "admin", "delivery": "email"}
+        assert address not in json.dumps(audit[4]), (
+            "audit_events has no FK and outlives the offboard cascade, so the"
+            " invitee's address must not be written into it"
+        )
+
+    def test_the_link_in_the_mail_opens_the_row_that_was_written(self, world):
+        """The round trip, not two shapes that merely look consistent: the
+        token the invitee receives must hash to the digest the row stores, or
+        the mail is a link to nothing."""
+        out = run(world, "invite_member", email=self._address("link"))
+        job = _one(world, "SELECT payload FROM jobs WHERE id = %s", (out.data["job_id"],))
+        accept_url = job[0]["params"]["accept_url"]
+        assert accept_url.startswith(f"{ORIGIN}/join/")
+        token = accept_url.rsplit("/", 1)[1]
+        assert self._row(world, out.data["invitation_id"])[5] == sessions.token_hash(token)
+
+    def test_the_token_is_never_handed_back_to_the_inviter(self, world):
+        """Not `"token" not in out.data` — that only checks a name. The stored
+        digest is compared against every string the caller received."""
+        out = run(world, "invite_member", email=self._address("secret"))
+        stored = self._row(world, out.data["invitation_id"])[5]
+        for value in out.data.values():
+            if isinstance(value, str):
+                assert sessions.token_hash(value) != stored
+
+    def test_re_inviting_the_same_address_revokes_the_first(self, world):
+        """`uq_invite_live` is a partial unique on the pending rows, so `06`
+        §2's "new row + revoke prior, same transaction" is what keeps a second
+        invitation from being a constraint violation — and what stops the first
+        token outliving the mail that superseded it."""
+        address = self._address("again")
+        first = run(world, "invite_member", email=address).data["invitation_id"]
+        second = run(world, "invite_member", email=address).data["invitation_id"]
+        assert first != second
+        assert self._row(world, first)[3] == "revoked"
+        assert self._row(world, second)[3] == "pending"
+        assert (
+            _one(
+                world,
+                "SELECT count(*) FROM workspace_invitations"
+                " WHERE workspace_id = %s AND email = %s AND state = 'pending'",
+                (str(world["a"]["ws"]), address),
+            )[0]
+            == 1
+        )
+
+    def test_an_invitation_minted_here_is_acceptable(self, world):
+        """G1 and G2 closed against each other: mint through the port, accept
+        through the door, and read the membership row back."""
+        address = self._address("accept")
+        (invitee,) = _migrate(
+            world["stream"],
+            "INSERT INTO users (primary_email) VALUES (%s) RETURNING id",
+            (address,),
+        )
+        out = run(world, "invite_member", email=address, role="admin")
+        job = _one(world, "SELECT payload FROM jobs WHERE id = %s", (out.data["job_id"],))
+        token = job[0]["params"]["accept_url"].rsplit("/", 1)[1]
+
+        accepted = asyncio.run(_accept(world["ingress"], token, str(invitee)))
+        assert accepted == {
+            "workspace_id": str(world["a"]["ws"]),
+            "role": "admin",
+            "matched": True,
+        }
+        assert (
+            _one(
+                world,
+                "SELECT role FROM workspace_members WHERE workspace_id = %s AND user_id = %s",
+                (str(world["a"]["ws"]), str(invitee)),
+            )[0]
+            == "admin"
+        )
+        assert self._row(world, out.data["invitation_id"])[3] == "accepted"
+
+    def test_owner_is_not_an_invitable_role(self, world):
+        """FC-6.4 — ownership moves by `transfer_ownership`. An invitation that
+        could mint an owner would be a second path to it, unaudited as one."""
+        assert refused(world, "invite_member", email=self._address("own"), role="owner") == (
+            "invalid_args"
+        )
+        assert (
+            refused(world, "invite_member", email="not-an-address", role="member")
+            == "invalid_args"
+        )
+        assert refused(world, "invite_member", role="member") == "invalid_args"
+
+    def test_without_a_front_end_origin_it_refuses_instead_of_minting(self, world):
+        """The defect this command was unbuilt for, one layer down: a row whose
+        accept link cannot be built is an offer nobody can take."""
+        from src.config.settings import settings
+
+        before = settings.WEB_APP_URL
+        settings.WEB_APP_URL = None
+        try:
+            address = self._address("noorigin")
+            assert refused(world, "invite_member", email=address) == "not_built"
+            assert (
+                _one(
+                    world,
+                    "SELECT count(*) FROM workspace_invitations WHERE email = %s",
+                    (address,),
+                )[0]
+                == 0
+            ), "the refusal rolled back, it did not leave a row behind"
+        finally:
+            settings.WEB_APP_URL = before
+
+    def test_telegram_delivery_is_refused_by_name_rather_than_written(self, world):
+        address = self._address("tg")
+        assert (
+            refused(world, "invite_member", email=address, delivery_channel="telegram")
+            == "not_built"
+        )
+        assert (
+            _one(
+                world,
+                "SELECT count(*) FROM workspace_invitations WHERE email = %s",
+                (address,),
+            )[0]
+            == 0
+        )
+
+    def test_the_invitation_lands_in_the_inviters_workspace_only(self, world):
+        """Two identities, so "which workspace" has something to be wrong
+        about: an invite issued as B's owner is B's, and A cannot see it."""
+        address = self._address("tenant")
+        out = run(world, "invite_member", ids=world["b"], email=address)
+        assert self._row(world, out.data["invitation_id"])[0] == str(world["b"]["ws"])
+        assert (
+            _one(
+                world,
+                "SELECT count(*) FROM workspace_invitations"
+                " WHERE workspace_id = %s AND email = %s",
+                (str(world["a"]["ws"]), address),
+            )[0]
+            == 0
+        )

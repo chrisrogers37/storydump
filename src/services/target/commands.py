@@ -203,6 +203,10 @@ def _build_registry() -> dict[str, Optional[Executor]]:
             "resume_workspace": ex.resume_workspace,
             "create_workspace": ex.create_workspace,
             "rename_workspace": ex.rename_workspace,
+            # `06` §2's invited path. The ACCEPT half has been built since
+            # `fn_invitation_accept` landed, so until now the surface could
+            # consume an invitation nobody could create (#1090 G1).
+            "invite_member": ex.invite_member,
         }
     )
     return registry

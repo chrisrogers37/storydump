@@ -244,7 +244,7 @@ async def enqueue(
     session,
     *,
     kind: str,
-    workspace_id: str,
+    workspace_id: Optional[str],
     serialization_key: str,
     payload: dict,
     lane: str = "bulk",
@@ -252,6 +252,12 @@ async def enqueue(
     unless_pending: bool = False,
 ) -> Optional[str]:
     """Insert one `ready` job in the caller's transaction; returns its id.
+
+    *workspace_id* is None for exactly the system kinds — `ck_jobs_system_kinds`
+    is a BICONDITIONAL, so it refuses a NULL on a tenant kind just as firmly as
+    a value on a system one. The bind is already `CAST(:ws AS uuid)`, so NULL
+    needs no separate statement; only the annotation was narrower than the
+    column.
 
     The payload is built in Python and bound ONCE as jsonb — the tier's shape
     (`outbox.enqueue`, `media_sync`); building JSON inside the statement is

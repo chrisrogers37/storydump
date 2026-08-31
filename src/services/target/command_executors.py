@@ -56,9 +56,11 @@ from typing import Any
 from sqlalchemy import text
 
 from src.config.defaults import DEFAULT_REPOST_TTL_DAYS, DEFAULT_SKIP_TTL_DAYS
+from src.config.settings import settings
 from src.services.target import (
     google_drive_oauth,
     intent_ledger,
+    invitations,
     jobs,
     readers,
     workspaces,
@@ -522,3 +524,58 @@ async def create_workspace(session, command: Command) -> CommandResult:
         workspace_id=command.args.get("workspace_id"),
     )
     return CommandResult("executed", {"workspace_id": ws_id})
+
+
+async def invite_member(session, command: Command) -> CommandResult:
+    """`06` §2's invited path, admin+ (`ROLE_FLOOR`). Thin, like its neighbours:
+    `invitations.create` owns the three writes and the delivery job.
+
+    Two refusals before any of that, and both are `not_built` rather than
+    `invalid_args` deliberately — the caller did nothing wrong, this deployment
+    cannot honour the request, which is what 501 says:
+
+    * **No `WEB_APP_URL`.** The accept link is `<origin>/join/<token>`; with no
+      origin there is no link, and minting the row anyway would leave a
+      membership offer nobody can accept — the exact shape of defect this
+      command was unbuilt for.
+    * **`delivery_channel='telegram'`.** `06` §2 specifies an `invitation`
+      outbox card on the workspace's `telegram_group` binding, and
+      `ck_outbox_kind` already admits the kind, but nothing renders it (the
+      Telegram surface is W4). Writing a card no sender draws would be the same
+      defect wearing the other channel's clothes, so it is refused by name.
+    """
+    origin = settings.web_app_origin
+    if not origin:
+        raise CommandRefused(
+            "not_built",
+            "no web front end configured (WEB_APP_URL) — an invitation whose"
+            " accept link cannot be built is a row nobody can use",
+        )
+    delivery = command.args.get("delivery_channel", "email")
+    if delivery not in invitations.DELIVERY_CHANNELS:
+        raise CommandRefused(
+            "not_built",
+            f"{delivery!r} invitation delivery has no sender in this tier"
+            " (`06` §2's invitation outbox card is W4's); email is the"
+            " web-born workspace's channel",
+        )
+    workspace = await readers.row(
+        session,
+        "SELECT name FROM workspaces WHERE id = :ws",
+        ws=command.workspace_id,
+    )
+    if workspace is None:
+        raise CommandRefused("not_found", f"workspace {command.workspace_id}")
+    minted = await invitations.create(
+        session,
+        workspace_id=command.workspace_id,
+        invited_by_user_id=command.actor_user_id,
+        email=command.args.get("email"),
+        role=command.args.get("role", "member"),
+        workspace_name=workspace["name"],
+        accept_url_base=origin,
+    )
+    # `executed`, not `enqueued`: the invitation EXISTS when this returns, and
+    # is acceptable from that instant. The queued job carries the mail, not the
+    # offer — an admin who reads 202 here would reasonably think the opposite.
+    return CommandResult("executed", minted)

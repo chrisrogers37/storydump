@@ -109,7 +109,6 @@ class TestEveryCommandHasAFloorAndAnExecutorSlot:
             "move_account",
             "offboard_workspace",
             "restore_workspace",
-            "invite_member",
             "remove_member",
             "change_role",
             "transfer_ownership",
