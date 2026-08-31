@@ -52,6 +52,7 @@ from src.api import google_client
 from src.api.principal import (
     clear_session_cookie,
     presented_token,
+    require_deliverable_session,
     require_engine,
     set_session_cookie,
 )
@@ -178,6 +179,7 @@ async def google_signin(request: Request) -> Response:
     client_id, _, redirect_uri = google_client.configured(
         google_client.SIGNIN_CALLBACK_PATH
     )
+    require_deliverable_session()
     engine = require_engine(request)
     cookie_nonce = new_state()
     async with engine.begin() as conn:

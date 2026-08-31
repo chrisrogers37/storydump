@@ -40,6 +40,9 @@ INTENT = "44444444-4444-4444-4444-444444444444"
 #: The configured sign-in world: API host, front-end origin, client id.
 API = "https://api.example.test"
 FRONT = "https://app.example.test"
+#: The registrable domain both of the above sit under — what a cookie must be
+#: scoped to for the front end to read a session the API minted.
+COOKIE_DOMAIN = "example.test"
 CLIENT_ID = "cid"
 
 
@@ -128,10 +131,19 @@ def signed_in(app):
 
 @pytest.fixture
 def google_configured(monkeypatch):
+    """A sign-in world that can actually DELIVER the session it mints.
+
+    `SESSION_COOKIE_DOMAIN` covers both `API` and `FRONT`, which are sibling
+    subdomains of `COOKIE_DOMAIN`. Before #1117 this fixture set every other
+    variable and left the cookie host-only — modelling, and so normalising, the
+    exact deployment that authenticates and then bounces the person back to
+    `/login`.
+    """
     monkeypatch.setattr(settings, "GOOGLE_CLIENT_ID", CLIENT_ID, raising=False)
     monkeypatch.setattr(settings, "GOOGLE_CLIENT_SECRET", "sec", raising=False)
     monkeypatch.setattr(settings, "OAUTH_REDIRECT_BASE_URL", API, raising=False)
     monkeypatch.setattr(settings, "WEB_APP_URL", FRONT, raising=False)
+    monkeypatch.setattr(settings, "SESSION_COOKIE_DOMAIN", COOKIE_DOMAIN, raising=False)
 
 
 @pytest.fixture

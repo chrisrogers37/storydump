@@ -18,13 +18,14 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 from fastapi.testclient import TestClient
 
-from src.api.principal import COOKIE
+from src.api.principal import COOKIE, session_delivery_gap
 from src.api.routes import auth
 from src.config.settings import settings
 from src.services.target import google_oidc, identity, rate_counters, sessions
 from src.services.target.ig_login_oauth import OAuthStateRefused
 from tests.src.api.conftest import (
     API,
+    COOKIE_DOMAIN,
     FRONT,
     cookie_header,
     unsigned_id_token,
@@ -267,3 +268,99 @@ class TestSignout:
 
         monkeypatch.setattr(sessions, "revoke", revoke)
         assert client.post("/auth/signout").status_code == 200
+
+
+class TestSessionDelivery:
+    """#1117 — sign-in refuses rather than minting a session the front end can
+    never read.
+
+    Production authenticated correctly and bounced the person back to `/login`,
+    because the cookie was host-only on the API host while the front end sat on
+    a different registrable domain. Every part worked; the composition did not.
+    """
+
+    def test_a_host_only_cookie_with_a_separate_front_end_refuses(
+        self, client, configured, monkeypatch
+    ):
+        """The #1117 shape exactly: everything else configured, cookie host-only."""
+        monkeypatch.setattr(settings, "SESSION_COOKIE_DOMAIN", None, raising=False)
+        resp = client.get("/auth/google", follow_redirects=False)
+        assert resp.status_code == 503
+        detail = resp.json()["detail"]
+        assert "SESSION_COOKIE_DOMAIN" in detail
+        assert "api.example.test" in detail and "app.example.test" in detail
+
+    def test_a_cookie_domain_covering_neither_host_refuses(
+        self, client, configured, monkeypatch
+    ):
+        """Production's real shape — the API on one registrable domain, the front
+        end on another, so no cookie scope can span them."""
+        monkeypatch.setattr(
+            settings, "SESSION_COOKIE_DOMAIN", "elsewhere.test", raising=False
+        )
+        resp = client.get("/auth/google", follow_redirects=False)
+        assert resp.status_code == 503
+        assert "does not cover both" in resp.json()["detail"]
+
+    def test_a_covering_cookie_domain_is_let_through(
+        self, client, configured, counter, state_store
+    ):
+        """The positive control. Without it the two refusals above are also
+        satisfied by a gate that refuses everything."""
+        resp = client.get("/auth/google", follow_redirects=False)
+        assert resp.status_code == 302
+        assert urlsplit(resp.headers["location"]).netloc == "accounts.google.com"
+
+    def test_no_front_end_configured_is_not_a_gap(
+        self, client, configured, counter, state_store, monkeypatch
+    ):
+        """`WEB_APP_URL` unset is the documented fail-closed reading, not a
+        misconfiguration this gate owns. It is also what production runs today,
+        and this gate must not be the thing that takes sign-in down.
+        """
+        monkeypatch.setattr(settings, "WEB_APP_URL", None, raising=False)
+        monkeypatch.setattr(settings, "SESSION_COOKIE_DOMAIN", None, raising=False)
+        resp = client.get("/auth/google", follow_redirects=False)
+        assert resp.status_code == 302
+
+    def test_a_same_origin_deployment_needs_no_cookie_domain(
+        self, client, configured, counter, state_store, monkeypatch
+    ):
+        """Host-only is correct when the API and the front end are one host."""
+        monkeypatch.setattr(settings, "WEB_APP_URL", API, raising=False)
+        monkeypatch.setattr(settings, "SESSION_COOKIE_DOMAIN", None, raising=False)
+        resp = client.get("/auth/google", follow_redirects=False)
+        assert resp.status_code == 302
+
+    def test_the_gate_does_not_consult_the_public_suffix_list(self, monkeypatch):
+        """The stated bound, pinned so it is not mistaken for coverage.
+
+        `up.railway.app` IS a public suffix, so a cookie scoped to it is rejected
+        by every browser — measured in Chromium against the real host. This gate
+        compares host suffixes only and PASSES that configuration. If a later
+        change makes it PSL-aware, this test should fail and be deleted; until
+        then it records what the gate does not check.
+        """
+        monkeypatch.setattr(
+            settings,
+            "OAUTH_REDIRECT_BASE_URL",
+            "https://a.up.railway.app",
+            raising=False,
+        )
+        monkeypatch.setattr(
+            settings, "WEB_APP_URL", "https://b.up.railway.app", raising=False
+        )
+        monkeypatch.setattr(
+            settings, "SESSION_COOKIE_DOMAIN", "up.railway.app", raising=False
+        )
+        assert session_delivery_gap() is None
+
+    def test_a_leading_dot_on_the_cookie_domain_is_accepted(self, monkeypatch):
+        """`.example.test` and `example.test` are the same scope (RFC 6265 §5.2.3
+        strips the dot); the gate must not read the legacy spelling as a gap."""
+        monkeypatch.setattr(settings, "OAUTH_REDIRECT_BASE_URL", API, raising=False)
+        monkeypatch.setattr(settings, "WEB_APP_URL", FRONT, raising=False)
+        monkeypatch.setattr(
+            settings, "SESSION_COOKIE_DOMAIN", "." + COOKIE_DOMAIN, raising=False
+        )
+        assert session_delivery_gap() is None
