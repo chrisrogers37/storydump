@@ -76,11 +76,34 @@ Description=storydump scheduling-outage monitor
 
 [Service]
 Type=oneshot
+# THE NOTIFY COMMAND NEEDS AN ENVIRONMENT AND A systemd --user UNIT HAS ALMOST
+# NONE. This line is not optional decoration: a `oneshot` under `systemd --user`
+# inherits neither the shell profile nor `bot.conf`, so a notify command that
+# reads its destination from the environment finds nothing there and refuses.
+# Measured on the fleet host 2026-08-31: with no EnvironmentFile, the enrolled
+# unit exited 11 on the first real thing it had to say -- `tg-post.sh` exited 2
+# ("TELEGRAM_GROUP_CHAT_ID not set") before reaching the network. The detector,
+# the poller and the classification were all correct; the message did not land.
+#
+# Point this at whatever file supplies the notify command's destination. It must
+# be readable by the user the timer runs as.
+EnvironmentFile=%h/.config/storydump/scheduling-monitor.env
 ExecStart=/usr/bin/python3 %h/ops/storydump/scripts/scheduling_monitor.py \
   --url https://<api-host>/health/scheduling \
   --state-file %h/.local/state/storydump-scheduling-monitor.json \
   --notify-command %h/claudlobby/lib/tg-post.sh
 SuccessExitStatus=0 10
+```
+
+**Verify the notify path before trusting the unit**, because the monitor cannot
+tell you its pager is broken until it already has something urgent to say —
+which is the worst possible moment to find out:
+
+```bash
+# Same environment systemd gives it. A working path prints nothing and exits 0.
+systemd-run --user --wait --collect --quiet \
+  --unit=notify-probe -p EnvironmentFile=%h/.config/storydump/scheduling-monitor.env \
+  %h/claudlobby/lib/tg-post.sh "scheduling-monitor notify probe"
 ```
 
 ```ini
