@@ -543,6 +543,17 @@ async def invite_member(session, command: Command) -> CommandResult:
       `ck_outbox_kind` already admits the kind, but nothing renders it (the
       Telegram surface is W4). Writing a card no sender draws would be the same
       defect wearing the other channel's clothes, so it is refused by name.
+
+    **The capability check is HALF a check, and that is stated rather than
+    hidden.** Delivery needs two things and this executor can see one of them.
+    A deployment with `WEB_APP_URL` set and no `RESEND_API_KEY` passes here,
+    mints the row, and queues a `send_email` job the worker PARKS
+    (`work_loop`'s registry, when `WorkerDeps.email` is None) — so the admin
+    is told the invitation went out and it did not. The executor is
+    structurally blind to that: `WorkerDeps` is the worker's, not the port's.
+    The fix is a per-command deployment-prerequisite declaration checked in
+    `commands.execute`, which the second mailing producer (`06` §5's D3/D4)
+    will need too; filed as #1130 rather than bolted on here.
     """
     origin = settings.web_app_origin
     if not origin:
@@ -559,21 +570,22 @@ async def invite_member(session, command: Command) -> CommandResult:
             " (`06` §2's invitation outbox card is W4's); email is the"
             " web-born workspace's channel",
         )
-    workspace = await readers.row(
-        session,
-        "SELECT name FROM workspaces WHERE id = :ws",
-        ws=command.workspace_id,
-    )
-    if workspace is None:
-        raise CommandRefused("not_found", f"workspace {command.workspace_id}")
+    # No `SELECT name FROM workspaces` and no `not_found` guard on it: the
+    # floor is `admin`, so `commands.execute` has already run
+    # `authorize_member`, which requires a `workspace_members` row whose
+    # `workspace_id` FKs `workspaces` — the workspace provably exists by the
+    # time an executor runs. A guard that cannot fire is one a later reader
+    # cannot retire without re-deriving that ordering from three files. The
+    # name still has to be resolved (the mail is payload-complete, `02` §5),
+    # and `create` reads it on the INSERT it was already issuing.
     minted = await invitations.create(
         session,
         workspace_id=command.workspace_id,
         invited_by_user_id=command.actor_user_id,
         email=command.args.get("email"),
         role=command.args.get("role", "member"),
-        workspace_name=workspace["name"],
         accept_url_base=origin,
+        delivery_channel=delivery,
     )
     # `executed`, not `enqueued`: the invitation EXISTS when this returns, and
     # is acceptable from that instant. The queued job carries the mail, not the

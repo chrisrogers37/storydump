@@ -24,7 +24,6 @@ exactly one job while one is pending, and a fresh one once it is not.
 from __future__ import annotations
 
 import asyncio
-import json
 import uuid
 
 import psycopg2
@@ -36,11 +35,15 @@ from sqlalchemy.pool import NullPool
 from src.config.defaults import DEFAULT_REPOST_TTL_DAYS, DEFAULT_SKIP_TTL_DAYS
 from src.services.target import commands, invitations, sessions
 from src.services.target.commands import Command, CommandRefused
+from src.services.target.workspaces import InvalidWorkspaceArgs
 from src.services.target.unit_of_work import asyncpg_url, unit_of_work
 from tests.scripts.conftest import (
     _scratch,
     as_user,
+    fetch_all,
     fetch_one,
+    in_tenant,
+    ingress_engine,
     replay_advertised_stream,
     seed_workspace_chain,
     set_test_passwords,
@@ -482,28 +485,15 @@ class TestAnotherTenantsIntent:
 ORIGIN = "https://app.invite-gate.test"
 
 
-@pytest.fixture(autouse=True, scope="module")
-def _web_origin():
-    """`invite_member` refuses without a front-end origin, by design. The suite
-    inherits no `WEB_APP_URL`, so the gate supplies one and restores it — and
-    `TestInviteMember` asserts the refusal directly rather than relying on the
-    ambient absence, which is exactly the coverage a fixture like this can
-    silently delete."""
-    from src.config.settings import settings
-
-    before = settings.WEB_APP_URL
-    settings.WEB_APP_URL = ORIGIN
-    yield
-    settings.WEB_APP_URL = before
-
-
 async def _accept(dsn: str, token: str, user: str):
-    engine = create_async_engine(asyncpg_url(dsn), poolclass=NullPool)
-    try:
+    # `ingress_engine` rather than a third inline `create_async_engine` in this
+    # file: it is the conftest helper written for exactly an asyncio.run-per-call
+    # driver, and the sibling gates already use it.
+    async with ingress_engine(dsn) as engine:
         async with engine.begin() as conn:
-            return await invitations.accept(conn, token=token, user_id=user, channel="web")
-    finally:
-        await engine.dispose()
+            return await invitations.accept(
+                conn, token=token, user_id=user, channel="web"
+            )
 
 
 class TestInviteMember:
@@ -512,19 +502,61 @@ class TestInviteMember:
     nothing could create (#1090 G1). Every assertion here is read back from the
     database as the migration actor, never from the return value alone."""
 
+    @pytest.fixture(autouse=True)
+    def _web_origin(self, monkeypatch):
+        """`invite_member` refuses without a front-end origin, by design, and
+        the suite inherits no `WEB_APP_URL` — so this class supplies one and
+        `test_without_a_front_end_origin_...` asserts the refusal directly
+        rather than relying on the ambient absence, which is exactly the
+        coverage a fixture like this can otherwise delete silently.
+
+        Class-scoped autouse, not module: `settings` is a process singleton and
+        a module-scoped patch would put ORIGIN under the other nine classes in
+        this file, where a future no-origin assertion would pass for the wrong
+        reason. `monkeypatch` restores on every exit path, including a raise."""
+        from src.config.settings import settings
+
+        monkeypatch.setattr(settings, "WEB_APP_URL", ORIGIN, raising=False)
+
     def _address(self, tag: str) -> str:
         return f"invitee-{tag}-{uuid.uuid4().hex[:8]}@example.test"
 
-    def _row(self, world, invitation_id: str):
-        return _one(
-            world,
-            "SELECT workspace_id::text, email, role, state, delivery_channel,"
-            "       token_hash, invited_by_user_id::text,"
-            "       expires_at > now() + interval '6 days',"
-            "       expires_at < now() + interval '8 days'"
+    def _row(self, world, invitation_id: str) -> dict:
+        """By NAME, per `fetch_all`'s own rule: a positional projection this
+        wide means `row[7]` in one test and `row[3]` in another, and inserting
+        a column silently re-points both — for the boolean columns, into a test
+        that still passes."""
+        return fetch_all(
+            world["stream"],
+            "SELECT workspace_id::text AS workspace_id, email, role, state,"
+            "       delivery_channel, token_hash,"
+            "       invited_by_user_id::text AS invited_by,"
+            "       expires_at BETWEEN now() + interval '6 days'"
+            "                      AND now() + interval '8 days' AS in_window"
             "  FROM workspace_invitations WHERE id = %s",
             (invitation_id,),
+        )[0]
+
+    def _count(self, world, address: str, *, ws=None, state=None) -> int:
+        sql = "SELECT count(*) FROM workspace_invitations WHERE email = %s"
+        params = [address]
+        if ws is not None:
+            sql += " AND workspace_id = %s"
+            params.append(ws)
+        if state is not None:
+            sql += " AND state = %s"
+            params.append(state)
+        return _one(world, sql, tuple(params))[0]
+
+    def _token(self, world, out) -> str:
+        """The accept token, parsed out of the queued mail exactly as the
+        invitee's browser would take it. One copy: this parse is what decides
+        whether the link works, and two copies drift on the day the URL shape
+        changes."""
+        job = _one(
+            world, "SELECT payload FROM jobs WHERE id = %s", (out.data["job_id"],)
         )
+        return job[0]["params"]["accept_url"].rsplit("/", 1)[1]
 
     def test_mints_a_pending_row_and_queues_the_mail(self, world):
         ws, owner = str(world["a"]["ws"]), str(world["a"]["user"])
@@ -537,9 +569,10 @@ class TestInviteMember:
         assert out.data["role"] == "admin"
 
         row = self._row(world, out.data["invitation_id"])
-        assert row[:5] == (ws, address, "admin", "pending", "email")
-        assert row[6] == owner, "the inviter is recorded"
-        assert row[7] and row[8], "expiry is the `05` seven-day window"
+        assert (row["workspace_id"], row["email"], row["role"]) == (ws, address, "admin")
+        assert (row["state"], row["delivery_channel"]) == ("pending", "email")
+        assert row["invited_by"] == owner, "the inviter is recorded"
+        assert row["in_window"], "expiry is the `05` seven-day window"
 
         job = _one(
             world,
@@ -564,28 +597,37 @@ class TestInviteMember:
             (out.data["invitation_id"],),
         )
         assert audit[:4] == ("member", "invited", "user", "web")
-        assert audit[4] == {"v": 1, "event": "invited", "role": "admin", "delivery": "email"}
-        assert address not in json.dumps(audit[4]), (
-            "audit_events has no FK and outlives the offboard cascade, so the"
-            " invitee's address must not be written into it"
-        )
+        # Pinned whole, not field-scoped: `audit_events` has no FK and outlives
+        # the offboard cascade, so the invitee's ADDRESS must not appear here —
+        # and only an exact-blob assertion can say that. A follow-up
+        # `address not in json.dumps(...)` would be provably true given this
+        # line and would read as the guard for a property it does not guard.
+        assert audit[4] == {
+            "v": 1,
+            "event": "invited",
+            "role": "admin",
+            "delivery": "email",
+        }
 
     def test_the_link_in_the_mail_opens_the_row_that_was_written(self, world):
         """The round trip, not two shapes that merely look consistent: the
         token the invitee receives must hash to the digest the row stores, or
         the mail is a link to nothing."""
         out = run(world, "invite_member", email=self._address("link"))
-        job = _one(world, "SELECT payload FROM jobs WHERE id = %s", (out.data["job_id"],))
-        accept_url = job[0]["params"]["accept_url"]
-        assert accept_url.startswith(f"{ORIGIN}/join/")
-        token = accept_url.rsplit("/", 1)[1]
-        assert self._row(world, out.data["invitation_id"])[5] == sessions.token_hash(token)
+        job = _one(
+            world, "SELECT payload FROM jobs WHERE id = %s", (out.data["job_id"],)
+        )
+        assert job[0]["params"]["accept_url"].startswith(f"{ORIGIN}/join/")
+        token = self._token(world, out)
+        assert self._row(world, out.data["invitation_id"])[
+            "token_hash"
+        ] == sessions.token_hash(token)
 
     def test_the_token_is_never_handed_back_to_the_inviter(self, world):
         """Not `"token" not in out.data` — that only checks a name. The stored
         digest is compared against every string the caller received."""
         out = run(world, "invite_member", email=self._address("secret"))
-        stored = self._row(world, out.data["invitation_id"])[5]
+        stored = self._row(world, out.data["invitation_id"])["token_hash"]
         for value in out.data.values():
             if isinstance(value, str):
                 assert sessions.token_hash(value) != stored
@@ -599,16 +641,10 @@ class TestInviteMember:
         first = run(world, "invite_member", email=address).data["invitation_id"]
         second = run(world, "invite_member", email=address).data["invitation_id"]
         assert first != second
-        assert self._row(world, first)[3] == "revoked"
-        assert self._row(world, second)[3] == "pending"
+        assert self._row(world, first)["state"] == "revoked"
+        assert self._row(world, second)["state"] == "pending"
         assert (
-            _one(
-                world,
-                "SELECT count(*) FROM workspace_invitations"
-                " WHERE workspace_id = %s AND email = %s AND state = 'pending'",
-                (str(world["a"]["ws"]), address),
-            )[0]
-            == 1
+            self._count(world, address, ws=str(world["a"]["ws"]), state="pending") == 1
         )
 
     def test_an_invitation_minted_here_is_acceptable(self, world):
@@ -621,10 +657,9 @@ class TestInviteMember:
             (address,),
         )
         out = run(world, "invite_member", email=address, role="admin")
-        job = _one(world, "SELECT payload FROM jobs WHERE id = %s", (out.data["job_id"],))
-        token = job[0]["params"]["accept_url"].rsplit("/", 1)[1]
-
-        accepted = asyncio.run(_accept(world["ingress"], token, str(invitee)))
+        accepted = asyncio.run(
+            _accept(world["ingress"], self._token(world, out), str(invitee))
+        )
         assert accepted == {
             "workspace_id": str(world["a"]["ws"]),
             "role": "admin",
@@ -638,40 +673,39 @@ class TestInviteMember:
             )[0]
             == "admin"
         )
-        assert self._row(world, out.data["invitation_id"])[3] == "accepted"
+        assert self._row(world, out.data["invitation_id"])["state"] == "accepted"
 
     def test_owner_is_not_an_invitable_role(self, world):
         """FC-6.4 — ownership moves by `transfer_ownership`. An invitation that
         could mint an owner would be a second path to it, unaudited as one."""
-        assert refused(world, "invite_member", email=self._address("own"), role="owner") == (
-            "invalid_args"
-        )
         assert (
-            refused(world, "invite_member", email="not-an-address", role="member")
+            refused(world, "invite_member", email=self._address("own"), role="owner")
             == "invalid_args"
         )
-        assert refused(world, "invite_member", role="member") == "invalid_args"
 
-    def test_without_a_front_end_origin_it_refuses_instead_of_minting(self, world):
+    def test_a_malformed_or_missing_address_is_refused(self, world):
+        """Separate from the role ceiling above, because a failure here is
+        `_clean_email`'s contract: sharing a test name would send the next
+        reader to `INVITABLE_ROLES` for a defect in the address validator."""
+        for email in ("not-an-address", "@example.test", "a@", "a b@x.test", "", None):
+            assert (
+                refused(world, "invite_member", email=email, role="member")
+                == "invalid_args"
+            ), email
+
+    def test_without_a_front_end_origin_it_refuses_instead_of_minting(
+        self, world, monkeypatch
+    ):
         """The defect this command was unbuilt for, one layer down: a row whose
         accept link cannot be built is an offer nobody can take."""
         from src.config.settings import settings
 
-        before = settings.WEB_APP_URL
-        settings.WEB_APP_URL = None
-        try:
-            address = self._address("noorigin")
-            assert refused(world, "invite_member", email=address) == "not_built"
-            assert (
-                _one(
-                    world,
-                    "SELECT count(*) FROM workspace_invitations WHERE email = %s",
-                    (address,),
-                )[0]
-                == 0
-            ), "the refusal rolled back, it did not leave a row behind"
-        finally:
-            settings.WEB_APP_URL = before
+        monkeypatch.setattr(settings, "WEB_APP_URL", None, raising=False)
+        address = self._address("noorigin")
+        assert refused(world, "invite_member", email=address) == "not_built"
+        assert self._count(world, address) == 0, (
+            "the refusal rolled back, it did not leave a row behind"
+        )
 
     def test_telegram_delivery_is_refused_by_name_rather_than_written(self, world):
         address = self._address("tg")
@@ -679,27 +713,44 @@ class TestInviteMember:
             refused(world, "invite_member", email=address, delivery_channel="telegram")
             == "not_built"
         )
-        assert (
-            _one(
-                world,
-                "SELECT count(*) FROM workspace_invitations WHERE email = %s",
-                (address,),
-            )[0]
-            == 0
-        )
+        assert self._count(world, address) == 0
+
+    def test_a_direct_caller_cannot_mint_a_channel_this_tier_cannot_deliver(
+        self, world
+    ):
+        """The executor refuses telegram first, so `create`'s own channel guard
+        is unreachable THROUGH THE PORT — and an unexercised guard is the thing
+        this file exists to distrust. The caller it guards against is the one
+        that does not use the port: a second adapter (W4) calling the writer
+        directly is the entire point of a second adapter.
+        """
+
+        async def _direct(session):
+            return await invitations.create(
+                session,
+                workspace_id=str(world["a"]["ws"]),
+                invited_by_user_id=str(world["a"]["user"]),
+                email=address,
+                role="member",
+                accept_url_base=ORIGIN,
+                delivery_channel="telegram",
+            )
+
+        address = self._address("direct")
+        with pytest.raises(InvalidWorkspaceArgs):
+            asyncio.run(
+                in_tenant(
+                    world["ingress"], world["a"]["ws"], world["a"]["user"], _direct
+                )
+            )
+        assert self._count(world, address) == 0
 
     def test_the_invitation_lands_in_the_inviters_workspace_only(self, world):
         """Two identities, so "which workspace" has something to be wrong
         about: an invite issued as B's owner is B's, and A cannot see it."""
         address = self._address("tenant")
         out = run(world, "invite_member", ids=world["b"], email=address)
-        assert self._row(world, out.data["invitation_id"])[0] == str(world["b"]["ws"])
-        assert (
-            _one(
-                world,
-                "SELECT count(*) FROM workspace_invitations"
-                " WHERE workspace_id = %s AND email = %s",
-                (str(world["a"]["ws"]), address),
-            )[0]
-            == 0
+        assert self._row(world, out.data["invitation_id"])["workspace_id"] == str(
+            world["b"]["ws"]
         )
+        assert self._count(world, address, ws=str(world["a"]["ws"])) == 0

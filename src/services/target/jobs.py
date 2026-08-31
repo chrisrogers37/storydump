@@ -253,11 +253,18 @@ async def enqueue(
 ) -> Optional[str]:
     """Insert one `ready` job in the caller's transaction; returns its id.
 
-    *workspace_id* is None for exactly the system kinds — `ck_jobs_system_kinds`
-    is a BICONDITIONAL, so it refuses a NULL on a tenant kind just as firmly as
-    a value on a system one. The bind is already `CAST(:ws AS uuid)`, so NULL
-    needs no separate statement; only the annotation was narrower than the
-    column.
+    *workspace_id* is None for exactly the system kinds, which
+    `ck_jobs_system_kinds` (`src/models/target/machinery.py`) enumerates — a
+    BICONDITIONAL, so it refuses a NULL on a tenant kind just as firmly as a
+    value on a system one. That list is NOT restated here on purpose: this
+    module is a thin layer over the merged machinery on the L.1 doctrine that
+    the DATABASE is the authority, and a Python copy would sit outside the
+    `0.2` parity gate — an eighth system kind would move the model and the
+    migration, pass the gate, and leave this module refusing a kind the
+    database accepts. The bind is already `CAST(:ws AS uuid)`, so NULL needs no
+    separate statement; only the annotation was narrower than the column, and
+    it stays keyword-only WITHOUT a default so no tenant-kind caller can omit
+    tenancy by forgetting it.
 
     The payload is built in Python and bound ONCE as jsonb — the tier's shape
     (`outbox.enqueue`, `media_sync`); building JSON inside the statement is

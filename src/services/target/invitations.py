@@ -48,8 +48,12 @@ REASONS = ("not_acceptable", "identity_mismatch")
 INVITE_TTL_DAYS = 7
 
 #: The role ceiling an invitation may name — `ck_invite_role` in the DDL, FC-6.4
-#: in the plan. Never `owner`: ownership moves by `transfer_ownership`, and an
-#: invitation that could mint an owner would be a second, unaudited path to it.
+#: in the plan. These are the bottom two rungs of the `workspace_members` ladder
+#: `tenant_resolution.ROLE_ORDER` owns (named here rather than sliced from it,
+#: the way `commands.FLOORS` names them, because a slice would silently follow a
+#: ladder change the DDL's CHECK would then refuse). Never `owner`: ownership
+#: moves by `transfer_ownership`, and an invitation that could mint an owner
+#: would be a second, unaudited path to it.
 INVITABLE_ROLES = ("member", "admin")
 
 #: `ck_invite_channel` admits `telegram` too, and `06` §2 specifies an
@@ -58,8 +62,16 @@ INVITABLE_ROLES = ("member", "admin")
 DELIVERY_CHANNELS = ("email",)
 
 
-def clean_email(value: Any) -> str:
-    """The address as the DDL stores it: stripped and lowercased (`053:255`).
+def _clean_email(value: Any) -> str:
+    """Stripped and lowercased.
+
+    `053` describes the column as lowercased in a COMMENT, and that is all it
+    is — plain `TEXT`, no `citext`, no `CHECK (email = lower(email))`, and
+    `uq_invite_live` indexes the raw value. So the invariant is the
+    application's to hold, and holding it is what stops `Foo@x.com` and
+    `foo@x.com` becoming two live invitations for one person. It is also why
+    `fn_invitation_accept` lowercases BOTH sides defensively rather than
+    trusting the column.
 
     Validation is deliberately thin — one `@`, something either side, no
     whitespace. A stricter pattern rejects real addresses, and the only thing
@@ -122,8 +134,8 @@ async def create(
     invited_by_user_id: str,
     email: str,
     role: str,
-    workspace_name: str,
     accept_url_base: str,
+    delivery_channel: str = "email",
 ) -> dict[str, Any]:
     """Mint one email invitation and queue its delivery. `06` §2, one unit.
 
@@ -148,6 +160,11 @@ async def create(
     It rides the same transaction as the row it announces, so a rolled-back
     invitation cannot leave a mail queued for a row that does not exist.
 
+    *accept_url_base* arrives normalised (`settings.web_app_origin` strips the
+    trailing slash and its docstring calls that "one spelling"); re-stripping it
+    here would make the property's guarantee look untrusted and would widen this
+    contract to accept a base nothing had normalised.
+
     Returns the invitation's id, address, role and expiry. **Not the token** —
     see the module docstring.
     """
@@ -155,7 +172,19 @@ async def create(
         raise InvalidWorkspaceArgs(
             f"role must be one of {', '.join(INVITABLE_ROLES)} — got {role!r}"
         )
-    address = clean_email(email)
+    if delivery_channel not in DELIVERY_CHANNELS:
+        # Checked HERE, not only at the executor. `ck_invite_channel` admits
+        # `telegram` and `06` §2 specifies an outbox card for it, so a caller
+        # that reaches this function directly — the W4 Telegram adapter is the
+        # one that will, since a second adapter not routing through
+        # `command_executors` is the whole point of it — would otherwise get a
+        # row stamped with a channel this tier does not deliver. The guard and
+        # the guarded code belong in the same module.
+        raise InvalidWorkspaceArgs(
+            f"this tier delivers {', '.join(DELIVERY_CHANNELS)} invitations —"
+            f" got {delivery_channel!r}"
+        )
+    address = _clean_email(email)
 
     await executor.execute(
         text(
@@ -172,21 +201,29 @@ async def create(
                 "INSERT INTO workspace_invitations"
                 " (workspace_id, token_hash, delivery_channel, email, role,"
                 "  invited_by_user_id, expires_at)"
-                " VALUES (:ws, :h, 'email', :email, :role, :by,"
-                "         now() + (interval '1 day' * CAST(:ttl AS int)))"
-                " RETURNING id, expires_at"
+                " VALUES (:ws, :h, :chan, :email, :role, :by,"
+                "         now() + make_interval(days => :ttl))"
+                " RETURNING id, expires_at,"
+                "   (SELECT name FROM workspaces WHERE id = :ws) AS workspace_name"
             ),
             {
                 "ws": workspace_id,
                 "h": sessions.token_hash(token),
+                "chan": delivery_channel,
                 "email": address,
                 "role": role,
+                # The row takes the inviter as a RESOLVED id (FC-2: a command
+                # carries resolved domain ids and nothing else) while the audit
+                # row below reads `app.actor_user_id`, the house form all three
+                # audit writers use. Same person by construction — the executor
+                # passes `command.actor_user_id`, which is what `apply_gucs`
+                # set on this very transaction.
                 "by": invited_by_user_id,
                 "ttl": INVITE_TTL_DAYS,
             },
         )
     ).first()
-    invitation_id = str(row[0])
+    invitation_id, expires_at, workspace_name = str(row[0]), row[1], row[2]
 
     await executor.execute(
         text(
@@ -198,6 +235,8 @@ async def create(
             "         NULLIF(current_setting('app.channel', true), ''),"
             "         CAST(:detail AS jsonb))"
         ),
+        # Hand-written, like the tier's two other audit inserts; #1131 tracks
+        # collapsing all three into one writer that also owns the GUC names.
         # The invited ADDRESS is deliberately absent: `audit_events` has no FK
         # and outlives the workspace's cascade (`02` §0), so anything written
         # here survives an offboard that is supposed to take the tenant's data
@@ -206,7 +245,12 @@ async def create(
             "ws": workspace_id,
             "inv": invitation_id,
             "detail": json.dumps(
-                {"v": 1, "event": "invited", "role": role, "delivery": "email"}
+                {
+                    "v": 1,
+                    "event": "invited",
+                    "role": role,
+                    "delivery": delivery_channel,
+                }
             ),
         },
     )
@@ -221,9 +265,14 @@ async def create(
             "v": 1,
             "to": address,
             "template": "invitation",
+            # `_invitation` also accepts an optional `inviter_name`, left
+            # unset: `users` carries no display name (only `primary_email`), so
+            # the only value available would put the inviting admin's address in
+            # a stranger's inbox. The template's own fallback — "You have been
+            # invited" — is the right copy for that.
             "params": {
                 "workspace_name": workspace_name,
-                "accept_url": f"{accept_url_base.rstrip('/')}/join/{token}",
+                "accept_url": f"{accept_url_base}/join/{token}",
             },
         },
     )
@@ -231,7 +280,7 @@ async def create(
         "invitation_id": invitation_id,
         "email": address,
         "role": role,
-        "expires_at": row[1],
-        "delivery": "email",
+        "expires_at": expires_at,
+        "delivery": delivery_channel,
         "job_id": job_id,
     }
