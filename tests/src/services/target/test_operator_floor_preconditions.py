@@ -7,6 +7,26 @@ would produce commands with nothing to act on — which is the same
 advertise-a-capability-nothing-performs defect the epic exists to remove, built
 fresh.
 
+**The two are unreachable for DIFFERENT reasons at different layers, and the
+difference decides what would reopen each.** Neither is "the estate is empty":
+
+* `clear_quarantine` — `provider_quarantine` has **no writer in the codebase at
+  all**. No column, no seam, no configuration reopens it; only new code does.
+  This is the strongest form of unreachable.
+* `resolve_review` — reachability is a chain, and the **first** gate is NOT the
+  load-bearing one. `approve` refuses under `manual_mode`, but
+  `api_publishing_enabled` is a `settings_change` key and `settings_change` is
+  BUILT, so any admin can flip it: on its own that gate is configuration, not
+  structure. The structural gate is one layer deeper — with the flag on, the
+  `publish_pipeline` job PARKS, because production composes `media_fetch=None`
+  (`worker.py`, W5b unbuilt), and `reconcile_ambiguous` — the other
+  `review_required` producer — parks on `poll=None` (W5a). Absent code, and a
+  constant in the composition root.
+
+Both tests below assert the structural gate. The `approve` gate is asserted too,
+because it is the first door and its removal is worth noticing, but it is
+labelled as the weak one so nobody reads it as the whole argument.
+
 That verdict is only true while these two facts hold. **These tests exist to
 FAIL when they stop holding**, and each failure message says what to do about
 it. A test that fails when someone does legitimate work is the right shape here:
@@ -59,6 +79,34 @@ def test_nothing_writes_provider_quarantine_so_there_is_nothing_to_clear():
     )
 
 
+def test_the_review_producers_park_under_the_production_seam_set():
+    """The STRUCTURAL half, and the one that does not move when a setting does.
+
+    Both `review_required` producers sit behind worker seams that production
+    composes as None, so even a workspace with `api_publishing_enabled` on mints
+    a `publish_pipeline` job that parks. Asserted behaviourally against the real
+    registry rather than by grep, and paired with the composition-root constant
+    that makes the default the deployed reality.
+    """
+    from src.services.target.work_loop import Parked, WorkerDeps, build_registry
+
+    registry = build_registry(WorkerDeps())
+    for kind in ("publish_pipeline", "reconcile_ambiguous"):
+        assert isinstance(registry[kind], Parked), (
+            f"{kind} now has an executor under the default seam set — an intent"
+            " can reach `review_required`, so `resolve_review` has parked items"
+            " to resolve. Reopen #1090 D6 (#1124)."
+        )
+
+    worker = (SERVICES.parent / "worker.py").read_text()
+    for seam in ("media_fetch=None", "poll=None"):
+        assert seam in worker, (
+            f"the composition root no longer passes {seam} — the seam that made"
+            " the parking above the DEPLOYED reality rather than a default is"
+            " gone. Reopen #1090 D6 (#1124)."
+        )
+
+
 def test_the_publish_pipeline_has_exactly_one_producer_and_it_is_manual_mode_gated():
     """`review_required`'s only two producers (`reconciler`, `publish_pipeline`)
     both sit inside the publish pipeline, and the pipeline runs only from a
@@ -67,6 +115,12 @@ def test_the_publish_pipeline_has_exactly_one_producer_and_it_is_manual_mode_gat
     refuses with `manual_mode` unless the workspace has `api_publishing_enabled`.
 
     In the manual-mode product #1090 measures, no intent can be parked.
+
+    **This is the WEAK gate of the two** — `api_publishing_enabled` is a
+    `settings_change` key and that command is built, so an admin can flip it
+    without a deploy. It is pinned because it is the first door and its removal
+    is worth knowing about, not because the D6 verdict rests on it. The verdict
+    rests on the test above.
     """
     # The FILE, never the line: a line number pins where the producer sits
     # today, which every neighbouring edit moves, and says nothing about the
