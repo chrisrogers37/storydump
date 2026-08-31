@@ -77,17 +77,30 @@ Description=storydump scheduling-outage monitor
 [Service]
 Type=oneshot
 # THE NOTIFY COMMAND NEEDS AN ENVIRONMENT AND A systemd --user UNIT HAS ALMOST
-# NONE. This line is not optional decoration: a `oneshot` under `systemd --user`
+# NONE. This is not optional decoration: a `oneshot` under `systemd --user`
 # inherits neither the shell profile nor `bot.conf`, so a notify command that
-# reads its destination from the environment finds nothing there and refuses.
-# Measured on the fleet host 2026-08-31: with no EnvironmentFile, the enrolled
-# unit exited 11 on the first real thing it had to say -- `tg-post.sh` exited 2
-# ("TELEGRAM_GROUP_CHAT_ID not set") before reaching the network. The detector,
-# the poller and the classification were all correct; the message did not land.
+# reads its destination and its credential from the environment finds neither.
 #
-# Point this at whatever file supplies the notify command's destination. It must
-# be readable by the user the timer runs as.
-EnvironmentFile=%h/.config/storydump/scheduling-monitor.env
+# TWO variables, with UNRELATED causes -- and the second was found only by
+# RUNNING the notify path, after the first had been applied and the unit looked
+# fixed. Measured on the fleet host 2026-08-31:
+#
+#   (1) no chat id     -> tg-post.sh exits 2, before any network call.
+#   (2) chat id set,    -> tg-post.sh exits 3: "send REJECTED -- message NOT
+#       wrong token         delivered (ok=<none>; error: Unauthorized)".
+#
+# (2) is the one that reads as fixed. With no TELEGRAM_STATE_DIR, tg-post.sh
+# falls back to the GENERIC channel dir, whose token is not authorised for the
+# group -- so a token resolves, and resolving is not the same as working.
+# Probing the file for a token line cannot tell these apart; only a real send
+# can. Point TELEGRAM_STATE_DIR at a channel dir whose token is authorised for
+# the destination chat.
+#
+# NOT `EnvironmentFile=bot.conf`. Every line there is `export KEY=value`, and
+# systemd does not strip the keyword -- it would create a variable literally
+# named `export TELEGRAM_GROUP_CHAT_ID` (measured: 53 of 60 lines).
+Environment=TELEGRAM_GROUP_CHAT_ID=<the operator group chat id>
+Environment=TELEGRAM_STATE_DIR=<a channel dir whose token is authorised there>
 ExecStart=/usr/bin/python3 %h/ops/storydump/scripts/scheduling_monitor.py \
   --url https://<api-host>/health/scheduling \
   --state-file %h/.local/state/storydump-scheduling-monitor.json \
@@ -95,28 +108,19 @@ ExecStart=/usr/bin/python3 %h/ops/storydump/scripts/scheduling_monitor.py \
 SuccessExitStatus=0 10
 ```
 
-**Verify the notify path before trusting the unit**, because the monitor cannot
-tell you its pager is broken until it already has something urgent to say —
-which is the worst possible moment to find out:
+**Verify the notify path by SENDING, before trusting the unit.** The monitor
+cannot tell you its pager is broken until it already has something urgent to
+say, which is the worst possible moment to find out — and the second failure
+above proves inspection is not enough, because a present token and an
+authorised token look identical in the file.
 
 ```bash
-# Same environment systemd gives it. A working path prints nothing and exits 0.
-systemd-run --user --wait --collect --quiet \
-  --unit=notify-probe -p EnvironmentFile=%h/.config/storydump/scheduling-monitor.env \
-  %h/claudlobby/lib/tg-post.sh "scheduling-monitor notify probe"
-```
-
-```ini
-# ~/.config/systemd/user/storydump-scheduling-monitor.timer
-[Unit]
-Description=poll storydump scheduling health every 5 minutes
-
-[Timer]
-OnBootSec=3min
-OnUnitActiveSec=5min
-
-[Install]
-WantedBy=timers.target
+# Exactly the environment systemd gives it. rc=0 means DELIVERED; rc=2 is a
+# missing chat id, rc=3 is a rejected send (wrong or unauthorised token).
+systemd-run --user --wait --collect --pipe --quiet \
+  -p Environment=TELEGRAM_GROUP_CHAT_ID=<id> \
+  -p Environment=TELEGRAM_STATE_DIR=<dir> \
+  %h/claudlobby/lib/tg-post.sh "scheduling-monitor notify probe"; echo "rc=$?"
 ```
 
 `--notify-command` is given the message as its single argument. It is
