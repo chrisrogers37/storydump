@@ -193,6 +193,13 @@
       "label": "\u00a711 alert_stranded_sources job kind (065, #1061) \u2014 ck_jobs_kind + ck_jobs_system_kinds widened together",
       "doc": "07-security-model.md",
       "ordinal": 9
+    },
+    {
+      "sha256": "060d649ad2044737ed7e261c266479ae6e1544579c777dac52cf385f9526af68",
+      "class": "normative",
+      "label": "\u00a712 no-media notice marker (066, #1090 D3) \u2014 ig_accounts.last_no_media_notice_at",
+      "doc": "07-security-model.md",
+      "ordinal": 10
     }
   ],
   "policy_expansion": {

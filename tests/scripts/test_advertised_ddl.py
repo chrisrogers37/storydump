@@ -267,11 +267,14 @@ class TestAgainstTheRealDocs:
         manifest = load_manifest(DEFAULT_MANIFEST)
         classes = [e.class_ for e in manifest.blocks]
 
-        # 22, not 21: `07` §10 adds the #1037 memberships door (migration
-        # 064), after §9's #982 refresh-leg provider guard (063) made it 21,
-        # the #942 reauth-prompt leg (062) made it 20 and §8's #883 guard
-        # (061) made it 19.
-        assert classes.count("normative") == 23
+        # One per `07` increment, each named so the next one has to say so
+        # here. The running total, which the prose had fallen a step behind:
+        # §8's #883 self-transition guard (061) made it 19, the #942
+        # reauth-prompt leg (062) 20, #982's refresh-leg provider guard (063)
+        # 21, §10's #1037 memberships door (064) 22, §11's
+        # `alert_stranded_sources` kind (065) 23, and §12's #1090 D3 no-media
+        # notice marker (066) makes it 24.
+        assert classes.count("normative") == 24
         assert classes.count("illustrative") == 4
 
     def test_real_stream_expands_the_fifteen_policies(self):

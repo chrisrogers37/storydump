@@ -85,6 +85,12 @@ class WorkerConfig:
     transit_reap_older_than_seconds: int = 48 * 3600
     stranded_alert_after_seconds: int = 24 * 3600  # re-alert cadence (#1061)
     stranded_alert_limit: int = 200  # rows re-alerted per beat
+    # 05: "no media available" notice dedup 24 h (06 section 5, slot missed).
+    no_media_notice_after_seconds: int = 24 * 3600
+    # The front end's origin (`settings.web_app_origin`), for the deep link in
+    # the parked-intent notice (06 section 5). None = the notice still fires,
+    # without a link: being told late beats not being told.
+    web_app_origin: Optional[str] = None
     clock_interval_seconds: float = 15.0
     clock_max_inserts: int = 500
     refresh_cadence_seconds: int = 7 * 24 * 3600
@@ -167,15 +173,22 @@ def build_registry(deps: WorkerDeps) -> dict:
                 " has no ig_accounts row"
             )
         slot_at = row["slot_at"]
-        intent_id = await scheduler.execute_plan_slot(
+        outcome = await scheduler.execute_plan_slot(
             session,
             workspace_id=str(job["workspace_id"]),
             ig_account_id=str(payload["ig_account_id"]),
             slot_at=slot_at,
             provider_account_ref=row["provider_account_ref"],
             approval_mode=row["approval_mode"],
+            no_media_notice_after_seconds=cfg.no_media_notice_after_seconds,
         )
-        if intent_id is not None:
+        if outcome.notice is not None:
+            # The library was empty AND there was no surface to say so on.
+            # Passed through rather than re-derived: `notice` already IS the
+            # verdict, so re-testing it here would be a second place to keep
+            # in step with the sentinel.
+            return outcome.notice
+        if outcome.intent_id is not None:
             # The fast path of the `02` §4 prompt edge: mint and prompt on
             # the same beat, same transaction. The prompt sweep is the
             # correctness backstop for anything this misses (a crash between
@@ -191,12 +204,58 @@ def build_registry(deps: WorkerDeps) -> dict:
         )
 
     async def reconcile_ambiguous(session, job):
+        """The `02` §6 sweep. TWO reasons, and only one of them needs a poll.
+
+        `fn_reconciler_sweep` tags every row `ladder_due` or `notify_window`.
+        A ladder row is an ambiguous publish that must be resolved against the
+        provider; a notify row is a parked `review_required` intent whose
+        customer-notification window has passed (`06` §5), which is purely
+        informational. Feeding the second into `reconcile_intent` — what this
+        did before the tag was read — polls a provider about an intent whose
+        ladder is already spent, and produces no notification at all. That is
+        why #1090 D4 had no producer despite the door shipping in 059.
+
+        **The poll seam parks the LADDER half, not the kind.** The module
+        docstring's rule is that a missing seam parks its *dependent* kind; the
+        notify half depends on nothing the deployment lacks, so parking it with
+        the ladder over-parks. This matters concretely rather than in
+        principle: production runs `poll=None` (`worker.py`), so under the old
+        registration the whole kind was `Parked` and the customer notification
+        could not fire even once the producer existed.
+        """
         due = await reconciler.sweep_due(
             session,
             limit=cfg.reconcile_limit,
             notify_after_seconds=cfg.reconcile_notify_after_seconds,
         )
+        ladder_skipped = unreachable = 0
         for op in due:
+            if op["reason"] == "notify_window":
+                sent = await reconciler.notify_parked_customer(
+                    session,
+                    intent_id=op["intent_id"],
+                    workspace_id=op["workspace_id"],
+                    web_app_origin=cfg.web_app_origin,
+                    retry_after_seconds=cfg.reconcile_notify_after_seconds,
+                )
+                if sent == outbox.UNDELIVERABLE:
+                    unreachable += 1
+                continue
+            if deps.poll is None:
+                ladder_skipped += 1
+                continue
+            # Scope the ladder row too. 059 says every write from this sweep
+            # "runs tenant-scoped as svc_worker" and nothing did — the session
+            # carries `app.tenant_id = ''` because this is a system singleton,
+            # so these writes were invisible to `p_tenant` already. Reading the
+            # reason tag also makes the tenant VARY across one sweep, so
+            # asserting it per row is what keeps a ladder row from inheriting
+            # the scope of whichever notify row preceded it.
+            await unit_of_work.apply_gucs(
+                session,
+                tenant_id=str(op["workspace_id"]),
+                actor_kind="system",
+            )
             await reconciler.reconcile_intent(
                 session,
                 intent_id=op["intent_id"],
@@ -204,6 +263,21 @@ def build_registry(deps: WorkerDeps) -> dict:
                 poll=deps.poll,
                 checks=op.get("checks", 0),
             )
+        if ladder_skipped:
+            # Loud, per the module docstring: the deployment cannot do this
+            # half and says so every beat it has work for it.
+            logger.warning(
+                "reconcile_ambiguous: %d ladder-due intent(s) left unpolled —"
+                " no provider poll seam configured (stub Meta adapter supplies"
+                " it); the notify half ran",
+                ladder_skipped,
+            )
+        if unreachable:
+            # One workspace with nowhere to receive its notice makes the WHOLE
+            # sweep not-a-delivery. The rows that did land are already written
+            # in this transaction; what must not happen is the run reading as
+            # clean when somebody was owed a message and got none.
+            return outbox.UNDELIVERABLE
 
     async def alert_stranded_sources(session, job):
         # Alert-only: nothing here re-arms a source or enqueues a sync. The
@@ -304,11 +378,9 @@ def build_registry(deps: WorkerDeps) -> dict:
     # No `deps.drive` gate: this path makes no provider call, and a fleet with
     # no adapter wired is exactly the one whose sources are stranded (#1061).
     registry["alert_stranded_sources"] = alert_stranded_sources
-    registry["reconcile_ambiguous"] = (
-        reconcile_ambiguous
-        if deps.poll is not None
-        else Parked("no provider poll seam configured (stub Meta adapter supplies it)")
-    )
+    # NOT parked on `deps.poll`: the executor's notify half needs no provider
+    # seam and its ladder half skips loudly without one. See the handler.
+    registry["reconcile_ambiguous"] = reconcile_ambiguous
     registry["reap_transit_assets"] = (
         reap_transit
         if deps.transit is not None
@@ -429,6 +501,10 @@ class WorkLoop:
         self.parked = 0
         self.failures = 0
         self.fenced = 0
+        #: Jobs that ran cleanly and reached NOBODY. Its own counter rather
+        #: than a share of `processed`, because the whole point is that the two
+        #: are not the same outcome.
+        self.undeliverable = 0
         self.consecutive_errors = 0
         self._stop = asyncio.Event()
 
@@ -494,14 +570,30 @@ class WorkLoop:
             return
         try:
             async with self._session_for(job) as session:
-                await entry(session, job)
+                outcome = await entry(session, job)
+                # The executor's verdict decides the terminal state. It was
+                # discarded here and `succeeded` hardcoded, which is what let a
+                # producer that reached nobody report a clean run. Every other
+                # executor returns None and is unaffected.
+                undeliverable = outcome == outbox.UNDELIVERABLE
                 await jobs.finalize_job(
                     session,
                     job["id"],
                     job["lease_token"],
-                    terminal_state="succeeded",
+                    terminal_state=(
+                        "review_required" if undeliverable else "succeeded"
+                    ),
                 )
-            self.processed += 1
+            if undeliverable:
+                logger.warning(
+                    "job %s (%s) reached no delivery surface — parked"
+                    " review_required, NOT recorded as delivered",
+                    job["id"],
+                    kind,
+                )
+                self.undeliverable += 1
+            else:
+                self.processed += 1
             self.consecutive_errors = 0
         except jobs.JobFenced:
             logger.warning(
