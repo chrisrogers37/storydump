@@ -30,7 +30,9 @@ pytestmark = pytest.mark.unit
 class TestItCannotSilentlyFailToLook:
     """The class of defect this script exists to detect, in the script itself."""
 
-    def test_a_moved_anchor_raises_instead_of_returning_an_empty_envelope(self, monkeypatch):
+    def test_a_moved_anchor_raises_instead_of_returning_an_empty_envelope(
+        self, monkeypatch
+    ):
         # An empty envelope would flag EVERY command as unreachable; an empty
         # vocabulary would report all clear. Both are wrong, and only one is
         # loud, so neither is allowed to happen silently.
@@ -87,7 +89,9 @@ class TestTheParserIgnoresProseAndStrings:
         stripped = uc._strip_ts_noise(noisy)
         assert "here" not in stripped and "str" not in stripped
         assert "real" in stripped
-        assert len(stripped) == len(noisy), "offsets must be preserved for the brace scan"
+        assert len(stripped) == len(noisy), (
+            "offsets must be preserved for the brace scan"
+        )
 
     def test_privilege_statements_and_sql_comments_are_not_calls(self):
         sql = (
