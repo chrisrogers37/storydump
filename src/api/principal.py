@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Optional
+from urllib.parse import urlsplit
 
 from fastapi import HTTPException, Request, Response
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -63,6 +64,79 @@ def require_engine(request: Request) -> AsyncEngine:
             detail="target database not configured: set TARGET_DATABASE_URL",
         )
     return engine
+
+
+def _covers(domain: str, host: str) -> bool:
+    """Whether a cookie scoped to *domain* is sent to *host* — RFC 6265 §5.1.3
+    domain-matching, which is exact-or-subdomain and nothing cleverer."""
+    return host == domain or host.endswith("." + domain)
+
+
+def session_delivery_gap() -> Optional[str]:
+    """Why a session minted here could not be read by the configured front end,
+    or ``None`` when it can.
+
+    The sign-in leg mints a session on the API host and the front end reads it
+    from the browser's cookie jar. Those are only the same jar when the cookie's
+    scope covers BOTH hosts, and nothing in the request tells you it does not —
+    the sign-in succeeds, the cookie is set, and the front end simply never sees
+    it, so the person is bounced back to `/login` having just signed in.
+
+    That state is not hypothetical: it is what production shipped (#1117), and
+    the reason it survived is that every individual part of it works.
+
+    ``WEB_APP_URL`` unset is NOT a gap here. It is the documented fail-closed
+    reading — no browser origin is admitted and sign-in lands on the API's own
+    root — and changing that is a deployment decision, not this gate's.
+
+    KNOWN BOUND, because a gate that implies more than it checks is worse than
+    none: this compares host suffixes and does NOT consult the Public Suffix
+    List. ``SESSION_COOKIE_DOMAIN`` set to a public suffix (``up.railway.app``
+    is one) passes this check and is still rejected by every browser. The PSL
+    is the browser's to enforce and we do not carry a copy.
+    """
+    front = settings.web_app_origin
+    if not front:
+        return None
+    base = settings.OAUTH_REDIRECT_BASE_URL
+    if not base:
+        return None
+    api_host = urlsplit(base).hostname
+    web_host = urlsplit(front).hostname
+    if not api_host or not web_host:
+        return None
+    if api_host == web_host:
+        return None
+    domain = (settings.SESSION_COOKIE_DOMAIN or "").lstrip(".")
+    if not domain:
+        return (
+            f"the session cookie is host-only on {api_host} and the front end "
+            f"is {web_host}, which will never receive it: set "
+            f"SESSION_COOKIE_DOMAIN to a domain covering both hosts"
+        )
+    if not _covers(domain, api_host) or not _covers(domain, web_host):
+        return (
+            f"SESSION_COOKIE_DOMAIN={domain} does not cover both {api_host} "
+            f"and {web_host}, so the front end will never receive the session: "
+            f"serve the API and the front end from one registrable domain"
+        )
+    return None
+
+
+def require_deliverable_session() -> None:
+    """A 503 that names the variable when sign-in would mint a session the
+    front end cannot read — the same posture as `require_engine`, for the same
+    reason: the condition is the deployment's, not the caller's.
+
+    This refuses at the START of the leg. Sending someone to Google for a
+    sign-in we already know we cannot deliver spends their consent on a round
+    trip that ends at the login page it began on.
+    """
+    gap = session_delivery_gap()
+    if gap is not None:
+        raise HTTPException(
+            status_code=503, detail=f"sign-in cannot deliver a session: {gap}"
+        )
 
 
 def presented_token(request: Request) -> Optional[str]:
