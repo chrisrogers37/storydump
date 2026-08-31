@@ -1,3 +1,4 @@
+import { notAuthenticatedCopy } from "./refusal-copy";
 /**
  * The browser's one door to the command route (#1057/#1063, epic P3).
  *
@@ -131,7 +132,7 @@ export function settingsRefusalCopy(reason: unknown): string {
     case "invalid_settings":
       return "Nothing to save — no setting changed.";
     case "unauthenticated":
-      return "That session expired. Sign in again.";
+      return notAuthenticatedCopy("Nothing changed.");
     case "unreachable":
     case "target_router_unreachable":
       return "Storydump cannot reach the server right now. Nothing changed — try again shortly.";

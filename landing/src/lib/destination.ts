@@ -1,3 +1,4 @@
+import { notAuthenticatedCopy } from "./refusal-copy";
 /**
  * Destinations, browser side (#1089).
  *
@@ -87,7 +88,7 @@ export function addDestinationRefusalCopy(reason: unknown): string {
       return "That handle is too long. Enter just the username, without the @.";
     case "unauthenticated":
     case "http_401":
-      return "That session expired. Sign in again.";
+      return notAuthenticatedCopy("Nothing was added.");
     case "insufficient_role":
     case "http_403":
       return "You need to be an admin of this workspace to add a destination.";

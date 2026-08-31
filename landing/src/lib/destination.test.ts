@@ -104,7 +104,15 @@ describe("addDestinationRefusalCopy", () => {
     ["handle_required", "Type the Instagram handle"],
     ["handle_malformed", "no spaces"],
     ["handle_too_long", "too long"],
-    ["unauthenticated", "session expired"],
+    // #1140: was ["unauthenticated", "session expired"]. The describe block's
+    // contract is "names what happened" and that row named something the code
+    // never established — a 401 admits roughly seven causes and the sentence
+    // picked one, wrongly, on the first real sign-in. The row is kept rather
+    // than deleted because a fragment assertion here is still worth having;
+    // what makes it real is that the fragment is now a description of the
+    // OBSERVATION rather than a guess at the cause. The exhaustive pin across
+    // all six sites lives in `refusal-copy.test.ts`.
+    ["unauthenticated", "not signed in, or the app could not prove it"],
     ["insufficient_role", "admin of this workspace"],
     ["unreachable", "Nothing was added"],
   ])("%s names what happened", (reason, fragment) => {

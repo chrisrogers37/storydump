@@ -1,3 +1,4 @@
+import { notAuthenticatedCopy } from "./refusal-copy";
 /**
  * The Drive connect leg, browser side and its one shared guard (#1065).
  *
@@ -92,7 +93,7 @@ export function connectRefusalCopy(reason: unknown): string {
       return "That source is no longer here. Reload the page.";
     case "unauthenticated":
     case "http_401":
-      return "That session expired. Sign in again.";
+      return notAuthenticatedCopy("Nothing changed.");
     case "malformed_authorization_url":
       return "Storydump could not start the Google sign-in. Nothing changed — report this if it repeats.";
     case "unreachable":
@@ -156,7 +157,7 @@ export function addSourceRefusalCopy(reason: unknown): string {
       return "That does not look like a Drive folder link. Open the folder in Drive and copy the address.";
     case "unauthenticated":
     case "http_401":
-      return "That session expired. Sign in again.";
+      return notAuthenticatedCopy("Nothing was added.");
     case "unreachable":
     case "target_router_unreachable":
       return "Storydump cannot reach the server right now. Nothing was added — try again shortly.";

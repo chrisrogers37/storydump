@@ -4,8 +4,8 @@
  * This file exists because omitting it was a live production outage, not a
  * style question. `POST /workspaces` reaches the port through `_dispatch`,
  * whose FIRST statement refuses a keyless command (`v1.py:104-109`) before the
- * body is read. So the create returned 400, wrote nothing, and `messageFor`
- * had no case for it — the first real user saw "That did not work. This one is
+ * body is read. So the create returned 400, wrote nothing, and
+ * `createWorkspaceRefusalCopy` had no case for it — the first real user saw "That did not work. This one is
  * on us." and no one could tell from the message what had happened.
  *
  * The invariant was already written down one route over
