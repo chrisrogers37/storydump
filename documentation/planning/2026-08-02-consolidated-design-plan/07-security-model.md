@@ -643,3 +643,52 @@ ALTER TABLE jobs ADD CONSTRAINT ck_jobs_system_kinds CHECK (
     ('reconcile_ambiguous','reap_expired','reap_transit_assets','retention_sweep',
      'reencrypt_credentials','send_email','alert_stranded_sources')));
 ```
+
+### §12. The "no media available" notice marker (066, #1090 D3)
+
+`06` §5's slot-missed row promises that "a 'no media available' notification
+fires at most once per `05` window when selection returns empty", and names the
+mechanism as "slot planner + notification dedup". The slot planner shipped; the
+dedup had nowhere to live, so neither did the notice — a grep for a no-media
+notification returned nothing anywhere in the tree, against a positive control
+that does enumerate the live outbox kinds. This is the marker half; the producer
+that stamps it is `scheduler.execute_plan_slot`, which already owns the empty
+case (`02` §5 names "no media" as its outcome).
+
+**Keyed per account, not per workspace.** A slot is minted per (workspace,
+`ig_account`) and the cadence lives on `ig_accounts`, so two accounts in one
+workspace starve independently. A workspace-keyed marker would let the first
+account's notice silence the second account's *first* notice — the failure the
+line exists to rule out is "you are told once", not "one of your accounts is
+told once".
+
+**No index, and the contrast with §9 is the reason.** §9 added
+`ix_ig_accounts_reauth_due` because the clock SCANS `ig_accounts` for accounts
+whose prompt is due — a predicate over the whole table. This marker is only ever
+read for the one account a `plan_slot` job already names, by primary key, so an
+index would be dead weight on every write serving no query that exists.
+
+**No grant, same shape of contrast.** §7's matrix gives `svc_worker` table-level
+`SELECT, INSERT, UPDATE` on `ig_accounts`, so the role that stamps this reaches
+it already. §9 needed an explicit column grant because `svc_clock`'s grant is
+column-scoped (`next_slot_at` and nothing else); the clock does not touch this
+marker, and adding a column grant would widen `svc_clock`'s reach for no caller.
+
+Appends rather than amends, for the same reason §10 and §11 did — the `02` §2
+block that prints `ig_accounts` is content-addressed and arm (b) is an ordered
+prefix.
+
+```sql
+-- The no-media notice dedup marker (#1090 D3). The window itself (05: 24 h) is a
+-- WorkerConfig parameter, not a constant here: the column records WHEN the notice
+-- last fired, never HOW OFTEN it may.
+ALTER TABLE ig_accounts
+  ADD COLUMN last_no_media_notice_at TIMESTAMPTZ NULL;
+
+COMMENT ON COLUMN ig_accounts.last_no_media_notice_at IS
+  'When this account last told its workspace that a slot found no media. '
+  'NULL = never told. Stamped by the slot planner at NOTICE time, in the same '
+  'transaction as the outbox row, so a rolled-back plan takes its notice with '
+  'it. The dedup window is 05 (24 h) and lives in WorkerConfig, not here: the '
+  'column records WHEN, never HOW OFTEN.';
+```

@@ -73,6 +73,11 @@ class IgAccount(TargetBase):
     # When the reauth-prompt clock leg last minted for this account (062);
     # NULL = never prompted. Stamped at mint, symmetric with next_slot_at.
     last_reauth_prompt_at = Column(TZ, nullable=True)
+    # When a slot last found no media for this account and said so (066).
+    # NULL = never told. Per-ACCOUNT, not per-workspace: two accounts in one
+    # workspace starve independently, so a workspace-keyed marker would let
+    # the first one's notice silence the second one's first notice.
+    last_no_media_notice_at = Column(TZ, nullable=True)
     created_at, updated_at = timestamps()
 
     __table_args__ = (

@@ -150,9 +150,194 @@ class TestSeamAbsenceParksTheDependentKind:
         assert isinstance(registry["publish_pipeline"], Parked)
         assert "media_fetch" in registry["publish_pipeline"].reason
 
-    def test_no_poll_parks_the_reconciler(self):
+    def test_no_poll_does_NOT_park_the_reconciler(self):
+        """Re-pointed, not deleted (#1090 D4). The property this class pins —
+        a missing seam parks its DEPENDENT kind — is unchanged and still has
+        four instances above. The reconciler stopped being one of them: the
+        `02` §6 sweep returns `ladder_due` rows (which need the poll) AND
+        `notify_window` rows (which need nothing), so parking the kind parked
+        a half that does not depend on the absent seam. Production runs
+        `poll=None`, so the old parking is exactly why `06` §5's customer
+        notification could never fire."""
         registry = build_registry(full_deps(poll=None))
-        assert isinstance(registry["reconcile_ambiguous"], Parked)
+        assert not isinstance(registry["reconcile_ambiguous"], Parked)
+
+
+class TestReconcilerSweepBranchesOnItsReason:
+    """The `notify_window` half of the `02` §6 sweep (#1090 D4).
+
+    `fn_reconciler_sweep` has tagged its rows since 059; nothing read the tag,
+    so every notify row was polled as if the ladder were due and no
+    notification was ever produced.
+    """
+
+    def _job(self):
+        return {"id": "j-rec", "kind": "reconcile_ambiguous", "workspace_id": None}
+
+    async def _drive(self, monkeypatch, *, rows, deps):
+        notified, reconciled = [], []
+
+        async def fake_sweep(session, *, limit, notify_after_seconds):
+            return rows
+
+        async def fake_notify(
+            session, *, intent_id, workspace_id, web_app_origin, retry_after_seconds
+        ):
+            notified.append((intent_id, web_app_origin))
+            return 1
+
+        async def fake_reconcile(session, *, intent_id, **kw):
+            reconciled.append(intent_id)
+            return "pending"
+
+        monkeypatch.setattr(work_loop.reconciler, "sweep_due", fake_sweep)
+        monkeypatch.setattr(work_loop.reconciler, "notify_parked_customer", fake_notify)
+        monkeypatch.setattr(work_loop.reconciler, "reconcile_intent", fake_reconcile)
+        registry = build_registry(deps)
+        await registry["reconcile_ambiguous"](_FakeSession(), self._job())
+        return notified, reconciled
+
+    async def test_a_notify_row_notifies_and_is_never_polled(self, monkeypatch):
+        """The defect in one assertion. `full_deps` supplies a poll seam that
+        RAISES when invoked, so a notify row routed into the ladder fails here
+        rather than passing quietly."""
+        rows = [{"intent_id": "i-1", "workspace_id": "ws-1", "reason": "notify_window"}]
+        notified, reconciled = await self._drive(
+            monkeypatch,
+            rows=rows,
+            deps=full_deps(config=WorkerConfig(web_app_origin="https://app.example")),
+        )
+        assert notified == [("i-1", "https://app.example")]
+        assert reconciled == [], "a parked intent must not be re-polled"
+
+    async def test_a_ladder_row_is_reconciled_not_notified(self, monkeypatch):
+        """The positive control: a branch test that never sees the other side
+        cannot tell "routes correctly" from "routes everything one way"."""
+        rows = [{"intent_id": "i-2", "workspace_id": "ws-1", "reason": "ladder_due"}]
+        notified, reconciled = await self._drive(
+            monkeypatch, rows=rows, deps=full_deps()
+        )
+        assert reconciled == ["i-2"]
+        assert notified == []
+
+    async def test_without_a_poll_seam_the_notify_half_still_runs(self, monkeypatch):
+        """Production's exact configuration (`worker.py` passes `poll=None`).
+        The ladder row is skipped, the notify row is served."""
+        rows = [
+            {"intent_id": "i-3", "workspace_id": "ws-1", "reason": "ladder_due"},
+            {"intent_id": "i-4", "workspace_id": "ws-1", "reason": "notify_window"},
+        ]
+        notified, reconciled = await self._drive(
+            monkeypatch, rows=rows, deps=full_deps(poll=None)
+        )
+        assert [n[0] for n in notified] == ["i-4"]
+        assert reconciled == [], "no seam to poll with"
+
+    async def test_a_workspace_with_no_surface_makes_the_sweep_undeliverable(
+        self, monkeypatch
+    ):
+        """The executor must not report a delivery it could not make."""
+        from src.services.target import outbox
+
+        rows = [{"intent_id": "i-5", "workspace_id": "ws-1", "reason": "notify_window"}]
+
+        async def fake_sweep(session, *, limit, notify_after_seconds):
+            return rows
+
+        async def fake_notify(session, **kw):
+            return outbox.UNDELIVERABLE
+
+        monkeypatch.setattr(work_loop.reconciler, "sweep_due", fake_sweep)
+        monkeypatch.setattr(work_loop.reconciler, "notify_parked_customer", fake_notify)
+        registry = build_registry(full_deps())
+        got = await registry["reconcile_ambiguous"](_FakeSession(), self._job())
+        assert got == outbox.UNDELIVERABLE
+
+    async def test_the_sweep_keys_match_what_the_door_returns(self):
+        """The `KeyError` that could not surface while the kind was parked.
+
+        The door returns `o_intent_id`/`o_workspace_id`; the consumer reads
+        `intent_id`/`workspace_id`. `sweep_due` now aliases in the SELECT, so
+        this asserts the two spellings agree at the one place that chooses
+        them — reading the shipped SQL rather than restating it.
+        """
+        import inspect
+
+        src = inspect.getsource(work_loop.reconciler.sweep_due)
+        for alias in ("AS intent_id", "AS workspace_id", "AS reason"):
+            assert alias in src, f"sweep_due must alias {alias}"
+
+
+class TestAJobThatReachedNobodyIsNotASuccess:
+    """#1090, ari's mid-sprint constraint. Two producers already log-and-succeed
+    on an empty binding list, so the ledger records a clean run for a message
+    nobody received and the cadence repeats into the void forever. The verdict
+    now decides the terminal state."""
+
+    def _loop(self, executor):
+        from src.services.target.work_loop import WorkLoop
+
+        finalized = {}
+
+        class _Jobs:
+            JobFenced = work_loop.jobs.JobFenced
+
+            @staticmethod
+            async def finalize_job(session, job_id, token, terminal_state):
+                finalized["state"] = terminal_state
+
+            @staticmethod
+            async def reschedule_job(*a, **k):  # pragma: no cover
+                raise AssertionError("must not reschedule")
+
+        loop = WorkLoop.__new__(WorkLoop)
+        loop._registry = {"deliver_outbox": executor}
+        loop._config = WorkerConfig()
+        loop.processed = loop.parked = loop.failures = 0
+        loop.fenced = loop.undeliverable = loop.consecutive_errors = 0
+
+        from contextlib import asynccontextmanager
+
+        @asynccontextmanager
+        async def _ctx(job):
+            yield _FakeSession()
+
+        loop._session_for = _ctx
+        return loop, finalized, _Jobs
+
+    async def test_undeliverable_parks_review_required_and_is_counted_apart(
+        self, monkeypatch
+    ):
+        from src.services.target import outbox
+
+        async def executor(session, job):
+            return outbox.UNDELIVERABLE
+
+        loop, finalized, fake_jobs = self._loop(executor)
+        monkeypatch.setattr(work_loop, "jobs", fake_jobs)
+        await loop._run_job({"id": "j1", "kind": "deliver_outbox", "lease_token": "t"})
+
+        assert finalized["state"] == "review_required", (
+            "not `succeeded`, and not `failed` either: retrying cannot"
+            " conjure a binding, so `failed` would trade a silent success"
+            " for a poison loop"
+        )
+        assert (loop.undeliverable, loop.processed) == (1, 0), (
+            "counted apart from real deliveries — that separation IS the fix"
+        )
+
+    async def test_an_ordinary_executor_still_succeeds(self, monkeypatch):
+        """The positive control. Every existing executor returns None, and a
+        change that made THEM stop succeeding would be worse than the bug."""
+
+        async def executor(session, job):
+            return None
+
+        loop, finalized, fake_jobs = self._loop(executor)
+        monkeypatch.setattr(work_loop, "jobs", fake_jobs)
+        await loop._run_job({"id": "j2", "kind": "deliver_outbox", "lease_token": "t"})
+        assert finalized["state"] == "succeeded"
+        assert (loop.undeliverable, loop.processed) == (0, 1)
 
 
 class _FakeSession:
@@ -188,7 +373,7 @@ class TestPlanSlotAdapterMapsThePayload:
 
         async def fake_execute_plan_slot(session, **kwargs):
             seen.update(kwargs)
-            return "intent-1"
+            return work_loop.scheduler.SlotOutcome(intent_id="intent-1")
 
         monkeypatch.setattr(
             work_loop.scheduler, "execute_plan_slot", fake_execute_plan_slot

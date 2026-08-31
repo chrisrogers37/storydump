@@ -19,7 +19,8 @@ L.3's own gate, which requires a test per mode.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Optional
+from datetime import timedelta
+from typing import Any, Callable, Optional, Union
 
 from sqlalchemy import text
 
@@ -104,11 +105,33 @@ async def sweep_due(conn, *, limit: int, notify_after_seconds: int) -> list[dict
     module does not re-implement that split — an unresolved ambiguity blocks
     its account's next publish via ``uq_publish_exclusive``, while a
     notify-window row is informational, and the door already encodes that.
+
+    **Keys are the door's names minus the ``o_`` prefix, aliased in the SELECT
+    so there is one spelling.** The prefix is a SQL OUT-parameter convention
+    and does not belong in the Python contract; the sole consumer already read
+    ``intent_id``/``workspace_id`` against a door that returned
+    ``o_intent_id``/``o_workspace_id``, so the first non-empty sweep would have
+    raised ``KeyError``. Nothing caught it because the kind parks without a
+    provider poll seam and no test drove the executor. Aliasing here fixes it
+    where the names are chosen rather than at the one call site that happens to
+    exist today.
+
+    ``reason`` is ``ladder_due`` or ``notify_window`` and the caller MUST
+    branch on it: the two rows want opposite work (poll the provider vs. tell
+    the customer), and the second needs no provider seam at all.
     """
-    rungs = "{" + ",".join(f'"{s} seconds"' for s in LADDER_SECONDS) + "}"
+    # A LIST of timedeltas, not a Postgres array LITERAL in a string. asyncpg
+    # binds `interval[]` from a Python sequence of timedeltas and REFUSES a
+    # str outright ("a sized iterable container expected"), so the literal
+    # form made this door raise `DataError` on its first statement — every
+    # call, not an edge case. Nothing caught it because the only caller sits
+    # behind a kind that parks without a provider poll seam, and no test drove
+    # it; this is why #1090 D4 had no notification even in principle.
+    rungs = [timedelta(seconds=s) for s in LADDER_SECONDS]
     result = await conn.execute(
         text(
-            "SELECT o_intent_id, o_workspace_id, o_reason"
+            "SELECT o_intent_id AS intent_id, o_workspace_id AS workspace_id,"
+            "       o_reason AS reason"
             " FROM fn_reconciler_sweep("
             "   :lim, CAST(:rungs AS interval[]),"
             "   make_interval(secs => :notify))"
@@ -116,6 +139,185 @@ async def sweep_due(conn, *, limit: int, notify_after_seconds: int) -> list[dict
         {"lim": limit, "rungs": rungs, "notify": notify_after_seconds},
     )
     return [dict(r) for r in result.mappings().all()]
+
+
+async def _record_no_surface(
+    conn, *, intent_id, retry_after_seconds: int
+) -> Union[int, str]:
+    """No push binding: record the ATTEMPT, and say so upward.
+
+    Two things must both be true and they pull opposite ways. The run must not
+    read as a delivery — `outbox.UNDELIVERABLE` is how that reaches the
+    ledger. And it must not park a job every 60 s for a condition that will
+    stand until someone adds a binding, which is what re-attempting on every
+    sweep would do. So the attempt is stamped and re-attempted on `05`'s
+    window, exactly the "once, not daily" bound `06` §5 puts on the notice
+    itself.
+
+    ``customer_notified`` is deliberately NOT set: it is the permanent latch
+    that says the customer WAS told, and nobody was. So the row stays due, and
+    the notice lands the moment a surface exists.
+
+    Returns `outbox.UNDELIVERABLE` on the beat that RECORDS the condition, and
+    `0` on the beats inside the window that follow it. The distinction being
+    drawn is between *a message was owed and could not be sent* and *nothing
+    was owed on this beat*, which is the same distinction the whole change is
+    about — not between "sent" and "not sent".
+    """
+    from src.services.target.outbox import UNDELIVERABLE
+
+    fresh = (
+        await conn.execute(
+            text(
+                "UPDATE post_intents"
+                " SET last_error ="
+                "   COALESCE(last_error, CAST('{\"v\": 1}' AS jsonb))"
+                "   || jsonb_build_object('evidence',"
+                "        COALESCE(last_error->'evidence', CAST('{}' AS jsonb))"
+                "        || jsonb_build_object('notify_attempted_at', now()))"
+                " WHERE id = :intent"
+                "   AND state = 'review_required'"
+                "   AND COALESCE("
+                "         CAST(last_error->'evidence'->>'notify_attempted_at'"
+                "              AS timestamptz),"
+                "         CAST('-infinity' AS timestamptz))"
+                "       < now() - make_interval(secs => :age)"
+                " RETURNING id"
+            ),
+            {"intent": str(intent_id), "age": float(retry_after_seconds)},
+        )
+    ).first()
+    if fresh is None:
+        # Already recorded inside this window. The condition still stands and
+        # is still visible — the `review_required` job from the first attempt
+        # and this intent's own stamp both persist — so re-reporting it on
+        # every 60 s beat would park a thousand jobs a day for one workspace
+        # and bury the signal it exists to raise. Bounded, not silenced.
+        return 0
+
+    logger.warning(
+        "reconciler: intent %s needs attention but its workspace has NO push"
+        " binding — nobody was told (#1090 D5)",
+        intent_id,
+    )
+    return UNDELIVERABLE
+
+
+async def notify_parked_customer(
+    conn,
+    *,
+    intent_id,
+    workspace_id,
+    web_app_origin: Optional[str] = None,
+    retry_after_seconds: int = 24 * 3600,
+) -> Union[int, str]:
+    """Tell the workspace a parked post needs attention.
+
+    Returns the number of outbox rows written, or `outbox.UNDELIVERABLE`
+    when the workspace has no surface to receive it — **never a bare `0` for
+    both**, which is the shape that let two existing producers report a clean
+    run to nobody.
+
+    `06` §5's `review_required` row: after `05`'s customer-notification window
+    the workspace gets "one workspace notification (\"a post needs attention\",
+    deep link to the web queue)". `fn_reconciler_sweep` (059) already selects
+    exactly these rows — state `review_required`, past the window, not yet
+    notified — and tags them ``notify_window``. **Nothing consumed that tag
+    until now**, which is why #1090 D4 had no producer: the door was built and
+    its output was fed straight into the ladder.
+
+    **The stamp is an atomic claim, and it MERGES.** Two things matter here.
+    The claim (``NOT ... customer_notified`` inside the UPDATE) closes the
+    window between the sweep's read and this write — the door's own filter
+    cannot, because the loop runs between them. The merge preserves
+    ``last_error->'evidence'``: that object carries ``checks``,
+    ``last_checked_at`` and the full ``trail``, which is the operator's entire
+    inheritance on a parked intent (`06` §5's resolution surface reads it), so
+    a ``jsonb_build_object`` rebuild of the kind :func:`_record_evidence` does
+    would notify the customer by destroying the evidence.
+
+    **Bindings are read before the claim**, for the reason spelled out at the
+    call — the same shape as `scheduler._notice_no_media`, and load-bearing
+    here because this latch never reopens.
+
+    *web_app_origin* is the front end's origin (`settings.web_app_origin`).
+    **Absent, the notice still fires without a link** — being told late is a
+    smaller failure than not being told, and a workspace whose deployment has
+    no web origin configured still needs to know a post is stuck.
+
+    **It scopes its own writes, and that is not defensive coding.**
+    `reconcile_ambiguous` is a SYSTEM singleton: it carries `workspace_id
+    NULL`, so `make_session_for` gives it ``app.tenant_id = ''``. The sweep
+    reads cross-tenant because `fn_reconciler_sweep` is SECURITY DEFINER —
+    and 059's own comment says the notification WRITE "then runs tenant-scoped
+    as svc_worker", which nothing implemented. Under an empty tenant every
+    statement below is invisible to `p_tenant`: the UPDATE matches no row,
+    `push_bindings` returns nothing, and this reports success having written
+    nothing. So the row's workspace is asserted here, through `apply_gucs`
+    rather than a hand-rolled `SET LOCAL` — its docstring is explicit that a
+    second copy of that call is how a third ships `is_local=false`.
+    """
+    from src.services.target import outbox, prompts, unit_of_work
+
+    # `02` §4's worker actor, matching `make_session_for`: the governance
+    # triggers on post_intents refuse a write that names no actor.
+    await unit_of_work.apply_gucs(
+        conn, tenant_id=str(workspace_id), actor_kind="system"
+    )
+
+    # Bindings BEFORE the claim, and here the ordering matters more than it
+    # does for the no-media notice: `customer_notified` is a permanent latch
+    # rather than a window, so stamping it for a workspace with no push
+    # binding (#1090 D5) would spend the ONE notification `06` §5 allows on an
+    # audience that cannot hear it, and the customer would never be told a
+    # post is stuck. Left unstamped, the row stays due — it is a genuinely
+    # outstanding condition — and the notice lands whenever a surface exists.
+    bindings = await prompts.push_bindings(conn, str(workspace_id))
+    if not bindings:
+        return await _record_no_surface(
+            conn, intent_id=intent_id, retry_after_seconds=retry_after_seconds
+        )
+
+    claimed = (
+        await conn.execute(
+            text(
+                "UPDATE post_intents"
+                " SET last_error ="
+                "   COALESCE(last_error, CAST('{\"v\": 1}' AS jsonb))"
+                "   || jsonb_build_object('evidence',"
+                "        COALESCE(last_error->'evidence', CAST('{}' AS jsonb))"
+                "        || jsonb_build_object('customer_notified', true))"
+                " WHERE id = :intent"
+                "   AND state = 'review_required'"
+                "   AND NOT COALESCE("
+                "         CAST(last_error->'evidence'->>'customer_notified'"
+                "              AS boolean), false)"
+                " RETURNING id"
+            ),
+            {"intent": str(intent_id)},
+        )
+    ).first()
+    if claimed is None:
+        return 0
+
+    link = f" {web_app_origin}/dashboard/queue" if web_app_origin else ""
+    await outbox.fanout_notification(
+        conn,
+        workspace_id=workspace_id,
+        bindings=bindings,
+        intent_id=intent_id,
+        text=(
+            "\u26a0\ufe0f A post needs attention: it could not be confirmed"
+            " as published and is waiting for a decision. Open the queue to"
+            f" resolve it.{link}"
+        ),
+    )
+    logger.info(
+        "reconciler: parked intent %s past the notify window — notified %d binding(s)",
+        intent_id,
+        len(bindings),
+    )
+    return len(bindings)
 
 
 async def _record_evidence(conn, *, intent_id, checks: int, trail: list) -> None:

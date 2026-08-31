@@ -614,9 +614,10 @@ class TestADuplicatePlanSlotMintsNoSecondIntent:
                     slot_at=slot,
                     provider_account_ref=f"ref-{uuid.uuid4().hex[:8]}",
                     approval_mode="manual",
+                    no_media_notice_after_seconds=24 * 3600,
                 )
                 await conn.commit()
-            assert first is not None, "positive control: the first run minted"
+            assert first.intent_id is not None, "positive control: the first run minted"
 
             async with engine.connect() as conn:
                 await self._tenant(conn, clock_db)
@@ -627,12 +628,15 @@ class TestADuplicatePlanSlotMintsNoSecondIntent:
                     slot_at=slot,
                     provider_account_ref=f"ref-{uuid.uuid4().hex[:8]}",
                     approval_mode="manual",
+                    no_media_notice_after_seconds=24 * 3600,
                 )
                 await conn.commit()
         finally:
             await engine.dispose()
 
-        assert second is None, "the duplicate execution minted a second intent"
+        assert second.intent_id is None, (
+            "the duplicate execution minted a second intent"
+        )
         assert (
             _owner_exec(
                 clock_db,

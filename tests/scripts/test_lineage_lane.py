@@ -329,6 +329,12 @@ class TestTheBoundaryIsDerivedAndLoud:
             # the same reason 064 was — the 02 §5 machinery block that prints these
             # constraints is content-addressed, and arm (b) never amends.
             "065_alert_stranded_sources_kind.sql",
+            # 066 extends the stream as 061-065 did: the "no media available"
+            # notice marker (#1090 D3), advertised as 07 section 12 before
+            # landing here. Appended for the same reason 064 and 065 were --
+            # the 02 section 2 block that prints ig_accounts is
+            # content-addressed, and arm (b) never amends.
+            "066_no_media_notice_marker.sql",
         ], (
             f"the target lineage is {above}. If you are landing the next F.2"
             " increment, add it here — deliberately, and at the end: arm (b)"
