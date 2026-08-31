@@ -43,7 +43,11 @@ Every intent edge's side effects are the `02` §4 matrix rows, verbatim:
 shape `fn_clock_tick` mints the baseline one (`059:271`) — same lane, key,
 attempts — and declines to mint a second while one is pending for that
 source, since the serialization key would only queue it behind the first.
-Both job rows go through `jobs.enqueue`, the tier's one INSERT.
+Both job rows go through `jobs.enqueue`, which is this module's only INSERT
+into `jobs` — not the tier's, as an earlier version of this line claimed:
+`media_sync`, `work_loop.ensure_sender_jobs` and `offboarding._mint_successor`
+each write the table directly where the shape needs SQL `enqueue` cannot
+carry.
 
 A caller-supplied value the writers refuse (`InvalidWorkspaceArgs`) is not
 caught here: `commands.execute` maps it once, for every executor.
@@ -60,6 +64,7 @@ from src.services.target import (
     google_drive_oauth,
     intent_ledger,
     jobs,
+    offboarding,
     readers,
     workspaces,
 )
@@ -68,8 +73,9 @@ from src.services.target.commands import Command, CommandRefused, CommandResult
 from src.services.target.intent_ledger import IntentTransitionRefused
 
 #: `02` §4 terminal states — the reaper/worker own every edge INTO these; a
-#: user command on a terminal intent renders it and acts on nothing (R6).
-TERMINAL_STATES = ("posted", "skipped", "rejected", "expired", "failed", "cancelled")
+#: user command on a terminal intent renders it and acts on nothing (R6). Re-
+#: exported from `intent_ledger`, which owns the one Python copy.
+TERMINAL_STATES = intent_ledger.TERMINAL_STATES
 
 
 def _arg(command: Command, name: str) -> str:
@@ -522,3 +528,69 @@ async def create_workspace(session, command: Command) -> CommandResult:
         workspace_id=command.args.get("workspace_id"),
     )
     return CommandResult("executed", {"workspace_id": ws_id})
+
+
+async def offboard_workspace(session, command: Command) -> CommandResult:
+    """`06` §1's entry edge, owner-only (`ROLE_FLOOR`). Two writes and a job.
+
+    The flip and the job are one transaction on purpose: a workspace left
+    `offboarding` with nothing scheduled to finish the job would sit invisible
+    to the clock forever, which is worse than not having started.
+
+    **`confirm` is required, and it is the port's half of `06` §1's "owner
+    (explicit, confirmed)".** The dialog is the front end's; what the port can
+    enforce is that the destructive intent was stated rather than arrived at.
+    This is the one command in the vocabulary whose effect is irreversible
+    after the grace window, and a `POST` with an empty body should not start
+    it.
+
+    **A second offboard is refused rather than absorbed.** `06` §1's table
+    admits `active/suspended → offboarding` and nothing else into that state,
+    and re-stamping `offboarding_at` would silently restart a 30-day clock the
+    owner believes is already running — moving a deletion date is not a no-op.
+    """
+    if command.args.get("confirm") is not True:
+        raise CommandRefused(
+            "invalid_args",
+            "offboarding deletes this workspace and everything in it after the"
+            " grace window; pass confirm=true to start it",
+        )
+    row = (
+        await session.execute(
+            text(
+                "UPDATE workspaces SET state = 'offboarding', offboarding_at = now()"
+                " WHERE id = :ws AND state IN ('active', 'suspended')"
+                " RETURNING offboarding_at"
+            ),
+            {"ws": command.workspace_id},
+        )
+    ).first()
+    if row is None:
+        state = await readers.row(
+            session,
+            "SELECT state FROM workspaces WHERE id = :ws",
+            ws=command.workspace_id,
+        )
+        if state is None:
+            raise CommandRefused("not_found", f"workspace {command.workspace_id}")
+        raise CommandRefused(
+            "illegal_transition",
+            f"workspace is {state['state']}, not active or suspended",
+        )
+    job_id = await jobs.enqueue(
+        session,
+        kind="offboard_workspace",
+        workspace_id=command.workspace_id,
+        lane=offboarding.LANE,
+        serialization_key=offboarding.serialization_key(command.workspace_id),
+        payload={"v": 1},
+    )
+    return CommandResult(
+        "enqueued",
+        {
+            "state": "offboarding",
+            "offboarding_at": row[0],
+            "job": "offboard_workspace",
+            "job_id": job_id,
+        },
+    )
