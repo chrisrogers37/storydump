@@ -213,3 +213,36 @@ describe("refusals", () => {
     expect(settingsRefusalCopy("illegal_transition")).not.toMatch(/queue|post/i);
   });
 });
+
+describe("a permission refusal is not a network blip", () => {
+  // The port maps `insufficient_role` to 403 and answers `{detail: "forbidden"}`
+  // — no `error`, no `reason` — so `submitCommand` synthesises `http_403` and
+  // every reason branch misses. Before this, a member refused for their ROLE and
+  // a browser that could not reach the app got the SAME sentence, and the two
+  // remedies are opposite: "ask an admin" versus "try again shortly".
+  //
+  // Found in review on #1154 by tracing the real refusal path, not by analogy.
+
+  it("names the permission problem instead of the generic failure", () => {
+    const copy = settingsRefusalCopy("http_403", 403);
+    expect(copy).toMatch(/permission/i);
+    expect(copy).not.toMatch(/try again shortly/i);
+  });
+
+  it("says who CAN do it — a refusal with no next step is half a message", () => {
+    expect(settingsRefusalCopy("http_403", 403)).toMatch(/admin|owner/i);
+  });
+
+  it("keys on the status, not the synthesised string", () => {
+    // `http_403` is a stand-in the client invents; the status is the real signal.
+    // If the port ever sends a reason alongside the 403, this must still fire.
+    expect(settingsRefusalCopy("something_else", 403)).toMatch(/permission/i);
+  });
+
+  it("does not swallow the other refusals", () => {
+    // A transport failure must keep its own sentence: same screen, opposite remedy.
+    expect(settingsRefusalCopy("unreachable", 0)).toMatch(/cannot reach/i);
+    expect(settingsRefusalCopy("invalid_name", 400)).toMatch(/give the workspace a name/i);
+    expect(settingsRefusalCopy("whatever", 500)).toMatch(/try again shortly/i);
+  });
+});

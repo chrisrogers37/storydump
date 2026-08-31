@@ -56,6 +56,7 @@ describe("every offered command can produce an idempotency key", () => {
     reject: { intent_id: UUID },
     settings_change: { submission_id: UUID, settings: { posts_per_day: 3 } },
     sync_now: { submission_id: UUID, source_id: UUID2 },
+    rename_workspace: { submission_id: UUID, name: "Northside Coffee" },
   };
 
   it("covers the whole table, so a new spec cannot skip this check", () => {
@@ -209,5 +210,42 @@ describe("the key derivation", () => {
   it("is stable, and distinct per command on the same subject", () => {
     expect(idempotencyKeyFor("mark_posted", UUID)).toBe(`mark_posted:${UUID}`);
     expect(idempotencyKeyFor("skip", UUID)).not.toBe(idempotencyKeyFor("mark_posted", UUID));
+  });
+});
+
+describe("rename_workspace", () => {
+  // #1152: the command was BUILT at the port the whole time — `admin` floor,
+  // executor wired — and absent from this allowlist, which is the only reason
+  // nobody could rename anything. `/welcome` promised "You can rename it later"
+  // regardless. The spec is what makes the promise true.
+  const spec = COMMAND_SPECS.rename_workspace;
+
+  it("is offered at all — the whole defect was that it was not", () => {
+    expect(isOfferedCommand("rename_workspace")).toBe(true);
+  });
+
+  it("passes the name through, trimmed, keyed on the submission", () => {
+    const parsed = spec.parse({ submission_id: UUID, name: "  Northside  " });
+    expect(parsed).toEqual({
+      ok: true,
+      body: { name: "Northside" },
+      identity: UUID,
+    });
+  });
+
+  it("refuses a blank name here rather than spending a round trip on it", () => {
+    for (const name of ["", "   ", 42, null, undefined]) {
+      expect(spec.parse({ submission_id: UUID, name })).toEqual({
+        ok: false,
+        error: "invalid_name",
+      });
+    }
+  });
+
+  it("still requires a submission id, like every other entity-less command", () => {
+    expect(spec.parse({ name: "Northside" })).toEqual({
+      ok: false,
+      error: "invalid_submission_id",
+    });
   });
 });

@@ -59,7 +59,7 @@ export function CaptionStyleCard({ captionStyle, workspaceId, editable, onError 
     setSaving(false);
 
     if (!result.ok) {
-      onError(settingsRefusalCopy(result.error));
+      onError(settingsRefusalCopy(result.error, result.status));
       return;
     }
     // Re-read rather than trust the submitted value: `initial` comes from the

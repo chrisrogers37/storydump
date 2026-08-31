@@ -73,6 +73,15 @@ export default async function SettingsPage() {
   const workspaceId = session.activeWorkspaceId;
   if (!workspaceId) redirect("/welcome");
 
+  // The name comes from the session's own workspace list rather than a fresh
+  // read: the switcher and header already render from it, so a second source
+  // here could disagree with them on the same screen. `workspaces` is nullable
+  // when the router could not be reached (`session.ts` keeps that distinct from
+  // "you have none"), and the empty string is a safe seed — the Save button is
+  // disabled on a blank name, so an unreachable read cannot submit one.
+  const workspaceName =
+    session.workspaces?.find((w) => w.id === workspaceId)?.name ?? "";
+
   const [configResult, accountsResult, sourcesResult, statsResult] =
     await Promise.all([
       workspaceFetch<WorkspaceConfig>("", workspaceId),
@@ -117,7 +126,12 @@ export default async function SettingsPage() {
         </TabsList>
 
         <TabsContent value="general">
-          <GeneralTab settings={settings} workspaceId={workspaceId} editable />
+          <GeneralTab
+            settings={settings}
+            workspaceId={workspaceId}
+            workspaceName={workspaceName}
+            editable
+          />
         </TabsContent>
 
         {/*
