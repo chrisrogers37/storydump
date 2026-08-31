@@ -1,9 +1,6 @@
 import Link from "next/link";
 import { siteConfig } from "@/config/site";
-
-export const metadata = {
-  title: `Sign-in problem — ${siteConfig.name}`,
-};
+import { resolveContent, resolveFlow } from "./content";
 
 /**
  * The three sign-in failure states, which are not interchangeable.
@@ -31,81 +28,29 @@ export const metadata = {
  * sixth, it lands here as the fallback rather than as a blank — which is the
  * right failure direction, but it is a fallback, not coverage.
  */
-type Reason =
-  | "denied"
-  | "missing_params"
-  | "state_refused"
-  | "exchange_failed"
-  | "identity_collision";
-
-type Content = {
-  heading: string;
-  body: string;
-  /** Where the primary action goes. Every reason here is recoverable by
-   *  starting again, so it is /login unless a reason says otherwise. */
-  href: string;
-  primary: string;
-  /** Rendered only where a person genuinely cannot self-serve. */
-  secondary?: string;
-};
-
-const CONTENT: Record<Reason | "generic", Content> = {
-  denied: {
-    heading: "Sign-in was cancelled.",
-    body: "You closed the Google window or declined the request. Nothing was created and nothing was shared.",
-    href: "/login",
-    primary: "Try again",
-  },
-  missing_params: {
-    heading: "That sign-in link was incomplete.",
-    body: "It looks like the address was cut short somewhere. Start again from the sign-in page.",
-    href: "/login",
-    primary: "Back to sign-in",
-  },
-  state_refused: {
-    heading: "That sign-in attempt has expired.",
-    body: "A sign-in has to finish in one go, from the browser that started it. Start again and it should work.",
-    href: "/login",
-    primary: "Start again",
-  },
-  exchange_failed: {
-    heading: "We could not finish signing you in.",
-    body: "Google accepted you but the last step did not complete. This one is on us — try again in a moment.",
-    href: "/login",
-    primary: "Try again",
-  },
-  identity_collision: {
-    // Says WHY, not just what. The reason is a real property of the account
-    // model — the API never merges two identities onto one email (D35) — and a
-    // person who is told "already in use" without that will keep retrying.
-    heading: "That email already belongs to another account.",
-    body: "Accounts are never merged, so this address cannot be added to a second one. Sign in with the account that already uses it.",
-    href: "/login",
-    primary: "Sign in with that account",
-    secondary: "Contact us if you think this is wrong",
-  },
-  generic: {
-    heading: "We could not sign you in.",
-    body: "Something went wrong on the way back from Google. Start again from the sign-in page.",
-    href: "/login",
-    primary: "Back to sign-in",
-    secondary: "Contact us if this keeps happening",
-  },
-};
-
-function resolve(reason: string | undefined): keyof typeof CONTENT {
-  return reason && reason in CONTENT && reason !== "generic"
-    ? (reason as Reason)
-    : "generic";
+/**
+ * The tab title is part of the claim. "Sign-in problem" on a Drive failure is
+ * the same false statement as the heading was, in the one place a reader sees
+ * before the page even paints.
+ */
+export async function generateMetadata({
+  searchParams,
+}: {
+  searchParams: Promise<{ reason?: string; flow?: string }>;
+}) {
+  const { flow } = await searchParams;
+  const what =
+    resolveFlow(flow) === "drive" ? "Drive connection problem" : "Sign-in problem";
+  return { title: `${what} — ${siteConfig.name}` };
 }
 
 export default async function AuthErrorPage({
   searchParams,
 }: {
-  searchParams: Promise<{ reason?: string }>;
+  searchParams: Promise<{ reason?: string; flow?: string }>;
 }) {
-  const { reason } = await searchParams;
-  const content = CONTENT[resolve(reason)];
+  const { reason, flow } = await searchParams;
+  const content = resolveContent(resolveFlow(flow), reason);
 
   return (
     <div className="flex min-h-svh flex-col items-center justify-center bg-background px-4">

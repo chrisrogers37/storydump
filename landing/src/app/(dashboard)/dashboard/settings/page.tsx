@@ -67,7 +67,16 @@ import { IntegrationsTab } from "@/components/dashboard/settings/integrations-ta
  * does not exist. `deriveSettings` is the other half of that guard: it resolves
  * every field once and leaves the unsourced ones `Unavailable`.
  */
-export default async function SettingsPage() {
+export default async function SettingsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ connected?: string }>;
+}) {
+  // `auth.py:364` has always redirected here with `?connected=gdrive` on a
+  // successful Drive grant. This page took NO searchParams at all, so the
+  // parameter was unreadable by construction and the grant completed in
+  // silence — #1090 B3's other half.
+  const { connected } = await searchParams;
   const session = await getSession().catch(() => null);
   if (!session) redirect("/login");
   const workspaceId = session.activeWorkspaceId;
@@ -108,6 +117,36 @@ export default async function SettingsPage() {
           Your posting schedule, accounts, and integrations.
         </p>
       </div>
+
+      {/*
+        SAYS ONLY WHAT THE REDIRECT SUBSTANTIATES, which is less than it is
+        tempting to write.
+
+        Reaching this parameter means `store_credential` committed — the
+        callback redirects to /auth/error otherwise — so "the grant completed"
+        is a fact. What is NOT a fact is that media will arrive: the callback
+        re-arms a sync only when the state row carried a `reconnect_target`,
+        and this parameter cannot say whether it did. An earlier draft of this
+        banner promised "media will appear as it syncs, which can take a few
+        minutes", which would be a confident wrong statement for every connect
+        without a target — the same defect as the error page's, in the other
+        direction.
+
+        So it resolves the ambiguity it CAN resolve. During the sync window a
+        successful grant and a failed one both show an empty library; this says
+        the grant is not the problem, and points at the source's own state,
+        which is the signal that actually tracks syncing.
+      */}
+      {connected === "gdrive" && (
+        <div
+          role="status"
+          className="rounded-md border border-green-200 bg-green-50 p-3 text-sm text-green-900"
+        >
+          <span className="font-medium">Google Drive access was granted.</span>{" "}
+          The grant completed, so an empty library is not a failed connection.
+          Its current state is shown on the source under Integrations.
+        </div>
+      )}
 
       <Tabs defaultValue="general">
         <TabsList>
