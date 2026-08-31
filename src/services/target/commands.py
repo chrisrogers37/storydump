@@ -83,10 +83,39 @@ VOCABULARY: tuple[str, ...] = (
 #: The floor ladder. ``user`` = any active signed-in user, no membership
 #: (the workspace does not exist yet); ``member``/``admin``/``owner`` = the
 #: `workspace_members` ladder `tenant_resolution.ROLE_ORDER` enforces;
-#: ``operator`` = a `service_tokens` bearer (`07` §6, X.2) — no user principal
-#: can satisfy it, and the refusal is a ROLE refusal so members are not told
-#: which operator commands exist.
+#: ``operator`` = the product owner acting on the admin surface, and NOTHING
+#: in this tier can currently produce that principal — see below.
 FLOORS: tuple[str, ...] = ("user", "member", "admin", "owner", "operator")
+
+# ``operator`` is the one floor with no principal behind it, and an earlier
+# version of this comment named the wrong reason, which is worth correcting
+# because the reason decides what has to be BUILT.
+#
+# It said a service-token bearer (`07` §6, X.2). No design document says that.
+# `07` §6 is *"First-party API auth for CLI and operator surfaces"* and scopes
+# `service_tokens` to the CLI — *"the CLI … authenticates with a bearer
+# `service_token`"* — and it never names `resolve_review` or
+# `clear_quarantine`. What the plan actually says the actor is:
+#
+#   - `02` §4's transition matrix gives all four `review_required` exits the
+#     actor **`user (operator)`**, beside `worker` and `reconciler` rows that
+#     it types precisely, and prints the resolve transaction with
+#     `SET LOCAL app.actor_kind = 'operator'` on a user's session.
+#   - `06` §5 puts the resolution surface in the **web Mini-App admin view**.
+#   - `06` §7: *"One operator (the product owner) … the operator acts through
+#     the admin API surface WITH THEIR OWN IDENTITY (`actor_kind='operator'`
+#     in audit)."*
+#
+# So the operator is a SIGNED-IN HUMAN whose audit stamp is `operator`, and
+# the substrate for that already exists unused: `ck_audit_actor` permits
+# `'operator'` and no Python writer ever emits it. The floor value is right;
+# building the principal is a change to the authorization gate in three
+# coordinated places — `Principal` carries no role, `Command` has no field
+# that can express a non-user principal, and the refusal is TWO independent
+# constructions (the branch in `execute` below AND `operator`'s absence from
+# `tenant_resolution.ROLE_ORDER`), so removing either alone changes nothing.
+# `04` sequences that at X.2, with the surface that needs it. Tracked as #1124;
+# nothing here lowers a floor in the meantime.
 
 #: Per-command floor, from `06` §2 (membership), §4 (accounts), §5 (operator).
 ROLE_FLOOR: dict[str, str] = {
@@ -234,9 +263,10 @@ async def execute(session, command: Command) -> CommandResult:
     floor = ROLE_FLOOR[command.kind]
 
     if floor == "operator":
-        # No user principal satisfies an operator floor. Refused as a ROLE
-        # refusal — deliberately not `CommandNotBuilt` — so the surface never
-        # confirms to a member that an operator command exists (`07` §5).
+        # No principal this tier can build satisfies an operator floor (see
+        # FLOORS). Refused as a ROLE refusal — deliberately not
+        # `CommandNotBuilt` — so the surface never confirms to a member that an
+        # operator command exists (`07` §5).
         raise TenantResolutionError(
             "insufficient_role", f"{command.kind} requires an operator principal"
         )
