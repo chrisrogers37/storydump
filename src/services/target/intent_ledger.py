@@ -74,6 +74,23 @@ async def legal_transitions(session) -> set:
     return {(r[0], r[1]) for r in rows}
 
 
+#: `02` §4's terminal intent states — the closed set no edge leaves. ONE Python
+#: home, because two of the copies that existed had to AGREE for a workflow to
+#: converge at all: `offboarding.drain` selects `NOT terminal` and cancels it,
+#: and `fn_offboard_finalize` (`059`) refuses while any `NOT terminal` row
+#: survives, so a state one list carries and the other does not is an offboard
+#: that mints successors forever. The database is still the authority — this is
+#: a name for `trg_intent_guard`'s set, not a second one.
+TERMINAL_STATES: tuple[str, ...] = (
+    "posted",
+    "skipped",
+    "rejected",
+    "expired",
+    "failed",
+    "cancelled",
+)
+
+
 async def transition(session, intent_id: str, to_state: str) -> None:
     """Move an intent to *to_state*, or raise.
 

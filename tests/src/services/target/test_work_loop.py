@@ -87,6 +87,10 @@ class TestRegistryCoversTheSchema:
             # #1092: live once a provider is configured, and `full_deps` now
             # supplies that seam like every other.
             "send_email",
+            # #1090 H1: live unconditionally. Its one provider seam is leg 3,
+            # which `06` §1 already backstops with the FC-3.6 TTL sweep, so a
+            # missing transit store must not park the whole workflow.
+            "offboard_workspace",
         }
 
     def test_the_unbuilt_kinds_park_even_with_every_seam_supplied(self):
@@ -107,6 +111,7 @@ class TestRegistryCoversTheSchema:
             # #1092: live once a provider is configured, and `full_deps` now
             # supplies that seam like every other.
             "send_email",
+            "offboard_workspace",  # #1090 H1
         }
         assert unbuilt, "denominator went empty — the schema kinds parse broke"
         for kind in unbuilt:

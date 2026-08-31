@@ -107,7 +107,6 @@ class TestEveryCommandHasAFloorAndAnExecutorSlot:
         assert set(port.UNBUILT) == {
             "autopost_now",
             "move_account",
-            "offboard_workspace",
             "restore_workspace",
             "invite_member",
             "remove_member",
@@ -118,6 +117,15 @@ class TestEveryCommandHasAFloorAndAnExecutorSlot:
         }
         for name in port.UNBUILT:
             assert port.REGISTRY[name] is None
+
+    def test_the_offboard_key_matches_the_one_the_successor_guards_on(self):
+        """`command_executors.offboard_workspace` mints the first job and
+        `offboarding._mint_successor` matches its duplicate guard on the same
+        key. If those two spellings drifted the guard would silently stop
+        guarding, so the helper is the single spelling and this pins it."""
+        from src.services.target import offboarding
+
+        assert offboarding.serialization_key("abc") == "ws:abc"
 
     def test_built_executors_are_callables(self):
         for name, fn in port.REGISTRY.items():
