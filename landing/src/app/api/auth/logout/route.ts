@@ -39,5 +39,9 @@ async function signOut(request: NextRequest) {
   return response;
 }
 
-export const GET = signOut;
+// POST ONLY, DELIBERATELY. A GET here revoked sessions for anything that
+// speculatively fetches a URL — Next's `<Link>` prefetch did exactly that from
+// `/welcome`, killing every session about a second after it was minted. Sign-out
+// mutates `session_tokens.revoked_at`, so it is not safe as a GET for any caller,
+// not merely for the one that bit us.
 export const POST = signOut;
