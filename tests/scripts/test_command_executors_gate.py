@@ -569,7 +569,11 @@ class TestInviteMember:
         assert out.data["role"] == "admin"
 
         row = self._row(world, out.data["invitation_id"])
-        assert (row["workspace_id"], row["email"], row["role"]) == (ws, address, "admin")
+        assert (row["workspace_id"], row["email"], row["role"]) == (
+            ws,
+            address,
+            "admin",
+        )
         assert (row["state"], row["delivery_channel"]) == ("pending", "email")
         assert row["invited_by"] == owner, "the inviter is recorded"
         assert row["in_window"], "expiry is the `05` seven-day window"
@@ -586,9 +590,10 @@ class TestInviteMember:
         # Read the name back rather than pinning "exec-a": TestPauseResumeRename
         # renames this workspace, so a literal here asserts test ORDER, not the
         # property — that the mail names the workspace the invite is into.
-        assert job[4]["params"]["workspace_name"] == _one(
-            world, "SELECT name FROM workspaces WHERE id = %s", (ws,)
-        )[0]
+        assert (
+            job[4]["params"]["workspace_name"]
+            == _one(world, "SELECT name FROM workspaces WHERE id = %s", (ws,))[0]
+        )
 
         audit = _one(
             world,
