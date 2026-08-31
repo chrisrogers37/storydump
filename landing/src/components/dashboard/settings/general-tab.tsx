@@ -66,17 +66,49 @@ type ToggleKey =
 
 /**
  * `settingsKey` is the column name the PORT accepts, or null when this toggle
- * is not a `settings_change` at all. It is what decides whether a switch is
- * interactive, so the mapping is stated once here rather than inferred at the
- * call site — and a toggle added without one is inert by default rather than
- * live and refused.
+ * is not a `settings_change` at all. The mapping is stated once here rather
+ * than inferred at the call site — and a toggle added without one is inert by
+ * default rather than live and refused.
+ *
+ * **A switch is live only when the port accepts the write AND something reads
+ * the value.** `settingsKey` alone answers the first half, and for three
+ * toggles it was answering as though it settled both (#1155). `dry_run_mode`
+ * and `enable_ai_captions` have NO reader anywhere in `src/services/target/` —
+ * their only consumers are legacy-tier, against a different table — so the
+ * switch saved, returned no error, and nothing happened. That is worse than a
+ * dead control: a save that confirms and does nothing manufactures a belief,
+ * and the person has no error and no reason to check.
+ *
+ * So `inertReason` now answers "why does this switch not move", which has
+ * THREE causes, not two, and the string says which:
+ *   1. no command at all (`settingsKey: null`) — `is_paused`
+ *   2. no column to read (`settings[key] === null`) — renders `Unavailable`
+ *   3. **the write lands and nothing consumes it** — the #1155 case
+ *
+ * Cause 3 keeps its real `settingsKey`, because saying `null` would claim the
+ * port has no such setting, which is false and would send the next person to
+ * add a command that already exists.
  */
-const TOGGLES: {
+/**
+ * THE predicate for "this switch moves". Exported because the #1155 gate
+ * asserts against it: a test that restated it would agree with itself while
+ * diverging from what ships, which is how the original defect survived review
+ * in the first place — a hand-rolled copy of a shipped rule is a copy that can
+ * be wrong on its own.
+ */
+export function isLiveToggle(row: { settingsKey: string | null; inertReason?: string }): boolean {
+  return row.settingsKey !== null && !row.inertReason;
+}
+
+export const TOGGLES: {
   key: ToggleKey;
   label: string;
   description: string;
   settingsKey: string | null;
-  /** Shown instead of the switch being silently dead. Required when null. */
+  /**
+   * Why this switch does not move. Required when `settingsKey` is null, and
+   * also set when the port accepts the write but nothing acts on the value.
+   */
   inertReason?: string;
 }[] = [
   {
@@ -92,6 +124,11 @@ const TOGGLES: {
     label: "Dry Run Mode",
     description: "Simulate posting without publishing",
     settingsKey: "dry_run_mode",
+    // The port stores it; nothing in `src/services/target/` reads it. Its only
+    // readers are legacy-tier, against `chat_settings` — a different table for
+    // a different cohort. And the thing it would modify does not exist: there
+    // is no publish path to simulate, so this cannot become true before one.
+    inertReason: "Nothing publishes yet, so there is nothing to simulate",
   },
   {
     key: "enable_instagram_api",
@@ -100,12 +137,24 @@ const TOGGLES: {
     // Renamed once at the read seam (`dashboard-payloads.ts`); the port's name
     // is what goes on the wire.
     settingsKey: "api_publishing_enabled",
+    // The ONLY one of the three with a real consumer, and it is inert for the
+    // opposite reason: turning it on does too much, not nothing. `approve`
+    // stops refusing `manual_mode` and mints a `publish_pipeline` job that
+    // PARKS — production composes `media_fetch=None` (W5b unbuilt) — while
+    // `prompts.render_card` swaps the card to `_ACTIONS_API`, so the person
+    // also loses the manual-mode actions that do work. Enabling it degrades
+    // the product rather than extending it.
+    inertReason: "Direct posting is not built yet",
   },
   {
     key: "enable_ai_captions",
     label: "AI Captions",
     description: "Auto-generate captions with Claude",
     settingsKey: "enable_ai_captions",
+    // Same shape as `dry_run_mode`: stored, never read in the target tier.
+    // Nothing there generates a caption at all — `meta_adapter` accepts one as
+    // a publish argument, which is the consumer of a caption, not a producer.
+    inertReason: "Caption generation is not built yet",
   },
   // The three below have no source on the target tier, so they never draw a
   // switch at all — `settings[key]` is null and renders `Unavailable`.
@@ -351,10 +400,11 @@ export function GeneralTab({
           {TOGGLES.map((row, i) => {
             const value = settings[row.key];
             const position = toggleState[row.key] ?? value;
-            // Two independent reasons a switch does not move, and they are not
-            // the same fact: the screen is read-only, or this particular
-            // setting has no command behind it.
-            const wired = row.settingsKey !== null;
+            // Reasons a switch does not move, and they are not the same
+            // fact: the screen is read-only, this setting has no command
+            // behind it, or the command works and nothing reads what it
+            // writes (#1155). The last one used to render as a live switch.
+            const wired = isLiveToggle(row);
             return (
               <div key={row.key}>
                 {i > 0 && <Separator className="mb-4" />}
