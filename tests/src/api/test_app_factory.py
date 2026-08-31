@@ -225,17 +225,63 @@ class TestSchedulingHealthIsASecondSurface:
             seen.append(executor)
             return {"stalled": 0, "accounts_active": 7, "max_lag_seconds": None}
 
+        async def fake_worker(executor):
+            # #1120 added a SECOND seam on this route. A route unit test has to
+            # stub both or it reaches SQL — which this class's own fixture
+            # guard catches, and did.
+            seen.append(executor)
+            return {
+                "succeeded_ever": 0,
+                "last_success_age_seconds": None,
+                "overdue_ready": 0,
+                "max_overdue_seconds": None,
+            }
+
         monkeypatch.setattr(scheduling_health, "scheduling_lag", fake_lag)
+        monkeypatch.setattr(scheduling_health, "worker_freshness", fake_worker)
         resp = client.get("/health/scheduling")
 
         assert resp.status_code == 200, resp.text
-        assert resp.json() == {
-            "stalled": 0,
-            "accounts_active": 7,
-            "max_lag_seconds": None,
-        }
+        payload = resp.json()
+        # The cursor axis keeps its exact shape — that is the poller contract a
+        # deployment predating #1120 still reads. Asserted key-by-key rather
+        # than by whole-dict equality so ADDING an axis is not a breakage while
+        # CHANGING one of these still is.
+        assert payload["stalled"] == 0
+        assert payload["accounts_active"] == 7
+        assert payload["max_lag_seconds"] is None
         assert seen, "the route answered without ever reaching its seam"
         # `scheduling_lag` names its parameter `executor`, not `session`, so a
         # connection is a legal argument. Pinned because that duck type is what
         # lets the route drop the unit of work at all.
         assert hasattr(seen[0], "execute")
+
+    def test_scheduling_health_serves_the_worker_axis_too(self, client, monkeypatch):
+        """#1120: both axes on ONE payload, deliberately.
+
+        A second endpoint would need a second poller invocation enrolled on the
+        fleet host — a unit change — to close a hole the existing poller can
+        already reach. One payload keeps the fix inside the app.
+        """
+
+        async def fake_lag(executor):
+            return {"stalled": 0, "accounts_active": 0, "max_lag_seconds": None}
+
+        async def fake_worker(executor):
+            return {
+                "succeeded_ever": 78,
+                "last_success_age_seconds": 3600,
+                "overdue_ready": 0,
+                "max_overdue_seconds": None,
+            }
+
+        monkeypatch.setattr(scheduling_health, "scheduling_lag", fake_lag)
+        monkeypatch.setattr(scheduling_health, "worker_freshness", fake_worker)
+        resp = client.get("/health/scheduling")
+
+        assert resp.status_code == 200, resp.text
+        payload = resp.json()
+        # The cursor axis is unchanged — the poller's existing contract.
+        assert payload["accounts_active"] == 0
+        assert payload["worker"]["succeeded_ever"] == 78
+        assert payload["worker"]["last_success_age_seconds"] == 3600
