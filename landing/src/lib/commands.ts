@@ -146,6 +146,25 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
    * becomes a database lookup downstream, and a refusal shaped like "this is
    * not an id" is more useful than one shaped like "no such source".
    */
+  /**
+   * The workspace's own name. Built and reachable at the port since the command
+   * vocabulary existed (`admin` floor, satisfied by an owner) — and absent from
+   * this allowlist, which is the only reason no one could rename anything.
+   *
+   * `/welcome` has been telling people "You can rename it later" the whole time
+   * (#1152). The promise was correct; this is the wiring it was waiting on.
+   *
+   * Shape only, as everywhere here: the port owns the length rule and does its
+   * own trim. Blank is refused HERE because an empty name is the caller's
+   * mistake and deserves a field-level answer rather than a round trip.
+   */
+  rename_workspace: submissionCommand((raw) => {
+    if (typeof raw.name !== "string" || raw.name.trim().length === 0) {
+      return { ok: false, error: "invalid_name" };
+    }
+    return { ok: true, body: { name: raw.name.trim() } };
+  }),
+
   sync_now: submissionCommand((raw) => {
     if (!isUuidLike(raw.source_id)) {
       return { ok: false, error: "invalid_source_id" };
