@@ -126,7 +126,23 @@ export function submitRenameWorkspace(workspaceId: string, name: string) {
   return submitCommand(workspaceId, "rename_workspace", { name });
 }
 
-export function settingsRefusalCopy(reason: unknown): string {
+export function settingsRefusalCopy(reason: unknown, status?: number): string {
+  // A permission refusal carries NO reason to switch on. `insufficient_role`
+  // is mapped to 403 and answered `{detail: "forbidden"}` — no `error`, no
+  // `reason` — so `submitCommand` synthesises `http_403` and every branch below
+  // misses. Without this, a member refused for their ROLE and a browser that
+  // could not reach the app got the same sentence, and the remedy for one is
+  // "ask an admin" while the remedy for the other is "try again".
+  //
+  // Keyed on the STATUS rather than the synthesised string, because the status
+  // is the real signal and `http_403` is only a stand-in for it. On this path
+  // 403 has exactly one cause: a non-member is answered 404, never 403
+  // (`v1.py:9`, deliberate non-disclosure), so a 403 means the caller IS a
+  // member and their role is too low.
+  if (status === 403) {
+    return "You do not have permission to change this. An admin or the workspace owner can.";
+  }
+
   switch (reason) {
     case REPLAYED_ERROR:
       // Not smoothed into the generic line: this one means the change did NOT

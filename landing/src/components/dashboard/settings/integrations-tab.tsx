@@ -202,7 +202,7 @@ export function IntegrationsTab({
     setSyncingId(null);
 
     if (!result.ok) {
-      setError(settingsRefusalCopy(result.error));
+      setError(settingsRefusalCopy(result.error, result.status));
       return;
     }
     setNotice(

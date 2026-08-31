@@ -207,7 +207,7 @@ export function GeneralTab({
     setSavingName(false);
 
     if (!result.ok) {
-      setError(settingsRefusalCopy(result.error));
+      setError(settingsRefusalCopy(result.error, result.status));
       return;
     }
     // Re-read: the name is rendered in the header and the workspace switcher
@@ -227,7 +227,7 @@ export function GeneralTab({
     setSavingSchedule(false);
 
     if (!result.ok) {
-      setError(settingsRefusalCopy(result.error));
+      setError(settingsRefusalCopy(result.error, result.status));
       return;
     }
     // Re-read rather than keep the submitted values on screen. This card is
@@ -256,7 +256,7 @@ export function GeneralTab({
       // Put the switch back where it was. Leaving it on the new position
       // beside an error message shows a state the workspace is not in.
       setToggleState((prev) => ({ ...prev, [key]: previous }));
-      setError(settingsRefusalCopy(result.error));
+      setError(settingsRefusalCopy(result.error, result.status));
       return;
     }
     router.refresh();
