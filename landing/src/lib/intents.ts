@@ -1,3 +1,4 @@
+import { notAuthenticatedCopy } from "./refusal-copy";
 /**
  * The web queue's contract with the ledger, and its pure decisions.
  *
@@ -134,7 +135,7 @@ export function refusalCopy(reason: unknown): string {
     case "not_found":
       return "This post is no longer in the queue.";
     case "unauthenticated":
-      return "That session expired. Sign in again.";
+      return notAuthenticatedCopy("Nothing changed.");
     case "target_router_unreachable":
       return "Storydump cannot reach the queue right now. Nothing changed — try again shortly.";
   }

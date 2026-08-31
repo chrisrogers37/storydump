@@ -89,7 +89,16 @@ describe("refusal copy", () => {
   });
 
   it("separates the person's session from the router being down", () => {
-    expect(refusalCopy("unauthenticated")).toMatch(/sign in/i);
+    // #1140: this asserted /sign in/i, which passed on "Sign in again." — the
+    // unhedged imperative that sent the first real user round a loop it could
+    // not resolve. The DISTINCTION this test is named for is the property
+    // worth pinning, so it is asserted directly: the two branches must not
+    // render the same sentence. The session branch's own wording is pinned
+    // once, against a shared source, in `refusal-copy.test.ts`.
+    expect(refusalCopy("unauthenticated")).not.toBe(
+      refusalCopy("target_router_unreachable"),
+    );
+    expect(refusalCopy("unauthenticated")).toMatch(/not signed in/i);
     expect(refusalCopy("target_router_unreachable")).toMatch(/Storydump/);
   });
 
