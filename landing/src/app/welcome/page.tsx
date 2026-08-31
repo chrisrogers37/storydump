@@ -1,9 +1,9 @@
 import { redirect } from "next/navigation";
 import { cookies } from "next/headers";
-import Link from "next/link";
 import { getSession } from "@/lib/session";
 import { listWorkspaces } from "@/lib/workspaces";
 import { CreateWorkspaceForm } from "@/components/workspace/create-workspace-form";
+import { SignOutButton } from "@/components/auth/sign-out-button";
 import { RouterUnavailable } from "@/components/workspace/router-unavailable";
 import { INVITE_COOKIE } from "@/app/join/[token]/start/route";
 import { siteConfig } from "@/config/site";
@@ -83,12 +83,7 @@ export default async function WelcomePage() {
           <RouterUnavailable what="Creating a workspace" />
         )}
 
-        <Link
-          href="/api/auth/logout"
-          className="inline-block text-sm text-muted-foreground transition-colors hover:text-foreground"
-        >
-          Sign out
-        </Link>
+        <SignOutButton className="inline-block text-sm text-muted-foreground transition-colors hover:text-foreground" />
       </div>
     </div>
   );
