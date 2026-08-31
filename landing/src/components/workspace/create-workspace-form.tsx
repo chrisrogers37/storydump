@@ -4,6 +4,8 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { Loader2 } from "lucide-react";
 
+import { createWorkspaceRefusalCopy } from "@/lib/refusal-copy";
+
 /**
  * Name a workspace and create it.
  *
@@ -56,7 +58,7 @@ export function CreateWorkspaceForm({
 
       if (!response.ok) {
         const body = await response.json().catch(() => ({}));
-        setError(messageFor(body?.error, response.status));
+        setError(createWorkspaceRefusalCopy(body?.error, response.status));
         setPending(false);
         return;
       }
@@ -155,13 +157,4 @@ export function destinationAfterCreate(
   selected: boolean,
 ): "/dashboard" | "/workspaces" {
   return created?.workspace_id && selected ? "/dashboard" : "/workspaces";
-}
-
-function messageFor(reason: unknown, status: number): string {
-  if (reason === "invalid_name") return "Give the workspace a name.";
-  if (status === 503 || reason === "target_router_unreachable") {
-    return "Storydump cannot create workspaces yet. Nothing you did — check back shortly.";
-  }
-  if (status === 401) return "Your session expired. Sign in again.";
-  return "That did not work. This one is on us.";
 }

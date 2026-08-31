@@ -59,7 +59,7 @@ export async function POST(request: NextRequest) {
   // `Idempotency-Key` is REQUIRED, not optional. `POST /workspaces` reaches the
   // port through `_dispatch`, whose first statement refuses a keyless command
   // (`v1.py:104-109`) — before the body is even read. Omitting it here returned a
-  // 400 that `messageFor` could not name, so the first real user saw only "That
+  // 400 that `createWorkspaceRefusalCopy` could not name, so the first real user saw only "That
   // did not work. This one is on us." and nothing was written.
   //
   // Identity is the trimmed NAME, which is the only thing stable across a retry
