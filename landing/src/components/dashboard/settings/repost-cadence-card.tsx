@@ -52,7 +52,7 @@ export function RepostCadenceCard({
     setSaving(null);
 
     if (!result.ok) {
-      onError(settingsRefusalCopy(result.error));
+      onError(settingsRefusalCopy(result.error, result.status));
       return;
     }
     router.refresh();
