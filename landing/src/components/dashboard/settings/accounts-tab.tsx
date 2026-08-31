@@ -23,7 +23,9 @@ import {
   addDestinationRefusalCopy,
   destinationHandle,
   destinationIsActive,
+  destinationStateBadge,
 } from "@/lib/destination";
+import type { DestinationStateBadge } from "@/lib/destination";
 import type { Destination } from "@/lib/types";
 
 /**
@@ -36,6 +38,22 @@ import type { Destination } from "@/lib/types";
  */
 const DISABLED_REASON =
   "Not wired up yet — changing accounts is not available on this API version.";
+
+/**
+ * Tone to Tailwind. Semantics come from `destinationStateBadge`; the classes
+ * live here because that is where the rest of this screen's visual language
+ * does. `inert` is deliberately the muted pair rather than a third colour —
+ * `disabled` and `moved` differ in their LABEL, and inventing a colour per
+ * state would say they differ in kind when they do not.
+ *
+ * Keyed on the tone UNION, so adding a tone without a class is a compile
+ * error rather than a row that renders an unstyled badge.
+ */
+const STATE_TONE_CLASS: Record<DestinationStateBadge["tone"], string> = {
+  active: "bg-green-100 text-green-800",
+  attention: "bg-amber-100 text-amber-900",
+  inert: "bg-muted text-muted-foreground",
+};
 
 interface AccountsTabProps {
   /** False while the write routes do not exist (#1063). */
@@ -145,6 +163,7 @@ export function AccountsTab({ accounts, editable, workspaceId }: AccountsTabProp
               {accounts.map((account) => {
                 const handleText = destinationHandle(account.handle);
                 const isActive = destinationIsActive(account.state);
+                const stateBadge = destinationStateBadge(account.state);
                 return (
                 <div
                   key={account.id}
@@ -155,11 +174,16 @@ export function AccountsTab({ accounts, editable, workspaceId }: AccountsTabProp
                       <p className="font-medium truncate">
                         {account.display_name ?? handleText ?? "Unnamed destination"}
                       </p>
-                      {isActive && (
-                        <Badge variant="secondary" className="bg-green-100 text-green-800">
-                          Active
-                        </Badge>
-                      )}
+                      {/* Unconditional. A row that renders at all states what
+                          it is: the three non-active values used to render as
+                          NO badge, which is what a not-yet-loaded row and a
+                          thrown component also look like (#1121). */}
+                      <Badge
+                        variant="secondary"
+                        className={STATE_TONE_CLASS[stateBadge.tone]}
+                      >
+                        {stateBadge.label}
+                      </Badge>
                     </div>
                     {handleText && (
                       <p className="text-sm text-muted-foreground">@{handleText}</p>

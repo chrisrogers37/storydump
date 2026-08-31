@@ -14,6 +14,7 @@ import {
   addDestinationRefusalCopy,
   destinationHandle,
   destinationIsActive,
+  destinationStateBadge,
 } from "./destination";
 
 const WS = "11111111-1111-4111-8111-111111111111";
@@ -137,5 +138,51 @@ describe("destinationIsActive", () => {
     expect(destinationIsActive("reauth_required")).toBe(false);
     expect(destinationIsActive("moved")).toBe(false);
     expect(destinationIsActive(undefined)).toBe(false);
+  });
+});
+
+/**
+ * #1121 Step 0. The payload has carried `state` since #1092 and the screen
+ * collapsed it back to `state === "active"`, so the three non-active values all
+ * rendered as the ABSENCE of a badge — indistinguishable from each other, and
+ * from a component that had not loaded.
+ */
+describe("destinationStateBadge", () => {
+  // `ck_ig_accounts_state`. Written out because the point of these tests is
+  // that the UI covers the WHOLE vocabulary, and deriving the list from the
+  // function under test would make that vacuous.
+  const VOCABULARY = ["active", "reauth_required", "disabled", "moved"];
+
+  it("gives every state in the vocabulary its own label", () => {
+    const labels = VOCABULARY.map((s) => destinationStateBadge(s).label);
+    // The property, not four assertions about instances: any two states
+    // sharing a label is the regression, whichever pair it is.
+    expect(new Set(labels).size).toBe(VOCABULARY.length);
+  });
+
+  it("renders something for a state it does not recognise", () => {
+    // The load-bearing one. Absence is what made this a regression rather
+    // than a gap, so no input may produce an empty badge.
+    for (const state of [null, undefined, "", "some_future_state"]) {
+      expect(destinationStateBadge(state).label).not.toBe("");
+    }
+  });
+
+  it("flags an unrecognised state for attention rather than treating it as inert", () => {
+    // The vocabulary is closed by a CHECK constraint, so a value outside it
+    // means the schema moved or the payload is wrong — both worth looking at.
+    expect(destinationStateBadge("some_future_state").tone).toBe("attention");
+  });
+
+  it("distinguishes disabled from moved by LABEL, not by colour alone", () => {
+    const disabled = destinationStateBadge("disabled");
+    const moved = destinationStateBadge("moved");
+    expect(disabled.tone).toBe(moved.tone); // neither is actionable
+    expect(disabled.label).not.toBe(moved.label); // and they are still tellable apart
+  });
+
+  it("marks the one state a person can act on", () => {
+    expect(destinationStateBadge("reauth_required").tone).toBe("attention");
+    expect(destinationStateBadge("active").tone).toBe("active");
   });
 });
