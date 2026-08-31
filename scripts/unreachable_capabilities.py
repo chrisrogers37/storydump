@@ -468,6 +468,29 @@ def _one_select_item(item: str) -> set[str]:
     return {plain.group(1)} if plain else set()
 
 
+#: The routes whose response shapes probe 3 would need in order to be decidable
+#: in general.
+_API_ROUTES = "src/api/routes/v1.py"
+
+
+def api_declares_response_models() -> bool:
+    """Whether the v1 routes declare their response shapes.
+
+    **The undecidable half of probe 3 is CONDITIONAL on this, not asserted.** An
+    UNDECIDED that can never clear is a permanent amber light, and a permanent
+    amber light is one people learn to read past — which would recreate, inside
+    this script, the habituation that lets an unread field ship. So the
+    prerequisite is machine-checked: declare response models and the disclosure
+    goes away on its own, without anyone remembering to delete it.
+    """
+    path = REPO / _API_ROUTES
+    try:
+        source = path.read_text()
+    except OSError as exc:
+        raise CannotLook(f"could not read {_API_ROUTES}: {exc}") from exc
+    return "response_model=" in source
+
+
 def probe_api_fields() -> ProbeResult:
     """Fields the API produces that no front-end source names.
 
@@ -530,10 +553,13 @@ def probe_api_fields() -> ProbeResult:
             f" across {len(ts_files)} front-end files"
         ),
     )
-    res.undecided.append(
-        "the general axis: v1.py declares NO response models, so every endpoint"
-        " that does not read through workspaces.py is outside this probe"
-    )
+    if not api_declares_response_models():
+        res.undecided.append(
+            "the general axis: v1.py declares NO response models, so every"
+            " endpoint that does not read through workspaces.py is outside this"
+            " probe. PREREQUISITE: declare response models on the v1 routes and"
+            " this clears by itself."
+        )
     allow = ALLOWLIST["api_fields"]
     for name in sorted(produced):
         if re.search(rf"\b{re.escape(name)}\b", consumed_text):
@@ -562,7 +588,7 @@ PROBES = {
 #: one reads as good news. A caller that treats every nonzero the same still
 #: cannot be misled, because 3 is nonzero too — the split only ever adds
 #: information.
-EXIT_CLEAN, EXIT_FINDINGS, EXIT_USAGE, EXIT_CANNOT_LOOK = 0, 1, 2, 3
+EXIT_CLEAN, EXIT_FINDINGS, EXIT_USAGE, EXIT_CANNOT_LOOK, EXIT_UNDECIDED = 0, 1, 2, 3, 4
 
 
 def run(names: list[str]) -> list[ProbeResult]:
@@ -585,10 +611,14 @@ def render(results: list[ProbeResult]) -> str:
             out.append(f"   UNDECIDED {u}")
         if not r.findings:
             out.append("   (no findings)")
-    out.append(f"\n{total} finding(s) across {len(results)} probe(s).")
+    undecided = sum(len(r.undecided) for r in results)
+    out.append(
+        f"\n{total} finding(s), {undecided} undecided, across {len(results)} probe(s)."
+    )
     out.append(
         "A finding is a capability that is BUILT and that nothing reaches."
-        " UNDECIDED is not a pass — it is a question this script cannot answer."
+        " UNDECIDED is not a pass — it is a question this script cannot answer,"
+        f" and it exits {EXIT_UNDECIDED} rather than 0 so a machine sees it too."
     )
     return "\n".join(out)
 
@@ -627,7 +657,29 @@ def main(argv: list[str] | None = None) -> int:
         )
     else:
         print(render(results))
-    return EXIT_FINDINGS if any(r.findings for r in results) else EXIT_CLEAN
+    # **`0` is the only code that claims completeness, and that is the whole
+    # point of this branch.** Before rajan's review the exit was findings-or-
+    # clean, so the moment the api_fields findings triaged to zero the script
+    # would have returned CLEAN forever while still printing a permanent
+    # UNDECIDED. The disclosure lived in the OUTPUT; the exit code is what a
+    # machine reads — so the honest text survived exactly until the tool was
+    # automated, which is the point of building it. That is this script's own
+    # disease one layer up: present, correct, and unread by the thing that
+    # mattered, which is what `credential_status` was.
+    #
+    # UNDECIDED gets its OWN code rather than folding into FINDINGS: "I could
+    # not decide" is a third state, and collapsing it into "I found problems"
+    # makes it indistinguishable from real findings and gets it triaged away.
+    #
+    # Precedence when both exist: FINDINGS wins, because findings are today's
+    # work while an undecidable axis is a standing prerequisite that does not
+    # change with them — and the text still names it. What can never happen is
+    # the case that matters: an all-clear over an axis nobody could examine.
+    if any(r.findings for r in results):
+        return EXIT_FINDINGS
+    if any(r.undecided for r in results):
+        return EXIT_UNDECIDED
+    return EXIT_CLEAN
 
 
 if __name__ == "__main__":
