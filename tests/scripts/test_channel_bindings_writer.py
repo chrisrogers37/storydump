@@ -20,7 +20,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
-from src.services.target import bindings, outbox, work_loop
+from src.services.target import bindings, outbox, prompts, work_loop
 from src.services.target.bindings import BOUND, REBOUND, TAKEN, BindingRefused
 from src.services.target.unit_of_work import asyncpg_url, unit_of_work
 from tests.scripts.conftest import (
@@ -186,9 +186,7 @@ class TestZeroToN:
         assert _bind(world, second) == BOUND
         ids = run(
             world,
-            lambda s: bindings.active_binding_ids(
-                s, workspace_id=str(world["a"]["ws"])
-            ),
+            lambda s: prompts.push_bindings(s, str(world["a"]["ws"])),
         )
         assert len(ids) >= 2
         assert len(set(ids)) == len(ids)
@@ -199,9 +197,7 @@ class TestZeroToN:
         _bind(world, second)
         before = run(
             world,
-            lambda s: bindings.active_binding_ids(
-                s, workspace_id=str(world["a"]["ws"])
-            ),
+            lambda s: prompts.push_bindings(s, str(world["a"]["ws"])),
         )
         run(
             world,
@@ -214,9 +210,7 @@ class TestZeroToN:
         )
         after = run(
             world,
-            lambda s: bindings.active_binding_ids(
-                s, workspace_id=str(world["a"]["ws"])
-            ),
+            lambda s: prompts.push_bindings(s, str(world["a"]["ws"])),
         )
         assert len(after) == len(before) - 1
 
@@ -312,9 +306,7 @@ class TestItAuditsAndUnInertsTheChain:
         assert _bind(world, ref) == BOUND
 
         async def enqueue_and_sweep(session):
-            ids = await bindings.active_binding_ids(
-                session, workspace_id=str(world["a"]["ws"])
-            )
+            ids = await prompts.push_bindings(session, str(world["a"]["ws"]))
             target = [
                 i
                 for i in ids

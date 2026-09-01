@@ -204,25 +204,3 @@ async def revoke(
         {"ws": str(workspace_id), "ch": channel, "ref": ref},
     )
     return result.rowcount > 0
-
-
-async def active_binding_ids(session, *, workspace_id: str) -> list[str]:
-    """This workspace's deliverable bindings, for a producer deciding what an
-    EMPTY set means.
-
-    That decision is deliberately the producer's and not this function's:
-    `outbox.UNDELIVERABLE` exists because "nobody to tell" was being recorded
-    as a clean run, and a helper that resolved AND iterated would make the
-    empty case a zero-length loop again.
-    """
-    rows = (
-        await session.execute(
-            text(
-                "SELECT id FROM channel_bindings"
-                " WHERE workspace_id = :ws AND state = 'active'"
-                " ORDER BY created_at, id"
-            ),
-            {"ws": str(workspace_id)},
-        )
-    ).all()
-    return [str(r[0]) for r in rows]
