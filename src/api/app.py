@@ -193,10 +193,25 @@ _PROVISIONING_STATUS = {
 }
 
 #: `InvitationRefused.reason` → status, total over `invitations.REASONS`.
-_INVITATION_STATUS = {"not_acceptable": 404, "identity_mismatch": 403}
+_INVITATION_STATUS = {
+    "not_acceptable": 404,
+    "identity_mismatch": 403,
+    # The CREATE half's refusals (#1172). All three are the caller's input
+    # being wrong rather than a state or an authorization fact, so 400 — and
+    # `already_invited` is deliberately NOT 409: a pending invitation to that
+    # address is not a conflicting write to fix by retrying, it is a thing
+    # that already exists, and the remedy is to revoke or wait rather than to
+    # send again.
+    "already_invited": 400,
+    "email_required": 400,
+    "invalid_role": 400,
+}
 _INVITATION_DETAIL = {
     "not_acceptable": "invitation not acceptable",
     "identity_mismatch": "identity proof mismatch",
+    "already_invited": "that address already has a pending invitation",
+    "email_required": "an email invitation needs an address",
+    "invalid_role": "role must be admin or member",
 }
 
 
