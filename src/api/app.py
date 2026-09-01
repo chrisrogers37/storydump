@@ -204,6 +204,7 @@ _INVITATION_STATUS = {
     # send again.
     "already_invited": 400,
     "email_required": 400,
+    "invalid_channel": 400,
     "invalid_role": 400,
 }
 _INVITATION_DETAIL = {
@@ -212,6 +213,7 @@ _INVITATION_DETAIL = {
     "already_invited": "that address already has a pending invitation",
     "email_required": "an email invitation needs an address",
     "invalid_role": "role must be admin or member",
+    "invalid_channel": "delivery_channel must be email or telegram",
 }
 
 
