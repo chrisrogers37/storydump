@@ -63,6 +63,7 @@ from src.config.defaults import DEFAULT_REPOST_TTL_DAYS, DEFAULT_SKIP_TTL_DAYS
 from src.services.target import (
     google_drive_oauth,
     intent_ledger,
+    invitations,
     jobs,
     offboarding,
     readers,
@@ -529,6 +530,56 @@ async def account_settings_change(session, command: Command) -> CommandResult:
         raise CommandRefused("not_found", f"account {account_id}")
     return CommandResult(
         "executed", {"ig_account_id": account_id, "changed": sorted(cleaned)}
+    )
+
+
+async def invite_member(session, command: Command) -> CommandResult:
+    """Invite someone to this workspace. Returns the invitation and its token.
+
+    **The accept half already existed** — `fn_invitation_accept` and
+    `/join/[token]` shipped with `06` §2 / #1090 G2 — so until now an
+    invitation could be accepted but not created. This is the create half,
+    built to the acceptor's contract rather than to a fresh design: the token
+    is hashed with `sessions.token_hash` because that door resolves by
+    `token_hash` alone, and `invitations.create` writes every column its D33
+    identity check reads.
+
+    **The token is returned, once.** It is the credential — possession
+    accepts — and only its hash is stored, so this return value is the single
+    opportunity to deliver it. A delivery producer (email here, a Telegram
+    card in `06` §2's other half) is what turns it into something a person
+    receives; the two share this one minting door rather than each having
+    their own.
+
+    `role` defaults to `member` and is a CEILING, never a grant: the acceptor
+    downgrades an unmatched admin invite to `member` plus an
+    elevation-pending notification (D36). So minting an admin invitation
+    cannot itself elevate anyone, which is why the floor for this command is
+    `admin` rather than `owner`.
+    """
+    email = _arg(command, "email")
+    role = command.args.get("role", "member")
+    if not isinstance(role, str):
+        raise CommandRefused("invalid_args", "role must be a string")
+    try:
+        invitation_id, token = await invitations.create(
+            session,
+            workspace_id=command.workspace_id,
+            invited_by_user_id=command.actor_user_id,
+            role=role,
+            delivery_channel="email",
+            email=email,
+        )
+    except invitations.InvitationRefused as exc:
+        # The port's closed vocabulary, not this module's: `already_invited`
+        # and `email_required` are both the caller's input being wrong, and
+        # `invalid_role` likewise. Mapping them to `invalid_args` keeps
+        # `REASONS` closed while the detail carries which.
+        raise CommandRefused("invalid_args", str(exc)) from exc
+
+    return CommandResult(
+        "executed",
+        {"invitation_id": invitation_id, "invite_token": token, "role": role},
     )
 
 
