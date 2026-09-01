@@ -546,10 +546,27 @@ async def invite_member(session, command: Command) -> CommandResult:
 
     **The token is returned, once.** It is the credential — possession
     accepts — and only its hash is stored, so this return value is the single
-    opportunity to deliver it. A delivery producer (email here, a Telegram
-    card in `06` §2's other half) is what turns it into something a person
+    opportunity to deliver it. A delivery producer (email, or a Telegram card
+    in `06` §2's other half) is what turns it into something a person
     receives; the two share this one minting door rather than each having
     their own.
+
+    **`delivery_channel` is the caller's, defaulting to `email`.** It was
+    pinned to `email` here while `invitations.create` accepted both, which
+    made the Telegram half of `06` §2 unmintable — the general writer existed
+    and this door closed it one layer up. The wrong repair would have been to
+    let the Telegram producer read an EMAIL invitation and post a card for it:
+    that broadcasts a token minted for one person's inbox into a group, and
+    `053` makes email the D33 acceptance value, so a tapper fails the identity
+    match and takes the recorded-skip path — landing as `member` with an
+    elevation-pending notice. It would look like it worked. Two schema facts
+    make the honest shape safe instead: `uq_invite_live` is
+    `(workspace_id, email)` and NULLs never collide there, so Telegram
+    invitations do not conflict with each other or with an email invite to the
+    same workspace; and a hint-only invitation carries no identity proof, so
+    D33/D36 downgrades an admin invite on accept rather than elevating.
+    (Raised by lane C rather than built around, which is what kept the
+    broadcast shape out of the tier.)
 
     `role` defaults to `member` and is a CEILING, never a grant: the acceptor
     downgrades an unmatched admin invite to `member` plus an
@@ -557,18 +574,39 @@ async def invite_member(session, command: Command) -> CommandResult:
     cannot itself elevate anyone, which is why the floor for this command is
     `admin` rather than `owner`.
     """
-    email = _arg(command, "email")
     role = command.args.get("role", "member")
     if not isinstance(role, str):
         raise CommandRefused("invalid_args", "role must be a string")
+    channel = command.args.get("delivery_channel", "email")
+    if not isinstance(channel, str):
+        raise CommandRefused("invalid_args", "delivery_channel must be a string")
+    # NOT `_arg`: that one is the required-argument reader, and an address is
+    # required for an email invitation only. `invitations.create` already
+    # refuses `email_required` by name, so forcing it here would move the rule
+    # away from the writer that owns it and break the telegram channel.
+    email = command.args.get("email")
+    if email is not None and not isinstance(email, str):
+        raise CommandRefused("invalid_args", "email must be a string")
+    tg_user_id = command.args.get("invited_tg_user_id")
+    # Bool first: `isinstance(True, int)` is True in Python, so a JSON `true`
+    # would otherwise reach the column as the user id 1.
+    if tg_user_id is not None and (
+        isinstance(tg_user_id, bool) or not isinstance(tg_user_id, int)
+    ):
+        raise CommandRefused("invalid_args", "invited_tg_user_id must be an integer")
+    hint = command.args.get("invited_channel_hint")
+    if hint is not None and not isinstance(hint, str):
+        raise CommandRefused("invalid_args", "invited_channel_hint must be a string")
     try:
         invitation_id, token = await invitations.create(
             session,
             workspace_id=command.workspace_id,
             invited_by_user_id=command.actor_user_id,
             role=role,
-            delivery_channel="email",
+            delivery_channel=channel,
             email=email,
+            invited_tg_user_id=tg_user_id,
+            invited_channel_hint=hint,
         )
     except invitations.InvitationRefused as exc:
         # The port's closed vocabulary, not this module's: `already_invited`
