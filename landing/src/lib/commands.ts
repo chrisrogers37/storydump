@@ -188,6 +188,37 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
     }
     return { ok: true, body: { source_id: raw.source_id } };
   }),
+
+  /**
+   * One account's schedule overrides. Capable, deliberately unwired — same
+   * posture `settings_change` was added under, and for the same reason: the
+   * control is its own piece of work.
+   *
+   * Shape only, as everywhere here. The port owns which of the four columns
+   * are legal and what type each takes, and it is the port that knows `null`
+   * means INHERIT the workspace default rather than "unset" — a second copy of
+   * that rule here is one that could disagree, and this is the copy that would
+   * go stale.
+   *
+   * `settings` is checked non-empty for the same reason it is on
+   * `settings_change`: an empty object is the caller's mistake and deserves a
+   * field-level answer rather than a round trip. The id is checked as a UUID
+   * for the reason `intent_id` and `source_id` are — it becomes a database
+   * lookup, and "this is not an id" is a more useful refusal than "no such
+   * account", which is also what the port must answer for someone else's.
+   */
+  account_settings_change: submissionCommand((raw) => {
+    if (!isUuidLike(raw.ig_account_id)) {
+      return { ok: false, error: "invalid_ig_account_id" };
+    }
+    if (!isPlainObject(raw.settings) || Object.keys(raw.settings).length === 0) {
+      return { ok: false, error: "invalid_settings" };
+    }
+    return {
+      ok: true,
+      body: { ig_account_id: raw.ig_account_id, settings: raw.settings },
+    };
+  }),
 };
 
 export function isOfferedCommand(value: unknown): value is string {

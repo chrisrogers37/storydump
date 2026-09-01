@@ -72,6 +72,35 @@ NULLABLE_SETTINGS = frozenset(
     {"approval_ttl_minutes", "repost_ttl_days", "skip_ttl_days", "caption_style"}
 )
 
+#: The per-account schedule overrides an `account_settings_change` may touch —
+#: `054`'s "per-account schedule overrides; NULL = inherit the workspace
+#: column" — with the Python type each accepts. Deliberately NOT the account's
+#: whole row, and each exclusion is a different kind of thing:
+#:
+#:   - `state` is a governed transition (`ck_ig_accounts_state`, the reauth and
+#:     `moved` flows), not a setting. A settings write that could clear
+#:     `reauth_required` would retire a credential prompt without a credential.
+#:   - `handle` / `display_name` are identity. `provider_account_ref` is derived
+#:     from the handle at creation (`provisioning.manual_ref_for`) and
+#:     `uq_ig_account_live` keys on the ref, so editing the handle here would
+#:     leave the two spellings of one account disagreeing.
+#:   - `next_slot_at` / `last_posted_at` are the clock's machinery — `055`'s
+#:     audit trigger names exactly those two as the columns that advance
+#:     without auditing.
+ACCOUNT_SETTINGS_COLUMNS: dict[str, type] = {
+    "tz": str,
+    "posts_per_day": int,
+    "posting_hours_start": int,
+    "posting_hours_end": int,
+}
+
+#: Every account override is nullable, and NULL is not "unset" — it is the
+#: INHERIT arm of the ladder the clock resolves per tick (`059`'s due-scan:
+#: `COALESCE(a.posts_per_day, w.posts_per_day)`). A command that could set an
+#: override but never clear one would be a one-way door: an account could leave
+#: the workspace default and have no way back to it.
+ACCOUNT_NULLABLE_SETTINGS = frozenset(ACCOUNT_SETTINGS_COLUMNS)
+
 _CONFIG_COLUMNS = (
     "id, name, state, tz, posts_per_day, posting_hours_start, posting_hours_end,"
     " approval_mode, auto_reapprove_returning, approval_ttl_minutes, dry_run_mode,"
@@ -85,10 +114,14 @@ class InvalidWorkspaceArgs(StorydumpError):
     sees it, or because the database's CHECK refused it."""
 
 
-async def _write(executor, sql: str, **params) -> None:
-    """One writer: a `check_violation` is the caller's value being wrong."""
+async def _write(executor, sql: str, **params):
+    """One writer: a `check_violation` is the caller's value being wrong.
+
+    Returns the driver result, so a writer whose WHERE can match nothing reads
+    `rowcount` rather than issuing a second statement to find out. Callers that
+    cannot miss ignore it."""
     try:
-        await executor.execute(text(sql), params)
+        return await executor.execute(text(sql), params)
     except DBAPIError as exc:
         for cause in driver_candidates(exc):
             if isinstance(cause, CheckViolationError):
@@ -496,21 +529,30 @@ async def set_paused(
     await executor.execute(text(stmt), {"u": str(by_user_id), "ws": str(workspace_id)})
 
 
-def validate_settings(changes: Mapping[str, Any]) -> dict[str, Any]:
+def _validate_against(
+    changes: Mapping[str, Any],
+    columns: Mapping[str, type],
+    nullable: frozenset[str],
+) -> dict[str, Any]:
     """Keys and Python types only — the DB CHECKs decide the values.
 
     `bool` is refused for int columns explicitly, because `True` IS an int in
     Python and would otherwise slip through as `posts_per_day = 1`.
+
+    The two allowlists differ; the type discipline does not, and this is the
+    one copy of it. A second hand-written loop would be free to disagree about
+    what an integer is, and the account columns carry the same `BETWEEN 1 AND
+    50` CHECK the workspace ones do.
     """
     if not changes:
         raise InvalidWorkspaceArgs("no settings supplied")
     cleaned: dict[str, Any] = {}
     for key, value in changes.items():
-        if key not in SETTINGS_COLUMNS:
+        if key not in columns:
             raise InvalidWorkspaceArgs(f"unknown setting {key!r}")
-        expected = SETTINGS_COLUMNS[key]
+        expected = columns[key]
         if value is None:
-            if key not in NULLABLE_SETTINGS:
+            if key not in nullable:
                 raise InvalidWorkspaceArgs(f"{key} cannot be null")
         elif expected is int and (
             isinstance(value, bool) or not isinstance(value, int)
@@ -520,6 +562,18 @@ def validate_settings(changes: Mapping[str, Any]) -> dict[str, Any]:
             raise InvalidWorkspaceArgs(f"{key} must be {expected.__name__}")
         cleaned[key] = value
     return cleaned
+
+
+def validate_settings(changes: Mapping[str, Any]) -> dict[str, Any]:
+    """The workspace's typed product configuration (`02` §1)."""
+    return _validate_against(changes, SETTINGS_COLUMNS, NULLABLE_SETTINGS)
+
+
+def validate_account_settings(changes: Mapping[str, Any]) -> dict[str, Any]:
+    """One account's schedule overrides — same rules, narrower allowlist."""
+    return _validate_against(
+        changes, ACCOUNT_SETTINGS_COLUMNS, ACCOUNT_NULLABLE_SETTINGS
+    )
 
 
 async def change_settings(
@@ -536,4 +590,52 @@ async def change_settings(
         **cleaned,
         ws=str(workspace_id),
     )
+    return cleaned
+
+
+async def change_account_settings(
+    executor, *, workspace_id: str, ig_account_id: str, changes: Mapping[str, Any]
+) -> Optional[dict[str, Any]]:
+    """Apply one account's schedule overrides; returns the cleaned map that was
+    written, or ``None`` when no such account exists in this workspace.
+
+    **The WHERE is workspace-bound as well as id-bound**, which is the tier's
+    rule for a caller-supplied id (`command_executors._intent_row`: "Workspace-
+    bound in the WHERE, not only by RLS").
+
+    **It is defence in depth, and measured to be exactly that — not the guard.**
+    `p_tenant` on `ig_accounts` (`058`:266) covers `svc_ingress`, the role this
+    runs as, so the cross-tenant write is already refused with this clause
+    removed: mutation-tested, and the gate's tenancy case stays green without
+    it. The clause is kept because the convention is right and because
+    `svc_clock` holds `USING (true)` on this table, so the role reaching a row
+    is not invariant — but nothing here proves it, and a reader should not
+    infer that removing RLS would still leave this write scoped.
+
+    **A miss is ``None``, not an exception**, and the caller renders it as
+    `not_found` — the same answer for "no such account" and "someone else's
+    account", so the surface cannot be used to test which ids exist (`07` §5).
+
+    **The id is PARSED, never passed through raw.** `ig_accounts.id` is `UUID`,
+    so a non-UUID string reaches Postgres as a failed cast — a `DataError` this
+    module does not translate, which would surface as a 500 rather than a
+    refusal. `transit._workspace_folder` sets the precedent; here the parse
+    result is discarded and the canonical form bound, so `{...}` and uppercase
+    spellings resolve to the one row rather than missing it.
+    """
+    try:
+        account = uuid.UUID(str(ig_account_id))
+    except (ValueError, AttributeError, TypeError):
+        raise InvalidWorkspaceArgs(f"not an ig_account_id: {ig_account_id!r}") from None
+    cleaned = validate_account_settings(changes)
+    assignments = ", ".join(f"{k} = :{k}" for k in cleaned)
+    result = await _write(
+        executor,
+        f"UPDATE ig_accounts SET {assignments} WHERE id = :acct AND workspace_id = :ws",
+        **cleaned,
+        acct=str(account),
+        ws=str(workspace_id),
+    )
+    if result.rowcount == 0:
+        return None
     return cleaned

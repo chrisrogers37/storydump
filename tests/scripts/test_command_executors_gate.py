@@ -473,3 +473,273 @@ class TestAnotherTenantsIntent:
         assert _one(
             world, "SELECT state FROM post_intents WHERE id = %s", (i["id"],)
         ) == ("awaiting_approval",)
+
+
+# --- account_settings_change: the per-account schedule overrides (#1175) ------
+
+
+def _acct(world, ids=None) -> dict:
+    """The four override columns plus what the clock would actually resolve —
+    the same `COALESCE(account, workspace)` the due-scan applies per tick, so a
+    test cannot pass by writing a column the scheduler does not read."""
+    ids = ids or world["a"]
+    ppd, hs, he, tz, eff_ppd, eff_tz = _one(
+        world,
+        "SELECT a.posts_per_day, a.posting_hours_start, a.posting_hours_end, a.tz,"
+        "       COALESCE(a.posts_per_day, w.posts_per_day),"
+        "       COALESCE(a.tz, w.tz)"
+        "  FROM ig_accounts a JOIN workspaces w ON w.id = a.workspace_id"
+        " WHERE a.id = %s",
+        (str(ids["iga"]),),
+    )
+    return {
+        "posts_per_day": ppd,
+        "posting_hours_start": hs,
+        "posting_hours_end": he,
+        "tz": tz,
+        "eff_ppd": eff_ppd,
+        "eff_tz": eff_tz,
+    }
+
+
+class TestAccountSettingsChange:
+    """`054` gave every account its own cadence, window and tz; `06` §3 made the
+    account the unit of scheduling; `fn_clock_tick` resolves the ladder per row.
+    Nothing could write those columns, so a second account silently inherited
+    every default. These drive the write end to end and read back what the CLOCK
+    reads, not merely what was stored."""
+
+    def test_sets_an_override_the_clock_will_resolve(self, world):
+        before = _acct(world)
+        assert before["posts_per_day"] is None, "the chain seeds a bare account"
+        out = run(
+            world,
+            "account_settings_change",
+            ig_account_id=str(world["a"]["iga"]),
+            settings={"posts_per_day": 7, "tz": "America/New_York"},
+        )
+        assert out.outcome == "executed"
+        assert out.data["changed"] == ["posts_per_day", "tz"]
+        after = _acct(world)
+        assert after["posts_per_day"] == 7
+        assert after["eff_ppd"] == 7, "the override must win the COALESCE"
+        assert after["eff_tz"] == "America/New_York"
+
+    def test_null_puts_the_account_back_on_the_workspace_default(self, world):
+        """NULL is the INHERIT arm, not "unset". Without this the command is a
+        one-way door: an account could leave the default and never return."""
+        (ws_default,) = _one(
+            world,
+            "SELECT posts_per_day FROM workspaces WHERE id = %s",
+            (str(world["a"]["ws"]),),
+        )
+        run(
+            world,
+            "account_settings_change",
+            ig_account_id=str(world["a"]["iga"]),
+            settings={"posts_per_day": 11},
+        )
+        assert _acct(world)["eff_ppd"] == 11
+        run(
+            world,
+            "account_settings_change",
+            ig_account_id=str(world["a"]["iga"]),
+            settings={"posts_per_day": None},
+        )
+        back = _acct(world)
+        assert back["posts_per_day"] is None
+        assert back["eff_ppd"] == ws_default, "inheritance restored"
+
+    def test_another_workspaces_account_is_not_found_and_is_not_written(self, world):
+        """The half that matters is the second assertion: a refusal that had
+        already written would be the tenancy bug wearing a 404.
+
+        **What enforces this is RLS, not the writer's WHERE clause, and this
+        test cannot tell them apart.** Mutation-tested: delete
+        `AND workspace_id = :ws` from `change_account_settings` and this stays
+        green, because `p_tenant` on `ig_accounts` (`058`:266) already covers
+        `svc_ingress`. Read it as the CONTRACT being pinned — cross-tenant is
+        `not_found` and writes nothing — never as evidence for the clause."""
+        b_before = _acct(world, world["b"])
+        assert (
+            refused(
+                world,
+                "account_settings_change",
+                ig_account_id=str(world["b"]["iga"]),
+                settings={"posts_per_day": 9},
+            )
+            == "not_found"
+        )
+        assert _acct(world, world["b"]) == b_before
+
+    def test_a_missing_or_unparseable_account_id_is_invalid_args(self, world):
+        """Not a 500. `ig_accounts.id` is UUID, so an unparseable string would
+        reach Postgres as a failed cast — a DataError this tier does not
+        translate."""
+        assert (
+            refused(world, "account_settings_change", settings={"posts_per_day": 3})
+            == "invalid_args"
+        )
+        assert (
+            refused(
+                world,
+                "account_settings_change",
+                ig_account_id="not-a-uuid",
+                settings={"posts_per_day": 3},
+            )
+            == "invalid_args"
+        )
+
+    def test_an_unlisted_column_is_refused_by_name(self, world):
+        """`state` is a governed transition and `handle` is identity; neither is
+        a setting. The allowlist is what keeps them out of a settings write."""
+        for bad in ({"state": "disabled"}, {"handle": "someone_else"}):
+            assert (
+                refused(
+                    world,
+                    "account_settings_change",
+                    ig_account_id=str(world["a"]["iga"]),
+                    settings=bad,
+                )
+                == "invalid_args"
+            ), bad
+
+    def test_a_bool_is_not_an_integer_and_an_empty_map_is_refused(self, world):
+        """`True` IS an int in Python and would land as `posts_per_day = 1`."""
+        assert (
+            refused(
+                world,
+                "account_settings_change",
+                ig_account_id=str(world["a"]["iga"]),
+                settings={"posts_per_day": True},
+            )
+            == "invalid_args"
+        )
+        assert (
+            refused(
+                world,
+                "account_settings_change",
+                ig_account_id=str(world["a"]["iga"]),
+                settings={},
+            )
+            == "invalid_args"
+        )
+
+    def test_the_database_check_decides_the_value(self, world):
+        """The allowlist bounds the KEYS; `ck_iga_ppd` bounds the values, and a
+        check_violation on the account table has to surface as a refusal rather
+        than a 500 — the same translation the workspace writer relies on."""
+        assert (
+            refused(
+                world,
+                "account_settings_change",
+                ig_account_id=str(world["a"]["iga"]),
+                settings={"posts_per_day": 0},
+            )
+            == "invalid_args"
+        )
+        assert _acct(world)["posts_per_day"] != 0
+
+    def test_the_change_is_audited(self, world):
+        """`055`'s trigger early-exits only for `next_slot_at`/`last_posted_at`,
+        so these four columns audit already — the trail this command needs
+        exists in the schema and is asserted rather than assumed."""
+        (before,) = _one(
+            world,
+            "SELECT count(*) FROM audit_events"
+            " WHERE workspace_id = %s AND entity_id = %s",
+            (str(world["a"]["ws"]), str(world["a"]["iga"])),
+        )
+        run(
+            world,
+            "account_settings_change",
+            ig_account_id=str(world["a"]["iga"]),
+            settings={"posting_hours_start": 9, "posting_hours_end": 17},
+        )
+        (after,) = _one(
+            world,
+            "SELECT count(*) FROM audit_events"
+            " WHERE workspace_id = %s AND entity_id = %s",
+            (str(world["a"]["ws"]), str(world["a"]["iga"])),
+        )
+        assert after > before
+
+    def test_two_accounts_in_one_workspace_diverge(self, world):
+        """**The first time `n >= 2` has been driven anywhere.**
+
+        `uq_ig_account_live` keys on `(workspace_id, provider_account_ref)` so
+        two accounts were always LEGAL, and `fn_clock_tick` resolves the ladder
+        per row so they were always structurally able to differ. Both of those
+        are reads of the schema. Until this test nothing had ever put a second
+        row in one workspace and made the two resolve differently, which is the
+        whole point of the command and the X.3 gate's precondition.
+
+        It is still not driven in PRODUCTION — no second account exists on any
+        real workspace, and this creates one only inside the scratch database.
+        """
+        (second,) = _migrate(
+            world["stream"],
+            "INSERT INTO ig_accounts (workspace_id, provider_account_ref, handle)"
+            " VALUES (%s, %s, %s) RETURNING id",
+            (str(world["a"]["ws"]), "manual:second_account", "second_account"),
+        )
+        run(
+            world,
+            "account_settings_change",
+            ig_account_id=str(world["a"]["iga"]),
+            settings={"posts_per_day": 2, "tz": "America/New_York"},
+        )
+        run(
+            world,
+            "account_settings_change",
+            ig_account_id=str(second),
+            settings={"posts_per_day": 9, "tz": "Europe/London"},
+        )
+        first_ppd, first_tz = _one(
+            world,
+            "SELECT COALESCE(a.posts_per_day, w.posts_per_day),"
+            "       COALESCE(a.tz, w.tz)"
+            "  FROM ig_accounts a JOIN workspaces w ON w.id = a.workspace_id"
+            " WHERE a.id = %s",
+            (str(world["a"]["iga"]),),
+        )
+        second_ppd, second_tz = _one(
+            world,
+            "SELECT COALESCE(a.posts_per_day, w.posts_per_day),"
+            "       COALESCE(a.tz, w.tz)"
+            "  FROM ig_accounts a JOIN workspaces w ON w.id = a.workspace_id"
+            " WHERE a.id = %s",
+            (str(second),),
+        )
+        assert (first_ppd, first_tz) == (2, "America/New_York")
+        assert (second_ppd, second_tz) == (9, "Europe/London")
+
+        # And one of them can go back to inheriting while the other does not —
+        # the two rows are independent in BOTH directions, not merely settable.
+        run(
+            world,
+            "account_settings_change",
+            ig_account_id=str(second),
+            settings={"posts_per_day": None},
+        )
+        (ws_default,) = _one(
+            world,
+            "SELECT posts_per_day FROM workspaces WHERE id = %s",
+            (str(world["a"]["ws"]),),
+        )
+        (second_after,) = _one(
+            world,
+            "SELECT COALESCE(a.posts_per_day, w.posts_per_day)"
+            "  FROM ig_accounts a JOIN workspaces w ON w.id = a.workspace_id"
+            " WHERE a.id = %s",
+            (str(second),),
+        )
+        (first_after,) = _one(
+            world,
+            "SELECT COALESCE(a.posts_per_day, w.posts_per_day)"
+            "  FROM ig_accounts a JOIN workspaces w ON w.id = a.workspace_id"
+            " WHERE a.id = %s",
+            (str(world["a"]["iga"]),),
+        )
+        assert second_after == ws_default
+        assert first_after == 2, "clearing one override must not touch the other"

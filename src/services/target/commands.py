@@ -62,6 +62,7 @@ VOCABULARY: tuple[str, ...] = (
     "autopost_now",
     "sync_now",
     "settings_change",
+    "account_settings_change",
     "pause_workspace",
     "resume_workspace",
     "connect_account",
@@ -127,6 +128,15 @@ ROLE_FLOOR: dict[str, str] = {
     "autopost_now": "member",
     "sync_now": "member",
     "settings_change": "admin",
+    # Starts EQUAL to the workspace floor, and the equality is the point rather
+    # than an oversight. What a separate kind buys is that the floors CAN
+    # diverge — the gate below reads `ROLE_FLOOR[command.kind]`, keyed on kind
+    # with no scope parameter, so a scope-carrying `settings_change` could only
+    # ever apply one floor to workspace and account both. Starting them equal is
+    # behaviourally identical to that and keeps the option open. Loosening this
+    # later is cheap; tightening it is a security change, so it does not start
+    # loose (#1175 ruling).
+    "account_settings_change": "admin",
     "pause_workspace": "admin",
     "resume_workspace": "admin",
     "connect_account": "admin",
@@ -228,6 +238,7 @@ def _build_registry() -> dict[str, Optional[Executor]]:
             "reconnect_account": ex.reconnect_account,
             "disconnect_account": ex.disconnect_account,
             "settings_change": ex.settings_change,
+            "account_settings_change": ex.account_settings_change,
             "pause_workspace": ex.pause_workspace,
             "resume_workspace": ex.resume_workspace,
             "create_workspace": ex.create_workspace,
