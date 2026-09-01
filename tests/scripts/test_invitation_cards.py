@@ -169,11 +169,18 @@ class TestTheEmptyCaseIsAQuietBeat:
         assert n == 0
         assert _cards(world, world["b"]) == before
 
-    def test_the_count_distinguishes_quiet_from_silently_skipped(self, world):
+    def test_a_workspace_with_a_binding_never_reports_a_quiet_beat(self, world):
         """The bound on the ruling: a quiet beat is right for ZERO bindings and
-        would be wrong as a blanket rule. Returning a count is what lets a
-        caller tell "nobody to tell" from "had somewhere and wrote nothing" —
-        the shape that would satisfy clause 3 while failing clause 4."""
+        would be wrong as a blanket rule.
+
+        **This guards the implementation, not the return type.** A count cannot
+        let a CALLER tell "nobody to tell" from "had somewhere and wrote
+        nothing" — both are `0`, and an earlier name for this test claimed it
+        could. What is actually asserted is narrower and true: with a binding
+        present, `announce` never returns `0`. That is the clause-3-satisfied,
+        clause-4-failed shape, and this is what would catch it if a future
+        change ever made the loop skip.
+        """
         ref = _chat()
         assert (
             run(
