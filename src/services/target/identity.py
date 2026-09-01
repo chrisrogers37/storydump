@@ -23,10 +23,26 @@ from src.exceptions.base import StorydumpError
 from src.services.target import readers
 
 PROVIDER_GOOGLE = "google"
+PROVIDER_TELEGRAM = "telegram"
 
 
 class IdentityCollision(StorydumpError):
     """The verified email belongs to a different user. Refused, never merged."""
+
+
+class IdentityAlreadyLinked(StorydumpError):
+    """This provider identity, or this user's slot for it, is already taken.
+
+    Both directions are refusals and they are NOT the same fact:
+    `uq_identity_per_provider` means the external account belongs to someone
+    else; `uq_user_provider` means this user already linked a different one.
+    Named separately in `reason` so an operator can tell them apart — the
+    tapper is told neither (`07` §5).
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 async def upsert_google_identity(
@@ -137,3 +153,78 @@ async def get_user(executor, *, user_id: str) -> Optional[dict]:
         u=str(user_id),
     )
     return user
+
+
+async def link_identity(
+    executor,
+    *,
+    user_id: str,
+    provider: str,
+    external_id: str,
+    display_name: Optional[str] = None,
+) -> bool:
+    """Attach a provider identity to an EXISTING, pinned user. Returns whether
+    a new row was written (False = this exact link already existed).
+
+    **A sibling of `upsert_google_identity`, deliberately not a parameterised
+    version of it.** That function is find-or-CREATE: it may mint a `users`
+    row and it carries verified-email machinery. Linking is a different
+    operation with different preconditions — the user already exists and is
+    pinned by the `link` state (`07` §2: *"link pins the user but no
+    workspace"*), it must NEVER create one, and Telegram supplies no verified
+    email at all. Parameterising the provider would drag a create path and an
+    email path into a flow where both are wrong.
+
+    Idempotent on the exact pair, so a double-tap of the same deep link is not
+    an error — but linking a DIFFERENT account, or an account already held by
+    another user, is refused by name.
+
+    Serialized per (provider, subject) with a transaction-scoped advisory lock,
+    the same discipline `upsert_google_identity` uses and for the same reason:
+    two concurrent taps for one subject must not race the uniqueness checks.
+    """
+    if not user_id or not external_id:
+        raise ValueError("user_id and external_id are required")
+
+    await executor.execute(
+        text("SELECT pg_advisory_xact_lock(hashtext(:k))"),
+        {"k": f"identity:{provider}:{external_id}"},
+    )
+
+    held = (
+        await executor.execute(
+            text(
+                "SELECT user_id FROM user_identities"
+                " WHERE provider = :p AND external_id = :sub"
+            ),
+            {"p": provider, "sub": external_id},
+        )
+    ).first()
+    if held is not None:
+        if str(held[0]) == str(user_id):
+            return False  # already linked to THIS user — idempotent, not an error
+        raise IdentityAlreadyLinked("identity_held_by_another_user")
+
+    mine = (
+        await executor.execute(
+            text(
+                "SELECT external_id FROM user_identities"
+                " WHERE user_id = :u AND provider = :p"
+            ),
+            {"u": str(user_id), "p": provider},
+        )
+    ).first()
+    if mine is not None:
+        # `uq_user_provider`. Replacing it would silently unlink the old
+        # account, which is an operator action with an audit trail, not a tap.
+        raise IdentityAlreadyLinked("user_already_has_this_provider")
+
+    await executor.execute(
+        text(
+            "INSERT INTO user_identities"
+            " (user_id, provider, external_id, display_name, verified_at)"
+            " VALUES (:u, :p, :sub, :dn, now())"
+        ),
+        {"u": str(user_id), "p": provider, "sub": external_id, "dn": display_name},
+    )
+    return True
