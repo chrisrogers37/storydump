@@ -80,7 +80,14 @@ REQUIRE_DB_ENV = "REQUIRE_TEST_DATABASE"
 #: the verdict cannot see: a stray module-level skipmark, a missing optional
 #: dependency. If you add a legitimate skip, raise this on purpose rather than
 #: deleting the check.
-MAX_EXPECTED_SKIPS = 10
+#:
+#: 10 -> 11 (#1195): `test_schema_drift_live.py` audits a LIVE database
+#: against the target models and skips unless `SCHEMA_DRIFT_DSN` is
+#: supplied, which only the scheduled `schema-drift` workflow does.
+#: Skipping on pull requests is the designed behaviour, not a gap:
+#: production legitimately lags `main` between merge and deploy, so a
+#: PR-time assertion would be red as its normal state.
+MAX_EXPECTED_SKIPS = 11
 
 # Global flag to track if database is available
 _database_available = None
