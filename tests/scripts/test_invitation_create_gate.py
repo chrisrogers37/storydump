@@ -366,3 +366,163 @@ class TestTheExecutorDoesNotNarrowTheWriter:
                 world, {"delivery_channel": "telegram", "invited_tg_user_id": True}
             )
         assert "invited_tg_user_id" in str(exc.value)
+
+
+class TestTheEmailProducer:
+    """`06` §2's email arm: *"a `send_email` job through the `07` §1 port to
+    the invited address"*.
+
+    Everything downstream of this was already built — port, executor, budget,
+    retry ladder, the `invitation` template — and **nothing minted a job**, so
+    the whole channel was unreachable. These drive `commands.execute`, so they
+    cover the producer AND the wiring, which is the pair the delivery_channel
+    defect showed can disagree.
+    """
+
+    async def _invite(self, world, args, *, origin="https://app.example.test"):
+        engine = create_async_engine(_async_url(world["dsn"]))
+        try:
+            import src.services.target.command_executors as ce
+
+            class _Settings:
+                web_app_origin = origin
+
+            original = ce.settings
+            ce.settings = _Settings()
+            try:
+                async with engine.begin() as conn:
+                    return await commands.execute(
+                        conn,
+                        Command(
+                            kind="invite_member",
+                            workspace_id=world["ws"],
+                            actor_user_id=world["user"],
+                            channel="web",
+                            args=args,
+                        ),
+                    )
+            finally:
+                ce.settings = original
+        finally:
+            await engine.dispose()
+
+    async def _job(self, world, job_id):
+        engine = create_async_engine(_async_url(world["dsn"]))
+        try:
+            async with engine.begin() as conn:
+                row = (
+                    await conn.execute(
+                        text(
+                            "SELECT kind, workspace_id, lane, state,"
+                            "       serialization_key, payload"
+                            " FROM jobs WHERE id = :i"
+                        ),
+                        {"i": job_id},
+                    )
+                ).mappings()
+                return row.first()
+        finally:
+            await engine.dispose()
+
+    async def test_an_email_invitation_enqueues_a_send_email_job(self, world):
+        """The gap this closes, stated as the row that never existed."""
+        result = await self._invite(world, {"email": "Invitee@Example.com"})
+        delivery = result.data["delivery"]
+        assert delivery["channel"] == "email"
+        assert delivery["state"] == "queued"
+
+        job = await self._job(world, delivery["job_id"])
+        assert job["kind"] == "send_email"
+        assert job["state"] == "ready"
+        # NULL by `ck_jobs_system_kinds`, which is a biconditional — a workspace
+        # id here would not merely be untidy, the INSERT would fail.
+        assert job["workspace_id"] is None
+        assert job["payload"]["to"] == "Invitee@Example.com"
+        assert job["payload"]["template"] == "invitation"
+        assert job["payload"]["v"] == 1
+
+    async def test_the_accept_url_carries_the_token_the_acceptor_resolves(self, world):
+        """The link is the whole credential, so it has to be THE token — not a
+        second one, and not the invitation id. Asserted by round-tripping the
+        value out of the URL through the real accept door."""
+        result = await self._invite(world, {"email": "roundtrip@example.com"})
+        job = await self._job(world, result.data["delivery"]["job_id"])
+        accept_url = job["payload"]["params"]["accept_url"]
+        assert accept_url.startswith("https://app.example.test/join/")
+
+        from_url = accept_url.rsplit("/", 1)[-1]
+        assert from_url == result.data["invite_token"]
+        # And it actually accepts — the token in the email is not merely equal
+        # to the returned one, it resolves at the door the email points at.
+        round_ = _Round(world)
+        try:
+            outcome = await round_.accept(from_url, email="roundtrip@example.com")
+            assert outcome is not None
+        finally:
+            await round_.engine.dispose()
+
+    async def test_the_job_is_claimable_so_the_channel_is_actually_reachable(
+        self, world
+    ):
+        """The point of the whole change: a real worker can pick this up.
+
+        Asserting the row exists would pass even if it were minted into a lane
+        or a state nothing claims — which is the shape the entire email channel
+        was already in.
+        """
+        result = await self._invite(world, {"email": "claimable@example.com"})
+        engine = create_async_engine(_async_url(world["dsn"]))
+        try:
+            async with engine.begin() as conn:
+                claimed = (
+                    await conn.execute(
+                        text(
+                            "SELECT id FROM jobs"
+                            " WHERE state = 'ready' AND run_at <= now()"
+                            "   AND kind = 'send_email'"
+                            "   AND serialization_key = :k"
+                            " ORDER BY run_at LIMIT 1"
+                        ),
+                        {"k": f"email:inv:{result.data['invitation_id']}"},
+                    )
+                ).scalar()
+        finally:
+            await engine.dispose()
+        # str(): asyncpg returns a uuid.UUID and the job id travels as text.
+        assert str(claimed) == result.data["delivery"]["job_id"]
+
+    async def test_no_origin_enqueues_nothing_and_says_so(self, world):
+        """A template that requires `accept_url` would refuse at RENDER, in the
+        worker, having burned an attempt to learn something knowable here.
+
+        The invitation still stands — the token is returned and can be shared
+        by hand — so this is a delivery outcome, not a reason to refuse the
+        command. What it must never be is silent.
+        """
+        result = await self._invite(
+            world, {"email": "noorigin@example.com"}, origin=None
+        )
+        assert result.data["delivery"] == {
+            "channel": "email",
+            "state": "not_configured",
+        }
+        assert result.data["invite_token"]
+
+        # Scoped to THIS invitation, not the whole table: the lane is
+        # module-scoped, so earlier tests in this class have left their own
+        # `send_email` rows behind and a global count would answer about them.
+        engine = create_async_engine(_async_url(world["dsn"]))
+        try:
+            async with engine.begin() as conn:
+                count = (
+                    await conn.execute(
+                        text(
+                            "SELECT count(*) FROM jobs WHERE kind = 'send_email'"
+                            " AND serialization_key = :k"
+                        ),
+                        {"k": f"email:inv:{result.data['invitation_id']}"},
+                    )
+                ).scalar()
+        finally:
+            await engine.dispose()
+        assert count == 0, "a job was enqueued that could never render"
