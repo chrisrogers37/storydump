@@ -159,14 +159,14 @@ class TestTheEmptyCaseIsAQuietBeat:
         is a whole-invitation claim and the email arm may have delivered."""
         inv, token = _mint(world, ids=world["b"], hint="nobody")
         before = _cards(world, world["b"])
-        n = run(
+        result = run(
             world,
             lambda s: invitation_cards.announce(
                 s, workspace_id=str(world["b"]["ws"]), invitation=inv, token=token
             ),
             ids=world["b"],
         )
-        assert n == 0
+        assert result == {"bindings": 0, "cards": 0}
         assert _cards(world, world["b"]) == before
 
     def test_the_count_distinguishes_quiet_from_silently_skipped(self, world):
@@ -188,13 +188,17 @@ class TestTheEmptyCaseIsAQuietBeat:
             == "bound"
         )
         inv, token = _mint(world, hint="someone")
-        n = run(
+        result = run(
             world,
             lambda s: invitation_cards.announce(
                 s, workspace_id=str(world["a"]["ws"]), invitation=inv, token=token
             ),
         )
-        assert n >= 1, "a workspace WITH a binding must not report a quiet beat"
+        assert result["bindings"] >= 1
+        assert result["cards"] == result["bindings"], (
+            "cards must equal bindings; cards==0 with bindings>0 is the silent "
+            "clause-4 failure, and a bare count could not express it"
+        )
 
 
 class TestThePayload:
@@ -241,18 +245,19 @@ class TestItReachesTheBuiltChain:
         before = _cards(world)
 
         async def announce_and_sweep(session):
-            n = await invitation_cards.announce(
+            result = await invitation_cards.announce(
                 session,
                 workspace_id=str(world["a"]["ws"]),
                 invitation=inv,
                 token=token,
             )
             minted = await work_loop.ensure_sender_jobs(session)
-            return n, minted
+            return result, minted
 
-        n, minted = run(world, announce_and_sweep)
-        assert n >= 2, "one card per binding"
-        assert _cards(world) == before + n
+        result, minted = run(world, announce_and_sweep)
+        assert result["cards"] >= 2, "one card per binding"
+        assert result["bindings"] == result["cards"]
+        assert _cards(world) == before + result["cards"]
         assert minted >= 1
         (jobs,) = fetch_one(
             world["stream"],
@@ -300,3 +305,48 @@ class TestItReachesTheBuiltChain:
         with pytest.raises(RuntimeError):
             run(world, announce_then_fail)
         assert _cards(world) == before, "the card rolled back with the invitation"
+
+
+class TestZeroHasTwoCausesAndTheyAreDistinguishable:
+    def test_no_binding_and_none_produced_are_not_the_same_zero(self, world):
+        """**Why `announce` returns two numbers rather than one.**
+
+        `cards == 0` has two causes with opposite meanings: nothing to write to
+        (a quiet beat, nothing was owed) and bindings present with nothing
+        written (a bug that would satisfy clause 3 while failing clause 4).
+        Both are zero. Only the pair separates them, which is what lets the
+        caller pick `no_binding` over `none_produced` instead of collapsing
+        both into a success.
+        """
+        inv_b, token_b = _mint(world, ids=world["b"], hint="nobody")
+        quiet = run(
+            world,
+            lambda s: invitation_cards.announce(
+                s, workspace_id=str(world["b"]["ws"]), invitation=inv_b, token=token_b
+            ),
+            ids=world["b"],
+        )
+
+        ref = _chat()
+        run(
+            world,
+            lambda s: bindings.bind(
+                s,
+                workspace_id=str(world["a"]["ws"]),
+                chat_type="supergroup",
+                external_ref=ref,
+            ),
+        )
+        inv_a, token_a = _mint(world, hint="someone")
+        delivered = run(
+            world,
+            lambda s: invitation_cards.announce(
+                s, workspace_id=str(world["a"]["ws"]), invitation=inv_a, token=token_a
+            ),
+        )
+
+        assert quiet["cards"] == 0 and quiet["bindings"] == 0
+        assert delivered["cards"] > 0 and delivered["bindings"] > 0
+        # The discriminator a bare count destroys: had-a-surface is visible
+        # even when nothing was written, because `bindings` is reported too.
+        assert quiet["bindings"] != delivered["bindings"]
