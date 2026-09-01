@@ -155,8 +155,7 @@ class TestTheCreateHalfMatchesTheAcceptor:
                 row = (
                     await conn.execute(
                         text(
-                            "SELECT token_hash FROM workspace_invitations"
-                            " WHERE id = :i"
+                            "SELECT token_hash FROM workspace_invitations WHERE id = :i"
                         ),
                         {"i": inv_id},
                     )
@@ -181,9 +180,7 @@ class TestTheCreateHalfMatchesTheAcceptor:
         finally:
             await r.close()
 
-    async def test_a_mismatched_identity_is_refused_and_nothing_is_granted(
-        self, world
-    ):
+    async def test_a_mismatched_identity_is_refused_and_nothing_is_granted(self, world):
         """The refusal that makes the token safe to email: possession alone
         does not accept an addressed invitation."""
         r = _Round(world)
@@ -275,9 +272,7 @@ class TestTheRefusalsAreNamedRatherThanConstraintNames:
         finally:
             await r.close()
 
-    async def test_an_unknown_role_is_refused_before_the_database_sees_it(
-        self, world
-    ):
+    async def test_an_unknown_role_is_refused_before_the_database_sees_it(self, world):
         r = _Round(world)
         try:
             with pytest.raises(invitations.InvitationRefused) as exc:

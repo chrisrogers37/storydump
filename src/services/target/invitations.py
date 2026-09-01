@@ -128,11 +128,15 @@ async def create(
     edge already follows.
     """
     if role not in ("admin", "member"):
-        raise InvitationRefused("invalid_role", f"role must be admin or member, not {role!r}")
+        raise InvitationRefused(
+            "invalid_role", f"role must be admin or member, not {role!r}"
+        )
     # `ck_invite_email_required` enforces this too; refusing here names the
     # field instead of surfacing a constraint name to a person.
     if delivery_channel == "email" and not (email or "").strip():
-        raise InvitationRefused("email_required", "an email invitation needs an address")
+        raise InvitationRefused(
+            "email_required", "an email invitation needs an address"
+        )
 
     # Lowercased because `uq_invite_live` compares bytes and
     # `fn_invitation_accept` compares `lower(...)` on both sides: storing a
