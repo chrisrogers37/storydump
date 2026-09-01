@@ -60,6 +60,7 @@ from typing import Any
 from sqlalchemy import text
 
 from src.config.defaults import DEFAULT_REPOST_TTL_DAYS, DEFAULT_SKIP_TTL_DAYS
+from src.config.settings import settings
 from src.services.target import (
     google_drive_oauth,
     intent_ledger,
@@ -626,9 +627,41 @@ async def invite_member(session, command: Command) -> CommandResult:
         # `REASONS` closed while the detail carries which.
         raise CommandRefused("invalid_args", str(exc)) from exc
 
+    # The email arm of `06` §2. NOT discarded: a producer whose verdict reaches
+    # nobody is #1132's defect one layer up, where the work loop dropped an
+    # executor's return value and a run nobody could have received recorded as
+    # a success. `delivery` carries `channel` + `state` for either arm, so a
+    # caller reads one shape whichever channel was used.
+    delivery: dict[str, Any] = {"channel": channel}
+    if channel == "email":
+        job_id = await invitations.deliver_by_email(
+            session,
+            workspace_id=command.workspace_id,
+            invitation_id=invitation_id,
+            token=token,
+            email=email,
+            web_app_origin=settings.web_app_origin,
+        )
+        if job_id is None:
+            delivery["state"] = "not_configured"
+        else:
+            delivery["state"] = "queued"
+            delivery["job_id"] = job_id
+    else:
+        # The card producer is #1188 and is not wired here yet — see the BOUND
+        # in the docstring. Reported as the gap it is rather than omitted,
+        # because an absent key reads as "not applicable" and this is not that.
+        delivery["state"] = "none_produced"
+        delivery["cards"] = 0
+
     return CommandResult(
         "executed",
-        {"invitation_id": invitation_id, "invite_token": token, "role": role},
+        {
+            "invitation_id": invitation_id,
+            "invite_token": token,
+            "role": role,
+            "delivery": delivery,
+        },
     )
 
 
