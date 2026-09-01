@@ -58,6 +58,11 @@ describe("every offered command can produce an idempotency key", () => {
     sync_now: { submission_id: UUID, source_id: UUID2 },
     rename_workspace: { submission_id: UUID, name: "Northside Coffee" },
     disconnect_account: { submission_id: UUID, source_id: UUID2 },
+    account_settings_change: {
+      submission_id: UUID,
+      ig_account_id: UUID2,
+      settings: { posts_per_day: 3 },
+    },
   };
 
   it("covers the whole table, so a new spec cannot skip this check", () => {
@@ -283,5 +288,63 @@ describe("disconnect_account", () => {
     const a = spec.parse({ submission_id: UUID, source_id: UUID2 });
     const b = COMMAND_SPECS.sync_now.parse({ submission_id: UUID, source_id: UUID2 });
     expect(a).toEqual(b);
+  });
+});
+
+describe("account_settings_change", () => {
+  it("forwards the account id and the settings, keyed on the submission", () => {
+    const parsed = parseCommand("account_settings_change", {
+      submission_id: UUID,
+      ig_account_id: UUID2,
+      settings: { posts_per_day: 7, tz: "America/New_York" },
+      extra: "ignored",
+    });
+    expect(parsed).toEqual({
+      ok: true,
+      body: {
+        ig_account_id: UUID2,
+        settings: { posts_per_day: 7, tz: "America/New_York" },
+      },
+      identity: UUID,
+    });
+  });
+
+  it("refuses a non-uuid account id by its own name", () => {
+    for (const bad of ["", "not-a-uuid", 12, null, undefined, {}]) {
+      expect(
+        parseCommand("account_settings_change", {
+          submission_id: UUID,
+          ig_account_id: bad,
+          settings: { posts_per_day: 3 },
+        }),
+        String(bad),
+      ).toEqual({ ok: false, error: "invalid_ig_account_id" });
+    }
+  });
+
+  it("refuses an empty or non-object settings map", () => {
+    for (const bad of [{}, null, "x", 3, []]) {
+      expect(
+        parseCommand("account_settings_change", {
+          submission_id: UUID,
+          ig_account_id: UUID2,
+          settings: bad,
+        }),
+        String(bad),
+      ).toEqual({ ok: false, error: "invalid_settings" });
+    }
+  });
+
+  it("does NOT re-validate what the port owns", () => {
+    // `nonsense_key` is not one of the four columns and `posts_per_day: 900`
+    // is past `ck_iga_ppd`. Both pass HERE and are refused by the port, which
+    // is the same division `settings_change` draws: a second copy of the
+    // allowlist is one that can disagree, and this is the copy that goes stale.
+    const parsed = parseCommand("account_settings_change", {
+      submission_id: UUID,
+      ig_account_id: UUID2,
+      settings: { nonsense_key: 1, posts_per_day: 900 },
+    });
+    expect(parsed.ok).toBe(true);
   });
 });
