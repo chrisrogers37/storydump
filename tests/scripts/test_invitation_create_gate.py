@@ -317,7 +317,19 @@ class TestTheExecutorDoesNotNarrowTheWriter:
     async def test_a_telegram_invitation_can_be_minted_through_the_command(self, world):
         """The bug, stated as the thing that could not happen."""
         result = await self._execute(
-            world, {"delivery_channel": "telegram", "invited_tg_user_id": 4242}
+            world,
+            {
+                "delivery_channel": "telegram",
+                "invited_tg_user_id": 4242,
+                # Carried here for a reason worth stating: `delivery_channel`
+                # and `invited_tg_user_id` reach the executor in this test
+                # while `invited_channel_hint` only ever appeared in a DIRECT
+                # `create()` call. Three arguments added by one change, two
+                # exercised through the real caller and one not — which is the
+                # same shape as the defect this class exists for, since a test
+                # of the callee says nothing about what the caller passes.
+                "invited_channel_hint": "@someone",
+            },
         )
         assert result.outcome == "executed"
         engine = create_async_engine(_async_url(world["dsn"]))
@@ -326,7 +338,8 @@ class TestTheExecutorDoesNotNarrowTheWriter:
                 row = (
                     await conn.execute(
                         text(
-                            "SELECT delivery_channel, email, invited_tg_user_id"
+                            "SELECT delivery_channel, email, invited_tg_user_id,"
+                            "       invited_channel_hint"
                             " FROM workspace_invitations WHERE id = :i"
                         ),
                         {"i": result.data["invitation_id"]},
@@ -340,6 +353,10 @@ class TestTheExecutorDoesNotNarrowTheWriter:
         # with an email invite to the same workspace.
         assert row[1] is None
         assert row[2] == 4242
+        assert row[3] == "@someone", (
+            "the executor dropped invited_channel_hint — it is display data the"
+            " card producer renders, and losing it is silent"
+        )
 
     async def test_email_remains_the_default_so_clause_3_is_unchanged(self, world):
         """A caller that names no channel still gets the shipped behaviour."""
