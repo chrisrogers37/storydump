@@ -568,6 +568,17 @@ async def invite_member(session, command: Command) -> CommandResult:
     (Raised by lane C rather than built around, which is what kept the
     broadcast shape out of the tier.)
 
+    **BOUND, and read this before concluding clause 4 is done: a `telegram`
+    invitation minted here is announced NOWHERE.** This change makes the mint
+    possible; the card producer that would deliver it is #1188 and is not on
+    `main` yet, so between these two landing, a Telegram invitation is a real
+    row with a real token that no person is ever told about. That is the
+    advertise-a-capability-nothing-performs shape the epic exists to remove, so
+    it is stated rather than left for someone to find in the seam. It is
+    inert in practice — no surface passes `delivery_channel` today, so nothing
+    mints one — and it closes when #1188 wires the producer to this call site.
+    The `email` arm has no such gap.
+
     `role` defaults to `member` and is a CEILING, never a grant: the acceptor
     downgrades an unmatched admin invite to `member` plus an
     elevation-pending notification (D36). So minting an admin invitation
