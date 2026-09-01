@@ -249,6 +249,7 @@ def _build_registry() -> dict[str, Optional[Executor]]:
             # calling it, and the job kind since `056` with nothing minting it
             # (#1090 H1).
             "offboard_workspace": ex.offboard_workspace,
+            "restore_workspace": ex.restore_workspace,
         }
     )
     return registry

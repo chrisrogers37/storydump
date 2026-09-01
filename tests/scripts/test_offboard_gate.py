@@ -145,7 +145,9 @@ def _credential(off_db, ws):
 # --- the command: `06` §1's entry edge ---------------------------------------
 
 
-async def _command(dsn: str, ws: str, user: str, args: dict):
+async def _command(
+    dsn: str, ws: str, user: str, args: dict, *, kind="offboard_workspace"
+):
     engine = create_async_engine(asyncpg_url(dsn), poolclass=NullPool)
     try:
         uow = unit_of_work(
@@ -158,7 +160,7 @@ async def _command(dsn: str, ws: str, user: str, args: dict):
             return await commands.execute(
                 session,
                 Command(
-                    kind="offboard_workspace",
+                    kind=kind,
                     workspace_id=ws,
                     actor_user_id=user,
                     channel="web",
@@ -171,6 +173,30 @@ async def _command(dsn: str, ws: str, user: str, args: dict):
 
 def offboard(off_db, ws, **args):
     return asyncio.run(_command(off_db["ingress"], ws["ws"], ws["user"], args))
+
+
+def restore(off_db, ws):
+    return asyncio.run(
+        _command(off_db["ingress"], ws["ws"], ws["user"], {}, kind="restore_workspace")
+    )
+
+
+def _account_credential(off_db, ws, state="active"):
+    """An ACCOUNT-owned credential. `_credential` above makes a SOURCE-owned one,
+    and the restore interlock keys on the account side."""
+    (cid,) = _migrate(
+        off_db["owner_stream"],
+        "INSERT INTO oauth_credentials (workspace_id, ig_account_id, provider,"
+        " state, encrypted_payload) VALUES (%s, %s, 'ig_login', %s, %s)"
+        " RETURNING id",
+        (ws["ws"], ws["iga"], state, b"x"),
+    )
+    return str(cid)
+
+
+def _account_state(off_db, ws):
+    (state,) = _one(off_db, "SELECT state FROM ig_accounts WHERE id = %s", (ws["iga"],))
+    return state
 
 
 class TestTheCommand:
@@ -576,3 +602,137 @@ class TestTheTransitSeam:
         assert out["outcome"] == "drained", (
             "a refused asset does not stall the workflow"
         )
+
+
+class TestTheRestore:
+    """`06` §1's way back (#1127). The interlock tests are the load-bearing
+    ones: flipping the workspace back is the obvious half and the harmless
+    half."""
+
+    def test_it_flips_state_back_and_clears_the_anchor(self, off_db, ws):
+        offboard(off_db, ws, confirm=True)
+        result = restore(off_db, ws)
+        assert result.outcome == "executed"
+        state, anchor = _one(
+            off_db,
+            "SELECT state, offboarding_at FROM workspaces WHERE id = %s",
+            (ws["ws"],),
+        )
+        assert state == "active"
+        assert anchor is None
+
+    def test_an_account_with_a_revoked_credential_needs_reconnect(self, off_db, ws):
+        """THE INTERLOCK. `fn_clock_tick`'s due-scan reads `a.state='active'`
+        and never consults credential state, and offboarding never touches
+        `ig_accounts.state` — so without this flip a restored workspace resumes
+        planning slots whose every publish fails against a revoked credential.
+
+        Revert-check: drop the second UPDATE from the executor and this goes
+        red, because the account is left `active`."""
+        _account_credential(off_db, ws)
+        assert _account_state(off_db, ws) == "active"
+        offboard(off_db, ws, confirm=True)
+        # Leg 2 lives in the JOB, not the command — the credential is not
+        # revoked until the workflow runs. `grace=3600` keeps the window open so
+        # legs 1-3 run and leg 5 does not.
+        run_job(off_db, ws, grace=3600)
+        result = restore(off_db, ws)
+        assert _account_state(off_db, ws) == "reauth_required"
+        assert result.data["accounts_needing_reconnect"] == 1
+
+    def test_restoring_before_the_workflow_runs_needs_no_reconnect(self, off_db, ws):
+        """An owner who changes their mind immediately has revoked nothing, so
+        nothing is stranded in `reauth_required`. The flip keys on the credential
+        actually being revoked rather than on the offboard having been started —
+        those come apart exactly here."""
+        _account_credential(off_db, ws)
+        offboard(off_db, ws, confirm=True)
+        result = restore(off_db, ws)
+        assert _account_state(off_db, ws) == "active"
+        assert result.data["accounts_needing_reconnect"] == 0
+
+    def test_a_manual_destination_keeps_posting(self, off_db, ws):
+        """A destination with no credential row has nothing to reconnect, and a
+        blanket freeze would strand the only kind the estate currently has."""
+        offboard(off_db, ws, confirm=True)
+        result = restore(off_db, ws)
+        assert _account_state(off_db, ws) == "active"
+        assert result.data["accounts_needing_reconnect"] == 0
+
+    def test_restoring_a_workspace_that_is_not_offboarding_is_refused(self, off_db, ws):
+        with pytest.raises(CommandRefused) as caught:
+            restore(off_db, ws)
+        assert caught.value.reason == "illegal_transition"
+        assert "not offboarding" in str(caught.value)
+
+    def test_restoring_past_the_grace_window_is_refused(self, off_db, ws):
+        """`06` §1: "within the grace window only". The guard is policy — safety
+        is structural, since `fn_offboard_finalize` deletes the row — so it has
+        to hold in the interval BEFORE the finalizer runs."""
+        offboard(off_db, ws, confirm=True)
+        _migrate(
+            off_db["owner_stream"],
+            "UPDATE workspaces SET offboarding_at = now() - interval '31 days'"
+            " WHERE id = %s",
+            (ws["ws"],),
+        )
+        with pytest.raises(CommandRefused) as caught:
+            restore(off_db, ws)
+        assert caught.value.reason == "illegal_transition"
+        assert "grace window closed" in str(caught.value)
+        (state,) = _one(
+            off_db, "SELECT state FROM workspaces WHERE id = %s", (ws["ws"],)
+        )
+        assert state == "offboarding"
+
+    def test_the_state_check_is_what_refuses_not_the_anchor_arithmetic(
+        self, off_db, ws
+    ):
+        """A surviving mutant found this gap: with `state = 'offboarding'`
+        dropped from the WHERE, every other test still passed, because a
+        non-offboarding workspace has a NULL `offboarding_at` and the grace
+        comparison is then NULL — refusing by accident rather than by rule.
+
+        The state is CONSTRUCTED rather than driven, deliberately: no product
+        writer can currently produce a stamped anchor on a non-offboarding
+        workspace (offboard sets both, restore clears both, finalize deletes the
+        row). That unreachability is exactly what the precondition preserves, so
+        the guard is pinned against the day a suspend path stamps one."""
+        _migrate(
+            off_db["owner_stream"],
+            "UPDATE workspaces SET state = 'suspended', offboarding_at = now()"
+            " WHERE id = %s",
+            (ws["ws"],),
+        )
+        with pytest.raises(CommandRefused) as caught:
+            restore(off_db, ws)
+        assert caught.value.reason == "illegal_transition"
+        assert "not offboarding" in str(caught.value)
+        (state,) = _one(
+            off_db, "SELECT state FROM workspaces WHERE id = %s", (ws["ws"],)
+        )
+        assert state == "suspended"
+
+    def test_the_two_refusals_do_not_read_the_same(self, off_db, ws):
+        """Both are `illegal_transition`; a caller must still be able to tell
+        "never started" from "too late", because the remedies differ — one is
+        "nothing to undo", the other is "the data is going away"."""
+        with pytest.raises(CommandRefused) as never_started:
+            restore(off_db, ws)
+        offboard(off_db, ws, confirm=True)
+        _migrate(
+            off_db["owner_stream"],
+            "UPDATE workspaces SET offboarding_at = now() - interval '31 days'"
+            " WHERE id = %s",
+            (ws["ws"],),
+        )
+        with pytest.raises(CommandRefused) as too_late:
+            restore(off_db, ws)
+        assert str(never_started.value) != str(too_late.value)
+
+    def test_a_pending_offboard_job_no_ops_after_a_restore(self, off_db, ws):
+        """No job is cancelled on restore; the workflow re-reads state and
+        stands down on its own."""
+        offboard(off_db, ws, confirm=True)
+        restore(off_db, ws)
+        assert run_job(off_db, ws, grace=0)["outcome"] == "not_offboarding"
