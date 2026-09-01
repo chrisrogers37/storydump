@@ -54,21 +54,18 @@ workspace with no bindings and a delivered email has not failed at anything.
 
 **The bound on that, stated because it is the thing the ruling could get
 wrong:** it is right for zero bindings and would be wrong as a blanket rule. An
-invitation whose workspace HAS bindings and which silently enqueues nothing
+invitation whose workspace HAS bindings and which silently enqueued nothing
 would satisfy clause 3 while quietly failing clause 4.
 
-**A count alone cannot express that, which is why this returns two numbers.**
-Zero cards has two causes with opposite meanings — no binding to write to
-(nothing was owed) versus bindings present and nothing written (a bug) — and
-both are `0`. So `announce` reports `bindings` AND `cards`, and a caller derives
-the delivery state from the pair. Returning one number would have forced the
-second case to read as the first, which is the defect this plumbing exists to
-prevent, one layer up.
-
-**The state vocabulary is deliberately not spelled here.** `invitations`
-carries `DELIVERY_STATES` as the closed list both arms share; this module
-returns the FACTS that decide it rather than a second spelling of the words —
-the same rule that removed a local copy of `push_bindings`.
+**That second case is NOT reachable here, and the bare count is honest only
+because of that.** The loop enqueues one card per binding with no per-item
+guard, so a failure raises and rolls back with the invitation rather than
+returning a short count — no input to this code writes fewer cards than there
+are bindings. So `0` means exactly one thing today: there was nothing to write
+to. A single integer could not carry both meanings at once, which is why, if
+per-item failure handling is ever added, the return type has to change in the
+same commit. That is the point to revisit this — with a real divergent case to
+test against rather than an imagined one.
 """
 
 from __future__ import annotations
@@ -116,13 +113,11 @@ async def announce(
     workspace_id: str,
     invitation: Mapping[str, Any],
     token: str,
-) -> dict[str, int]:
-    """Enqueue one invitation card per push binding.
+) -> int:
+    """Enqueue one invitation card per push binding. Returns how many.
 
-    Returns ``{"bindings": n, "cards": m}`` — the two facts a delivery state is
-    derived from. ``cards == 0`` with ``bindings == 0`` is a quiet beat;
-    ``cards == 0`` with ``bindings > 0`` is a bug, and a single count could not
-    tell a caller which it was holding.
+    `0` means there were no push bindings — nothing else in this implementation
+    can produce a zero, and the module note says why that is load-bearing.
 
     Runs in the caller's transaction: an invitation and the card announcing it
     must commit together or not at all (`02` §4's same-tx rule, and
@@ -147,10 +142,8 @@ async def announce(
 
     bindings = await prompts.push_bindings(session, str(workspace_id))
     if not bindings:
-        # A quiet beat, not UNDELIVERABLE — see the module note. Reported as
-        # zero-of-zero rather than a bare zero, so the caller can see that
-        # there was nothing to write to rather than inferring it.
-        return {"bindings": 0, "cards": 0}
+        # A quiet beat, not UNDELIVERABLE — see the module note.
+        return 0
 
     payload = render_card(invitation, token.strip())
     for binding_id in bindings:
@@ -161,4 +154,4 @@ async def announce(
             kind="invitation",
             payload=payload,
         )
-    return {"bindings": len(bindings), "cards": len(bindings)}
+    return len(bindings)
