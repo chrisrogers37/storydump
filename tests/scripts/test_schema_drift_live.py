@@ -48,6 +48,18 @@ which is #1195's other half and an operator decision.
   uniqueness and foreign keys — the dimensions `schema_parity` compares, whose
   own docstring enumerates the deliberate omissions (column defaults, index
   shape, and the rest).
+- **Materialized views, sequences and functions are invisible here** — MEASURED
+  against a database holding one of each, where the signature came back as the
+  table and the view alone. That is not a small corner: the expected side is
+  built by applying a migration whose entire job is to supply FUNCTIONS, and
+  production carries 20 of them in `public` plus a sequence. A change to any of
+  them reports clean.
+- **Views are compared by their COLUMNS only.** They are NOT out of scope, and
+  the distinction is the point: `information_schema.columns` includes views, so
+  one gained or dropped IS caught, while one whose *definition* changed behind
+  an unchanged column list is not. Stating them as uncovered would be as wrong
+  as leaving them unstated, in the same direction — a reader believing the
+  scope is other than it is.
 - **It never writes**, to production or anywhere. Both sides are read with
   `information_schema` queries; the expected side is built in a scratch
   database.
