@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { getSession } from "@/lib/session";
 import { AcceptInvitation } from "@/components/workspace/accept-invitation";
+import { SignOutButton } from "@/components/auth/sign-out-button";
 import { siteConfig } from "@/config/site";
 
 export const metadata = {
@@ -68,9 +69,12 @@ export default async function JoinPage({
         {session && (
           <p className="text-center text-xs text-muted-foreground">
             Signed in as {session.displayName || session.email || "you"}.{" "}
-            <Link href="/api/auth/logout" className="underline underline-offset-2">
+            <SignOutButton
+              className="underline underline-offset-2"
+              redirectTo={`/join/${encodeURIComponent(token)}`}
+            >
               Use a different account
-            </Link>
+            </SignOutButton>
           </p>
         )}
       </div>
