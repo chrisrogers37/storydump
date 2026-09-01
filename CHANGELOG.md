@@ -45,6 +45,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   **Stated bound — a `telegram` invitation minted through this is announced nowhere yet.** The card producer is #1188 and is not on `main`, so until it lands a Telegram mint is a real row with a real token nobody is told about. Inert in practice (no surface passes `delivery_channel` today) and named here rather than left in the seam, because a reader of the executor would otherwise reasonably conclude clause 4 is finished. The `email` arm has no such gap.
 
+  **Coverage of the same change, caught by review:** three arguments were added here and only two reached the executor-level test — `delivery_channel` and `invited_tg_user_id` were exercised through `commands.execute` while `invited_channel_hint` appeared only in a DIRECT `invitations.create` call. One new field with caller-level coverage and its sibling without, which is the same shape as the defect this PR fixes: a test of the callee says nothing about what the caller passes. The hint is now asserted through the real port; setting it to `None` in the executor fails that test.
+
   **Tested through `commands.execute`, not the executor function.** Every existing test in that gate drives `invitations.create` directly, which is exactly why the defect survived a gate written for it — a test of the door says nothing about its caller. Mutation: re-pinning the channel kills 2 of the new tests; removing the `bool` guard on `invited_tg_user_id` kills the third. That guard is not incidental — `isinstance(True, int)` is `True` in Python, so a JSON `true` would otherwise be written as Telegram user id `1`, addressing an invitation at a stranger.
 
 ### Added
