@@ -108,7 +108,6 @@ class TestEveryCommandHasAFloorAndAnExecutorSlot:
             "autopost_now",
             "move_account",
             "restore_workspace",
-            "invite_member",
             "remove_member",
             "change_role",
             "transfer_ownership",

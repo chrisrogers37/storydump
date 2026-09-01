@@ -242,6 +242,7 @@ def _build_registry() -> dict[str, Optional[Executor]]:
             "pause_workspace": ex.pause_workspace,
             "resume_workspace": ex.resume_workspace,
             "create_workspace": ex.create_workspace,
+            "invite_member": ex.invite_member,
             "rename_workspace": ex.rename_workspace,
             # `06` §1's offboarding entry edge. The DOOR that finishes the job
             # (`fn_offboard_finalize`) has existed since `059` with nothing
