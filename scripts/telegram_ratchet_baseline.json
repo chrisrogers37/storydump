@@ -132,6 +132,7 @@
     "src/services/core/telegram_service.py",
     "src/services/core/telegram_settings.py",
     "src/services/core/telegram_user_manager.py",
-    "src/services/core/telegram_utils.py"
+    "src/services/core/telegram_utils.py",
+    "src/services/target/telegram_dispatch.py"
   ]
 }

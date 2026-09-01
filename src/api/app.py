@@ -11,7 +11,8 @@ What it mounts, and why each lives where it does:
 - ``/auth`` — sign-in hosted on the API (`07` §1), see `routes/auth.py`.
 - ``/api/v1`` — reads as resources, writes as the `01` vocabulary, see
   `routes/v1.py`.
-- ``/webhooks/telegram`` — the dormant W4 ingress route, unchanged; W4 arms it
+- ``/webhooks/telegram`` — the W4 ingress route, wired for the `/start` door
+  only (#1183). Chat-inbound resolution remains #854 and is NOT enabled
   (`TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN` + `app.state.ingress`) rather than
   writing a new one.
 - ``/health`` — Railway's probe (`railway.toml`), which now also says whether
@@ -52,6 +53,7 @@ from src.api.routes.auth import router as auth_router
 from src.api.routes.retired import router as retired_router
 from src.api.routes.v1 import IDEMPOTENCY_HEADER
 from src.api.routes.v1 import router as v1_router
+from src.api.routes import webhooks
 from src.api.routes.webhooks import router as webhooks_router
 from src.config.settings import settings
 from src.exceptions.tenancy import TenantResolutionError
@@ -60,6 +62,7 @@ from src.services.target.invitations import InvitationRefused
 from src.services.target.provisioning import ProvisioningRefused
 from src.services.target import scheduling_health
 from src.services.target.unit_of_work import create_engine, engine_url_from_env
+from src.services.target.telegram_dispatch import TelegramDispatcher
 from src.services.target.webhook_ingress import AdmissionConflict, DeliveryReplayed
 from src.utils.logger import logger
 
@@ -320,9 +323,29 @@ def create_app(
         if engine is not None
         else _engine_from_env(os.environ if env is None else env)
     )
-    # The W4 ingress resolution seam (#854), unchanged: None means the webhook
-    # route refuses every delivery BEFORE admitting it.
-    app.state.ingress = None
+    # The W4 ingress seam, WIRED for the `/start` door only (#1183).
+    #
+    # ⚠ THIS DOES NOT MAKE CHAT-INBOUND WORK, and the distinction is the whole
+    # reason #1183 was filed separately from #854. A `/start` payload carries
+    # its own resolution — `link-<state>` names its user, `inv-<token>` names
+    # its workspace — so both resolve against tables `svc_ingress` already
+    # reaches pre-context (`oauth_states`, `user_identities`, `users` are all
+    # role-scoped `USING (true)`; the `fn_invitation_accept` door is already
+    # granted). An ORDINARY chat message carries neither and still needs
+    # #854's resolver, because `channel_bindings` is GUC-filtered for
+    # `svc_ingress` and there is no pre-context path to a workspace.
+    #
+    # Wired only when an engine exists: without one there is nothing to
+    # `connect` to, and a runtime whose `connect` fails would convert the
+    # route's honest 503 into a 500 mid-delivery.
+    app.state.ingress = (
+        webhooks.IngressRuntime(
+            connect=app.state.engine.connect,
+            dispatch=TelegramDispatcher(),
+        )
+        if app.state.engine is not None
+        else None
+    )
 
     _register_handlers(app)
 
