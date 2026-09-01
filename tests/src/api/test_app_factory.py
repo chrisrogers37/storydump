@@ -146,10 +146,22 @@ class TestRefusalMappingsAreTotal:
         assert set(module._COMMAND_STATUS) == set(commands.REASONS)
 
     def test_invitation_reasons(self):
+        """Both dicts, because BOTH are indexed on the refusal path.
+
+        This pin caught `invalid_channel` reaching `REASONS` without a status
+        (#1172) — a coupling invisible at the point the reason is added, in a
+        file that PR never touched. It only asserted `_INVITATION_STATUS`,
+        though, and that is a hole in the same direction: the handler reads
+        `_INVITATION_STATUS.get(...)` and falls back to a logged 500, but then
+        indexes `_INVITATION_DETAIL[...]` BARE. So a reason mapped in the first
+        and missing from the second passed this test and raised `KeyError` at
+        runtime — the exact failure the pin exists to prevent, one dict over.
+        """
         from src.api import app as module
         from src.services.target import invitations
 
         assert set(module._INVITATION_STATUS) == set(invitations.REASONS)
+        assert set(module._INVITATION_DETAIL) == set(invitations.REASONS)
 
     def test_tenant_reasons_are_a_subset_of_the_closed_vocabulary(self):
         from src.api import app as module

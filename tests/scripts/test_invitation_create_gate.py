@@ -27,7 +27,8 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from src.services.target import invitations, sessions
+from src.services.target import commands, invitations, sessions
+from src.services.target.commands import Command, CommandRefused
 from tests.scripts.conftest import (
     _scratch,
     actor_lacks_createrole,
@@ -280,3 +281,105 @@ class TestTheRefusalsAreNamedRatherThanConstraintNames:
             assert exc.value.reason == "invalid_role"
         finally:
             await r.close()
+
+
+class TestTheExecutorDoesNotNarrowTheWriter:
+    """The defect this class exists for: `invitations.create` accepted both
+    channels from the day it shipped, and `invite_member` passed the literal
+    `"email"`, so no Telegram invitation could be minted through the command
+    port at all. Every test above drives `create` DIRECTLY, which is precisely
+    why that survived — a gate on the door says nothing about the caller.
+
+    So these go through `commands.execute` — the real dispatch door, which
+    also walks the registry entry and the role floor — and one of them is
+    the same assertion as
+    `test_a_telegram_invitation_is_the_same_object_with_another_channel`
+    deliberately: the writer was never the broken half.
+    """
+
+    async def _execute(self, world, args):
+        engine = create_async_engine(_async_url(world["dsn"]))
+        try:
+            async with engine.begin() as conn:
+                return await commands.execute(
+                    conn,
+                    Command(
+                        kind="invite_member",
+                        workspace_id=world["ws"],
+                        actor_user_id=world["user"],
+                        channel="web",
+                        args=args,
+                    ),
+                )
+        finally:
+            await engine.dispose()
+
+    async def test_a_telegram_invitation_can_be_minted_through_the_command(self, world):
+        """The bug, stated as the thing that could not happen."""
+        result = await self._execute(
+            world,
+            {
+                "delivery_channel": "telegram",
+                "invited_tg_user_id": 4242,
+                # Carried here for a reason worth stating: `delivery_channel`
+                # and `invited_tg_user_id` reach the executor in this test
+                # while `invited_channel_hint` only ever appeared in a DIRECT
+                # `create()` call. Three arguments added by one change, two
+                # exercised through the real caller and one not — which is the
+                # same shape as the defect this class exists for, since a test
+                # of the callee says nothing about what the caller passes.
+                "invited_channel_hint": "@someone",
+            },
+        )
+        assert result.outcome == "executed"
+        engine = create_async_engine(_async_url(world["dsn"]))
+        try:
+            async with engine.begin() as conn:
+                row = (
+                    await conn.execute(
+                        text(
+                            "SELECT delivery_channel, email, invited_tg_user_id,"
+                            "       invited_channel_hint"
+                            " FROM workspace_invitations WHERE id = :i"
+                        ),
+                        {"i": result.data["invitation_id"]},
+                    )
+                ).first()
+        finally:
+            await engine.dispose()
+        assert row[0] == "telegram"
+        # NULL, not empty string: `uq_invite_live` is (workspace_id, email) and
+        # NULLs never collide, which is what lets telegram invitations coexist
+        # with an email invite to the same workspace.
+        assert row[1] is None
+        assert row[2] == 4242
+        assert row[3] == "@someone", (
+            "the executor dropped invited_channel_hint — it is display data the"
+            " card producer renders, and losing it is silent"
+        )
+
+    async def test_email_remains_the_default_so_clause_3_is_unchanged(self, world):
+        """A caller that names no channel still gets the shipped behaviour."""
+        result = await self._execute(world, {"email": "default@example.com"})
+        assert result.outcome == "executed"
+        assert result.data["invite_token"]
+
+    async def test_an_unknown_channel_is_refused_by_name_not_by_constraint(self, world):
+        """`ck_invite_channel` would also stop this. The refusal names the
+        field instead, which is the same trade `email_required` already makes."""
+        with pytest.raises(CommandRefused) as exc:
+            await self._execute(world, {"delivery_channel": "carrier_pigeon"})
+        assert "email or telegram" in str(exc.value) or "email, telegram" in str(
+            exc.value
+        )
+
+    async def test_a_json_true_cannot_become_the_user_id_one(self, world):
+        """`isinstance(True, bool)` and `isinstance(True, int)` are BOTH true in
+        Python, so a bare int check would write `1` — a real Telegram user id —
+        for a JSON `true`. Ordinary type confusion everywhere else; here it
+        addresses an invitation at a stranger."""
+        with pytest.raises(CommandRefused) as exc:
+            await self._execute(
+                world, {"delivery_channel": "telegram", "invited_tg_user_id": True}
+            )
+        assert "invited_tg_user_id" in str(exc.value)

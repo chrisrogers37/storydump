@@ -39,7 +39,12 @@ REASONS = (
     "already_invited",
     "email_required",
     "invalid_role",
+    "invalid_channel",
 )
+
+#: `053`'s `ck_invite_channel`, mirrored so the refusal can name the field. A
+#: tuple rather than a set so the refusal message has a stable order.
+CHANNELS = ("email", "telegram")
 
 #: `05` seam, and `053`'s own words: "now() + 7 days at insert". Named here
 #: because the DDL states it as a default in prose, not as a column default —
@@ -130,6 +135,17 @@ async def create(
     if role not in ("admin", "member"):
         raise InvitationRefused(
             "invalid_role", f"role must be admin or member, not {role!r}"
+        )
+    # `ck_invite_channel` enforces this too. Refusing here is the same trade the
+    # email check below makes: a person reads "must be email or telegram", not
+    # the name of a check constraint. It also has to come FIRST — an unknown
+    # channel is not `email`, so the check below would wave it through and the
+    # row would die at the constraint with the less useful message.
+    if delivery_channel not in CHANNELS:
+        raise InvitationRefused(
+            "invalid_channel",
+            f"delivery_channel must be one of {', '.join(CHANNELS)},"
+            f" not {delivery_channel!r}",
         )
     # `ck_invite_email_required` enforces this too; refusing here names the
     # field instead of surfacing a constraint name to a person.
