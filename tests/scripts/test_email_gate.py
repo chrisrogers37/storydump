@@ -15,11 +15,17 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from datetime import datetime, timezone
 
 import psycopg2
 import pytest
 
-from src.services.target.email_sender import BUDGET_LIMIT, execute_send_email
+from src.services.target.email_sender import (
+    BUDGET_LIMIT,
+    BUDGET_WINDOW_SECONDS,
+    execute_send_email,
+)
+from src.services.target.rate_counters import window_start
 from tests.scripts.conftest import (
     _scratch,
     as_user,
@@ -120,10 +126,47 @@ def _seed_leased_job(email_db, *, attempts=0):
     }
 
 
+def _budget_window():
+    """The window the CODE will address — never a second derivation of it.
+
+    `date_trunc('day', now())` was the obvious spelling and it is wrong: it
+    floors in the DATABASE SESSION's timezone, while `window_start` floors epoch
+    seconds and is therefore UTC unconditionally. The two coincide only on a UTC
+    server, so on any other host the seed below landed in a row the code never
+    read, the ceiling was never exercised, and the file was permanently red
+    (#1186). Calling the shipped function is what removes the assumption; pinning
+    the session timezone would only document it.
+    """
+    return window_start(datetime.now(timezone.utc), BUDGET_WINDOW_SECONDS)
+
+
+def _seed_budget(email_db, count):
+    """Put the counter at *count* in the window the code will look in."""
+    _owner(
+        email_db,
+        "INSERT INTO rate_counters (scope, key, window_start, count)"
+        " VALUES ('email_global', '', %s, %s)",
+        (_budget_window(), count),
+    )
+
+
 def _counter(email_db):
+    """The count in THIS window, never whichever row Postgres returns first.
+
+    The old form selected on `scope`/`key` alone with no `ORDER BY`, so with two
+    window rows present the answer was arbitrary — nondeterministic across a
+    window boundary even on a UTC host (#1187). Production is not exposed to
+    this: `rate_counters` holds exactly one statement, an
+    `INSERT ... ON CONFLICT (scope, key, window_start)`, so every real read is
+    addressed by full key and there is no unfiltered SELECT anywhere in the
+    tier. This was only ever a test-helper defect, but an assertion that reads
+    an arbitrary row cannot fail honestly.
+    """
     rows = _owner(
         email_db,
-        "SELECT count FROM rate_counters WHERE scope = 'email_global' AND key = ''",
+        "SELECT count FROM rate_counters"
+        " WHERE scope = 'email_global' AND key = '' AND window_start = %s",
+        (_budget_window(),),
         fetch=True,
     )
     return rows[0][0] if rows else None
@@ -190,12 +233,7 @@ class TestTheBudget:
         a daily ceiling would otherwise exhaust three rungs measured in
         minutes and drop the mail entirely."""
         job = _seed_leased_job(email_db, attempts=1)
-        _owner(
-            email_db,
-            "INSERT INTO rate_counters (scope, key, window_start, count)"
-            " VALUES ('email_global', '', date_trunc('day', now()), %s)",
-            (BUDGET_LIMIT,),
-        )
+        _seed_budget(email_db, BUDGET_LIMIT)
         sender = _Sender()
 
         result = _run(email_db, job, sender)
@@ -217,12 +255,7 @@ class TestTheBudget:
         defers has not spent anything, so the ceiling is not walked past by
         jobs that never sent."""
         job = _seed_leased_job(email_db)
-        _owner(
-            email_db,
-            "INSERT INTO rate_counters (scope, key, window_start, count)"
-            " VALUES ('email_global', '', date_trunc('day', now()), %s)",
-            (BUDGET_LIMIT,),
-        )
+        _seed_budget(email_db, BUDGET_LIMIT)
 
         _run(email_db, job, _Sender())
 
