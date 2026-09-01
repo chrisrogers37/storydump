@@ -138,6 +138,11 @@ jobs:
               echo
               echo "Scope: \`public\` schema only; columns, CHECK constraints, uniqueness and foreign keys."
               echo "\`legacy\` is not compared, and data is never read."
+              echo
+              echo "**What a clean result does NOT cover** (measured, not assumed):"
+              echo "- **Materialized views, sequences and functions are invisible** to this check — none appear in the comparison at all. Production currently holds 1 sequence and 20 functions in \`public\`, and a change to any of them reports clean."
+              echo "- **Views are compared only by their COLUMNS.** They do appear (\`information_schema.columns\` includes them), so a view gained or dropped is caught — but a view whose *definition* changed while its column list did not reports clean."
+              echo "- Non-unique indexes, column defaults, and the other dimensions \`scripts/schema_parity.py\` enumerates in its own docstring."
             else
               echo "**DRIFT, or the audit could not complete** (step outcome: \`${AUDIT_OUTCOME}\`)."
               echo
@@ -145,8 +150,20 @@ jobs:
               echo "The reverse is an object applied **outside** the repo."
               echo
               if [ -f drift.log ]; then
+                # A LADDER, because the richest extraction is also the most
+                # fragile. The drift block only exists when the comparison was
+                # actually reached; a FIXTURE ERROR never produces it, and the
+                # bare `sed` rendered an empty fence — a failure carrying no
+                # information about what failed, which invites a reader to
+                # dismiss it rather than act. Each rung is strictly more
+                # general than the last, and the final one cannot be empty.
+                DIAG=$(sed -n '/live schema drift/,/^====/p' drift.log | head -60)
+                [ -n "${DIAG}" ] || DIAG=$(grep -E '^E ' drift.log | head -40)
+                [ -n "${DIAG}" ] || DIAG=$(sed -n '/short test summary info/,$p' drift.log | head -40)
+                [ -n "${DIAG}" ] || DIAG=$(tail -40 drift.log)
+                [ -n "${DIAG}" ] || DIAG="drift.log exists but yielded no diagnostic lines — read the step log above."
                 echo '```'
-                sed -n '/live schema drift/,/^====/p' drift.log | head -60
+                printf '%s\n' "${DIAG}"
                 echo '```'
               else
                 echo "No log was produced — the step did not reach the comparison."
