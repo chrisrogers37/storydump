@@ -244,7 +244,12 @@ async def enqueue(
     session,
     *,
     kind: str,
-    workspace_id: str,
+    # Optional because `ck_jobs_system_kinds` is a BICONDITIONAL: a system kind
+    # (`send_email` and six others) must carry a NULL workspace, and a tenant
+    # kind must not. The column has always accepted NULL and the annotation
+    # simply predated the first caller that needed one — every earlier caller
+    # enqueues a tenant kind.
+    workspace_id: Optional[str],
     serialization_key: str,
     payload: dict,
     lane: str = "bulk",
@@ -252,6 +257,10 @@ async def enqueue(
     unless_pending: bool = False,
 ) -> Optional[str]:
     """Insert one `ready` job in the caller's transaction; returns its id.
+
+    *workspace_id* is None for a system kind and a real id for a tenant kind;
+    the database enforces which is which, so passing the wrong one fails loudly
+    at the constraint rather than writing a row nothing can claim.
 
     The payload is built in Python and bound ONCE as jsonb — the tier's shape
     (`outbox.enqueue`, `media_sync`); building JSON inside the statement is
