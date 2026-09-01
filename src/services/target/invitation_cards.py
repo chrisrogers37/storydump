@@ -30,6 +30,20 @@ elevate anyone**, which is what makes the shape safe.
 It does mean the payload must carry nothing person-identifying. The invitee's
 email address is the OTHER arm's delivery address and is never put in a card.
 
+## Nothing calls this yet, and that is stated here rather than only in a PR
+
+`invite_member` mints the invitation; announcing it is a separate call that
+does not exist on `main` at the time of writing. So a Telegram invitation can
+be minted and announced NOWHERE — the mint succeeds, the email arm is
+unaffected, and no card is produced. **Clause 4 is not done when this module
+lands; it is done when a caller exists.**
+
+Recorded in the module because a PR body is read once and this file is read
+whenever someone asks whether the card path works. The same fact is stated from
+the minting side, so neither half of the seam claims a completeness the pair
+does not have — the failure this repeats otherwise is a surface that is built,
+reachable in principle, and connected to nothing.
+
 ## The empty case is a quiet beat, not `UNDELIVERABLE`
 
 `outbox.UNDELIVERABLE` exists because "reached no delivery surface" was being
