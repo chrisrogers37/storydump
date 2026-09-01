@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The `send_email` producer — `06` §2's email arm had a transport and no minter (#1172).** An email invitation is specified as *"a `send_email` job through the `07` §1 port to the invited address"*, and **nothing had ever enqueued one.** Enumerated before building rather than sampled: twelve `send_email` references in `src/`, every one of them the kind enum, the executor, the registry entry, or a docstring. **Zero producers.** So the port, the executor, the 90/day budget, the retry ladder and the `invitation` template were all built, all correct, and collectively unreachable — the same built-and-inert shape as the `channel_bindings` writer.
+
+  **It runs in the caller's transaction**, which `invitations.create` already commits to: an invitation and whatever announces it commit together or not at all (`02` §4). Split them and both failures are live — an invitation nobody was told about, or an email carrying a token that was rolled back.
+
+  Three constraints verified against the schema rather than assumed. `workspace_id` on the job row is **NULL** because `ck_jobs_system_kinds` is a biconditional — the workspace id passed in is for the name lookup only, and a system kind is payload-complete under `02` §5, so the worker performs zero tenant reads at execution. `payload->'v'` is numeric per `ck_jobs_payload_v`. And **the accept-URL host comes from the deployment's `web_app_origin`, never from `command.args`** — a caller-chosen host in an email our own domain sends is a phishing primitive, not a configuration option.
+
+  **With no origin configured it enqueues nothing and says so.** The template requires `accept_url` and would refuse at *render* — in the worker, hours later, having burned an attempt budget to discover something knowable at mint time. The invitation itself still stands and its token is still returned, so this is a delivery outcome to report rather than a reason to refuse the whole command. What it must never be is silent: a run where nobody could have been told has to be distinguishable from a delivered one.
+
+  `CommandResult.data["delivery"]` carries `channel` + `state` for either arm, from the closed `invitations.DELIVERY_STATES` vocabulary, so a caller reads one shape whichever channel was used and a count is never flattened into a bare success. Agreed with lane C rather than each arm inventing its own spelling.
+
+  Tested through `commands.execute`: the job is minted, its accept URL carries **the** token (round-tripped through the real accept door, not merely compared), and it is **claimable** — asserting the row exists would pass even if it were minted into a lane or state nothing claims, which is precisely the condition the channel was already in.
+
+- **`jobs.enqueue`'s `workspace_id` widens to `Optional[str]`.** The column always accepted NULL; the annotation predated the first caller that needed one, since every earlier caller enqueues a tenant kind.
+
 ### Fixed
 
 - **`test_email_gate.py` seeded the budget counter into a row the code never reads, and the file was permanently red on every non-UTC host (#1186, #1187).** The seed spelled the window as `date_trunc('day', now())`, which floors in the **database session's** timezone; `rate_counters.window_start()` floors epoch seconds and is therefore **UTC unconditionally**. They coincide only on a UTC server. This fleet's shared Postgres is `America/New_York`, so locally the seeded `90` landed four hours away from the row the sender addressed, the sender created its own at `1`, and the ceiling was never exercised — `assert 1 == 90`.
