@@ -574,6 +574,108 @@ async def create_workspace(session, command: Command) -> CommandResult:
     return CommandResult("executed", {"workspace_id": ws_id})
 
 
+async def restore_workspace(session, command: Command) -> CommandResult:
+    """`06` §1's way back: `offboarding → active`, **within the grace window
+    only**, owner-only (`ROLE_FLOOR`).
+
+    Two writes, and the second one is the whole point.
+
+    **THE CLOCK NEVER CONSULTS CREDENTIAL STATE.** `fn_clock_tick`'s due-scan
+    (`059`) selects `WHERE a.state = 'active' AND ... AND w.state = 'active'`,
+    and `ix_ig_accounts_due` is partial on the same account predicate. Nothing
+    in that path looks at `oauth_credentials`. Offboarding, for its part, never
+    touches `ig_accounts.state` at all — leg 2 revokes credentials and stops.
+
+    So flipping the workspace back is NOT sufficient, and the failure it leaves
+    is quiet: accounts are still `active`, their credentials are `revoked`, and
+    the clock resumes planning slots that every publish then fails. `06` §1's
+    "posting resumes as reconnects land" is a PRECONDITION — posting must not
+    resume before them — and `ig_accounts.state = 'reauth_required'` is the only
+    mechanism in the schema that expresses it, because it is the one the
+    dispatcher predicate actually reads.
+
+    A derived `credential_status` badge (#1078) renders `revoked` as
+    reconnect-needed and is genuinely useful, but it is a DISPLAY fact. **A badge
+    does not stop the clock.**
+
+    **Scoped to accounts holding a revoked credential, deliberately.** A manual
+    destination has no `oauth_credentials` row by construction (`provisioning`:
+    "a destination needs no credential, no OAuth round trip and no Meta call to
+    exist"), so there is nothing for its owner to reconnect. A blanket freeze
+    would strand exactly the destinations that were never broken — currently the
+    only kind the estate has.
+
+    **The grace guard is policy; safety is structural.** `fn_offboard_finalize`
+    deletes the workspace row, so a restore attempted after it ran matches
+    nothing and refuses `not_found` on its own. This guard is what makes
+    "irreversible after the grace window" true in the interval *before* the
+    finalizer happens to run, and it reads the one shared
+    `offboarding.GRACE_SECONDS_DEFAULT` so it cannot disagree with the finalizer
+    about when the window closed.
+
+    No job is cancelled or enqueued. A pending offboard job re-reads state and
+    returns `not_offboarding` untouched, which is already covered.
+    """
+    restored = (
+        await session.execute(
+            text(
+                "UPDATE workspaces SET state = 'active', offboarding_at = NULL"
+                " WHERE id = :ws AND state = 'offboarding'"
+                "   AND offboarding_at"
+                "       + interval '1 second' * CAST(:g AS bigint) > now()"
+                " RETURNING id::text"
+            ),
+            {"ws": command.workspace_id, "g": offboarding.GRACE_SECONDS_DEFAULT},
+        )
+    ).first()
+    if restored is None:
+        # Three distinct refusals, kept distinct: a caller must be able to tell
+        # "no such workspace" from "not offboarding" from "too late".
+        current = await readers.row(
+            session,
+            "SELECT state, offboarding_at"
+            "       + interval '1 second' * CAST(:g AS bigint) AS closed_at"
+            "  FROM workspaces WHERE id = :ws",
+            ws=command.workspace_id,
+            g=offboarding.GRACE_SECONDS_DEFAULT,
+        )
+        if current is None:
+            raise CommandRefused("not_found", f"workspace {command.workspace_id}")
+        if current["state"] != "offboarding":
+            raise CommandRefused(
+                "illegal_transition",
+                f"workspace is {current['state']}, not offboarding",
+            )
+        raise CommandRefused(
+            "illegal_transition",
+            "the grace window closed at"
+            f" {current['closed_at']}; this workspace can no longer be restored",
+        )
+    reauth = (
+        await session.execute(
+            text(
+                "UPDATE ig_accounts a SET state = 'reauth_required'"
+                " WHERE a.workspace_id = :ws AND a.state = 'active'"
+                "   AND EXISTS (SELECT 1 FROM oauth_credentials c"
+                "                WHERE c.ig_account_id = a.id"
+                "                  AND c.workspace_id = a.workspace_id"
+                "                  AND c.state = 'revoked')"
+                " RETURNING a.id::text"
+            ),
+            {"ws": command.workspace_id},
+        )
+    ).all()
+    # `executed`, not an invented outcome: the flip is inline, and the two
+    # legal values are the documented contract (`v1.py` maps 202/200 off it).
+    return CommandResult(
+        "executed",
+        {
+            "state": "active",
+            "accounts_needing_reconnect": len(reauth),
+        },
+    )
+
+
 async def offboard_workspace(session, command: Command) -> CommandResult:
     """`06` §1's entry edge, owner-only (`ROLE_FLOOR`). Two writes and a job.
 

@@ -96,7 +96,7 @@ class WorkerConfig:
     clock_max_inserts: int = 500
     refresh_cadence_seconds: int = 7 * 24 * 3600
     heartbeat_interval_seconds: float = 20.0
-    offboard_grace_seconds: int = 30 * 24 * 3600  # 05: grace window 30 days
+    offboard_grace_seconds: int = offboarding.GRACE_SECONDS_DEFAULT
     offboard_drain_timeout_seconds: int = 15 * 60  # 05: publish-drain 15 min
     offboard_drain_recheck_seconds: int = 60  # provisional: 05 states no cadence
     offboard_drain_limit: int = 500  # provisional: 05 states no bound

@@ -89,6 +89,17 @@ TERMINAL_STATES = intent_ledger.TERMINAL_STATES
 #: says must DRAIN rather than be flipped.
 DRAINING_STATES = ("publishing", "publishing_ambiguous")
 
+#: `06` §1's grace window, and the ONE definition of it. `WorkerConfig` defaults
+#: to this and `restore_workspace` refuses past it, so the finalizer and the way
+#: back cannot disagree about when the window closed — the same reason
+#: `finalize` takes the grace it was scheduled with rather than reading its own.
+#:
+#: The clock guard is POLICY, not safety. Safety is structural: `fn_offboard_finalize`
+#: deletes the workspace row, so a restore attempted after it ran finds nothing
+#: and refuses `not_found` on its own. This constant is what makes "irreversible
+#: after the grace window" true BEFORE the finalizer happens to run.
+GRACE_SECONDS_DEFAULT = 30 * 24 * 3600
+
 
 def serialization_key(workspace_id: str) -> str:
     return f"ws:{workspace_id}"
