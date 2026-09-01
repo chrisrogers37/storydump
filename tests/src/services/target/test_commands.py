@@ -107,7 +107,6 @@ class TestEveryCommandHasAFloorAndAnExecutorSlot:
         assert set(port.UNBUILT) == {
             "autopost_now",
             "move_account",
-            "invite_member",
             "remove_member",
             "change_role",
             "transfer_ownership",
