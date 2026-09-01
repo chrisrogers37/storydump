@@ -74,12 +74,14 @@ def run(world, fn, *, ids=None):
     return asyncio.run(_in_uow(world["ingress"], str(ids["ws"]), str(ids["user"]), fn))
 
 
-def _bind(world, ref, *, ids=None, channel="telegram_group"):
+def _bind(world, ref, *, ids=None, chat_type="supergroup"):
+    """Default `supergroup` deliberately: it is the most common real group type
+    and the one a two-of-three mapping drops."""
     ids = ids or world["a"]
     return run(
         world,
         lambda s: bindings.bind(
-            s, workspace_id=str(ids["ws"]), channel=channel, external_ref=ref
+            s, workspace_id=str(ids["ws"]), chat_type=chat_type, external_ref=ref
         ),
         ids=ids,
     )
@@ -91,6 +93,20 @@ def _row(world, ref):
         "SELECT workspace_id, state FROM channel_bindings WHERE external_ref = %s",
         (ref,),
     )
+
+
+def _migrate(world, sql, params=()):
+    """One committed statement as the migration actor — the governance audit
+    triggers refuse an anonymous write."""
+    conn = psycopg2.connect(world["stream"])
+    try:
+        conn.autocommit = False
+        with conn.cursor() as cur:
+            cur.execute("SET app.actor_kind = 'migration'")
+            cur.execute(sql, params)
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _chat() -> str:
@@ -128,7 +144,7 @@ class TestBind:
                 lambda s: bindings.revoke(
                     s,
                     workspace_id=str(world["a"]["ws"]),
-                    channel="telegram_group",
+                    chat_type="group",
                     external_ref=ref,
                 ),
             )
@@ -155,8 +171,8 @@ class TestBind:
         a DM and a group are two rows. Pinned because reading the constraint as
         "one row per chat id" would make the DM path silently TAKEN."""
         ref = _chat()
-        assert _bind(world, ref, channel="telegram_group") == BOUND
-        assert _bind(world, ref, channel="telegram_dm") == BOUND
+        assert _bind(world, ref, chat_type="group") == BOUND
+        assert _bind(world, ref, chat_type="private") == BOUND
 
 
 class TestZeroToN:
@@ -192,7 +208,7 @@ class TestZeroToN:
             lambda s: bindings.revoke(
                 s,
                 workspace_id=str(world["a"]["ws"]),
-                channel="telegram_group",
+                chat_type="group",
                 external_ref=first,
             ),
         )
@@ -206,11 +222,14 @@ class TestZeroToN:
 
 
 class TestRefusals:
-    def test_an_unknown_channel_is_refused_by_name(self, world):
-        for bad in ("web", "telegram", "", None, 3):
+    def test_an_unknown_chat_type_is_refused_by_name(self, world):
+        """Including the ALREADY-MAPPED spellings. A writer that quietly took
+        `telegram_group` as well would let a caller bypass the mapping, which
+        is how the two lanes drift back apart."""
+        for bad in ("channel", "web", "telegram", "telegram_group", "", None, 3):
             with pytest.raises(BindingRefused) as e:
-                _bind(world, _chat(), channel=bad)
-            assert e.value.reason == "channel_unknown", bad
+                _bind(world, _chat(), chat_type=bad)
+            assert e.value.reason == "chat_type_unsupported", bad
 
     def test_a_missing_or_malformed_chat_id_is_refused_by_name(self, world):
         for bad, reason in (
@@ -235,7 +254,7 @@ class TestRefusals:
                 lambda s: bindings.revoke(
                     s,
                     workspace_id=str(world["b"]["ws"]),
-                    channel="telegram_group",
+                    chat_type="group",
                     external_ref=ref,
                 ),
                 ids=world["b"],
@@ -330,3 +349,85 @@ class TestItAuditsAndUnInertsTheChain:
             (str(world["a"]["ws"]),),
         )
         assert jobs >= 1
+
+
+class TestChatTypeMapping:
+    """The mapping lives HERE and in one place. It is not duplicated in the
+    `/start` router, and before this it existed nowhere at all — the legacy
+    handler tested `chat.type not in ("group", "supergroup")` inline and had no
+    DM path, so `telegram_dm` was a schema value nothing could ever produce."""
+
+    def test_every_bindable_telegram_chat_type_maps(self):
+        assert bindings.channel_for_chat_type("private") == "telegram_dm"
+        assert bindings.channel_for_chat_type("group") == "telegram_group"
+        assert bindings.channel_for_chat_type("supergroup") == "telegram_group"
+
+    def test_a_broadcast_channel_is_refused_rather_than_guessed(self):
+        """`channel` is a real Telegram chat type with no `ck_bindings_channel`
+        value. Mapping it to either would invent a product decision."""
+        with pytest.raises(BindingRefused) as e:
+            bindings.channel_for_chat_type("channel")
+        assert e.value.reason == "chat_type_unsupported"
+
+    def test_a_missing_or_non_string_type_is_refused_by_the_same_name(self):
+        for bad in (None, "", "Group", 3, {}):
+            with pytest.raises(BindingRefused) as e:
+                bindings.channel_for_chat_type(bad)
+            assert e.value.reason == "chat_type_unsupported", bad
+
+    def test_every_mapped_value_is_a_legal_channel(self):
+        """Totality against the writer's own vocabulary, so the two cannot
+        drift into a mapping that produces a value `bind` would refuse."""
+        for value in set(bindings._CHAT_TYPES.values()):
+            assert value in bindings.CHANNELS
+
+
+class TestAFreedChatIsBindableAgain:
+    def test_a_finalized_tenants_chat_has_no_tombstone_and_rebinds_clean(self, world):
+        """**Lane D's seam, pinned here because it lands on THIS flow.**
+
+        `fn_offboard_finalize` deletes the workspace and the FK cascade takes
+        `channel_bindings` with it — no code of mine runs. Because
+        `uq_binding_external` is GLOBAL, the freed chat then becomes bindable by
+        any workspace, and there is no tombstone: the row is gone and the chat
+        looks pristine.
+
+        That is correct, and it is worth driving rather than assuming, because
+        the alternative failure is silent — a stale row would make the chat
+        permanently `TAKEN` for a tenant that no longer exists, and nothing
+        would ever report it.
+
+        **"No tombstone" is true of `channel_bindings` and FALSE of the record
+        as a whole**, which is worth being exact about because the imprecise
+        version was briefly believed across two lanes. `audit_events` carries
+        `workspace_id UUID NOT NULL` with **no FK** — `§0`'s stated exception,
+        *"audit outlives the tenant"* — so the governance trigger's rows for
+        this binding survive the delete that removes the binding itself. The
+        creation flow sees a pristine chat; the AUDIT still knows. Both halves
+        are asserted below.
+        """
+        conn = psycopg2.connect(world["stream"])
+        try:
+            doomed = seed_workspace_chain(conn, f"doomed-{uuid.uuid4().hex[:6]}")
+        finally:
+            conn.close()
+
+        ref = _chat()
+        assert _bind(world, ref, ids=doomed) == BOUND
+        assert _bind(world, ref) == TAKEN, "held while that tenant lives"
+
+        _migrate(world, "DELETE FROM workspaces WHERE id = %s", (str(doomed["ws"]),))
+
+        assert _row(world, ref) is None, "cascade removed it — no tombstone"
+        assert _bind(world, ref) == BOUND, "the chat is genuinely free again"
+
+        (surviving,) = fetch_one(
+            world["stream"],
+            "SELECT count(*) FROM audit_events"
+            " WHERE entity_kind = 'channel_binding' AND workspace_id = %s",
+            (str(doomed["ws"]),),
+        )
+        assert surviving > 0, (
+            "audit_events has no FK to workspaces (§0: audit outlives the "
+            "tenant), so the deleted tenant's binding history is still there"
+        )

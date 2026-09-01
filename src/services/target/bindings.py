@@ -45,10 +45,19 @@ a policy violation, which a caller can only render as a 500. The guarded form
 lets the conflicting row stay invisible and reports "not yours" as an ordinary
 outcome.
 
-It also does not widen the existence oracle `02` §6 already accepts and bounds
-— a plain INSERT raises and thereby confirms the chat is bound *somewhere*,
-while this returns the same :data:`TAKEN` whether the chat is held elsewhere or
-the caller simply may not have it.
+**On the existence oracle, stated precisely, because an earlier version of this
+note over-claimed.** :data:`TAKEN` has exactly one cause — the conflict fired
+and the guard rejected it — so it leaks *precisely* what the `UniqueViolation`
+leaks: this chat is bound somewhere. The guarded form changes the SHAPE of that
+answer (a value a caller can render, not an exception it can only turn into a
+500); it does not change the INFORMATION. It neither widens nor narrows the
+leak `02` §6 inventories.
+
+That leak is accepted there on a stated ground — *"the person probing must
+already be adding the bot to that chat"* — which bounds who can ask, not what
+the answer reveals. Nothing in the plan names a rule about collapsing refusals
+into one string; returning a single value for the single case is this module's
+choice and should be reviewed as such.
 """
 
 from __future__ import annotations
@@ -90,18 +99,56 @@ class BindingRefused(StorydumpError):
         )
 
 
-def _clean(channel: object, external_ref: object) -> tuple[str, str]:
-    if channel not in CHANNELS:
-        raise BindingRefused("channel_unknown", f"one of {', '.join(CHANNELS)}")
+#: Telegram's chat types → this module's channel vocabulary. **It lives here,
+#: and that placement is the point.** The `/start` router (branden's lane) and
+#: any future adapter both need it, and a mapping embedded in two lanes is one
+#: that can disagree about what a supergroup is — the fork this module exists
+#: to prevent for the write itself.
+#:
+#: A broadcast `channel` is deliberately absent rather than mapped: it is a
+#: real Telegram chat type with no value in `ck_bindings_channel`, and guessing
+#: one would invent a product decision. It refuses by name.
+_CHAT_TYPES: dict[str, str] = {
+    "private": "telegram_dm",
+    "group": "telegram_group",
+    "supergroup": "telegram_group",
+}
+
+
+def channel_for_chat_type(chat_type: object) -> str:
+    """One Telegram `chat.type` → one `ck_bindings_channel` value.
+
+    The legacy handler tested `chat.type not in ("group", "supergroup")` inline
+    and had no DM path at all; this is that rule made total and named, so a
+    caller cannot quietly omit a type.
+    """
+    mapped = _CHAT_TYPES.get(chat_type) if isinstance(chat_type, str) else None
+    if mapped is None:
+        raise BindingRefused(
+            "chat_type_unsupported", f"{chat_type!r} has no channel_bindings value"
+        )
+    return mapped
+
+
+def _clean(chat_type: object, external_ref: object) -> tuple[str, str]:
+    """Telegram's own vocabulary in, this schema's out.
+
+    **The writers take the RAW `chat.type`, and that is the contract rather
+    than a convenience.** The `/start` router passes what Telegram sent
+    precisely because the mapping is this module's domain rule; a writer that
+    demanded an already-mapped value would leave the rule owned here and
+    implemented nowhere, which is the state #1178 was reviewed in.
+    """
+    channel = channel_for_chat_type(chat_type)
     if not isinstance(external_ref, str) or not external_ref.strip():
         raise BindingRefused("external_ref_required")
     ref = external_ref.strip()
     if not _EXTERNAL_REF.match(ref):
         raise BindingRefused("external_ref_malformed", "a Telegram chat id")
-    return str(channel), ref
+    return channel, ref
 
 
-async def bind(session, *, workspace_id: str, channel: str, external_ref: str) -> str:
+async def bind(session, *, workspace_id: str, chat_type: str, external_ref: str) -> str:
     """Bind one chat to one workspace. Returns :data:`BOUND`, :data:`REBOUND`
     or :data:`TAKEN`.
 
@@ -117,7 +164,7 @@ async def bind(session, *, workspace_id: str, channel: str, external_ref: str) -
     `provisioning.create_destination`'s idiom, one round trip rather than a
     read-then-write that another transaction could interleave.
     """
-    channel, ref = _clean(channel, external_ref)
+    channel, ref = _clean(chat_type, external_ref)
     row = (
         await session.execute(
             text(
@@ -137,7 +184,7 @@ async def bind(session, *, workspace_id: str, channel: str, external_ref: str) -
 
 
 async def revoke(
-    session, *, workspace_id: str, channel: str, external_ref: str
+    session, *, workspace_id: str, chat_type: str, external_ref: str
 ) -> bool:
     """Mark this workspace's binding revoked — the bot was kicked or blocked.
 
@@ -147,7 +194,7 @@ async def revoke(
     the workspace has no such binding, which is the correct answer for a kick
     from a chat it never held.
     """
-    channel, ref = _clean(channel, external_ref)
+    channel, ref = _clean(chat_type, external_ref)
     result = await session.execute(
         text(
             "UPDATE channel_bindings SET state = 'revoked'"
