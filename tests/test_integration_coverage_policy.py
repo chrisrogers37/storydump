@@ -283,8 +283,11 @@ class TestTheSkipCeiling:
         that is its known cost, and it is why the verdict above, which derives
         its input, is the load-bearing gate and this is the backstop. Raise it
         deliberately when a legitimate skip lands; do not delete the check.
+
+        Raised 10 -> 11 for #1195's live-drift audit, which skips on pull
+        requests by design and runs only on the schedule.
         """
-        assert MAX_EXPECTED_SKIPS == 10
+        assert MAX_EXPECTED_SKIPS == 11
 
 
 class TestTheRequirementSwitch:

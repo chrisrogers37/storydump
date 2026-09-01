@@ -1,0 +1,157 @@
+# LIVE SCHEMA DRIFT MONITOR (#1195)
+#
+# Compares a running database's `public` schema against the target schema this
+# repo declares, and reports when they disagree. It exists because migration
+# 066 merged 2026-08-31, production's highest applied migration was 65, and
+# nothing noticed for a day.
+#
+# THIS IS DELIBERATELY NOT A PULL-REQUEST GATE, and must never be added to the
+# required-checks list. Production lags `main` by design between merge and
+# deploy, so prod-versus-repo is legitimately red for every migration PR from
+# merge until deploy — red would be this check's NORMAL state, and a gate whose
+# normal state is red gets weakened by whoever hits it first. The blocking
+# version belongs at deploy time (`railway.toml`'s dormant `preDeployCommand`),
+# which is an operator decision, not a CI one.
+#
+# It reads live schema, never the migration ledger. The ledger read perfectly
+# healthy throughout the 066 window — rows 1-65, no holes, zero checksum
+# mismatches — because a ledger describes what the runner did and cannot
+# describe what a human did around it.
+
+name: Schema Drift
+
+on:
+  schedule:
+    # 06:00 UTC daily — after any overnight deploy has settled.
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+jobs:
+  drift:
+    name: Live schema drift
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: test_user
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_DB: storyline_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e .
+
+      # The monitor is unwired until an operator supplies a READ-ONLY
+      # production DSN as a repository secret. Until then this reports NOT
+      # CHECKED and stops. It must not proceed and pass: a missing credential
+      # rendering as a clean schema is the same fail-toward-reassuring
+      # direction #1195 is about.
+      - name: Check the monitor is wired
+        id: wired
+        env:
+          DSN: ${{ secrets.SCHEMA_DRIFT_DSN }}
+        run: |
+          if [ -z "${DSN}" ]; then
+            echo "wired=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Schema drift NOT CHECKED::No SCHEMA_DRIFT_DSN secret is configured, so no database was audited. This is NOT a clean schema result."
+            {
+              echo "## Schema drift: NOT CHECKED"
+              echo
+              echo "No \`SCHEMA_DRIFT_DSN\` repository secret is configured, so **no database was audited**."
+              echo
+              echo "**This is not a clean result.** It means the monitor is unwired."
+              echo "Supply a READ-ONLY connection string for the database to audit."
+              echo
+              echo "See #1195."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "wired=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Generate test encryption key
+        if: steps.wired.outputs.wired == 'true'
+        id: gen-key
+        run: echo "key=$(python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')" >> "$GITHUB_OUTPUT"
+
+      - name: Audit live schema against the repo
+        id: audit
+        if: steps.wired.outputs.wired == 'true'
+        env:
+          # The database under audit. READ-ONLY by contract: the check issues
+          # information_schema queries and nothing else.
+          SCHEMA_DRIFT_DSN: ${{ secrets.SCHEMA_DRIFT_DSN }}
+          # Turns a missing DSN from a SKIP into a failure. Without it a job
+          # whose only check silently skipped still exits 0 and shows a green
+          # tick — the same defect REQUIRE_TEST_DATABASE exists to prevent.
+          REQUIRE_SCHEMA_DRIFT_CHECK: "1"
+          # Scratch-database + Settings floor, matching the CI test job.
+          DB_HOST: localhost
+          DB_PORT: 5432
+          DB_USER: test_user
+          DB_PASSWORD: test_password
+          DB_NAME: storyline_ai
+          TEST_DB_NAME: storyline_test
+          TELEGRAM_BOT_TOKEN: test_token
+          TELEGRAM_CHANNEL_ID: -1001234567890
+          ADMIN_TELEGRAM_CHAT_ID: -1001234567890
+          ENCRYPTION_KEY: ${{ steps.gen-key.outputs.key }}
+          REQUIRE_TEST_DATABASE: "1"
+          DRY_RUN_MODE: "true"
+          LOG_LEVEL: INFO
+          MEDIA_DIR: /tmp/test-media
+        run: |
+          set -o pipefail
+          pytest tests/scripts/test_schema_drift_live.py \
+            -o addopts="" -v --no-header -rA 2>&1 | tee drift.log
+          rc=${PIPESTATUS[0]}
+          echo "pytest rc=${rc}"
+          exit "${rc}"
+
+      - name: Report
+        if: always() && steps.wired.outputs.wired == 'true'
+        env:
+          AUDIT_OUTCOME: ${{ steps.audit.outcome }}
+        run: |
+          {
+            echo "## Schema drift"
+            echo
+            if [ "${AUDIT_OUTCOME}" = "success" ]; then
+              echo "**CLEAN** — the audited database matches the target schema this repo declares."
+              echo
+              echo "Scope: \`public\` schema only; columns, CHECK constraints, uniqueness and foreign keys."
+              echo "\`legacy\` is not compared, and data is never read."
+            else
+              echo "**DRIFT, or the audit could not complete** (step outcome: \`${AUDIT_OUTCOME}\`)."
+              echo
+              echo "A column declared here and absent there is an **unapplied migration**."
+              echo "The reverse is an object applied **outside** the repo."
+              echo
+              if [ -f drift.log ]; then
+                echo '```'
+                sed -n '/live schema drift/,/^====/p' drift.log | head -60
+                echo '```'
+              else
+                echo "No log was produced — the step did not reach the comparison."
+              fi
+            fi
+            echo
+            echo "See #1195."
+          } >> "$GITHUB_STEP_SUMMARY"
