@@ -54,6 +54,7 @@ from src.api.routes.retired import router as retired_router
 from src.api.routes.v1 import IDEMPOTENCY_HEADER
 from src.api.routes.v1 import router as v1_router
 from src.api.routes import webhooks
+from src.api.routes.meta import router as meta_router
 from src.api.routes.webhooks import router as webhooks_router
 from src.config.settings import settings
 from src.exceptions.tenancy import TenantResolutionError
@@ -368,6 +369,9 @@ def create_app(
     app.include_router(auth_router, prefix="/auth")
     app.include_router(v1_router, prefix="/api/v1")
     app.include_router(webhooks_router, prefix="/webhooks")
+    # Meta's policy callbacks (#410). Under the same prefix as the other
+    # provider-called doors; the URLs are not registered with Meta yet.
+    app.include_router(meta_router, prefix="/webhooks/meta")
     # The Mini App's URL is baked into buttons real users still hold; it
     # redirects rather than 404s (`routes/retired.py`).
     app.include_router(retired_router)
