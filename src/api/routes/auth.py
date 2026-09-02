@@ -48,7 +48,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
-from src.api import google_client
+from src.api import google_client, instagram_client
 from src.api.principal import (
     clear_session_cookie,
     presented_token,
@@ -73,6 +73,7 @@ from src.services.target.ig_login_oauth import (
     issue_state,
     new_state,
 )
+from src.services.target import ig_login_oauth, provisioning
 from src.services.target.unit_of_work import unit_of_work
 from src.utils.logger import logger
 
@@ -91,6 +92,7 @@ PREAUTH_SCOPE = "preauth_ip"
 
 #: The Drive leg's name on the error page (`flow=`); sign-in carries none.
 DRIVE_FLOW = "drive"
+IG_FLOW = "instagram"
 
 
 def _client_ip(request: Request) -> str:
@@ -362,4 +364,110 @@ async def google_drive_callback(
 
     return RedirectResponse(
         _landing("/dashboard/settings?connected=gdrive"), status_code=302
+    )
+
+
+@router.get("/instagram/callback")
+async def instagram_callback(
+    request: Request,
+    state: Optional[str] = None,
+    code: Optional[str] = None,
+    error: Optional[str] = None,
+) -> Response:
+    """The Instagram Login connect/reconnect return (#1041).
+
+    The Drive callback's shape, deliberately, because the difference between
+    the two legs is only which provider answers: consume the state, exchange
+    the code outside any transaction, then write the credential inside the
+    state's OWN workspace as the state's user, so the audit trigger names a
+    real actor and `p_tenant` binds the row.
+
+    **Connect and reconnect diverge only in what the credential attaches to.**
+    A connect has no account row yet and creates one from the identity Meta
+    returned — which is the whole point of the leg, and the one thing a typed
+    handle cannot supply. A reconnect attaches to the account the ISSUE leg
+    pinned in `reconnect_target`, never to anything the browser sent back.
+    """
+    client_id, client_secret, redirect_uri = instagram_client.configured()
+    row = await _consume_callback(
+        request,
+        state=state,
+        code=code,
+        error=error,
+        expected_provider=ig_login_oauth.PROVIDER,
+        expected_purpose={"connect", "reconnect"},
+        flow=IG_FLOW,
+    )
+    if isinstance(row, Response):
+        return row
+
+    # The provider call sits between the two transactions, never inside one.
+    try:
+        async with httpx.AsyncClient() as client:
+            grant = await ig_login_oauth.exchange_code(
+                client,
+                code=code,
+                redirect_uri=redirect_uri,
+                client_id=client_id,
+                client_secret=client_secret,
+            )
+    except StorydumpError as exc:
+        # The reason is named; no token rides in it. A refusal this leg does
+        # not know falls to `exchange_failed` rather than leaking a raw string
+        # into a URL a stranger can read.
+        logger.warning("instagram connect: exchange refused: %s", exc)
+        return _fail(
+            ig_login_oauth.REDIRECT_REASON.get(
+                getattr(exc, "reason", None), "exchange_failed"
+            ),
+            flow=IG_FLOW,
+        )
+
+    uow = unit_of_work(
+        require_engine(request),
+        str(row["workspace_id"]),
+        actor_kind="user",
+        actor_user_id=str(row["user_id"]),
+        channel="web",
+    )
+    async with uow.begin() as session:
+        account_id = row["reconnect_target"]
+        if account_id is None:
+            # Connect: the destination is created from Meta's identity, so the
+            # row carries a REAL provider_account_ref rather than the
+            # provisional `manual:<handle>` a typed handle produces. That
+            # difference is what makes a connected account distinguishable
+            # from a claimed one, here and in the UI.
+            account_id, _created = await provisioning.create_destination(
+                session,
+                workspace_id=str(row["workspace_id"]),
+                provider_account_ref=grant.ig_user_id,
+            )
+        existing = await ig_login_oauth.live_credential_id(
+            session,
+            workspace_id=row["workspace_id"],
+            ig_account_id=account_id,
+        )
+        if existing is None:
+            # Also the ordinary path for a reconnect of an account that was
+            # added by handle and never credentialed — there is nothing to
+            # swap, and refusing would strand exactly the case #1041 exists
+            # to fix.
+            await ig_login_oauth.store_credential(
+                session,
+                workspace_id=row["workspace_id"],
+                ig_account_id=account_id,
+                token=grant.access_token,
+                expires_at=grant.expires_at,
+            )
+        else:
+            await ig_login_oauth.swap_credential(
+                session,
+                credential_id=existing,
+                token=grant.access_token,
+                expires_at=grant.expires_at,
+            )
+
+    return RedirectResponse(
+        _landing("/dashboard/settings?connected=ig_login"), status_code=302
     )

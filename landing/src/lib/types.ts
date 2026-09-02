@@ -22,6 +22,20 @@ export interface Destination {
   handle: string | null;
   display_name: string | null;
   state: string;
+  /**
+   * Whether a usable Instagram grant exists. **Not derivable from `state`** —
+   * that is the SCHEDULING state and reads `active` for a destination that was
+   * only ever typed into a form (#1041). Same two-axis split `MediaSource`
+   * already carries for exactly the same reason (#1078/#1080).
+   */
+  credential_status: "none" | "active" | "expired" | "revoked";
+  /**
+   * Which KIND of destination this is. `manual` is a finished, correct state
+   * for a workspace that publishes through a person, so it must not render as
+   * a broken connection — which is why this is separate from
+   * `credential_status` rather than one more value inside it.
+   */
+  connection: "manual" | "instagram";
   next_slot_at: string | null;
   last_posted_at: string | null;
 }

@@ -58,3 +58,36 @@ export function sourceCredentialBadge(
     }
   );
 }
+
+
+/**
+ * The same two-axis rule, for a POSTING DESTINATION rather than a media source.
+ *
+ * It is a separate function rather than a reuse of `sourceCredentialBadge`
+ * because destinations have a state media sources do not: `manual`, where no
+ * credential is CORRECT. A workspace with `api_publishing_enabled` false
+ * publishes through a person, and rendering that as "Awaiting access" would
+ * tell a working setup it is broken — the same class of lie as the one this
+ * module exists to stop, pointed the other way.
+ *
+ * The reported bug (#1041): the tab showed a handle-only destination as
+ * "Active", beside the words "No Instagram login needed", and a real user read
+ * that as connected. `Active` was true — it is scheduled and it posts — and
+ * that is exactly why the fix is a SECOND axis rather than a reinterpretation
+ * of the first.
+ */
+export function destinationConnectionBadge(
+  connection: string | null | undefined,
+  status: string | null | undefined,
+): SourceCredentialBadge {
+  if (connection === "manual") {
+    return { label: "Handle only — posts via Telegram", tone: "inert" };
+  }
+  const badge = sourceCredentialBadge(status);
+  // Only the `none` copy is Google-specific; the rest already say the right
+  // thing, so only that one is re-worded.
+  if (status === "none") {
+    return { label: "Awaiting Instagram access", tone: "attention" };
+  }
+  return badge;
+}

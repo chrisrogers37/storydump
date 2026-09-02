@@ -16,6 +16,7 @@ import {
   destinationIsActive,
   destinationStateBadge,
 } from "./destination";
+import { destinationConnectionBadge } from "./source-credential";
 
 const WS = "11111111-1111-4111-8111-111111111111";
 
@@ -192,5 +193,34 @@ describe("destinationStateBadge", () => {
   it("marks the one state a person can act on", () => {
     expect(destinationStateBadge("reauth_required").tone).toBe("attention");
     expect(destinationStateBadge("active").tone).toBe("active");
+  });
+});
+
+describe("destinationConnectionBadge (#1041)", () => {
+  it("never calls a handle-only destination broken", () => {
+    // `manual` is a FINISHED state for a workspace publishing through a
+    // person. Rendering it as "Awaiting access" would tell a working setup it
+    // is broken — the same lie as the one this module exists to stop, pointed
+    // the other way.
+    const badge = destinationConnectionBadge("manual", "none");
+    expect(badge.tone).toBe("inert");
+    expect(badge.label.toLowerCase()).not.toContain("awaiting");
+  });
+
+  it("only a live Instagram grant is ever green", () => {
+    expect(destinationConnectionBadge("instagram", "active").tone).toBe("active");
+    for (const status of ["none", "expired", "revoked"]) {
+      expect(destinationConnectionBadge("instagram", status).tone).not.toBe("active");
+    }
+    // And the manual case is never green either, however it is asked.
+    expect(destinationConnectionBadge("manual", "active").tone).not.toBe("active");
+  });
+
+  it("distinguishes a never-connected account from a lapsed one", () => {
+    // Different remedies: CONNECT versus RECONNECT.
+    const none = destinationConnectionBadge("instagram", "none").label;
+    const expired = destinationConnectionBadge("instagram", "expired").label;
+    expect(none).not.toBe(expired);
+    expect(none).toContain("Instagram");
   });
 });

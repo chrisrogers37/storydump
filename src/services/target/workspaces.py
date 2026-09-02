@@ -225,12 +225,50 @@ async def list_members(executor, *, workspace_id: str) -> list[dict]:
 
 
 async def list_accounts(executor, *, workspace_id: str) -> list[dict]:
+    """Destinations plus their credential STATUS — presence and freshness, never
+    a token. The same shape `list_sources` derives, and for the same reason
+    (#1078), because the defect is the same one object over.
+
+    **`ig_accounts.state` cannot answer "is this connected" and must not be
+    used as a proxy for it.** It is the SCHEDULING state: a destination added
+    by typing a handle is `active` — correctly, it is scheduled and it posts
+    through a person — and so is one holding a live Instagram grant. The tab
+    rendered both as "Active" and a real user read that as connected (#1041).
+
+    So the two axes are separated rather than one being reinterpreted.
+    `credential_status` says whether a grant exists and is usable;
+    `connection` says which KIND of destination this is, because "no
+    credential" means two different things: an `api_publishing_enabled` false
+    workspace publishing through a person, for which `manual` is the finished
+    state and nothing is wrong, and an account that expects a grant and has
+    none. A single field would have to call the first of those broken.
+    """
     return await readers.rows(
         executor,
-        "SELECT id, provider_account_ref, handle, display_name, state,"
-        "       posts_per_day, posting_hours_start, posting_hours_end, tz,"
-        "       next_slot_at, last_posted_at, created_at"
-        "  FROM ig_accounts WHERE workspace_id = :ws ORDER BY created_at, id",
+        "SELECT a.id, a.provider_account_ref, a.handle, a.display_name, a.state,"
+        "       a.posts_per_day, a.posting_hours_start, a.posting_hours_end,"
+        "       a.tz, a.next_slot_at, a.last_posted_at, a.created_at,"
+        "       CASE"
+        "         WHEN c.id IS NULL THEN 'none'"
+        "         WHEN c.state <> 'active' THEN c.state"
+        "         WHEN c.expires_at IS NOT NULL AND c.expires_at <= now()"
+        "           THEN 'expired'"
+        "         ELSE 'active'"
+        "       END AS credential_status,"
+        "       c.created_at AS credential_connected_at,"
+        # The reference PREFIX is the discriminator, and it is the only honest
+        # one available: a `manual:` ref is what `create_destination` derives
+        # from a typed handle, and a real Meta id is what the OAuth callback
+        # supplies. Deriving here rather than shipping the raw ref keeps the
+        # front end out of the business of parsing our key format.
+        "       CASE WHEN a.provider_account_ref LIKE 'manual:%'"
+        "            THEN 'manual' ELSE 'instagram' END AS connection"
+        "  FROM ig_accounts a"
+        "  LEFT JOIN oauth_credentials c"
+        "    ON c.workspace_id = a.workspace_id"
+        "   AND c.ig_account_id = a.id"
+        "   AND c.provider = 'ig_login'"
+        " WHERE a.workspace_id = :ws ORDER BY a.created_at, a.id",
         ws=str(workspace_id),
     )
 

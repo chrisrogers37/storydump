@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { destinationConnectionBadge } from "@/lib/source-credential";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -164,6 +165,14 @@ export function AccountsTab({ accounts, editable, workspaceId }: AccountsTabProp
                 const handleText = destinationHandle(account.handle);
                 const isActive = destinationIsActive(account.state);
                 const stateBadge = destinationStateBadge(account.state);
+                // The second axis (#1041). `state` says whether this is
+                // scheduled; this says whether it can reach Instagram on its
+                // own. A handle-only destination is legitimately BOTH active
+                // and unconnected, which one badge cannot express.
+                const connBadge = destinationConnectionBadge(
+                  account.connection,
+                  account.credential_status,
+                );
                 return (
                 <div
                   key={account.id}
@@ -183,6 +192,15 @@ export function AccountsTab({ accounts, editable, workspaceId }: AccountsTabProp
                         className={STATE_TONE_CLASS[stateBadge.tone]}
                       >
                         {stateBadge.label}
+                      </Badge>
+                      {/* Unconditional, for the same reason as the state badge
+                          above: a row that renders nothing here is
+                          indistinguishable from one that failed to load. */}
+                      <Badge
+                        variant="secondary"
+                        className={STATE_TONE_CLASS[connBadge.tone]}
+                      >
+                        {connBadge.label}
                       </Badge>
                     </div>
                     {handleText && (

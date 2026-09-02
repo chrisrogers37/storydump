@@ -235,6 +235,29 @@ def _identity_for(
     return manual_ref_for(normalised), normalised
 
 
+async def destination_exists(executor, *, workspace_id: str, account_id: str) -> bool:
+    """Is *account_id* a live destination of *workspace_id*?
+
+    Exists so the reconnect route can refuse an unknown account without the
+    API layer reaching for SQL — the one `text()` in `routes/v1.py` would have
+    been the first, and the layer rule (API -> Services, never straight to the
+    data) is worth more than the four lines it saves.
+
+    `state <> 'moved'` matches `uq_ig_account_live`'s predicate: a tombstone is
+    not a destination you can reconnect, it is one that went somewhere else.
+    """
+    row = (
+        await executor.execute(
+            text(
+                "SELECT 1 FROM ig_accounts"
+                " WHERE id = :id AND workspace_id = :ws AND state <> 'moved'"
+            ),
+            {"id": str(account_id), "ws": str(workspace_id)},
+        )
+    ).first()
+    return row is not None
+
+
 async def create_destination(
     executor,
     *,

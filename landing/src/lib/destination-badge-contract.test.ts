@@ -71,3 +71,17 @@ describe("the accounts tab renders destination state, not a boolean", () => {
     expect(accountsTabSource()).not.toMatch(/(?<![!\w])isActive\s*&&/);
   });
 });
+
+describe("the accounts tab renders CONNECTION as a second axis (#1041)", () => {
+  it("asks the helper rather than deriving connectedness itself", () => {
+    // The reported bug was a handle-only destination rendering as "Active"
+    // beside "No Instagram login needed", read by a real user as connected.
+    // `Active` was TRUE — it is scheduled — so the fix is a second axis, and
+    // this asserts the screen still has one.
+    expect(accountsTabSource()).toContain("destinationConnectionBadge(");
+  });
+
+  it("renders the label the helper returns", () => {
+    expect(accountsTabSource()).toContain("connBadge.label");
+  });
+});

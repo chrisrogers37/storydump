@@ -55,6 +55,8 @@ from __future__ import annotations
 import hashlib
 import logging
 import secrets
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from sqlalchemy import text
@@ -301,6 +303,154 @@ async def reap_expired_states(conn, *, limit: int = 500) -> int:
     return result.rowcount
 
 
+#: Refusal reason -> the `reason` the browser is redirected with. Two internal
+#: reasons collapse to one user-facing value on purpose: a caller cannot act
+#: differently on "Meta answered 400" than on "Meta answered something that was
+#: not JSON", and naming the difference in a URL tells a stranger about our
+#: parsing.
+REDIRECT_REASON = {
+    "exchange_failed": "exchange_failed",
+    "malformed_response": "exchange_failed",
+    "no_long_lived_token": "grant_incomplete",
+}
+
+
+class IgLoginRefused(StorydumpError):
+    """The grant could not be completed. `reason` is `REDIRECT_REASON`'s key
+    set, and **no token ever rides in the message** — this is raised on a path
+    whose whole purpose is handling tokens, and the message reaches a log."""
+
+    def __init__(self, reason: str, detail: str = ""):
+        if reason not in REDIRECT_REASON:
+            raise ValueError(f"unknown refusal reason {reason!r}")
+        self.reason = reason
+        super().__init__(
+            f"ig login grant refused: {reason}{': ' + detail if detail else ''}"
+        )
+
+
+@dataclass(frozen=True)
+class IgLoginGrant:
+    """What the callback has after a successful exchange.
+
+    `ig_user_id` is carried because the connect leg has no account row yet and
+    this is the only place the real Instagram identity appears — it is what
+    distinguishes a genuinely connected destination from a `manual:<handle>`
+    one typed into a form.
+    """
+
+    access_token: str
+    ig_user_id: str
+    expires_at: Optional[datetime] = None
+
+
+async def exchange_code(
+    client,
+    *,
+    code: str,
+    redirect_uri: str,
+    client_id: str,
+    client_secret: str,
+) -> IgLoginGrant:
+    """Trade the authorization code for a LONG-LIVED token, through the floor.
+
+    **Two legs, not one, and the second is not optional.** Instagram Login's
+    code exchange returns a token valid for about an hour; the long-lived swap
+    (`ig_exchange_token`) is what makes it last sixty days and become
+    refreshable by `refresh_params`. Storing the short-lived one would strand
+    the account within the hour and leave a credential row the refresh leg
+    cannot rescue — the same failure `google_drive_oauth` refuses a
+    refresh-token-less grant to avoid, arrived at from the other direction.
+
+    The short-lived response is also the ONLY place `user_id` appears, so it is
+    read here and carried on the grant rather than re-fetched.
+    """
+    status, body = await _post_form(
+        client,
+        TOKEN_URL,
+        {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "grant_type": "authorization_code",
+            "redirect_uri": redirect_uri,
+            "code": code,
+        },
+    )
+    if status != 200:
+        raise IgLoginRefused("exchange_failed", f"token endpoint answered {status}")
+    if not isinstance(body, dict):
+        raise IgLoginRefused(
+            "malformed_response", "token endpoint body is not an object"
+        )
+    short_lived = body.get("access_token")
+    if not isinstance(short_lived, str) or not short_lived:
+        raise IgLoginRefused("malformed_response", "no access token in the grant")
+    user_id = body.get("user_id")
+    if user_id is None or not str(user_id).strip():
+        raise IgLoginRefused("malformed_response", "the grant names no user_id")
+
+    status, body = await _get_params(
+        client,
+        LONG_LIVED_URL,
+        {
+            "grant_type": "ig_exchange_token",
+            "client_secret": client_secret,
+            "access_token": short_lived,
+        },
+    )
+    if status != 200 or not isinstance(body, dict):
+        raise IgLoginRefused(
+            "no_long_lived_token",
+            f"the long-lived swap answered {status}; a one-hour token is"
+            " refused rather than stored",
+        )
+    long_lived = body.get("access_token")
+    if not isinstance(long_lived, str) or not long_lived:
+        raise IgLoginRefused("no_long_lived_token", "the swap returned no token")
+    expires_in = body.get("expires_in")
+    expires_at = None
+    if isinstance(expires_in, (int, float)) and not isinstance(expires_in, bool):
+        expires_at = datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))
+    return IgLoginGrant(
+        access_token=long_lived,
+        ig_user_id=str(user_id).strip(),
+        expires_at=expires_at,
+    )
+
+
+async def _post_form(client, url: str, data: dict) -> tuple[int, Any]:
+    """POST a form through the egress floor. Body parsed as JSON, or None."""
+    from src.services.target import egress
+    from src.services.target.egress import EgressPolicy
+
+    response = await egress.request(
+        client, "POST", url, policy=EgressPolicy(timeout_class="standard"), data=data
+    )
+    return _status_and_json(response)
+
+
+async def _get_params(client, url: str, params: dict) -> tuple[int, Any]:
+    """GET through the egress floor. Body parsed as JSON, or None.
+
+    The long-lived swap is a GET with the token in the query string — Meta's
+    shape, not a choice made here. It is never logged for that reason.
+    """
+    from src.services.target import egress
+    from src.services.target.egress import EgressPolicy
+
+    response = await egress.request(
+        client, "GET", url, policy=EgressPolicy(timeout_class="standard"), params=params
+    )
+    return _status_and_json(response)
+
+
+def _status_and_json(response) -> tuple[int, Any]:
+    try:
+        return response.status_code, response.json()
+    except ValueError:
+        return response.status_code, None
+
+
 def refresh_params(current_token: str) -> dict[str, str]:
     """The IG-host refresh shape, and ONLY that shape.
 
@@ -354,6 +504,37 @@ async def store_credential(
         },
     )
     return str(result.scalar_one())
+
+
+async def live_credential_id(conn, *, workspace_id, ig_account_id):
+    """The id of this account's live `ig_login` credential, or None.
+
+    Lives here rather than in the callback route so the API layer holds no
+    SQL — `routes/auth.py` had none before this change and should keep none.
+
+    None is the ORDINARY answer on two different paths and neither is an
+    error: a fresh connect has just created the destination, and a reconnect
+    of an account added by handle never had a credential to begin with. Both
+    store rather than swap, which is why the caller branches on presence
+    instead of treating absence as a refusal — refusing would strand exactly
+    the case #1041 exists to fix.
+    """
+    row = (
+        await conn.execute(
+            text(
+                "SELECT id FROM oauth_credentials"
+                " WHERE ig_account_id = :acct AND workspace_id = :ws"
+                "   AND provider = :provider AND state <> 'revoked'"
+                " ORDER BY id LIMIT 1"
+            ),
+            {
+                "acct": str(ig_account_id),
+                "ws": str(workspace_id),
+                "provider": PROVIDER,
+            },
+        )
+    ).first()
+    return None if row is None else row[0]
 
 
 async def swap_credential(conn, *, credential_id, token: str, expires_at=None) -> None:

@@ -41,7 +41,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 
 from src.api.principal import Principal, current_principal, require_engine
-from src.api import google_client
+from src.api import google_client, instagram_client
 from src.services.target import (
     commands,
     google_drive_oauth,
@@ -52,6 +52,7 @@ from src.services.target import (
     workspaces,
 )
 from src.services.target.commands import Command, CommandResult
+from src.services.target import ig_login_oauth
 from src.services.target.ig_login_oauth import issue_state
 from src.services.target.unit_of_work import unit_of_work
 
@@ -478,6 +479,88 @@ async def create_source(
         status_code=201 if created else 200,
         content={"source_id": source_id, "created": created},
     )
+
+
+@router.post("/workspaces/{ws}/accounts/connect")
+async def connect_account(
+    ws: uuid.UUID,
+    request: Request,
+    principal: Principal = Depends(current_principal),
+):
+    """Start an Instagram Login grant for a NEW destination (#1041).
+
+    The OAuth leg was built (#341, #378) and never routed, which is why a
+    workspace could only ever "link" an account by typing a handle into a
+    form. This is the missing routing and nothing more — the handle form stays,
+    because a workspace with `api_publishing_enabled` false publishes through a
+    person and that tier is deliberate. The two arrive beside each other.
+
+    **Resource-shaped rather than `POST …/commands/{command}`**: an OAuth leg
+    is a browser redirect carrying state, which the command port cannot
+    express. **POST returning the URL rather than a 302**, following the Drive
+    sibling (`connect_source`): a browser cannot be `fetch()`ed through a
+    cross-origin redirect to Instagram, so the front end is handed where to go
+    and sends the browser itself.
+
+    No `reconnect_target`: there is no account row yet. The callback creates
+    the destination from the identity Meta returns, which is precisely what a
+    typed handle cannot supply.
+    """
+    client_id, _, redirect_uri = instagram_client.configured()
+    async with _admin(request, str(ws), principal) as session:
+        state = await issue_state(
+            session,
+            purpose="connect",
+            provider=ig_login_oauth.PROVIDER,
+            user_id=principal.user_id,
+            workspace_id=str(ws),
+        )
+    return {
+        "authorization_url": ig_login_oauth.authorization_url(
+            state, client_id=client_id, redirect_uri=redirect_uri
+        )
+    }
+
+
+@router.post("/workspaces/{ws}/accounts/{account_id}/reconnect")
+async def reconnect_account(
+    ws: uuid.UUID,
+    account_id: uuid.UUID,
+    request: Request,
+    principal: Principal = Depends(current_principal),
+):
+    """Re-grant an EXISTING destination whose credential died or never was.
+
+    Separate from `connect_account` rather than one route branching on a
+    purpose, because the two differ in the URL: a reconnect names the account
+    it is for and a connect cannot. `issue_state` retires any prior live
+    reconnect state for the same target in its own transaction — last issued
+    wins — so a user who clicks twice cannot land two callbacks.
+
+    The account is checked for existence HERE rather than in the callback: a
+    state minted against an id that does not exist is a state nothing can ever
+    consume, and refusing at issue time gives the caller a 404 instead of a
+    redirect that fails minutes later at a URL they cannot read.
+    """
+    client_id, _, redirect_uri = instagram_client.configured()
+    async with _admin(request, str(ws), principal) as session:
+        if not await provisioning.destination_exists(
+            session, workspace_id=str(ws), account_id=str(account_id)
+        ):
+            raise HTTPException(status_code=404, detail="not found")
+        state = await issue_state(
+            session,
+            purpose="reconnect",
+            provider=ig_login_oauth.PROVIDER,
+            user_id=principal.user_id,
+            workspace_id=str(ws),
+            reconnect_target=str(account_id),
+        )
+    return {
+        "authorization_url": ig_login_oauth.authorization_url(
+            state, client_id=client_id, redirect_uri=redirect_uri
+        )
+    }
 
 
 @router.post("/workspaces/{ws}/sources/{source_id}/connect")
