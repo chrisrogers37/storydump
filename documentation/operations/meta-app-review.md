@@ -105,8 +105,8 @@ What Meta asks for (**DOCUMENTED-FROM-META'S-DOCS**):
 |---|---|---|
 | Privacy Policy URL | **live** | `https://storydump.app/privacy` — `landing/src/app/(marketing)/privacy/page.tsx` |
 | Terms of Service URL | **live** | `https://storydump.app/terms` — `landing/src/app/(marketing)/terms/page.tsx` |
-| Deauthorize Callback URL | **in flight** | alex is building it. Path not settled — see below. |
-| Data Deletion Request URL | **in flight** | Same PR. |
+| Deauthorize Callback URL | **built, not yet registered** | `POST /webhooks/meta/deauthorize` — shipped in #1208. Still has to be entered in App settings → Basic. |
+| Data Deletion Request URL | **built, not yet registered** | `POST /webhooks/meta/data-deletion` — same PR, same remaining step. |
 | App logo | **NOT-YET-ATTEMPTED, unowned** | 1024×1024 PNG, no transparency. **Nobody owns this.** It blocks submission and it is the kind of item that is discovered at the end. |
 
 ### Deauthorize Callback and Data Deletion Request
@@ -124,7 +124,33 @@ Both receive a **signed request** from Meta, which must be verified against the 
 
 > **COMMUNITY-REPORTED:** that Meta *probes the URL at save time and rejects the field outright* is widely reported by other developers and **was not found in Meta's own documentation**. The advice above does not depend on it being true.
 
-**Fill in the actual paths once alex's PR is up.** They are deliberately blank here rather than guessed; a runbook that names an endpoint the code does not serve is worse than one that names none.
+**The paths, now that they are served** (#410 implementation PR):
+
+| Field | URL |
+|---|---|
+| Deauthorize Callback URL | `https://api.storydump.app/webhooks/meta/deauthorize` |
+| Data Deletion Request URL | `https://api.storydump.app/webhooks/meta/data-deletion` |
+
+**One correction to the requirement as stated above, and it is deliberate.**
+This section says the app "must delete it and return a confirmation code plus a
+status URL". The implementation returns the code and the status URL, and
+**deletes nothing synchronously.** Meta's response contract is a `url` plus a
+`confirmation_code` precisely so completion can be asynchronous, so a receipt is
+the specified shape rather than a shortfall — and three things make inline
+deletion wrong here: the subject cannot be reliably identified (the schema
+stores no Meta person), the blast radius is not the requester's to spend (an
+Instagram account sits inside a workspace holding other members' content), and
+the product's real deletion door — `offboard_workspace` — is owner-only with an
+explicit confirm and a 30-day grace window, so an unauthenticated external
+caller must not reach a stronger deletion than the owner's own.
+
+**Also: which app you register these under decides which secret must verify
+them.** `INSTAGRAM_APP_SECRET` and `FACEBOOK_APP_SECRET` are both accepted, so
+either works — but note which one you used, because a future narrowing to a
+single setting would silently refuse 100% of Meta's callbacks.
+
+Full endpoint behaviour, cascade scope and the RLS bound:
+[`meta-callback-endpoints.md`](meta-callback-endpoints.md).
 
 ---
 
