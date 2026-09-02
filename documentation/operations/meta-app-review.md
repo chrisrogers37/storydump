@@ -12,8 +12,14 @@ Every section below carries one. **They are not decoration** — a section resea
 |---|---|
 | **WALKED** | Somebody on this team performed these steps and this is what happened. |
 | **DOCUMENTED-FROM-META'S-DOCS** | Taken from Meta's published requirements. Believed accurate, **nobody here has done it**. Expect the real flow to differ in detail. |
+| **COMMUNITY-REPORTED** | Widely reported by other developers but **not found in Meta's own documentation**. Useful, and explicitly weaker than the row above. |
 | **NOT-YET-ATTEMPTED** | Known to be required; no walkthrough exists and none is invented here. |
-| **COMMUNITY-REPORTED** | Widely reported by other developers but **not found in Meta's own documentation**. Useful, and explicitly not the same claim as the row above. Applied inline to a single sentence, not to a whole section. |
+
+**THE FIRST THREE ARE RANKED, STRONGEST FIRST, AND THE RANK IS THE POINT.** `WALKED` is the strongest claim this file can make. `DOCUMENTED-FROM-META'S-DOCS` is weaker — believed, not observed. `COMMUNITY-REPORTED` is weaker still, and is the weakest thing here that is still an assertion. **Where two could apply, use the weaker one.** Four labels of apparently equal standing would give this document more categories and no more honesty, which is the failure the labels exist to prevent.
+
+`NOT-YET-ATTEMPTED` sits outside that ranking: it reports *status* — nobody has done this — rather than where a claim came from, so it can coexist with any of the three.
+
+**Scope:** the first three may be applied either to a whole section or inline to a single sentence. Section-level says *everything below came from here*; inline says *this one claim did, and its neighbours did not*. **Do not apply both to the same claim** — an inline label inside a section already carrying it is noise, not emphasis.
 
 As of this draft **exactly one section is WALKED** — *Why App Review is required*, which records a failure this team actually hit. Everything else is research or not started.
 
@@ -168,11 +174,11 @@ Meta's reviewers are looking for one thing: *does the app use this permission th
 Order matters, because the later tracks depend on the earlier ones being accepted:
 
 1. **Rename** (Step 0) — App settings → Basic.
-2. **Business Verification** — Business Manager → Security Centre. Start early; it is the longest pole and the other tracks cannot be granted without it.
+2. **Business Verification** — Business Manager → Security Centre. Start early: Advanced Access is not granted while it is outstanding. *(That dependency is Meta's; **COMMUNITY-REPORTED:** that it is the longest of the three tracks is other developers' experience, not a published figure.)*
 3. **Fill App settings → Basic completely** — privacy URL, terms URL, deauthorize callback, data deletion URL, app logo, category.
 4. **App Review → Permissions and Features** — request Advanced Access on `instagram_business_basic` and `instagram_business_content_publish`, pasting the justification copy above into each.
 5. **Attach the demo video** to the submission (both permissions can reference the same video; say so in each justification).
-6. **Submit**, then watch the App Dashboard *and* the email on the developer account — Meta's feedback arrives by both and the dashboard notification is easy to miss.
+6. **Submit**, then watch the App Dashboard *and* the email on the developer account. *(**COMMUNITY-REPORTED:** that the dashboard notification is easy to miss is other developers' experience — watch both regardless, which costs nothing either way.)*
 
 ---
 
@@ -182,7 +188,7 @@ Order matters, because the later tracks depend on the earlier ones being accepte
 
 - **App Review: 1–3 weeks** typically reported.
 - **Business Verification: longer, and unbounded if documents are rejected.** Each rejection costs a full round trip.
-  - **COMMUNITY-REPORTED:** an address mismatch between the uploaded document and the value entered in Business Manager is frequently cited by other developers as the cause. **Meta's own documentation does not state this**, and no frequency claim here is sourced — treat it as a thing worth double-checking before submitting, not as a documented failure mode.
+  - An address mismatch between the uploaded document and the value entered in Business Manager is frequently cited by other developers as the cause. **Meta's own documentation does not state this**, and no frequency claim in this section is sourced — treat it as a thing worth double-checking before submitting, not as a documented failure mode.
 - Treat the two as sequential for planning even though they run in parallel: Advanced Access will not be granted while Business Verification is outstanding.
 
 ---
