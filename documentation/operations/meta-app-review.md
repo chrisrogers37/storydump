@@ -19,6 +19,8 @@ Every section below carries one. **They are not decoration** — a section resea
 
 `NOT-YET-ATTEMPTED` sits outside that ranking: it reports *status* — nobody has done this — rather than where a claim came from, so it can coexist with any of the three.
 
+**These rules are enforced, not requested.** `tests/test_meta_runbook_markers.py` pins them: a marker the legend does not define, a legend whose WALKED count disagrees with the body, an inline label inside a section already carrying it, a new section with no marker, or the ranking going missing all fail CI. **What it cannot check is whether a marker is CORRECT** — a claim labelled `DOCUMENTED-FROM-META'S-DOCS` that actually came from a forum post looks identical to a true one, and catching that took a human reading Meta's documentation. Sorting a claim into the right bucket is still yours.
+
 **Scope:** the first three may be applied either to a whole section or inline to a single sentence. Section-level says *everything below came from here*; inline says *this one claim did, and its neighbours did not*. **Do not apply both to the same claim** — an inline label inside a section already carrying it is noise, not emphasis.
 
 As of this draft **exactly one section is WALKED** — *Why App Review is required*, which records a failure this team actually hit. Everything else is research or not started.
