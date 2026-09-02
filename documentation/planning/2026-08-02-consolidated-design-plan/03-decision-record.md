@@ -122,7 +122,7 @@ Same relitigation rule. "R3 §n" cites review 4840492901 on PR #731.
 
 **Pass-3 owner items (beside PA-1, which stays open exactly as before):**
 - **D28 ack — closed:** ratified 2026-08-03, conditional as recorded above.
-- **Email provider ack — OPEN:** `07` §1 names **Resend** as the EmailSender default; a new external service is a flagged decision, not an assumption. Until acked, the port ships provider-swappable; X.3's real-send gate is the only hard dependency on the choice.
+- **Email provider ack — OPEN → SUPERSEDED, see pass 4:** `07` §1 names **Resend** as the EmailSender default; a new external service is a flagged decision, not an assumption. Until acked, the port ships provider-swappable; X.3's real-send gate is the only hard dependency on the choice. **(Pass-3 text, historical: body untouched. The ack was reopened by FC-6 and is now RULED in the DEFERRAL direction — pass 4 below. Its last clause is no longer true: X.3's real-send gate is deferred out of the gate (`04`), so the choice has no hard dependency left. Marked rather than rewritten so the pass record stands.)**
 
 ## Pass-4 decisions (2026-08-03 — the #732 liveness finding and the sign-in/invitation rulings, applied)
 

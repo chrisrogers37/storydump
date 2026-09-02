@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **X.3 gate clause 3 was unsatisfiable under the owner's own ruling, so the invitation-email conjunct is DEFERRED OUT of the gate (#1172).** The gate demanded *"a real invitation email delivers end-to-end **through the configured provider**"*, and the owner ruled to defer email — its intended use being referrals and other communications rather than invitation transport. **A clause that names a configured provider cannot be met by a decision not to configure one.**
 
-  **This is a ratification, not an editorial fix: it changes what "passed" means for a gate clause.** The gate now asserts five clauses and names the sixth as deferred.
+  **This is a ratification, not an editorial fix: it changes what "passed" means for a gate clause.** The gate now asserts five clauses and names **clause 3** as deferred. *(Clause 6 is `restore_workspace`, which is ratified and asserted — #1193. The deferred clause is 3.)*
 
   **Deliberately NOT widened.** The obvious wording — letting clause 3 pass on the Telegram arm — would collapse two clauses into one. The Telegram invitation card is its own conjunct and remains so; **the gate now asserts nothing whatever about email delivery** rather than asserting it is satisfied by something else. **A gate with a deferred clause is a truthful board; a gate that passes by redefinition is not.**
 
