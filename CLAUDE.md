@@ -1,7 +1,19 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code when working with this repository.
-Domain-specific rules are in `.claude/rules/` and load automatically when working in matching files.
+Guidance for Claude Code in this repository.
+
+**Read [`AGENTS.md`](AGENTS.md) first.** It is the canonical, vendor-neutral
+guide — project overview, architecture, the command port, setup, commands,
+testing, services, and what is deliberately not wired. This file carries only
+what is specific to Claude Code, plus the safety rules, which are repeated here
+rather than referenced because they are the one thing that must not depend on a
+reader following a link.
+
+Everything shared lives in `AGENTS.md` and is **not** duplicated here. Two
+documents that must be manually kept in agreement are two documents that will
+eventually disagree; the overlap is deliberately as small as the safety
+requirement allows, and `tests/test_agent_docs.py` fails if the two safety lists
+drift apart or if either names a command the CLI does not have.
 
 ---
 
@@ -9,115 +21,56 @@ Domain-specific rules are in `.claude/rules/` and load automatically when workin
 
 **THIS SYSTEM POSTS TO INSTAGRAM. DO NOT TRIGGER POSTING WITHOUT EXPLICIT USER APPROVAL.**
 
-### NEVER run these commands:
+### NEVER run these
+
 ```bash
-storydump-cli process-queue          # Posts to Instagram/Telegram
-storydump-cli process-queue --force  # Posts to Instagram/Telegram
-python -m src.main                   # Starts posting scheduler
-storydump-cli create-schedule        # Modifies production schedule
-storydump-cli reset-queue            # Modifies production queue
-storydump-cli instagram-auth         # Modifies authentication
+python -m src.main                   # Starts the posting scheduler + Telegram bot
+storydump-cli reset-queue            # Mutates the posting queue
+storydump-cli instagram-auth         # Mutates stored authentication
+storydump-cli revoke-tokens          # Destroys stored OAuth tokens for a service
+storydump-cli rotate-keys            # Re-encrypts every stored token row
 ```
 
-### SAFE commands you CAN run:
-```bash
-storydump-cli list-queue             # Reading/inspection only
-storydump-cli list-media
-storydump-cli list-categories
-storydump-cli list-users
-storydump-cli check-health
-storydump-cli instagram-status
-storydump-cli validate-image <path>
-storydump-cli category-mix-history
-storydump-cli sync-media
-storydump-cli sync-status
-storydump-cli backfill-instagram --dry-run
-storydump-cli backfill-status
-storydump-cli pool-health
-storydump-cli dedup-media            # Dry-run by default (--apply mutates)
-pytest                               # Tests - always safe
-```
+### Before ANY posting-related action
 
-### Before ANY posting-related action:
-1. **STOP** and ask the user for explicit confirmation
-2. Explain exactly what will happen
-3. Wait for user to type "yes" or approve
+1. **STOP** and ask the user for explicit confirmation.
+2. Explain exactly what will happen.
+3. Wait for the user to approve.
 
-### Telegram Web (web.telegram.org):
-- **NEVER type or click** — view/screenshot only
-- All bot interactions must go through the database or user's phone
+### Telegram Web (web.telegram.org)
+
+- **NEVER type or click** — view and screenshot only.
+- All bot interactions go through the database or the user's own device.
+
+### Production
+
+Never run against production: the posting scheduler, or mutating SQL on
+`posting_history`.
+
+This list names what is unambiguously destructive; absence from it does not mean
+a command is read-only. See the same section in `AGENTS.md` for the commands
+that write despite reading as inspection.
 
 ---
 
-## Cloud Deployment (Railway + Neon)
+## Domain rules
 
-- **Worker**: `python -m src.main` (scheduler + Telegram bot)
-- **API**: `uvicorn src.api.app:app` (REST API + Mini App)
-- **Database**: Neon PostgreSQL — connect via `psql "$DATABASE_URL"`
-- Env vars are per-service — must set on both worker AND API
-- **NEVER run on production**: `process-queue`, `python -m src.main`, or mutating SQL on `posting_history`
+`.claude/rules/` loads automatically when working in matching files:
 
----
+| File | Covers |
+|---|---|
+| `changelog.md` | CHANGELOG conventions |
+| `database.md` | Schema, migrations, query patterns |
+| `development-patterns.md` | Repo-wide code conventions |
+| `scheduler.md` | Posting scheduler behaviour |
+| `telegram.md` | Telegram bot surface |
+| `testing.md` | Test layout and fixtures |
 
-## Project Overview
+## Working here
 
-**Storydump** is a hosted, multi-tenant Instagram Story scheduling and automation service with Telegram-based team collaboration. We operate one deployment and serve tenants on it; the operator and a tenant are different parties, which is why per-tenant isolation is a product requirement rather than a hardening preference.
-
-**Core Philosophy**: Phased deployment — 100% manual posting (Phase 1), optional Instagram API automation (Phase 2), web UI (Phase 3).
-
-**Tech Stack**: Python 3.10+, FastAPI, Neon PostgreSQL, Telegram Bot, Railway deployment, Next.js landing site.
-
-## Architecture: STRICT SEPARATION OF CONCERNS
-
-**CRITICAL** — each layer is strictly isolated. NEVER violate layer boundaries:
-
-- **CLI/API** → calls Services (never touches Repositories or Models directly)
-- **UI** → calls API (never calls Services directly)
-- **Services** → orchestrate business logic, call Repositories
-- **Repositories** → CRUD operations, return Models
-- **Models** → database schema definitions only (no business logic)
-
-## Essential Commands
-
-```bash
-# Development setup
-python3 -m venv venv && source venv/bin/activate
-pip install -r requirements.txt && pip install -e .
-
-# Common tasks
-storydump-cli check-health
-storydump-cli queue-preview
-storydump-cli list-categories
-storydump-cli update-category-mix
-
-# Testing
-pytest                          # All tests
-pytest tests/src/services/      # Service tests only
-pytest -m unit                  # Unit tests only
-pytest --cov=src                # With coverage
-```
-
-## Feature Flags
-
-```bash
-ENABLE_INSTAGRAM_API=false  # Phase 1: Telegram-only (default)
-ENABLE_INSTAGRAM_API=true   # Phase 2: Hybrid mode
-```
-
-When enabled, Instagram API is tried first. On failure or rate-limit, falls back to Telegram automatically. Posts are never lost.
-
-## Pre-Commit & CI Requirements
-
-**Run before every commit:**
-```bash
-source venv/bin/activate && ruff check . && ruff format --check . && pytest
-```
-
-**ALWAYS update CHANGELOG.md** when creating PRs — CI will fail without it. Use [Keep a Changelog](https://keepachangelog.com/) format, entries under `## [Unreleased]`.
-
-## Documentation
-
-- **Full docs**: `documentation/README.md`
-- **All new docs** go in `documentation/` subdirectories (planning/, guides/, updates/, operations/, api/)
-- **Bug fixes/patches**: Use dated filenames in `documentation/updates/` (e.g., `2026-01-04-bugfixes.md`)
-- **Never** create markdown files scattered in source directories
+- Run `ruff check .` and `ruff format --check .` before pushing; CI gates both.
+- **Always update `CHANGELOG.md`** on a PR — CI fails without it.
+- The test suite needs a real PostgreSQL; set `REQUIRE_TEST_DATABASE=1` so a
+  database that fails to come up produces failures instead of silent skips.
+- New documentation goes in `documentation/` subdirectories, never scattered
+  through source.
