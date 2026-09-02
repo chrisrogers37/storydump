@@ -11,9 +11,11 @@ reader following a link.
 
 Everything shared lives in `AGENTS.md` and is **not** duplicated here. Two
 documents that must be manually kept in agreement are two documents that will
-eventually disagree; the overlap is deliberately as small as the safety
-requirement allows, and `tests/test_agent_docs.py` fails if the two safety lists
-drift apart or if either names a command the CLI does not have.
+eventually disagree, so the overlap is **exactly one section** — the safety
+rules below, repeated because they must not depend on a reader following a
+link. That single overlap is guarded: `tests/test_agent_docs.py` fails if the
+two never-run lists drift apart, or if either document names a command the CLI
+does not have. Nothing else here is shared, and nothing else needs guarding.
 
 ---
 
@@ -68,9 +70,8 @@ that write despite reading as inspection.
 
 ## Working here
 
-- Run `ruff check .` and `ruff format --check .` before pushing; CI gates both.
-- **Always update `CHANGELOG.md`** on a PR — CI fails without it.
-- The test suite needs a real PostgreSQL; set `REQUIRE_TEST_DATABASE=1` so a
-  database that fails to come up produces failures instead of silent skips.
-- New documentation goes in `documentation/` subdirectories, never scattered
-  through source.
+Everything else — setup, commands, testing, services, pre-commit and CI,
+documentation placement — is in [`AGENTS.md`](AGENTS.md) and is deliberately
+not repeated here. If you find yourself about to add operational guidance to
+this file, it belongs there instead: this file is Claude Code specifics plus
+the safety block, and nothing else.
