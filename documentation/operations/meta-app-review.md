@@ -13,8 +13,11 @@ Every section below carries one. **They are not decoration** — a section resea
 | **WALKED** | Somebody on this team performed these steps and this is what happened. |
 | **DOCUMENTED-FROM-META'S-DOCS** | Taken from Meta's published requirements. Believed accurate, **nobody here has done it**. Expect the real flow to differ in detail. |
 | **NOT-YET-ATTEMPTED** | Known to be required; no walkthrough exists and none is invented here. |
+| **COMMUNITY-REPORTED** | Widely reported by other developers but **not found in Meta's own documentation**. Useful, and explicitly not the same claim as the row above. Applied inline to a single sentence, not to a whole section. |
 
-As of this draft **no section is WALKED.** That is the honest state on day one and it is why the marker exists — the first person through each track should promote its marker and correct the steps.
+As of this draft **exactly one section is WALKED** — *Why App Review is required*, which records a failure this team actually hit. Everything else is research or not started.
+
+*(An earlier revision of this paragraph said no section was WALKED, while the document marked one. A legend that miscounts its own labels is the same defect the labels exist to prevent, so it is corrected rather than quietly adjusted.)*
 
 ---
 
@@ -65,7 +68,7 @@ Nothing else is requested. There is no messaging permission anywhere in the tree
 The app still displays as **"Story Poster"**. Change it in **App settings → Basic → Display name** to **Storydump**.
 
 - Users see this string on the OAuth consent screen. Submitting for review while it says "Story Poster" means every reviewer *and* every user sees a name that matches nothing else about the product.
-- Per Meta's documentation a display-name change **does not trigger re-review**. Do it before submission anyway, so the reviewer sees the name the screenshots and videos show.
+- **COMMUNITY-REPORTED:** that a display-name change **does not trigger re-review** is the common report and is what [#410](https://github.com/chrisrogers37/storydump/issues/410) assumed. An earlier revision of this line attributed it to *Meta's documentation*; it was not sourced there. Do it before submission regardless, so the reviewer sees the name the screenshots and videos show.
 
 ---
 
@@ -111,7 +114,9 @@ Meta requires both before granting Advanced Access:
 
 Both receive a **signed request** from Meta, which must be verified against the app secret before anything is acted on — an unverified callback is an unauthenticated delete endpoint.
 
-**Where they get registered:** App Dashboard → **App settings → Basic**, in the *Deauthorize Callback URL* and *Data Deletion Request URL* fields. Both must be `https://` and publicly reachable — Meta probes them at save time, so they have to be deployed before the field will accept them.
+**Where they get registered:** App Dashboard → **App settings → Basic**, in the *Deauthorize Callback URL* and *Data Deletion Request URL* fields. Both must be `https://` and publicly reachable. **Deploy them before filling these fields in** — a URL that is not serving cannot be verified by Meta at any later point either, so there is no ordering in which deploying second helps.
+
+> **COMMUNITY-REPORTED:** that Meta *probes the URL at save time and rejects the field outright* is widely reported by other developers and **was not found in Meta's own documentation**. The advice above does not depend on it being true.
 
 **Fill in the actual paths once alex's PR is up.** They are deliberately blank here rather than guessed; a runbook that names an endpoint the code does not serve is worse than one that names none.
 
@@ -173,20 +178,21 @@ Order matters, because the later tracks depend on the earlier ones being accepte
 
 ## Wait times
 
-**Marker: DOCUMENTED-FROM-META'S-DOCS.**
+**Marker: COMMUNITY-REPORTED — the whole section.** Meta publishes no processing-time commitment for either track, so every number below is other developers' experience, including the one this runbook's own issue carried. Plan against them; do not quote them to anyone as Meta's.
 
-- **App Review: 1–3 weeks** typical.
-- **Business Verification: longer, and unbounded if documents are rejected** — a mismatch between the registered address on the document and the one entered in Business Manager is the usual cause and costs a full round trip.
+- **App Review: 1–3 weeks** typically reported.
+- **Business Verification: longer, and unbounded if documents are rejected.** Each rejection costs a full round trip.
+  - **COMMUNITY-REPORTED:** an address mismatch between the uploaded document and the value entered in Business Manager is frequently cited by other developers as the cause. **Meta's own documentation does not state this**, and no frequency claim here is sourced — treat it as a thing worth double-checking before submitting, not as a documented failure mode.
 - Treat the two as sequential for planning even though they run in parallel: Advanced Access will not be granted while Business Verification is outstanding.
 
 ---
 
 ## If review is rejected
 
-**Marker: DOCUMENTED-FROM-META'S-DOCS.**
+**Marker: COMMUNITY-REPORTED — the whole section.** Meta publishes no taxonomy of rejection causes, so the specifics below are other developers' accounts and this team's inference, not documented behaviour. The instruction in the last bullet is the part that is ours and is binding.
 
 - Meta names the specific permission and gives a reason, usually terse. Read it against the justification copy for *that* permission, not the app as a whole.
-- The two failures worth pre-empting are both video failures: the consent screen not legible, and the published result not shown inside Instagram. Both are cheap to fix and cost a full review cycle.
+- The two failures worth pre-empting are both video failures: the consent screen not legible, and the published result not shown inside Instagram. Both are cheap to fix and cost a full review cycle. *(Commonly reported, not published by Meta. The demo-video script in Track 3 is built around these two — if they turn out to be wrong, that script is what needs revising.)*
 - Resubmission does not reset Business Verification.
 - **Record the rejection reason in this file** when it happens, and promote the relevant section's marker to WALKED. The next person through should not rediscover it.
 
