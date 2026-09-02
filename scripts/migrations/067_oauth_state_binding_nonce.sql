@@ -40,6 +40,14 @@
 -- a 900s TTL, so at most fifteen minutes of in-flight connect attempts are
 -- affected, and the remedy for a user who hits it is to press connect again.
 -- Leaving even one live is strictly worse.
+--
+-- Adoption evidence (`runner adopt`). TWO postconditions, because the rename is
+-- half the change: the first proves the widened constraint landed, the second
+-- proves the old one is GONE rather than sitting alongside it -- a state in
+-- which the biconditional would still forbid a bound connect row and the flow
+-- would be broken in the opposite direction.
+-- runner:postcondition SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_oauth_state_binding_nonce')
+-- runner:postcondition SELECT NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_oauth_state_signin_nonce')
 
 -- The unbound in-flight states. Scoped to the two purposes being widened:
 -- `signin` rows already carry a nonce (the old biconditional required it) and

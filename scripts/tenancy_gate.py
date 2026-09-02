@@ -94,6 +94,15 @@ _TENANCY_IRRELEVANT: tuple[str, ...] = (
     # RLS bit (the reducing hazards the refusal names are all table-shaped).
     "COMMENT ON ",
     "DROP FUNCTION ",
+    # 067 adds row-level DML alongside the `INSERT INTO ` already here. A
+    # DELETE removes ROWS; the four facts this derivation tracks --
+    # tenant_keyed, rls_enabled, rls_forced, policies -- are all properties of
+    # the TABLE, and none of them can be moved by removing rows from it. Note
+    # this is a weaker claim than "harmless": deleting rows can certainly
+    # destroy data, and that is the migration author's argument to make in the
+    # file. It cannot change the tenancy shape, which is the only thing this
+    # allowlist is asserting.
+    "DELETE FROM ",
 )
 
 

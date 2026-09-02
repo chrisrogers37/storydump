@@ -335,6 +335,7 @@ class TestTheBoundaryIsDerivedAndLoud:
             # the 02 section 2 block that prints ig_accounts is
             # content-addressed, and arm (b) never amends.
             "066_no_media_notice_marker.sql",
+            "067_oauth_state_binding_nonce.sql",
         ], (
             f"the target lineage is {above}. If you are landing the next F.2"
             " increment, add it here — deliberately, and at the end: arm (b)"
