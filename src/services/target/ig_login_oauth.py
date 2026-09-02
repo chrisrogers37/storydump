@@ -81,6 +81,25 @@ PROVIDER = "ig_login"
 #: `ck_oauth_state_purpose`'s closed set.
 PURPOSES = ("connect", "reconnect", "signin", "link")
 
+#: Purposes whose callback MUST prove it is the same browser that started the
+#: flow, by presenting the nonce whose hash the state row pins.
+#:
+#: **`signin` was the only member, and that was the vulnerability.** `connect`
+#: and `reconnect` complete by writing a publish-capable credential into the
+#: workspace the state names, and nothing about the callback checked WHO was
+#: completing it: `issue_state` records `user_id`/`workspace_id`, but those
+#: only ATTRIBUTE the write afterwards. So a legitimate admin of their own
+#: workspace could mint a real state, send the genuine provider link to
+#: someone else, and receive that person's credential — every step looking
+#: legitimate to the victim, because every step WAS legitimate except the
+#: binding nobody checked.
+#:
+#: `link` is deliberately absent: its callback is a Telegram `/start` tap, not
+#: a browser redirect, so there is no cookie jar to bind to and requiring one
+#: would refuse every legitimate link. It is bound instead by the tapping
+#: Telegram identity against the row's pinned user (`07` §2, D35).
+NONCE_BOUND_PURPOSES = ("signin", "connect", "reconnect")
+
 
 class OAuthStateRefused(StorydumpError):
     """A state could not be issued or consumed, with the reason NAMED.
@@ -146,6 +165,18 @@ async def issue_state(
         raise OAuthStateRefused(f"unknown purpose {purpose!r}")
     if purpose == "reconnect" and reconnect_target is None:
         raise OAuthStateRefused("reconnect requires a reconnect_target")
+    # Fail CLOSED at issue, not only at consume. A row minted without a nonce
+    # for a bound purpose is a row `consume_state` must refuse, so minting one
+    # can only ever produce a flow that dies at the callback -- and if the
+    # consume-side check were ever loosened, it would silently become an
+    # unbound state again. Refusing here means the unbound state does not
+    # exist, rather than existing and being caught downstream.
+    if purpose in NONCE_BOUND_PURPOSES and cookie_nonce is None:
+        raise OAuthStateRefused(
+            f"{purpose!r} requires a cookie_nonce: this purpose completes in a"
+            " browser and the callback must be able to prove it is the same"
+            " one. A caller that cannot supply one cannot start this flow."
+        )
 
     if purpose == "reconnect":
         await conn.execute(
@@ -247,11 +278,25 @@ async def consume_state(
                 f" not {sorted(allowed)}, and will not be honoured here"
             )
 
-    if row["purpose"] == "signin":
-        if cookie_nonce is None or hash_nonce(cookie_nonce) != row["cookie_nonce_hash"]:
+    if row["purpose"] in NONCE_BOUND_PURPOSES:
+        # TWO conditions, and the first is the one that is easy to omit. A row
+        # carrying no hash must be REFUSED, never waved through: a check of the
+        # form "if a hash is present, match it" is satisfied by every row that
+        # has none, so an unbound state would downgrade itself past the guard.
+        # `issue_state` will not mint such a row, and this does not rely on it.
+        if row["cookie_nonce_hash"] is None:
             raise OAuthStateRefused(
-                "anonymous-state CSRF check failed: the browser presented no "
-                "matching nonce cookie for this state"
+                f"unbound state: this {row['purpose']!r} state was issued with"
+                " no session binding and will not be honoured"
+            )
+        # Constant-time: the presented nonce is attacker-controlled and the
+        # stored value is a secret-derived digest.
+        if cookie_nonce is None or not secrets.compare_digest(
+            hash_nonce(cookie_nonce), row["cookie_nonce_hash"]
+        ):
+            raise OAuthStateRefused(
+                "session-binding check failed: the browser completing this "
+                "flow presented no matching nonce cookie for this state"
             )
     return row
 

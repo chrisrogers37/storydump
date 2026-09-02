@@ -52,7 +52,13 @@ from src.services.target import (
     workspaces,
 )
 from src.services.target.commands import Command, CommandResult
-from src.services.target.ig_login_oauth import issue_state
+from src.api.routes.auth import DRIVE_NONCE_COOKIE, DRIVE_NONCE_COOKIE_PATH
+from src.config.settings import settings
+from src.services.target.ig_login_oauth import (
+    STATE_TTL_SECONDS,
+    issue_state,
+    new_state,
+)
 from src.services.target.unit_of_work import unit_of_work
 
 router = APIRouter(tags=["v1"])
@@ -507,6 +513,11 @@ async def connect_source(
         )
         if purpose is None:
             raise HTTPException(status_code=404, detail="not found")
+        # The binding. Minted HERE, in the adapter, because it is a transport
+        # value: `Command` is documented "never a chat id, a session value or a
+        # transport payload", so the channel-agnostic port cannot carry one --
+        # which is why the executor door cannot start this flow at all.
+        cookie_nonce = new_state()
         state = await issue_state(
             session,
             purpose=purpose,
@@ -514,12 +525,30 @@ async def connect_source(
             user_id=principal.user_id,
             workspace_id=str(ws),
             reconnect_target=str(source_id),
+            cookie_nonce=cookie_nonce,
         )
-    return {
-        "authorization_url": google_drive_oauth.authorization_url(
-            client_id=client_id, redirect_uri=redirect_uri, state=state
-        )
-    }
+    response = JSONResponse(
+        content={
+            "authorization_url": google_drive_oauth.authorization_url(
+                client_id=client_id, redirect_uri=redirect_uri, state=state
+            )
+        }
+    )
+    # `samesite="lax"` because the callback arrives as a top-level GET
+    # navigation from the provider, which lax permits and strict would not --
+    # strict here refuses every legitimate return. Scoped to the Drive
+    # callback's own path: see `DRIVE_NONCE_COOKIE_PATH` for why the sign-in
+    # cookie's path does not reach this leg.
+    response.set_cookie(
+        DRIVE_NONCE_COOKIE,
+        cookie_nonce,
+        max_age=STATE_TTL_SECONDS,
+        httponly=True,
+        secure=settings.SESSION_COOKIE_SECURE,
+        samesite="lax",
+        path=DRIVE_NONCE_COOKIE_PATH,
+    )
+    return response
 
 
 # --- commands -----------------------------------------------------------

@@ -76,6 +76,14 @@ def oauth_db(admin_conn, owner_actor):
         gen.close()
 
 
+#: `connect`/`reconnect` are nonce-bound purposes, so every state in this file
+#: carries one. These tests are about the state MACHINE -- replay, expiry,
+#: cross-workspace, last-issued-wins -- and the binding has its own class
+#: below; passing one shared value keeps the machine tests reading as machine
+#: tests rather than as binding tests.
+GATE_NONCE = "l6-gate-cookie-nonce"
+
+
 def _run(coro):
     """A fresh loop per call — `asyncio.get_event_loop()` RAISES on 3.10 (CI)
     while merely warning on 3.11 (local), so it cannot be used here."""
@@ -202,10 +210,17 @@ class TestStateIssueAndConsume:
         state = _call(
             oauth_db,
             lambda c: oauth.issue_state(
-                c, purpose="connect", user_id=user, workspace_id=ws
+                c,
+                cookie_nonce=GATE_NONCE,
+                purpose="connect",
+                user_id=user,
+                workspace_id=ws,
             ),
         )
-        row = _call(oauth_db, lambda c: oauth.consume_state(c, state=state))
+        row = _call(
+            oauth_db,
+            lambda c: oauth.consume_state(c, state=state, cookie_nonce=GATE_NONCE),
+        )
         assert row["purpose"] == "connect"
         assert str(row["workspace_id"]) == str(ws)
 
@@ -216,6 +231,7 @@ class TestStateIssueAndConsume:
             oauth_db,
             lambda c: oauth.issue_state(
                 c,
+                cookie_nonce=GATE_NONCE,
                 purpose="connect",
                 user_id=oauth_db["user"],
                 workspace_id=oauth_db["ws"],
@@ -230,7 +246,10 @@ class TestStateIssueAndConsume:
             )[0][0]
             is True
         )
-        _call(oauth_db, lambda c: oauth.consume_state(c, state=state))
+        _call(
+            oauth_db,
+            lambda c: oauth.consume_state(c, state=state, cookie_nonce=GATE_NONCE),
+        )
         assert (
             _exec(
                 oauth_db,
@@ -246,14 +265,21 @@ class TestStateIssueAndConsume:
             oauth_db,
             lambda c: oauth.issue_state(
                 c,
+                cookie_nonce=GATE_NONCE,
                 purpose="connect",
                 user_id=oauth_db["user"],
                 workspace_id=oauth_db["ws"],
             ),
         )
-        _call(oauth_db, lambda c: oauth.consume_state(c, state=state))
+        _call(
+            oauth_db,
+            lambda c: oauth.consume_state(c, state=state, cookie_nonce=GATE_NONCE),
+        )
         with pytest.raises(OAuthStateRefused, match="already consumed"):
-            _call(oauth_db, lambda c: oauth.consume_state(c, state=state))
+            _call(
+                oauth_db,
+                lambda c: oauth.consume_state(c, state=state, cookie_nonce=GATE_NONCE),
+            )
 
     def test_EXPIRY_is_refused_BY_NAME_and_is_a_different_reason_than_replay(
         self, oauth_db
@@ -265,6 +291,7 @@ class TestStateIssueAndConsume:
             oauth_db,
             lambda c: oauth.issue_state(
                 c,
+                cookie_nonce=GATE_NONCE,
                 purpose="connect",
                 user_id=oauth_db["user"],
                 workspace_id=oauth_db["ws"],
@@ -277,11 +304,17 @@ class TestStateIssueAndConsume:
             (state,),
         )
         with pytest.raises(OAuthStateRefused, match="expired"):
-            _call(oauth_db, lambda c: oauth.consume_state(c, state=state))
+            _call(
+                oauth_db,
+                lambda c: oauth.consume_state(c, state=state, cookie_nonce=GATE_NONCE),
+            )
 
     def test_an_UNKNOWN_state_is_refused_BY_NAME(self, oauth_db):
         with pytest.raises(OAuthStateRefused, match="unknown state"):
-            _call(oauth_db, lambda c: oauth.consume_state(c, state="nope"))
+            _call(
+                oauth_db,
+                lambda c: oauth.consume_state(c, state="nope", cookie_nonce=GATE_NONCE),
+            )
 
     def test_CROSS_WORKSPACE_replay_is_refused(self, oauth_db):
         """`07` §2: the row pins the workspace, so a callback cannot be replayed
@@ -290,6 +323,7 @@ class TestStateIssueAndConsume:
             oauth_db,
             lambda c: oauth.issue_state(
                 c,
+                cookie_nonce=GATE_NONCE,
                 purpose="connect",
                 user_id=oauth_db["user"],
                 workspace_id=oauth_db["ws"],
@@ -300,7 +334,7 @@ class TestStateIssueAndConsume:
             _call(
                 oauth_db,
                 lambda c: oauth.consume_state(
-                    c, state=state, expected_workspace_id=other
+                    c, cookie_nonce=GATE_NONCE, state=state, expected_workspace_id=other
                 ),
             )
 
@@ -310,6 +344,7 @@ class TestStateIssueAndConsume:
             oauth_db,
             lambda c: oauth.issue_state(
                 c,
+                cookie_nonce=GATE_NONCE,
                 purpose="connect",
                 user_id=oauth_db["user"],
                 workspace_id=oauth_db["ws"],
@@ -336,6 +371,7 @@ class TestReconnectIsLastIssuedWins:
             oauth_db,
             lambda c: oauth.issue_state(
                 c,
+                cookie_nonce=GATE_NONCE,
                 purpose="reconnect",
                 user_id=oauth_db["user"],
                 workspace_id=oauth_db["ws"],
@@ -346,6 +382,7 @@ class TestReconnectIsLastIssuedWins:
             oauth_db,
             lambda c: oauth.issue_state(
                 c,
+                cookie_nonce=GATE_NONCE,
                 purpose="reconnect",
                 user_id=oauth_db["user"],
                 workspace_id=oauth_db["ws"],
@@ -353,8 +390,14 @@ class TestReconnectIsLastIssuedWins:
             ),
         )
         with pytest.raises(OAuthStateRefused, match="already consumed"):
-            _call(oauth_db, lambda c: oauth.consume_state(c, state=first))
-        row = _call(oauth_db, lambda c: oauth.consume_state(c, state=second))
+            _call(
+                oauth_db,
+                lambda c: oauth.consume_state(c, state=first, cookie_nonce=GATE_NONCE),
+            )
+        row = _call(
+            oauth_db,
+            lambda c: oauth.consume_state(c, state=second, cookie_nonce=GATE_NONCE),
+        )
         assert row["purpose"] == "reconnect"
 
     def test_at_most_one_live_reconnect_state_per_target_at_any_commit(self, oauth_db):
@@ -364,6 +407,7 @@ class TestReconnectIsLastIssuedWins:
                 oauth_db,
                 lambda c: oauth.issue_state(
                     c,
+                    cookie_nonce=GATE_NONCE,
                     purpose="reconnect",
                     user_id=oauth_db["user"],
                     workspace_id=oauth_db["ws"],
@@ -386,6 +430,7 @@ class TestReconnectIsLastIssuedWins:
                 oauth_db,
                 lambda c: oauth.issue_state(
                     c,
+                    cookie_nonce=GATE_NONCE,
                     purpose="reconnect",
                     user_id=oauth_db["user"],
                     workspace_id=oauth_db["ws"],
@@ -544,6 +589,7 @@ class TestReapExpiredCoversTheOauthStatesClass:
             oauth_db,
             lambda c: oauth.issue_state(
                 c,
+                cookie_nonce=GATE_NONCE,
                 purpose="connect",
                 user_id=oauth_db["user"],
                 workspace_id=oauth_db["ws"],
@@ -553,16 +599,21 @@ class TestReapExpiredCoversTheOauthStatesClass:
             oauth_db,
             lambda c: oauth.issue_state(
                 c,
+                cookie_nonce=GATE_NONCE,
                 purpose="connect",
                 user_id=oauth_db["user"],
                 workspace_id=oauth_db["ws"],
             ),
         )
-        _call(oauth_db, lambda c: oauth.consume_state(c, state=consumed))
+        _call(
+            oauth_db,
+            lambda c: oauth.consume_state(c, state=consumed, cookie_nonce=GATE_NONCE),
+        )
         stale = _call(
             oauth_db,
             lambda c: oauth.issue_state(
                 c,
+                cookie_nonce=GATE_NONCE,
                 purpose="connect",
                 user_id=oauth_db["user"],
                 workspace_id=oauth_db["ws"],
@@ -591,12 +642,16 @@ class TestReapExpiredCoversTheOauthStatesClass:
                 oauth_db,
                 lambda c: oauth.issue_state(
                     c,
+                    cookie_nonce=GATE_NONCE,
                     purpose="connect",
                     user_id=oauth_db["user"],
                     workspace_id=oauth_db["ws"],
                 ),
             )
-            _call(oauth_db, lambda c: oauth.consume_state(c, state=s))
+            _call(
+                oauth_db,
+                lambda c: oauth.consume_state(c, state=s, cookie_nonce=GATE_NONCE),
+            )
         assert _call(oauth_db, lambda c: oauth.reap_expired_states(c, limit=2)) == 2
         assert (
             _exec(oauth_db, "SELECT count(*) FROM oauth_states", fetch=True)[0][0] == 2
@@ -609,9 +664,18 @@ class TestTheGuardsAreLoadBearing:
     def test_dropping_ck_oauth_state_context_lets_an_unpinned_connect_through(
         self, oauth_db
     ):
+        # The row carries a `cookie_nonce_hash` so that the OTHER constraint --
+        # `ck_oauth_state_binding_nonce`, which requires one for `connect` --
+        # is satisfied and this test still isolates the context guard. Without
+        # it both constraints reject the insert, the drop below changes
+        # nothing, and the test would pass for the wrong reason: it would prove
+        # only that *some* constraint refuses, which is what it exists to rule
+        # out.
         bad = (
-            "INSERT INTO oauth_states (state, provider, purpose, expires_at)"
-            " VALUES (%s, 'ig_login', 'connect', now() + interval '5 minutes')"
+            "INSERT INTO oauth_states"
+            " (state, provider, purpose, cookie_nonce_hash, expires_at)"
+            " VALUES (%s, 'ig_login', 'connect', repeat('a', 64),"
+            "         now() + interval '5 minutes')"
         )
         with pytest.raises(psycopg2.errors.CheckViolation):
             _exec(oauth_db, bad, (f"s-{uuid.uuid4()}",))
@@ -642,3 +706,188 @@ class TestTheGuardsAreLoadBearing:
                 "   WHEN 'link' THEN user_id IS NOT NULL AND workspace_id IS NULL"
                 "   ELSE user_id IS NOT NULL AND workspace_id IS NOT NULL END)",
             )
+
+
+class TestConnectAndReconnectAreBoundToTheIssuingBrowser:
+    """The session-binding gap (#1213 follow-up), against the real database.
+
+    `connect`/`reconnect` complete by writing a publish-capable credential into
+    the workspace the state names, and nothing checked WHO completed the
+    callback: `issue_state` records `user_id`/`workspace_id`, but those
+    attribute the write afterwards rather than gating it, and the nonce check
+    was gated to `purpose == 'signin'` by a literal comparison.
+
+    So a legitimate admin of their own workspace could mint a real state, send
+    the genuine provider link to someone else, and receive that person's
+    credential. Every step looks legitimate to the recipient because every step
+    IS legitimate except the binding.
+
+    **The attack is modelled, never performed.** No provider is contacted and
+    no credential is exchanged; what is exercised is the one predicate the
+    attack turns on — whether a callback carrying a different browser's cookie
+    (or none) is honoured. That is the whole of the defect at this layer.
+    """
+
+    def _issue(self, oauth_db, purpose, nonce, target=None):
+        return _call(
+            oauth_db,
+            lambda c: oauth.issue_state(
+                c,
+                purpose=purpose,
+                cookie_nonce=nonce,
+                user_id=oauth_db["user"],
+                workspace_id=oauth_db["ws"],
+                reconnect_target=target,
+            ),
+        )
+
+    def test_the_legitimate_round_trip_still_completes(self, oauth_db):
+        """Positive control FIRST: a refusal test proves nothing if the happy
+        path was already broken by the same change."""
+        state = self._issue(oauth_db, "connect", "browser-A")
+        row = _call(
+            oauth_db,
+            lambda c: oauth.consume_state(c, state=state, cookie_nonce="browser-A"),
+        )
+        assert row["purpose"] == "connect"
+        assert str(row["workspace_id"]) == str(oauth_db["ws"])
+
+    def test_A_DIFFERENT_BROWSER_CANNOT_COMPLETE_A_CONNECT(self, oauth_db):
+        """THE DEFECT. The victim's browser holds no nonce for the attacker's
+        state, so it presents a different one -- or none at all."""
+        state = self._issue(oauth_db, "connect", "attacker-browser")
+        with pytest.raises(oauth.OAuthStateRefused, match="session-binding"):
+            _call(
+                oauth_db,
+                lambda c: oauth.consume_state(
+                    c, state=state, cookie_nonce="victim-browser"
+                ),
+            )
+
+    def test_NO_COOKIE_AT_ALL_CANNOT_COMPLETE_A_CONNECT(self, oauth_db):
+        """The likelier shape of the same attack: the recipient's browser was
+        never given a cookie for this flow, so it sends none."""
+        state = self._issue(oauth_db, "connect", "attacker-browser")
+        with pytest.raises(oauth.OAuthStateRefused, match="session-binding"):
+            _call(oauth_db, lambda c: oauth.consume_state(c, state=state))
+
+    def test_RECONNECT_IS_BOUND_TOO_not_only_connect(self, oauth_db):
+        """Reconnect re-credentials an EXISTING source, so an unbound one
+        replaces a live credential rather than adding a new one."""
+        state = self._issue(
+            oauth_db, "reconnect", "attacker-browser", target=oauth_db["iga"]
+        )
+        with pytest.raises(oauth.OAuthStateRefused, match="session-binding"):
+            _call(
+                oauth_db,
+                lambda c: oauth.consume_state(
+                    c, state=state, cookie_nonce="victim-browser"
+                ),
+            )
+
+    def test_ISSUE_FAILS_CLOSED_rather_than_minting_an_unbindable_state(self, oauth_db):
+        """A state minted with nothing to bind to could only ever die at the
+        callback. Refusing at issue means it never exists."""
+        for purpose in ("connect", "reconnect"):
+            with pytest.raises(
+                oauth.OAuthStateRefused, match="requires a cookie_nonce"
+            ):
+                _call(
+                    oauth_db,
+                    lambda c, p=purpose: oauth.issue_state(
+                        c,
+                        purpose=p,
+                        user_id=oauth_db["user"],
+                        workspace_id=oauth_db["ws"],
+                        reconnect_target=oauth_db["iga"],
+                    ),
+                )
+
+    def test_AN_UNBOUND_ROW_IS_REFUSED_BY_THE_CODE_not_only_by_the_schema(
+        self, oauth_db
+    ):
+        """The two guards are independent, and this proves the code half.
+
+        `ck_oauth_state_binding_nonce` makes an unbound `connect` row
+        unstorable, so `consume_state`'s own check can never fire in
+        production -- which is exactly why it must be tested with the schema
+        guard removed. A check of the form "if a hash is present, match it"
+        passes every row that has none; the code refuses on ABSENCE, and only
+        dropping the constraint can demonstrate that.
+        """
+        _exec(
+            oauth_db,
+            "ALTER TABLE oauth_states DROP CONSTRAINT ck_oauth_state_binding_nonce",
+        )
+        try:
+            token = f"s-{uuid.uuid4()}"
+            _exec(
+                oauth_db,
+                "INSERT INTO oauth_states"
+                " (state, user_id, workspace_id, provider, purpose, expires_at)"
+                " VALUES (%s, %s, %s, 'ig_login', 'connect',"
+                "         now() + interval '5 minutes')",
+                (token, oauth_db["user"], oauth_db["ws"]),
+            )
+            with pytest.raises(oauth.OAuthStateRefused, match="unbound state"):
+                _call(
+                    oauth_db,
+                    lambda c: oauth.consume_state(
+                        c, state=token, cookie_nonce="any-nonce"
+                    ),
+                )
+        finally:
+            # The row must go BEFORE the constraint returns: the CAS marked it
+            # consumed but did not remove it, and the constraint applies to
+            # every row regardless of `consumed_at` -- so re-adding it over a
+            # surviving unbound row fails, and would leave the table without
+            # the guard for every later test in the module.
+            _exec(oauth_db, "DELETE FROM oauth_states WHERE state = %s", (token,))
+            _exec(
+                oauth_db,
+                "ALTER TABLE oauth_states ADD CONSTRAINT"
+                " ck_oauth_state_binding_nonce CHECK ("
+                " (purpose IN ('signin', 'connect', 'reconnect'))"
+                " = (cookie_nonce_hash IS NOT NULL))",
+            )
+
+    def test_SIGNIN_IS_UNCHANGED(self, oauth_db):
+        """Regression guard on the generalisation: sign-in was already bound,
+        and widening the rule must not have altered it in either direction."""
+        state = _call(
+            oauth_db,
+            lambda c: oauth.issue_state(c, purpose="signin", cookie_nonce="browser-A"),
+        )
+        with pytest.raises(oauth.OAuthStateRefused, match="session-binding"):
+            _call(
+                oauth_db,
+                lambda c: oauth.consume_state(c, state=state, cookie_nonce="browser-B"),
+            )
+        state2 = _call(
+            oauth_db,
+            lambda c: oauth.issue_state(c, purpose="signin", cookie_nonce="browser-A"),
+        )
+        assert (
+            _call(
+                oauth_db,
+                lambda c: oauth.consume_state(
+                    c, state=state2, cookie_nonce="browser-A"
+                ),
+            )["purpose"]
+            == "signin"
+        )
+
+    def test_LINK_IS_DELIBERATELY_NOT_BOUND(self, oauth_db):
+        """`link` completes as a Telegram `/start` tap, not a browser redirect.
+        Requiring a cookie would refuse every legitimate link, so it is outside
+        the rule -- and that exclusion is asserted, not left to inference."""
+        state = _call(
+            oauth_db,
+            lambda c: oauth.issue_state(
+                c, purpose="link", user_id=oauth_db["user"], provider="telegram"
+            ),
+        )
+        assert (
+            _call(oauth_db, lambda c: oauth.consume_state(c, state=state))["purpose"]
+            == "link"
+        )

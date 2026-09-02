@@ -272,9 +272,10 @@ class TestAgainstTheRealDocs:
         # §8's #883 self-transition guard (061) made it 19, the #942
         # reauth-prompt leg (062) 20, #982's refresh-leg provider guard (063)
         # 21, §10's #1037 memberships door (064) 22, §11's
-        # `alert_stranded_sources` kind (065) 23, and §12's #1090 D3 no-media
-        # notice marker (066) makes it 24.
-        assert classes.count("normative") == 24
+        # `alert_stranded_sources` kind (065) 23, §12's #1090 D3 no-media
+        # notice marker (066) 24, and §13's binding-nonce widening (067 --
+        # the nonce covers connect/reconnect, not signin alone) makes it 25.
+        assert classes.count("normative") == 25
         assert classes.count("illustrative") == 4
 
     def test_real_stream_expands_the_fifteen_policies(self):

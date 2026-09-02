@@ -908,33 +908,45 @@ class TestTheConnectTrioIsThinAndTenantBound:
         assert exc.value.reason == "illegal_transition"
 
     @pytest.mark.asyncio
-    async def test_connect_mints_the_state_the_callback_will_consume(
+    async def test_the_port_REFUSES_to_start_a_browser_flow_it_cannot_bind(
         self, lane_db, sync_conn
     ):
-        """Initiating IS minting the state row — #1065 shipped the callback and
-        no start leg, so until this executor a Drive connect could not begin.
-        The result carries the state and NOT a URL: composing one needs the
-        redirect URI that `src/api/google_client.py` owns, and no service
-        module imports from `src.api`."""
+        """**The port REFUSES to start this flow, and that is the fix, not a
+        regression.**
+
+        This executor used to mint the state row. It cannot any more: a
+        `connect` state is only safe if the callback can prove it is the same
+        browser that started it, that proof is a nonce whose hash the row
+        pins, and a nonce is a transport value -- which `Command` is documented
+        never to carry ("Resolved ids only -- never a chat id, a session value
+        or a transport payload"). A channel-agnostic port has nothing to bind
+        to, so minting here could only ever produce a state that `consume_state`
+        must refuse.
+
+        Without the refusal the executor minted an UNBOUND state: a legitimate
+        admin could pass the resulting link to someone else and receive their
+        publish-capable credential. The web route
+        `POST /workspaces/{ws}/sources/{source_id}/connect` owns this flow --
+        it serves both purposes, it is what the dashboard calls, and it is
+        where a cookie can be set.
+
+        Asserted on the ROW as well as the refusal: a refusal that still left
+        a state behind would be the same defect wearing an error message.
+        """
         chain = seed_workspace_chain(sync_conn, "p4-mint")
 
-        res = await _command(lane_db, "connect_account", chain, source_id=chain["src"])
-        assert res.outcome == "executed"
-        assert res.data["purpose"] == "connect"
-        assert res.data["provider"] == "gdrive"
-        assert res.data["state"] and "http" not in str(res.data.get("state"))
+        with pytest.raises(CommandRefused) as exc:
+            await _command(lane_db, "connect_account", chain, source_id=chain["src"])
+        assert exc.value.reason == "illegal_transition"
+        assert "session binding" in str(exc.value)
 
         with sync_conn.cursor() as cur:
             cur.execute(
-                "SELECT workspace_id, reconnect_target, provider, consumed_at"
-                " FROM oauth_states WHERE state = %s",
-                (res.data["state"],),
+                "SELECT count(*) FROM oauth_states"
+                " WHERE workspace_id = %s AND reconnect_target = %s",
+                (chain["ws"], chain["src"]),
             )
-            row = cur.fetchone()
-        assert row is not None, "the callback has nothing to consume otherwise"
-        assert str(row[0]) == str(chain["ws"])
-        assert str(row[1]) == str(chain["src"])
-        assert row[2] == "gdrive" and row[3] is None
+            assert cur.fetchone()[0] == 0, "a refused connect must mint nothing"
 
 
 class TestFailureRouting:

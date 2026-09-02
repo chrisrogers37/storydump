@@ -70,7 +70,12 @@ RLS class: `session_tokens`, `oauth_states`, and `service_tokens` are **auth-pla
 
 - **Issuance, by purpose.** `connect`/`reconnect`: only from an authenticated session whose user holds admin+ in `workspace_id` (checked at issue AND at callback — the row pins both, so a callback cannot be replayed into a different workspace). `link`: only from an authenticated session; the row pins the user, and the callback attaches the new identity to exactly that user (D35). `signin`: anonymous — that is its purpose; its guards are the next bullet plus the `preauth_ip` admission (§1).
 - **Anonymous-state CSRF (`signin` — the replacement for session binding):** the issue response sets a short-TTL httpOnly cookie carrying a random nonce and stores its hash in `cookie_nonce_hash`; the callback requires the double-submit (cookie present, hash matches the row) — a cross-site victim's browser would carry no matching cookie for an attacker-supplied state. The id_token is additionally bound to the row via the OIDC `nonce` claim: the authorization request sends `nonce = SHA256(state)`, and verification requires the claim to equal the hash of the state the callback presented — a token minted for one state row cannot be replayed against another. Everything else — one-shot CAS consume, TTL, reaper — is the same machinery every purpose uses.
-- Callback consume is one-shot CAS (`… WHERE state = :s AND consumed_at IS NULL AND expires_at > now() RETURNING …`); a consumed/expired/unknown state is rejected cold. For session-bound purposes CSRF safety comes from the state being unguessable, single-use, and session-bound; for `signin` it comes from the cookie-nonce + OIDC-nonce pair above.
+- Callback consume is one-shot CAS (`… WHERE state = :s AND consumed_at IS NULL AND expires_at > now() RETURNING …`); a consumed/expired/unknown state is rejected cold.
+- **Every browser-completed purpose is bound to the browser that started it, by the cookie nonce** — `signin`, `connect` and `reconnect` alike (`ig_login_oauth.NONCE_BOUND_PURPOSES`). `issue_state` refuses to mint one of these without a nonce, and `consume_state` refuses a row that carries no hash as well as one whose hash does not match, so an unbound state cannot exist and could not pass if it did.
+
+  **An earlier version of this document claimed the state was already "unguessable, single-use, and session-bound", and the third was false.** It was true only for `signin`. `connect`/`reconnect` recorded `user_id` and `workspace_id` but VERIFIED neither at consume — those fields attribute the write afterwards, they do not gate it — and the nonce check was gated to `purpose == "signin"` by a literal comparison. Nothing checked who was completing the flow, so a legitimate admin of their own workspace could mint a real state, send the genuine provider link onward, and receive the recipient's publish-capable credential into their own workspace. Every step looked legitimate to the recipient because every step *was* legitimate except the binding. Corrected in code and here together, because a security model that overstates a property is worse than one that omits it: the overstatement is what stops anyone looking.
+
+  `link` is deliberately outside this set: it completes as a Telegram `/start` tap rather than a browser redirect, so there is no cookie jar to bind to; it is bound instead by the tapping Telegram identity against the row's pinned user (D35 below).
 - **The start-token door (one door, two named purposes — D33/D35):** the Telegram deep link `t.me/<bot>?start=<payload>` serves two flows, kept apart by a payload prefix that names the purpose. `inv-<token>` resolves **only** against `workspace_invitations.token_hash` (membership — `02` §1, `06` §2); `link-<state>` resolves **only** against `oauth_states` rows with `purpose='link', provider='telegram'` — the state value *is* the one-shot start token (unguessable, stored, CAS-consumed; a stateless signed token could not be one-shot). `/start` with a link token binds the tapping Telegram identity to the row's pinned user. An invite token cannot link identities and a link token cannot grant membership — enforced by disjoint lookup tables, not convention.
 - **Reconnect binding:** `purpose='reconnect'` pins the exact credential owner being replaced; the callback transaction swaps `encrypted_payload` in place (same row id — no window where the account has zero credentials) and flips `ig_accounts.state` `reauth_required → active`. **Concurrent reconnects — "last issued wins", made true of the schema (pass 3; R3 review §6.6: the pass-2 "last consumed wins" claim was false — independently issued state rows never consumed one another, so both callbacks could land):** issuing a reconnect state **invalidates prior live states for the same target in the issue transaction** — `UPDATE oauth_states SET consumed_at = now() WHERE purpose = 'reconnect' AND reconnect_target = :target AND consumed_at IS NULL` — so at most one live state exists per target at any commit; the callback CAS consumes it one-shot, and a superseded state's callback finds it consumed and shows "a newer reconnect superseded this one". Connect-vs-reconnect races on the same account still collapse on `uq_credential_per_account`.
 
@@ -691,4 +696,48 @@ COMMENT ON COLUMN ig_accounts.last_no_media_notice_at IS
   'transaction as the outbox row, so a rolled-back plan takes its notice with '
   'it. The dedup window is 05 (24 h) and lives in WorkerConfig, not here: the '
   'column records WHEN, never HOW OFTEN.';
+```
+
+## §13 The binding nonce covers connect and reconnect (067, #1213 follow-up)
+
+`060` wrote the nonce rule as a biconditional on `signin` alone, which does not
+merely permit an unbound `connect` state — it **requires** one, because a
+`connect` row carrying a nonce was rejected by the database. Schema and code
+agreed and were wrong in the same direction: `consume_state` gated its nonce
+check on `purpose == 'signin'`, and this constraint guaranteed there would
+never be anything to check for the other purposes.
+
+What that bought: `connect`/`reconnect` complete by writing a publish-capable
+credential into the workspace the state names, and nothing verified **who**
+completed the callback. `user_id`/`workspace_id` are recorded at issue, but
+they attribute the write afterwards — they do not gate it.
+
+`link` stays outside the rule: it completes as a Telegram `/start` tap, so
+there is no cookie jar to bind to, and requiring one would refuse every
+legitimate link.
+
+The in-flight unbound rows are **deleted, not migrated** — a live `connect` row
+with a NULL nonce is exactly the exploitable object this removes, and it cannot
+be given a nonce retroactively because the browser that would hold the matching
+cookie never received one. Bounded by the 900s TTL.
+
+Appends rather than amends, for the same reason §10, §11 and §12 did — the
+`§2` block that prints `oauth_states` is content-addressed and arm (b) is an
+ordered prefix.
+
+```sql
+-- The unbound in-flight states. Scoped to the two purposes being widened:
+-- signin rows already carry a nonce (the old biconditional required it) and
+-- link rows are outside the new rule, so neither is touched.
+DELETE FROM oauth_states
+ WHERE purpose IN ('connect', 'reconnect')
+   AND cookie_nonce_hash IS NULL;
+
+ALTER TABLE oauth_states
+  DROP CONSTRAINT ck_oauth_state_signin_nonce;
+
+ALTER TABLE oauth_states
+  ADD CONSTRAINT ck_oauth_state_binding_nonce CHECK (
+    (purpose IN ('signin', 'connect', 'reconnect'))
+      = (cookie_nonce_hash IS NOT NULL));
 ```

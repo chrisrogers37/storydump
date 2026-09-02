@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **OAuth `connect`/`reconnect` state is bound to the browser that issued it (security).** The callback verified nothing about **who** was completing the flow. `issue_state` records `user_id` and `workspace_id`, but those attribute the write afterwards — they do not gate it — and `consume_state`'s nonce check was gated to `purpose == "signin"` by a literal comparison. So a legitimate admin of their own workspace could mint a real `state`, send the genuine provider link to someone else, and receive that person's publish-capable credential into their own workspace. Every step looks legitimate to the recipient because every step **is** legitimate except the binding.
+
+  **The schema encoded the same defect, and more strongly than the code did.** `060`'s `ck_oauth_state_signin_nonce` is a biconditional — `(purpose = 'signin') = (cookie_nonce_hash IS NOT NULL)` — which does not merely permit an unbound `connect` row, it **requires** one: a `connect` row carrying a nonce was rejected by the database. Schema and code agreed and were wrong in the same direction, which is why reading either alone made the other look correct. Migration `067` widens it and renames it to `ck_oauth_state_binding_nonce`, because the old name states the defect.
+
+  **One mechanism, three purposes** — sign-in's existing nonce cookie, extended rather than replaced. `issue_state` now fails **closed**, refusing to mint a bound purpose with nothing to bind to, so an unbound state does not exist rather than existing and dying at the callback; `consume_state` refuses a row carrying **no** hash as well as one whose hash does not match, because "if a hash is present, match it" is satisfied by every row that has none. **PKCE was considered and rejected**: it binds the code exchange to the client instance, and our client instance is the server, shared between attacker and victim — it defends code interception, not this.
+
+  **`link` is deliberately excluded** and asserted so: it completes as a Telegram `/start` tap, so there is no cookie jar, and requiring one would refuse every legitimate link. **The Drive cookie needed its own path** — RFC 6265 requires the character after the cookie-path prefix to be `/`, and in `/auth/google-drive/callback` it is `-`, so reusing sign-in's `/auth/google` path would have sent no cookie and refused every legitimate Drive callback while looking like a working binding.
+
+  **The command port can no longer start these flows, structurally rather than by omission.** `Command` is documented "Resolved ids only — never a chat id, a session value or a transport payload", and a browser nonce is exactly a transport value, so the channel-agnostic port cannot carry one; `connect_account`/`reconnect_account` now refuse by name and point at the web route, which the dashboard already uses and which serves both purposes.
+
+  **In-flight unbound rows are deleted, not migrated** — a live `connect` row with a NULL nonce is precisely the exploitable object, and it cannot be given a nonce retroactively because the browser that would hold the cookie never received one. Bounded by the 900s TTL.
+
+  Scope note: **Instagram has no OAuth callback route in this app** — the fix is in the shared `issue_state`/`consume_state`, so `ig_login`'s `connect`/`reconnect` purposes are covered before that surface is ever wired. Every new assertion was reverted individually and confirmed red for its own defect.
+
 ### Added
 
 - **X.3 gate clause 3 was unsatisfiable under the owner's own ruling, so the invitation-email conjunct is DEFERRED OUT of the gate (#1172).** The gate demanded *"a real invitation email delivers end-to-end **through the configured provider**"*, and the owner ruled to defer email — its intended use being referrals and other communications rather than invitation transport. **A clause that names a configured provider cannot be met by a decision not to configure one.**

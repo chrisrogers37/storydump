@@ -92,9 +92,16 @@ class OAuthState(TargetBase):
             " END",
             name="ck_oauth_state_context",
         ),
+        # Every browser-completed purpose carries a binding nonce -- `signin`,
+        # `connect` and `reconnect` alike (migration 067). `link` is outside
+        # the rule: it completes as a Telegram `/start` tap, so there is no
+        # cookie jar to bind to. Kept a biconditional rather than a one-way
+        # implication, so a nonce on a purpose that cannot use one is a schema
+        # error rather than a silently ignored column.
         CheckConstraint(
-            "(purpose = 'signin') = (cookie_nonce_hash IS NOT NULL)",
-            name="ck_oauth_state_signin_nonce",
+            "(purpose IN ('signin', 'connect', 'reconnect'))"
+            " = (cookie_nonce_hash IS NOT NULL)",
+            name="ck_oauth_state_binding_nonce",
         ),
     )
 

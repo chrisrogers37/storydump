@@ -200,6 +200,13 @@
       "label": "\u00a712 no-media notice marker (066, #1090 D3) \u2014 ig_accounts.last_no_media_notice_at",
       "doc": "07-security-model.md",
       "ordinal": 10
+    },
+    {
+      "sha256": "4ab530045550359b21e292c1c89a2e80406d3494fd9582e0b5d91c9d8e1ead91",
+      "class": "normative",
+      "label": "\u00a713 oauth state binding nonce (067, #1213 follow-up) \u2014 the nonce covers connect/reconnect, not signin alone",
+      "doc": "07-security-model.md",
+      "ordinal": 11
     }
   ],
   "policy_expansion": {

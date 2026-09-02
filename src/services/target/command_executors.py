@@ -70,7 +70,6 @@ from src.services.target import (
     readers,
     workspaces,
 )
-from src.services.target.ig_login_oauth import issue_state
 from src.services.target.commands import Command, CommandRefused, CommandResult
 from src.services.target.intent_ledger import IntentTransitionRefused
 
@@ -381,22 +380,30 @@ async def _begin_drive_link(session, command: Command, *, expect: str) -> Comman
             "illegal_transition",
             f"source {source_id} needs {purpose}, not {expect}",
         )
-    state = await issue_state(
-        session,
-        purpose=purpose,
-        user_id=command.actor_user_id,
-        workspace_id=command.workspace_id,
-        reconnect_target=source_id,
-        provider=google_drive_oauth.PROVIDER,
-    )
-    return CommandResult(
-        "executed",
-        {
-            "source_id": source_id,
-            "provider": google_drive_oauth.PROVIDER,
-            "purpose": purpose,
-            "state": state,
-        },
+    # THE PORT CANNOT START THIS FLOW, and the reason is structural rather
+    # than an omission to be plumbed around.
+    #
+    # `connect`/`reconnect` complete in a BROWSER, and the callback has to
+    # prove it is the same browser that started the flow -- otherwise a
+    # legitimate admin can mint a real state, pass the genuine provider link
+    # to someone else, and receive that person's publish-capable credential
+    # into their own workspace. The proof is a nonce whose hash the state row
+    # pins, and the nonce is a transport value: `Command` is documented
+    # "Resolved ids only -- never a chat id, a session value or a transport
+    # payload", so this door cannot carry one without breaking the invariant
+    # that makes the port channel-agnostic.
+    #
+    # So it refuses BY NAME rather than minting a state that `consume_state`
+    # would later refuse anyway. The web adapter owns this flow
+    # (`POST /workspaces/{ws}/sources/{source_id}/connect`), which is both
+    # purposes, is what the dashboard already calls, and is where a cookie can
+    # be set. A chat-side door for it needs a binding a chat can actually
+    # provide, which is a design question rather than a wiring one.
+    raise CommandRefused(
+        "illegal_transition",
+        f"{purpose} for source {source_id} is a browser redirect flow and"
+        " cannot be started through the command port, which carries no session"
+        " binding; use POST /workspaces/{ws}/sources/{source_id}/connect",
     )
 
 

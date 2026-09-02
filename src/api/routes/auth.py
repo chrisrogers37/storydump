@@ -84,6 +84,24 @@ router = APIRouter(tags=["auth"])
 NONCE_COOKIE = "sd_oauth_nonce"
 NONCE_COOKIE_PATH = "/auth/google"
 
+#: The Drive connect/reconnect leg's binding cookie. Same MECHANISM as
+#: `NONCE_COOKIE` -- one scheme, not two -- but a distinct name and path, for
+#: two independent reasons.
+#:
+#: **Path, because `/auth/google` does not cover the Drive callback.** RFC 6265
+#: path-matching requires the character following the cookie-path prefix to be
+#: `/`; in `/auth/google-drive/callback` it is `-`. So the sign-in cookie is
+#: NOT sent to this leg, and reusing its path would have refused every
+#: legitimate Drive callback while looking like a working binding.
+#:
+#: **Name, because the sign-in path must not be able to break.** Same-name
+#: cookies at these two paths are mutually exclusive under a correct reading of
+#: the same rule, so one name would also work -- but it would make sign-in's
+#: behaviour depend on precise path-matching in every browser, to save nothing.
+#: A distinct name cannot collide with sign-in in any implementation.
+DRIVE_NONCE_COOKIE = "sd_oauth_nonce_drive"
+DRIVE_NONCE_COOKIE_PATH = "/auth/google-drive"
+
 #: `05`: pre-auth admission, 30/min per client IP, scope `preauth_ip`.
 PREAUTH_LIMIT = 30
 PREAUTH_WINDOW_SECONDS = 60
@@ -289,8 +307,15 @@ async def google_drive_callback(
     error: Optional[str] = None,
 ) -> Response:
     """The Drive connect leg's return: consume the state, exchange the code,
-    write the credential — the sign-in callback's shape, trusting the state
-    row alone (the module docstring has what that buys)."""
+    write the credential.
+
+    **This leg no longer trusts the state row alone.** It presents the binding
+    nonce, so `consume_state` can refuse a callback completed by a browser
+    other than the one that started the flow -- without which a legitimate
+    admin could mint a real state, send the genuine provider link onward, and
+    receive the recipient's publish-capable credential into their own
+    workspace.
+    """
     client_id, client_secret, redirect_uri = google_client.configured(
         google_client.DRIVE_CALLBACK_PATH
     )
@@ -301,6 +326,7 @@ async def google_drive_callback(
         error=error,
         expected_provider=google_drive_oauth.PROVIDER,
         expected_purpose={"connect", "reconnect"},
+        cookie_nonce=request.cookies.get(DRIVE_NONCE_COOKIE),
         flow=DRIVE_FLOW,
     )
     if isinstance(row, Response):

@@ -193,6 +193,11 @@ class TestTheStateRow:
                 s,
                 purpose=purpose,
                 provider=drive.PROVIDER,
+                # `connect`/`reconnect` are browser-completed, so the state
+                # carries a binding nonce; these tests are about the ROW's
+                # pinned context, not the binding, which has its own class in
+                # the L6 gate.
+                cookie_nonce="gdrive-gate-nonce",
                 user_id=tenant["user"],
                 workspace_id=tenant["ws"],
                 reconnect_target=tenant["src"],
@@ -206,6 +211,12 @@ class TestTheStateRow:
         transaction, which therefore commits — so a refused state is burned.
         A driver that let the refusal unwind the unit of work would roll the
         CAS back and prove the opposite. Returns the row, or the refusal."""
+
+        # The callback presents the cookie the issuing browser was given --
+        # the legitimate round trip. Overridable, so a test that wants the
+        # WRONG browser can say so; the binding itself is exercised in the L6
+        # gate rather than here.
+        expect.setdefault("cookie_nonce", "gdrive-gate-nonce")
 
         async def consume(s):
             try:
@@ -290,6 +301,25 @@ class TestTheRoutePairAsSvcIngress:
                     f"/api/v1/workspaces/{ws}/sources/{sid}/connect", headers=owner
                 )
                 assert started.status_code == 200, started.text
+                # THE BINDING, asserted where a regression is legible. The
+                # callback below refuses without this cookie, so the rest of
+                # this test already depends on it -- but a path regression
+                # would surface there as an opaque `state_refused`, and the
+                # path is the subtle part: RFC 6265 requires the character
+                # after the cookie-path prefix to be `/`, and in
+                # `/auth/google-drive/callback` it is `-`, so sign-in's
+                # `/auth/google` path would NOT reach this leg.
+                set_cookie = started.headers.get("set-cookie", "")
+                assert auth_routes.DRIVE_NONCE_COOKIE in set_cookie, set_cookie
+                assert f"Path={auth_routes.DRIVE_NONCE_COOKIE_PATH}" in set_cookie, (
+                    "the binding cookie must be scoped to the Drive callback's"
+                    f" own path, got: {set_cookie}"
+                )
+                assert "HttpOnly" in set_cookie and "SameSite=lax" in set_cookie, (
+                    "httponly keeps the nonce out of script; lax is required"
+                    " because the callback is a top-level cross-site GET"
+                    f" (strict would refuse every legitimate return): {set_cookie}"
+                )
                 url = started.json()["authorization_url"]
                 q = parse_qs(urlsplit(url).query)
                 assert q["scope"] == [drive.SCOPE]
