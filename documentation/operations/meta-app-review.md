@@ -113,7 +113,33 @@ Both receive a **signed request** from Meta, which must be verified against the 
 
 **Where they get registered:** App Dashboard → **App settings → Basic**, in the *Deauthorize Callback URL* and *Data Deletion Request URL* fields. Both must be `https://` and publicly reachable — Meta probes them at save time, so they have to be deployed before the field will accept them.
 
-**Fill in the actual paths once alex's PR is up.** They are deliberately blank here rather than guessed; a runbook that names an endpoint the code does not serve is worse than one that names none.
+**The paths, now that they are served** (#410 implementation PR):
+
+| Field | URL |
+|---|---|
+| Deauthorize Callback URL | `https://api.storydump.app/webhooks/meta/deauthorize` |
+| Data Deletion Request URL | `https://api.storydump.app/webhooks/meta/data-deletion` |
+
+**One correction to the requirement as stated above, and it is deliberate.**
+This section says the app "must delete it and return a confirmation code plus a
+status URL". The implementation returns the code and the status URL, and
+**deletes nothing synchronously.** Meta's response contract is a `url` plus a
+`confirmation_code` precisely so completion can be asynchronous, so a receipt is
+the specified shape rather than a shortfall — and three things make inline
+deletion wrong here: the subject cannot be reliably identified (the schema
+stores no Meta person), the blast radius is not the requester's to spend (an
+Instagram account sits inside a workspace holding other members' content), and
+the product's real deletion door — `offboard_workspace` — is owner-only with an
+explicit confirm and a 30-day grace window, so an unauthenticated external
+caller must not reach a stronger deletion than the owner's own.
+
+**Also: which app you register these under decides which secret must verify
+them.** `INSTAGRAM_APP_SECRET` and `FACEBOOK_APP_SECRET` are both accepted, so
+either works — but note which one you used, because a future narrowing to a
+single setting would silently refuse 100% of Meta's callbacks.
+
+Full endpoint behaviour, cascade scope and the RLS bound:
+[`meta-callback-endpoints.md`](meta-callback-endpoints.md).
 
 ---
 
