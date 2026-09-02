@@ -1,182 +1,242 @@
 # Meta App Review — Runbook
 
-Sibling of [`google-oauth-verification.md`](google-oauth-verification.md); same
-shape, same purpose — a submission somebody else can reproduce. Tracker: #410.
+**Status:** Business Verification starting 2026-09-02. **Owner:** chrisrogers37 (submission); engineering owns Tracks 2–3 inputs. **Closes:** the documentation half of [#410](https://github.com/chrisrogers37/storydump/issues/410).
 
-## What Meta requires, and which part is code
+Sibling to [`google-oauth-verification.md`](google-oauth-verification.md) — same shape, different provider. Read that one too if you are doing both; the Google submission is a smaller version of this problem.
 
-App Review runs three tracks. Only one of them is engineering.
+## How to read the status markers
 
-| Track | Owner | State |
+Every section below carries one. **They are not decoration** — a section researched from Meta's published documentation must not read as one somebody has walked, and that distinction is the whole reason this file is trustworthy.
+
+| Marker | Means |
+|---|---|
+| **WALKED** | Somebody on this team performed these steps and this is what happened. |
+| **DOCUMENTED-FROM-META'S-DOCS** | Taken from Meta's published requirements. Believed accurate, **nobody here has done it**. Expect the real flow to differ in detail. |
+| **NOT-YET-ATTEMPTED** | Known to be required; no walkthrough exists and none is invented here. |
+
+As of this draft **no section is WALKED.** That is the honest state on day one and it is why the marker exists — the first person through each track should promote its marker and correct the steps.
+
+---
+
+## ⚠ STANDING CONSTRAINT — do not drop the `legacy` schema before the demo videos are recorded
+
+**Read this if you are working on migrations, not just if you are working on App Review.**
+
+Track 3 requires **demo videos of a real Instagram publish**, recorded against a running system. Today that system is the **legacy** tier: `src/worker_impl.py` gates the worker on `WORKER_IMPL`, which runs the legacy scheduler unless an operator has set `WORKER_IMPL=target` on the service (a config fact, not visible from this repo — check Railway before assuming either way).
+
+The M.3 cutover's last step is **3g `DROP SCHEMA legacy CASCADE`** (`documentation/planning/2026-08-02-consolidated-design-plan/04-execution-sequence.md:194`). Running it before the videos exist removes the only tier that can produce them.
+
+**Precisely what is and is not at risk**, because the crude version of this warning is wrong and would be dismissed:
+
+- **The data is not at risk.** Step 3f snapshots every legacy table to `archive.<t>_pre_cutover_<YYYYMMDD>` *before* anything is dropped.
+- **The runnable system is.** A demo video needs a working publish path with a real account and real media, not a table you can `SELECT` from. After 3g, the legacy lineage is gone as a *running* thing, and the target tier can only replace it once it is actually serving.
+
+**So the ordering constraint is: record the Track 3 videos, or arm and verify the target tier, before 3g runs.** Either satisfies it; neither is currently done.
+
+**This paragraph is not sufficient protection and should not be treated as such.** A migration author executing the cutover reads `04-execution-sequence.md` and `scripts/m1_preflight.py`, not this runbook. A durable guard belongs at the 3g site — a preflight check that refuses while `#410` is open, or at minimum a note at `04-execution-sequence.md:194` pointing here. Filed as [#1202](https://github.com/chrisrogers37/storydump/issues/1202) rather than left as prose; until that lands, this is a convention, and conventions are exactly what get tidied away by someone acting in good faith.
+
+---
+
+## Why App Review is required
+
+**Marker: WALKED** — this is the failure we actually hit.
+
+Instagram Login OAuth works end-to-end for accounts Meta has allowlisted (`@gatortails` succeeded). Every other account is refused at the eligibility gate:
+
+> Instagram Business API: Your Instagram account is ineligible for using Instagram Business Messaging API.
+
+The gate is keyed off the app's **use case** in the Meta Developer Portal — *"Manage messaging & content on Instagram"* — which applies the stricter Messaging API criteria even though this app requests neither messaging permission. Until App Review grants **Advanced Access** on the two permissions below, every non-allowlisted tenant hits this wall. See [#410](https://github.com/chrisrogers37/storydump/issues/410) for the original diagnosis and [#341](https://github.com/chrisrogers37/storydump/issues/341) / [#378](https://github.com/chrisrogers37/storydump/issues/378) for the OAuth wiring.
+
+### The permissions this app requests
+
+| Permission | Declared at | Used for |
 |---|---|---|
-| Business Verification | Chris (business documents) | his |
-| Advanced access | demo videos | needs the legacy path, which is why legacy stays |
-| **App Verification** | **us** | privacy + ToS live; **these two endpoints were the gap** |
+| `instagram_business_basic` | `src/services/target/ig_login_oauth.py:72`, `src/services/integrations/instagram_login_oauth.py:47` | Reading the connected account's own profile and its own media |
+| `instagram_business_content_publish` | same | Creating and publishing media containers to the connected account |
 
-App Verification needs a privacy policy, terms of service, an app logo, and two
-callback URLs. `https://storydump.app/privacy` and `/terms` are already live.
-This document covers the two URLs.
+Nothing else is requested. There is no messaging permission anywhere in the tree.
 
-## The two endpoints
+---
 
-Both live under `/webhooks/meta` and both verify Meta's `signed_request` before
-doing anything. **They are different verbs and are deliberately not shared code
-paths** — Meta treats deauthorize and deletion as different events, and
-conflating them would destroy tenant data on a mere disconnect.
+## Step 0 — rename the app to "Storydump"
 
-| | Deauthorize | Data deletion |
+**Marker: NOT-YET-ATTEMPTED.** Do this first; it is cheap and it is visible to every user.
+
+The app still displays as **"Story Poster"**. Change it in **App settings → Basic → Display name** to **Storydump**.
+
+- Users see this string on the OAuth consent screen. Submitting for review while it says "Story Poster" means every reviewer *and* every user sees a name that matches nothing else about the product.
+- Per Meta's documentation a display-name change **does not trigger re-review**. Do it before submission anyway, so the reviewer sees the name the screenshots and videos show.
+
+---
+
+## Track 1 — Business Verification (Chris's, in progress)
+
+**Marker: NOT-YET-ATTEMPTED.** Deliberately a skeleton.
+
+**No walkthrough is written here on purpose.** Chris is starting this today; the step-by-step should be filled in from what he actually hits, not from what Meta's docs imply he will. A runbook describing a flow nobody has walked is the confidently-wrong document this team keeps finding.
+
+What Meta asks for (**DOCUMENTED-FROM-META'S-DOCS**):
+
+- **Legal entity name** exactly as registered.
+- **Business documentation** — one of: business license, certificate of incorporation, EIN assignment letter (US), or equivalent registration document.
+- **Registered business address**, matching the documentation.
+- **Business phone number**, which Meta verifies by call or SMS.
+- **Domain ownership** of `storydump.app`, verified by DNS TXT record, HTML file upload, or meta tag.
+- Verification happens in **Meta Business Manager**, not the app dashboard, and attaches to the *business* that owns the app — so the app must be correctly claimed by that business first.
+
+**To fill in as you go:** which document Meta accepted, how long each stage took, anything it asked for that is not on the list above, and any point where the portal's wording diverged from it.
+
+---
+
+## Track 2 — App Verification
+
+**Marker: mixed, per row.**
+
+| Requirement | Status | Notes |
 |---|---|---|
-| URL | `POST /webhooks/meta/deauthorize` | `POST /webhooks/meta/data-deletion` |
-| Fires when | a person removes the app | a person asks Meta to delete their data |
-| Effect | credentials marked `revoked` | a **receipt** is recorded |
-| Deletes data | **no** | **not synchronously — see below** |
-| Response | `{"status": "ok"}` | `{"url": ..., "confirmation_code": ...}` |
+| Privacy Policy URL | **live** | `https://storydump.app/privacy` — `landing/src/app/(marketing)/privacy/page.tsx` |
+| Terms of Service URL | **live** | `https://storydump.app/terms` — `landing/src/app/(marketing)/terms/page.tsx` |
+| Deauthorize Callback URL | **in flight** | alex is building it. Path not settled — see below. |
+| Data Deletion Request URL | **in flight** | Same PR. |
+| App logo | **NOT-YET-ATTEMPTED, unowned** | 1024×1024 PNG, no transparency. **Nobody owns this.** It blocks submission and it is the kind of item that is discovered at the end. |
 
-A third, read-only door backs the returned URL:
-`GET /webhooks/meta/data-deletion/status?code=<code>`.
+### Deauthorize Callback and Data Deletion Request
 
-## Why deletion is deferred-with-receipt
+**Marker: DOCUMENTED-FROM-META'S-DOCS for the requirement; the implementation is alex's and is not duplicated here.**
 
-**The shape is Meta's own.** The callback's response contract is a `url` plus a
-`confirmation_code` precisely so completion can be asynchronous. Returning a
-receipt is what the integration specifies, not a way around it.
+Meta requires both before granting Advanced Access:
 
-Three reasons it must not delete inline, in increasing order of weight:
+- **Deauthorize Callback URL** — Meta POSTs here when a user removes the app from their Instagram/Facebook account. The app must treat it as a revocation: stop using that account's tokens and stop scheduling for it.
+- **Data Deletion Request URL** — Meta POSTs here when a user requests deletion of their data. The app must delete it and return a confirmation code plus a status URL the user can check.
 
-1. **The subject cannot be reliably identified.** Meta sends an app-scoped
-   person id. The target schema stores no Meta person:
-   `user_identities.provider` is CHECK-constrained to `('telegram','google')`
-   and `oauth_credentials` is keyed to an `ig_account_id`. The only
-   Meta-shaped identifier held is `ig_accounts.provider_account_ref`, which
-   names an **account** rather than a person and is sometimes a provisional
-   `manual:<handle>` that no Meta id will ever equal.
-2. **The blast radius is not the requester's to spend.** An Instagram account
-   lives inside a workspace that may hold other members' content. Somebody
-   disconnecting an integration has no authority to erase it.
-3. **The product already has the right door, and it is deliberately not
-   automatic.** `offboard_workspace` is owner-only, demands an explicit
-   `confirm`, and runs a 30-day grace window before anything is irreversible.
-   An unauthenticated external caller must not reach a **stronger** deletion
-   than the owner's own confirmed one.
+Both receive a **signed request** from Meta, which must be verified against the app secret before anything is acted on — an unverified callback is an unauthenticated delete endpoint.
 
-So the receipt is the deliverable, and completing it stays a human,
-owner-confirmed act through the existing door.
+**Where they get registered:** App Dashboard → **App settings → Basic**, in the *Deauthorize Callback URL* and *Data Deletion Request URL* fields. Both must be `https://` and publicly reachable — Meta probes them at save time, so they have to be deployed before the field will accept them.
 
-## Cascade scope — what is and is not touched
+**The paths, now that they are served** (#410 implementation PR):
 
-**Deauthorize** updates `oauth_credentials.state` to `revoked` for the matching
-`ig_accounts` rows, scoped on the `(ig_account_id, workspace_id)` **pair**.
-Nothing else: not the account row, its media, its posting history, its
-workspace, or any other member's content.
+| Field | URL |
+|---|---|
+| Deauthorize Callback URL | `https://api.storydump.app/webhooks/meta/deauthorize` |
+| Data Deletion Request URL | `https://api.storydump.app/webhooks/meta/data-deletion` |
 
-**Data deletion** writes nothing. It logs the request and returns the receipt.
+**One correction to the requirement as stated above, and it is deliberate.**
+This section says the app "must delete it and return a confirmation code plus a
+status URL". The implementation returns the code and the status URL, and
+**deletes nothing synchronously.** Meta's response contract is a `url` plus a
+`confirmation_code` precisely so completion can be asynchronous, so a receipt is
+the specified shape rather than a shortfall — and three things make inline
+deletion wrong here: the subject cannot be reliably identified (the schema
+stores no Meta person), the blast radius is not the requester's to spend (an
+Instagram account sits inside a workspace holding other members' content), and
+the product's real deletion door — `offboard_workspace` — is owner-only with an
+explicit confirm and a 30-day grace window, so an unauthenticated external
+caller must not reach a stronger deletion than the owner's own.
 
-**Neither endpoint issues a SQL `DELETE`.** A test parses both modules' AST and
-asserts it.
+**Also: which app you register these under decides which secret must verify
+them.** `INSTAGRAM_APP_SECRET` and `FACEBOOK_APP_SECRET` are both accepted, so
+either works — but note which one you used, because a future narrowing to a
+single setting would silently refuse 100% of Meta's callbacks.
 
-## The RLS bound — read this before believing a zero
+Full endpoint behaviour, cascade scope and the RLS bound:
+[`meta-callback-endpoints.md`](meta-callback-endpoints.md).
 
-Every table these callbacks touch is tenant-scoped under row-level security:
-`ig_accounts` and `oauth_credentials` (`058_rls_and_policies.sql:266,278`) and
-`audit_events` (`:188-192`), all keyed on
-`current_setting('app.tenant_id')` for `svc_ingress` and `svc_worker`.
+---
 
-**A Meta callback names no workspace**, so there is no tenant to set. Two
-consequences, and they point in opposite directions:
+## Track 3 — Advanced Access per scope
 
-- **As `svc_ingress` or `svc_worker`**, the lookup returns **zero rows
-  regardless of what is stored**, and the revoke updates nothing. The endpoint
-  answers 200 and looks healthy while being structurally blind.
-- **As a table owner**, RLS is bypassed — no migration anywhere declares
-  `FORCE ROW LEVEL SECURITY` — so the statements run unfiltered. This is why
-  the revoke predicate carries the workspace explicitly: without it, an
-  owner-role connection would make this a cross-tenant credential write.
+**Marker: NOT-YET-ATTEMPTED for the submission; the copy below is drafted and ready to paste.**
 
-So **a zero from these endpoints is "not established", never "no such
-account"**, and the logs say exactly that. The durable fix is a named,
-reviewable, tenant-free door — a SECURITY DEFINER function in the shape of
-`fn_invitation_accept` — which needs a migration and is deliberately **not**
-in this change.
+This is the longest track and the one that gates everything else, so its inputs are written now rather than when the other two clear. Both permissions need **justification copy** and a **demo video**.
 
-That same bound is why the deletion receipt is **logged rather than stored**.
-`audit_events` is the natural home (no foreign key, outlives a workspace's
-cascade), but a row could be neither written nor read back by confirmation
-code without a tenant context. An endpoint that queried anyway would answer
-"not found" for every genuine receipt.
+### `instagram_business_basic` — justification copy
 
-## The app secret is not one setting
+> Storydump is a scheduling tool for Instagram Stories. After a user connects their own Instagram Business account through Instagram Login, we use `instagram_business_basic` for exactly two things. First, to read that account's own profile (`GET /{ig-user-id}`) so the app can display which account is connected and store the account id the publishing calls need — without it a user with several connected accounts cannot tell them apart. Second, to read the account's own media and stories (`GET /{ig-user-id}/media`, `GET /{ig-user-id}/stories`) so the app can confirm that a story it scheduled actually published, and can avoid re-posting content that is already live. We read only the connected account's own data. We do not read other users' profiles, media, comments, or follower data, and we request no messaging permission of any kind.
 
-`settings` carries two — `INSTAGRAM_APP_SECRET` (annotated *preferred*) and
-`FACEBOOK_APP_SECRET` (annotated *legacy*). Which one signs these callbacks is
-decided by **which Meta app the URLs are registered under**, a submission-time
-fact the code cannot read. Keying to the wrong one refuses 100% of Meta's
-requests and fails App Review, with no symptom beyond a warning line.
+### `instagram_business_content_publish` — justification copy
 
-Both are therefore candidates, preferred first, and a request is accepted if it
-verifies against either — the ordinary key-rotation posture. Every candidate is
-a secret we hold, each is checked by a full constant-time comparison, and no
-secret configured at all still refuses everything.
+> Publishing is the product. A user points Storydump at a folder of their own media and sets a posting schedule; at each scheduled slot the app publishes one item to that user's own Instagram Business account as a Story. We use the standard two-step container flow: `POST /{ig-user-id}/media` with `media_type=STORIES` and an `image_url` or `video_url` pointing at the user's own media, then `POST /{ig-user-id}/media_publish` with the returned `creation_id`, polling `GET /{container_id}?fields=status_code,status` in between until the container is ready. Every publish is initiated by a schedule the account owner configured and can pause or cancel at any time; the app never publishes to an account other than the one whose owner connected it, and never publishes content the user did not place in their own connected media source.
 
-**When you register the URLs (step 4), note which app you used.**
+*(Both are written against what the code actually calls — see `src/services/integrations/instagram_api.py`. If the API usage changes, change these; a justification that describes a call the app no longer makes is a rejection waiting to happen.)*
 
-## Signature verification
+### Demo video script
 
-`meta_callbacks.parse_signed_request` verifies HMAC-SHA256 over the **raw
-base64 payload string**, not the re-encoded JSON — re-serialising would produce
-different bytes for the same logical payload and break honest requests.
+**Marker: NOT-YET-ATTEMPTED.** Host on YouTube **unlisted** — the standard, and what the Google submission used.
 
-Properties, each pinned by a test that was confirmed to fail when the property
-is removed:
+Meta's reviewers are looking for one thing: *does the app use this permission the way the justification says it does?* Show the whole path, screen-recorded, no cuts, narrated or captioned.
 
-- **Fails closed.** No configured secret refuses everything rather than
-  accepting everything — asserted on both callbacks, and directly on the
-  primitive, since the route can no longer reach the primitive's own guard.
-- **The algorithm is checked against a constant**, never dispatched from the
-  payload's own field — otherwise a correctly signed request declaring
-  `"algorithm": "none"` would be honoured.
-- **`hmac.compare_digest`**, not `==`.
-- **One refusal for every failure mode.** A caller never learns whether the
-  deployment holds a secret or how close their forgery was.
+**One video covering both permissions is acceptable and is easier to keep honest than two.** Record in this order:
 
-## Submission steps
+1. **Start signed out.** Show the Storydump landing page at `storydump.app`. This establishes it is a real product, not a test harness.
+2. **Sign in**, then start connecting an Instagram account.
+3. **Show the consent screen in full**, long enough to read. The permission list must be legible — this is the single most-cited reason demo videos get rejected. Confirm the app name reads **Storydump** (Step 0), not "Story Poster".
+4. **Complete the connection**, and show the app displaying the connected account's username and profile. *This is `instagram_business_basic` doing its job — say so in narration.*
+5. **Show the media source** the user has pointed at, and the schedule they have configured.
+6. **Publish a story** — either wait for a scheduled slot or trigger one — and show the app reporting success. *This is `instagram_business_content_publish`.*
+7. **Open Instagram itself and show the story live on the account.** Reviewers want the effect, not the app's own success message.
+8. **Show disconnecting the account**, so the revocation path is visible.
 
-1. Confirm privacy and ToS URLs resolve: `https://storydump.app/privacy`, `/terms`.
-2. Upload the app logo (1024×1024, no text) in the Meta app dashboard.
-3. Deploy this branch so the endpoints answer on `https://api.storydump.app`.
-4. Register the two URLs in **App Dashboard → Settings → Basic**:
-   - Deauthorize Callback URL — `https://api.storydump.app/webhooks/meta/deauthorize`
-   - Data Deletion Request URL — `https://api.storydump.app/webhooks/meta/data-deletion`
-5. Use Meta's **"Send Test"** control beside each field. It sends a genuinely
-   signed request; a 400 means the deployed `FACEBOOK_APP_SECRET` does not
-   match the app.
-6. Submit App Verification once Business Verification is under way.
+**Do not** speed up, cut between steps, or show a mocked screen. A video that skips the consent screen or shows a stubbed publish is the most common rejection.
 
-## If it is rejected
+**Prerequisite:** step 6 needs a running publish path — see the standing constraint at the top of this file.
 
-Meta's usual reasons are a URL that does not answer over HTTPS, a callback that
-returns a non-2xx, or a data-deletion endpoint whose returned `url` does not
-render a human-readable status. All three are observable with `curl` before
-submitting; the status URL is the one people forget to open.
+---
+
+## Submission flow
+
+**Marker: DOCUMENTED-FROM-META'S-DOCS.** Nobody here has submitted; expect the portal to differ in detail and correct this section afterwards.
+
+Order matters, because the later tracks depend on the earlier ones being accepted:
+
+1. **Rename** (Step 0) — App settings → Basic.
+2. **Business Verification** — Business Manager → Security Centre. Start early; it is the longest pole and the other tracks cannot be granted without it.
+3. **Fill App settings → Basic completely** — privacy URL, terms URL, deauthorize callback, data deletion URL, app logo, category.
+4. **App Review → Permissions and Features** — request Advanced Access on `instagram_business_basic` and `instagram_business_content_publish`, pasting the justification copy above into each.
+5. **Attach the demo video** to the submission (both permissions can reference the same video; say so in each justification).
+6. **Submit**, then watch the App Dashboard *and* the email on the developer account — Meta's feedback arrives by both and the dashboard notification is easy to miss.
+
+---
+
+## Wait times
+
+**Marker: DOCUMENTED-FROM-META'S-DOCS.**
+
+- **App Review: 1–3 weeks** typical.
+- **Business Verification: longer, and unbounded if documents are rejected** — a mismatch between the registered address on the document and the one entered in Business Manager is the usual cause and costs a full round trip.
+- Treat the two as sequential for planning even though they run in parallel: Advanced Access will not be granted while Business Verification is outstanding.
+
+---
+
+## If review is rejected
+
+**Marker: DOCUMENTED-FROM-META'S-DOCS.**
+
+- Meta names the specific permission and gives a reason, usually terse. Read it against the justification copy for *that* permission, not the app as a whole.
+- The two failures worth pre-empting are both video failures: the consent screen not legible, and the published result not shown inside Instagram. Both are cheap to fix and cost a full review cycle.
+- Resubmission does not reset Business Verification.
+- **Record the rejection reason in this file** when it happens, and promote the relevant section's marker to WALKED. The next person through should not rediscover it.
+
+---
+
+## Operational alternative while review is pending
+
+**Marker: DOCUMENTED-FROM-META'S-DOCS.**
+
+Meta has the equivalent of Google's test-user list: accounts added under **App Dashboard → Roles** (as Administrators, Developers, or Testers) can use the app with **Standard Access** permissions without passing the eligibility gate. This is how `@gatortails` works today.
+
+- Use it for closed beta only. It does not scale and it is not a substitute for review.
+- Roles are per-person and require the invited account to accept.
+
+---
 
 ## See also
 
-- [`google-oauth-verification.md`](google-oauth-verification.md) — the sibling runbook
-- `src/services/target/meta_callbacks.py` — verification and effects
-- `src/api/routes/meta.py` — the routes
-- `tests/src/api/test_meta_callbacks.py` — the signature proofs
-
-## Known gaps, filed rather than hidden
-
-1. **No test executes SQL.** The suite builds an engine-less app, so the
-   statement bodies are never run — which is how a `channel = 'meta'` value
-   violating `ck_audit_channel` survived the first draft. An integration test
-   against the test database is the fix.
-2. **The tenant-free door** described under the RLS bound. Until it exists,
-   these endpoints cannot reliably resolve a subject on a tenant-scoped role.
-3. **`_b64url_decode` duplicates `google_oidc.py`.** Extracting a shared helper
-   means editing another signature-verification path, which does not belong in
-   the same change as this one.
+- [`google-oauth-verification.md`](google-oauth-verification.md) — sibling runbook for Google Drive's `drive.readonly`. Same shape; the scope-justification section there is the model for Track 3 here.
+- [`documentation/planning/2026-03-31-meta-app-launch-design.md`](../planning/2026-03-31-meta-app-launch-design.md) — the original Meta/Instagram OAuth design.
+- `src/services/integrations/instagram_api.py` — every Graph call the justification copy describes.
 
 ## Related issues
 
-- #410 — Meta App Review tracker
+- [#410](https://github.com/chrisrogers37/storydump/issues/410) — this runbook. Submission itself remains a manual operations task tracked there.
+- [#371](https://github.com/chrisrogers37/storydump/issues/371) — Google OAuth verification runbook (sibling).
+- [#341](https://github.com/chrisrogers37/storydump/issues/341), [#378](https://github.com/chrisrogers37/storydump/issues/378) — Instagram Login wiring; functional for allowlisted accounts.
