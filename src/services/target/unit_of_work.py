@@ -73,6 +73,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 from src.config.settings import settings
+from src.utils.logger import logger
 from src.exceptions.base import StorydumpError
 
 #: `05` seam value. Pinned, not configurable, not read from settings — see the
@@ -302,3 +303,31 @@ async def apply_gucs(
 def unit_of_work(engine: AsyncEngine, tenant_id: str, **gucs) -> UnitOfWork:
     """Factory. Present so call sites read as intent rather than construction."""
     return UnitOfWork(engine, tenant_id, **gucs)
+
+
+#: Who is this connection, and does that login bypass row-level security?
+#: Asked of the catalog, never read off the URL: the F.4 rollout (#751) exists
+#: because the configured login and the effective one can disagree, and only
+#: the effective one decides whether `p_tenant` policies apply.
+CONNECTION_ROLE_SQL = (
+    "SELECT current_user::text AS login,"
+    " COALESCE((SELECT rolbypassrls FROM pg_roles WHERE rolname = current_user),"
+    " false) AS bypassrls"
+)
+
+
+async def connection_role(conn) -> Optional[dict]:
+    """`{"user": <login>, "bypassrls": <bool>}` for *conn*, or None.
+
+    Diagnostic, so it never raises: the API samples it once at startup and the
+    worker on its election connection, and neither may die because a catalog
+    read failed. A None is reported as unknown, not invented as safe.
+    """
+    try:
+        row = (await conn.execute(text(CONNECTION_ROLE_SQL))).first()
+    except Exception as exc:  # noqa: BLE001 — see docstring: diagnostic only
+        logger.warning("connection role could not be sampled: %s", exc)
+        return None
+    if row is None:
+        return None
+    return {"user": str(row[0]), "bypassrls": bool(row[1])}

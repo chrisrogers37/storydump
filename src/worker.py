@@ -400,6 +400,10 @@ async def run(app: WorkerApp, *, stop: asyncio.Event | None = None) -> None:
     health_server = app.health_server = await health_endpoint.serve_health(app)
 
     election_conn = await engine.connect()
+    # Who the worker connects as, and whether that login bypasses RLS (#751,
+    # F.4): the runtime posture is verified from this line after a deploy.
+    role = await unit_of_work.connection_role(election_conn)
+    logger.info("worker database role: %s", role if role is not None else "unknown")
     claim_conns = [await engine.connect() for _ in app.loops]
     for wl, conn in zip(app.loops, claim_conns):
         wl.bind_claim_conn(conn)

@@ -37,7 +37,9 @@ at nothing and on a misconfigured one would point at a legacy-shaped database
 
 from __future__ import annotations
 
+import asyncio
 import os
+from contextlib import asynccontextmanager
 import time
 from typing import Mapping, Optional
 
@@ -62,7 +64,11 @@ from src.services.target.commands import CommandNotBuilt, CommandRefused
 from src.services.target.invitations import InvitationRefused
 from src.services.target.provisioning import ProvisioningRefused
 from src.services.target import scheduling_health
-from src.services.target.unit_of_work import create_engine, engine_url_from_env
+from src.services.target.unit_of_work import (
+    connection_role,
+    create_engine,
+    engine_url_from_env,
+)
 from src.services.target.telegram_dispatch import TelegramDispatcher
 from src.services.target.webhook_ingress import AdmissionConflict, DeliveryReplayed
 from src.utils.logger import logger
@@ -302,6 +308,23 @@ def _engine_from_env(env: Mapping[str, str]) -> Optional[AsyncEngine]:
     return create_engine(url)
 
 
+async def _sample_db_role(app: FastAPI) -> None:
+    """Fill `app.state.db_role` once, from the catalog; never raise.
+
+    Diagnostic for the F.4 rollout (#751): production has connected as the
+    owner role with BYPASSRLS, which makes every tenant policy inert, and this
+    is how the switch to the runtime login is verified after a deploy. A
+    failure leaves None — "not sampled" — never a guessed-safe value.
+    """
+    if app.state.engine is None:
+        return
+    try:
+        async with app.state.engine.connect() as conn:
+            app.state.db_role = await connection_role(conn)
+    except Exception as exc:  # noqa: BLE001 — diagnostic; never fails startup
+        logger.warning("database role not sampled at startup: %s", exc)
+
+
 def _cors_origins() -> list[str]:
     """The ONE browser origin admitted (`settings.web_app_origin`); never "*",
     and with no origin configured no origin is admitted."""
@@ -314,16 +337,39 @@ def create_app(
     """Assemble the app. *engine* injects the target engine (tests, or a
     composition root that owns the pool); otherwise it comes from *env*
     (default: the process environment) and from nothing else."""
+
+    @asynccontextmanager
+    async def _lifespan(app_: FastAPI):
+        # The role sample runs as a background task so startup never waits on
+        # the database (see `app.state.db_role` below); a sample still pending
+        # at shutdown is cancelled rather than left to die with the loop.
+        task = asyncio.create_task(_sample_db_role(app_))
+        try:
+            yield
+        finally:
+            if not task.done():
+                task.cancel()
+
     app = FastAPI(
         title="Storydump API",
         description="Sign-in, reads and commands for the target tier",
         version=VERSION,
+        lifespan=_lifespan,
     )
     app.state.engine = (
         engine
         if engine is not None
         else _engine_from_env(os.environ if env is None else env)
     )
+    # Which database login this process holds, and whether it bypasses RLS
+    # (#751, F.4). Sampled ONCE, in the background, after startup — `/health`
+    # reports the cached answer and still opens no connection of its own, so a
+    # database blip cannot fail the probe. None means "not sampled", never
+    # "safe": production has connected as the owner role with BYPASSRLS, which
+    # makes every tenant policy inert, and this field is how the switch to the
+    # runtime login is verified after a deploy.
+    app.state.db_role = None
+
     # The W4 ingress seam, WIRED for the `/start` door only (#1183).
     #
     # ⚠ THIS DOES NOT MAKE CHAT-INBOUND WORK, and the distinction is the whole
@@ -386,6 +432,7 @@ def create_app(
             "version": VERSION,
             "uptime_seconds": int(time.time() - _START_TIME),
             "target_database": app.state.engine is not None,
+            "db_role": app.state.db_role,
         }
 
     @app.get("/health/scheduling")
