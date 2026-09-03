@@ -21,7 +21,15 @@ from fastapi.testclient import TestClient
 from src.api.principal import COOKIE, session_delivery_gap
 from src.api.routes import auth
 from src.config.settings import settings
-from src.services.target import google_oidc, identity, rate_counters, sessions
+from src.services.target import (
+    google_oidc,
+    identity,
+    ig_login_oauth,
+    provisioning,
+    rate_counters,
+    sessions,
+    tenant_resolution,
+)
 from src.services.target.ig_login_oauth import OAuthStateRefused
 from tests.src.api.conftest import (
     API,
@@ -364,3 +372,256 @@ class TestSessionDelivery:
             settings, "SESSION_COOKIE_DOMAIN", "." + COOKIE_DOMAIN, raising=False
         )
         assert session_delivery_gap() is None
+
+
+WS = "33333333-3333-3333-3333-333333333333"
+USER = "22222222-2222-2222-2222-222222222222"
+ACCOUNT = "55555555-5555-4555-8555-555555555555"
+
+
+class TestInstagramCallback:
+    """`GET /auth/instagram-login/callback` — the return half of the destination
+    connect (#1220 step 2). The Drive callback's shape: the state row is the
+    only thing trusted, the provider call sits between two transactions, and
+    every failure lands on the error page with `flow=instagram`.
+
+    Everything behind a seam: the state consume, the exchange, the unit of
+    work (a fake session — the conftest engine refuses SQL), the admin
+    re-check `07` §2 asks for at the callback, and the three writes.
+    """
+
+    @pytest.fixture
+    def instagram(self, configured, counter, monkeypatch):
+        monkeypatch.setattr(settings, "INSTAGRAM_APP_ID", "app-1", raising=False)
+        monkeypatch.setattr(settings, "INSTAGRAM_APP_SECRET", "sec", raising=False)
+
+    @pytest.fixture
+    def state_row(self, monkeypatch):
+        row = {
+            "state": "st-ig",
+            "purpose": "connect",
+            "provider": "ig_login",
+            "user_id": USER,
+            "workspace_id": WS,
+            "reconnect_target": ACCOUNT,
+        }
+        seen = {}
+
+        async def consume_state(
+            conn, *, state, expected_provider=None, expected_purpose=None, **kw
+        ):
+            seen.update(
+                state=state, provider=expected_provider, purpose=expected_purpose
+            )
+            if state != "st-ig":
+                raise OAuthStateRefused("no")
+            return dict(row)
+
+        monkeypatch.setattr(auth, "consume_state", consume_state)
+        row["seen"] = seen
+        return row
+
+    @pytest.fixture
+    def writes(self, monkeypatch):
+        """The unit of work and the three writes, recorded in order."""
+        log = []
+
+        class _Session:
+            pass
+
+        class _Uow:
+            def __init__(self, engine, tenant_id, **kw):
+                log.append(
+                    ("uow", tenant_id, kw.get("actor_user_id"), kw.get("channel"))
+                )
+
+            def begin(self):
+                from contextlib import asynccontextmanager
+
+                @asynccontextmanager
+                async def _cm():
+                    yield _Session()
+
+                return _cm()
+
+        async def authorize_member(
+            session, workspace_id, user_id, minimum_role="member"
+        ):
+            log.append(("gate", workspace_id, user_id, minimum_role))
+            return "owner"
+
+        async def attach(
+            session, *, workspace_id, ig_account_id, provider_account_ref, handle
+        ):
+            log.append(
+                ("attach", workspace_id, ig_account_id, provider_account_ref, handle)
+            )
+
+        async def credential_for_account(session, *, workspace_id, ig_account_id):
+            return log_state.get("existing")
+
+        async def store_credential(
+            session, *, workspace_id, ig_account_id, token, expires_at=None
+        ):
+            log.append(("store", workspace_id, ig_account_id, token))
+            return "cred-new"
+
+        async def swap_credential(session, *, credential_id, token, expires_at=None):
+            log.append(("swap", credential_id, token))
+
+        log_state = {"existing": None}
+        monkeypatch.setattr(auth, "unit_of_work", _Uow)
+        monkeypatch.setattr(tenant_resolution, "authorize_member", authorize_member)
+        monkeypatch.setattr(provisioning, "attach_connected_identity", attach)
+        monkeypatch.setattr(
+            ig_login_oauth, "credential_for_account", credential_for_account
+        )
+        monkeypatch.setattr(ig_login_oauth, "store_credential", store_credential)
+        monkeypatch.setattr(ig_login_oauth, "swap_credential", swap_credential)
+        log_state["log"] = log
+        return log_state
+
+    @pytest.fixture
+    def grant(self, monkeypatch):
+        async def exchange_code(
+            client_, *, code, redirect_uri, client_id, client_secret
+        ):
+            return ig_login_oauth.IgGrant(
+                access_token="IGQVJ-long",
+                expires_at=None,
+                ig_user_id="17841400000000001",
+                username="gatortails",
+            )
+
+        monkeypatch.setattr(ig_login_oauth, "exchange_code", exchange_code)
+
+    @pytest.mark.parametrize(
+        "query, reason",
+        [
+            ("error=access_denied", "denied"),
+            ("state=st-ig", "missing_params"),
+            ("code=c", "missing_params"),
+        ],
+    )
+    def test_denied_or_incomplete_lands_on_the_error_page_for_this_flow(
+        self, client, instagram, query, reason
+    ):
+        resp = client.get(
+            f"/auth/instagram-login/callback?{query}", follow_redirects=False
+        )
+        assert resp.status_code == 302
+        assert (
+            resp.headers["location"]
+            == f"{FRONT}/auth/error?reason={reason}&flow=instagram"
+        )
+
+    def test_a_state_minted_for_another_leg_is_refused_by_name(
+        self, client, instagram, state_row
+    ):
+        resp = client.get(
+            "/auth/instagram-login/callback?state=st-other&code=c",
+            follow_redirects=False,
+        )
+        assert (
+            resp.headers["location"]
+            == f"{FRONT}/auth/error?reason=state_refused&flow=instagram"
+        )
+        assert state_row["seen"]["provider"] == "ig_login"
+        assert set(state_row["seen"]["purpose"]) == {"connect", "reconnect"}
+
+    def test_a_state_naming_no_account_cannot_act(
+        self, client, instagram, state_row, writes
+    ):
+        state_row["reconnect_target"] = None
+        resp = client.get(
+            "/auth/instagram-login/callback?state=st-ig&code=c", follow_redirects=False
+        )
+        assert (
+            resp.headers["location"]
+            == f"{FRONT}/auth/error?reason=state_refused&flow=instagram"
+        )
+        assert writes["log"] == []
+
+    def test_a_refused_exchange_lands_on_the_error_page(
+        self, client, instagram, state_row, writes, monkeypatch
+    ):
+        async def exchange_code(client_, **kw):
+            raise ig_login_oauth.IgOAuthRefused("long_lived_failed")
+
+        monkeypatch.setattr(ig_login_oauth, "exchange_code", exchange_code)
+        resp = client.get(
+            "/auth/instagram-login/callback?state=st-ig&code=c", follow_redirects=False
+        )
+        assert (
+            resp.headers["location"]
+            == f"{FRONT}/auth/error?reason=exchange_failed&flow=instagram"
+        )
+        assert writes["log"] == []
+
+    def test_connect_attaches_the_real_identity_stores_the_credential_and_returns_to_settings(
+        self, client, instagram, state_row, writes, grant
+    ):
+        resp = client.get(
+            "/auth/instagram-login/callback?state=st-ig&code=c0de",
+            follow_redirects=False,
+        )
+        assert resp.status_code == 302, resp.text
+        assert (
+            resp.headers["location"]
+            == f"{FRONT}/dashboard/settings?connected=instagram"
+        )
+        assert writes["log"] == [
+            ("uow", WS, USER, "web"),
+            ("gate", WS, USER, "admin"),
+            ("attach", WS, ACCOUNT, "17841400000000001", "gatortails"),
+            ("store", WS, ACCOUNT, "IGQVJ-long"),
+        ]
+
+    def test_reconnect_swaps_the_existing_credential_in_place(
+        self, client, instagram, state_row, writes, grant
+    ):
+        state_row["purpose"] = "reconnect"
+        writes["existing"] = "cred-1"
+        client.get(
+            "/auth/instagram-login/callback?state=st-ig&code=c0de",
+            follow_redirects=False,
+        )
+        assert ("swap", "cred-1", "IGQVJ-long") in writes["log"]
+        assert not any(w[0] == "store" for w in writes["log"])
+
+    def test_a_user_no_longer_admin_at_callback_time_is_refused(
+        self, client, instagram, state_row, writes, grant, monkeypatch
+    ):
+        from src.exceptions.tenancy import TenantResolutionError
+
+        async def authorize_member(
+            session, workspace_id, user_id, minimum_role="member"
+        ):
+            raise TenantResolutionError("insufficient_role")
+
+        monkeypatch.setattr(tenant_resolution, "authorize_member", authorize_member)
+        resp = client.get(
+            "/auth/instagram-login/callback?state=st-ig&code=c0de",
+            follow_redirects=False,
+        )
+        assert (
+            resp.headers["location"]
+            == f"{FRONT}/auth/error?reason=state_refused&flow=instagram"
+        )
+        assert not any(w[0] in ("attach", "store", "swap") for w in writes["log"])
+
+    def test_an_account_already_connected_elsewhere_in_the_workspace_is_named(
+        self, client, instagram, state_row, writes, grant, monkeypatch
+    ):
+        async def attach(session, **kw):
+            raise provisioning.ProvisioningRefused("duplicate_destination")
+
+        monkeypatch.setattr(provisioning, "attach_connected_identity", attach)
+        resp = client.get(
+            "/auth/instagram-login/callback?state=st-ig&code=c0de",
+            follow_redirects=False,
+        )
+        assert (
+            resp.headers["location"]
+            == f"{FRONT}/auth/error?reason=already_connected&flow=instagram"
+        )

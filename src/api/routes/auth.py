@@ -34,8 +34,16 @@ for another leg, or the nonce cookie did not match) · ``exchange_failed`` ·
 ``identity_collision`` (sign-in: the verified email belongs to another
 account — D35, never merged) · ``grant_incomplete`` (Drive: Google answered
 with a grant the leg will not keep; `google_drive_oauth.REDIRECT_REASON` maps
-each refusal). A Drive failure also carries ``flow=drive``: the page today is
-sign-in-shaped (title, CTAs), and needs to know which leg it renders for.
+each refusal) · ``already_connected`` (Instagram: the real account is already
+another destination in this workspace). A Drive failure also carries
+``flow=drive`` and an Instagram one ``flow=instagram``: the page is
+sign-in-shaped by default and needs to know which leg it renders for.
+
+`GET /auth/instagram-login/callback` is the other half of
+`POST /api/v1/workspaces/{ws}/accounts/{id}/connect` (#1220 step 2): the same
+shape as the Drive leg on the LEGACY flow's registered path, so the Meta app
+needs no console change. The `07` §2 admin check runs again at the callback,
+inside the write transaction.
 """
 
 from __future__ import annotations
@@ -48,7 +56,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
-from src.api import google_client
+from src.api import google_client, instagram_client
 from src.api.principal import (
     clear_session_cookie,
     presented_token,
@@ -58,13 +66,17 @@ from src.api.principal import (
 )
 from src.config.settings import settings
 from src.exceptions.base import StorydumpError
+from src.exceptions.tenancy import TenantResolutionError
 from src.services.target import (
     google_drive_oauth,
     google_oidc,
     identity,
+    ig_login_oauth,
     media_sync,
+    provisioning,
     rate_counters,
     sessions,
+    tenant_resolution,
 )
 from src.services.target.ig_login_oauth import (
     STATE_TTL_SECONDS,
@@ -91,6 +103,8 @@ PREAUTH_SCOPE = "preauth_ip"
 
 #: The Drive leg's name on the error page (`flow=`); sign-in carries none.
 DRIVE_FLOW = "drive"
+#: The Instagram connect leg's (#1220 step 2).
+INSTAGRAM_FLOW = "instagram"
 
 
 def _client_ip(request: Request) -> str:
@@ -158,7 +172,9 @@ async def _consume_callback(
         return _fail("denied", flow=flow)
     if not state or not code:
         return _fail("missing_params", flow=flow)
-    label = "drive connect" if flow == DRIVE_FLOW else "google sign-in"
+    label = {DRIVE_FLOW: "drive connect", INSTAGRAM_FLOW: "instagram connect"}.get(
+        flow, "google sign-in"
+    )
     async with engine.begin() as conn:
         await _preauth_guard(conn, request)
         try:
@@ -362,4 +378,111 @@ async def google_drive_callback(
 
     return RedirectResponse(
         _landing("/dashboard/settings?connected=gdrive"), status_code=302
+    )
+
+
+@router.get("/instagram-login/callback")
+async def instagram_login_callback(
+    request: Request,
+    state: Optional[str] = None,
+    code: Optional[str] = None,
+    error: Optional[str] = None,
+) -> Response:
+    """The Instagram connect leg's return (#1220 step 2): consume the state,
+    exchange the code for a long-lived token and its owner, attach that
+    identity to the destination the state pinned, write the credential — the
+    Drive callback's shape, trusting the state row plus the `07` §2 admin
+    re-check."""
+    app_id, app_secret, redirect_uri = instagram_client.configured()
+    row = await _consume_callback(
+        request,
+        state=state,
+        code=code,
+        error=error,
+        expected_provider=ig_login_oauth.PROVIDER,
+        expected_purpose={"connect", "reconnect"},
+        flow=INSTAGRAM_FLOW,
+    )
+    if isinstance(row, Response):
+        return row
+    if row["reconnect_target"] is None:
+        logger.warning("instagram connect: state names no destination")
+        return _fail("state_refused", flow=INSTAGRAM_FLOW)
+
+    # The provider calls sit between the two transactions, never inside one.
+    try:
+        async with httpx.AsyncClient() as client:
+            grant = await ig_login_oauth.exchange_code(
+                client,
+                code=code,
+                redirect_uri=redirect_uri,
+                client_id=app_id,
+                client_secret=app_secret,
+            )
+    except StorydumpError as exc:
+        logger.warning("instagram connect: exchange refused: %s", exc)
+        return _fail(
+            ig_login_oauth.REDIRECT_REASON.get(
+                getattr(exc, "reason", None), "exchange_failed"
+            ),
+            flow=INSTAGRAM_FLOW,
+        )
+
+    workspace_id = str(row["workspace_id"])
+    account_id = str(row["reconnect_target"])
+    uow = unit_of_work(
+        require_engine(request),
+        workspace_id,
+        actor_kind="user",
+        actor_user_id=str(row["user_id"]),
+        channel="web",
+    )
+    try:
+        async with uow.begin() as session:
+            # `07` §2: admin+ checked at issue AND at callback. The row pins
+            # the workspace and the user; what can change between the two is
+            # the membership, and a demoted admin's pending state must not
+            # land a credential.
+            await tenant_resolution.authorize_member(
+                session, workspace_id, str(row["user_id"]), minimum_role="admin"
+            )
+            await provisioning.attach_connected_identity(
+                session,
+                workspace_id=workspace_id,
+                ig_account_id=account_id,
+                provider_account_ref=grant.ig_user_id,
+                handle=grant.username,
+            )
+            existing = await ig_login_oauth.credential_for_account(
+                session, workspace_id=workspace_id, ig_account_id=account_id
+            )
+            if existing is not None:
+                await ig_login_oauth.swap_credential(
+                    session,
+                    credential_id=existing,
+                    token=grant.access_token,
+                    expires_at=grant.expires_at,
+                )
+            else:
+                await ig_login_oauth.store_credential(
+                    session,
+                    workspace_id=workspace_id,
+                    ig_account_id=account_id,
+                    token=grant.access_token,
+                    expires_at=grant.expires_at,
+                )
+    except TenantResolutionError as exc:
+        logger.warning("instagram connect: callback authorization refused: %s", exc)
+        return _fail("state_refused", flow=INSTAGRAM_FLOW)
+    except provisioning.ProvisioningRefused as exc:
+        logger.warning("instagram connect: attach refused: %s", exc)
+        reason = (
+            "already_connected"
+            if exc.reason == "duplicate_destination"
+            else "state_refused"
+        )
+        return _fail(reason, flow=INSTAGRAM_FLOW)
+
+    return RedirectResponse(
+        _landing("/dashboard/settings?connected=instagram"), status_code=302
     )

@@ -52,15 +52,20 @@ pretends to close the chain.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+
 import hashlib
 import logging
 import secrets
 from typing import Any, Optional
 
+import httpx
 from sqlalchemy import text
 
 from src.config.constants import IG_LOGIN_API_BASE, IG_LOGIN_GRAPH_BASE
 from src.exceptions import StorydumpError
+from src.services.target import egress
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +80,8 @@ AUTHORIZE_URL = f"{IG_LOGIN_API_BASE}/oauth/authorize"
 TOKEN_URL = f"{IG_LOGIN_API_BASE}/oauth/access_token"
 LONG_LIVED_URL = f"{IG_LOGIN_GRAPH_BASE}/access_token"
 REFRESH_URL = f"{IG_LOGIN_GRAPH_BASE}/refresh_access_token"
+#: Who the long-lived token belongs to — the real Meta id and the handle.
+PROFILE_URL = f"{IG_LOGIN_GRAPH_BASE}/me"
 
 PROVIDER = "ig_login"
 
@@ -434,3 +441,201 @@ async def mark_dead(conn, *, credential_id) -> None:
         ),
         {"acct": str(row[0])},
     )
+
+
+# ---------------------------------------------------------------------------
+# The connect leg (#1220 step 2 / #1041): the code exchange and the route's
+# three-way "which state do I mint" — the Drive leg's shape, on Instagram.
+# ---------------------------------------------------------------------------
+
+#: What each exchange refusal becomes on the error page. Every failure of the
+#: three provider calls is, to the person, "the last step did not complete" —
+#: the reasons stay distinct in the log and collapse only at the redirect.
+REDIRECT_REASON = {
+    "exchange_failed": "exchange_failed",
+    "malformed_response": "exchange_failed",
+    "long_lived_failed": "exchange_failed",
+    "profile_failed": "exchange_failed",
+}
+
+
+class IgOAuthRefused(StorydumpError):
+    """The grant could not be completed. ``reason`` is :data:`REDIRECT_REASON`'s
+    key set — exchange_failed | malformed_response | long_lived_failed |
+    profile_failed — and no token ever rides in the message."""
+
+    def __init__(self, reason: str, detail: str = ""):
+        if reason not in REDIRECT_REASON:
+            raise ValueError(f"unknown IgOAuthRefused reason {reason!r}")
+        self.reason = reason
+        self.detail = detail
+        super().__init__(
+            f"instagram grant refused: {reason}" + (f" — {detail}" if detail else "")
+        )
+
+
+@dataclass(frozen=True)
+class IgGrant:
+    """A long-lived Instagram Login token and who it is for. `ig_user_id` is
+    the REAL account id `ig_accounts.provider_account_ref` keys on (054);
+    `username` is display, and may be None if the profile read omitted it."""
+
+    access_token: str
+    expires_at: Optional[datetime]
+    ig_user_id: str
+    username: Optional[str]
+
+
+def _json_object(response: httpx.Response, *, reason: str) -> dict:
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise IgOAuthRefused(reason, "the endpoint did not answer JSON") from exc
+    if not isinstance(body, dict):
+        raise IgOAuthRefused(reason, "the endpoint body is not a JSON object")
+    return body
+
+
+async def exchange_code(
+    client: httpx.AsyncClient,
+    *,
+    code: str,
+    redirect_uri: str,
+    client_id: str,
+    client_secret: str,
+) -> IgGrant:
+    """Trade the authorization code for a long-lived token and its owner —
+    three provider calls, every one through the egress floor, none inside a
+    transaction (`02` §5; the caller commits the state consume first).
+
+    1. ``POST api.instagram.com/oauth/access_token`` — code → short-lived token.
+       Instagram appends ``#_`` to the code it hands back; it is stripped here,
+       the legacy flow's lesson.
+    2. ``GET graph.instagram.com/access_token?grant_type=ig_exchange_token`` —
+       short-lived → long-lived (60 days; `expires_in` is relative, so the
+       expiry is stamped here).
+    3. ``GET graph.instagram.com/me?fields=user_id,username`` — who it is for.
+
+    Refuses BY NAME at each step; bodies are never logged (they carry tokens).
+    """
+    policy = egress.EgressPolicy(timeout_class="standard")
+
+    short = await egress.request(
+        client,
+        "POST",
+        TOKEN_URL,
+        policy=policy,
+        data={
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "grant_type": "authorization_code",
+            "redirect_uri": redirect_uri,
+            "code": code.rstrip("#_"),
+        },
+    )
+    if short.status_code != 200:
+        raise IgOAuthRefused(
+            "exchange_failed", f"token endpoint answered {short.status_code}"
+        )
+    body = _json_object(short, reason="malformed_response")
+    # Instagram Login wraps the answer in a one-element `data` list.
+    token_data = (
+        body["data"][0] if isinstance(body.get("data"), list) and body["data"] else body
+    )
+    short_token = (
+        token_data.get("access_token") if isinstance(token_data, dict) else None
+    )
+    if not isinstance(short_token, str) or not short_token:
+        raise IgOAuthRefused(
+            "malformed_response", "no access token in the code exchange"
+        )
+
+    long_lived = await egress.request(
+        client,
+        "GET",
+        LONG_LIVED_URL,
+        policy=policy,
+        params={
+            "grant_type": "ig_exchange_token",
+            "client_secret": client_secret,
+            "access_token": short_token,
+        },
+    )
+    if long_lived.status_code != 200:
+        raise IgOAuthRefused(
+            "long_lived_failed",
+            f"long-lived exchange answered {long_lived.status_code}",
+        )
+    body = _json_object(long_lived, reason="malformed_response")
+    token = body.get("access_token")
+    if not isinstance(token, str) or not token:
+        raise IgOAuthRefused(
+            "malformed_response", "no access token in the long-lived exchange"
+        )
+    expires_at = None
+    expires_in = body.get("expires_in")
+    if isinstance(expires_in, (int, float)) and not isinstance(expires_in, bool):
+        expires_at = datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))
+
+    profile = await egress.request(
+        client,
+        "GET",
+        PROFILE_URL,
+        policy=policy,
+        params={"fields": "user_id,username", "access_token": token},
+    )
+    if profile.status_code != 200:
+        raise IgOAuthRefused(
+            "profile_failed", f"profile read answered {profile.status_code}"
+        )
+    body = _json_object(profile, reason="malformed_response")
+    ig_user_id = body.get("user_id")
+    if ig_user_id is None or str(ig_user_id).strip() == "":
+        raise IgOAuthRefused("malformed_response", "no user_id in the profile")
+    username = body.get("username")
+    return IgGrant(
+        access_token=token,
+        expires_at=expires_at,
+        ig_user_id=str(ig_user_id),
+        username=username if isinstance(username, str) and username else None,
+    )
+
+
+async def connect_purpose(conn, *, workspace_id, ig_account_id) -> Optional[str]:
+    """Which state the connect route mints for this destination, in one query:
+    ``None`` when the account is not this workspace's (the route answers 404 —
+    never 403, since a destination's existence is not disclosed across
+    tenants), ``"connect"`` when it has never been credentialed, ``"reconnect"``
+    once it has — so `issue_state`'s last-issued-wins retires a stale state."""
+    credentialed = (
+        await conn.execute(
+            text(
+                "SELECT EXISTS ("
+                "  SELECT 1 FROM oauth_credentials c"
+                "   WHERE c.ig_account_id = a.id AND c.workspace_id = a.workspace_id"
+                "     AND c.provider = :provider"
+                ") AS credentialed"
+                "  FROM ig_accounts a"
+                " WHERE a.id = :acct AND a.workspace_id = :ws AND a.state <> 'moved'"
+            ),
+            {"acct": str(ig_account_id), "ws": str(workspace_id), "provider": PROVIDER},
+        )
+    ).scalar()
+    if credentialed is None:
+        return None
+    return "reconnect" if credentialed else "connect"
+
+
+async def credential_for_account(conn, *, workspace_id, ig_account_id) -> Optional[str]:
+    """The id of this destination's `ig_login` credential row, or None.
+    `uq_credential_per_account` makes it at most one, so a reconnect swaps
+    the payload in place rather than inserting beside it."""
+    result = await conn.execute(
+        text(
+            "SELECT id::text FROM oauth_credentials"
+            " WHERE workspace_id = :ws AND ig_account_id = :acct AND provider = :provider"
+        ),
+        {"ws": str(workspace_id), "acct": str(ig_account_id), "provider": PROVIDER},
+    )
+    row = result.first()
+    return None if row is None else str(row[0])

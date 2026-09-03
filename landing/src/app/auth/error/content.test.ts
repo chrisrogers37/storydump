@@ -14,7 +14,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { DRIVE, SIGNIN, resolveContent, resolveFlow } from "./content";
+import { DRIVE, INSTAGRAM, SIGNIN, resolveContent, resolveFlow } from "./content";
 
 const DRIVE_REASONS = [
   "denied",
@@ -94,5 +94,29 @@ describe("the error page knows which leg it is rendering for", () => {
     const prose = `${DRIVE.denied.heading} ${DRIVE.denied.body}`.toLowerCase();
     expect(prose).not.toMatch(/you closed/);
     expect(prose).toContain("google");
+  });
+});
+
+describe("the Instagram connect leg has its own table", () => {
+  it("routes flow=instagram to the Instagram table", () => {
+    expect(resolveFlow("instagram")).toBe("instagram");
+    expect(resolveContent("instagram", "denied")).toBe(INSTAGRAM.denied);
+  });
+
+  it("covers every reason the Instagram leg can send, without falling to generic", () => {
+    for (const reason of ["denied", "missing_params", "state_refused", "exchange_failed", "already_connected"]) {
+      expect(resolveContent("instagram", reason)).not.toBe(INSTAGRAM.generic);
+    }
+  });
+
+  it("never tells an Instagram user anything about their sign-in or session, and returns them to Settings", () => {
+    for (const content of Object.values(INSTAGRAM) as { heading: string; body: string; href: string }[]) {
+      expect(`${content.heading} ${content.body}`).not.toMatch(/sign[- ]in|session|signed out/i);
+      expect(content.href).toBe("/dashboard/settings");
+    }
+  });
+
+  it("says why on already_connected, because retrying identically reproduces it", () => {
+    expect(INSTAGRAM.already_connected.body).toMatch(/already/i);
   });
 });

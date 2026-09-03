@@ -16,6 +16,7 @@ from src.exceptions.tenancy import TenantResolutionError
 from src.services.target import (
     commands,
     identity,
+    ig_login_oauth,
     invitations,
     sessions,
     webhook_ingress,
@@ -403,3 +404,104 @@ class TestInvitations:
         resp = client.post("/api/v1/invitations/tok-1/accept")
         assert resp.status_code == status
         assert resp.json()["reason"] == reason
+
+
+ACCOUNT = "55555555-5555-4555-8555-555555555555"
+
+
+class TestDestinationConnect:
+    """`POST /workspaces/{ws}/accounts/{id}/connect` — start the Instagram
+    Login grant for ONE destination (#1220 step 2, #1041). The Drive connect
+    route's shape: admin floor, a state row pinned to the account, and the
+    URL the browser goes to."""
+
+    @pytest.fixture
+    def instagram_configured(self, monkeypatch):
+        from src.config.settings import settings
+
+        monkeypatch.setattr(settings, "INSTAGRAM_APP_ID", "app-1", raising=False)
+        monkeypatch.setattr(settings, "INSTAGRAM_APP_SECRET", "sec", raising=False)
+        monkeypatch.setattr(
+            settings,
+            "OAUTH_REDIRECT_BASE_URL",
+            "https://api.example.test",
+            raising=False,
+        )
+
+    @pytest.fixture
+    def purpose(self, monkeypatch):
+        holder = {"value": "connect", "asked": None}
+
+        async def connect_purpose(session, *, workspace_id, ig_account_id):
+            holder["asked"] = (workspace_id, ig_account_id)
+            return holder["value"]
+
+        monkeypatch.setattr(ig_login_oauth, "connect_purpose", connect_purpose)
+        return holder
+
+    @pytest.fixture
+    def issued(self, monkeypatch):
+        seen = {}
+
+        async def issue_state(session, **kw):
+            seen.update(kw)
+            return "st4te"
+
+        from src.api.routes import v1
+
+        monkeypatch.setattr(v1, "issue_state", issue_state)
+        return seen
+
+    def test_mints_a_state_pinned_to_the_account_and_says_where_to_go(
+        self, client, signed_in, tenant, instagram_configured, purpose, issued
+    ):
+        resp = client.post(f"/api/v1/workspaces/{WS}/accounts/{ACCOUNT}/connect")
+        assert resp.status_code == 200, resp.text
+        url = resp.json()["authorization_url"]
+        assert url.startswith("https://api.instagram.com/oauth/authorize?")
+        assert "state=st4te" in url
+        assert "instagram-login%2Fcallback" in url
+        assert tenant == [
+            ("uow", WS, PRINCIPAL.user_id),
+            ("gate", WS, PRINCIPAL.user_id, "admin"),
+        ]
+        assert purpose["asked"] == (WS, ACCOUNT)
+        assert issued["purpose"] == "connect"
+        assert issued["provider"] == ig_login_oauth.PROVIDER
+        assert issued["reconnect_target"] == ACCOUNT
+        assert issued["workspace_id"] == WS
+        assert issued["user_id"] == PRINCIPAL.user_id
+
+    def test_a_credentialed_account_mints_a_reconnect(
+        self, client, signed_in, tenant, instagram_configured, purpose, issued
+    ):
+        purpose["value"] = "reconnect"
+        resp = client.post(f"/api/v1/workspaces/{WS}/accounts/{ACCOUNT}/connect")
+        assert resp.status_code == 200
+        assert issued["purpose"] == "reconnect"
+
+    def test_an_account_that_is_not_this_workspaces_is_404_never_403(
+        self, client, signed_in, tenant, instagram_configured, purpose, issued
+    ):
+        purpose["value"] = None
+        resp = client.post(f"/api/v1/workspaces/{WS}/accounts/{ACCOUNT}/connect")
+        assert resp.status_code == 404
+        assert issued == {}
+
+    def test_unconfigured_instagram_refuses_503_before_any_seam(
+        self, client, signed_in, tenant, purpose, issued, monkeypatch
+    ):
+        from src.config.settings import settings
+
+        monkeypatch.setattr(settings, "INSTAGRAM_APP_ID", None, raising=False)
+        resp = client.post(f"/api/v1/workspaces/{WS}/accounts/{ACCOUNT}/connect")
+        assert resp.status_code == 503
+        assert "INSTAGRAM_APP_ID" in resp.json()["detail"]
+        assert tenant == []
+
+    def test_a_non_uuid_account_is_refused_before_any_seam(
+        self, client, signed_in, tenant, instagram_configured
+    ):
+        resp = client.post(f"/api/v1/workspaces/{WS}/accounts/not-an-id/connect")
+        assert resp.status_code == 422
+        assert tenant == []

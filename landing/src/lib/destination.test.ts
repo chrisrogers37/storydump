@@ -12,9 +12,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   addDestination,
   addDestinationRefusalCopy,
+  connectControlFor,
+  destinationConnectRefusalCopy,
   destinationHandle,
   destinationIsActive,
   destinationStateBadge,
+  isInstagramAuthorizationUrl,
+  requestDestinationConnect,
 } from "./destination";
 
 const WS = "11111111-1111-4111-8111-111111111111";
@@ -192,5 +196,96 @@ describe("destinationStateBadge", () => {
   it("marks the one state a person can act on", () => {
     expect(destinationStateBadge("reauth_required").tone).toBe("attention");
     expect(destinationStateBadge("active").tone).toBe("active");
+  });
+});
+
+describe("isInstagramAuthorizationUrl", () => {
+  // The value is NAVIGATED TO, so the guard sits at the navigation. Equality on
+  // the host, never `endsWith` — same trap `source-connect.ts` names.
+  it("accepts Instagram's authorize host over https", () => {
+    expect(
+      isInstagramAuthorizationUrl("https://api.instagram.com/oauth/authorize?client_id=1"),
+    ).toBe(true);
+  });
+
+  it.each([
+    "http://api.instagram.com/oauth/authorize",
+    "https://evil-api.instagram.com/oauth/authorize",
+    "https://api.instagram.com.evil.example/oauth/authorize",
+    "https://api.instagram.com:8443/oauth/authorize",
+    "https://accounts.google.com/o/oauth2/v2/auth",
+    "not a url",
+  ])("refuses %s", (value) => {
+    expect(isInstagramAuthorizationUrl(value)).toBe(false);
+  });
+});
+
+describe("connectControlFor", () => {
+  it("offers Connect for a destination that has never been connected", () => {
+    expect(connectControlFor("none")).toEqual({ label: "Connect Instagram", kind: "connect" });
+  });
+
+  it("offers Reconnect when the credential is expired or revoked", () => {
+    expect(connectControlFor("expired")).toEqual({ label: "Reconnect Instagram", kind: "reconnect" });
+    expect(connectControlFor("revoked")).toEqual({ label: "Reconnect Instagram", kind: "reconnect" });
+  });
+
+  it("offers nothing on a live connection — the badge says connected", () => {
+    expect(connectControlFor("active")).toBeNull();
+  });
+
+  it("treats a value this build does not recognise as not connected", () => {
+    expect(connectControlFor(undefined)).toEqual({ label: "Connect Instagram", kind: "connect" });
+  });
+});
+
+describe("requestDestinationConnect", () => {
+  const ACCOUNT = "55555555-5555-4555-8555-555555555555";
+
+  it("asks the proxy for this destination's authorization URL and returns it", async () => {
+    stubFetch({ authorizationUrl: "https://api.instagram.com/oauth/authorize?state=s" });
+    const result = await requestDestinationConnect(WS, ACCOUNT);
+    expect(captured[0].url).toBe(`/api/workspaces/${WS}/accounts/${ACCOUNT}/connect`);
+    expect(captured[0].init.method).toBe("POST");
+    expect(result).toEqual({
+      ok: true,
+      authorizationUrl: "https://api.instagram.com/oauth/authorize?state=s",
+    });
+  });
+
+  it("refuses a URL that is not Instagram's, at the line before navigation", async () => {
+    stubFetch({ authorizationUrl: "https://evil.example/oauth/authorize" });
+    const result = await requestDestinationConnect(WS, ACCOUNT);
+    expect(result).toEqual({ ok: false, error: "malformed_authorization_url", status: 200 });
+  });
+
+  it("carries the proxy's refusal by name", async () => {
+    stubFetch({ error: "not found" }, 404);
+    const result = await requestDestinationConnect(WS, ACCOUNT);
+    expect(result).toEqual({ ok: false, error: "not found", status: 404 });
+  });
+
+  it("reports an unreachable app as such", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("offline"); }));
+    const result = await requestDestinationConnect(WS, ACCOUNT);
+    expect(result).toEqual({ ok: false, error: "unreachable", status: 0 });
+  });
+});
+
+describe("destinationConnectRefusalCopy", () => {
+  it("says the service is not set up when Instagram is unconfigured", () => {
+    expect(destinationConnectRefusalCopy("http_503")).toMatch(/not set up/i);
+  });
+
+  it("names the admin floor on a role refusal", () => {
+    expect(destinationConnectRefusalCopy("http_403")).toMatch(/admin/i);
+  });
+
+  it("sends a stale screen back for a destination that is gone", () => {
+    expect(destinationConnectRefusalCopy("http_404")).toMatch(/reload/i);
+  });
+
+  it("has a sentence for the unknown case that promises nothing", () => {
+    expect(destinationConnectRefusalCopy("mystery")).toMatch(/nothing changed/i);
   });
 });

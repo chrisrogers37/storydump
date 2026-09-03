@@ -77,10 +77,13 @@ import json
 import logging
 from typing import Optional
 
+from asyncpg.exceptions import UniqueViolationError
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 
 from src.exceptions import StorydumpError
 from src.services.target import readers
+from src.services.target._dbapi import driver_candidates
 
 logger = logging.getLogger(__name__)
 
@@ -448,3 +451,55 @@ async def get_or_create_media_source(
         },
     )
     return str(result.scalar_one()), True
+
+
+async def attach_connected_identity(
+    executor,
+    *,
+    workspace_id: str,
+    ig_account_id: str,
+    provider_account_ref: str,
+    handle: Optional[str],
+) -> None:
+    """A destination becomes a CONNECTED destination (#1220 step 2).
+
+    The row was created from a typed handle with a provisional
+    ``manual:<handle>`` reference (`MANUAL_REF_PREFIX`); the OAuth callback now
+    knows the real Meta id, and this is the reconciliation that note promised:
+    the reference flips to the real id, the handle is refreshed from the
+    profile when Instagram supplied one, and an account parked
+    `reauth_required` comes back `active` — the `07` §2 reconnect edge, on the
+    account the dispatcher actually reads.
+
+    `uq_ig_account_live (workspace_id, provider_account_ref)` decides the one
+    case this cannot do: the real id is already another live row in this
+    workspace. That is two destinations for one Instagram feed, which the
+    index exists to forbid, so it is refused as ``duplicate_destination``
+    rather than merged — merging would silently move a schedule.
+    """
+    try:
+        result = await executor.execute(
+            text(
+                "UPDATE ig_accounts"
+                "   SET provider_account_ref = :ref,"
+                "       handle = COALESCE(:handle, handle),"
+                "       state = CASE WHEN state = 'reauth_required' THEN 'active' ELSE state END"
+                " WHERE id = :acct AND workspace_id = :ws AND state <> 'moved'"
+            ),
+            {
+                "ref": account_ref_from(provider_account_ref),
+                "handle": handle_from(handle) if handle else None,
+                "acct": str(ig_account_id),
+                "ws": str(workspace_id),
+            },
+        )
+    except DBAPIError as exc:
+        for cause in driver_candidates(exc):
+            if isinstance(cause, UniqueViolationError):
+                raise ProvisioningRefused(
+                    "duplicate_destination",
+                    "that Instagram account is already another destination here",
+                ) from exc
+        raise
+    if result.rowcount == 0:
+        raise ProvisioningRefused("not_found", f"destination {ig_account_id}")

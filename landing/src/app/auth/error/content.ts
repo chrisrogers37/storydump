@@ -27,7 +27,7 @@
  * exactly that ("if the API adds a sixth, it lands here as the fallback") —
  * the sixth already existed.
  */
-export type Flow = "signin" | "drive";
+export type Flow = "signin" | "drive" | "instagram";
 
 /** Reasons either leg can send. */
 export type SharedReason =
@@ -42,6 +42,9 @@ export type SigninReason = SharedReason | "identity_collision";
 /** Drive only: `google_drive_oauth.REDIRECT_REASON` maps
  *  `no_refresh_token` and `scope_not_granted` onto it. */
 export type DriveReason = SharedReason | "grant_incomplete";
+
+/** Instagram only: the real account is already another destination here. */
+export type InstagramReason = SharedReason | "already_connected";
 
 export type Content = {
   heading: string;
@@ -159,13 +162,63 @@ export const DRIVE: Record<DriveReason | "generic", Content> = {
   },
 };
 
-/** `auth.py` sends `flow=drive` on the Drive leg and nothing on sign-in. */
+/**
+ * Instagram-connect copy (#1220 step 2). The reader is SIGNED IN and was
+ * connecting a destination from Settings; the same three properties the Drive
+ * table holds — never "sign in", never a claim about the account, `href` back
+ * to Settings.
+ */
+export const INSTAGRAM: Record<InstagramReason | "generic", Content> = {
+  denied: {
+    heading: "Instagram was not connected.",
+    body: "Instagram came back without granting access. That happens if the request was declined, and it can also happen when Instagram refuses it — an account that is not a Professional account, or one the app is not yet approved for. Nothing about your workspace changed.",
+    href: "/dashboard/settings",
+    primary: "Try connecting again",
+  },
+  missing_params: {
+    heading: "That Instagram connection link was incomplete.",
+    body: "The address was cut short on the way back from Instagram. Nothing was connected. Start the connection again from Settings.",
+    href: "/dashboard/settings",
+    primary: "Back to settings",
+  },
+  state_refused: {
+    heading: "That Instagram connection attempt has expired.",
+    body: "A connection has to finish in one go, from the browser that started it, by an admin of the workspace. Nothing was connected — start it again and it should work.",
+    href: "/dashboard/settings",
+    primary: "Try connecting again",
+  },
+  exchange_failed: {
+    heading: "We could not finish connecting Instagram.",
+    body: "Instagram accepted the request but the last step did not complete. Nothing was connected. This one is on us — try again in a moment.",
+    href: "/dashboard/settings",
+    primary: "Try connecting again",
+  },
+  already_connected: {
+    heading: "That Instagram account is already a destination here.",
+    body: "The account you signed in with is already connected to another destination in this workspace, so it was not attached a second time. Nothing changed. Remove the duplicate destination, or connect a different account.",
+    href: "/dashboard/settings",
+    primary: "Back to settings",
+  },
+  generic: {
+    heading: "We could not connect Instagram.",
+    body: "Something went wrong on the way back from Instagram. Nothing was connected.",
+    href: "/dashboard/settings",
+    primary: "Back to settings",
+    secondary: "Contact us if this keeps happening",
+  },
+};
+
+/** `auth.py` sends `flow=drive` on the Drive leg, `flow=instagram` on the
+ *  Instagram connect leg, and nothing on sign-in. */
 export function resolveFlow(flow: string | undefined): Flow {
-  return flow === "drive" ? "drive" : "signin";
+  if (flow === "drive") return "drive";
+  if (flow === "instagram") return "instagram";
+  return "signin";
 }
 
 export function resolveContent(flow: Flow, reason: string | undefined): Content {
-  const table: Record<string, Content> = flow === "drive" ? DRIVE : SIGNIN;
+  const table: Record<string, Content> =
+    flow === "drive" ? DRIVE : flow === "instagram" ? INSTAGRAM : SIGNIN;
   return reason && reason !== "generic" && reason in table
     ? table[reason]
     : table.generic;
