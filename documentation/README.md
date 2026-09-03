@@ -2,11 +2,10 @@
 
 Welcome to the Storydump documentation hub. All project documentation is organized here by purpose.
 
-**Last Updated**: 2026-07-30
-**Current Version**: v1.6.0
-**Current Phase**: Phase 2 (Instagram API Automation) - COMPLETED | Phase 1.8 (Telegram UX) - COMPLETED
-**Next Phase**: Phase 3 (Shopify Integration) - PENDING
-**Deployment**: Railway (worker + API) + Neon PostgreSQL
+**Last Updated**: 2026-09-02
+**Current Version**: v1.6.0 (last tagged release; the 2026-08 multi-tenant refactor is under `[Unreleased]` in the CHANGELOG)
+**Current program**: the [consolidated design plan](planning/2026-08-02-consolidated-design-plan/README.md) — Phases 0, F and L built; Phase M partially executed; **Phase X.3 (multi-workspace UX) in progress**; Phase S pending. Per-increment scoreboard in that README's *Live status*.
+**Deployment**: Railway (worker + API) + Neon PostgreSQL; landing site and dashboard on Vercel
 
 ## Documentation Structure
 
@@ -15,19 +14,14 @@ documentation/
 ├── README.md (this file)          # Documentation index
 ├── ROADMAP.md                     # Product roadmap and version history
 ├── SECURITY_REVIEW.md             # Security audit findings
-├── planning/                       # Planning and design documents
-│   ├── 2026-07-system-review/     # Full-system review: triage + detailed findings + issue backlog
-│   ├── 2026-07-29-data-model-evaluation/  # Data model evaluation: neutral prompt, self-evaluation, target model, epic, triage, migration plan
-│   ├── 2026-07-29-high-throughput-multi-tenant/
-│   │                               # Durable multi-tenant/worker architecture and migration plan
-│   ├── phases/                    # Phased implementation plans
-│   │   ├── 00_MASTER_ROADMAP.md   # Vision, architecture, phase overview
-│   │   ├── 02_shopify_integration.md        # PENDING
-│   │   ├── 03_printify_integration.md       # PENDING
-│   │   ├── 04_media_product_linking.md      # PENDING
-│   │   ├── 05_llm_integration.md            # PENDING
-│   │   ├── 06_order_email_automation.md     # PENDING
-│   │   └── 07_dashboard_ui.md              # PENDING
+├── planning/                       # Live plans and increment specs
+│   ├── 2026-08-02-consolidated-design-plan/   # THE authoritative plan (ratified, in execution)
+│   ├── 2026-08-11-f1-ownership-inventory/     # F.1 spec — built (#846); burn-down on #841
+│   ├── 2026-08-14-f2-increment-split/         # F.2 split — complete (migrations 052–060)
+│   ├── 2026-08-17-m1-transform-spec/          # M.1 — abandoned (legacy data not migrated)
+│   ├── 2026-08-17-m2-rehearsal-spec/          # M.2 — not executed
+│   └── 2026-08-17-m3-parity-bar-mapping/      # M.3 parity bar — deferred
+├── archive/                        # Completed, superseded and abandoned plans (see archive/README.md)
 ├── cloudinary/                     # Cloudinary usage analyses and enhancement proposals
 ├── guides/                         # How-to guides and tutorials
 ├── operations/                     # Operational runbooks
@@ -38,53 +32,22 @@ documentation/
 
 ## Planning & Architecture
 
-### High-Throughput Multi-Tenant Architecture
-**[2026-07-29-high-throughput-multi-tenant/](planning/2026-07-29-high-throughput-multi-tenant/README.md)** - PROPOSED
-- PostgreSQL-authoritative commands, leased jobs, provider operations, and transactional outbox
-- Redis-based shared admission and work wake-ups with independent ready-job recovery
-- Webhook ingress, fair worker pools, mandatory tenant context, and RLS defense in depth
-- Independent review prompt, repository self-evaluation, P0-P3 triage, and file-oriented implementation plan
+### Consolidated design plan (2026-08-02) — authoritative
+**[2026-08-02-consolidated-design-plan/](planning/2026-08-02-consolidated-design-plan/README.md)** - RATIFIED, IN EXECUTION
+- The single plan for the multi-tenant refactor: fixed constraints FC-0..FC-9, target architecture, executable domain model, decision record D1–D41, the increment sequence (Phases 0 → F → L → M → X → S), operational numbers, product lifecycles, security model
+- Read `README.md` → `00` → `04`; the README's *Live status* carries the per-increment scoreboard (2026-09-02) and the three rulings applied in practice but not yet written into `00`/`03`
+- Position: Phases 0, F and L built · the M.3 window applied by hand and not closed out (3f/3g and the stand-down owed) · X.3 in progress (#1172) · S pending
+- Trackers: #746 (Phase 0), #806 (F.2), #841 (F.1), #751 (F.4), #790 (Phase M), #1172 (X.3), #1212 (state of play)
 
-### Master Roadmap
-**[phases/00_MASTER_ROADMAP.md](planning/phases/00_MASTER_ROADMAP.md)** - Phases 1-2.5 COMPLETED
-- Vision: E-commerce Optimization Hub for Social Media Marketing
-- Architecture principles (strict separation of concerns)
-- Service naming conventions and data model strategy
-- Data flow diagrams (current Phase 2 and future Phase 5+)
-- Phase overview with status markers (8 phases total, 5 completed, 6 pending)
+### Increment specs (live; each carries a status banner)
+- **[2026-08-11-f1-ownership-inventory/](planning/2026-08-11-f1-ownership-inventory/README.md)** — F.1 ownership inventory and fail-closed interface spec — BUILT (`src/repositories/tenant_scope.py`); residual burn-down on #841
+- **[2026-08-14-f2-increment-split/](planning/2026-08-14-f2-increment-split/README.md)** — F.2 migration split — COMPLETED (migrations 052–060)
+- **[2026-08-17-m1-transform-spec/](planning/2026-08-17-m1-transform-spec/README.md)** — M.1 legacy → target transform — ABANDONED by owner ruling 2026-09-02 (legacy data not migrated; spec retained as the record)
+- **[2026-08-17-m2-rehearsal-spec/](planning/2026-08-17-m2-rehearsal-spec/README.md)** — M.2 window rehearsal — NOT EXECUTED
+- **[2026-08-17-m3-parity-bar-mapping/](planning/2026-08-17-m3-parity-bar-mapping/README.md)** — M.3 Telegram parity bar — DEFERRED (#854)
 
-### Active Phase Planning Documents
-
-**[phases/02_shopify_integration.md](planning/phases/02_shopify_integration.md)** - PENDING
-- Shopify Admin API integration, product catalog sync (Type 2 SCD), order tracking
-
-**[phases/03_printify_integration.md](planning/phases/03_printify_integration.md)** - PENDING
-- Printify API for print-on-demand, product/blueprint sync, fulfillment tracking
-
-**[phases/04_media_product_linking.md](planning/phases/04_media_product_linking.md)** - PENDING
-- Many-to-many media-product relationships, attribution tracking, performance analytics
-
-**[phases/05_llm_integration.md](planning/phases/05_llm_integration.md)** - PENDING
-- LLM service abstraction (Claude/OpenAI), content suggestions, email drafting
-
-**[phases/06_order_email_automation.md](planning/phases/06_order_email_automation.md)** - PENDING
-- Order notifications via Telegram, Gmail API, LLM-drafted customer responses
-
-**[phases/07_dashboard_ui.md](planning/phases/07_dashboard_ui.md)** - PENDING
-- Next.js web dashboard, analytics visualizations, media-product management
-
-### Data Model Evaluation (2026-07-29)
-
-**[2026-07-29-data-model-evaluation/](planning/2026-07-29-data-model-evaluation/README.md)** - PROPOSED
-- Neutral, reusable prompt for evaluating the system and its data model (no recommendation leakage)
-- Repository-grounded self-evaluation: schema inventory, path traces, liabilities, comparison of three target approaches
-- Recommended workspace-rooted target model, implementation epic, P0–P3 issue triage, and an
-  expand/backfill/dual-write/shadow-read/cutover/contract migration plan with per-consumer coverage and rollback
-
-### Feed & Queue Features (Research)
-
-- **[01: Live Story Visibility](planning/feed-queue-features/01_live_story_visibility.md)** — Fetch & display live stories in `/status` (Ready)
-- **[02: Feed Reset](planning/feed-queue-features/02_feed_reset.md)** — Clear live stories from Instagram (Blocked — no DELETE API)
+### Archive
+**[archive/README.md](archive/README.md)** — index of completed, superseded and abandoned plans, moved out of `planning/` on 2026-09-02: the two 2026-07-29 design packages the consolidated plan adjudicated, the 2026-07 full-system review, the 2026-05/06 Instagram investigations, the pre-refactor product phases (Shopify, Printify, LLM, order email, dashboard) and roadmap, and the completed credential-refactor, session-isolation, web-app-migration and Meta-launch plans.
 
 ### Test Coverage Report
 **[TEST_COVERAGE.md](guides/TEST_COVERAGE.md)** - CURRENT (1,417 tests)
@@ -224,11 +187,10 @@ a guide walking a reader through it contradicted a fixed constraint.
 
 ## Security
 
-**[planning/2026-07-system-review/triage-tracker.md](planning/2026-07-system-review/triage-tracker.md)** - Full-system review (2026-07-02)
-- 91 triaged findings (bugs, security, architecture, over-complication, tests)
-- Organized under 5 cross-cutting epics; filed as 36 GitHub issues (26 individual P0/P1 + 10 clusters)
-- Prioritizes data-integrity, security, and multi-tenant isolation work first
-- Includes durable `triage-tracker.md`, `detailed-findings.md`, and a `file-issues.sh` filing script
+**[archive/2026-07-system-review/triage-tracker.md](archive/2026-07-system-review/triage-tracker.md)** - Full-system review (2026-07-02) — ARCHIVED audit record
+- 91 triaged findings (bugs, security, architecture, over-complication, tests) under 5 cross-cutting epics
+- Filed as one GitHub issue per finding, not the clustered 36 the document planned: 5 epics (#560, #576, #577, #578, #579) + #580–#658, all under the `system-review` label — 72 open / 12 closed on 2026-09-02
+- The live state is the label, not the document; the consolidated plan absorbed the tenancy, migration and multi-worker epics into Phases F, 0 and L
 
 **[SECURITY_REVIEW.md](SECURITY_REVIEW.md)** - Reviewed 2026-01-11, Updated 2026-02-10
 - No hardcoded credentials found
@@ -256,8 +218,8 @@ Coming in Phase 5 (Dashboard UI):
 ### For New Developers
 1. Start with **[quickstart.md](guides/quickstart.md)**, then **[dev-environment-setup.md](guides/dev-environment-setup.md)** (local setup)
 2. Read **[testing-guide.md](guides/testing-guide.md)** (understand testing)
-3. Review **[phases/00_MASTER_ROADMAP.md](planning/phases/00_MASTER_ROADMAP.md)** (architecture and roadmap)
-4. Read root **[CLAUDE.md](../CLAUDE.md)** for detailed service/model reference and safety rules
+3. Read **[../AGENTS.md](../AGENTS.md)** (architecture, the command port, setup, commands, testing) and the **[consolidated design plan](planning/2026-08-02-consolidated-design-plan/README.md)** (where the system is going)
+4. Read root **[CLAUDE.md](../CLAUDE.md)** for the safety rules (it defers to `AGENTS.md` for everything else)
 
 ### For Deploying to Production
 1. Follow **[deployment.md](guides/deployment.md)** step-by-step
@@ -269,16 +231,14 @@ Coming in Phase 5 (Dashboard UI):
 7. For cloud-specific details: **[cloud-deployment.md](guides/cloud-deployment.md)**
 
 ### For Understanding Architecture
-1. Check **[phases/00_MASTER_ROADMAP.md](planning/phases/00_MASTER_ROADMAP.md)**
-   - Architecture principles and data flow diagrams
-   - Service naming conventions (core/, integrations/, domain/)
-   - Phase progression and dependencies
-2. Read root **[CLAUDE.md](../CLAUDE.md)** for service/model/table reference
+1. Read **[../AGENTS.md](../AGENTS.md)** — layering rules, the command port, services, what is deliberately not wired
+2. Read the consolidated plan's `01-target-architecture.md` and `02-domain-model.md` for the target tier (`src/services/target/`, `src/models/target/`)
+3. The pre-refactor roadmap and its diagrams are archived at `archive/phases/00_MASTER_ROADMAP.md`
 
 ### For Contributing Code
 1. Read root **[CLAUDE.md](../CLAUDE.md)** (development guidelines, pre-commit checklist)
 2. Review **[testing-guide.md](guides/testing-guide.md)** (test requirements — every feature needs tests)
-3. Check **[phases/00_MASTER_ROADMAP.md](planning/phases/00_MASTER_ROADMAP.md)** for context
+3. Check the consolidated plan's `04-execution-sequence.md` for the increment your change belongs to
 4. Run pre-commit: `source venv/bin/activate && ruff check src/ tests/ && ruff format --check src/ tests/ && pytest`
 
 ---
@@ -310,8 +270,8 @@ When adding new documentation:
    - How-to guides → `guides/`
    - Operations → `operations/`
    - Bug fixes/patches → `updates/` (use dated filenames: `YYYY-MM-DD-description.md`)
-   - Completed plans → keep in their current documentation area with a clear
-     `COMPLETED` or `Superseded` status
+   - Completed, superseded or abandoned plans → `git mv` to `archive/` (same layout), add a
+     one-line status banner at the top, and add a row to `archive/README.md`
 
 2. **Update this index** (`documentation/README.md`)
 
@@ -330,9 +290,10 @@ When adding new documentation:
 
 | Area | Status | Files | Notes |
 |------|--------|-------|-------|
-| **Planning** | Current | 26 Markdown files, including the 6-document throughput/tenancy set | Phases 1-2 complete; high-throughput design proposed; later product phases pending |
-| **Guides** | Current | 9 guides | Setup, deployment, testing, Instagram API, dev env, deployment options, Tailscale, test coverage |
-| **Operations** | Current | 3 files | Monitoring, backup, troubleshooting |
+| **Planning** | Current | 15 Markdown files: the 10-file consolidated plan + 5 increment specs | Plan ratified and in execution (Phase X.3 current); each spec carries a status banner |
+| **Archive** | Historical | 37 files | Completed, superseded and abandoned plans, indexed in `archive/README.md` |
+| **Guides** | Current | 10 guides | Setup, deployment, testing, Instagram Login, dev env, deployment options, CI/CD, landing deploy, test coverage (its test count is stale) |
+| **Operations** | Current | 11 files | Monitoring, backup, troubleshooting, migration runner, scheduling monitor, worker recovery, Meta App Review + callbacks, Google OAuth verification, preview deployments, one postmortem |
 | **Updates** | Current | 3 files | Bugfixes, category scheduling, force posting |
 | **Security** | Current | 1 file | Security review (updated post-refactor) |
 | **API Docs** | Future | 0 files | Planned for Phase 5 (Dashboard UI) |
@@ -342,6 +303,7 @@ When adding new documentation:
 - **IN PROGRESS** - Work actively underway
 - **PENDING** - Planned for future implementation
 - **PROPOSED** - Design is documented but still requires review and phase-specific approval
+- **ARCHIVED** - Completed, superseded or abandoned; kept under `archive/` as the record, with a status banner
 
 ---
 
@@ -350,11 +312,11 @@ When adding new documentation:
 - **Setup issues?** → See [quickstart.md](guides/quickstart.md) troubleshooting, or [dev-environment-setup.md](guides/dev-environment-setup.md) for a local environment
 - **Deployment questions?** → Check [deployment.md](guides/deployment.md)
 - **Test failures?** → Review [testing-guide.md](guides/testing-guide.md)
-- **Architecture questions?** → Read [phases/00_MASTER_ROADMAP.md](planning/phases/00_MASTER_ROADMAP.md)
+- **Architecture questions?** → Read [../AGENTS.md](../AGENTS.md), then the [consolidated design plan](planning/2026-08-02-consolidated-design-plan/README.md)
 - **Version history?** → Check [ROADMAP.md](ROADMAP.md) or [../CHANGELOG.md](../CHANGELOG.md)
 - **Instagram setup?** → Follow [instagram-login-setup.md](guides/instagram-login-setup.md)
 - **Security concerns?** → Review [SECURITY_REVIEW.md](SECURITY_REVIEW.md)
 
 ---
 
-*Last updated: 2026-07-30*
+*Last updated: 2026-09-02*
