@@ -166,6 +166,28 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
   }),
 
   /**
+   * The way OUT. Owner-only at the port (`ROLE_FLOOR`), and the port refuses a
+   * body without `confirm: true` (`command_executors.py`): the destructive
+   * intent must be STATED, not arrived at. The typed-name dialog is the front
+   * end's half of `06` §1's "owner (explicit, confirmed)"; this is the shape
+   * check that keeps an accidental empty POST from spending a round trip.
+   *
+   * Built since the X.3 work (#1135) and unreachable because no adapter
+   * offered it (#1127). Irreversible once the 30-day grace window closes.
+   */
+  offboard_workspace: submissionCommand((raw) => {
+    if (raw.confirm !== true) return { ok: false, error: "confirm_required" };
+    return { ok: true, body: { confirm: true } };
+  }),
+
+  /**
+   * The way back, inside the grace window. No body: the workspace is the URL
+   * and the deadline is the port's to enforce (#1185), not this file's to
+   * pre-judge.
+   */
+  restore_workspace: submissionCommand(() => ({ ok: true, body: {} })),
+
+  /**
    * Disconnect a Drive source. Same shape as `sync_now` and for the same
    * reason: the executor reads `source_id` and refuses `invalid_args` without
    * one, and the id becomes a database lookup, so "this is not an id" is a

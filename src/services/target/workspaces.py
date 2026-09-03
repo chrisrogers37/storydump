@@ -40,7 +40,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
 from src.exceptions.base import StorydumpError
-from src.services.target import readers
+from src.services.target import offboarding, readers
 from src.services.target._dbapi import driver_candidates
 from src.services.target.unit_of_work import apply_gucs
 
@@ -203,12 +203,21 @@ async def list_for_user(executor, *, user_id: str) -> list[dict]:
 
 
 async def get_workspace(executor, *, workspace_id: str) -> Optional[dict]:
-    """The config row (`02` §1's typed columns) plus state, or None."""
-    return await readers.row(
+    """The config row (`02` §1's typed columns) plus state, or None.
+
+    Carries `restorable_until` — when an offboarding workspace can last be
+    restored — computed here from the one grace constant so the dashboard
+    never derives it from a copied number (#1127)."""
+    row = await readers.row(
         executor,
         f"SELECT {_CONFIG_COLUMNS} FROM workspaces WHERE id = :ws",
         ws=str(workspace_id),
     )
+    if row is not None:
+        row["restorable_until"] = offboarding.restorable_until(
+            row.get("offboarding_at")
+        )
+    return row
 
 
 async def list_members(executor, *, workspace_id: str) -> list[dict]:
