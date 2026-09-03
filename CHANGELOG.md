@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`/health` reports which database login the API holds and whether it bypasses row-level security (#751, F.4).** Production has connected as `neondb_owner` with `BYPASSRLS`, which makes every `p_tenant` policy inert on the deployed path, and nothing could say so. The role is sampled once, in the background, after startup — the probe itself still opens no connection, pinned by test — and reported as `db_role: {user, bypassrls}` or `null` for "not sampled", never a guessed-safe value. The worker logs the same fact on its election connection at boot. `connection_role()` in `unit_of_work.py` is the one place the question is asked, of the catalog rather than the URL.
 - **X.3 gate clause 3 was unsatisfiable under the owner's own ruling, so the invitation-email conjunct is DEFERRED OUT of the gate (#1172).** The gate demanded *"a real invitation email delivers end-to-end **through the configured provider**"*, and the owner ruled to defer email — its intended use being referrals and other communications rather than invitation transport. **A clause that names a configured provider cannot be met by a decision not to configure one.**
 
   **This is a ratification, not an editorial fix: it changes what "passed" means for a gate clause.** The gate now asserts five clauses and names **clause 3** as deferred. *(Clause 6 is `restore_workspace`, which is ratified and asserted — #1193. The deferred clause is 3.)*
