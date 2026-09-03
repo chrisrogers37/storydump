@@ -88,8 +88,12 @@ export default async function SettingsPage({
   // when the router could not be reached (`session.ts` keeps that distinct from
   // "you have none"), and the empty string is a safe seed — the Save button is
   // disabled on a blank name, so an unreachable read cannot submit one.
-  const workspaceName =
-    session.workspaces?.find((w) => w.id === workspaceId)?.name ?? "";
+  const membership = session.workspaces?.find((w) => w.id === workspaceId);
+  const workspaceName = membership?.name ?? "";
+  // The Delete / Restore card is owner-only (#1127). An unknown role — the
+  // list was unreachable — hides it: a delete control whose refusal we cannot
+  // predict is worse than a missing one, and the port refuses non-owners anyway.
+  const isOwner = membership?.role === "owner";
 
   const [configResult, accountsResult, sourcesResult, statsResult] =
     await Promise.all([
@@ -170,6 +174,9 @@ export default async function SettingsPage({
             workspaceId={workspaceId}
             workspaceName={workspaceName}
             editable
+            workspaceState={configResult.data.state}
+            restorableUntil={configResult.data.restorable_until}
+            isOwner={isOwner}
           />
         </TabsContent>
 

@@ -22,6 +22,7 @@ import {
 } from "@/lib/command-client";
 import type { SettingsView } from "@/lib/dashboard-payloads";
 import { CaptionStyleCard } from "./caption-style-card";
+import { DangerZoneCard } from "./danger-zone-card";
 import { RepostCadenceCard } from "./repost-cadence-card";
 
 /**
@@ -199,11 +200,20 @@ export function GeneralTab({
   workspaceId,
   workspaceName,
   editable,
+  workspaceState,
+  restorableUntil,
+  isOwner,
 }: {
   settings: SettingsView;
   workspaceId: string;
   workspaceName: string;
   editable: boolean;
+  /** `workspaces.state`; drives the Delete / Restore card (#1127). */
+  workspaceState: string;
+  /** Server-computed restore deadline while offboarding, else null. */
+  restorableUntil: string | null;
+  /** The card is owner-only; the page decides from the session's role. */
+  isOwner: boolean;
 }) {
   const router = useRouter();
   const [name, setName] = useState(workspaceName);
@@ -514,6 +524,20 @@ export function GeneralTab({
           })}
         </CardContent>
       </Card>
+
+      {/*
+        Owner-only, and gated HERE rather than left to the port's 403: a delete
+        control an admin cannot use is a promise the screen cannot keep, the
+        same shape as the toggles above (#1155).
+      */}
+      {isOwner && (
+        <DangerZoneCard
+          workspaceId={workspaceId}
+          workspaceName={workspaceName}
+          state={workspaceState}
+          restorableUntil={restorableUntil}
+        />
+      )}
     </div>
   );
 }
