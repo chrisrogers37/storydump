@@ -14,6 +14,8 @@ from sqlalchemy import text
 
 from src.config.settings import settings
 from src.services.target.unit_of_work import (
+    CONNECTION_ROLE_SQL,
+    connection_role,
     MAX_OVERFLOW_SEAM,
     POOL_RECYCLE_SEAM,
     POOL_SIZE_SEAM,
@@ -346,3 +348,64 @@ class TestTenantScopingAndGucHygieneUnderPoolReuse:
             assert in_transaction() is False
         finally:
             await engine.dispose()
+
+
+class _Result:
+    def __init__(self, row):
+        self._row = row
+
+    def first(self):
+        return self._row
+
+
+class _Conn:
+    """A connection that answers the role query with a fixed row, or raises."""
+
+    def __init__(self, row=None, raises=None):
+        self._row, self._raises, self.statements = row, raises, []
+
+    async def execute(self, statement, *args, **kwargs):
+        self.statements.append(str(statement))
+        if self._raises is not None:
+            raise self._raises
+        return _Result(self._row)
+
+
+class TestConnectionRole:
+    """`connection_role` is the one place that asks a live connection who it is.
+
+    It exists for the F.4 rollout (#751): production connects as the owner role
+    with `BYPASSRLS`, which makes every tenant policy inert, and nothing in the
+    estate could SAY so. The switch to the runtime logins is verified by reading
+    this back, so it has to be honest and it has to be harmless.
+    """
+
+    async def test_it_reports_the_login_and_whether_it_bypasses_rls(self):
+        conn = _Conn(row=("svc_ingress", False))
+        assert await connection_role(conn) == {
+            "user": "svc_ingress",
+            "bypassrls": False,
+        }
+
+    async def test_it_asks_postgres_not_the_config(self):
+        """The answer has to come from the catalog: a role name copied from the
+        URL would report what was CONFIGURED, and the whole point is to detect
+        a deployment where the two disagree."""
+        conn = _Conn(row=("neondb_owner", True))
+        await connection_role(conn)
+        assert "current_user" in conn.statements[0]
+        assert "rolbypassrls" in conn.statements[0]
+        assert (
+            "current_user" in CONNECTION_ROLE_SQL
+            and "rolbypassrls" in CONNECTION_ROLE_SQL
+        )
+
+    async def test_a_failing_sample_is_none_never_an_exception(self):
+        """A diagnostic must not take its caller down: the API samples this at
+        startup and the worker on its election connection, and neither may die
+        because a catalog read failed."""
+        conn = _Conn(raises=RuntimeError("connection reset"))
+        assert await connection_role(conn) is None
+
+    async def test_an_empty_answer_is_none(self):
+        assert await connection_role(_Conn(row=None)) is None

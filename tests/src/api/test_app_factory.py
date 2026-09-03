@@ -7,6 +7,9 @@ means a 503 that NAMES the variable (never the settings-built URL), and no
 
 from __future__ import annotations
 
+import time
+from contextlib import asynccontextmanager
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -297,3 +300,94 @@ class TestSchedulingHealthIsASecondSurface:
         assert payload["accounts_active"] == 0
         assert payload["worker"]["succeeded_ever"] == 78
         assert payload["worker"]["last_success_age_seconds"] == 3600
+
+
+class _RoleResult:
+    def __init__(self, row):
+        self._row = row
+
+    def first(self):
+        return self._row
+
+
+class _RoleConn:
+    def __init__(self, row):
+        self._row = row
+
+    async def execute(self, *args, **kwargs):
+        return _RoleResult(self._row)
+
+
+class _RoleEngine:
+    """An engine whose connections know who they are, and count themselves."""
+
+    def __init__(self, user="svc_ingress", bypassrls=False):
+        self.connects = 0
+        self._row = (user, bypassrls)
+
+    @asynccontextmanager
+    async def connect(self):
+        self.connects += 1
+        yield _RoleConn(self._row)
+
+    begin = connect
+
+
+def _wait_for_role(client, timeout=2.0):
+    """The sample runs as a background task after startup; wait for it."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        role = client.get("/health").json()["db_role"]
+        if role is not None:
+            return role
+        time.sleep(0.02)
+    return client.get("/health").json()["db_role"]
+
+
+class TestHealthReportsTheDatabaseRole:
+    """`/health` says which database login the API holds, and whether that login
+    bypasses row-level security (#751, F.4).
+
+    Production connects as `neondb_owner` with `BYPASSRLS`, so every `p_tenant`
+    policy is inert on the deployed path — and nothing could say so. The switch
+    to `svc_ingress` is verified by reading this field back after the deploy.
+
+    The value is sampled ONCE, at startup, in the background. The probe itself
+    still opens no connection: that property is what keeps a database blip from
+    taking the service down for a fault no restart repairs, and it is pinned
+    below by counting connections.
+    """
+
+    def test_without_startup_the_role_is_unknown_not_invented(self):
+        app = create_app(env={})
+        assert TestClient(app).get("/health").json()["db_role"] is None
+
+    def test_it_reports_the_login_and_bypassrls_after_startup(self):
+        engine = _RoleEngine(user="svc_ingress", bypassrls=False)
+        app = create_app(engine=engine)
+        with TestClient(app) as client:
+            assert _wait_for_role(client) == {"user": "svc_ingress", "bypassrls": False}
+
+    def test_an_owner_login_is_reported_as_bypassing_rls(self):
+        engine = _RoleEngine(user="neondb_owner", bypassrls=True)
+        app = create_app(engine=engine)
+        with TestClient(app) as client:
+            assert _wait_for_role(client) == {"user": "neondb_owner", "bypassrls": True}
+
+    def test_the_probe_opens_no_connection_of_its_own(self):
+        engine = _RoleEngine()
+        app = create_app(engine=engine)
+        with TestClient(app) as client:
+            _wait_for_role(client)
+            for _ in range(3):
+                assert client.get("/health").status_code == 200
+        assert engine.connects == 1
+
+    def test_a_failing_sample_leaves_the_probe_answering(self, engine):
+        """The conftest engine refuses SQL. Startup must survive that and the
+        probe must still answer 200 with an honest unknown."""
+        app = create_app(engine=engine)
+        with TestClient(app) as client:
+            resp = client.get("/health")
+        assert resp.status_code == 200
+        assert resp.json()["db_role"] is None
