@@ -1,5 +1,7 @@
 # F.1 — Ownership inventory and fail-closed interface spec
 
+> **Status (2026-09-02):** spec ratified and **built** — `src/repositories/tenant_scope.py` (#846) is its implementation, `tests/src/repositories/test_f1_fail_closed.py` its gate. The residual burn-down is tracked on #841: keyword-only tenant params landed for 22 of 72 methods (#962), 8 `if chat_settings_id` sites remain unclassified, and the web-boundary dependency is #869. The legacy repositories this governs retire with the legacy tier.
+
 Verification against the ratified plan, per `04` F.1. **Documentation only — no schema, no
 migration, no production-table change.** Classification is read off the plan, not invented here.
 

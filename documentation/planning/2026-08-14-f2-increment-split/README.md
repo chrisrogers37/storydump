@@ -1,6 +1,6 @@
 # F.2 — the increment split, reshaped under Fork 1 ruling (a)
 
-**Status:** ratified. Fork 1 locked to option (a) on
+**Status:** ratified — and **complete (2026-08-19)**: all nine segments landed as migrations 052–060 (#806, PRs #813/#822/#828/#844–#851) and were applied to production on 2026-08-26. Retained as the record of the split; the tracker's title was never updated past 2 of 9. Fork 1 locked to option (a) on
 [#806](https://github.com/chrisrogers37/storydump/issues/806#issuecomment-5287041579).
 This document supersedes the split filed in a #746 comment.
 

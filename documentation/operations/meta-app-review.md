@@ -232,7 +232,7 @@ Meta has the equivalent of Google's test-user list: accounts added under **App D
 ## See also
 
 - [`google-oauth-verification.md`](google-oauth-verification.md) — sibling runbook for Google Drive's `drive.readonly`. Same shape; the scope-justification section there is the model for Track 3 here.
-- [`documentation/planning/2026-03-31-meta-app-launch-design.md`](../planning/2026-03-31-meta-app-launch-design.md) — the original Meta/Instagram OAuth design.
+- [`documentation/archive/2026-03-31-meta-app-launch-design.md`](../archive/2026-03-31-meta-app-launch-design.md) — the original Meta/Instagram OAuth design.
 - `src/services/integrations/instagram_api.py` — every Graph call the justification copy describes.
 
 ## Related issues

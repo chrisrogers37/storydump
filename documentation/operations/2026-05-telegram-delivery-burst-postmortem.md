@@ -8,7 +8,7 @@
 | **Symptom** | Cards never delivered to Telegram chats; queue items burned through 3 retries each then recorded as failed |
 | **User impact** | Posts didn't surface for manual approval; queue backlog grew to 995 items |
 | **Resolved by** | Burst self-terminated. No code change deployed during the window. |
-| **Related** | Issue #467 (this), #444 (queue backlog), `documentation/planning/investigations/ig-host-routing_2026-06-02/` |
+| **Related** | Issue #467 (this), #444 (queue backlog), `documentation/archive/investigations/ig-host-routing_2026-06-02/` |
 
 ## TL;DR
 
