@@ -188,6 +188,11 @@ a guide walking a reader through it contradicted a fixed constraint.
 - Configuration backup (.env, tokens)
 - Disaster recovery steps
 
+### Runtime Database Roles (F.4 rollout)
+**[operations/runtime-database-roles.md](operations/runtime-database-roles.md)**
+- Moving the API and worker off the owner login onto `svc_ingress` / `svc_worker`, one service at a time
+- Verified through `/health`'s `db_role` field and the worker's boot log line; rollback per step
+
 ### Troubleshooting
 **[operations/troubleshooting.md](operations/troubleshooting.md)**
 - Service won't start (common causes, log inspection)
