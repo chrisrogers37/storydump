@@ -3,13 +3,20 @@ builder = "NIXPACKS"
 buildCommand = "pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media"
 
 [deploy]
-# DORMANT (plan §0.2 / #712): the migration runner ships unarmed — enabling
-# the predeploy apply is a human-gated step AFTER `runner adopt` has entered
-# production into the ledger. To arm, uncomment on both services; the
-# runner's advisory lock serializes concurrent deploys, and a migration
-# failure aborts the deploy with the old version still serving.
+# ARMED 2026-09-02 (plan §0.2 / #712, runbook step 5; #1195 is the gap this
+# closes). Every deploy of either service first applies pending migrations
+# through the runner. Production entered the ledger via `runner adopt` on
+# 2026-08-26 and stood at 066 with zero drift when this was armed. The runner
+# takes an advisory lock, so the two services' predeploys serialize and the
+# second finds nothing pending. A failing migration aborts the deploy with the
+# old version still serving; each file is its own transaction and ledger row,
+# so a mid-corpus failure resumes at the failed file on the next deploy — fix
+# forward, never edit an applied file (#1011 records the partial-state shape).
+# `DATABASE_URL` on BOTH services must be the database-owner connection: it
+# owns the target tables, and the app's own `TARGET_DATABASE_URL` is the
+# runtime login, which must not hold DDL rights.
 # See documentation/operations/migration-runner.md.
-# preDeployCommand = "python -m scripts.migration_runner apply"
+preDeployCommand = "python -m scripts.migration_runner apply"
 healthcheckPath = "/health"
 healthcheckTimeout = 30
 restartPolicyType = "ON_FAILURE"
