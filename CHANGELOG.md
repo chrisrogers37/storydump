@@ -114,6 +114,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The migration runner's predeploy step is armed (#1195; plan §0.2 runbook step 5).** `railway.toml` now runs `python -m scripts.migration_runner apply` before every deploy of either service, so a merged migration can no longer sit unapplied — the failure that let 066 wait a day. The runner's advisory lock serializes the two services; a failing migration aborts the deploy with the old build still serving and resumes at the failed file next time. Requires `DATABASE_URL` on both services to be the database-owner connection (the runtime `TARGET_DATABASE_URL` login must not hold DDL rights); the runbook's rollout section records the 2026-09-02 state and the rollback (revert the line). `tests/test_deploy_guardrails.py` flips from pinning dormancy to pinning exactly one arming point, in this file.
+
 - **`bindings.active_binding_ids` removed — it was a second spelling of a predicate that names its own owner.** `prompts.push_bindings` states it is the one owner of "where can we say this" and has six production callers; the function added in #1178 had none outside its own tests, and it *differed* — `push_bindings` filters `channel LIKE 'telegram%'` and the removed one did not, so it would have silently widened the day a non-Telegram channel joined `ck_bindings_channel`. Callers and tests now route through the declared owner.
 
 ### Added
