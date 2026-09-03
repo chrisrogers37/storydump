@@ -207,6 +207,11 @@ class Settings(BaseSettings):
     # ingress door rather than accepting every one. Arming the target webhook is
     # therefore two deliberate acts -- set this, then register -- not one.
     TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN: Optional[str] = None
+    # The target bot's @username (without the @) — the bot whose webhook
+    # points at this API and whose token the worker sends with. Renders the
+    # `t.me/<bot>?start=link-…` deep link (`07` §2 `link`). Absent means the
+    # link route refuses 503 rather than minting a link to nowhere.
+    TARGET_TELEGRAM_BOT_USERNAME: Optional[str] = None
 
     # Number of Telegram updates processed concurrently (PTB
     # Application.concurrent_updates). Each concurrent callback runs in its own
