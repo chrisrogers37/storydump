@@ -1,30 +1,30 @@
-"""The migration runner ships DORMANT — asserted, not remembered (#746).
+"""The migration runner is ARMED — asserted, not remembered (#1195).
 
-`04`'s ground rule is that no production schema change happens outside the M.3
-window, and the runner's dormancy is what enforces it: nothing invokes
-`scripts.migration_runner` automatically on deploy, so applying migrations to
-production stays a deliberate human act.
+Until 2026-09-02 this file pinned the opposite: the runner shipped DORMANT,
+because from migration 051 (the 3c schema move) an armed runner would have
+performed the M.3 cutover on an ordinary deploy. That window is behind us —
+051 through 066 were applied to production by hand on 2026-08-24 and
+2026-08-26 (plan `00` FC-7 §7) — so an apply on deploy now meets only files
+that land after this commit, which is exactly what the runner exists for. The
+failure it prevents is #1195's: a migration merged, never applied, and nothing
+noticing for a day.
 
-**Why this became a test at F.2.1b.** Until migration 051 the worst an armed
-runner could do to production was apply a fix-forward. From 051 on — the 3c
-schema move — an armed runner performs the cutover: it renames `public` to
-`legacy` and hands the database to a target schema that does not exist yet.
-The blast radius behind one commented line changed completely, while the line
-itself did not. That line has been read by hand and reported every time it
-mattered, by three different people in one week; a hand-check does not survive
-the person doing it.
+What the guard pins now:
 
-**The invariant is general on purpose.** Not "railway.toml's `preDeployCommand`
-key is commented" — that knows about exactly the one arming point that exists
-today, and the next one lands somewhere it does not look. The rule is: no
-deploy configuration in this repo invokes the runner automatically, whichever
-file and whichever key.
+1. **Exactly one arming point, and it is `railway.toml`'s `preDeployCommand`.**
+   Two arming points would run the runner twice per deploy from two different
+   environments; one arming point anywhere other than the file the runbook
+   names is the one nobody reads.
+2. **No other deploy configuration invokes the runner** — the Procfile in
+   particular, where a `release:` process would be a second, un-runbooked route.
+3. **The predicate can fail** — a guard that has only ever passed is a guard
+   nobody has proven reads anything.
 
-No database, no fixtures, no corpus — deliberately. This guard must stay
+Still no database, no fixtures, no corpus, deliberately: this must stay
 readable when the migration suites cannot run at all.
 
-**When the window genuinely opens**, delete this file in the same PR that arms
-the runner, so a reviewer sees both halves at once.
+If the runner is ever disarmed again on purpose, flip these assertions in the
+same PR and say why in the runbook, so a reviewer sees both halves at once.
 """
 
 from pathlib import Path
@@ -38,6 +38,9 @@ DEPLOY_CONFIGS = ("railway.toml", "Procfile")
 
 #: What an invocation of the runner looks like in any of them.
 RUNNER_MODULE = "migration_runner"
+
+#: The one line that arms the runner, as the runbook prints it.
+ARMING_POINT = 'preDeployCommand = "python -m scripts.migration_runner apply"'
 
 
 def automatic_runner_invocations(text):
@@ -59,38 +62,30 @@ def _deploy_configs():
     return [(name, REPO_ROOT / name) for name in DEPLOY_CONFIGS]
 
 
-@pytest.mark.parametrize("name,path", _deploy_configs())
-def test_no_deploy_config_invokes_the_migration_runner(name, path):
+def test_railway_arms_the_runner_exactly_once():
+    railway = (REPO_ROOT / "railway.toml").read_text()
+
+    assert automatic_runner_invocations(railway) == [ARMING_POINT], (
+        "railway.toml must arm the migration runner exactly once, as the"
+        f" runbook prints it ({ARMING_POINT!r}). Disarming or moving it is a"
+        " deliberate change: flip this test in the same PR and say why in"
+        " documentation/operations/migration-runner.md."
+    )
+
+
+@pytest.mark.parametrize(
+    "name,path", [c for c in _deploy_configs() if c[0] != "railway.toml"]
+)
+def test_no_other_deploy_config_invokes_the_runner(name, path):
     if not path.exists():
         pytest.skip(f"{name} is not in this repo")
 
     armed = automatic_runner_invocations(path.read_text())
 
     assert armed == [], (
-        f"{name} invokes the migration runner on deploy, and the corpus now"
-        f" contains the M.3 cutover (migration 051): {armed}"
-    )
-
-
-def test_the_dormant_switch_is_still_present_and_off():
-    """Present AND off, because 'off' alone also describes a file that no
-    longer mentions the runner at all — at which point the check above passes
-    on a repo whose arming point moved somewhere it is not looking. This is
-    what distinguishes disarmed from absent.
-    """
-    railway = (REPO_ROOT / "railway.toml").read_text()
-
-    commented = [
-        line.strip()
-        for line in railway.splitlines()
-        if RUNNER_MODULE in line and line.lstrip().startswith("#")
-    ]
-
-    assert commented, (
-        "railway.toml no longer carries the commented-out runner predeploy"
-        " command. If the arming point moved, point DEPLOY_CONFIGS and"
-        " RUNNER_MODULE at wherever it went; if it was removed on purpose,"
-        " delete this test deliberately."
+        f"{name} invokes the migration runner on deploy: {armed}. The one"
+        " arming point is railway.toml's preDeployCommand; a second would run"
+        " the runner twice per deploy from a different environment."
     )
 
 

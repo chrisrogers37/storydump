@@ -86,6 +86,20 @@ comparator CI uses.
 Ground rule: no production migration runs before this runner ships, and
 none of this is armed by merging the PR that adds it.
 
+**State as of 2026-09-02.** Steps 1–4 happened, though not as printed:
+production entered the ledger on 2026-08-26 (`runner status`: 046–050
+`adopted`, 051+ `applied`), and every migration through 066 was applied by
+hand as the database-owner role rather than as `svc_migration` (#1195; the
+window's actor story is in the plan, `00` FC-7 §7). The scheduled drift
+monitor (#1197) reads live `information_schema` against the tree and was
+clean at 066. Step 5 is armed by the PR that carries this paragraph:
+`railway.toml`'s `preDeployCommand` runs `apply` on every deploy of either
+service. Preconditions that PR states and the operator confirms before
+merging: `DATABASE_URL` is set on both Railway services and is the
+database-owner connection (the app's `TARGET_DATABASE_URL` is a separate,
+runtime-only login), and `runner status` against production reports zero
+pending. Rollback is reverting the line; the ledger is untouched either way.
+
 1. **Create the runner login** — as the database-owner actor (on Neon, the
    project's database owner), per the plan §0.2 login contract (the creator
    receives ADMIN on PG16+, which the M.3 bootstrap depends on):
