@@ -4,6 +4,8 @@
 **Current Version**: v1.6.0 (Phase 2 Complete, Phase 1.8 Complete)
 **Next Version**: TBD
 
+> **Status (2026-09-02): historical.** This roadmap records the phase-1/2 product (v1.0.0 – v1.6.0) and pre-dates the 2026-08 multi-tenant refactor. The forward plan is [`planning/2026-08-02-consolidated-design-plan/`](planning/2026-08-02-consolidated-design-plan/README.md); the "Phase 3" and backlog sections below are not the current program. The version history table remains accurate.
+
 ---
 
 ## Vision

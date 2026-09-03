@@ -1,5 +1,7 @@
 # The M.3 parity bar — the legacy→target command mapping
 
+> **Status (2026-09-02): DEFERRED.** The window opened without the bar: the web queue became the act-on-it surface (#1033) and Telegram a second channel rather than a gate (#1090 G8). General chat-inbound dispatch is #854 (open). FC-7 §3's *"Telegram works after"* end state is still owed and this mapping is the reference for it; the two forks in §7 are unruled.
+
 **Status:** filed, not ratified. The mapping below is derived; **two forks are open and marked
 blocked pending ruling** (§7). Nothing here decides them.
 

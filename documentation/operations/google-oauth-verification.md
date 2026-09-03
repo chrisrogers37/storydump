@@ -123,7 +123,7 @@ For internal/closed beta until verification clears:
 ## See also
 
 - [`documentation/guides/cloud-deployment.md`](../guides/cloud-deployment.md) — `OAUTH_REDIRECT_BASE_URL` and Railway env-var setup.
-- [`documentation/planning/2026-03-31-meta-app-launch-design.md`](../planning/2026-03-31-meta-app-launch-design.md) — sibling Meta/Instagram OAuth verification story (different provider, similar shape).
+- [`documentation/archive/2026-03-31-meta-app-launch-design.md`](../archive/2026-03-31-meta-app-launch-design.md) — sibling Meta/Instagram OAuth verification story (different provider, similar shape).
 
 ## Related issues
 

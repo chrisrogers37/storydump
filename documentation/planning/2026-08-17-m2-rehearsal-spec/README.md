@@ -1,5 +1,7 @@
 # M.2 rehearsal spec — the window, proven on a branch
 
+> **Status (2026-09-02): NOT EXECUTED.** The window's steps 3a–3d were applied to production by hand as `neondb_owner` across 2026-08-24 and 2026-08-26 (#1195, #1014) without this rehearsal (`00` FC-7 §7); 3e is abandoned (M.1 spec), and 3f, 3g and the step-8 stand-down have not run. The success/abandon stand-down legs (§4–§5) still govern 3g when it is scheduled, which is why this spec is retained.
+
 **Status:** draft for review (#790 M.2). Planning artifact only — no implementation, no branch created, nothing executed. Same discipline as the M.1 spec (merged, #827/#830): everything ruled is made executable; every open input is **marked, with per-option deltas, and picked by nobody here**.
 
 **Scope:** `04` Phase M **M.2** (L91) made executable as a rehearsal protocol: branch production via PITR → the step-0 bootstrap under the **real Neon project-owner role** → the full M.3 step-3 sequence (3a–3g, file order, all postconditions green, every step as `svc_migration`) → the step-8 **success** stand-down with its identity-gated gate → the target smoke battery against the branch → timed, logged, repeated until clean — plus the three separate legs: **rollback-and-re-entry**, **abandon**, and **guard-refusal**. It is also, by `05` §DR's own row, **the first DR drill** ("the M.2 rehearsal IS the first drill"), which adds two obligations a reading of `04` alone misses (§4 L5).

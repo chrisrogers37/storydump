@@ -277,7 +277,7 @@ Key resources:
 - **[Quick Start Guide](documentation/guides/quickstart.md)** - Start here: using, developing, or operating Storydump
 - **[Deployment Guide](documentation/guides/deployment.md)** - Production deployment checklist
 - **[Testing Guide](documentation/guides/testing-guide.md)** - How to run and write tests
-- **[Technical Specification](documentation/planning/instagram_automation_plan.md)** - Complete implementation plan
+- **[Consolidated design plan](documentation/planning/2026-08-02-consolidated-design-plan/README.md)** - The authoritative multi-tenant plan (ratified, in execution; per-increment status in its *Live status*)
 - **[Developer Guide](CLAUDE.md)** - Development guidelines and architecture
 
 ## License

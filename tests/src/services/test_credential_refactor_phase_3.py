@@ -325,7 +325,7 @@ class TestOAuthCallsitesUseMetaId:
 # api_tokens.meta_account_id (copied from instagram_accounts.instagram_account_id)
 # would match what IG Login returns as user_id. For legacy FB-Login-era rows
 # this assumption is false — see 00_INVESTIGATION.md in the
-# documentation/planning/investigations/ig-oauth-cross-flow-reconnect_2026-05-25/
+# documentation/archive/investigations/ig-oauth-cross-flow-reconnect_2026-05-25/
 # directory for the prod stack traces. The username branch is now carried by
 # find_existing_account_for_oauth as the third lookup tier (after
 # meta_account_id and the legacy column). It self-heals on first reconnect.
