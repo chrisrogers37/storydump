@@ -127,6 +127,50 @@ export function submitRenameWorkspace(workspaceId: string, name: string) {
   return submitCommand(workspaceId, "rename_workspace", { name });
 }
 
+/**
+ * Start offboarding (#1127). The intent rides in the body because the port
+ * requires it stated; the dialog that gathered it is the caller's.
+ */
+export function submitOffboardWorkspace(workspaceId: string) {
+  return submitCommand(workspaceId, "offboard_workspace", { confirm: true });
+}
+
+/** Restore a workspace inside its grace window (#1185). */
+export function submitRestoreWorkspace(workspaceId: string) {
+  return submitCommand(workspaceId, "restore_workspace");
+}
+
+/**
+ * A sentence for an offboarding or restore refusal. Its own vocabulary, like
+ * `settingsRefusalCopy`: these reasons cannot arise from a settings write, and
+ * the 403 here means something narrower — only the OWNER may do this, so the
+ * settings sentence ("an admin or the owner can") would be wrong.
+ */
+export function offboardingRefusalCopy(reason: unknown, status?: number): string {
+  if (status === 403) {
+    return "Only the workspace owner can delete or restore it.";
+  }
+  switch (reason) {
+    case "confirm_required":
+      return "Type the workspace name exactly to confirm.";
+    case "illegal_transition":
+      // Three port refusals share this reason: already deleting, not deleting,
+      // and the restore window having closed. All three mean the screen is
+      // behind the workspace, and the remedy is the same.
+      return "This workspace is not in a state that allows that — it may already be deleting, or the restore window may have closed. Reload to see its current state.";
+    case "not_found":
+      return "This workspace no longer exists.";
+    case REPLAYED_ERROR:
+      return "That did not go through — the app sent it under a key the server had already seen. Reload and try again; report it if it repeats.";
+    case "unauthenticated":
+      return notAuthenticatedCopy("Nothing changed.");
+    case "unreachable":
+    case "target_router_unreachable":
+      return "Storydump cannot reach the server right now. Nothing changed — try again shortly.";
+  }
+  return "That did not go through. Nothing changed — try again shortly.";
+}
+
 export function settingsRefusalCopy(reason: unknown, status?: number): string {
   // A permission refusal carries NO reason to switch on. `insufficient_role`
   // is mapped to 403 and answered `{detail: "forbidden"}` — no `error`, no

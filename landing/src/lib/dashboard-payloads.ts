@@ -112,6 +112,8 @@ export type WorkspaceConfig = {
   enable_ai_captions: boolean | null;
   api_publishing_enabled: boolean | null;
   offboarding_at: string | null;
+  /** When an offboarding workspace can last be restored; server-computed (#1127). */
+  restorable_until: string | null;
   created_at: string;
   updated_at: string | null;
 };

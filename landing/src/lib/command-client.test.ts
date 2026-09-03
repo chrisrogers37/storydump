@@ -23,8 +23,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { idempotencyKeyFor, parseCommand } from "./commands";
 import {
   REPLAYED_ERROR,
+  offboardingRefusalCopy,
   settingsRefusalCopy,
   submitCommand,
+  submitOffboardWorkspace,
+  submitRestoreWorkspace,
   submitSettingsChange,
 } from "./command-client";
 
@@ -244,5 +247,57 @@ describe("a permission refusal is not a network blip", () => {
     expect(settingsRefusalCopy("unreachable", 0)).toMatch(/cannot reach/i);
     expect(settingsRefusalCopy("invalid_name", 400)).toMatch(/give the workspace a name/i);
     expect(settingsRefusalCopy("whatever", 500)).toMatch(/try again shortly/i);
+  });
+});
+
+describe("offboarding — the way in and the way back (#1127)", () => {
+  it("starts offboarding with the intent STATED, under a fresh submission id", async () => {
+    stubFetch({ outcome: "enqueued", state: "offboarding" }, 202);
+    const result = await submitOffboardWorkspace(WS);
+    expect(result.ok).toBe(true);
+    expect(captured[0].url).toBe(`/api/workspaces/${WS}/commands/offboard_workspace`);
+    expect(sentBody(0).confirm).toBe(true);
+    expect(typeof sentBody(0).submission_id).toBe("string");
+    expect(portKey(0, "offboard_workspace")).toMatch(/^offboard_workspace:/);
+  });
+
+  it("restores with an empty body, under a fresh submission id", async () => {
+    stubFetch({ outcome: "executed", state: "active" }, 200);
+    const result = await submitRestoreWorkspace(WS);
+    expect(result.ok).toBe(true);
+    expect(captured[0].url).toBe(`/api/workspaces/${WS}/commands/restore_workspace`);
+    expect(Object.keys(sentBody(0))).toEqual(["submission_id"]);
+  });
+
+  it("two attempts are two submissions, never one deduped by content", async () => {
+    stubFetch({ outcome: "enqueued" }, 202);
+    await submitOffboardWorkspace(WS);
+    await submitOffboardWorkspace(WS);
+    expect(portKey(0, "offboard_workspace")).not.toBe(portKey(1, "offboard_workspace"));
+  });
+});
+
+describe("offboardingRefusalCopy", () => {
+  it("names the owner on a role refusal — not 'an admin', because admins cannot", () => {
+    expect(offboardingRefusalCopy("http_403", 403)).toMatch(/owner/i);
+    expect(offboardingRefusalCopy("http_403", 403)).not.toMatch(/admin/i);
+  });
+
+  it("asks for the typed confirmation when the intent was not stated", () => {
+    expect(offboardingRefusalCopy("confirm_required")).toMatch(/type the workspace name/i);
+  });
+
+  it("sends a stale screen back to the current state on an illegal transition", () => {
+    // Covers all three port refusals that share the reason: already
+    // offboarding, not offboarding, and the grace window having closed.
+    expect(offboardingRefusalCopy("illegal_transition")).toMatch(/reload/i);
+  });
+
+  it("does not smooth a replay into success", () => {
+    expect(offboardingRefusalCopy(REPLAYED_ERROR)).toMatch(/not/i);
+  });
+
+  it("has a sentence for the unknown case that promises nothing", () => {
+    expect(offboardingRefusalCopy("something_new")).toMatch(/nothing changed/i);
   });
 });

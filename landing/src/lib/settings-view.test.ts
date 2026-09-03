@@ -40,6 +40,7 @@ const CONFIG: WorkspaceConfig = {
   enable_ai_captions: true,
   api_publishing_enabled: true,
   offboarding_at: null,
+  restorable_until: null,
   created_at: "2026-08-01T00:00:00Z",
   updated_at: null,
 };

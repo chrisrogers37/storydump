@@ -66,6 +66,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from sqlalchemy import text
@@ -99,6 +100,19 @@ DRAINING_STATES = ("publishing", "publishing_ambiguous")
 #: and refuses `not_found` on its own. This constant is what makes "irreversible
 #: after the grace window" true BEFORE the finalizer happens to run.
 GRACE_SECONDS_DEFAULT = 30 * 24 * 3600
+
+
+def restorable_until(offboarding_at: Optional[datetime]) -> Optional[datetime]:
+    """When the grace window closes for a workspace that began offboarding at
+    *offboarding_at*, or None for one that is not offboarding.
+
+    The dashboard shows this date and `restore_workspace` enforces the same
+    arithmetic in SQL; both read `GRACE_SECONDS_DEFAULT`, so the screen never
+    carries a copied "30 days" that could drift from the guard (#1127).
+    """
+    if offboarding_at is None:
+        return None
+    return offboarding_at + timedelta(seconds=GRACE_SECONDS_DEFAULT)
 
 
 def serialization_key(workspace_id: str) -> str:

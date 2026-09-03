@@ -57,6 +57,8 @@ describe("every offered command can produce an idempotency key", () => {
     settings_change: { submission_id: UUID, settings: { posts_per_day: 3 } },
     sync_now: { submission_id: UUID, source_id: UUID2 },
     rename_workspace: { submission_id: UUID, name: "Northside Coffee" },
+    offboard_workspace: { submission_id: UUID, confirm: true },
+    restore_workspace: { submission_id: UUID },
     disconnect_account: { submission_id: UUID, source_id: UUID2 },
     account_settings_change: {
       submission_id: UUID,
@@ -346,5 +348,59 @@ describe("account_settings_change", () => {
       settings: { nonsense_key: 1, posts_per_day: 900 },
     });
     expect(parsed.ok).toBe(true);
+  });
+});
+
+describe("offboard_workspace", () => {
+  // #1127: the executor has been built and owner-gated at the port since the
+  // X.3 work landed, and NO adapter could issue it. This row is the web
+  // surface — the "explicit, confirmed" half of `06` §1's owner action.
+  const spec = COMMAND_SPECS.offboard_workspace;
+
+  it("is offered at all — the whole gap was that it was not", () => {
+    expect(isOfferedCommand("offboard_workspace")).toBe(true);
+  });
+
+  it("forwards the stated intent, keyed on the submission", () => {
+    expect(spec.parse({ submission_id: UUID, confirm: true })).toEqual({
+      ok: true,
+      body: { confirm: true },
+      identity: UUID,
+    });
+  });
+
+  it("refuses here unless the intent was STATED — the port requires confirm=true too", () => {
+    // The dialog is the front end's; this is the shape check that keeps an
+    // accidental empty POST from spending a round trip to be refused.
+    expect(spec.parse({ submission_id: UUID })).toEqual({
+      ok: false,
+      error: "confirm_required",
+    });
+    expect(spec.parse({ submission_id: UUID, confirm: "yes" })).toEqual({
+      ok: false,
+      error: "confirm_required",
+    });
+    expect(spec.parse({ submission_id: UUID, confirm: false })).toEqual({
+      ok: false,
+      error: "confirm_required",
+    });
+  });
+});
+
+describe("restore_workspace", () => {
+  // The way back inside the grace window. Owner-only at the port; no body —
+  // the workspace is the URL and the deadline is the port's to enforce.
+  const spec = COMMAND_SPECS.restore_workspace;
+
+  it("is offered", () => {
+    expect(isOfferedCommand("restore_workspace")).toBe(true);
+  });
+
+  it("sends an empty body, keyed on the submission", () => {
+    expect(spec.parse({ submission_id: UUID })).toEqual({
+      ok: true,
+      body: {},
+      identity: UUID,
+    });
   });
 });
