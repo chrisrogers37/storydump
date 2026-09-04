@@ -22,6 +22,7 @@ cluster, which is the scope the guarded resource actually has.
 import contextlib
 import functools
 import json
+import shutil
 import subprocess
 import time
 import uuid
@@ -1057,8 +1058,12 @@ def _psql_run(dsn: str, files) -> None:
     cmd = ["psql", dsn, "-q", "-v", "ON_ERROR_STOP=1"]
     for f in files:
         cmd += ["-f", str(f)]
+    # A minimal PATH, widened only by the directory of the psql the developer's
+    # own PATH resolves (a Homebrew keg on a Mac); CI's lives in /usr/bin.
+    found = shutil.which("psql")
+    path = "/usr/bin:/bin" if not found else f"{Path(found).parent}:/usr/bin:/bin"
     env = {
-        "PATH": "/usr/bin:/bin",
+        "PATH": path,
         "PGOPTIONS": "-c client_min_messages=warning",
         "LC_ALL": "C.UTF-8",
     }

@@ -136,6 +136,20 @@ green run that skipped its integration coverage is the failure mode that guard
 exists to prevent. Set it locally too when a green result is going to be
 reported anywhere.
 
+To run the database-gated suites on a laptop, give them a throwaway server
+shaped like CI's and a `psql` on your PATH — the fixtures apply migrations
+through it, and the Homebrew `postgresql@15` keg is enough:
+
+```bash
+docker run -d --name storydump-test-pg -p 65433:5432 \
+  -e POSTGRES_USER=test_user -e POSTGRES_PASSWORD=test_password \
+  -e POSTGRES_DB=storyline_test postgres:15
+PATH="/opt/homebrew/opt/postgresql@15/bin:$PATH" \
+DB_HOST=localhost DB_PORT=65433 DB_USER=test_user DB_PASSWORD=test_password \
+DB_NAME=storyline_ai TEST_DB_NAME=storyline_test REQUIRE_TEST_DATABASE=1 \
+  pytest tests/scripts/
+```
+
 ## Services
 
 - **Worker:** `python -m src.main` (scheduler + Telegram bot) — see the safety rules.
