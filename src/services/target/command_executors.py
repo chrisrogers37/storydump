@@ -95,7 +95,7 @@ async def _intent_row(session, command: Command) -> dict[str, Any]:
     row = await readers.row(
         session,
         "SELECT i.id, i.state, i.media_item_id, i.ig_account_id,"
-        "       i.provider_account_ref,"
+        "       i.provider_account_ref, i.cancel_requested,"
         "       w.api_publishing_enabled, w.repost_ttl_days, w.skip_ttl_days,"
         "       COALESCE(a.posts_per_day, w.posts_per_day) AS eff_ppd,"
         "       COALESCE(a.tz, w.tz) AS eff_tz"
@@ -109,6 +109,17 @@ async def _intent_row(session, command: Command) -> dict[str, Any]:
     if row is None:
         raise CommandRefused("not_found", f"intent {intent_id}")
     return row
+
+
+def _refuse_if_cancelling(intent: dict[str, Any]) -> None:
+    """A card whose cancellation is requested offers no lever. The flag is
+    set by `cancel` and by `disable_account` (a removed destination's cards);
+    the worker terminalizes at its next checkpoint (`02` §4), and until it
+    does, acting on the card would post for a destination someone removed."""
+    if intent.get("cancel_requested"):
+        raise CommandRefused(
+            "illegal_transition", f"intent {intent['id']} is being cancelled"
+        )
 
 
 async def _flip(session, intent_id: str, to_state: str) -> None:
@@ -126,6 +137,7 @@ def _result(intent: dict[str, Any], state: str, **extra: Any) -> CommandResult:
 
 async def approve(session, command: Command) -> CommandResult:
     intent = await _intent_row(session, command)
+    _refuse_if_cancelling(intent)
     if not intent["api_publishing_enabled"]:
         raise CommandRefused(
             "manual_mode",
@@ -151,6 +163,7 @@ async def approve(session, command: Command) -> CommandResult:
 
 async def skip(session, command: Command) -> CommandResult:
     intent = await _intent_row(session, command)
+    _refuse_if_cancelling(intent)
     await _flip(session, str(intent["id"]), "skipped")
     ttl_days = int(intent["skip_ttl_days"] or DEFAULT_SKIP_TTL_DAYS)
     await session.execute(
@@ -176,6 +189,7 @@ async def skip(session, command: Command) -> CommandResult:
 
 async def reject(session, command: Command) -> CommandResult:
     intent = await _intent_row(session, command)
+    _refuse_if_cancelling(intent)
     await _flip(session, str(intent["id"]), "rejected")
     await session.execute(
         text(
@@ -204,6 +218,7 @@ async def mark_posted(session, command: Command) -> CommandResult:
     over-posting direction R1 exists to avoid; `cap_at_write` freezes at the
     day's first debit exactly as the API path's does."""
     intent = await _intent_row(session, command)
+    _refuse_if_cancelling(intent)
     row = (
         await session.execute(
             text(
@@ -275,6 +290,7 @@ async def mark_posted(session, command: Command) -> CommandResult:
 
 async def cancel(session, command: Command) -> CommandResult:
     intent = await _intent_row(session, command)
+    _refuse_if_cancelling(intent)
     if intent["state"] in TERMINAL_STATES:
         raise CommandRefused(
             "illegal_transition", f"intent is already {intent['state']!r}"
@@ -417,10 +433,10 @@ async def disable_account(session, command: Command) -> CommandResult:
 
     The destination leaves the clock's scan (`fn_clock_tick` reads
     `state = 'active'` only), its Instagram credential is revoked locally,
-    and its live intents are cancelled outright through the ledger's own
-    edge — only an in-flight publish is flagged `cancel_requested`, as
-    `cancel` flags one, for the pipeline to finish (`06` "account
-    disabled"). The row stays: the history hangs off it, and connecting the
+    and its live intents are flagged `cancel_requested` — as `cancel` flags
+    one; the user never writes a terminal state (`02` §4) — for the worker
+    to finish, with the Queue offering a flagged card no action meanwhile.
+    The row stays: the history hangs off it, and connecting the
     same account again is what brings it back (`connect_destination` adopts
     a `disabled` row and `attach_connected_identity` flips it `active`).
     The audit row is the governance trigger's, under this unit of work's

@@ -123,6 +123,9 @@ export function AccountsTab({ accounts, editable, workspaceId }: AccountsTabProp
     try {
       const result = await submitDisableAccount(workspaceId, accountId);
       if (!result.ok) {
+        // The banner lives outside the dialog; close the dialog first so the
+        // refusal is what the person sees, not a spinner that stopped.
+        setRemovingDialogOpen(null);
         setError(disableAccountRefusalCopy(result.error, result.status));
         return;
       }

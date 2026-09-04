@@ -153,7 +153,7 @@ def build_registry(deps: WorkerDeps) -> dict:
             (
                 await session.execute(
                     text(
-                        "SELECT a.provider_account_ref, w.approval_mode,"
+                        "SELECT a.provider_account_ref, a.state, w.approval_mode,"
                         # The inner CAST AS text pins $1's inferred type —
                         # `.claude/rules/database.md` › bound parameters.
                         "       CAST(CAST(:slot AS text) AS timestamptz) AS slot_at"
@@ -174,6 +174,11 @@ def build_registry(deps: WorkerDeps) -> dict:
                 f"plan_slot {job['id']}: account {payload.get('ig_account_id')}"
                 " has no ig_accounts row"
             )
+        if row["state"] != "active":
+            # Minted while the account was active, run after it was removed
+            # (or parked for reauth): the clock reads `active` only, and so
+            # does this — a stale mint is a no-op, not a post.
+            return "account_inactive"
         slot_at = row["slot_at"]
         outcome = await scheduler.execute_plan_slot(
             session,

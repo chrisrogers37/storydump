@@ -1035,8 +1035,8 @@ class TestRemovingADestination:
         effects = disable(world, account_id=account_id)
         assert effects == {
             "credential_revoked": True,
-            "intents_cancelled": 0,
             "intents_flagged": 0,
+            "states_retired": 0,
         }
 
         row = _owner(
@@ -1075,20 +1075,76 @@ class TestRemovingADestination:
             == 1
         )
 
-    def test_live_intents_are_cancelled_through_the_ledgers_own_edge(self, world):
+    def test_live_intents_are_flagged_for_the_worker_never_terminalized_here(
+        self, world
+    ):
         """The seeded account carries a live intent (`scheduled`); removing the
-        account cancels it outright — `trg_intent_guard` admits the edge — so
-        nothing lingers in the Queue waiting for a worker that never touches
-        an `awaiting_approval` card."""
+        account flags it the way `cancel` would — `02` §4: the user never
+        writes a terminal state — and leaves the edge to the worker."""
         seeded = str(world["a"]["iga"])
         effects = disable(world, account_id=seeded)
-        assert effects["intents_cancelled"] >= 1
+        assert effects["intents_flagged"] >= 1
         row = _owner(
             world,
             "SELECT state, cancel_requested FROM post_intents WHERE id = %s",
             (str(world["a"]["intent"]),),
         )
-        assert row == ("cancelled", False)
+        assert row == ("scheduled", True)
+
+    def test_a_grant_issued_before_the_removal_is_retired(self, world):
+        account_id, _ = destination(world, ref=_ref("granted"))
+        conn = psycopg2.connect(world["stream"])
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SET app.actor_kind = 'migration'")
+                cur.execute(
+                    "INSERT INTO oauth_states"
+                    " (state, user_id, workspace_id, provider, purpose, reconnect_target,"
+                    "  expires_at)"
+                    " VALUES ('st-before', %s, %s, 'ig_login', 'connect', %s,"
+                    "         now() + interval '15 minutes')",
+                    (str(world["a"]["user"]), str(world["a"]["ws"]), account_id),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        effects = disable(world, account_id=account_id)
+        assert effects["states_retired"] == 1
+        consumed = _owner(
+            world,
+            "SELECT consumed_at IS NOT NULL FROM oauth_states WHERE state = %s",
+            ("st-before",),
+        )
+        assert consumed == (True,)
+
+    def test_a_revived_destination_gets_a_fresh_cursor_not_a_catch_up_burst(
+        self, world
+    ):
+        typed, _ = destination(world, ref=None, handle="@Dormant")
+        _force_state(world, "ig_accounts", typed, "disabled")
+        # Removed a while ago: the cursor points a month back.
+        conn = psycopg2.connect(world["stream"])
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SET app.actor_kind = 'migration'")
+                cur.execute(
+                    "UPDATE ig_accounts SET next_slot_at = now() - interval '30 days'"
+                    " WHERE id = %s",
+                    (typed,),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        account_id, created = connect(
+            world, ref=_ref("revive-cursor"), handle="dormant"
+        )
+        assert (account_id, created) == (typed, False)
+        row = _owner(
+            world,
+            "SELECT state, next_slot_at > now() FROM ig_accounts WHERE id = %s",
+            (typed,),
+        )
+        assert row == ("active", True)
 
     def test_removing_twice_is_refused_by_name(self, world):
         account_id, _ = destination(world, ref=_ref("twice-removed"))

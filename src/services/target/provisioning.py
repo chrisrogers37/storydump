@@ -82,6 +82,7 @@ from sqlalchemy.exc import DBAPIError
 
 from src.exceptions import StorydumpError
 from src.services.target import readers
+from src.services.target.intent_ledger import TERMINAL_STATES
 from src.services.target._dbapi import constraint_violated
 
 logger = logging.getLogger(__name__)
@@ -505,7 +506,18 @@ async def attach_connected_identity(
                 "   SET provider_account_ref = :ref,"
                 "       handle = COALESCE(:handle, handle),"
                 "       state = CASE WHEN state IN ('reauth_required', 'disabled')"
-                "                    THEN 'active' ELSE state END"
+                "                    THEN 'active' ELSE state END,"
+                # A row coming back to `active` gets a FRESH cursor: the stale
+                # one would walk the clock through every missed slot as a burst
+                # of catch-up posts. Same seed as `create_destination`.
+                "       next_slot_at = CASE"
+                "         WHEN state IN ('reauth_required', 'disabled') THEN"
+                "           (SELECT fn_next_slot(now(), COALESCE(ig_accounts.tz, w.tz),"
+                "                     COALESCE(ig_accounts.posting_hours_start, w.posting_hours_start),"
+                "                     COALESCE(ig_accounts.posting_hours_end, w.posting_hours_end),"
+                "                     COALESCE(ig_accounts.posts_per_day, w.posts_per_day))"
+                "              FROM workspaces w WHERE w.id = ig_accounts.workspace_id)"
+                "         ELSE next_slot_at END"
                 " WHERE id = :acct AND workspace_id = :ws AND state <> 'moved'"
                 "   AND (provider_account_ref = :ref"
                 "        OR (provider_account_ref LIKE :manual_prefix"
@@ -662,22 +674,6 @@ async def connect_destination(
 #: imports this one for `attach_connected_identity`.
 IG_LOGIN_PROVIDER = "ig_login"
 
-#: Live intent states `trg_intent_guard` lets go straight to `cancelled`
-#: (`post_intent_transitions`, 055) — and the two it does not, where only the
-#: `cancel_requested` overlay can act. Closed literals, interpolated as such.
-CANCEL_OUTRIGHT_STATES: tuple[str, ...] = (
-    "scheduled",
-    "prompt_pending",
-    "awaiting_approval",
-    "approved",
-    "review_required",
-)
-CANCEL_ON_TOUCH_STATES: tuple[str, ...] = ("publishing", "publishing_ambiguous")
-
-
-def _sql_list(states: tuple[str, ...]) -> str:
-    return ", ".join(f"'{state}'" for state in states)
-
 
 async def disable_destination(
     executor, *, workspace_id: str, ig_account_id: str
@@ -691,10 +687,11 @@ async def disable_destination(
     locally, so the refresh cadence stops touching a token nobody wants
     refreshed (the remote revoke is a provider call and does not belong inside
     a unit of work — `disconnect_account`'s scope statement); its live intents
-    are cancelled outright through the ledger's own edge, so nothing lingers
-    in the Queue (`06` "awaiting_approval cards … suppressed"); an in-flight
-    publish is flagged `cancel_requested` instead — the overlay `cancel` uses —
-    and the pipeline finishes it at its next checkpoint.
+    are flagged `cancel_requested`, the overlay `cancel` uses (`02` §4: the
+    user never writes a terminal state; the pipeline honours the flag at
+    admission, the Queue offers a flagged card no action, and the worker leg
+    that terminalizes the waiting states is #1235); and any grant issued for
+    the row before the removal is retired, so it cannot land afterwards.
 
     The row stays. `oauth_credentials` and the intent history hang off it, and
     `connect_destination` adopting a `disabled` row is how the account comes
@@ -734,30 +731,34 @@ async def disable_destination(
             "provider": IG_LOGIN_PROVIDER,
         },
     )
-    # Cancelled OUTRIGHT, through the edge `trg_intent_guard` admits from every
-    # live state but the two publishing ones. Nothing in the web reads
-    # `cancel_requested`, and no worker touches an `awaiting_approval` card, so
-    # a flag alone would leave the removed account's cards approvable forever.
-    cancelled = await executor.execute(
-        text(
-            "UPDATE post_intents SET state = 'cancelled'"
-            " WHERE workspace_id = :ws AND ig_account_id = :acct"
-            f"   AND state IN ({_sql_list(CANCEL_OUTRIGHT_STATES)})"
-        ),
-        {"acct": str(ig_account_id), "ws": str(workspace_id)},
-    )
-    # An in-flight publish cannot be yanked; the pipeline honours the flag at
-    # its next checkpoint — the overlay `cancel` uses.
+    # Flagged, never terminalized here: `02` §4 — every `→ cancelled` edge's
+    # actor is the worker, and the user never writes a terminal state (the
+    # rule `cancel` follows). The pipeline honours the flag at admission; the
+    # Queue shows a flagged card as cancelling and offers it no action; the
+    # worker leg that terminalizes the WAITING states is the follow-up the
+    # docstring names.
+    terminal = ", ".join(f"'{state}'" for state in TERMINAL_STATES)
     flagged = await executor.execute(
         text(
             "UPDATE post_intents SET cancel_requested = true"
             " WHERE workspace_id = :ws AND ig_account_id = :acct"
-            f"   AND NOT cancel_requested AND state IN ({_sql_list(CANCEL_ON_TOUCH_STATES)})"
+            f"   AND NOT cancel_requested AND state NOT IN ({terminal})"
         ),
         {"acct": str(ig_account_id), "ws": str(workspace_id)},
     )
+    # A grant issued BEFORE the removal must not land afterwards and revive the
+    # row by surprise — the statement `issue_state` uses to retire a target's
+    # live states.
+    retired = await executor.execute(
+        text(
+            "UPDATE oauth_states SET consumed_at = now()"
+            " WHERE reconnect_target = :acct AND provider = :provider"
+            "   AND consumed_at IS NULL"
+        ),
+        {"acct": str(ig_account_id), "provider": IG_LOGIN_PROVIDER},
+    )
     return {
         "credential_revoked": bool(revoked.rowcount),
-        "intents_cancelled": cancelled.rowcount,
         "intents_flagged": flagged.rowcount,
+        "states_retired": retired.rowcount,
     }

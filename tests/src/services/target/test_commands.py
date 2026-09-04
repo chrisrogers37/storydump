@@ -384,3 +384,40 @@ class TestDisableAccountIsInThePort:
             "intents_cancelled": 2,
             "intents_flagged": 0,
         }
+
+
+class TestACancellingCardOffersNoLever:
+    """`cancel` and `disable_account` set `cancel_requested`; until the worker
+    terminalizes (`02` §4), the four intent commands refuse the card by name —
+    acting on it would post for a destination someone removed."""
+
+    @pytest.mark.parametrize("kind", ["approve", "skip", "reject", "mark_posted"])
+    async def test_refused_as_illegal_transition(self, monkeypatch, kind):
+        from src.services.target import command_executors
+
+        async def _intent_row(session, command):
+            return {
+                "id": "i1",
+                "state": "awaiting_approval",
+                "cancel_requested": True,
+                "media_item_id": "m1",
+                "ig_account_id": "a1",
+                "provider_account_ref": "ref",
+                "api_publishing_enabled": True,
+                "repost_ttl_days": 30,
+                "skip_ttl_days": 7,
+                "eff_ppd": 3,
+                "eff_tz": "UTC",
+            }
+
+        monkeypatch.setattr(command_executors, "_intent_row", _intent_row)
+        command = port.Command(
+            kind=kind,
+            workspace_id="ws",
+            actor_user_id="u",
+            channel="web",
+            args={"intent_id": "i1"},
+        )
+        with pytest.raises(port.CommandRefused) as info:
+            await getattr(command_executors, kind)(object(), command)
+        assert info.value.reason == "illegal_transition"
