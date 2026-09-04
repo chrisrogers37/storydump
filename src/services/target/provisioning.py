@@ -492,9 +492,9 @@ async def attach_connected_identity(
     longer active (offboarding) accepts no new credential either — "revoked
     immediately" must not be undone by a state issued before the offboard.
     """
-    ref = account_ref_from(provider_account_ref)
-    display_handle = handle_from(handle) if handle else None
-    expected_manual = manual_ref_for(display_handle) if display_handle else None
+    ref, display_handle, expected_manual = _connected_identity(
+        provider_account_ref, handle
+    )
     try:
         result = await executor.execute(
             text(
@@ -505,9 +505,7 @@ async def attach_connected_identity(
                 " WHERE id = :acct AND workspace_id = :ws AND state <> 'moved'"
                 "   AND (provider_account_ref = :ref"
                 "        OR (provider_account_ref LIKE :manual_prefix"
-                # CAST: a bare `:p IS NULL` leaves asyncpg unable to type the
-                # parameter (measured against PostgreSQL 15 — #1221 shipped
-                # without this and every per-row connect failed at the callback).
+                # CAST — `.claude/rules/database.md` › bound parameters.
                 "            AND (CAST(:expected_manual AS text) IS NULL"
                 "                 OR provider_account_ref = :expected_manual)))"
                 "   AND EXISTS (SELECT 1 FROM workspaces w"
@@ -554,60 +552,75 @@ async def attach_connected_identity(
     )
 
 
+def _connected_identity(
+    provider_account_ref: object, handle: object
+) -> tuple[str, Optional[str], Optional[str]]:
+    """What a CONNECTED identity is, once: `(real ref, display handle, the
+    manual ref that handle would have been typed as)`. Both the per-row attach
+    and the workspace-level adopt read the same three values."""
+    ref = account_ref_from(provider_account_ref)
+    display_handle = handle_from(handle) if handle else None
+    manual_ref = manual_ref_for(display_handle) if display_handle else None
+    return ref, display_handle, manual_ref
+
+
 async def connect_destination(
     executor,
     *,
     workspace_id: str,
     provider_account_ref: str,
     handle: Optional[str],
+    ig_account_id: Optional[str] = None,
 ) -> tuple[str, bool]:
-    """The destination for an identity Instagram just returned, when the
-    connect pinned NO destination (owner ruling 2026-09-04: destinations are
-    added by connecting, so there is nothing to type first). Returns
-    ``(id, created)``.
+    """Land an identity Instagram just returned on a destination. Returns
+    ``(id, created)`` — the one function the callback calls for every grant.
 
+    *ig_account_id* given: the state pinned this row (a per-destination
+    connect or reconnect) and the identity attaches to it — or is refused by
+    `attach_connected_identity`'s same-account rule.
+
+    *ig_account_id* None: the workspace-level ADD (owner ruling 2026-09-04:
+    destinations are added by connecting, so there is nothing to type first).
     Adopt before create. The account may already be a row here — under its
     real id (a reconnect through the workspace-level control) or under the
     typed ``manual:<handle>`` that named it before connecting existed — and a
     second row for one feed is the thing `uq_ig_account_live` forbids. The
-    real id wins when both somehow exist. Adoption is
-    `attach_connected_identity`, so the same-account rule and the
-    `reauth_required` → `active` flip are one code path with the per-row
-    connect; only a row on another real id is out of reach by construction
-    (the lookup never matches it). No row at all is a new, SCHEDULED
-    destination under the real id — `create_destination`, with the handle
-    Instagram supplied.
+    real id wins when both somehow exist. Adoption is the same
+    `attach_connected_identity` write, so the same-account rule and the
+    `reauth_required` → `active` flip are one code path; a row on another
+    real id is out of reach by construction (the lookup never matches it).
+    No row at all is a new, SCHEDULED destination under the real id —
+    `create_destination`, with the handle Instagram supplied.
     """
-    ref = account_ref_from(provider_account_ref)
-    display_handle = handle_from(handle) if handle else None
-    manual_ref = manual_ref_for(display_handle) if display_handle else None
-    existing = await readers.row(
-        executor,
-        "SELECT id FROM ig_accounts"
-        " WHERE workspace_id = :ws AND state <> 'moved'"
-        # A NULL :manual_ref compares to nothing — no guard needed, and a guard
-        # of the form `:p IS NOT NULL AND col = :p` leaves asyncpg unable to
-        # type the parameter (measured against PostgreSQL 15).
-        "   AND (provider_account_ref = :ref OR provider_account_ref = :manual_ref)"
-        " ORDER BY (provider_account_ref = :ref) DESC"
-        " LIMIT 1",
-        ws=str(workspace_id),
-        ref=ref,
-        manual_ref=manual_ref,
-    )
-    if existing is not None:
-        await attach_connected_identity(
+    ref, display_handle, manual_ref = _connected_identity(provider_account_ref, handle)
+    if ig_account_id is None:
+        existing = await readers.row(
             executor,
-            workspace_id=workspace_id,
-            ig_account_id=str(existing["id"]),
-            provider_account_ref=ref,
-            handle=display_handle,
+            "SELECT id FROM ig_accounts"
+            " WHERE workspace_id = :ws AND state <> 'moved'"
+            # No `:manual_ref IS NOT NULL` guard: a NULL compares to nothing,
+            # and the guard shape cannot be typed — `.claude/rules/database.md`.
+            "   AND (provider_account_ref = :ref OR provider_account_ref = :manual_ref)"
+            " ORDER BY (provider_account_ref = :ref) DESC"
+            " LIMIT 1",
+            ws=str(workspace_id),
+            ref=ref,
+            manual_ref=manual_ref,
         )
-        return str(existing["id"]), False
-    return await create_destination(
+        if existing is None:
+            return await create_destination(
+                executor,
+                workspace_id=workspace_id,
+                provider_account_ref=ref,
+                handle=display_handle,
+                schedule=True,
+            )
+        ig_account_id = str(existing["id"])
+    await attach_connected_identity(
         executor,
         workspace_id=workspace_id,
+        ig_account_id=ig_account_id,
         provider_account_ref=ref,
         handle=display_handle,
-        schedule=True,
     )
+    return str(ig_account_id), False

@@ -605,14 +605,31 @@ async def connect_workspace_account(
     """
     app_id, _, redirect_uri = instagram_client.configured()
     async with _admin(request, str(ws), principal) as session:
-        state = await issue_state(
+        return await _instagram_grant(
             session,
+            principal=principal,
+            ws=ws,
             purpose="connect",
-            provider=ig_login_oauth.PROVIDER,
-            user_id=principal.user_id,
-            workspace_id=str(ws),
             reconnect_target=None,
+            app_id=app_id,
+            redirect_uri=redirect_uri,
         )
+
+
+async def _instagram_grant(
+    session, *, principal, ws, purpose, reconnect_target, app_id, redirect_uri
+) -> dict:
+    """Mint the state and say where the browser goes — the tail both Instagram
+    connect routes share. `configured()` stays with the caller so a 503 lands
+    before any seam is touched."""
+    state = await issue_state(
+        session,
+        purpose=purpose,
+        provider=ig_login_oauth.PROVIDER,
+        user_id=principal.user_id,
+        workspace_id=str(ws),
+        reconnect_target=reconnect_target,
+    )
     return {
         "authorization_url": ig_login_oauth.authorization_url(
             state, redirect_uri=redirect_uri, client_id=app_id
@@ -647,19 +664,15 @@ async def connect_account(
         )
         if purpose is None:
             raise HTTPException(status_code=404, detail="not found")
-        state = await issue_state(
+        return await _instagram_grant(
             session,
+            principal=principal,
+            ws=ws,
             purpose=purpose,
-            provider=ig_login_oauth.PROVIDER,
-            user_id=principal.user_id,
-            workspace_id=str(ws),
             reconnect_target=str(account_id),
+            app_id=app_id,
+            redirect_uri=redirect_uri,
         )
-    return {
-        "authorization_url": ig_login_oauth.authorization_url(
-            state, redirect_uri=redirect_uri, client_id=app_id
-        )
-    }
 
 
 # --- commands -----------------------------------------------------------

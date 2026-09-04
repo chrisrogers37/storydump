@@ -449,6 +449,22 @@ class TestConnectDestinationAdoptsOrCreates:
         )
         assert log[0][1]["manual_ref"] is None
 
+    async def test_a_pinned_destination_skips_the_lookup_and_attaches_to_it(
+        self, seams
+    ):
+        from src.services.target.provisioning import connect_destination
+
+        log, found = seams
+        result = await connect_destination(
+            object(),
+            workspace_id="ws",
+            provider_account_ref="1784",
+            handle="GatorTails",
+            ig_account_id="pinned",
+        )
+        assert result == ("pinned", False)
+        assert log == [("attach", "ws", "pinned", "1784", "GatorTails")]
+
     async def test_no_row_creates_a_scheduled_destination_from_the_grant(self, seams):
         from src.services.target.provisioning import connect_destination
 

@@ -444,10 +444,9 @@ async def instagram_login_callback(
         return _fail("exchange_failed", flow=INSTAGRAM_FLOW)
 
     workspace_id = str(row["workspace_id"])
-    # Targeted: the state pinned the destination to connect or reconnect.
-    # Untargeted: the workspace-level ADD (owner ruling 2026-09-04) — the
-    # destination is whichever row this account already has here, or a new
-    # scheduled one; either way the credential write below is the same.
+    # Pinned: the state named the destination to connect or reconnect.
+    # Unpinned: the workspace-level ADD (owner ruling 2026-09-04). One landing
+    # function decides; the credential write below is the same either way.
     target = row["reconnect_target"]
     uow = unit_of_work(
         require_engine(request),
@@ -465,22 +464,13 @@ async def instagram_login_callback(
             await tenant_resolution.authorize_member(
                 session, workspace_id, str(row["user_id"]), minimum_role="admin"
             )
-            if target is None:
-                account_id, _ = await provisioning.connect_destination(
-                    session,
-                    workspace_id=workspace_id,
-                    provider_account_ref=grant.ig_user_id,
-                    handle=grant.username,
-                )
-            else:
-                account_id = str(target)
-                await provisioning.attach_connected_identity(
-                    session,
-                    workspace_id=workspace_id,
-                    ig_account_id=account_id,
-                    provider_account_ref=grant.ig_user_id,
-                    handle=grant.username,
-                )
+            account_id, _ = await provisioning.connect_destination(
+                session,
+                workspace_id=workspace_id,
+                ig_account_id=None if target is None else str(target),
+                provider_account_ref=grant.ig_user_id,
+                handle=grant.username,
+            )
             # One write for connect AND reconnect: the upsert replaces an
             # existing credential in place (`07` §2 — same row id, no gap).
             await ig_login_oauth.store_credential(
@@ -504,8 +494,8 @@ async def instagram_login_callback(
     )
 
 
-#: `provisioning.attach_connected_identity`'s refusals (also raised through
-#: `connect_destination`'s adopt path) on the error page. Each
+#: `provisioning.connect_destination`'s refusals (its attach step's) on the
+#: error page. Each
 #: is a DIFFERENT remedy, which is why they are not folded into `state_refused`
 #: ("start again and it should work" is false for all three).
 _ATTACH_REASON = {

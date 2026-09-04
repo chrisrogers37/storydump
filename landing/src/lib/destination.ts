@@ -1,5 +1,7 @@
 import { notAuthenticatedCopy, unreachableCopy } from "./refusal-copy";
 import { isHttpsUrlOnHost } from "./redirect-guard";
+import { requestGrant } from "./start-grant";
+import type { GrantResult } from "./start-grant";
 /**
  * Destinations, browser side (#1089).
  *
@@ -137,22 +139,16 @@ export function connectControlFor(status: string | null | undefined): ConnectCon
   return { label: "Connect Instagram", kind: "connect" };
 }
 
-export type DestinationConnectResult =
-  | { ok: true; authorizationUrl: string }
-  | { ok: false; error: string; status: number };
+/** Where the browser goes to authorize, or why it cannot — `start-grant.ts`'s shape. */
+export type DestinationConnectResult = GrantResult;
 
-/**
- * Ask for the authorization URL for ONE destination. Returns it rather than
- * navigating, so a component can render a refusal instead of leaving the
- * person on a page that silently did nothing.
- */
 /**
  * Start the Instagram grant that ADDS a destination to this workspace (owner
  * ruling 2026-09-04): no account is named — Instagram says which account
  * signed in, and the callback adopts or creates the destination from that.
  */
 export function requestWorkspaceConnect(workspaceId: string): Promise<DestinationConnectResult> {
-  return startInstagramGrant(`/api/workspaces/${workspaceId}/accounts/connect`);
+  return requestGrant(`/api/workspaces/${workspaceId}/accounts/connect`, isInstagramAuthorizationUrl);
 }
 
 /** Connect or reconnect ONE existing destination. */
@@ -160,36 +156,12 @@ export function requestDestinationConnect(
   workspaceId: string,
   accountId: string,
 ): Promise<DestinationConnectResult> {
-  return startInstagramGrant(`/api/workspaces/${workspaceId}/accounts/${accountId}/connect`);
+  return requestGrant(
+    `/api/workspaces/${workspaceId}/accounts/${accountId}/connect`,
+    isInstagramAuthorizationUrl,
+  );
 }
 
-async function startInstagramGrant(path: string): Promise<DestinationConnectResult> {
-  let response: Response;
-  try {
-    response = await fetch(path, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-    });
-  } catch {
-    return { ok: false, error: "unreachable", status: 0 };
-  }
-
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const error = typeof data?.error === "string" ? data.error : `http_${response.status}`;
-    return { ok: false, error, status: response.status };
-  }
-
-  const url = data?.authorizationUrl;
-  // Checked at the line before navigation, not only where the value was
-  // fetched — the two can drift apart.
-  if (typeof url !== "string" || !isInstagramAuthorizationUrl(url)) {
-    return { ok: false, error: "malformed_authorization_url", status: response.status };
-  }
-  return { ok: true, authorizationUrl: url };
-}
-
-/** A sentence for a connect refusal. Every branch says what happened to the data. */
 export function destinationConnectRefusalCopy(reason: unknown): string {
   switch (reason) {
     case "http_503":
@@ -199,7 +171,7 @@ export function destinationConnectRefusalCopy(reason: unknown): string {
       return "You need to be an admin of this workspace to connect an Instagram account.";
     case "not found":
     case "http_404":
-      return "That destination is no longer here. Reload the page.";
+      return "That workspace or destination is no longer here. Reload the page.";
     case "unauthenticated":
     case "http_401":
       return notAuthenticatedCopy("Nothing changed.");

@@ -1,5 +1,7 @@
 import { notAuthenticatedCopy, unreachableCopy } from "./refusal-copy";
 import { isHttpsUrlOnHost } from "./redirect-guard";
+import { requestGrant } from "./start-grant";
+import type { GrantResult } from "./start-grant";
 /**
  * The Drive connect leg, browser side and its one shared guard (#1065).
  *
@@ -29,47 +31,20 @@ export function isAuthorizationUrl(value: string): boolean {
   return isHttpsUrlOnHost(value, AUTHORIZATION_HOST);
 }
 
-export type ConnectResult =
-  | { ok: true; authorizationUrl: string }
-  | { ok: false; error: string; status: number };
+/** `start-grant.ts`'s shape, named for this leg's callers. */
+export type ConnectResult = GrantResult;
 
-/**
- * Ask for the authorization URL for ONE source. Returns it rather than
- * navigating: the caller owns the navigation, so a component can render a
- * refusal instead of leaving the person on a page that silently did nothing.
- */
-export async function requestSourceConnect(
+/** Connect or reconnect ONE Drive source: the grant starts at its proxy. */
+export function requestSourceConnect(
   workspaceId: string,
   sourceId: string,
 ): Promise<ConnectResult> {
-  let response: Response;
-  try {
-    response = await fetch(
-      `/api/workspaces/${workspaceId}/sources/${sourceId}/connect`,
-      { method: "POST", headers: { "Content-Type": "application/json" } },
-    );
-  } catch {
-    return { ok: false, error: "unreachable", status: 0 };
-  }
-
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const error = typeof data?.error === "string" ? data.error : `http_${response.status}`;
-    return { ok: false, error, status: response.status };
-  }
-
-  const url = data?.authorizationUrl;
-  // Checked again on the client, deliberately. The route already guarantees
-  // it, and this is the line immediately before `window.location.assign` —
-  // the guard belongs where the navigation is, not only where the value was
-  // fetched, because those two can drift apart.
-  if (typeof url !== "string" || !isAuthorizationUrl(url)) {
-    return { ok: false, error: "malformed_authorization_url", status: response.status };
-  }
-  return { ok: true, authorizationUrl: url };
+  return requestGrant(
+    `/api/workspaces/${workspaceId}/sources/${sourceId}/connect`,
+    isAuthorizationUrl,
+  );
 }
 
-/** A sentence for a connect refusal. */
 export function connectRefusalCopy(reason: unknown): string {
   switch (reason) {
     case "not found":

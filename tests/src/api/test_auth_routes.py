@@ -488,11 +488,15 @@ class TestInstagramCallback:
 
         seams = {"log": log, "connect_refusal": None}
 
-        async def connect(session, *, workspace_id, provider_account_ref, handle):
-            log.append(("connect", workspace_id, provider_account_ref, handle))
+        async def connect(
+            session, *, workspace_id, provider_account_ref, handle, ig_account_id=None
+        ):
+            log.append(
+                ("connect", workspace_id, ig_account_id, provider_account_ref, handle)
+            )
             if seams["connect_refusal"] is not None:
                 raise seams["connect_refusal"]
-            return ("acct-adopted", True)
+            return (ig_account_id or "acct-adopted", ig_account_id is None)
 
         monkeypatch.setattr(auth, "unit_of_work", _Uow)
         monkeypatch.setattr(tenant_resolution, "authorize_member", authorize_member)
@@ -566,7 +570,7 @@ class TestInstagramCallback:
         assert writes["log"] == [
             ("uow", WS, USER, "web"),
             ("gate", WS, USER, "admin"),
-            ("connect", WS, "17841400000000001", "gatortails"),
+            ("connect", WS, None, "17841400000000001", "gatortails"),
             ("store", WS, "acct-adopted", "IGQVJ-long"),
         ]
 
@@ -651,7 +655,7 @@ class TestInstagramCallback:
         assert writes["log"] == [
             ("uow", WS, USER, "web"),
             ("gate", WS, USER, "admin"),
-            ("attach", WS, ACCOUNT, "17841400000000001", "gatortails"),
+            ("connect", WS, ACCOUNT, "17841400000000001", "gatortails"),
             ("store", WS, ACCOUNT, "IGQVJ-long"),
         ]
 
@@ -698,14 +702,10 @@ class TestInstagramCallback:
         browser,
         writes,
         grant,
-        monkeypatch,
         refusal,
         reason,
     ):
-        async def attach(session, **kw):
-            raise provisioning.ProvisioningRefused(refusal)
-
-        monkeypatch.setattr(provisioning, "attach_connected_identity", attach)
+        writes["connect_refusal"] = provisioning.ProvisioningRefused(refusal)
         resp = self._return(client)
         assert (
             resp.headers["location"]

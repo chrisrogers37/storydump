@@ -26,16 +26,16 @@ import {
   requestDestinationConnect,
   requestWorkspaceConnect,
 } from "@/lib/destination";
-import type { DestinationStateBadge } from "@/lib/destination";
+import type { DestinationConnectResult, DestinationStateBadge } from "@/lib/destination";
 import type { Destination } from "@/lib/types";
 
 /**
- * `switch-account` and `remove-account` are real controls whose routes are not
- * wired yet (#1063 / epic P6, F5 locked (b)) — DISABLED WITH A REASON, not
- * removed. The distinction is deliberate: a control that was always a lie gets
- * deleted (the Connect button below, whose `oauth-url` route does not exist),
- * while a control that is real and is coming back stays visible and inert, so
- * the screen does not lose a capability the user is about to get.
+ * Connect is real and ungated: the header's *Connect Instagram* ADDS a
+ * destination through the Instagram Login grant (owner ruling 2026-09-04), and
+ * each row's Connect/Reconnect acts on the account it names. `switch-account`
+ * and `remove-account` are real controls whose routes are not wired yet
+ * (#1063 / epic P6) — DISABLED WITH A REASON, not removed, so the screen does
+ * not lose a capability the user is about to get.
  */
 const DISABLED_REASON =
   "Not wired up yet — changing accounts is not available on this API version.";
@@ -75,10 +75,7 @@ export function AccountsTab({ accounts, editable, workspaceId }: AccountsTabProp
    * deliberately not cleared there — a re-enabled button on a page that is
    * navigating away invites a second click that retires the first state.
    */
-  async function startGrant(
-    tag: string,
-    request: () => ReturnType<typeof requestWorkspaceConnect>,
-  ) {
+  async function startGrant(tag: string, request: () => Promise<DestinationConnectResult>) {
     setError(null);
     setLoadingAction(tag);
     const result = await request();
@@ -138,13 +135,29 @@ export function AccountsTab({ accounts, editable, workspaceId }: AccountsTabProp
         </div>
       )}
       <Card>
-        <CardHeader>
+        <CardHeader className="flex flex-row items-center justify-between gap-4">
           <CardTitle className="text-base">Instagram Accounts</CardTitle>
+          {/*
+            A destination is ADDED by connecting (owner ruling 2026-09-04).
+            Nothing is typed: Instagram says which account signed in, and the
+            callback lands it on the row it already has here or on a new,
+            scheduled one — one source of truth for the handle.
+          */}
+          <Button
+            type="button"
+            size="sm"
+            onClick={connectNewAccount}
+            disabled={loadingAction !== null}
+          >
+            {loadingAction === "connect-new" ? "Opening Instagram..." : "Connect Instagram"}
+          </Button>
         </CardHeader>
         <CardContent>
           {accounts.length === 0 ? (
             <p className="text-sm text-muted-foreground py-4 text-center">
-              No Instagram account connected yet. Connect one below.
+              No Instagram account connected yet. Use Connect Instagram to add the
+              account this workspace posts to; what it produces is posts waiting for
+              your approval.
             </p>
           ) : (
             <div className="space-y-3">
@@ -262,30 +275,6 @@ export function AccountsTab({ accounts, editable, workspaceId }: AccountsTabProp
             </p>
           )}
 
-          {/*
-            A destination is ADDED by connecting (owner ruling 2026-09-04).
-            Nothing is typed: Instagram says which account signed in, and the
-            callback lands it on the row it already has here or on a new,
-            scheduled one — so the handle has one source of truth. The rows
-            above keep their own Connect/Reconnect for the account they name.
-          */}
-          <div className="mt-6 border-t pt-4">
-            <p className="text-sm font-medium">Connect an Instagram account</p>
-            <p className="mt-1 text-xs text-muted-foreground">
-              Sign in to Instagram to add the account this workspace posts to.
-              Storydump takes the handle from Instagram and schedules it; what
-              that produces is posts waiting for your approval.
-            </p>
-            <Button
-              type="button"
-              size="sm"
-              className="mt-3"
-              onClick={connectNewAccount}
-              disabled={loadingAction !== null}
-            >
-              {loadingAction === "connect-new" ? "Opening Instagram..." : "Connect Instagram"}
-            </Button>
-          </div>
         </CardContent>
       </Card>
     </div>

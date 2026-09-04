@@ -47,3 +47,22 @@ paths:
 ```
 
 Check existing migrations with `ls scripts/migrations/` for the next version number.
+
+## Bound parameters under asyncpg
+
+The target tier runs SQLAlchemy `text()` over asyncpg, which PREPARES every
+statement, so PostgreSQL must infer each parameter's type from where it is
+used. Two shapes cannot be inferred and fail at runtime with
+`could not determine data type of parameter $N` — never in the unit tests
+(scripted executors), only against a real database:
+
+- a nullable parameter tested alone: write `CAST(:p AS text) IS NULL`, or drop
+  the guard when `col = :p` already yields NULL for a NULL parameter
+  (`provisioning.attach_connected_identity`, `connect_destination`);
+- a string that must become a timestamp: `CAST(CAST(:p AS text) AS timestamptz)`
+  (`work_loop.py` — a bare `CAST(:p AS timestamptz)` makes asyncpg refuse the
+  string).
+
+Run the affected gate suite against a real PostgreSQL before merging (the
+recipe is in `AGENTS.md` › Testing); #1221 shipped the first shape and every
+per-row Instagram connect failed at the callback until #1232.
