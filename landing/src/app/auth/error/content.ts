@@ -48,7 +48,8 @@ export type InstagramReason =
   | SharedReason
   | "already_connected"
   | "wrong_account"
-  | "destination_gone";
+  | "destination_gone"
+  | "workspace_closing";
 
 export type Content = {
   heading: string;
@@ -209,6 +210,12 @@ export const INSTAGRAM: Record<InstagramReason | "generic", Content> = {
     // that signed in is not it.
     heading: "That is not the Instagram account this destination is for.",
     body: "Instagram authorised a different account than this destination was set up for. Nothing was connected and the destination was not changed. Switch Instagram to that account and try again — or add the account Instagram authorised as its own destination.",
+    href: "/dashboard/settings",
+    primary: "Back to settings",
+  },
+  workspace_closing: {
+    heading: "This workspace is being deleted.",
+    body: "Nothing new can be connected to a workspace that is closing, so the Instagram account you authorised was not added. Nothing was connected — restore the workspace first if that was a mistake.",
     href: "/dashboard/settings",
     primary: "Back to settings",
   },

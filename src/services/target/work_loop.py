@@ -154,10 +154,8 @@ def build_registry(deps: WorkerDeps) -> dict:
                 await session.execute(
                     text(
                         "SELECT a.provider_account_ref, w.approval_mode,"
-                        # The inner CAST AS text pins $1's inferred type: bare
-                        # CAST(:slot AS timestamptz) makes PG infer the param
-                        # as timestamptz and asyncpg then refuses the string
-                        # (measured — the gate went red on exactly that).
+                        # The inner CAST AS text pins $1's inferred type —
+                        # `.claude/rules/database.md` › bound parameters.
                         "       CAST(CAST(:slot AS text) AS timestamptz) AS slot_at"
                         " FROM ig_accounts a JOIN workspaces w ON w.id = a.workspace_id"
                         " WHERE a.id = :acct"
