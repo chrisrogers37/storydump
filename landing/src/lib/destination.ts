@@ -1,4 +1,5 @@
-import { notAuthenticatedCopy } from "./refusal-copy";
+import { notAuthenticatedCopy, unreachableCopy } from "./refusal-copy";
+import { isHttpsUrlOnHost } from "./redirect-guard";
 /**
  * Destinations, browser side (#1089).
  *
@@ -94,7 +95,7 @@ export function addDestinationRefusalCopy(reason: unknown): string {
       return "You need to be an admin of this workspace to add a destination.";
     case "unreachable":
     case "target_router_unreachable":
-      return "Storydump cannot reach the server right now. Nothing was added — try again shortly.";
+      return unreachableCopy("Nothing was added");
   }
   return "Could not add that destination. Nothing was added — try again shortly.";
 }
@@ -181,4 +182,112 @@ export function destinationStateBadge(
       tone: "attention",
     }
   );
+}
+
+// ── The connect leg (#1220 step 2) ────────────────────────────────────────
+
+/** The one host the browser may be sent to by this flow. */
+const INSTAGRAM_AUTHORIZATION_HOST = "api.instagram.com";
+
+/**
+ * HTTPS, and Instagram's authorize host exactly — `source-connect.ts`'s guard
+ * for the other provider, and for the same reason: the value is NAVIGATED TO.
+ * Equality on `host`, never `endsWith`, so `evil-api.instagram.com` and
+ * `api.instagram.com.evil.example` are both refused, and a non-default port
+ * with them.
+ */
+export function isInstagramAuthorizationUrl(value: string): boolean {
+  return isHttpsUrlOnHost(value, INSTAGRAM_AUTHORIZATION_HOST);
+}
+
+export type ConnectControl = { label: string; kind: "connect" | "reconnect" };
+
+/** The one-line connection status beside a destination, from the same fact
+ *  `connectControlFor` reads, so the caption and the control cannot disagree. */
+export function destinationConnectionCaption(status: string | null | undefined): string {
+  const control = connectControlFor(status);
+  if (control === null) return "Instagram connected";
+  return control.kind === "reconnect"
+    ? "Instagram access needs reconnecting"
+    : "Not connected to Instagram — posting is by hand until it is";
+}
+
+/**
+ * Which control a destination row offers, from its credential status.
+ *
+ * `none` and an unrecognised value both offer Connect: a status this build
+ * does not know is not evidence of a live connection. `active` offers
+ * nothing — the badge beside the handle says connected, and a Reconnect
+ * button on a live account invites people to re-consent for no reason.
+ */
+export function connectControlFor(status: string | null | undefined): ConnectControl | null {
+  switch (status) {
+    case "active":
+      return null;
+    case "expired":
+    case "revoked":
+      return { label: "Reconnect Instagram", kind: "reconnect" };
+  }
+  return { label: "Connect Instagram", kind: "connect" };
+}
+
+export type DestinationConnectResult =
+  | { ok: true; authorizationUrl: string }
+  | { ok: false; error: string; status: number };
+
+/**
+ * Ask for the authorization URL for ONE destination. Returns it rather than
+ * navigating, so a component can render a refusal instead of leaving the
+ * person on a page that silently did nothing.
+ */
+export async function requestDestinationConnect(
+  workspaceId: string,
+  accountId: string,
+): Promise<DestinationConnectResult> {
+  let response: Response;
+  try {
+    response = await fetch(`/api/workspaces/${workspaceId}/accounts/${accountId}/connect`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
+  } catch {
+    return { ok: false, error: "unreachable", status: 0 };
+  }
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = typeof data?.error === "string" ? data.error : `http_${response.status}`;
+    return { ok: false, error, status: response.status };
+  }
+
+  const url = data?.authorizationUrl;
+  // Checked at the line before navigation, not only where the value was
+  // fetched — the two can drift apart.
+  if (typeof url !== "string" || !isInstagramAuthorizationUrl(url)) {
+    return { ok: false, error: "malformed_authorization_url", status: response.status };
+  }
+  return { ok: true, authorizationUrl: url };
+}
+
+/** A sentence for a connect refusal. Every branch says what happened to the data. */
+export function destinationConnectRefusalCopy(reason: unknown): string {
+  switch (reason) {
+    case "http_503":
+      return "Instagram sign-in is not set up on this deployment yet. Nothing changed.";
+    case "insufficient_role":
+    case "http_403":
+      return "You need to be an admin of this workspace to connect an Instagram account.";
+    case "not found":
+    case "http_404":
+      return "That destination is no longer here. Reload the page.";
+    case "unauthenticated":
+    case "http_401":
+      return notAuthenticatedCopy("Nothing changed.");
+    case "malformed_authorization_url":
+      return "Storydump could not start the Instagram sign-in. Nothing changed — report this if it repeats.";
+    case "unreachable":
+    case "target_router_unreachable":
+      return unreachableCopy("Nothing changed");
+  }
+  return "Could not start the Instagram sign-in. Nothing changed — try again shortly.";
 }

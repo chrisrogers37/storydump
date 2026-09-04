@@ -150,6 +150,17 @@ export default async function SettingsPage({
         the grant is not the problem, and points at the source's own state,
         which is the signal that actually tracks syncing.
       */}
+      {connected === "instagram" && (
+        <div
+          role="status"
+          className="rounded-md border border-green-200 bg-green-50 p-3 text-sm text-green-900"
+        >
+          <span className="font-medium">Instagram account connected.</span>{" "}
+          Storydump will keep its access fresh. Publishing through Instagram
+          directly is not switched on yet; approvals still post by hand.
+        </div>
+      )}
+
       {connected === "gdrive" && (
         <div
           role="status"

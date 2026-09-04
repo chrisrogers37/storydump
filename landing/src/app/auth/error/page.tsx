@@ -39,8 +39,13 @@ export async function generateMetadata({
   searchParams: Promise<{ reason?: string; flow?: string }>;
 }) {
   const { flow } = await searchParams;
+  const resolved = resolveFlow(flow);
   const what =
-    resolveFlow(flow) === "drive" ? "Drive connection problem" : "Sign-in problem";
+    resolved === "drive"
+      ? "Drive connection problem"
+      : resolved === "instagram"
+        ? "Instagram connection problem"
+        : "Sign-in problem";
   return { title: `${what} — ${siteConfig.name}` };
 }
 

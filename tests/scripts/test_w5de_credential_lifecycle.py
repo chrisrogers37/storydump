@@ -288,6 +288,31 @@ class TestStoreArmsTheTick:
             "store_credential must arm next_refresh_at — an unarmed credential"
             " is invisible to the refresh leg forever"
         )
+        # Armed for LATER, not for now: Meta refuses to refresh a long-lived
+        # token younger than 24 hours (`0.4`), so a credential due on the very
+        # next tick would be refreshed into a definitive 400 and marked dead
+        # minutes after it was connected (#1221 review). The first refresh is
+        # the `05` row-56 cadence out; the tick must NOT mint yet.
+        with sync_conn.cursor() as cur:
+            cur.execute(
+                "SELECT next_refresh_at > now() + interval '6 days'"
+                "   AND next_refresh_at <= now() + interval '8 days'"
+                "  FROM oauth_credentials WHERE id = %s",
+                (cred_id,),
+            )
+            assert cur.fetchone()[0], "the first refresh must be ~7 days out"
+        _tick(sync_conn)
+        assert not any(
+            j["payload"].get("credential_id") == cred_id
+            for j in _jobs_of_kind(sync_conn, "refresh_credential")
+        ), "a brand-new credential must not be refreshed on the next tick"
+        # Once it IS due, the leg sees it — the property this test exists for.
+        with sync_conn.cursor() as cur:
+            cur.execute(
+                "UPDATE oauth_credentials SET next_refresh_at = now() WHERE id = %s",
+                (cred_id,),
+            )
+        sync_conn.commit()
 
         _tick(sync_conn)
         minted = _jobs_of_kind(sync_conn, "refresh_credential")

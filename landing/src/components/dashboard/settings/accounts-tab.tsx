@@ -21,9 +21,13 @@ import { postApi } from "@/lib/dashboard-api";
 import {
   addDestination,
   addDestinationRefusalCopy,
+  connectControlFor,
+  destinationConnectRefusalCopy,
+  destinationConnectionCaption,
   destinationHandle,
   destinationIsActive,
   destinationStateBadge,
+  requestDestinationConnect,
 } from "@/lib/destination";
 import type { DestinationStateBadge } from "@/lib/destination";
 import type { Destination } from "@/lib/types";
@@ -114,6 +118,25 @@ export function AccountsTab({ accounts, editable, workspaceId }: AccountsTabProp
     }
   }
 
+  /**
+   * Start the Instagram Login grant for ONE destination (#1220 step 2). Busy
+   * state rides the same `loadingAction` tag the other row controls use. The
+   * page leaves on success, so the tag is deliberately not cleared there — a
+   * re-enabled button on a page that is navigating away invites a second
+   * click that retires the first state.
+   */
+  async function connectDestination(accountId: string) {
+    setError(null);
+    setLoadingAction(`connect-${accountId}`);
+    const result = await requestDestinationConnect(workspaceId, accountId);
+    if (!result.ok) {
+      setLoadingAction(null);
+      setError(destinationConnectRefusalCopy(result.error));
+      return;
+    }
+    window.location.assign(result.authorizationUrl);
+  }
+
   async function switchAccount(accountId: string) {
     setError(null);
     setLoadingAction(`switch-${accountId}`);
@@ -164,6 +187,7 @@ export function AccountsTab({ accounts, editable, workspaceId }: AccountsTabProp
                 const handleText = destinationHandle(account.handle);
                 const isActive = destinationIsActive(account.state);
                 const stateBadge = destinationStateBadge(account.state);
+                const connectControl = connectControlFor(account.credential_status);
                 return (
                 <div
                   key={account.id}
@@ -188,8 +212,26 @@ export function AccountsTab({ accounts, editable, workspaceId }: AccountsTabProp
                     {handleText && (
                       <p className="text-sm text-muted-foreground">@{handleText}</p>
                     )}
+                    {/* The credential is a separate fact from the schedule
+                        state above it: a destination can be scheduled and
+                        never connected, which is every manual-mode row. */}
+                    <p className="text-xs text-muted-foreground">
+                      {destinationConnectionCaption(account.credential_status)}
+                    </p>
                   </div>
                   <div className="flex items-center gap-2">
+                    {connectControl && (
+                      <Button
+                        variant={connectControl.kind === "reconnect" ? "default" : "outline"}
+                        size="sm"
+                        onClick={() => connectDestination(account.id)}
+                        disabled={loadingAction !== null}
+                      >
+                        {loadingAction === `connect-${account.id}`
+                          ? "Opening Instagram..."
+                          : connectControl.label}
+                      </Button>
+                    )}
                     {!isActive && (
                         <Button
                           variant="outline"
@@ -271,8 +313,10 @@ export function AccountsTab({ accounts, editable, workspaceId }: AccountsTabProp
               Add the Instagram handle you post to
             </Label>
             <p className="mt-1 text-xs text-muted-foreground">
-              No Instagram login needed. Adding it starts the schedule, and
-              what that produces is posts waiting for approval, not posts.
+              Adding a handle needs no Instagram login: it starts the schedule,
+              and what that produces is posts waiting for your approval. To let
+              Storydump publish for you, use Connect Instagram on the account
+              once it is listed above.
             </p>
             <div className="mt-3 flex items-center gap-2">
               <span

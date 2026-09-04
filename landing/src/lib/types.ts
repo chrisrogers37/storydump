@@ -24,6 +24,9 @@ export interface Destination {
   state: string;
   next_slot_at: string | null;
   last_posted_at: string | null;
+  /** #1220 step 2. `none` = never connected; `expired`/`revoked` = reconnect needed. */
+  credential_status: "none" | "active" | "expired" | "revoked";
+  credential_connected_at: string | null;
 }
 
 /** LEGACY account payload. One consumer left; dies with it. See `Destination`. */
