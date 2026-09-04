@@ -270,7 +270,10 @@ async def list_accounts(executor, *, workspace_id: str) -> list[dict]:
         "    ON c.workspace_id = a.workspace_id"
         "   AND c.ig_account_id = a.id"
         "   AND c.provider = :provider"
-        " WHERE a.workspace_id = :ws ORDER BY a.created_at, a.id",
+        # A `disabled` destination is a REMOVED one (owner decision 2026-09-04):
+        # it leaves this list, and connecting the account again brings it back.
+        " WHERE a.workspace_id = :ws AND a.state <> 'disabled'"
+        " ORDER BY a.created_at, a.id",
         ws=str(workspace_id),
         provider=IG_LOGIN_PROVIDER,
     )

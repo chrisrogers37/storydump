@@ -82,6 +82,7 @@ from sqlalchemy.exc import DBAPIError
 
 from src.exceptions import StorydumpError
 from src.services.target import readers
+from src.services.target.intent_ledger import TERMINAL_STATES
 from src.services.target._dbapi import constraint_violated
 
 logger = logging.getLogger(__name__)
@@ -656,3 +657,76 @@ async def connect_destination(
         handle=display_handle,
     )
     return str(ig_account_id), False
+
+
+#: `ig_login_oauth.PROVIDER`, spelled here rather than imported: that module
+#: imports this one for `attach_connected_identity`.
+IG_LOGIN_PROVIDER = "ig_login"
+
+
+async def disable_destination(
+    executor, *, workspace_id: str, ig_account_id: str
+) -> dict:
+    """Remove, in the port's terms (owner decision 2026-09-04): `02`'s
+    "active ↔ disabled" edge, disabling half. Returns what else moved.
+
+    Three writes, one transaction, in this order: the destination leaves the
+    clock's scan (`state = 'disabled'` — `fn_clock_tick` reads `active` only,
+    so nothing further is minted for it); its Instagram credential is revoked
+    locally, so the refresh cadence stops touching a token nobody wants
+    refreshed (the remote revoke is a provider call and does not belong inside
+    a unit of work — `disconnect_account`'s scope statement); its live intents
+    are flagged `cancel_requested`, the overlay `cancel` uses, and the worker
+    finishes them on its next touch (`06` "account disabled").
+
+    The row stays. `oauth_credentials` and the intent history hang off it, and
+    `connect_destination` adopting a `disabled` row is how the account comes
+    back — `attach_connected_identity` flips it `active`. Refused by name when
+    nothing moved: `already_disabled` (a stale screen), or `not_found` (no
+    such destination here, or a `moved` tombstone).
+    """
+    disabled = await executor.execute(
+        text(
+            "UPDATE ig_accounts SET state = 'disabled'"
+            " WHERE id = :acct AND workspace_id = :ws"
+            "   AND state IN ('active', 'reauth_required')"
+        ),
+        {"acct": str(ig_account_id), "ws": str(workspace_id)},
+    )
+    if not disabled.rowcount:
+        current = await readers.row(
+            executor,
+            "SELECT state FROM ig_accounts WHERE id = :acct AND workspace_id = :ws",
+            acct=str(ig_account_id),
+            ws=str(workspace_id),
+        )
+        if current is None or current["state"] == "moved":
+            raise ProvisioningRefused("not_found", f"destination {ig_account_id}")
+        raise ProvisioningRefused(
+            "already_disabled", f"destination {ig_account_id} is already disabled"
+        )
+    revoked = await executor.execute(
+        text(
+            "UPDATE oauth_credentials SET state = 'revoked'"
+            " WHERE workspace_id = :ws AND ig_account_id = :acct"
+            "   AND provider = :provider AND state <> 'revoked'"
+        ),
+        {
+            "acct": str(ig_account_id),
+            "ws": str(workspace_id),
+            "provider": IG_LOGIN_PROVIDER,
+        },
+    )
+    terminal = ", ".join(f"'{state}'" for state in TERMINAL_STATES)
+    flagged = await executor.execute(
+        text(
+            "UPDATE post_intents SET cancel_requested = true"
+            " WHERE workspace_id = :ws AND ig_account_id = :acct"
+            f"   AND NOT cancel_requested AND state NOT IN ({terminal})"
+        ),
+        {"acct": str(ig_account_id), "ws": str(workspace_id)},
+    )
+    return {
+        "credential_revoked": bool(revoked.rowcount),
+        "intents_flagged": flagged.rowcount,
+    }

@@ -320,3 +320,15 @@ class TestIngestOwnsTheOrder:
                 _Session(), _cmd(), external_ref="k-1", principal="sess-1", payload={}
             )
         assert gate == [] and executor == []
+
+
+class TestDisableAccountIsInThePort:
+    """`02`'s "active ↔ disabled (user command, audited)" edge finally has a
+    name (owner decision 2026-09-04: the web's Remove). In the vocabulary, at
+    the admin floor like every other destination act, with an executor."""
+
+    def test_named_at_the_admin_floor_with_an_executor(self):
+        assert "disable_account" in port.VOCABULARY
+        assert port.ROLE_FLOOR["disable_account"] == "admin"
+        assert port.REGISTRY["disable_account"] is not None
+        assert "disable_account" not in port.UNBUILT

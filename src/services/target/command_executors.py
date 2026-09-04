@@ -67,6 +67,7 @@ from src.services.target import (
     invitations,
     jobs,
     offboarding,
+    provisioning,
     readers,
     workspaces,
 )
@@ -408,6 +409,36 @@ async def connect_account(session, command: Command) -> CommandResult:
 async def reconnect_account(session, command: Command) -> CommandResult:
     """Begin a Drive reconnect for a source whose credential exists."""
     return await _begin_drive_link(session, command, expect="reconnect")
+
+
+async def disable_account(session, command: Command) -> CommandResult:
+    """`02`'s "active ↔ disabled (user command, audited)" edge, the disabling
+    half — what the web calls Remove (owner decision 2026-09-04).
+
+    The destination leaves the clock's scan (`fn_clock_tick` reads
+    `state = 'active'` only), its Instagram credential is revoked locally,
+    and its live intents are flagged `cancel_requested` exactly as `cancel`
+    flags one — the worker finishes them on its next touch (`06` "account
+    disabled"). The row stays: the history hangs off it, and connecting the
+    same account again is what brings it back (`connect_destination` adopts
+    a `disabled` row and `attach_connected_identity` flips it `active`).
+    The audit row is the governance trigger's, under this unit of work's
+    actor. No provider call — the same scope statement as `disconnect_account`.
+    """
+    account_id = _arg(command, "ig_account_id")
+    try:
+        effects = await provisioning.disable_destination(
+            session, workspace_id=command.workspace_id, ig_account_id=account_id
+        )
+    except provisioning.ProvisioningRefused as exc:
+        if exc.reason == "already_disabled":
+            raise CommandRefused(
+                "illegal_transition", f"destination {account_id} is already disabled"
+            ) from exc
+        raise CommandRefused("not_found", f"destination {account_id}") from exc
+    return CommandResult(
+        "executed", {"ig_account_id": account_id, "state": "disabled", **effects}
+    )
 
 
 async def disconnect_account(session, command: Command) -> CommandResult:

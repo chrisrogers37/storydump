@@ -29,6 +29,8 @@ import {
   submitOffboardWorkspace,
   submitRestoreWorkspace,
   submitSettingsChange,
+  submitDisableAccount,
+  disableAccountRefusalCopy,
 } from "./command-client";
 
 const WS = "11111111-1111-4111-8111-111111111111";
@@ -299,5 +301,45 @@ describe("offboardingRefusalCopy", () => {
 
   it("has a sentence for the unknown case that promises nothing", () => {
     expect(offboardingRefusalCopy("something_new")).toMatch(/nothing changed/i);
+  });
+});
+
+describe("removing a destination — disable_account (owner decision 2026-09-04)", () => {
+  const ACCOUNT = "55555555-5555-4555-8555-555555555555";
+
+  it("sends the account id under a fresh submission id, to the port's door", async () => {
+    stubFetch({ outcome: "executed", ig_account_id: ACCOUNT }, 200);
+    const result = await submitDisableAccount(WS, ACCOUNT);
+    expect(result.ok).toBe(true);
+    expect(captured[0].url).toBe(`/api/workspaces/${WS}/commands/disable_account`);
+    expect(sentBody(0).ig_account_id).toBe(ACCOUNT);
+    expect(typeof sentBody(0).submission_id).toBe("string");
+    expect(portKey(0, "disable_account")).toMatch(/^disable_account:/);
+  });
+
+  it("two attempts are two submissions", async () => {
+    stubFetch({ outcome: "executed" }, 200);
+    await submitDisableAccount(WS, ACCOUNT);
+    await submitDisableAccount(WS, ACCOUNT);
+    expect(portKey(0, "disable_account")).not.toBe(portKey(1, "disable_account"));
+  });
+});
+
+describe("disableAccountRefusalCopy", () => {
+  it("names the admin floor on a role refusal", () => {
+    expect(disableAccountRefusalCopy("http_403", 403)).toMatch(/admin/i);
+  });
+
+  it("sends a stale screen back when the destination is gone or already removed", () => {
+    expect(disableAccountRefusalCopy("not_found")).toMatch(/reload/i);
+    expect(disableAccountRefusalCopy("illegal_transition")).toMatch(/already/i);
+  });
+
+  it("does not smooth a replay into success", () => {
+    expect(disableAccountRefusalCopy(REPLAYED_ERROR)).toMatch(/not/i);
+  });
+
+  it("has a sentence for the unknown case that promises nothing", () => {
+    expect(disableAccountRefusalCopy("something_new")).toMatch(/nothing changed/i);
   });
 });
