@@ -42,10 +42,12 @@ from fastapi.responses import JSONResponse
 
 from src.api.principal import Principal, current_principal, require_engine
 from src.api import google_client, instagram_client
+from src.config.settings import settings
 from src.services.target import (
     commands,
     google_drive_oauth,
     identity,
+    identity_link,
     ig_login_oauth,
     invitations,
     provisioning,
@@ -53,7 +55,7 @@ from src.services.target import (
     workspaces,
 )
 from src.services.target.commands import Command, CommandResult
-from src.services.target.ig_login_oauth import issue_state
+from src.services.target.ig_login_oauth import STATE_TTL_SECONDS, issue_state
 from src.services.target.unit_of_work import unit_of_work
 
 router = APIRouter(tags=["v1"])
@@ -191,6 +193,38 @@ async def me(request: Request, principal: Principal = Depends(current_principal)
     if user is None:
         raise HTTPException(status_code=404, detail="not found")
     return {"user": user, "workspaces": memberships}
+
+
+@router.post("/me/telegram/link")
+async def telegram_link(
+    request: Request, principal: Principal = Depends(current_principal)
+):
+    """The link a signed-in user taps to attach their Telegram identity
+    (`07` §2 `link`: only from an authenticated session; the row pins the
+    user, and the bot's `/start` door attaches the tapping identity to exactly
+    that user — D35). The service half is #1180; this route is what the X.3
+    drive was missing (#1172, #1157).
+
+    Tenant-less, like `/me`: an identity belongs to a user, not a workspace.
+    One transaction — the state row commits before the link is handed back,
+    so a tap can never arrive ahead of the row it consumes. The link is good
+    for `STATE_TTL_SECONDS`; a second click retires nothing (link states are
+    per-user and independent) and simply mints a fresh one.
+    """
+    # A username, not a handle: an operator who pastes `@storydump_app_bot`
+    # must not mint `t.me/@…`, which Telegram cannot open.
+    bot_username = (settings.TARGET_TELEGRAM_BOT_USERNAME or "").strip().lstrip("@")
+    if not bot_username:
+        raise HTTPException(
+            status_code=503,
+            detail="telegram linking not configured: set TARGET_TELEGRAM_BOT_USERNAME",
+        )
+    engine = require_engine(request)
+    async with engine.begin() as conn:
+        link = await identity_link.issue_link_state(
+            conn, user_id=principal.user_id, bot_username=bot_username
+        )
+    return {"link": link, "expires_in_seconds": STATE_TTL_SECONDS}
 
 
 @router.get("/workspaces")

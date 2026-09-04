@@ -15,6 +15,7 @@ import {
   connectRefusalCopy,
   requestSourceConnect,
 } from "@/lib/source-connect";
+import { requestTelegramLink, telegramLinkRefusalCopy } from "@/lib/telegram-link";
 import { settingsRefusalCopy, submitCommand } from "@/lib/command-client";
 
 /**
@@ -78,13 +79,22 @@ export function IntegrationsTab({
   settings,
   sources,
   workspaceId,
+  telegramLinked,
+  telegramDisplayName,
 }: {
   settings: SettingsView;
   /** The workspace's sources, unflattened — this card renders them per row. */
   sources: SourceRow[];
   workspaceId: string;
+  /** Whether the signed-in USER has a Telegram identity attached — a fact
+   *  about the person, not this workspace (#1172 clause 1). */
+  telegramLinked: boolean;
+  /** Who that identity is, so a link tapped by the wrong person is visible. */
+  telegramDisplayName: string | null;
 }) {
   const router = useRouter();
+  const [telegramLink, setTelegramLink] = useState<{ link: string; expiresInSeconds: number } | null>(null);
+  const [linkingTelegram, setLinkingTelegram] = useState(false);
   const [syncingId, setSyncingId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [disconnectingId, setDisconnectingId] = useState<string | null>(null);
@@ -182,6 +192,26 @@ export function IntegrationsTab({
    * outage cannot block the user's disconnect. Claiming it has happened would be
    * a misleadingly-specific promise where an honestly-generic one is available.
    */
+  /**
+   * Mint the Telegram deep link and SHOW it rather than navigate: the tap has
+   * to happen inside Telegram, on whatever device the person has it on, so a
+   * same-tab `location.assign` to `t.me` would strand a desktop browser on
+   * Telegram's web landing page. An anchor opens it where Telegram is
+   * installed; the raw link is there to copy to a phone.
+   */
+  async function linkTelegram() {
+    setError(null);
+    setNotice(null);
+    setLinkingTelegram(true);
+    const result = await requestTelegramLink();
+    setLinkingTelegram(false);
+    if (!result.ok) {
+      setError(telegramLinkRefusalCopy(result.error));
+      return;
+    }
+    setTelegramLink({ link: result.link, expiresInSeconds: result.expiresInSeconds });
+  }
+
   async function disconnectSource(sourceId: string) {
     setError(null);
     setNotice(null);
@@ -245,6 +275,64 @@ export function IntegrationsTab({
       {notice && (
         <div className="mb-4 rounded-md border bg-muted/40 p-3 text-sm">{notice}</div>
       )}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Telegram</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {telegramLinked ? (
+            <div className="flex items-center gap-2">
+              <Badge variant="secondary" className="bg-green-100 text-green-800">
+                Linked
+              </Badge>
+              <p className="text-sm text-muted-foreground">
+                {telegramDisplayName
+                  ? `Telegram account "${telegramDisplayName}" is linked to your Storydump account.`
+                  : "A Telegram account is linked to your Storydump account."}{" "}
+                If that is not you, contact us — there is no unlink control yet.
+              </p>
+            </div>
+          ) : (
+            <>
+              <p className="text-sm text-muted-foreground">
+                Link your Telegram account to approve posts and receive
+                notifications there. Linking is per person, not per workspace,
+                and the link below works once and expires after{" "}
+                {telegramLink?.expiresInSeconds
+                  ? Math.round(telegramLink.expiresInSeconds / 60)
+                  : 15}{" "}
+                minutes.
+              </p>
+              {telegramLink ? (
+                <div className="space-y-2">
+                  <Button asChild>
+                    <a href={telegramLink.link} target="_blank" rel="noopener noreferrer">
+                      Open Telegram to finish linking
+                    </a>
+                  </Button>
+                  <p className="break-all font-mono text-xs text-muted-foreground">
+                    {telegramLink.link}
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    <strong>Do not share this link.</strong> Whoever taps it links
+                    their Telegram to your account. Tap Start in the chat that
+                    opens — the bot stays silent — then reload this page; it shows
+                    Linked once the bot has heard from you. Asking for a new link
+                    retires this one.
+                  </p>
+                  <Button variant="ghost" size="sm" onClick={linkTelegram} disabled={linkingTelegram}>
+                    {linkingTelegram ? "Preparing link..." : "Get a new link"}
+                  </Button>
+                </div>
+              ) : (
+                <Button variant="outline" onClick={linkTelegram} disabled={linkingTelegram}>
+                  {linkingTelegram ? "Preparing link..." : "Link Telegram"}
+                </Button>
+              )}
+            </>
+          )}
+        </CardContent>
+      </Card>
       <Card>
         <CardHeader>
           <CardTitle className="text-base">Google Drive</CardTitle>

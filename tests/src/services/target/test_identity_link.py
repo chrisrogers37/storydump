@@ -143,3 +143,33 @@ class TestTheDeepLinkAndRegistration:
         identity_link.register(r)
         r.register("inv-", inv)  # must not raise
         assert set(r._handlers) == {"link-", "inv-"}
+
+
+class TestIssuingRetiresTheUsersEarlierLinks:
+    """One live link per user: a copy pasted into a chat stops working the
+    moment a new one is minted (the `07` §2 last-issued-wins rule)."""
+
+    async def test_the_users_other_live_link_states_are_consumed_before_issuing(
+        self, monkeypatch
+    ):
+        statements = []
+
+        class _Conn:
+            async def execute(self, statement, params=None):
+                statements.append((str(statement), params))
+
+        async def issue_state(conn, **kw):
+            statements.append(("ISSUE", kw))
+            return "st4te"
+
+        monkeypatch.setattr(identity_link.ig_login_oauth, "issue_state", issue_state)
+        link = await identity_link.issue_link_state(
+            _Conn(), user_id="user-1", bot_username="storydump_app_bot"
+        )
+        assert link == "https://t.me/storydump_app_bot?start=link-st4te"
+        (retire, _), (issue, kw) = statements
+        assert "UPDATE oauth_states SET consumed_at = now()" in retire
+        assert "consumed_at IS NULL" in retire and "user_id = :uid" in retire
+        assert (
+            issue == "ISSUE" and kw["user_id"] == "user-1" and kw["purpose"] == "link"
+        )

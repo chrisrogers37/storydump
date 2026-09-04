@@ -57,6 +57,7 @@
 import { cache } from "react";
 import { cookies } from "next/headers";
 import { targetFetch } from "./target-api";
+import { telegramIdentityFrom } from "./telegram-link";
 
 export interface SessionUser {
   /** `users.id` — a UUID. */
@@ -80,6 +81,10 @@ export interface SessionUser {
   workspaces: Array<{ id: string; name: string; role: string; state: string }> | null;
   /** Reasons the API named for anything it could not fully answer. */
   degraded: string[];
+  /** Whether a Telegram identity is attached (`/me` identities, provider `telegram`). */
+  telegramLinked: boolean;
+  /** That identity's display name, or null — linked-without-a-name is a real state. */
+  telegramDisplayName: string | null;
 }
 
 /**
@@ -129,7 +134,12 @@ export const WORKSPACE_COOKIE_OPTIONS = {
 };
 
 type MeResponse = {
-  user: { id: string; display_name?: string; primary_email?: string } | null;
+  user: {
+    id: string;
+    display_name?: string;
+    primary_email?: string;
+    identities?: Array<{ provider: string; display_name?: string | null }>;
+  } | null;
   /**
    * NULL IS NOT AN EMPTY LIST, and the API is explicit about the difference:
    * when the membership list cannot be read it answers `null` with the reason
@@ -167,6 +177,8 @@ export async function resolveSessionToken(
       activeWorkspaceId: null,
       workspaces: result.data.workspaces,
       degraded: result.data.degraded ?? [],
+      telegramLinked: telegramIdentityFrom(user.identities) !== null,
+      telegramDisplayName: telegramIdentityFrom(user.identities)?.displayName ?? null,
     };
   }
 

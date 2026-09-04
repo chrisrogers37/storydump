@@ -16,6 +16,7 @@ from src.exceptions.tenancy import TenantResolutionError
 from src.services.target import (
     commands,
     identity,
+    identity_link,
     ig_login_oauth,
     invitations,
     sessions,
@@ -505,3 +506,75 @@ class TestDestinationConnect:
         resp = client.post(f"/api/v1/workspaces/{WS}/accounts/not-an-id/connect")
         assert resp.status_code == 422
         assert tenant == []
+
+
+class TestTelegramLink:
+    """`POST /me/telegram/link` — the link a signed-in user taps to attach
+    their Telegram identity (`07` §2 `link`: only from an authenticated
+    session; the row pins the user). The service half landed in #1180; this
+    is the route the X.3 drive was missing (#1172, #1157)."""
+
+    URL = "/api/v1/me/telegram/link"
+
+    @pytest.fixture
+    def bot(self, monkeypatch):
+        from src.config.settings import settings
+
+        monkeypatch.setattr(
+            settings, "TARGET_TELEGRAM_BOT_USERNAME", "storydump_app_bot", raising=False
+        )
+
+    @pytest.fixture
+    def issued(self, monkeypatch):
+        seen = {}
+
+        async def issue_link_state(conn, *, user_id, bot_username):
+            seen.update(user_id=user_id, bot_username=bot_username)
+            return f"https://t.me/{bot_username}?start=link-st4te"
+
+        monkeypatch.setattr(identity_link, "issue_link_state", issue_link_state)
+        return seen
+
+    def test_requires_a_session(self, client):
+        assert client.post(self.URL).status_code == 401
+
+    def test_unconfigured_bot_is_a_503_naming_the_setting(
+        self, client, signed_in, issued, monkeypatch
+    ):
+        from src.config.settings import settings
+
+        monkeypatch.setattr(
+            settings, "TARGET_TELEGRAM_BOT_USERNAME", None, raising=False
+        )
+        resp = client.post(self.URL)
+        assert resp.status_code == 503
+        assert "TARGET_TELEGRAM_BOT_USERNAME" in resp.json()["detail"]
+        assert issued == {}
+
+    def test_a_stray_at_sign_in_the_setting_does_not_reach_the_link(
+        self, client, signed_in, issued, monkeypatch
+    ):
+        from src.config.settings import settings
+
+        monkeypatch.setattr(
+            settings,
+            "TARGET_TELEGRAM_BOT_USERNAME",
+            " @storydump_app_bot ",
+            raising=False,
+        )
+        resp = client.post(self.URL)
+        assert resp.status_code == 200
+        assert issued["bot_username"] == "storydump_app_bot"
+
+    def test_issues_a_link_for_the_signed_in_user_and_says_how_long_it_lasts(
+        self, client, signed_in, bot, issued
+    ):
+        resp = client.post(self.URL)
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["link"] == "https://t.me/storydump_app_bot?start=link-st4te"
+        assert body["expires_in_seconds"] == ig_login_oauth.STATE_TTL_SECONDS
+        assert issued == {
+            "user_id": PRINCIPAL.user_id,
+            "bot_username": "storydump_app_bot",
+        }
