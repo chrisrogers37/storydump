@@ -80,6 +80,7 @@ export function IntegrationsTab({
   sources,
   workspaceId,
   telegramLinked,
+  telegramDisplayName,
 }: {
   settings: SettingsView;
   /** The workspace's sources, unflattened — this card renders them per row. */
@@ -88,6 +89,8 @@ export function IntegrationsTab({
   /** Whether the signed-in USER has a Telegram identity attached — a fact
    *  about the person, not this workspace (#1172 clause 1). */
   telegramLinked: boolean;
+  /** Who that identity is, so a link tapped by the wrong person is visible. */
+  telegramDisplayName: string | null;
 }) {
   const router = useRouter();
   const [telegramLink, setTelegramLink] = useState<{ link: string; expiresInSeconds: number } | null>(null);
@@ -283,7 +286,10 @@ export function IntegrationsTab({
                 Linked
               </Badge>
               <p className="text-sm text-muted-foreground">
-                Your Telegram account is linked to your Storydump account.
+                {telegramDisplayName
+                  ? `Telegram account "${telegramDisplayName}" is linked to your Storydump account.`
+                  : "A Telegram account is linked to your Storydump account."}{" "}
+                If that is not you, contact us — there is no unlink control yet.
               </p>
             </div>
           ) : (
@@ -292,7 +298,10 @@ export function IntegrationsTab({
                 Link your Telegram account to approve posts and receive
                 notifications there. Linking is per person, not per workspace,
                 and the link below works once and expires after{" "}
-                {telegramLink ? Math.round(telegramLink.expiresInSeconds / 60) : 15} minutes.
+                {telegramLink?.expiresInSeconds
+                  ? Math.round(telegramLink.expiresInSeconds / 60)
+                  : 15}{" "}
+                minutes.
               </p>
               {telegramLink ? (
                 <div className="space-y-2">
@@ -305,9 +314,15 @@ export function IntegrationsTab({
                     {telegramLink.link}
                   </p>
                   <p className="text-xs text-muted-foreground">
-                    Tap Start in the chat that opens. Then reload this page — it
-                    shows Linked once the bot has heard from you.
+                    <strong>Do not share this link.</strong> Whoever taps it links
+                    their Telegram to your account. Tap Start in the chat that
+                    opens — the bot stays silent — then reload this page; it shows
+                    Linked once the bot has heard from you. Asking for a new link
+                    retires this one.
                   </p>
+                  <Button variant="ghost" size="sm" onClick={linkTelegram} disabled={linkingTelegram}>
+                    {linkingTelegram ? "Preparing link..." : "Get a new link"}
+                  </Button>
                 </div>
               ) : (
                 <Button variant="outline" onClick={linkTelegram} disabled={linkingTelegram}>

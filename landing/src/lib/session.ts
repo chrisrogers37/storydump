@@ -57,7 +57,7 @@
 import { cache } from "react";
 import { cookies } from "next/headers";
 import { targetFetch } from "./target-api";
-import { telegramLinkedFrom } from "./telegram-link";
+import { telegramIdentityFrom } from "./telegram-link";
 
 export interface SessionUser {
   /** `users.id` — a UUID. */
@@ -83,6 +83,8 @@ export interface SessionUser {
   degraded: string[];
   /** Whether a Telegram identity is attached (`/me` identities, provider `telegram`). */
   telegramLinked: boolean;
+  /** That identity's display name, or null — linked-without-a-name is a real state. */
+  telegramDisplayName: string | null;
 }
 
 /**
@@ -136,7 +138,7 @@ type MeResponse = {
     id: string;
     display_name?: string;
     primary_email?: string;
-    identities?: Array<{ provider: string }>;
+    identities?: Array<{ provider: string; display_name?: string | null }>;
   } | null;
   /**
    * NULL IS NOT AN EMPTY LIST, and the API is explicit about the difference:
@@ -175,7 +177,8 @@ export async function resolveSessionToken(
       activeWorkspaceId: null,
       workspaces: result.data.workspaces,
       degraded: result.data.degraded ?? [],
-      telegramLinked: telegramLinkedFrom(user.identities),
+      telegramLinked: telegramIdentityFrom(user.identities) !== null,
+      telegramDisplayName: telegramIdentityFrom(user.identities)?.displayName ?? null,
     };
   }
 

@@ -32,6 +32,7 @@ export async function POST() {
 
   return NextResponse.json({
     link,
-    expiresInSeconds: result.data?.expires_in_seconds ?? 0,
+    // The API's STATE_TTL_SECONDS; the fallback is the same number, never 0.
+    expiresInSeconds: result.data?.expires_in_seconds ?? 900,
   });
 }

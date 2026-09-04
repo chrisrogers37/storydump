@@ -10,6 +10,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   isTelegramLink,
   requestTelegramLink,
+  telegramIdentityFrom,
   telegramLinkRefusalCopy,
   telegramLinkedFrom,
 } from "./telegram-link";
@@ -36,6 +37,18 @@ beforeEach(() => vi.unstubAllGlobals());
 describe("isTelegramLink", () => {
   it("accepts a t.me deep link carrying a link- start payload", () => {
     expect(isTelegramLink("https://t.me/storydump_app_bot?start=link-abc123")).toBe(true);
+  });
+
+  it("pins the product's bot when the site knows it", () => {
+    expect(
+      isTelegramLink("https://t.me/storydump_app_bot?start=link-abc", "storydump_app_bot"),
+    ).toBe(true);
+    expect(isTelegramLink("https://t.me/evil_bot?start=link-abc", "storydump_app_bot")).toBe(
+      false,
+    );
+    expect(isTelegramLink("https://t.me/@storydump_app_bot?start=link-abc", "storydump_app_bot")).toBe(
+      false,
+    );
   });
 
   it.each([
@@ -101,5 +114,22 @@ describe("telegramLinkedFrom", () => {
     expect(telegramLinkedFrom([{ provider: "google" }])).toBe(false);
     expect(telegramLinkedFrom(undefined)).toBe(false);
     expect(telegramLinkedFrom(null)).toBe(false);
+  });
+});
+
+describe("telegramIdentityFrom", () => {
+  it("names the attached Telegram identity", () => {
+    expect(telegramIdentityFrom([{ provider: "telegram", display_name: "Chris R" }])).toEqual({
+      displayName: "Chris R",
+    });
+  });
+
+  it("is linked-without-a-name when the identity carries none", () => {
+    expect(telegramIdentityFrom([{ provider: "telegram" }])).toEqual({ displayName: null });
+  });
+
+  it("is null without a telegram identity or an unreadable list", () => {
+    expect(telegramIdentityFrom([{ provider: "google" }])).toBeNull();
+    expect(telegramIdentityFrom(undefined)).toBeNull();
   });
 });

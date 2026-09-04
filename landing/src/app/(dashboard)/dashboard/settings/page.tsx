@@ -218,6 +218,7 @@ export default async function SettingsPage({
             sources={sourcesResult.data.sources ?? []}
             workspaceId={workspaceId}
             telegramLinked={session.telegramLinked}
+            telegramDisplayName={session.telegramDisplayName}
           />
         </TabsContent>
       </Tabs>

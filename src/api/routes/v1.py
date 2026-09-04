@@ -211,7 +211,9 @@ async def telegram_link(
     for `STATE_TTL_SECONDS`; a second click retires nothing (link states are
     per-user and independent) and simply mints a fresh one.
     """
-    bot_username = settings.TARGET_TELEGRAM_BOT_USERNAME
+    # A username, not a handle: an operator who pastes `@storydump_app_bot`
+    # must not mint `t.me/@…`, which Telegram cannot open.
+    bot_username = (settings.TARGET_TELEGRAM_BOT_USERNAME or "").strip().lstrip("@")
     if not bot_username:
         raise HTTPException(
             status_code=503,

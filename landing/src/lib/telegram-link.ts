@@ -1,4 +1,6 @@
-import { notAuthenticatedCopy } from "./refusal-copy";
+import { isHttpsUrlOnHost } from "./redirect-guard";
+import { notAuthenticatedCopy, unreachableCopy } from "./refusal-copy";
+import { botName } from "./telegram-bot";
 
 /**
  * Linking a Telegram identity, browser side (#1172 clause-1 wiring; #1157).
@@ -17,18 +19,15 @@ const LINK_PREFIX = "link-";
 
 /**
  * HTTPS, Telegram's short host exactly (equality on `host`, so a lookalike or
- * a non-default port is refused), and a `start` payload of THIS flow's kind —
- * an invitation link (`inv-`) is a different door and must not be opened from
- * a control labelled "link your account".
+ * a non-default port is refused), the PRODUCT'S bot when the site knows it
+ * (`NEXT_PUBLIC_TELEGRAM_BOT_NAME` — a link to some other bot must not be
+ * opened from a control labelled "link your account"), and a `start` payload
+ * of THIS flow's kind — an invitation link (`inv-`) is a different door.
  */
-export function isTelegramLink(value: string): boolean {
-  let parsed: URL;
-  try {
-    parsed = new URL(value);
-  } catch {
-    return false;
-  }
-  if (parsed.protocol !== "https:" || parsed.host !== TELEGRAM_HOST) return false;
+export function isTelegramLink(value: string, bot: string | undefined = botName): boolean {
+  if (!isHttpsUrlOnHost(value, TELEGRAM_HOST)) return false;
+  const parsed = new URL(value);
+  if (bot && parsed.pathname !== `/${bot}`) return false;
   const start = parsed.searchParams.get("start") ?? "";
   return start.startsWith(LINK_PREFIX) && start.length > LINK_PREFIX.length;
 }
@@ -77,7 +76,7 @@ export function telegramLinkRefusalCopy(reason: unknown): string {
       return "Storydump could not produce a Telegram link. Nothing changed — report this if it repeats.";
     case "unreachable":
     case "target_router_unreachable":
-      return "Storydump cannot reach the server right now. Nothing changed — try again shortly.";
+      return unreachableCopy("Nothing changed");
   }
   return "Could not start Telegram linking. Nothing changed — try again shortly.";
 }
@@ -87,5 +86,23 @@ export function telegramLinkRefusalCopy(reason: unknown): string {
 export function telegramLinkedFrom(
   identities: ReadonlyArray<{ provider: string }> | null | undefined,
 ): boolean {
-  return Array.isArray(identities) && identities.some((i) => i.provider === "telegram");
+  return telegramIdentityFrom(identities) !== null;
+}
+
+/**
+ * The attached Telegram identity's display name, or null. Shown beside
+ * "Linked" so a person can tell WHOSE Telegram is on their account — the one
+ * check that makes a link tapped by the wrong person visible.
+ */
+export function telegramIdentityFrom(
+  identities:
+    | ReadonlyArray<{ provider: string; display_name?: string | null }>
+    | null
+    | undefined,
+): { displayName: string | null } | null {
+  if (!Array.isArray(identities)) return null;
+  const found = identities.find((i) => i.provider === "telegram");
+  if (!found) return null;
+  const name = typeof found.display_name === "string" ? found.display_name.trim() : "";
+  return { displayName: name || null };
 }
