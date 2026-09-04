@@ -130,6 +130,25 @@ def destination(world, *, ids=None, ref: str, handle=None, schedule=True):
     )
 
 
+def connect(world, *, ids=None, ref: str, handle=None):
+    """A workspace-level connect: what the Instagram callback does when the
+    state pinned no destination (owner ruling 2026-09-04)."""
+    ids = ids or world["a"]
+    return asyncio.run(
+        in_tenant(
+            world["ingress"],
+            str(ids["ws"]),
+            str(ids["user"]),
+            lambda s: provisioning.connect_destination(
+                s,
+                workspace_id=str(ids["ws"]),
+                provider_account_ref=ref,
+                handle=handle,
+            ),
+        )
+    )
+
+
 def source(world, *, ids=None, folder: str, root_name=None):
     ids = ids or world["a"]
     return asyncio.run(
@@ -181,6 +200,20 @@ def _make_due(world, account_id: str) -> None:
                 " WHERE id = %s",
                 (account_id,),
             )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _force_state(world, table: str, row_id: str, state: str) -> None:
+    """Put a row into *state* by hand — the fixture for an edge the drivers
+    above cannot reach (an offboarding workspace, a disabled destination)."""
+    conn = psycopg2.connect(world["stream"])
+    try:
+        conn.autocommit = False
+        with conn.cursor() as cur:
+            cur.execute("SET app.actor_kind = 'migration'")
+            cur.execute(f"UPDATE {table} SET state = %s WHERE id = %s", (state, row_id))
         conn.commit()
     finally:
         conn.close()
@@ -834,3 +867,113 @@ class TestSchedulingLagSeesBothOutageShapes:
         lag = _lag(world)
         assert "accounts_active" in lag
         assert lag["accounts_active"] >= 1
+
+
+class TestConnectingAdoptsOrCreates:
+    """Destinations are added by CONNECTING (owner ruling 2026-09-04). The
+    identity Instagram returns lands on the one row this account already has
+    in the workspace, or becomes a new scheduled destination under its real
+    id — never a second row for one feed."""
+
+    def test_a_fresh_account_becomes_a_scheduled_destination_under_its_real_id(
+        self, world
+    ):
+        ref = _ref("fresh")
+        account_id, created = connect(world, ref=ref, handle="Fresh")
+        assert created is True
+        row = _owner(
+            world,
+            "SELECT provider_account_ref, handle, state, next_slot_at"
+            "  FROM ig_accounts WHERE id = %s",
+            (account_id,),
+        )
+        assert row[0] == ref
+        assert row[1] == "Fresh"
+        assert row[2] == "active"
+        assert row[3] is not None, "a connected destination must be scheduled"
+
+    def test_a_typed_handle_is_adopted_and_flipped_to_the_real_id(self, world):
+        typed, _ = destination(world, ref=None, handle="@GatorTails")
+        ref = _ref("adopt")
+        account_id, created = connect(world, ref=ref, handle="gatortails")
+        assert (account_id, created) == (typed, False)
+        row = _owner(
+            world,
+            "SELECT provider_account_ref, handle FROM ig_accounts WHERE id = %s",
+            (account_id,),
+        )
+        assert row == (ref, "gatortails")
+        live = _owner(
+            world,
+            "SELECT count(*) FROM ig_accounts WHERE workspace_id = %s"
+            "   AND state <> 'moved'"
+            "   AND provider_account_ref IN (%s, 'manual:gatortails')",
+            (str(world["a"]["ws"]), ref),
+        )
+        assert live[0] == 1
+
+    def test_connecting_the_same_account_twice_is_one_destination(self, world):
+        ref = _ref("twice")
+        first, created_first = connect(world, ref=ref, handle="Twice")
+        second, created_second = connect(world, ref=ref, handle="Twice")
+        assert first == second
+        assert (created_first, created_second) == (True, False)
+
+    def test_a_workspace_that_is_closing_refuses_a_new_destination(self, world):
+        """The guard the pinned path gets from `attach_connected_identity`'s
+        WHERE, on the create path too: a state issued before an offboard must
+        not land a destination (and then a credential) in a workspace being
+        deleted."""
+        _force_state(world, "workspaces", str(world["b"]["ws"]), "offboarding")
+        ref = _ref("closing")
+        with pytest.raises(ProvisioningRefused) as info:
+            connect(world, ids=world["b"], ref=ref, handle="Closing")
+        assert info.value.reason == "workspace_inactive"
+        count = _owner(
+            world,
+            "SELECT count(*) FROM ig_accounts WHERE provider_account_ref = %s",
+            (ref,),
+        )
+        assert count[0] == 0
+
+    def test_a_grant_without_a_username_creates_then_adopts_by_real_id(self, world):
+        """The NULL-bound shapes against real PostgreSQL: `:manual_ref` NULL in
+        the lookup, `:handle` NULL in the attach — the driver-typing class the
+        rule in `.claude/rules/database.md` exists for."""
+        ref = _ref("nameless")
+        first, created_first = connect(world, ref=ref, handle=None)
+        second, created_second = connect(world, ref=ref, handle=None)
+        assert first == second
+        assert (created_first, created_second) == (True, False)
+        row = _owner(
+            world, "SELECT handle, state FROM ig_accounts WHERE id = %s", (first,)
+        )
+        assert row == (None, "active")
+
+    def test_connecting_a_disabled_destination_brings_it_back(self, world):
+        """The remove edge's inverse: connecting IS the enable (`02` "active ↔
+        disabled"). A disabled row must not swallow a fresh credential and
+        stay hidden from the clock."""
+        typed, _ = destination(world, ref=None, handle="@Parked")
+        _force_state(world, "ig_accounts", typed, "disabled")
+        ref = _ref("revive")
+        account_id, created = connect(world, ref=ref, handle="parked")
+        assert (account_id, created) == (typed, False)
+        row = _owner(
+            world,
+            "SELECT state, provider_account_ref FROM ig_accounts WHERE id = %s",
+            (typed,),
+        )
+        assert row == ("active", ref)
+
+    def test_adoption_never_reaches_across_workspaces(self, world):
+        elsewhere, _ = destination(world, ids=world["b"], ref=None, handle="Shared")
+        ref = _ref("tenant")
+        account_id, created = connect(world, ref=ref, handle="shared")
+        assert created is True and account_id != elsewhere
+        untouched = _owner(
+            world,
+            "SELECT provider_account_ref FROM ig_accounts WHERE id = %s",
+            (elsewhere,),
+        )
+        assert untouched == ("manual:shared",)

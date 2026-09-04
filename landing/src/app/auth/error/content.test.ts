@@ -112,6 +112,7 @@ describe("the Instagram connect leg has its own table", () => {
       "already_connected",
       "wrong_account",
       "destination_gone",
+      "workspace_closing",
     ]) {
       expect(resolveContent("instagram", reason)).not.toBe(INSTAGRAM.generic);
     }

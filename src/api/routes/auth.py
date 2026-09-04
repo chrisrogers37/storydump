@@ -390,9 +390,11 @@ async def instagram_login_callback(
 ) -> Response:
     """The Instagram connect leg's return (#1220 step 2): consume the state,
     check the returning browser is the one that started the flow, exchange
-    the code for a long-lived token and its owner, attach that identity to
-    the destination the state pinned, write the credential — the Drive
-    callback's shape plus the `07` §2 callback-time checks.
+    the code for a long-lived token and its owner, land that identity on a
+    destination — the one the state pinned, or (untargeted: the workspace-
+    level ADD, owner ruling 2026-09-04) the row this account already has
+    here or a new one — and write the credential. The Drive callback's shape
+    plus the `07` §2 callback-time checks.
 
     **The state row is necessary and not sufficient.** It pins the user who
     started the flow; it does not prove the browser that returned is theirs.
@@ -415,9 +417,6 @@ async def instagram_login_callback(
     )
     if isinstance(row, Response):
         return row
-    if row["reconnect_target"] is None:
-        logger.warning("instagram connect: state names no destination")
-        return _fail("state_refused", flow=INSTAGRAM_FLOW)
 
     presenter = await _presenting_user(request)
     if presenter is None or presenter != str(row["user_id"]):
@@ -445,7 +444,10 @@ async def instagram_login_callback(
         return _fail("exchange_failed", flow=INSTAGRAM_FLOW)
 
     workspace_id = str(row["workspace_id"])
-    account_id = str(row["reconnect_target"])
+    # Pinned: the state named the destination to connect or reconnect.
+    # Unpinned: the workspace-level ADD (owner ruling 2026-09-04). One landing
+    # function decides; the credential write below is the same either way.
+    target = row["reconnect_target"]
     uow = unit_of_work(
         require_engine(request),
         workspace_id,
@@ -462,10 +464,10 @@ async def instagram_login_callback(
             await tenant_resolution.authorize_member(
                 session, workspace_id, str(row["user_id"]), minimum_role="admin"
             )
-            await provisioning.attach_connected_identity(
+            account_id, _ = await provisioning.connect_destination(
                 session,
                 workspace_id=workspace_id,
-                ig_account_id=account_id,
+                ig_account_id=None if target is None else str(target),
                 provider_account_ref=grant.ig_user_id,
                 handle=grant.username,
             )
@@ -482,23 +484,26 @@ async def instagram_login_callback(
         logger.warning("instagram connect: callback authorization refused: %s", exc)
         return _fail("state_refused", flow=INSTAGRAM_FLOW)
     except provisioning.ProvisioningRefused as exc:
-        logger.warning("instagram connect: attach refused: %s", exc)
-        return _fail(
-            _ATTACH_REASON.get(exc.reason, "state_refused"), flow=INSTAGRAM_FLOW
-        )
+        if exc.reason not in _ATTACH_REASON:
+            raise
+        logger.warning("instagram connect: landing refused: %s", exc)
+        return _fail(_ATTACH_REASON[exc.reason], flow=INSTAGRAM_FLOW)
 
     return RedirectResponse(
         _landing("/dashboard/settings?connected=instagram"), status_code=302
     )
 
 
-#: `provisioning.attach_connected_identity`'s refusals on the error page. Each
-#: is a DIFFERENT remedy, which is why they are not folded into `state_refused`
-#: ("start again and it should work" is false for all three).
+#: `provisioning.connect_destination`'s refusals on the error page. Each is a
+#: DIFFERENT remedy, which is why they are not folded into `state_refused`
+#: ("start again and it should work" is false for every one of them). A
+#: reason outside this table is not a grant outcome at all — `slot_not_seeded`
+#: is a programming error — and is answered as one, never as "start again".
 _ATTACH_REASON = {
     "duplicate_destination": "already_connected",
     "wrong_account": "wrong_account",
     "not_found": "destination_gone",
+    "workspace_inactive": "workspace_closing",
 }
 
 

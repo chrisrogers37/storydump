@@ -473,24 +473,29 @@ class TestInstagramCallback:
             log.append(("gate", workspace_id, user_id, minimum_role))
             return "owner"
 
-        async def attach(
-            session, *, workspace_id, ig_account_id, provider_account_ref, handle
-        ):
-            log.append(
-                ("attach", workspace_id, ig_account_id, provider_account_ref, handle)
-            )
-
         async def store_credential(
             session, *, workspace_id, ig_account_id, token, expires_at=None
         ):
             log.append(("store", workspace_id, ig_account_id, token))
             return "cred-new"
 
+        seams = {"log": log, "connect_refusal": None}
+
+        async def connect(
+            session, *, workspace_id, provider_account_ref, handle, ig_account_id=None
+        ):
+            log.append(
+                ("connect", workspace_id, ig_account_id, provider_account_ref, handle)
+            )
+            if seams["connect_refusal"] is not None:
+                raise seams["connect_refusal"]
+            return (ig_account_id or "acct-adopted", ig_account_id is None)
+
         monkeypatch.setattr(auth, "unit_of_work", _Uow)
         monkeypatch.setattr(tenant_resolution, "authorize_member", authorize_member)
-        monkeypatch.setattr(provisioning, "attach_connected_identity", attach)
+        monkeypatch.setattr(provisioning, "connect_destination", connect)
         monkeypatch.setattr(ig_login_oauth, "store_credential", store_credential)
-        return {"log": log}
+        return seams
 
     @pytest.fixture
     def grant(self, monkeypatch):
@@ -540,16 +545,69 @@ class TestInstagramCallback:
         assert state_row["seen"]["provider"] == "ig_login"
         assert set(state_row["seen"]["purpose"]) == {"connect", "reconnect"}
 
-    def test_a_state_naming_no_account_cannot_act(
-        self, client, instagram, state_row, browser, writes
+    def test_a_state_naming_no_account_adopts_or_creates_the_destination(
+        self, client, instagram, state_row, browser, writes, grant
+    ):
+        """Owner ruling 2026-09-04: destinations are added by connecting. An
+        untargeted connect state lands the credential on the row the
+        signed-in account already has here, or on a new one — one adopt-or-
+        create seam, then the same single credential write."""
+        state_row["reconnect_target"] = None
+        resp = self._return(client)
+        assert resp.status_code == 302, resp.text
+        assert (
+            resp.headers["location"]
+            == f"{FRONT}/dashboard/settings?connected=instagram"
+        )
+        assert writes["log"] == [
+            ("uow", WS, USER, "web"),
+            ("gate", WS, USER, "admin"),
+            ("connect", WS, None, "17841400000000001", "gatortails"),
+            ("store", WS, "acct-adopted", "IGQVJ-long"),
+        ]
+
+    def test_a_closing_workspace_refuses_the_add_by_name(
+        self, client, instagram, state_row, browser, writes, grant
     ):
         state_row["reconnect_target"] = None
+        writes["connect_refusal"] = provisioning.ProvisioningRefused(
+            "workspace_inactive", "offboarding"
+        )
         resp = self._return(client)
         assert (
             resp.headers["location"]
-            == f"{FRONT}/auth/error?reason=state_refused&flow=instagram"
+            == f"{FRONT}/auth/error?reason=workspace_closing&flow=instagram"
         )
-        assert writes["log"] == []
+        assert not any(entry[0] == "store" for entry in writes["log"])
+
+    def test_a_reason_that_is_not_a_grant_outcome_is_not_dressed_as_one(
+        self, client, instagram, state_row, browser, writes, grant
+    ):
+        """`slot_not_seeded` is a programming error; "start again and it
+        should work" would be a lie, so it is answered as an error."""
+        writes["connect_refusal"] = provisioning.ProvisioningRefused(
+            "slot_not_seeded", "the cursor could not be computed"
+        )
+        try:
+            resp = self._return(client)
+        except provisioning.ProvisioningRefused:
+            return
+        assert resp.status_code == 500
+        assert "auth/error" not in resp.headers.get("location", "")
+
+    def test_a_refused_adoption_lands_on_the_error_page_by_name(
+        self, client, instagram, state_row, browser, writes, grant
+    ):
+        state_row["reconnect_target"] = None
+        writes["connect_refusal"] = provisioning.ProvisioningRefused(
+            "duplicate_destination", "twice"
+        )
+        resp = self._return(client)
+        assert (
+            resp.headers["location"]
+            == f"{FRONT}/auth/error?reason=already_connected&flow=instagram"
+        )
+        assert not any(entry[0] == "store" for entry in writes["log"])
 
     def test_a_browser_without_a_session_is_refused_before_the_provider_is_called(
         self, client, instagram, state_row, writes, grant, monkeypatch
@@ -618,7 +676,7 @@ class TestInstagramCallback:
         assert writes["log"] == [
             ("uow", WS, USER, "web"),
             ("gate", WS, USER, "admin"),
-            ("attach", WS, ACCOUNT, "17841400000000001", "gatortails"),
+            ("connect", WS, ACCOUNT, "17841400000000001", "gatortails"),
             ("store", WS, ACCOUNT, "IGQVJ-long"),
         ]
 
@@ -647,7 +705,7 @@ class TestInstagramCallback:
             resp.headers["location"]
             == f"{FRONT}/auth/error?reason=state_refused&flow=instagram"
         )
-        assert not any(w[0] in ("attach", "store") for w in writes["log"])
+        assert not any(w[0] == "store" for w in writes["log"])
 
     @pytest.mark.parametrize(
         "refusal, reason",
@@ -665,14 +723,10 @@ class TestInstagramCallback:
         browser,
         writes,
         grant,
-        monkeypatch,
         refusal,
         reason,
     ):
-        async def attach(session, **kw):
-            raise provisioning.ProvisioningRefused(refusal)
-
-        monkeypatch.setattr(provisioning, "attach_connected_identity", attach)
+        writes["connect_refusal"] = provisioning.ProvisioningRefused(refusal)
         resp = self._return(client)
         assert (
             resp.headers["location"]
