@@ -233,14 +233,46 @@ async def list_members(executor, *, workspace_id: str) -> list[dict]:
     )
 
 
+#: A credential's usability as a projection — `none` (never connected) ·
+#: `active` · `expired` · `revoked` — over the LEFT-JOINed row aliased `c`.
+#: One definition for destinations and sources: the rule it mirrors is the one
+#: `drive_credentials` / the refresh leg ENFORCE (usable iff `state = 'active'`
+#: and `expires_at` has not passed), and two copies of it could drift apart.
+#: The Instagram credential provider, as `ig_login_oauth.PROVIDER` spells it.
+#: A local name rather than an import: that module's import graph must not
+#: grow a dependency on this one.
+IG_LOGIN_PROVIDER = "ig_login"
+
+_CREDENTIAL_STATUS_SQL = (
+    "CASE"
+    "  WHEN c.id IS NULL THEN 'none'"
+    "  WHEN c.state <> 'active' THEN c.state"
+    "  WHEN c.expires_at IS NOT NULL AND c.expires_at <= now() THEN 'expired'"
+    "  ELSE 'active'"
+    " END AS credential_status"
+)
+
+
 async def list_accounts(executor, *, workspace_id: str) -> list[dict]:
+    """Destinations plus their `ig_login` credential STATUS — presence and
+    freshness, never a token — derived exactly as `list_sources` derives it
+    (#1220 step 2): `none` (never connected) · `active` · `expired` · `revoked`.
+    `uq_credential_per_account` makes the join single-row."""
     return await readers.rows(
         executor,
-        "SELECT id, provider_account_ref, handle, display_name, state,"
-        "       posts_per_day, posting_hours_start, posting_hours_end, tz,"
-        "       next_slot_at, last_posted_at, created_at"
-        "  FROM ig_accounts WHERE workspace_id = :ws ORDER BY created_at, id",
+        "SELECT a.id, a.provider_account_ref, a.handle, a.display_name, a.state,"
+        "       a.posts_per_day, a.posting_hours_start, a.posting_hours_end, a.tz,"
+        "       a.next_slot_at, a.last_posted_at, a.created_at,"
+        f"       {_CREDENTIAL_STATUS_SQL},"
+        "       c.created_at AS credential_connected_at"
+        "  FROM ig_accounts a"
+        "  LEFT JOIN oauth_credentials c"
+        "    ON c.workspace_id = a.workspace_id"
+        "   AND c.ig_account_id = a.id"
+        "   AND c.provider = :provider"
+        " WHERE a.workspace_id = :ws ORDER BY a.created_at, a.id",
         ws=str(workspace_id),
+        provider=IG_LOGIN_PROVIDER,
     )
 
 
@@ -279,13 +311,7 @@ async def list_sources(executor, *, workspace_id: str) -> list[dict]:
         executor,
         "SELECT s.id, s.provider, s.state, s.next_sync_at, s.last_sync_success_at,"
         "       s.alerted_at, s.created_at,"
-        "       CASE"
-        "         WHEN c.id IS NULL THEN 'none'"
-        "         WHEN c.state <> 'active' THEN c.state"
-        "         WHEN c.expires_at IS NOT NULL AND c.expires_at <= now()"
-        "           THEN 'expired'"
-        "         ELSE 'active'"
-        "       END AS credential_status,"
+        f"       {_CREDENTIAL_STATUS_SQL},"
         "       c.created_at AS credential_connected_at"
         "  FROM media_sources s"
         "  LEFT JOIN oauth_credentials c"

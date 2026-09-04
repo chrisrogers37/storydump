@@ -417,6 +417,45 @@ class TestTheCredentialUnderTheRing:
             == "super-secret-token"
         )
 
+    def test_storing_twice_for_one_account_is_ONE_row_replaced_in_place(self, oauth_db):
+        """The connect callback writes with `store_credential` for connect AND
+        reconnect (#1221): the second store must land on `uq_credential_per_account`
+        as an UPDATE — same id, new payload, `active`, one row — which is the
+        partial-index inference only a real database can prove."""
+        first = _call(
+            oauth_db,
+            lambda c: oauth.store_credential(
+                c,
+                workspace_id=oauth_db["ws"],
+                ig_account_id=oauth_db["iga"],
+                token="first",
+            ),
+        )
+        _exec(
+            oauth_db,
+            "UPDATE oauth_credentials SET state = 'expired' WHERE id = %s",
+            (first,),
+        )
+        second = _call(
+            oauth_db,
+            lambda c: oauth.store_credential(
+                c,
+                workspace_id=oauth_db["ws"],
+                ig_account_id=oauth_db["iga"],
+                token="second",
+            ),
+        )
+        assert second == first
+        rows = _exec(
+            oauth_db,
+            "SELECT id, state, encrypted_payload FROM oauth_credentials"
+            " WHERE workspace_id = %s AND ig_account_id = %s AND provider = 'ig_login'",
+            (oauth_db["ws"], oauth_db["iga"]),
+            fetch=True,
+        )
+        assert len(rows) == 1 and rows[0][1] == "active"
+        assert oauth.ring().decrypt(rows[0][2]) == "second"
+
     def test_a_reconnect_swap_replaces_the_payload_IN_PLACE(self, oauth_db):
         """`07` §2 — no window where the account has zero credentials. A
         delete-then-insert would open exactly that window, and nothing else in

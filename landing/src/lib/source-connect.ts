@@ -1,4 +1,5 @@
-import { notAuthenticatedCopy } from "./refusal-copy";
+import { notAuthenticatedCopy, unreachableCopy } from "./refusal-copy";
+import { isHttpsUrlOnHost } from "./redirect-guard";
 /**
  * The Drive connect leg, browser side and its one shared guard (#1065).
  *
@@ -25,24 +26,7 @@ const AUTHORIZATION_HOST = "accounts.google.com";
  * it is needed rather than after.
  */
 export function isAuthorizationUrl(value: string): boolean {
-  let parsed: URL;
-  try {
-    parsed = new URL(value);
-  } catch {
-    return false;
-  }
-  // EQUALITY, not `endsWith` — which `evil-accounts.google.com` and
-  // `accounts.google.com.evil.example` both satisfy. That is the real trap
-  // here and it is what this line exists for.
-  //
-  // Against `host` rather than `hostname`, which is the stricter of the two:
-  // `host` carries a non-default port, so `https://accounts.google.com:1234`
-  // is refused, while `hostname` strips it and would accept. A port variant is
-  // not a threat we could actually be exposed to — reaching it means holding
-  // Google's own host — but refusing it costs nothing and leaves one fewer
-  // shape to reason about. The default port is omitted from `host`, so the
-  // ordinary URL passes.
-  return parsed.protocol === "https:" && parsed.host === AUTHORIZATION_HOST;
+  return isHttpsUrlOnHost(value, AUTHORIZATION_HOST);
 }
 
 export type ConnectResult =
@@ -98,7 +82,7 @@ export function connectRefusalCopy(reason: unknown): string {
       return "Storydump could not start the Google sign-in. Nothing changed — report this if it repeats.";
     case "unreachable":
     case "target_router_unreachable":
-      return "Storydump cannot reach the server right now. Nothing changed — try again shortly.";
+      return unreachableCopy("Nothing changed");
   }
   return "Could not start the Google sign-in. Nothing changed — try again shortly.";
 }
@@ -160,7 +144,7 @@ export function addSourceRefusalCopy(reason: unknown): string {
       return notAuthenticatedCopy("Nothing was added.");
     case "unreachable":
     case "target_router_unreachable":
-      return "Storydump cannot reach the server right now. Nothing was added — try again shortly.";
+      return unreachableCopy("Nothing was added");
   }
   return "Could not add that folder. Nothing was added — try again shortly.";
 }

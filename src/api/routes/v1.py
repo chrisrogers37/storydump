@@ -41,11 +41,12 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 
 from src.api.principal import Principal, current_principal, require_engine
-from src.api import google_client
+from src.api import google_client, instagram_client
 from src.services.target import (
     commands,
     google_drive_oauth,
     identity,
+    ig_login_oauth,
     invitations,
     provisioning,
     tenant_resolution,
@@ -518,6 +519,48 @@ async def connect_source(
     return {
         "authorization_url": google_drive_oauth.authorization_url(
             client_id=client_id, redirect_uri=redirect_uri, state=state
+        )
+    }
+
+
+@router.post("/workspaces/{ws}/accounts/{account_id}/connect")
+async def connect_account(
+    ws: uuid.UUID,
+    account_id: uuid.UUID,
+    request: Request,
+    principal: Principal = Depends(current_principal),
+):
+    """Start the Instagram Login grant for ONE destination: mint the state the
+    callback will consume and hand back where the browser goes (#1220 step 2,
+    #1041). The Drive connect route's shape, exactly.
+
+    An OAuth leg is a browser redirect, which the command port cannot express,
+    so it lives here as a resource route at the admin floor — the floor
+    `commands.ROLE_FLOOR["connect_account"]` names. Per-DESTINATION: the state
+    pins the `ig_accounts` row in `reconnect_target`, `connect` for a row that
+    has never been credentialed and `reconnect` after that, so a stale
+    reconnect state is retired by the next one (last issued wins). The
+    callback attaches the credential to THIS row and flips its provisional
+    `manual:<handle>` reference to the real Meta id.
+    """
+    app_id, _, redirect_uri = instagram_client.configured()
+    async with _admin(request, str(ws), principal) as session:
+        purpose = await ig_login_oauth.connect_purpose(
+            session, workspace_id=str(ws), ig_account_id=str(account_id)
+        )
+        if purpose is None:
+            raise HTTPException(status_code=404, detail="not found")
+        state = await issue_state(
+            session,
+            purpose=purpose,
+            provider=ig_login_oauth.PROVIDER,
+            user_id=principal.user_id,
+            workspace_id=str(ws),
+            reconnect_target=str(account_id),
+        )
+    return {
+        "authorization_url": ig_login_oauth.authorization_url(
+            state, redirect_uri=redirect_uri, client_id=app_id
         )
     }
 
