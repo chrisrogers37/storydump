@@ -941,10 +941,14 @@ class TestConnectingAdoptsOrCreates:
         not land a destination (and then a credential) in a workspace being
         deleted."""
         _force_state(world, "workspaces", str(world["b"]["ws"]), "offboarding")
-        ref = _ref("closing")
-        with pytest.raises(ProvisioningRefused) as info:
-            connect(world, ids=world["b"], ref=ref, handle="Closing")
-        assert info.value.reason == "workspace_inactive"
+        try:
+            ref = _ref("closing")
+            with pytest.raises(ProvisioningRefused) as info:
+                connect(world, ids=world["b"], ref=ref, handle="Closing")
+            assert info.value.reason == "workspace_inactive"
+        finally:
+            # `world` outlives this test; B must be active again for the rest.
+            _force_state(world, "workspaces", str(world["b"]["ws"]), "active")
         count = _owner(
             world,
             "SELECT count(*) FROM ig_accounts WHERE provider_account_ref = %s",
@@ -1029,7 +1033,11 @@ class TestRemovingADestination:
         _make_due(world, account_id)
 
         effects = disable(world, account_id=account_id)
-        assert effects == {"credential_revoked": True, "intents_flagged": 0}
+        assert effects == {
+            "credential_revoked": True,
+            "intents_cancelled": 0,
+            "intents_flagged": 0,
+        }
 
         row = _owner(
             world,
@@ -1067,18 +1075,20 @@ class TestRemovingADestination:
             == 1
         )
 
-    def test_live_intents_are_flagged_for_the_worker_to_cancel(self, world):
+    def test_live_intents_are_cancelled_through_the_ledgers_own_edge(self, world):
         """The seeded account carries a live intent (`scheduled`); removing the
-        account flags it the way `cancel` would, and the worker finishes it."""
+        account cancels it outright — `trg_intent_guard` admits the edge — so
+        nothing lingers in the Queue waiting for a worker that never touches
+        an `awaiting_approval` card."""
         seeded = str(world["a"]["iga"])
         effects = disable(world, account_id=seeded)
-        assert effects["intents_flagged"] >= 1
-        flagged = _owner(
+        assert effects["intents_cancelled"] >= 1
+        row = _owner(
             world,
-            "SELECT cancel_requested FROM post_intents WHERE id = %s",
+            "SELECT state, cancel_requested FROM post_intents WHERE id = %s",
             (str(world["a"]["intent"]),),
         )
-        assert flagged == (True,)
+        assert row == ("cancelled", False)
 
     def test_removing_twice_is_refused_by_name(self, world):
         account_id, _ = destination(world, ref=_ref("twice-removed"))

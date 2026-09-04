@@ -554,29 +554,53 @@ class TestDisableDestination:
     next touch (`06` "account disabled"). The row stays: history, and the
     connect that brings it back, both need it."""
 
-    async def test_disables_revokes_and_flags_in_that_order(self):
+    async def test_disables_revokes_cancels_and_flags_in_that_order(self):
+        """Pending posts are cancelled OUTRIGHT through the ledger's own edge —
+        nothing in the web reads `cancel_requested`, so a flagged
+        `awaiting_approval` card would stay approvable forever. Only an
+        in-flight publish is flagged: the pipeline honours the flag and the
+        ledger has no direct edge out of `publishing`."""
         from src.services.target.provisioning import disable_destination
 
-        ex = _ScriptedExecutor((1, {"id": "acct"}), (1, None), (2, None))
+        ex = _ScriptedExecutor((1, {"id": "acct"}), (1, None), (2, None), (1, None))
         result = await disable_destination(ex, workspace_id="ws", ig_account_id="acct")
-        assert result == {"credential_revoked": True, "intents_flagged": 2}
-        (disable, revoke, flag) = ex.statements
+        assert result == {
+            "credential_revoked": True,
+            "intents_cancelled": 2,
+            "intents_flagged": 1,
+        }
+        (disable, revoke, cancel, flag) = ex.statements
         assert "UPDATE ig_accounts" in disable[0]
         assert "state = 'disabled'" in disable[0]
         assert "state IN ('active', 'reauth_required')" in disable[0]
         assert disable[1] == {"acct": "acct", "ws": "ws"}
         assert "UPDATE oauth_credentials SET state = 'revoked'" in revoke[0]
         assert revoke[1]["provider"] == "ig_login"
+        assert "UPDATE post_intents SET state = 'cancelled'" in cancel[0]
+        for live in (
+            "scheduled",
+            "prompt_pending",
+            "awaiting_approval",
+            "approved",
+            "review_required",
+        ):
+            assert f"'{live}'" in cancel[0]
+        assert "'publishing'" not in cancel[0]
+        assert cancel[1] == {"acct": "acct", "ws": "ws"}
         assert "UPDATE post_intents SET cancel_requested = true" in flag[0]
-        assert "NOT cancel_requested" in flag[0]
-        assert flag[1]["acct"] == "acct" and flag[1]["ws"] == "ws"
+        assert "'publishing'" in flag[0] and "NOT cancel_requested" in flag[0]
+        assert flag[1] == {"acct": "acct", "ws": "ws"}
 
-    async def test_nothing_to_revoke_or_flag_is_reported_not_invented(self):
+    async def test_nothing_to_revoke_cancel_or_flag_is_reported_not_invented(self):
         from src.services.target.provisioning import disable_destination
 
-        ex = _ScriptedExecutor((1, {"id": "acct"}), (0, None), (0, None))
+        ex = _ScriptedExecutor((1, {"id": "acct"}), (0, None), (0, None), (0, None))
         result = await disable_destination(ex, workspace_id="ws", ig_account_id="acct")
-        assert result == {"credential_revoked": False, "intents_flagged": 0}
+        assert result == {
+            "credential_revoked": False,
+            "intents_cancelled": 0,
+            "intents_flagged": 0,
+        }
 
     async def test_an_unknown_or_moved_destination_is_not_found(self):
         from src.services.target.provisioning import disable_destination

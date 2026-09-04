@@ -82,7 +82,6 @@ from sqlalchemy.exc import DBAPIError
 
 from src.exceptions import StorydumpError
 from src.services.target import readers
-from src.services.target.intent_ledger import TERMINAL_STATES
 from src.services.target._dbapi import constraint_violated
 
 logger = logging.getLogger(__name__)
@@ -663,6 +662,22 @@ async def connect_destination(
 #: imports this one for `attach_connected_identity`.
 IG_LOGIN_PROVIDER = "ig_login"
 
+#: Live intent states `trg_intent_guard` lets go straight to `cancelled`
+#: (`post_intent_transitions`, 055) — and the two it does not, where only the
+#: `cancel_requested` overlay can act. Closed literals, interpolated as such.
+CANCEL_OUTRIGHT_STATES: tuple[str, ...] = (
+    "scheduled",
+    "prompt_pending",
+    "awaiting_approval",
+    "approved",
+    "review_required",
+)
+CANCEL_ON_TOUCH_STATES: tuple[str, ...] = ("publishing", "publishing_ambiguous")
+
+
+def _sql_list(states: tuple[str, ...]) -> str:
+    return ", ".join(f"'{state}'" for state in states)
+
 
 async def disable_destination(
     executor, *, workspace_id: str, ig_account_id: str
@@ -670,14 +685,16 @@ async def disable_destination(
     """Remove, in the port's terms (owner decision 2026-09-04): `02`'s
     "active ↔ disabled" edge, disabling half. Returns what else moved.
 
-    Three writes, one transaction, in this order: the destination leaves the
+    Four writes, one transaction, in this order: the destination leaves the
     clock's scan (`state = 'disabled'` — `fn_clock_tick` reads `active` only,
     so nothing further is minted for it); its Instagram credential is revoked
     locally, so the refresh cadence stops touching a token nobody wants
     refreshed (the remote revoke is a provider call and does not belong inside
     a unit of work — `disconnect_account`'s scope statement); its live intents
-    are flagged `cancel_requested`, the overlay `cancel` uses, and the worker
-    finishes them on its next touch (`06` "account disabled").
+    are cancelled outright through the ledger's own edge, so nothing lingers
+    in the Queue (`06` "awaiting_approval cards … suppressed"); an in-flight
+    publish is flagged `cancel_requested` instead — the overlay `cancel` uses —
+    and the pipeline finishes it at its next checkpoint.
 
     The row stays. `oauth_credentials` and the intent history hang off it, and
     `connect_destination` adopting a `disabled` row is how the account comes
@@ -717,16 +734,30 @@ async def disable_destination(
             "provider": IG_LOGIN_PROVIDER,
         },
     )
-    terminal = ", ".join(f"'{state}'" for state in TERMINAL_STATES)
+    # Cancelled OUTRIGHT, through the edge `trg_intent_guard` admits from every
+    # live state but the two publishing ones. Nothing in the web reads
+    # `cancel_requested`, and no worker touches an `awaiting_approval` card, so
+    # a flag alone would leave the removed account's cards approvable forever.
+    cancelled = await executor.execute(
+        text(
+            "UPDATE post_intents SET state = 'cancelled'"
+            " WHERE workspace_id = :ws AND ig_account_id = :acct"
+            f"   AND state IN ({_sql_list(CANCEL_OUTRIGHT_STATES)})"
+        ),
+        {"acct": str(ig_account_id), "ws": str(workspace_id)},
+    )
+    # An in-flight publish cannot be yanked; the pipeline honours the flag at
+    # its next checkpoint — the overlay `cancel` uses.
     flagged = await executor.execute(
         text(
             "UPDATE post_intents SET cancel_requested = true"
             " WHERE workspace_id = :ws AND ig_account_id = :acct"
-            f"   AND NOT cancel_requested AND state NOT IN ({terminal})"
+            f"   AND NOT cancel_requested AND state IN ({_sql_list(CANCEL_ON_TOUCH_STATES)})"
         ),
         {"acct": str(ig_account_id), "ws": str(workspace_id)},
     )
     return {
         "credential_revoked": bool(revoked.rowcount),
+        "intents_cancelled": cancelled.rowcount,
         "intents_flagged": flagged.rowcount,
     }

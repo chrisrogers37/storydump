@@ -332,3 +332,55 @@ class TestDisableAccountIsInThePort:
         assert port.ROLE_FLOOR["disable_account"] == "admin"
         assert port.REGISTRY["disable_account"] is not None
         assert "disable_account" not in port.UNBUILT
+
+    @pytest.mark.parametrize(
+        "refusal, expected",
+        [("already_disabled", "illegal_transition"), ("not_found", "not_found")],
+    )
+    async def test_the_executor_translates_the_destinations_refusals(
+        self, monkeypatch, refusal, expected
+    ):
+        from src.services.target import command_executors, provisioning
+
+        async def disable_destination(session, *, workspace_id, ig_account_id):
+            raise provisioning.ProvisioningRefused(refusal, "scripted")
+
+        monkeypatch.setattr(provisioning, "disable_destination", disable_destination)
+        command = port.Command(
+            kind="disable_account",
+            workspace_id="ws",
+            actor_user_id="u",
+            channel="web",
+            args={"ig_account_id": "acct"},
+        )
+        with pytest.raises(port.CommandRefused) as info:
+            await command_executors.disable_account(object(), command)
+        assert info.value.reason == expected
+
+    async def test_the_executor_reports_what_moved(self, monkeypatch):
+        from src.services.target import command_executors, provisioning
+
+        async def disable_destination(session, *, workspace_id, ig_account_id):
+            return {
+                "credential_revoked": True,
+                "intents_cancelled": 2,
+                "intents_flagged": 0,
+            }
+
+        monkeypatch.setattr(provisioning, "disable_destination", disable_destination)
+        command = port.Command(
+            kind="disable_account",
+            workspace_id="ws",
+            actor_user_id="u",
+            channel="web",
+            args={"ig_account_id": "acct"},
+        )
+        result = await command_executors.disable_account(object(), command)
+        assert result.outcome == "executed"
+        assert result.data == {
+            "ig_account_id": "acct",
+            "state": "disabled",
+            "credential_revoked": True,
+            "intents_cancelled": 2,
+            "intents_flagged": 0,
+        }

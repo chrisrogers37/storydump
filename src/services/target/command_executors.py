@@ -417,8 +417,9 @@ async def disable_account(session, command: Command) -> CommandResult:
 
     The destination leaves the clock's scan (`fn_clock_tick` reads
     `state = 'active'` only), its Instagram credential is revoked locally,
-    and its live intents are flagged `cancel_requested` exactly as `cancel`
-    flags one — the worker finishes them on its next touch (`06` "account
+    and its live intents are cancelled outright through the ledger's own
+    edge — only an in-flight publish is flagged `cancel_requested`, as
+    `cancel` flags one, for the pipeline to finish (`06` "account
     disabled"). The row stays: the history hangs off it, and connecting the
     same account again is what brings it back (`connect_destination` adopts
     a `disabled` row and `attach_connected_identity` flips it `active`).
