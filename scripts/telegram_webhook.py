@@ -50,6 +50,14 @@ ALLOWED_UPDATES = ["message"]
 TIMEOUT_S = 20
 
 
+class MissingVariable(Exception):
+    """A required deployment variable is not exported in this shell."""
+
+
+class BotApiError(Exception):
+    """A Bot API method did not answer ``ok`` — summarised, never quoted."""
+
+
 def _http(
     method: str,
     url: str,
@@ -76,10 +84,6 @@ def _http(
         return status, None
 
 
-class MissingVariable(Exception):
-    """A required deployment variable is not exported in this shell."""
-
-
 def _env(name: str) -> str:
     value = os.environ.get(name, "").strip()
     if not value:
@@ -87,21 +91,29 @@ def _env(name: str) -> str:
     return value
 
 
-def _bot(
-    token: str, method: str, data: Optional[dict[str, str]] = None
-) -> tuple[int, Any]:
-    return _http(
+#: What to add to a failure line, per method, when it helps the operator.
+_HINT = {"getMe": " — is the token the bot's?"}
+
+
+def _call(token: str, method: str, data: Optional[dict[str, str]] = None) -> dict:
+    """One Bot API method → its ``ok`` body, or :class:`BotApiError`.
+
+    The failure is summarised by status and `error_code` WITHOUT quoting the
+    description — Telegram echoes request details there, and the request
+    carried the token."""
+    status, body = _http(
         "POST" if data is not None else "GET",
         f"{BOT_API}/bot{token}/{method}",
         data=data,
     )
-
-
-def _bot_error(method: str, status: int, body: Any) -> str:
-    """Summarise a Bot API failure WITHOUT quoting its description — Telegram
-    echoes request details there, and the request carried the token."""
-    code = body.get("error_code") if isinstance(body, dict) else None
-    return f"{method} failed: HTTP {status}" + (f" (error_code {code})" if code else "")
+    if status != 200 or not isinstance(body, dict) or not body.get("ok"):
+        code = body.get("error_code") if isinstance(body, dict) else None
+        raise BotApiError(
+            f"{method} failed: HTTP {status}"
+            + (f" (error_code {code})" if code else "")
+            + _HINT.get(method, "")
+        )
+    return body
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -109,18 +121,10 @@ def cmd_status(args: argparse.Namespace) -> int:
     secret = os.environ.get(SECRET_VAR, "").strip()
     failed = False
 
-    status, body = _bot(token, "getMe")
-    if status != 200 or not isinstance(body, dict) or not body.get("ok"):
-        print(_bot_error("getMe", status, body) + " — is the token the bot's?")
-        return 1
-    me = body["result"]
+    me = _call(token, "getMe")["result"]
     print(f"bot: @{me.get('username')} (id {me.get('id')})")
 
-    status, body = _bot(token, "getWebhookInfo")
-    if status != 200 or not isinstance(body, dict) or not body.get("ok"):
-        print(_bot_error("getWebhookInfo", status, body))
-        return 1
-    info = body["result"]
+    info = _call(token, "getWebhookInfo")["result"]
     url = info.get("url") or ""
     if not url:
         print("webhook: NO WEBHOOK is registered for this bot — run `register`")
@@ -140,15 +144,11 @@ def cmd_status(args: argparse.Namespace) -> int:
     if not secret:
         print(f"api door: skipped — {SECRET_VAR} is not set in this shell")
         return 1 if failed else 0
-    status, body = _http(
-        "POST",
-        args.url,
-        data={},
-        headers={SECRET_HEADER: secret},
-    )
+    status, _ = _http("POST", args.url, data={}, headers={SECRET_HEADER: secret})
     if status == 400:
         print(
-            "api door: API accepts the secret (refused the empty body one step later, as designed)"
+            "api door: API accepts the secret (refused the empty body one step"
+            " later, as designed)"
         )
     elif status == 403:
         print(
@@ -170,7 +170,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 def cmd_register(args: argparse.Namespace) -> int:
     token = _env(TOKEN_VAR)
     secret = _env(SECRET_VAR)
-    status, body = _bot(
+    body = _call(
         token,
         "setWebhook",
         {
@@ -180,19 +180,13 @@ def cmd_register(args: argparse.Namespace) -> int:
             "drop_pending_updates": "true",
         },
     )
-    if status != 200 or not isinstance(body, dict) or not body.get("ok"):
-        print(_bot_error("setWebhook", status, body))
-        return 1
     print(f"setWebhook: {body.get('description') or 'ok'} → {args.url}")
     return cmd_status(args)
 
 
 def cmd_deregister(args: argparse.Namespace) -> int:
     token = _env(TOKEN_VAR)
-    status, body = _bot(token, "deleteWebhook", {"drop_pending_updates": "false"})
-    if status != 200 or not isinstance(body, dict) or not body.get("ok"):
-        print(_bot_error("deleteWebhook", status, body))
-        return 1
+    _call(token, "deleteWebhook", {"drop_pending_updates": "false"})
     print(
         "deleteWebhook: ok — Telegram will deliver nothing until `register` runs again"
     )
@@ -234,6 +228,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             f"{exc} is not set — export it in this shell (never paste it into a chat)"
         )
         return 2
+    except BotApiError as exc:
+        print(str(exc))
+        return 1
 
 
 if __name__ == "__main__":
