@@ -104,7 +104,11 @@ export function isQueueCommand(value: unknown): value is QueueCommand {
 export function actionsFor(
   state: IntentState,
   apiPublishingEnabled: boolean,
+  cancelRequested = false,
 ): QueueCommand[] {
+  // A card whose cancellation is requested (by `cancel`, or because its
+  // destination was removed) has no lever until the worker finishes it.
+  if (cancelRequested) return [];
   if (state !== "awaiting_approval") return [];
   return apiPublishingEnabled
     ? ["approve", "mark_posted", "skip", "reject"]

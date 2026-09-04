@@ -35,6 +35,11 @@ describe("which actions an intent offers", () => {
     ]);
   });
 
+  it("offers nothing on a card whose cancellation is requested — its destination may be gone", () => {
+    expect(actionsFor("awaiting_approval", true, true)).toEqual([]);
+    expect(actionsFor("awaiting_approval", false, true)).toEqual([]);
+  });
+
   it("offers nothing on every other state — those rows are the ledger's read-only view", () => {
     for (const state of INTENT_STATES) {
       if (state === "awaiting_approval") continue;

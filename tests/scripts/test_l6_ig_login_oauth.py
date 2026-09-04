@@ -681,3 +681,64 @@ class TestTheGuardsAreLoadBearing:
                 "   WHEN 'link' THEN user_id IS NOT NULL AND workspace_id IS NULL"
                 "   ELSE user_id IS NOT NULL AND workspace_id IS NOT NULL END)",
             )
+
+
+class TestARemovedDestinationStaysRemoved:
+    """`disable_account` (#1233) revokes the credential and disables the row;
+    a refresh job minted before the removal must not undo either."""
+
+    def test_a_swap_leaves_a_revoked_credential_revoked(self, oauth_db):
+        acct = _new_account(oauth_db)
+        cid = _call(
+            oauth_db,
+            lambda c: oauth.store_credential(
+                c, workspace_id=oauth_db["ws"], ig_account_id=acct, token="old"
+            ),
+        )
+        _exec(
+            oauth_db,
+            "UPDATE oauth_credentials SET state = 'revoked' WHERE id = %s",
+            (cid,),
+        )
+        with pytest.raises(oauth.OAuthStateRefused):
+            _call(
+                oauth_db,
+                lambda c: oauth.swap_credential(c, credential_id=cid, token="new"),
+            )
+        rows = _exec(
+            oauth_db,
+            "SELECT state FROM oauth_credentials WHERE id = %s",
+            (cid,),
+            fetch=True,
+        )
+        assert rows == [("revoked",)]
+        assert (
+            _call(oauth_db, lambda c: oauth.load_credential(c, credential_id=cid))
+            == "old"
+        )
+
+    def test_mark_dead_leaves_a_disabled_account_disabled(self, oauth_db):
+        acct = _new_account(oauth_db)
+        cid = _call(
+            oauth_db,
+            lambda c: oauth.store_credential(
+                c, workspace_id=oauth_db["ws"], ig_account_id=acct, token="tok"
+            ),
+        )
+        _exec(
+            oauth_db,
+            "UPDATE oauth_credentials SET state = 'revoked' WHERE id = %s",
+            (cid,),
+        )
+        _exec(
+            oauth_db, "UPDATE ig_accounts SET state = 'disabled' WHERE id = %s", (acct,)
+        )
+        _call(oauth_db, lambda c: oauth.mark_dead(c, credential_id=cid))
+        rows = _exec(
+            oauth_db,
+            "SELECT c.state, a.state FROM oauth_credentials c"
+            "  JOIN ig_accounts a ON a.id = c.ig_account_id WHERE c.id = %s",
+            (cid,),
+            fetch=True,
+        )
+        assert rows == [("revoked", "disabled")]

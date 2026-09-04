@@ -16,6 +16,7 @@ import {
   DialogClose,
 } from "@/components/ui/dialog";
 import { postApi } from "@/lib/dashboard-api";
+import { disableAccountRefusalCopy, submitDisableAccount } from "@/lib/command-client";
 import {
   connectControlFor,
   destinationConnectRefusalCopy,
@@ -32,10 +33,10 @@ import type { Destination } from "@/lib/types";
 /**
  * Connect is real and ungated: the header's *Connect Instagram* ADDS a
  * destination through the Instagram Login grant (owner ruling 2026-09-04), and
- * each row's Connect/Reconnect acts on the account it names. `switch-account`
- * and `remove-account` are real controls whose routes are not wired yet
- * (#1063 / epic P6) — DISABLED WITH A REASON, not removed, so the screen does
- * not lose a capability the user is about to get.
+ * each row's Connect/Reconnect acts on the account it names, and Remove is the
+ * port's `disable_account`. `switch-account` is a real control whose route is
+ * not wired yet (#1063 / epic P6) — DISABLED WITH A REASON, not removed, so
+ * the screen does not lose a capability the user is about to get.
  */
 const DISABLED_REASON =
   "Not wired up yet — changing accounts is not available on this API version.";
@@ -112,15 +113,24 @@ export function AccountsTab({ accounts, editable, workspaceId }: AccountsTabProp
     }
   }
 
+  /**
+   * Remove = the port's `disable_account` (owner decision 2026-09-04). The row
+   * leaves the list; connecting the same account again brings it back.
+   */
   async function removeAccount(accountId: string) {
     setError(null);
     setLoadingAction(`remove-${accountId}`);
     try {
-      await postApi("remove-account", { account_id: accountId });
+      const result = await submitDisableAccount(workspaceId, accountId);
+      if (!result.ok) {
+        // The banner lives outside the dialog; close the dialog first so the
+        // refusal is what the person sees, not a spinner that stopped.
+        setRemovingDialogOpen(null);
+        setError(disableAccountRefusalCopy(result.error, result.status));
+        return;
+      }
       setRemovingDialogOpen(null);
       router.refresh();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to remove account");
     } finally {
       setLoadingAction(null);
     }
@@ -228,8 +238,7 @@ export function AccountsTab({ accounts, editable, workspaceId }: AccountsTabProp
                           <Button
                             variant="destructive"
                             size="sm"
-                            disabled={!editable}
-                            title={editable ? undefined : DISABLED_REASON}
+                            disabled={loadingAction !== null}
                           >
                             Remove
                           </Button>
@@ -239,9 +248,10 @@ export function AccountsTab({ accounts, editable, workspaceId }: AccountsTabProp
                             <DialogTitle>Remove Account</DialogTitle>
                             <DialogDescription>
                               Remove{" "}
-                              {handleText ? `@${handleText}` : "this destination"}? This
-                              will disconnect the account and stop all scheduled
-                              posts.
+                              {handleText ? `@${handleText}` : "this destination"} from this
+                              workspace? Its schedule stops, its Instagram connection is
+                              revoked, and posts waiting for approval are cancelled.
+                              Connecting the account again brings it back.
                             </DialogDescription>
                           </DialogHeader>
                           <DialogFooter>
@@ -269,9 +279,8 @@ export function AccountsTab({ accounts, editable, workspaceId }: AccountsTabProp
 
           {!editable && (
             <p className="mt-4 text-xs text-muted-foreground">
-              Switching and removing accounts is not wired up yet — those
-              controls are shown disabled rather than hidden, because they are
-              coming back.
+              Switching accounts is not wired up yet — the control is shown
+              disabled rather than hidden, because it is coming back.
             </p>
           )}
 

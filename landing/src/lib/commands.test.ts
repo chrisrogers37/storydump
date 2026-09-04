@@ -60,6 +60,7 @@ describe("every offered command can produce an idempotency key", () => {
     offboard_workspace: { submission_id: UUID, confirm: true },
     restore_workspace: { submission_id: UUID },
     disconnect_account: { submission_id: UUID, source_id: UUID2 },
+    disable_account: { submission_id: UUID, ig_account_id: UUID2 },
     account_settings_change: {
       submission_id: UUID,
       ig_account_id: UUID2,
@@ -290,6 +291,34 @@ describe("disconnect_account", () => {
     const a = spec.parse({ submission_id: UUID, source_id: UUID2 });
     const b = COMMAND_SPECS.sync_now.parse({ submission_id: UUID, source_id: UUID2 });
     expect(a).toEqual(b);
+  });
+});
+
+describe("disable_account", () => {
+  // Owner decision 2026-09-04: the Accounts tab's Remove. The port's edge is
+  // `active → disabled`; the row stays for history and for the connect that
+  // brings it back.
+  const spec = COMMAND_SPECS.disable_account;
+
+  it("is offered", () => {
+    expect(isOfferedCommand("disable_account")).toBe(true);
+  });
+
+  it("carries the account id the executor refuses without", () => {
+    expect(spec.parse({ submission_id: UUID, ig_account_id: UUID2 })).toEqual({
+      ok: true,
+      body: { ig_account_id: UUID2 },
+      identity: UUID,
+    });
+  });
+
+  it("refuses a non-id before it becomes a database lookup", () => {
+    for (const bad of ["", "not-a-uuid", 7, null, undefined]) {
+      expect(spec.parse({ submission_id: UUID, ig_account_id: bad })).toEqual({
+        ok: false,
+        error: "invalid_account_id",
+      });
+    }
   });
 });
 

@@ -69,6 +69,7 @@ VOCABULARY: tuple[str, ...] = (
     "reconnect_account",
     "disconnect_account",
     "move_account",
+    "disable_account",
     "create_workspace",
     "rename_workspace",
     "offboard_workspace",
@@ -143,6 +144,7 @@ ROLE_FLOOR: dict[str, str] = {
     "reconnect_account": "admin",
     "disconnect_account": "admin",
     "move_account": "admin",
+    "disable_account": "admin",
     "create_workspace": "user",
     "rename_workspace": "admin",
     "offboard_workspace": "owner",
@@ -237,6 +239,9 @@ def _build_registry() -> dict[str, Optional[Executor]]:
             "connect_account": ex.connect_account,
             "reconnect_account": ex.reconnect_account,
             "disconnect_account": ex.disconnect_account,
+            # `02` "active ↔ disabled (user command, audited)", the disabling
+            # half — the web's Remove (owner decision 2026-09-04).
+            "disable_account": ex.disable_account,
             "settings_change": ex.settings_change,
             "account_settings_change": ex.account_settings_change,
             "pause_workspace": ex.pause_workspace,

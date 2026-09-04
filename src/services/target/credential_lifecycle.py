@@ -250,6 +250,19 @@ async def refresh_credential(deps, session, job) -> str:
     # Phase 1 — load, own transaction, committed before any provider talk.
     try:
         async with factory() as s:
+            # A credential revoked since this job was minted — a removed
+            # destination's — is left exactly as it is: no provider call, no
+            # flip. The clock mints only for `active` credentials, so this is
+            # the one-tick window between a mint and a removal.
+            state = await oauth.credential_state(s, credential_id=credential_id)
+            if state is not None and state != "active":
+                logger.info(
+                    "refresh_credential %s: credential %s is %s — nothing to refresh",
+                    job["id"],
+                    credential_id,
+                    state,
+                )
+                return "stale"
             token = await oauth.load_credential(s, credential_id=credential_id)
     except oauth.CredentialUndecryptable:
         # load_credential already flipped credential+account and committed;

@@ -130,7 +130,7 @@ export function QueueList({
     <div className="space-y-3">
       <ul className="divide-y rounded-lg border bg-card">
         {intents.map((intent) => {
-          const actions = actionsFor(intent.state, apiPublishingEnabled);
+          const actions = actionsFor(intent.state, apiPublishingEnabled, intent.cancel_requested);
           const MediaGlyph = intent.media_kind === "video" ? Video : ImageIcon;
 
           return (
@@ -151,6 +151,11 @@ export function QueueList({
                 <Badge variant="secondary" className={STATE_TONE[intent.state]}>
                   {STATE_LABELS[intent.state] ?? intent.state}
                 </Badge>
+                {intent.cancel_requested && (
+                  <Badge variant="secondary" className="bg-amber-100 text-amber-900">
+                    Cancelling
+                  </Badge>
+                )}
 
                 {actions.length > 0 && (
                   <div className="flex flex-wrap items-center gap-2">

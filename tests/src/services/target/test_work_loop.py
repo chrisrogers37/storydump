@@ -393,6 +393,7 @@ class TestPlanSlotAdapterMapsThePayload:
             rows=[
                 {
                     "provider_account_ref": "ig-acct-9",
+                    "state": "active",
                     "approval_mode": "manual",
                     "slot_at": resolved_slot,
                 }
@@ -424,6 +425,45 @@ class TestPlanSlotAdapterMapsThePayload:
             "the raw payload string must ride to Postgres unmodified"
         )
         assert swept == [1], "a minted intent triggers the same-beat prompt fast path"
+
+    async def test_a_slot_minted_for_an_account_since_removed_is_a_no_op(
+        self, monkeypatch
+    ):
+        """The clock reads `active` only; a `plan_slot` it minted a tick before
+        the destination was removed must not become a post afterwards."""
+        called = []
+
+        async def fake_execute_plan_slot(session, **kwargs):
+            called.append(kwargs)
+
+        monkeypatch.setattr(
+            work_loop.scheduler, "execute_plan_slot", fake_execute_plan_slot
+        )
+        from datetime import datetime, timezone
+
+        session = _FakeSession(
+            rows=[
+                {
+                    "provider_account_ref": "ig-acct-9",
+                    "state": "disabled",
+                    "approval_mode": "manual",
+                    "slot_at": datetime(2026, 8, 21, 10, 0, tzinfo=timezone.utc),
+                }
+            ]
+        )
+        job = {
+            "id": "j2",
+            "kind": "plan_slot",
+            "workspace_id": "ws-1",
+            "payload": {
+                "v": 1,
+                "ig_account_id": "acct-1",
+                "slot_at": "2026-08-21T10:00:00+00:00",
+            },
+        }
+        registry = build_registry(full_deps())
+        assert await registry["plan_slot"](session, job) == "account_inactive"
+        assert called == []
 
 
 class _Recorder:
