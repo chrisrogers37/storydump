@@ -12,10 +12,12 @@ import { isInstagramAuthorizationUrl } from "@/lib/destination";
  * express, so the API serves it as a resource route and this proxy mirrors
  * it. No `Idempotency-Key`: minting a state is last-issued-wins by design.
  *
- * Per-DESTINATION, because the credential attaches to the `ig_accounts` row
- * the person typed, flipping its provisional `manual:<handle>` reference to
- * the real Meta id. The API answers 404 — never 403 — for a destination that
- * is not this workspace's, and that passes through unchanged.
+ * Per-DESTINATION: the credential attaches to the row this route names —
+ * connect or reconnect — and a row still on its typed `manual:<handle>`
+ * reference flips to the real Meta id. Adding a NEW destination is the
+ * workspace-level sibling (`../connect`). The API answers 404 — never 403 —
+ * for a destination that is not this workspace's, and that passes through
+ * unchanged.
  */
 export async function POST(
   _request: NextRequest,

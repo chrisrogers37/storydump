@@ -205,6 +205,20 @@ def _make_due(world, account_id: str) -> None:
         conn.close()
 
 
+def _force_state(world, table: str, row_id: str, state: str) -> None:
+    """Put a row into *state* by hand — the fixture for an edge the drivers
+    above cannot reach (an offboarding workspace, a disabled destination)."""
+    conn = psycopg2.connect(world["stream"])
+    try:
+        conn.autocommit = False
+        with conn.cursor() as cur:
+            cur.execute("SET app.actor_kind = 'migration'")
+            cur.execute(f"UPDATE {table} SET state = %s WHERE id = %s", (state, row_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _ref(tag: str) -> str:
     return f"17841{uuid.uuid4().hex[:12]}-{tag}"
 
@@ -904,6 +918,53 @@ class TestConnectingAdoptsOrCreates:
         second, created_second = connect(world, ref=ref, handle="Twice")
         assert first == second
         assert (created_first, created_second) == (True, False)
+
+    def test_a_workspace_that_is_closing_refuses_a_new_destination(self, world):
+        """The guard the pinned path gets from `attach_connected_identity`'s
+        WHERE, on the create path too: a state issued before an offboard must
+        not land a destination (and then a credential) in a workspace being
+        deleted."""
+        _force_state(world, "workspaces", str(world["b"]["ws"]), "offboarding")
+        ref = _ref("closing")
+        with pytest.raises(ProvisioningRefused) as info:
+            connect(world, ids=world["b"], ref=ref, handle="Closing")
+        assert info.value.reason == "workspace_inactive"
+        count = _owner(
+            world,
+            "SELECT count(*) FROM ig_accounts WHERE provider_account_ref = %s",
+            (ref,),
+        )
+        assert count[0] == 0
+
+    def test_a_grant_without_a_username_creates_then_adopts_by_real_id(self, world):
+        """The NULL-bound shapes against real PostgreSQL: `:manual_ref` NULL in
+        the lookup, `:handle` NULL in the attach — the driver-typing class the
+        rule in `.claude/rules/database.md` exists for."""
+        ref = _ref("nameless")
+        first, created_first = connect(world, ref=ref, handle=None)
+        second, created_second = connect(world, ref=ref, handle=None)
+        assert first == second
+        assert (created_first, created_second) == (True, False)
+        row = _owner(
+            world, "SELECT handle, state FROM ig_accounts WHERE id = %s", (first,)
+        )
+        assert row == (None, "active")
+
+    def test_connecting_a_disabled_destination_brings_it_back(self, world):
+        """The remove edge's inverse: connecting IS the enable (`02` "active ↔
+        disabled"). A disabled row must not swallow a fresh credential and
+        stay hidden from the clock."""
+        typed, _ = destination(world, ref=None, handle="@Parked")
+        _force_state(world, "ig_accounts", typed, "disabled")
+        ref = _ref("revive")
+        account_id, created = connect(world, ref=ref, handle="parked")
+        assert (account_id, created) == (typed, False)
+        row = _owner(
+            world,
+            "SELECT state, provider_account_ref FROM ig_accounts WHERE id = %s",
+            (typed,),
+        )
+        assert row == ("active", ref)
 
     def test_adoption_never_reaches_across_workspaces(self, world):
         elsewhere, _ = destination(world, ids=world["b"], ref=None, handle="Shared")

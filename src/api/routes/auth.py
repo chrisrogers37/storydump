@@ -484,24 +484,26 @@ async def instagram_login_callback(
         logger.warning("instagram connect: callback authorization refused: %s", exc)
         return _fail("state_refused", flow=INSTAGRAM_FLOW)
     except provisioning.ProvisioningRefused as exc:
-        logger.warning("instagram connect: attach refused: %s", exc)
-        return _fail(
-            _ATTACH_REASON.get(exc.reason, "state_refused"), flow=INSTAGRAM_FLOW
-        )
+        if exc.reason not in _ATTACH_REASON:
+            raise
+        logger.warning("instagram connect: landing refused: %s", exc)
+        return _fail(_ATTACH_REASON[exc.reason], flow=INSTAGRAM_FLOW)
 
     return RedirectResponse(
         _landing("/dashboard/settings?connected=instagram"), status_code=302
     )
 
 
-#: `provisioning.connect_destination`'s refusals (its attach step's) on the
-#: error page. Each
-#: is a DIFFERENT remedy, which is why they are not folded into `state_refused`
-#: ("start again and it should work" is false for all three).
+#: `provisioning.connect_destination`'s refusals on the error page. Each is a
+#: DIFFERENT remedy, which is why they are not folded into `state_refused`
+#: ("start again and it should work" is false for every one of them). A
+#: reason outside this table is not a grant outcome at all — `slot_not_seeded`
+#: is a programming error — and is answered as one, never as "start again".
 _ATTACH_REASON = {
     "duplicate_destination": "already_connected",
     "wrong_account": "wrong_account",
     "not_found": "destination_gone",
+    "workspace_inactive": "workspace_closing",
 }
 
 

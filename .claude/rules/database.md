@@ -56,9 +56,10 @@ used. Two shapes cannot be inferred and fail at runtime with
 `could not determine data type of parameter $N` — never in the unit tests
 (scripted executors), only against a real database:
 
-- a nullable parameter tested alone: write `CAST(:p AS text) IS NULL`, or drop
-  the guard when `col = :p` already yields NULL for a NULL parameter
-  (`provisioning.attach_connected_identity`, `connect_destination`);
+- a nullable parameter tested alone: write `CAST(:p AS text) IS NULL`
+  (`provisioning.attach_connected_identity`), or drop the guard when
+  `col = :p` already yields NULL for a NULL parameter
+  (`provisioning.connect_destination`'s lookup);
 - a string that must become a timestamp: `CAST(CAST(:p AS text) AS timestamptz)`
   (`work_loop.py` — a bare `CAST(:p AS timestamptz)` makes asyncpg refuse the
   string).

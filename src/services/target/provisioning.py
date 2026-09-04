@@ -468,7 +468,10 @@ async def attach_connected_identity(
     the reference flips to the real id, the handle is refreshed from the
     profile when Instagram supplied one, and an account parked
     `reauth_required` comes back `active` — the `07` §2 reconnect edge, on the
-    account the dispatcher actually reads.
+    account the dispatcher actually reads. A `disabled` account (the remove
+    edge, `02` "active ↔ disabled") comes back `active` the same way:
+    connecting IS the enable, and a hidden row the clock skips must not
+    swallow a fresh credential and stay hidden.
 
     **A destination is for ONE Instagram account, and this write cannot move
     it to another.** Two refusals make that true, both named `wrong_account`:
@@ -501,7 +504,8 @@ async def attach_connected_identity(
                 "UPDATE ig_accounts"
                 "   SET provider_account_ref = :ref,"
                 "       handle = COALESCE(:handle, handle),"
-                "       state = CASE WHEN state = 'reauth_required' THEN 'active' ELSE state END"
+                "       state = CASE WHEN state IN ('reauth_required', 'disabled')"
+                "                    THEN 'active' ELSE state END"
                 " WHERE id = :acct AND workspace_id = :ws AND state <> 'moved'"
                 "   AND (provider_account_ref = :ref"
                 "        OR (provider_account_ref LIKE :manual_prefix"
@@ -559,7 +563,14 @@ def _connected_identity(
     manual ref that handle would have been typed as)`. Both the per-row attach
     and the workspace-level adopt read the same three values."""
     ref = account_ref_from(provider_account_ref)
-    display_handle = handle_from(handle) if handle else None
+    try:
+        display_handle = handle_from(handle) if handle else None
+    except ProvisioningRefused:
+        # A display column must not veto an identity-bearing write —
+        # `_identity_for` records the regression this guards against. A
+        # username the local rule refuses is stored as no username; the real
+        # id still lands.
+        display_handle = None
     manual_ref = manual_ref_for(display_handle) if display_handle else None
     return ref, display_handle, manual_ref
 
@@ -587,27 +598,48 @@ async def connect_destination(
     second row for one feed is the thing `uq_ig_account_live` forbids. The
     real id wins when both somehow exist. Adoption is the same
     `attach_connected_identity` write, so the same-account rule and the
-    `reauth_required` → `active` flip are one code path; a row on another
-    real id is out of reach by construction (the lookup never matches it).
-    No row at all is a new, SCHEDULED destination under the real id —
-    `create_destination`, with the handle Instagram supplied.
+    `reauth_required`/`disabled` → `active` flip are one code path; a row on
+    another real id is out of reach by construction (the lookup never matches
+    it). No row at all is a new, SCHEDULED destination under the real id —
+    `create_destination`, with the handle Instagram supplied — and only in an
+    `active` workspace (`workspace_inactive` otherwise).
+
+    Known residue: a typed row whose handle is NOT the connected account's
+    username (a renamed account, a typo) is not matched and stays a separate,
+    credential-less destination beside the connected one. The remove command
+    is its remedy; nothing here can tell that row from a deliberately parked
+    second destination.
     """
     ref, display_handle, manual_ref = _connected_identity(provider_account_ref, handle)
     if ig_account_id is None:
-        existing = await readers.row(
+        # One read: the workspace's state and the row this account already has
+        # here, if any. The workspace check is the guard the pinned path gets
+        # from `attach_connected_identity`'s WHERE — a state issued before an
+        # offboard must not land a credential in a workspace being deleted.
+        found = await readers.row(
             executor,
-            "SELECT id FROM ig_accounts"
-            " WHERE workspace_id = :ws AND state <> 'moved'"
+            "SELECT w.state AS workspace_state, a.id"
+            "  FROM workspaces w"
+            "  LEFT JOIN ig_accounts a"
+            "    ON a.workspace_id = w.id AND a.state <> 'moved'"
             # No `:manual_ref IS NOT NULL` guard: a NULL compares to nothing,
             # and the guard shape cannot be typed — `.claude/rules/database.md`.
-            "   AND (provider_account_ref = :ref OR provider_account_ref = :manual_ref)"
-            " ORDER BY (provider_account_ref = :ref) DESC"
+            "   AND (a.provider_account_ref = :ref OR a.provider_account_ref = :manual_ref)"
+            " WHERE w.id = :ws"
+            " ORDER BY (a.provider_account_ref = :ref) DESC NULLS LAST"
             " LIMIT 1",
             ws=str(workspace_id),
             ref=ref,
             manual_ref=manual_ref,
         )
-        if existing is None:
+        if found is None:
+            raise ProvisioningRefused("not_found", f"workspace {workspace_id}")
+        if found["workspace_state"] != "active":
+            raise ProvisioningRefused(
+                "workspace_inactive",
+                "nothing can be connected to a workspace that is not active",
+            )
+        if found["id"] is None:
             return await create_destination(
                 executor,
                 workspace_id=workspace_id,
@@ -615,7 +647,7 @@ async def connect_destination(
                 handle=display_handle,
                 schedule=True,
             )
-        ig_account_id = str(existing["id"])
+        ig_account_id = str(found["id"])
     await attach_connected_identity(
         executor,
         workspace_id=workspace_id,

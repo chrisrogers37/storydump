@@ -473,13 +473,6 @@ class TestInstagramCallback:
             log.append(("gate", workspace_id, user_id, minimum_role))
             return "owner"
 
-        async def attach(
-            session, *, workspace_id, ig_account_id, provider_account_ref, handle
-        ):
-            log.append(
-                ("attach", workspace_id, ig_account_id, provider_account_ref, handle)
-            )
-
         async def store_credential(
             session, *, workspace_id, ig_account_id, token, expires_at=None
         ):
@@ -500,8 +493,7 @@ class TestInstagramCallback:
 
         monkeypatch.setattr(auth, "unit_of_work", _Uow)
         monkeypatch.setattr(tenant_resolution, "authorize_member", authorize_member)
-        monkeypatch.setattr(provisioning, "attach_connected_identity", attach)
-        monkeypatch.setattr(provisioning, "connect_destination", connect, raising=False)
+        monkeypatch.setattr(provisioning, "connect_destination", connect)
         monkeypatch.setattr(ig_login_oauth, "store_credential", store_credential)
         return seams
 
@@ -573,6 +565,35 @@ class TestInstagramCallback:
             ("connect", WS, None, "17841400000000001", "gatortails"),
             ("store", WS, "acct-adopted", "IGQVJ-long"),
         ]
+
+    def test_a_closing_workspace_refuses_the_add_by_name(
+        self, client, instagram, state_row, browser, writes, grant
+    ):
+        state_row["reconnect_target"] = None
+        writes["connect_refusal"] = provisioning.ProvisioningRefused(
+            "workspace_inactive", "offboarding"
+        )
+        resp = self._return(client)
+        assert (
+            resp.headers["location"]
+            == f"{FRONT}/auth/error?reason=workspace_closing&flow=instagram"
+        )
+        assert not any(entry[0] == "store" for entry in writes["log"])
+
+    def test_a_reason_that_is_not_a_grant_outcome_is_not_dressed_as_one(
+        self, client, instagram, state_row, browser, writes, grant
+    ):
+        """`slot_not_seeded` is a programming error; "start again and it
+        should work" would be a lie, so it is answered as an error."""
+        writes["connect_refusal"] = provisioning.ProvisioningRefused(
+            "slot_not_seeded", "the cursor could not be computed"
+        )
+        try:
+            resp = self._return(client)
+        except provisioning.ProvisioningRefused:
+            return
+        assert resp.status_code == 500
+        assert "auth/error" not in resp.headers.get("location", "")
 
     def test_a_refused_adoption_lands_on_the_error_page_by_name(
         self, client, instagram, state_row, browser, writes, grant
@@ -684,7 +705,7 @@ class TestInstagramCallback:
             resp.headers["location"]
             == f"{FRONT}/auth/error?reason=state_refused&flow=instagram"
         )
-        assert not any(w[0] in ("attach", "store") for w in writes["log"])
+        assert not any(w[0] == "store" for w in writes["log"])
 
     @pytest.mark.parametrize(
         "refusal, reason",

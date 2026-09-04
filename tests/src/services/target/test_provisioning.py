@@ -409,7 +409,7 @@ class TestConnectDestinationAdoptsOrCreates:
         from src.services.target.provisioning import connect_destination
 
         log, found = seams
-        found["row"] = {"id": "acct-1"}
+        found["row"] = {"workspace_state": "active", "id": "acct-1"}
         result = await connect_destination(
             object(),
             workspace_id="ws",
@@ -426,7 +426,7 @@ class TestConnectDestinationAdoptsOrCreates:
         from src.services.target.provisioning import connect_destination
 
         log, found = seams
-        found["row"] = {"id": "acct-1"}
+        found["row"] = {"workspace_state": "active", "id": "acct-1"}
         await connect_destination(
             object(),
             workspace_id="ws",
@@ -438,12 +438,15 @@ class TestConnectDestinationAdoptsOrCreates:
         assert params["ref"] == "1784"
         assert params["manual_ref"] == "manual:gatortails"
         assert "state <> 'moved'" in found["sql"]
+        assert "FROM workspaces w" in found["sql"], (
+            "the workspace's state rides the same read"
+        )
 
     async def test_without_a_username_only_the_real_id_can_match(self, seams):
         from src.services.target.provisioning import connect_destination
 
         log, found = seams
-        found["row"] = None
+        found["row"] = {"workspace_state": "active", "id": None}
         await connect_destination(
             object(), workspace_id="ws", provider_account_ref="1784", handle=None
         )
@@ -469,7 +472,7 @@ class TestConnectDestinationAdoptsOrCreates:
         from src.services.target.provisioning import connect_destination
 
         log, found = seams
-        found["row"] = None
+        found["row"] = {"workspace_state": "active", "id": None}
         result = await connect_destination(
             object(),
             workspace_id="ws",
@@ -479,3 +482,44 @@ class TestConnectDestinationAdoptsOrCreates:
         assert result == ("new-id", True)
         assert ("create", "ws", "1784", "GatorTails", True) in log
         assert not any(entry[0] == "attach" for entry in log)
+
+    async def test_a_workspace_that_is_not_active_refuses_the_add_by_name(self, seams):
+        from src.services.target.provisioning import connect_destination
+
+        log, found = seams
+        found["row"] = {"workspace_state": "offboarding", "id": None}
+        with pytest.raises(ProvisioningRefused) as info:
+            await connect_destination(
+                object(), workspace_id="ws", provider_account_ref="1784", handle="x"
+            )
+        assert info.value.reason == "workspace_inactive"
+        assert [entry[0] for entry in log] == ["find"]
+
+    async def test_a_workspace_that_does_not_exist_is_not_found(self, seams):
+        from src.services.target.provisioning import connect_destination
+
+        log, found = seams
+        found["row"] = None
+        with pytest.raises(ProvisioningRefused) as info:
+            await connect_destination(
+                object(), workspace_id="ws", provider_account_ref="1784", handle="x"
+            )
+        assert info.value.reason == "not_found"
+
+    async def test_a_username_the_local_rule_refuses_does_not_veto_the_connect(
+        self, seams
+    ):
+        """`_identity_for`'s lesson, applied: a display value cannot refuse an
+        identity-bearing write. The real id lands; the username is dropped."""
+        from src.services.target.provisioning import connect_destination
+
+        log, found = seams
+        result = await connect_destination(
+            object(),
+            workspace_id="ws",
+            provider_account_ref="1784",
+            handle="two words",
+            ig_account_id="pinned",
+        )
+        assert result == ("pinned", False)
+        assert log == [("attach", "ws", "pinned", "1784", None)]

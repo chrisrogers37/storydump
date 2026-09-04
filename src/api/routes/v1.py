@@ -475,7 +475,7 @@ async def create_account(
     that is deliberately parked without a login.
 
     **Two bodies, one row (#1089).** ``{"handle": "..."}`` is the typed path the
-    settings form uses: there is no Meta id to send, so `create_destination`
+    CLI and tests use: there is no Meta id to send, so `create_destination`
     derives a provisional ``manual:<handle>`` reference. ``{"provider_account_ref":
     "..."}`` is the OAuth path for when a real id exists, and it still wins if
     both are sent. A request carrying NEITHER is refused as
