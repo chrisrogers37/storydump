@@ -404,7 +404,11 @@ async def swap_credential(conn, *, credential_id, token: str, expires_at=None) -
         text(
             "UPDATE oauth_credentials"
             " SET encrypted_payload = :payload, expires_at = :exp, state = 'active'"
-            " WHERE id = :cid"
+            # A revoked credential (a removed destination's) stays revoked: a
+            # refresh that was in flight when the account was removed must not
+            # bring the token back to life. `expired` → `active` IS allowed —
+            # that is the reconnect edge (D31).
+            " WHERE id = :cid AND state <> 'revoked'"
         ),
         {
             "cid": str(credential_id),
@@ -414,6 +418,19 @@ async def swap_credential(conn, *, credential_id, token: str, expires_at=None) -
     )
     if result.rowcount == 0:
         raise OAuthStateRefused(f"no credential {credential_id} to swap")
+
+
+async def credential_state(conn, *, credential_id) -> Optional[str]:
+    """The credential's state, or None when there is no such row — read
+    before a refresh so a credential revoked since the job was minted is left
+    alone (`refresh_credential`'s "stale" outcome)."""
+    row = (
+        await conn.execute(
+            text("SELECT state FROM oauth_credentials WHERE id = :cid"),
+            {"cid": str(credential_id)},
+        )
+    ).first()
+    return None if row is None else row[0]
 
 
 async def load_credential(conn, *, credential_id) -> str:
@@ -456,7 +473,9 @@ async def mark_dead(conn, *, credential_id) -> None:
     result = await conn.execute(
         text(
             "UPDATE oauth_credentials SET state = 'expired'"
-            " WHERE id = :cid AND state <> 'expired'"
+            # Only a LIVE credential dies here: a revoked one (a removed
+            # destination's) is already dead and must not be relabelled.
+            " WHERE id = :cid AND state = 'active'"
             " RETURNING ig_account_id"
         ),
         {"cid": str(credential_id)},
@@ -467,7 +486,10 @@ async def mark_dead(conn, *, credential_id) -> None:
     await conn.execute(
         text(
             "UPDATE ig_accounts SET state = 'reauth_required'"
-            " WHERE id = :acct AND state <> 'reauth_required'"
+            # From `active` only: a `disabled` (removed) row must not come
+            # back to the list as "reconnect needed" because a stale refresh
+            # job ran after the removal.
+            " WHERE id = :acct AND state = 'active'"
         ),
         {"acct": str(row[0])},
     )

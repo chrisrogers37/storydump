@@ -149,6 +149,22 @@ def connect(world, *, ids=None, ref: str, handle=None):
     )
 
 
+def disable(world, *, ids=None, account_id: str):
+    """Remove, as the `disable_account` executor performs it (owner decision
+    2026-09-04)."""
+    ids = ids or world["a"]
+    return asyncio.run(
+        in_tenant(
+            world["ingress"],
+            str(ids["ws"]),
+            str(ids["user"]),
+            lambda s: provisioning.disable_destination(
+                s, workspace_id=str(ids["ws"]), ig_account_id=account_id
+            ),
+        )
+    )
+
+
 def source(world, *, ids=None, folder: str, root_name=None):
     ids = ids or world["a"]
     return asyncio.run(
@@ -925,10 +941,14 @@ class TestConnectingAdoptsOrCreates:
         not land a destination (and then a credential) in a workspace being
         deleted."""
         _force_state(world, "workspaces", str(world["b"]["ws"]), "offboarding")
-        ref = _ref("closing")
-        with pytest.raises(ProvisioningRefused) as info:
-            connect(world, ids=world["b"], ref=ref, handle="Closing")
-        assert info.value.reason == "workspace_inactive"
+        try:
+            ref = _ref("closing")
+            with pytest.raises(ProvisioningRefused) as info:
+                connect(world, ids=world["b"], ref=ref, handle="Closing")
+            assert info.value.reason == "workspace_inactive"
+        finally:
+            # `world` outlives this test; B must be active again for the rest.
+            _force_state(world, "workspaces", str(world["b"]["ws"]), "active")
         count = _owner(
             world,
             "SELECT count(*) FROM ig_accounts WHERE provider_account_ref = %s",
@@ -977,3 +997,167 @@ class TestConnectingAdoptsOrCreates:
             (elsewhere,),
         )
         assert untouched == ("manual:shared",)
+
+
+class TestRemovingADestination:
+    """Remove = `disable_account` (owner decision 2026-09-04). What it must
+    change, measured against the real schema: the clock's predicate, the
+    accounts list, the credential, the live intents — and what it must not:
+    the row itself, which the connect that brings the account back needs."""
+
+    def _credential(self, world, account_id: str) -> str:
+        """An `ig_login` credential row for *account_id*, written by hand — the
+        gate tests the state flip, not the token round trip (that is L.6's)."""
+        conn = psycopg2.connect(world["stream"])
+        try:
+            conn.autocommit = False
+            with conn.cursor() as cur:
+                cur.execute("SET app.actor_kind = 'migration'")
+                cur.execute(
+                    "INSERT INTO oauth_credentials"
+                    " (workspace_id, ig_account_id, provider, encrypted_payload, state)"
+                    " VALUES (%s, %s, 'ig_login', 'ciphertext', 'active') RETURNING id",
+                    (str(world["a"]["ws"]), account_id),
+                )
+                cred_id = cur.fetchone()[0]
+            conn.commit()
+            return str(cred_id)
+        finally:
+            conn.close()
+
+    def test_the_destination_leaves_the_clock_and_the_list_and_its_credential_is_revoked(
+        self, world
+    ):
+        account_id, _ = destination(world, ref=_ref("remove"), handle="Leaving")
+        cred_id = self._credential(world, account_id)
+        _make_due(world, account_id)
+
+        effects = disable(world, account_id=account_id)
+        assert effects == {
+            "credential_revoked": True,
+            "intents_flagged": 0,
+            "states_retired": 0,
+        }
+
+        row = _owner(
+            world,
+            "SELECT a.state, c.state FROM ig_accounts a"
+            "  JOIN oauth_credentials c ON c.ig_account_id = a.id"
+            " WHERE a.id = %s AND c.id = %s",
+            (account_id, cred_id),
+        )
+        assert row == ("disabled", "revoked")
+        # Out of the clock's scan: due, and still nothing minted for it.
+        tick(world)
+        minted = _owner(
+            world,
+            "SELECT count(*) FROM jobs WHERE payload->>'ig_account_id' = %s",
+            (account_id,),
+        )
+        assert minted[0] == 0
+        # Out of the list the settings page renders.
+        listed = asyncio.run(
+            in_tenant(
+                world["ingress"],
+                str(world["a"]["ws"]),
+                str(world["a"]["user"]),
+                lambda s: workspaces.list_accounts(
+                    s, workspace_id=str(world["a"]["ws"])
+                ),
+            )
+        )
+        assert account_id not in {r["id"] for r in listed}
+        # The row itself stays — history hangs off it, and connect revives it.
+        assert (
+            _owner(
+                world, "SELECT count(*) FROM ig_accounts WHERE id = %s", (account_id,)
+            )[0]
+            == 1
+        )
+
+    def test_live_intents_are_flagged_for_the_worker_never_terminalized_here(
+        self, world
+    ):
+        """The seeded account carries a live intent (`scheduled`); removing the
+        account flags it the way `cancel` would — `02` §4: the user never
+        writes a terminal state — and leaves the edge to the worker."""
+        seeded = str(world["a"]["iga"])
+        effects = disable(world, account_id=seeded)
+        assert effects["intents_flagged"] >= 1
+        row = _owner(
+            world,
+            "SELECT state, cancel_requested FROM post_intents WHERE id = %s",
+            (str(world["a"]["intent"]),),
+        )
+        assert row == ("scheduled", True)
+
+    def test_a_grant_issued_before_the_removal_is_retired(self, world):
+        account_id, _ = destination(world, ref=_ref("granted"))
+        conn = psycopg2.connect(world["stream"])
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SET app.actor_kind = 'migration'")
+                cur.execute(
+                    "INSERT INTO oauth_states"
+                    " (state, user_id, workspace_id, provider, purpose, reconnect_target,"
+                    "  expires_at)"
+                    " VALUES ('st-before', %s, %s, 'ig_login', 'connect', %s,"
+                    "         now() + interval '15 minutes')",
+                    (str(world["a"]["user"]), str(world["a"]["ws"]), account_id),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        effects = disable(world, account_id=account_id)
+        assert effects["states_retired"] == 1
+        consumed = _owner(
+            world,
+            "SELECT consumed_at IS NOT NULL FROM oauth_states WHERE state = %s",
+            ("st-before",),
+        )
+        assert consumed == (True,)
+
+    def test_a_revived_destination_gets_a_fresh_cursor_not_a_catch_up_burst(
+        self, world
+    ):
+        typed, _ = destination(world, ref=None, handle="@Dormant")
+        _force_state(world, "ig_accounts", typed, "disabled")
+        # Removed a while ago: the cursor points a month back.
+        conn = psycopg2.connect(world["stream"])
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SET app.actor_kind = 'migration'")
+                cur.execute(
+                    "UPDATE ig_accounts SET next_slot_at = now() - interval '30 days'"
+                    " WHERE id = %s",
+                    (typed,),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        account_id, created = connect(
+            world, ref=_ref("revive-cursor"), handle="dormant"
+        )
+        assert (account_id, created) == (typed, False)
+        row = _owner(
+            world,
+            "SELECT state, next_slot_at > now() FROM ig_accounts WHERE id = %s",
+            (typed,),
+        )
+        assert row == ("active", True)
+
+    def test_removing_twice_is_refused_by_name(self, world):
+        account_id, _ = destination(world, ref=_ref("twice-removed"))
+        disable(world, account_id=account_id)
+        with pytest.raises(ProvisioningRefused) as info:
+            disable(world, account_id=account_id)
+        assert info.value.reason == "already_disabled"
+
+    def test_another_workspaces_destination_is_not_found_here(self, world):
+        elsewhere, _ = destination(world, ids=world["b"], ref=_ref("theirs"))
+        with pytest.raises(ProvisioningRefused) as info:
+            disable(world, account_id=elsewhere)
+        assert info.value.reason == "not_found"
+        assert _owner(
+            world, "SELECT state FROM ig_accounts WHERE id = %s", (elsewhere,)
+        ) == ("active",)

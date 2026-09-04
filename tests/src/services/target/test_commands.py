@@ -320,3 +320,104 @@ class TestIngestOwnsTheOrder:
                 _Session(), _cmd(), external_ref="k-1", principal="sess-1", payload={}
             )
         assert gate == [] and executor == []
+
+
+class TestDisableAccountIsInThePort:
+    """`02`'s "active ↔ disabled (user command, audited)" edge finally has a
+    name (owner decision 2026-09-04: the web's Remove). In the vocabulary, at
+    the admin floor like every other destination act, with an executor."""
+
+    def test_named_at_the_admin_floor_with_an_executor(self):
+        assert "disable_account" in port.VOCABULARY
+        assert port.ROLE_FLOOR["disable_account"] == "admin"
+        assert port.REGISTRY["disable_account"] is not None
+        assert "disable_account" not in port.UNBUILT
+
+    @pytest.mark.parametrize(
+        "refusal, expected",
+        [("already_disabled", "illegal_transition"), ("not_found", "not_found")],
+    )
+    async def test_the_executor_translates_the_destinations_refusals(
+        self, monkeypatch, refusal, expected
+    ):
+        from src.services.target import command_executors, provisioning
+
+        async def disable_destination(session, *, workspace_id, ig_account_id):
+            raise provisioning.ProvisioningRefused(refusal, "scripted")
+
+        monkeypatch.setattr(provisioning, "disable_destination", disable_destination)
+        command = port.Command(
+            kind="disable_account",
+            workspace_id="ws",
+            actor_user_id="u",
+            channel="web",
+            args={"ig_account_id": "acct"},
+        )
+        with pytest.raises(port.CommandRefused) as info:
+            await command_executors.disable_account(object(), command)
+        assert info.value.reason == expected
+
+    async def test_the_executor_reports_what_moved(self, monkeypatch):
+        from src.services.target import command_executors, provisioning
+
+        async def disable_destination(session, *, workspace_id, ig_account_id):
+            return {
+                "credential_revoked": True,
+                "intents_cancelled": 2,
+                "intents_flagged": 0,
+            }
+
+        monkeypatch.setattr(provisioning, "disable_destination", disable_destination)
+        command = port.Command(
+            kind="disable_account",
+            workspace_id="ws",
+            actor_user_id="u",
+            channel="web",
+            args={"ig_account_id": "acct"},
+        )
+        result = await command_executors.disable_account(object(), command)
+        assert result.outcome == "executed"
+        assert result.data == {
+            "ig_account_id": "acct",
+            "state": "disabled",
+            "credential_revoked": True,
+            "intents_cancelled": 2,
+            "intents_flagged": 0,
+        }
+
+
+class TestACancellingCardOffersNoLever:
+    """`cancel` and `disable_account` set `cancel_requested`; until the worker
+    terminalizes (`02` §4), the four intent commands refuse the card by name —
+    acting on it would post for a destination someone removed."""
+
+    @pytest.mark.parametrize("kind", ["approve", "skip", "reject", "mark_posted"])
+    async def test_refused_as_illegal_transition(self, monkeypatch, kind):
+        from src.services.target import command_executors
+
+        async def _intent_row(session, command):
+            return {
+                "id": "i1",
+                "state": "awaiting_approval",
+                "cancel_requested": True,
+                "media_item_id": "m1",
+                "ig_account_id": "a1",
+                "provider_account_ref": "ref",
+                "api_publishing_enabled": True,
+                "repost_ttl_days": 30,
+                "skip_ttl_days": 7,
+                "eff_ppd": 3,
+                "eff_tz": "UTC",
+            }
+
+        monkeypatch.setattr(command_executors, "_intent_row", _intent_row)
+        command = port.Command(
+            kind=kind,
+            workspace_id="ws",
+            actor_user_id="u",
+            channel="web",
+            args={"intent_id": "i1"},
+        )
+        with pytest.raises(port.CommandRefused) as info:
+            await getattr(command_executors, kind)(object(), command)
+        assert info.value.reason == "illegal_transition"

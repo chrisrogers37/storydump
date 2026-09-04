@@ -204,6 +204,18 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
     return { ok: true, body: { source_id: raw.source_id } };
   }),
 
+  /**
+   * Remove a destination (owner decision 2026-09-04): the port's
+   * `active → disabled` edge. The row stays for history and for the connect
+   * that brings the account back, so this is not a delete.
+   */
+  disable_account: submissionCommand((raw) => {
+    if (!isUuidLike(raw.ig_account_id)) {
+      return { ok: false, error: "invalid_account_id" };
+    }
+    return { ok: true, body: { ig_account_id: raw.ig_account_id } };
+  }),
+
   sync_now: submissionCommand((raw) => {
     if (!isUuidLike(raw.source_id)) {
       return { ok: false, error: "invalid_source_id" };

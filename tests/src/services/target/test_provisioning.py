@@ -273,6 +273,9 @@ class TestAttachConnectedIdentityRefusesTheWrongAccount:
         assert "provider_account_ref LIKE :manual_prefix" in sql
         assert "provider_account_ref = :expected_manual" in sql
         assert "w.state = 'active'" in sql
+        assert "next_slot_at = CASE" in sql and "fn_next_slot(now()" in sql, (
+            "a row coming back to active gets a fresh cursor, not a catch-up burst"
+        )
         assert params["expected_manual"] == "manual:gatortails"
         assert params["manual_prefix"] == "manual:%"
 
@@ -523,3 +526,89 @@ class TestConnectDestinationAdoptsOrCreates:
         )
         assert result == ("pinned", False)
         assert log == [("attach", "ws", "pinned", "1784", None)]
+
+
+class _ScriptedExecutor:
+    """Answers each `execute` from a queue of (rowcount, first_row) pairs."""
+
+    def __init__(self, *results):
+        self.results, self.statements = list(results), []
+
+    async def execute(self, statement, params=None):
+        self.statements.append((str(statement), params))
+        rowcount, first = self.results.pop(0)
+
+        class _R:
+            def mappings(self_inner):
+                return self_inner
+
+            def first(self_inner):
+                return first
+
+        _R.rowcount = rowcount
+        return _R()
+
+
+class TestDisableDestination:
+    """Remove, in the port's terms (owner decision 2026-09-04): the
+    destination leaves the clock's scan (`state = 'disabled'`), its Instagram
+    credential is revoked locally, its live intents are flagged for the
+    worker the way `cancel` flags one (`02` §4 — never terminalized by the
+    user's own write), and a grant issued for the row beforehand is retired.
+    The row stays: history, and the connect that brings it back, need it."""
+
+    async def test_disables_revokes_flags_and_retires_in_that_order(self):
+        from src.services.target.provisioning import disable_destination
+
+        ex = _ScriptedExecutor((1, {"id": "acct"}), (1, None), (2, None), (1, None))
+        result = await disable_destination(ex, workspace_id="ws", ig_account_id="acct")
+        assert result == {
+            "credential_revoked": True,
+            "intents_flagged": 2,
+            "states_retired": 1,
+        }
+        (disable, revoke, flag, retire) = ex.statements
+        assert "UPDATE ig_accounts" in disable[0]
+        assert "state = 'disabled'" in disable[0]
+        assert "state IN ('active', 'reauth_required')" in disable[0]
+        assert disable[1] == {"acct": "acct", "ws": "ws"}
+        assert "UPDATE oauth_credentials SET state = 'revoked'" in revoke[0]
+        assert revoke[1]["provider"] == "ig_login"
+        assert "UPDATE post_intents SET cancel_requested = true" in flag[0]
+        assert "NOT cancel_requested" in flag[0]
+        assert "state = 'cancelled'" not in flag[0], (
+            "the user never writes a terminal state"
+        )
+        assert flag[1] == {"acct": "acct", "ws": "ws"}
+        assert "UPDATE oauth_states SET consumed_at = now()" in retire[0]
+        assert "consumed_at IS NULL" in retire[0]
+        assert retire[1] == {"acct": "acct", "provider": "ig_login"}
+
+    async def test_nothing_to_revoke_flag_or_retire_is_reported_not_invented(self):
+        from src.services.target.provisioning import disable_destination
+
+        ex = _ScriptedExecutor((1, {"id": "acct"}), (0, None), (0, None), (0, None))
+        result = await disable_destination(ex, workspace_id="ws", ig_account_id="acct")
+        assert result == {
+            "credential_revoked": False,
+            "intents_flagged": 0,
+            "states_retired": 0,
+        }
+
+    async def test_an_unknown_or_moved_destination_is_not_found(self):
+        from src.services.target.provisioning import disable_destination
+
+        for current in (None, {"state": "moved"}):
+            ex = _ScriptedExecutor((0, None), (0, current))
+            with pytest.raises(ProvisioningRefused) as info:
+                await disable_destination(ex, workspace_id="ws", ig_account_id="acct")
+            assert info.value.reason == "not_found"
+            assert len(ex.statements) == 2, "nothing is revoked, flagged or retired"
+
+    async def test_disabling_twice_is_refused_by_name(self):
+        from src.services.target.provisioning import disable_destination
+
+        ex = _ScriptedExecutor((0, None), (0, {"state": "disabled"}))
+        with pytest.raises(ProvisioningRefused) as info:
+            await disable_destination(ex, workspace_id="ws", ig_account_id="acct")
+        assert info.value.reason == "already_disabled"

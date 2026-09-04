@@ -192,10 +192,10 @@ export default async function SettingsPage({
         </TabsContent>
 
         {/*
-          NOT flipped with General, and the reason is per-tab. `switch-account`
-          has no target-tier home at all and `remove-account` maps to
-          `disconnect_account`, which is UNBUILT — so these controls stay
-          disabled-with-reason per F5 (b) until the epic's P6.
+          NOT flipped with General: `editable` now gates only `switch-account`,
+          which has no target-tier home yet (epic P6) — Connect and Remove are
+          real and ungated inside the tab (Remove = `disable_account`,
+          owner decision 2026-09-04).
         */}
         <TabsContent value="accounts">
           <AccountsTab

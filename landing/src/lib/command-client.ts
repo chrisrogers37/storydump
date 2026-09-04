@@ -141,6 +141,33 @@ export function submitRestoreWorkspace(workspaceId: string) {
 }
 
 /**
+ * Remove a destination (owner decision 2026-09-04): `disable_account`. The
+ * schedule stops, the Instagram credential is revoked, posts waiting for
+ * approval are cancelled; connecting the same account again brings it back.
+ */
+export function submitDisableAccount(workspaceId: string, accountId: string) {
+  return submitCommand(workspaceId, "disable_account", { ig_account_id: accountId });
+}
+
+export function disableAccountRefusalCopy(reason: unknown, status?: number): string {
+  if (status === 403 || reason === "insufficient_role") {
+    return "You need to be an admin of this workspace to remove a destination.";
+  }
+  switch (reason) {
+    case "not_found":
+      return "That destination is no longer here. Reload the page.";
+    case "illegal_transition":
+      return "That destination was already removed. Reload the page.";
+    case REPLAYED_ERROR:
+      return "That did not go through — the app sent it under a key the server had already seen. Reload and try again; report this if it repeats.";
+    case "unauthenticated":
+    case "http_401":
+      return notAuthenticatedCopy("Nothing changed.");
+  }
+  return "Could not remove that destination. Nothing changed — try again shortly.";
+}
+
+/**
  * A sentence for an offboarding or restore refusal. Its own vocabulary, like
  * `settingsRefusalCopy`: these reasons cannot arise from a settings write, and
  * the 403 here means something narrower — only the OWNER may do this, so the

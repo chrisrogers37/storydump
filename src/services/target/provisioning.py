@@ -82,6 +82,7 @@ from sqlalchemy.exc import DBAPIError
 
 from src.exceptions import StorydumpError
 from src.services.target import readers
+from src.services.target.intent_ledger import TERMINAL_STATES
 from src.services.target._dbapi import constraint_violated
 
 logger = logging.getLogger(__name__)
@@ -505,7 +506,18 @@ async def attach_connected_identity(
                 "   SET provider_account_ref = :ref,"
                 "       handle = COALESCE(:handle, handle),"
                 "       state = CASE WHEN state IN ('reauth_required', 'disabled')"
-                "                    THEN 'active' ELSE state END"
+                "                    THEN 'active' ELSE state END,"
+                # A row coming back to `active` gets a FRESH cursor: the stale
+                # one would walk the clock through every missed slot as a burst
+                # of catch-up posts. Same seed as `create_destination`.
+                "       next_slot_at = CASE"
+                "         WHEN state IN ('reauth_required', 'disabled') THEN"
+                "           (SELECT fn_next_slot(now(), COALESCE(ig_accounts.tz, w.tz),"
+                "                     COALESCE(ig_accounts.posting_hours_start, w.posting_hours_start),"
+                "                     COALESCE(ig_accounts.posting_hours_end, w.posting_hours_end),"
+                "                     COALESCE(ig_accounts.posts_per_day, w.posts_per_day))"
+                "              FROM workspaces w WHERE w.id = ig_accounts.workspace_id)"
+                "         ELSE next_slot_at END"
                 " WHERE id = :acct AND workspace_id = :ws AND state <> 'moved'"
                 "   AND (provider_account_ref = :ref"
                 "        OR (provider_account_ref LIKE :manual_prefix"
@@ -656,3 +668,97 @@ async def connect_destination(
         handle=display_handle,
     )
     return str(ig_account_id), False
+
+
+#: `ig_login_oauth.PROVIDER`, spelled here rather than imported: that module
+#: imports this one for `attach_connected_identity`.
+IG_LOGIN_PROVIDER = "ig_login"
+
+
+async def disable_destination(
+    executor, *, workspace_id: str, ig_account_id: str
+) -> dict:
+    """Remove, in the port's terms (owner decision 2026-09-04): `02`'s
+    "active ↔ disabled" edge, disabling half. Returns what else moved.
+
+    Four writes, one transaction, in this order: the destination leaves the
+    clock's scan (`state = 'disabled'` — `fn_clock_tick` reads `active` only,
+    so nothing further is minted for it); its Instagram credential is revoked
+    locally, so the refresh cadence stops touching a token nobody wants
+    refreshed (the remote revoke is a provider call and does not belong inside
+    a unit of work — `disconnect_account`'s scope statement); its live intents
+    are flagged `cancel_requested`, the overlay `cancel` uses (`02` §4: the
+    user never writes a terminal state; the pipeline honours the flag at
+    admission, the Queue offers a flagged card no action, and the worker leg
+    that terminalizes the waiting states is #1235); and any grant issued for
+    the row before the removal is retired, so it cannot land afterwards.
+
+    The row stays. `oauth_credentials` and the intent history hang off it, and
+    `connect_destination` adopting a `disabled` row is how the account comes
+    back — `attach_connected_identity` flips it `active`. Refused by name when
+    nothing moved: `already_disabled` (a stale screen), or `not_found` (no
+    such destination here, or a `moved` tombstone).
+    """
+    disabled = await executor.execute(
+        text(
+            "UPDATE ig_accounts SET state = 'disabled'"
+            " WHERE id = :acct AND workspace_id = :ws"
+            "   AND state IN ('active', 'reauth_required')"
+        ),
+        {"acct": str(ig_account_id), "ws": str(workspace_id)},
+    )
+    if not disabled.rowcount:
+        current = await readers.row(
+            executor,
+            "SELECT state FROM ig_accounts WHERE id = :acct AND workspace_id = :ws",
+            acct=str(ig_account_id),
+            ws=str(workspace_id),
+        )
+        if current is None or current["state"] == "moved":
+            raise ProvisioningRefused("not_found", f"destination {ig_account_id}")
+        raise ProvisioningRefused(
+            "already_disabled", f"destination {ig_account_id} is already disabled"
+        )
+    revoked = await executor.execute(
+        text(
+            "UPDATE oauth_credentials SET state = 'revoked'"
+            " WHERE workspace_id = :ws AND ig_account_id = :acct"
+            "   AND provider = :provider AND state <> 'revoked'"
+        ),
+        {
+            "acct": str(ig_account_id),
+            "ws": str(workspace_id),
+            "provider": IG_LOGIN_PROVIDER,
+        },
+    )
+    # Flagged, never terminalized here: `02` §4 — every `→ cancelled` edge's
+    # actor is the worker, and the user never writes a terminal state (the
+    # rule `cancel` follows). The pipeline honours the flag at admission; the
+    # Queue shows a flagged card as cancelling and offers it no action; the
+    # worker leg that terminalizes the WAITING states is the follow-up the
+    # docstring names.
+    terminal = ", ".join(f"'{state}'" for state in TERMINAL_STATES)
+    flagged = await executor.execute(
+        text(
+            "UPDATE post_intents SET cancel_requested = true"
+            " WHERE workspace_id = :ws AND ig_account_id = :acct"
+            f"   AND NOT cancel_requested AND state NOT IN ({terminal})"
+        ),
+        {"acct": str(ig_account_id), "ws": str(workspace_id)},
+    )
+    # A grant issued BEFORE the removal must not land afterwards and revive the
+    # row by surprise — the statement `issue_state` uses to retire a target's
+    # live states.
+    retired = await executor.execute(
+        text(
+            "UPDATE oauth_states SET consumed_at = now()"
+            " WHERE reconnect_target = :acct AND provider = :provider"
+            "   AND consumed_at IS NULL"
+        ),
+        {"acct": str(ig_account_id), "provider": IG_LOGIN_PROVIDER},
+    )
+    return {
+        "credential_revoked": bool(revoked.rowcount),
+        "intents_flagged": flagged.rowcount,
+        "states_retired": retired.rowcount,
+    }
