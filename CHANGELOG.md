@@ -73,6 +73,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The Telegram link route refuses a `TARGET_TELEGRAM_BOT_USERNAME` that is not shaped like a Telegram bot username, naming the setting and the value.** On 2026-09-04 production carried `storydump_app_bot.` (trailing period); the API minted `t.me/storydump_app_bot.?start=…`, the site refused it as a different bot, and neither side said why (#1230). A 503 now names the malformed value where the mistake was made; a stray `@` is still stripped, not refused.
 - **The credential-refresh gate tests make the credential DUE before ticking, so `main` is green again after #1221.** #1221 armed a new credential's first refresh seven days out (Meta refuses to refresh a token younger than 24 hours); four `test_w5de_credential_lifecycle.py` tests still expected the very next tick to mint the refresh job. They escaped review because the DB-gated suites resolved `psql` only from `/usr/bin:/bin` and so could not run on a developer Mac; the fixture now also honours the psql on the developer's own PATH, and `AGENTS.md` carries the local recipe.
 - **X.3 gate clause 6 named the wrong object, so a correct build fails a literal check of it (#1181).** `06` §1's `offboarding → active` row said restore means *"every credential surfaces `reauth_required`"*, and `04` quotes that clause verbatim as the gate. **`reauth_required` is not a legal credential state** — `ck_credentials_state` is `active|expired|revoked`; the value belongs to `ig_accounts` (`ck_ig_accounts_state`).
 
