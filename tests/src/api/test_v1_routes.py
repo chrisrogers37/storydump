@@ -508,6 +508,75 @@ class TestDestinationConnect:
         assert tenant == []
 
 
+class TestWorkspaceConnect:
+    """`POST /workspaces/{ws}/accounts/connect` — start the Instagram Login
+    grant for an account that is NOT yet a destination (owner ruling
+    2026-09-04: destinations are added by connecting). Admin floor; the state
+    pins the user and the workspace and NO target — the callback adopts or
+    creates the destination from the identity Instagram returns."""
+
+    URL = f"/api/v1/workspaces/{WS}/accounts/connect"
+
+    @pytest.fixture
+    def instagram_configured(self, monkeypatch):
+        from src.config.settings import settings
+
+        monkeypatch.setattr(settings, "INSTAGRAM_APP_ID", "app-1", raising=False)
+        monkeypatch.setattr(settings, "INSTAGRAM_APP_SECRET", "sec", raising=False)
+        monkeypatch.setattr(
+            settings,
+            "OAUTH_REDIRECT_BASE_URL",
+            "https://api.example.test",
+            raising=False,
+        )
+
+    @pytest.fixture
+    def issued(self, monkeypatch):
+        seen = {}
+
+        async def issue_state(session, **kw):
+            seen.update(kw)
+            return "st4te"
+
+        from src.api.routes import v1
+
+        monkeypatch.setattr(v1, "issue_state", issue_state)
+        return seen
+
+    def test_requires_a_session(self, client, instagram_configured):
+        assert client.post(self.URL).status_code == 401
+
+    def test_mints_an_untargeted_connect_state_and_says_where_to_go(
+        self, client, signed_in, tenant, instagram_configured, issued
+    ):
+        resp = client.post(self.URL)
+        assert resp.status_code == 200, resp.text
+        url = resp.json()["authorization_url"]
+        assert url.startswith("https://api.instagram.com/oauth/authorize?")
+        assert "state=st4te" in url
+        assert "instagram-login%2Fcallback" in url
+        assert tenant == [
+            ("uow", WS, PRINCIPAL.user_id),
+            ("gate", WS, PRINCIPAL.user_id, "admin"),
+        ]
+        assert issued["purpose"] == "connect"
+        assert issued["provider"] == ig_login_oauth.PROVIDER
+        assert issued["reconnect_target"] is None
+        assert issued["workspace_id"] == WS
+        assert issued["user_id"] == PRINCIPAL.user_id
+
+    def test_unconfigured_instagram_refuses_503_before_any_seam(
+        self, client, signed_in, tenant, issued, monkeypatch
+    ):
+        from src.config.settings import settings
+
+        monkeypatch.setattr(settings, "INSTAGRAM_APP_ID", None, raising=False)
+        resp = client.post(self.URL)
+        assert resp.status_code == 503
+        assert "INSTAGRAM_APP_ID" in resp.json()["detail"]
+        assert tenant == [] and issued == {}
+
+
 class TestTelegramLink:
     """`POST /me/telegram/link` — the link a signed-in user taps to attach
     their Telegram identity (`07` §2 `link`: only from an authenticated

@@ -390,9 +390,11 @@ async def instagram_login_callback(
 ) -> Response:
     """The Instagram connect leg's return (#1220 step 2): consume the state,
     check the returning browser is the one that started the flow, exchange
-    the code for a long-lived token and its owner, attach that identity to
-    the destination the state pinned, write the credential — the Drive
-    callback's shape plus the `07` §2 callback-time checks.
+    the code for a long-lived token and its owner, land that identity on a
+    destination — the one the state pinned, or (untargeted: the workspace-
+    level ADD, owner ruling 2026-09-04) the row this account already has
+    here or a new one — and write the credential. The Drive callback's shape
+    plus the `07` §2 callback-time checks.
 
     **The state row is necessary and not sufficient.** It pins the user who
     started the flow; it does not prove the browser that returned is theirs.
@@ -415,9 +417,6 @@ async def instagram_login_callback(
     )
     if isinstance(row, Response):
         return row
-    if row["reconnect_target"] is None:
-        logger.warning("instagram connect: state names no destination")
-        return _fail("state_refused", flow=INSTAGRAM_FLOW)
 
     presenter = await _presenting_user(request)
     if presenter is None or presenter != str(row["user_id"]):
@@ -445,7 +444,11 @@ async def instagram_login_callback(
         return _fail("exchange_failed", flow=INSTAGRAM_FLOW)
 
     workspace_id = str(row["workspace_id"])
-    account_id = str(row["reconnect_target"])
+    # Targeted: the state pinned the destination to connect or reconnect.
+    # Untargeted: the workspace-level ADD (owner ruling 2026-09-04) — the
+    # destination is whichever row this account already has here, or a new
+    # scheduled one; either way the credential write below is the same.
+    target = row["reconnect_target"]
     uow = unit_of_work(
         require_engine(request),
         workspace_id,
@@ -462,13 +465,22 @@ async def instagram_login_callback(
             await tenant_resolution.authorize_member(
                 session, workspace_id, str(row["user_id"]), minimum_role="admin"
             )
-            await provisioning.attach_connected_identity(
-                session,
-                workspace_id=workspace_id,
-                ig_account_id=account_id,
-                provider_account_ref=grant.ig_user_id,
-                handle=grant.username,
-            )
+            if target is None:
+                account_id, _ = await provisioning.connect_destination(
+                    session,
+                    workspace_id=workspace_id,
+                    provider_account_ref=grant.ig_user_id,
+                    handle=grant.username,
+                )
+            else:
+                account_id = str(target)
+                await provisioning.attach_connected_identity(
+                    session,
+                    workspace_id=workspace_id,
+                    ig_account_id=account_id,
+                    provider_account_ref=grant.ig_user_id,
+                    handle=grant.username,
+                )
             # One write for connect AND reconnect: the upsert replaces an
             # existing credential in place (`07` §2 — same row id, no gap).
             await ig_login_oauth.store_credential(
@@ -492,7 +504,8 @@ async def instagram_login_callback(
     )
 
 
-#: `provisioning.attach_connected_identity`'s refusals on the error page. Each
+#: `provisioning.attach_connected_identity`'s refusals (also raised through
+#: `connect_destination`'s adopt path) on the error page. Each
 #: is a DIFFERENT remedy, which is why they are not folded into `state_refused`
 #: ("start again and it should work" is false for all three).
 _ATTACH_REASON = {

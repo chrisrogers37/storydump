@@ -357,3 +357,109 @@ class TestAttachConnectedIdentityRefusesTheWrongAccount:
                 handle="foo",
             )
         assert info.value.reason == "not_found"
+
+
+class TestConnectDestinationAdoptsOrCreates:
+    """A workspace-level connect pins NO destination (owner ruling 2026-09-04:
+    destinations are added by connecting). The identity Instagram returns
+    lands on the ONE row the account already has here — its real id, or the
+    typed handle that named it — and creates the destination only when
+    neither exists. Adoption goes through `attach_connected_identity`, so the
+    same-account rule and the reauth flip are the same code path as a
+    per-row connect."""
+
+    @pytest.fixture
+    def seams(self, monkeypatch):
+        from src.services.target import provisioning
+
+        log = []
+        found = {"row": None, "sql": None}
+
+        async def row(executor, sql, **params):
+            found["sql"] = sql
+            log.append(("find", params))
+            return found["row"]
+
+        async def attach(
+            executor, *, workspace_id, ig_account_id, provider_account_ref, handle
+        ):
+            log.append(
+                ("attach", workspace_id, ig_account_id, provider_account_ref, handle)
+            )
+
+        async def create(
+            executor,
+            *,
+            workspace_id,
+            provider_account_ref=None,
+            handle=None,
+            schedule=True,
+        ):
+            log.append(("create", workspace_id, provider_account_ref, handle, schedule))
+            return ("new-id", True)
+
+        monkeypatch.setattr(provisioning.readers, "row", row)
+        monkeypatch.setattr(provisioning, "attach_connected_identity", attach)
+        monkeypatch.setattr(provisioning, "create_destination", create)
+        return log, found
+
+    async def test_an_existing_row_for_this_account_is_adopted_not_duplicated(
+        self, seams
+    ):
+        from src.services.target.provisioning import connect_destination
+
+        log, found = seams
+        found["row"] = {"id": "acct-1"}
+        result = await connect_destination(
+            object(),
+            workspace_id="ws",
+            provider_account_ref="1784",
+            handle="GatorTails",
+        )
+        assert result == ("acct-1", False)
+        assert ("attach", "ws", "acct-1", "1784", "GatorTails") in log
+        assert not any(entry[0] == "create" for entry in log)
+
+    async def test_the_lookup_matches_the_real_id_or_the_folded_typed_handle(
+        self, seams
+    ):
+        from src.services.target.provisioning import connect_destination
+
+        log, found = seams
+        found["row"] = {"id": "acct-1"}
+        await connect_destination(
+            object(),
+            workspace_id="ws",
+            provider_account_ref="1784",
+            handle="GatorTails",
+        )
+        params = log[0][1]
+        assert params["ws"] == "ws"
+        assert params["ref"] == "1784"
+        assert params["manual_ref"] == "manual:gatortails"
+        assert "state <> 'moved'" in found["sql"]
+
+    async def test_without_a_username_only_the_real_id_can_match(self, seams):
+        from src.services.target.provisioning import connect_destination
+
+        log, found = seams
+        found["row"] = None
+        await connect_destination(
+            object(), workspace_id="ws", provider_account_ref="1784", handle=None
+        )
+        assert log[0][1]["manual_ref"] is None
+
+    async def test_no_row_creates_a_scheduled_destination_from_the_grant(self, seams):
+        from src.services.target.provisioning import connect_destination
+
+        log, found = seams
+        found["row"] = None
+        result = await connect_destination(
+            object(),
+            workspace_id="ws",
+            provider_account_ref="1784",
+            handle="GatorTails",
+        )
+        assert result == ("new-id", True)
+        assert ("create", "ws", "1784", "GatorTails", True) in log
+        assert not any(entry[0] == "attach" for entry in log)

@@ -437,10 +437,12 @@ async def get_intent(
 #
 # RESOURCE-shaped and NOT `POST …/commands/{command}`, because the vocabulary
 # is closed — `01` §Interaction-layer port is its normative home and has no
-# name for either of these. `connect_account` IS in the vocabulary and is
-# deliberately still unbuilt: it is the CONNECTION (an OAuth grant through
-# Meta), not the DESTINATION, and it is milestone 2. See `provisioning`'s
-# docstring for why only the destination is on the path to a closed loop.
+# name for either of these (`connect_account` there is the Drive SOURCE's
+# grant, F1 (a)). The Instagram grant is the resource routes below: per
+# workspace to ADD a destination by connecting (owner ruling 2026-09-04), per
+# destination to connect or reconnect one that already exists. See
+# `provisioning`'s docstring for why only the destination is on the path to
+# a closed loop.
 #
 # Admin floor on both (`06` §4). A member may look at the accounts and sources
 # a workspace posts to and from; deciding what they are is an admin act.
@@ -465,6 +467,12 @@ async def create_account(
     No credential and no Meta call: `ig_accounts` needs only `workspace_id` and
     `provider_account_ref`, and a workspace with `api_publishing_enabled` false
     (the default) publishes through a human rather than through the API.
+
+    **The web no longer adds destinations this way** (owner ruling 2026-09-04:
+    a destination is added by CONNECTING — `connect_workspace_account` below
+    — so the handle is Instagram's word, never a second source of truth). The
+    route stays as the API's typed path: the CLI, tests, and a destination
+    that is deliberately parked without a login.
 
     **Two bodies, one row (#1089).** ``{"handle": "..."}`` is the typed path the
     settings form uses: there is no Meta id to send, so `create_destination`
@@ -574,6 +582,40 @@ async def connect_source(
     return {
         "authorization_url": google_drive_oauth.authorization_url(
             client_id=client_id, redirect_uri=redirect_uri, state=state
+        )
+    }
+
+
+@router.post("/workspaces/{ws}/accounts/connect")
+async def connect_workspace_account(
+    ws: uuid.UUID, request: Request, principal: Principal = Depends(current_principal)
+):
+    """Start the Instagram Login grant for an account that is NOT yet a
+    destination here — the way a destination is ADDED (owner ruling
+    2026-09-04: connecting is the add; the handle comes from Instagram, so
+    nothing is typed and there is one source of truth).
+
+    The per-destination route's shape, minus the target: the state pins the
+    user and the workspace and no `ig_accounts` row, and the callback adopts
+    the row this account already has here or creates a scheduled one from
+    the identity Instagram returns (`provisioning.connect_destination`).
+    `connect` always — with no row to be credentialed there is no reconnect
+    to name, and an untargeted state retires nothing (states with no target
+    are independent one-shots).
+    """
+    app_id, _, redirect_uri = instagram_client.configured()
+    async with _admin(request, str(ws), principal) as session:
+        state = await issue_state(
+            session,
+            purpose="connect",
+            provider=ig_login_oauth.PROVIDER,
+            user_id=principal.user_id,
+            workspace_id=str(ws),
+            reconnect_target=None,
+        )
+    return {
+        "authorization_url": ig_login_oauth.authorization_url(
+            state, redirect_uri=redirect_uri, client_id=app_id
         )
     }
 

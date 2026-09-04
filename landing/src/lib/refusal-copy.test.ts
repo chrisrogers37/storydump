@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 
 import { settingsRefusalCopy } from "./command-client";
-import { addDestinationRefusalCopy } from "./destination";
 import { refusalCopy } from "./intents";
 import {
   createWorkspaceRefusalCopy,
@@ -46,12 +45,6 @@ const SITES: ReadonlyArray<{
   reasons: readonly string[];
 }> = [
   {
-    name: "addDestinationRefusalCopy",
-    outcome: "Nothing was added.",
-    copy: addDestinationRefusalCopy,
-    reasons: ["unauthenticated", "http_401"],
-  },
-  {
     name: "addSourceRefusalCopy",
     outcome: "Nothing was added.",
     copy: addSourceRefusalCopy,
@@ -86,10 +79,10 @@ const SITES: ReadonlyArray<{
 ];
 
 describe("the not-authenticated sentence is single-sourced", () => {
-  it("covers every site #1140 named", () => {
+  it("covers every site #1140 named, less the typed-handle add retired 2026-09-04", () => {
     // The count is asserted so that deleting a site from the table — the easy
     // way to make this file green — is itself a failure.
-    expect(SITES).toHaveLength(6);
+    expect(SITES).toHaveLength(5);
   });
 
   it.each(SITES)(
