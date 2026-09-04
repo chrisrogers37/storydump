@@ -551,6 +551,27 @@ class TestTelegramLink:
         assert "TARGET_TELEGRAM_BOT_USERNAME" in resp.json()["detail"]
         assert issued == {}
 
+    def test_a_username_that_is_not_a_telegram_bot_username_is_refused_by_name(
+        self, client, signed_in, issued, monkeypatch
+    ):
+        """A trailing period took production down on 2026-09-04: the API
+        minted `t.me/storydump_app_bot.?start=…` and the site refused it as a
+        different bot. The route must refuse the setting's SHAPE up front,
+        naming the setting and the value, and mint nothing."""
+        from src.config.settings import settings
+
+        monkeypatch.setattr(
+            settings,
+            "TARGET_TELEGRAM_BOT_USERNAME",
+            "storydump_app_bot.",
+            raising=False,
+        )
+        resp = client.post(self.URL)
+        assert resp.status_code == 503
+        assert "TARGET_TELEGRAM_BOT_USERNAME" in resp.json()["detail"]
+        assert "storydump_app_bot." in resp.json()["detail"]
+        assert issued == {}
+
     def test_a_stray_at_sign_in_the_setting_does_not_reach_the_link(
         self, client, signed_in, issued, monkeypatch
     ):
