@@ -60,6 +60,20 @@ def _tick(conn, max_jobs: int = 50) -> None:
     conn.commit()
 
 
+def _due_now(conn, cred_id) -> None:
+    """Bring a freshly stored credential's first refresh forward to now.
+
+    `store_credential` arms the first refresh ~7 days out — Meta refuses to
+    refresh a long-lived token younger than 24 hours (#1221) — so a test that
+    exercises the refresh leg itself must make the credential due first."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE oauth_credentials SET next_refresh_at = now() WHERE id = %s",
+            (cred_id,),
+        )
+    conn.commit()
+
+
 def _account_of(chain: dict, conn) -> tuple[str, str]:
     """(ig_account_id, provider_account_ref) of the seeded chain."""
     with conn.cursor() as cur:
@@ -307,12 +321,7 @@ class TestStoreArmsTheTick:
             for j in _jobs_of_kind(sync_conn, "refresh_credential")
         ), "a brand-new credential must not be refreshed on the next tick"
         # Once it IS due, the leg sees it — the property this test exists for.
-        with sync_conn.cursor() as cur:
-            cur.execute(
-                "UPDATE oauth_credentials SET next_refresh_at = now() WHERE id = %s",
-                (cred_id,),
-            )
-        sync_conn.commit()
+        _due_now(sync_conn, cred_id)
 
         _tick(sync_conn)
         minted = _jobs_of_kind(sync_conn, "refresh_credential")
@@ -386,6 +395,7 @@ class TestRefreshExecutorOnTheRealMachinery:
 
         chain = seed_workspace_chain(sync_conn, "w5d-ok")
         cred_id = await _store_cred(lane_db, chain)
+        _due_now(sync_conn, cred_id)
         _tick(sync_conn)
         assert _jobs_of_kind(sync_conn, "refresh_credential")
 
@@ -428,6 +438,7 @@ class TestRefreshExecutorOnTheRealMachinery:
 
         chain = seed_workspace_chain(sync_conn, "w5d-dead")
         cred_id = await _store_cred(lane_db, chain)
+        _due_now(sync_conn, cred_id)
         _tick(sync_conn)
 
         async def rejecting(token):
@@ -489,6 +500,7 @@ class TestRefreshExecutorOnTheRealMachinery:
 
         chain = seed_workspace_chain(sync_conn, "w5d-flaky")
         cred_id = await _store_cred(lane_db, chain)
+        _due_now(sync_conn, cred_id)
         _tick(sync_conn)
 
         async def flaky(token):
@@ -510,6 +522,7 @@ class TestRefreshExecutorOnTheRealMachinery:
     ):
         chain = seed_workspace_chain(sync_conn, "w5d-corrupt")
         cred_id = await _store_cred(lane_db, chain)
+        _due_now(sync_conn, cred_id)
         _tick(sync_conn)
         with sync_conn.cursor() as cur:
             cur.execute("SET app.actor_kind = 'migration'")
