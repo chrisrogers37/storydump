@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import logging
 
+from sqlalchemy import text
+
 from src.services.target import identity, ig_login_oauth
 from src.services.target.start_router import StartContext, StartResult
 
@@ -47,7 +49,22 @@ async def issue_link_state(conn, *, user_id: str, bot_username: str) -> str:
 
     Issuance requires an authenticated session — `07` §2 — which the calling
     route enforces; this function is handed the already-authenticated user.
+
+    **One live link per user.** A link is a bearer of the user's identity slot
+    (whoever taps it attaches THEIR Telegram to this user), so an earlier copy
+    that was pasted somewhere must not stay tappable after a new one is
+    minted: issuing retires the user's other live `link` states in the same
+    transaction — the "last issued wins" rule `07` §2 states for reconnects,
+    applied to the purpose it matters most for.
     """
+    await conn.execute(
+        text(
+            "UPDATE oauth_states SET consumed_at = now()"
+            " WHERE purpose = :purpose AND provider = :provider"
+            "   AND user_id = :uid AND consumed_at IS NULL"
+        ),
+        {"purpose": PURPOSE, "provider": PROVIDER, "uid": str(user_id)},
+    )
     state = await ig_login_oauth.issue_state(
         conn, purpose=PURPOSE, user_id=user_id, provider=PROVIDER
     )

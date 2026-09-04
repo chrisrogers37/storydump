@@ -193,12 +193,17 @@ class Settings(BaseSettings):
     TELEGRAM_CHANNEL_ID: int
     ADMIN_TELEGRAM_CHAT_ID: int
 
-    # Target tier (the serving system being cut over to). Prefixed because these
-    # pair with TARGET_TELEGRAM_BOT_TOKEN -- a DIFFERENT bot from
-    # TELEGRAM_BOT_TOKEN above -- and because this class reads whatever the
-    # ambient environment holds under a bare name (see the note at the top of
-    # this class). An operator setting a bare TELEGRAM_ name gets no signal about
-    # which of the two bots it belongs to.
+    # Target tier. Prefixed because these pair with TARGET_TELEGRAM_BOT_TOKEN,
+    # and because this class reads whatever the ambient environment holds under
+    # a bare name (see the note at the top of this class): an operator setting a
+    # bare TELEGRAM_ name gets no signal about which tier it belongs to.
+    #
+    # During the cutover the target bot HAD to be a different bot from
+    # TELEGRAM_BOT_TOKEN's, because the legacy scheduler polled that one and a
+    # bot cannot be polled and webhooked at once. With the worker on
+    # WORKER_IMPL=target nothing polls, and the product runs ONE bot
+    # (storydump_app_bot — documentation/operations/telegram-webhook.md); the
+    # legacy variable survives only until #1222 retires it.
     #
     # The value Telegram echoes in X-Telegram-Bot-Api-Secret-Token, set when the
     # target webhook is registered. Optional and absent by default, and the
@@ -207,6 +212,11 @@ class Settings(BaseSettings):
     # ingress door rather than accepting every one. Arming the target webhook is
     # therefore two deliberate acts -- set this, then register -- not one.
     TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN: Optional[str] = None
+    # The target bot's @username (without the @) — the bot whose webhook
+    # points at this API and whose token the worker sends with. Renders the
+    # `t.me/<bot>?start=link-…` deep link (`07` §2 `link`). Absent means the
+    # link route refuses 503 rather than minting a link to nowhere.
+    TARGET_TELEGRAM_BOT_USERNAME: Optional[str] = None
 
     # Number of Telegram updates processed concurrently (PTB
     # Application.concurrent_updates). Each concurrent callback runs in its own
