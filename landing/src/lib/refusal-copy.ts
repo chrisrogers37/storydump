@@ -55,6 +55,16 @@ export type RefusalOutcome =
  * did not establish which, an unhedged imperative asserts something it does not
  * know — the same defect one clause later.
  */
+/**
+ * The sentence for "the browser could not reach the app at all" — the sibling
+ * of `notAuthenticatedCopy`, single-sourced for the same reason: it was being
+ * retyped once per refusal table. *outcome* is what did NOT happen
+ * ("Nothing changed", "Nothing was added").
+ */
+export function unreachableCopy(outcome: string): string {
+  return `Storydump cannot reach the server right now. ${outcome} — try again shortly.`;
+}
+
 export function notAuthenticatedCopy(outcome: RefusalOutcome): string {
   return (
     "You are not signed in, or the app could not prove it. " +

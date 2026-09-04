@@ -14,6 +14,7 @@ import {
   addDestinationRefusalCopy,
   connectControlFor,
   destinationConnectRefusalCopy,
+  destinationConnectionCaption,
   destinationHandle,
   destinationIsActive,
   destinationStateBadge,
@@ -287,5 +288,21 @@ describe("destinationConnectRefusalCopy", () => {
 
   it("has a sentence for the unknown case that promises nothing", () => {
     expect(destinationConnectRefusalCopy("mystery")).toMatch(/nothing changed/i);
+  });
+});
+
+describe("destinationConnectionCaption", () => {
+  it("says connected only for a live credential", () => {
+    expect(destinationConnectionCaption("active")).toBe("Instagram connected");
+  });
+
+  it("says reconnect for an expired or revoked one", () => {
+    expect(destinationConnectionCaption("expired")).toMatch(/reconnect/i);
+    expect(destinationConnectionCaption("revoked")).toMatch(/reconnect/i);
+  });
+
+  it("says posting is by hand when nothing is connected", () => {
+    expect(destinationConnectionCaption("none")).toMatch(/by hand/i);
+    expect(destinationConnectionCaption(undefined)).toMatch(/by hand/i);
   });
 });

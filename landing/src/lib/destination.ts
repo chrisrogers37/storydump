@@ -1,4 +1,5 @@
-import { notAuthenticatedCopy } from "./refusal-copy";
+import { notAuthenticatedCopy, unreachableCopy } from "./refusal-copy";
+import { isHttpsUrlOnHost } from "./redirect-guard";
 /**
  * Destinations, browser side (#1089).
  *
@@ -94,7 +95,7 @@ export function addDestinationRefusalCopy(reason: unknown): string {
       return "You need to be an admin of this workspace to add a destination.";
     case "unreachable":
     case "target_router_unreachable":
-      return "Storydump cannot reach the server right now. Nothing was added — try again shortly.";
+      return unreachableCopy("Nothing was added");
   }
   return "Could not add that destination. Nothing was added — try again shortly.";
 }
@@ -196,16 +197,20 @@ const INSTAGRAM_AUTHORIZATION_HOST = "api.instagram.com";
  * with them.
  */
 export function isInstagramAuthorizationUrl(value: string): boolean {
-  let parsed: URL;
-  try {
-    parsed = new URL(value);
-  } catch {
-    return false;
-  }
-  return parsed.protocol === "https:" && parsed.host === INSTAGRAM_AUTHORIZATION_HOST;
+  return isHttpsUrlOnHost(value, INSTAGRAM_AUTHORIZATION_HOST);
 }
 
 export type ConnectControl = { label: string; kind: "connect" | "reconnect" };
+
+/** The one-line connection status beside a destination, from the same fact
+ *  `connectControlFor` reads, so the caption and the control cannot disagree. */
+export function destinationConnectionCaption(status: string | null | undefined): string {
+  const control = connectControlFor(status);
+  if (control === null) return "Instagram connected";
+  return control.kind === "reconnect"
+    ? "Instagram access needs reconnecting"
+    : "Not connected to Instagram — posting is by hand until it is";
+}
 
 /**
  * Which control a destination row offers, from its credential status.
@@ -282,7 +287,7 @@ export function destinationConnectRefusalCopy(reason: unknown): string {
       return "Storydump could not start the Instagram sign-in. Nothing changed — report this if it repeats.";
     case "unreachable":
     case "target_router_unreachable":
-      return "Storydump cannot reach the server right now. Nothing changed — try again shortly.";
+      return unreachableCopy("Nothing changed");
   }
   return "Could not start the Instagram sign-in. Nothing changed — try again shortly.";
 }

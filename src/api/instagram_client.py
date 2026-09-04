@@ -12,33 +12,17 @@ take the flow over (#1220).
 
 from __future__ import annotations
 
-from fastapi import HTTPException
-
-from src.config.settings import settings
+from src.api import oauth_client
 
 CONNECT_CALLBACK_PATH = "/auth/instagram-login/callback"
 
 
 def configured() -> tuple[str, str, str]:
     """(app_id, app_secret, redirect_uri), or a 503 that names what is
-    missing. A leg that is not configured refuses; it never half-works."""
-    missing = [
-        name
-        for name in (
-            "INSTAGRAM_APP_ID",
-            "INSTAGRAM_APP_SECRET",
-            "OAUTH_REDIRECT_BASE_URL",
-        )
-        if not getattr(settings, name, None)
-    ]
-    if missing:
-        raise HTTPException(
-            status_code=503,
-            detail=f"instagram oauth not configured: set {', '.join(missing)}",
-        )
-    base = settings.OAUTH_REDIRECT_BASE_URL.rstrip("/")
-    return (
-        settings.INSTAGRAM_APP_ID,
-        settings.INSTAGRAM_APP_SECRET,
-        f"{base}{CONNECT_CALLBACK_PATH}",
+    missing (`oauth_client.configured`)."""
+    return oauth_client.configured(
+        label="instagram",
+        id_setting="INSTAGRAM_APP_ID",
+        secret_setting="INSTAGRAM_APP_SECRET",
+        callback_path=CONNECT_CALLBACK_PATH,
     )

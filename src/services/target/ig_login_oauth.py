@@ -341,16 +341,30 @@ def ring():
 async def store_credential(
     conn, *, workspace_id, ig_account_id, token: str, expires_at=None
 ) -> str:
-    """Insert one `ig_login` credential, encrypted with ring key 0."""
+    """Write the destination's `ig_login` credential — or, on a reconnect,
+    replace the one it already has IN PLACE (`uq_credential_per_account`
+    admits one row per account and provider; same id, no gap, no second
+    row — `07` §2). Encrypted with ring key 0. Returns the id.
+
+    The Drive leg's `store_credential` has the same shape; the conflict
+    target repeats the partial index's predicate because Postgres cannot
+    infer a partial unique index without it."""
     result = await conn.execute(
         text(
             "INSERT INTO oauth_credentials"
             " (workspace_id, ig_account_id, provider, encrypted_payload,"
-            "  expires_at, next_refresh_at)"
+            "  expires_at, next_refresh_at, state)"
             # next_refresh_at = now(): immediately due, so the next clock tick
             # mints a refresh and that mint re-arms the cadence. Without this
             # a stored credential is invisible to the refresh leg forever.
-            " VALUES (:ws, :acct, :provider, :payload, :exp, now()) RETURNING id"
+            " VALUES (:ws, :acct, :provider, :payload, :exp, now(), 'active')"
+            " ON CONFLICT (workspace_id, ig_account_id, provider)"
+            "   WHERE ig_account_id IS NOT NULL"
+            " DO UPDATE SET encrypted_payload = EXCLUDED.encrypted_payload,"
+            "               expires_at = EXCLUDED.expires_at,"
+            "               next_refresh_at = now(),"
+            "               state = 'active'"
+            " RETURNING id"
         ),
         {
             "ws": str(workspace_id),
@@ -448,24 +462,24 @@ async def mark_dead(conn, *, credential_id) -> None:
 # three-way "which state do I mint" — the Drive leg's shape, on Instagram.
 # ---------------------------------------------------------------------------
 
-#: What each exchange refusal becomes on the error page. Every failure of the
-#: three provider calls is, to the person, "the last step did not complete" —
-#: the reasons stay distinct in the log and collapse only at the redirect.
-REDIRECT_REASON = {
-    "exchange_failed": "exchange_failed",
-    "malformed_response": "exchange_failed",
-    "long_lived_failed": "exchange_failed",
-    "profile_failed": "exchange_failed",
-}
+#: The closed set of exchange refusals. They stay distinct in the LOG — which
+#: of the three provider calls failed, and how — and all collapse to one
+#: `exchange_failed` on the error page, because to the person every one of
+#: them is "the last step did not complete" (the callback does that collapse).
+REASONS = (
+    "exchange_failed",
+    "malformed_response",
+    "long_lived_failed",
+    "profile_failed",
+)
 
 
 class IgOAuthRefused(StorydumpError):
-    """The grant could not be completed. ``reason`` is :data:`REDIRECT_REASON`'s
-    key set — exchange_failed | malformed_response | long_lived_failed |
-    profile_failed — and no token ever rides in the message."""
+    """The grant could not be completed. ``reason`` is one of :data:`REASONS`,
+    and no token ever rides in the message."""
 
     def __init__(self, reason: str, detail: str = ""):
-        if reason not in REDIRECT_REASON:
+        if reason not in REASONS:
             raise ValueError(f"unknown IgOAuthRefused reason {reason!r}")
         self.reason = reason
         self.detail = detail
@@ -624,18 +638,3 @@ async def connect_purpose(conn, *, workspace_id, ig_account_id) -> Optional[str]
     if credentialed is None:
         return None
     return "reconnect" if credentialed else "connect"
-
-
-async def credential_for_account(conn, *, workspace_id, ig_account_id) -> Optional[str]:
-    """The id of this destination's `ig_login` credential row, or None.
-    `uq_credential_per_account` makes it at most one, so a reconnect swaps
-    the payload in place rather than inserting beside it."""
-    result = await conn.execute(
-        text(
-            "SELECT id::text FROM oauth_credentials"
-            " WHERE workspace_id = :ws AND ig_account_id = :acct AND provider = :provider"
-        ),
-        {"ws": str(workspace_id), "acct": str(ig_account_id), "provider": PROVIDER},
-    )
-    row = result.first()
-    return None if row is None else str(row[0])

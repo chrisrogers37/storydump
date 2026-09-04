@@ -457,27 +457,17 @@ class TestInstagramCallback:
                 ("attach", workspace_id, ig_account_id, provider_account_ref, handle)
             )
 
-        async def credential_for_account(session, *, workspace_id, ig_account_id):
-            return log_state.get("existing")
-
         async def store_credential(
             session, *, workspace_id, ig_account_id, token, expires_at=None
         ):
             log.append(("store", workspace_id, ig_account_id, token))
             return "cred-new"
 
-        async def swap_credential(session, *, credential_id, token, expires_at=None):
-            log.append(("swap", credential_id, token))
-
-        log_state = {"existing": None}
+        log_state = {}
         monkeypatch.setattr(auth, "unit_of_work", _Uow)
         monkeypatch.setattr(tenant_resolution, "authorize_member", authorize_member)
         monkeypatch.setattr(provisioning, "attach_connected_identity", attach)
-        monkeypatch.setattr(
-            ig_login_oauth, "credential_for_account", credential_for_account
-        )
         monkeypatch.setattr(ig_login_oauth, "store_credential", store_credential)
-        monkeypatch.setattr(ig_login_oauth, "swap_credential", swap_credential)
         log_state["log"] = log
         return log_state
 
@@ -577,17 +567,17 @@ class TestInstagramCallback:
             ("store", WS, ACCOUNT, "IGQVJ-long"),
         ]
 
-    def test_reconnect_swaps_the_existing_credential_in_place(
+    def test_reconnect_takes_the_same_single_write_as_connect(
         self, client, instagram, state_row, writes, grant
     ):
+        """The upsert replaces the payload in place (`07` §2); the route has
+        no branch to get wrong, which is the point of it being one write."""
         state_row["purpose"] = "reconnect"
-        writes["existing"] = "cred-1"
         client.get(
             "/auth/instagram-login/callback?state=st-ig&code=c0de",
             follow_redirects=False,
         )
-        assert ("swap", "cred-1", "IGQVJ-long") in writes["log"]
-        assert not any(w[0] == "store" for w in writes["log"])
+        assert ("store", WS, ACCOUNT, "IGQVJ-long") in writes["log"]
 
     def test_a_user_no_longer_admin_at_callback_time_is_refused(
         self, client, instagram, state_row, writes, grant, monkeypatch
@@ -608,7 +598,7 @@ class TestInstagramCallback:
             resp.headers["location"]
             == f"{FRONT}/auth/error?reason=state_refused&flow=instagram"
         )
-        assert not any(w[0] in ("attach", "store", "swap") for w in writes["log"])
+        assert not any(w[0] in ("attach", "store") for w in writes["log"])
 
     def test_an_account_already_connected_elsewhere_in_the_workspace_is_named(
         self, client, instagram, state_row, writes, grant, monkeypatch

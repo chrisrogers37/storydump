@@ -136,14 +136,14 @@ class TestExchangeCode:
             await _exchange()
         assert info.value.reason == "malformed_response"
 
-    def test_every_reason_the_leg_can_raise_has_a_redirect(self):
+    def test_every_reason_the_leg_can_raise_is_in_the_closed_set(self):
         for reason in (
             "exchange_failed",
             "malformed_response",
             "long_lived_failed",
             "profile_failed",
         ):
-            assert reason in ig.REDIRECT_REASON
+            assert reason in ig.REASONS
 
     def test_an_unknown_reason_cannot_be_raised(self):
         with pytest.raises(ValueError):
@@ -179,6 +179,45 @@ class _Conn:
     async def execute(self, statement, params=None):
         self.params = params
         return _ScalarResult(self._value)
+
+
+class _CapturingConn:
+    def __init__(self):
+        self.statements = []
+
+    async def execute(self, statement, params=None):
+        self.statements.append((str(statement), params))
+
+        class _R:
+            def scalar_one(self_inner):
+                return "cred-1"
+
+        return _R()
+
+
+class TestStoreCredentialIsAnUpsert:
+    """One write for connect AND reconnect (`07` §2: a reconnect replaces the
+    payload in place, same row id). The property itself is proven against a
+    real database by the L.6 gate; this pins the SQL shape that makes it so,
+    including the partial index's predicate Postgres needs to infer it."""
+
+    async def test_the_insert_carries_the_in_place_replacement(self, monkeypatch):
+        class _Ring:
+            def encrypt(self, token):
+                return f"enc({token})"
+
+        monkeypatch.setattr(ig, "ring", lambda: _Ring())
+        conn = _CapturingConn()
+        cid = await ig.store_credential(
+            conn, workspace_id="ws", ig_account_id="acct", token="t0k"
+        )
+        assert cid == "cred-1"
+        ((sql, params),) = conn.statements
+        assert "ON CONFLICT (workspace_id, ig_account_id, provider)" in sql
+        assert "WHERE ig_account_id IS NOT NULL" in sql
+        assert "DO UPDATE SET encrypted_payload = EXCLUDED.encrypted_payload" in sql
+        assert "state = 'active'" in sql
+        assert params["payload"] == "enc(t0k)" and "t0k" not in sql
 
 
 class TestConnectPurpose:

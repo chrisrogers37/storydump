@@ -23,6 +23,7 @@ import {
   addDestinationRefusalCopy,
   connectControlFor,
   destinationConnectRefusalCopy,
+  destinationConnectionCaption,
   destinationHandle,
   destinationIsActive,
   destinationStateBadge,
@@ -72,7 +73,6 @@ export function AccountsTab({ accounts, editable, workspaceId }: AccountsTabProp
   const [removingDialogOpen, setRemovingDialogOpen] = useState<string | null>(null);
   const [handle, setHandle] = useState("");
   const [adding, setAdding] = useState(false);
-  const [connectingId, setConnectingId] = useState<string | null>(null);
   // Field-level, NOT the shared banner at the top of the tab. That banner is
   // for switch/remove, which act on a row far from it; a refusal about what was
   // typed belongs beside the field it is about, and is what `aria-describedby`
@@ -119,17 +119,18 @@ export function AccountsTab({ accounts, editable, workspaceId }: AccountsTabProp
   }
 
   /**
-   * Start the Instagram Login grant for ONE destination (#1220 step 2). The
-   * page leaves on success, so `connectingId` is deliberately not cleared
-   * there — a re-enabled button on a page that is navigating away invites a
-   * second click that retires the first state.
+   * Start the Instagram Login grant for ONE destination (#1220 step 2). Busy
+   * state rides the same `loadingAction` tag the other row controls use. The
+   * page leaves on success, so the tag is deliberately not cleared there — a
+   * re-enabled button on a page that is navigating away invites a second
+   * click that retires the first state.
    */
   async function connectDestination(accountId: string) {
     setError(null);
-    setConnectingId(accountId);
+    setLoadingAction(`connect-${accountId}`);
     const result = await requestDestinationConnect(workspaceId, accountId);
     if (!result.ok) {
-      setConnectingId(null);
+      setLoadingAction(null);
       setError(destinationConnectRefusalCopy(result.error));
       return;
     }
@@ -215,11 +216,7 @@ export function AccountsTab({ accounts, editable, workspaceId }: AccountsTabProp
                         state above it: a destination can be scheduled and
                         never connected, which is every manual-mode row. */}
                     <p className="text-xs text-muted-foreground">
-                      {account.credential_status === "active"
-                        ? "Instagram connected"
-                        : connectControl?.kind === "reconnect"
-                          ? "Instagram access needs reconnecting"
-                          : "Not connected to Instagram — posting is by hand until it is"}
+                      {destinationConnectionCaption(account.credential_status)}
                     </p>
                   </div>
                   <div className="flex items-center gap-2">
@@ -228,9 +225,11 @@ export function AccountsTab({ accounts, editable, workspaceId }: AccountsTabProp
                         variant={connectControl.kind === "reconnect" ? "default" : "outline"}
                         size="sm"
                         onClick={() => connectDestination(account.id)}
-                        disabled={connectingId !== null}
+                        disabled={loadingAction !== null}
                       >
-                        {connectingId === account.id ? "Opening Instagram..." : connectControl.label}
+                        {loadingAction === `connect-${account.id}`
+                          ? "Opening Instagram..."
+                          : connectControl.label}
                       </Button>
                     )}
                     {!isActive && (

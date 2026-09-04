@@ -420,13 +420,10 @@ async def instagram_login_callback(
                 client_secret=app_secret,
             )
     except StorydumpError as exc:
+        # Which of the three provider calls failed is in the log line; to the
+        # person every one of them is "the last step did not complete".
         logger.warning("instagram connect: exchange refused: %s", exc)
-        return _fail(
-            ig_login_oauth.REDIRECT_REASON.get(
-                getattr(exc, "reason", None), "exchange_failed"
-            ),
-            flow=INSTAGRAM_FLOW,
-        )
+        return _fail("exchange_failed", flow=INSTAGRAM_FLOW)
 
     workspace_id = str(row["workspace_id"])
     account_id = str(row["reconnect_target"])
@@ -453,24 +450,15 @@ async def instagram_login_callback(
                 provider_account_ref=grant.ig_user_id,
                 handle=grant.username,
             )
-            existing = await ig_login_oauth.credential_for_account(
-                session, workspace_id=workspace_id, ig_account_id=account_id
+            # One write for connect AND reconnect: the upsert replaces an
+            # existing credential in place (`07` §2 — same row id, no gap).
+            await ig_login_oauth.store_credential(
+                session,
+                workspace_id=workspace_id,
+                ig_account_id=account_id,
+                token=grant.access_token,
+                expires_at=grant.expires_at,
             )
-            if existing is not None:
-                await ig_login_oauth.swap_credential(
-                    session,
-                    credential_id=existing,
-                    token=grant.access_token,
-                    expires_at=grant.expires_at,
-                )
-            else:
-                await ig_login_oauth.store_credential(
-                    session,
-                    workspace_id=workspace_id,
-                    ig_account_id=account_id,
-                    token=grant.access_token,
-                    expires_at=grant.expires_at,
-                )
     except TenantResolutionError as exc:
         logger.warning("instagram connect: callback authorization refused: %s", exc)
         return _fail("state_refused", flow=INSTAGRAM_FLOW)
