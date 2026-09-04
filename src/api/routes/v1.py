@@ -31,6 +31,7 @@ from `app.actor_user_id` and answers under the production role.
 
 from __future__ import annotations
 
+import re
 import json
 import uuid
 from contextlib import asynccontextmanager
@@ -57,6 +58,12 @@ from src.services.target import (
 from src.services.target.commands import Command, CommandResult
 from src.services.target.ig_login_oauth import STATE_TTL_SECONDS, issue_state
 from src.services.target.unit_of_work import unit_of_work
+
+#: Telegram's username shape for a BOT: 5-32 characters of letters, digits and
+#: underscores, ending in "bot" (case-insensitive). The link route refuses a
+#: `TARGET_TELEGRAM_BOT_USERNAME` outside it rather than minting a link to a
+#: bot that cannot exist.
+TELEGRAM_BOT_USERNAME_RE = re.compile(r"(?i)[a-z][a-z0-9_]{1,28}bot")
 
 router = APIRouter(tags=["v1"])
 
@@ -208,8 +215,8 @@ async def telegram_link(
     Tenant-less, like `/me`: an identity belongs to a user, not a workspace.
     One transaction — the state row commits before the link is handed back,
     so a tap can never arrive ahead of the row it consumes. The link is good
-    for `STATE_TTL_SECONDS`; a second click retires nothing (link states are
-    per-user and independent) and simply mints a fresh one.
+    for `STATE_TTL_SECONDS`; a second click mints a fresh one and retires the
+    user's earlier live link (one live link per user — #1224 review).
     """
     # A username, not a handle: an operator who pastes `@storydump_app_bot`
     # must not mint `t.me/@…`, which Telegram cannot open.
@@ -218,6 +225,20 @@ async def telegram_link(
         raise HTTPException(
             status_code=503,
             detail="telegram linking not configured: set TARGET_TELEGRAM_BOT_USERNAME",
+        )
+    # …and a username with Telegram's shape. A stray trailing character —
+    # `storydump_app_bot.` in production on 2026-09-04 — mints a link the site
+    # refuses as a different bot, with nothing on either side saying why.
+    # Refuse the setting's shape here, naming the setting and the value, so
+    # the mistake is visible where it was made.
+    if not TELEGRAM_BOT_USERNAME_RE.fullmatch(bot_username):
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "TARGET_TELEGRAM_BOT_USERNAME is not a Telegram bot username:"
+                f" {bot_username!r} (5-32 letters, digits or underscores,"
+                " ending in 'bot')"
+            ),
         )
     engine = require_engine(request)
     async with engine.begin() as conn:
