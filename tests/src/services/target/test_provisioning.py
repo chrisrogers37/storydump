@@ -24,6 +24,7 @@ from src.services.target.provisioning import (
     MANUAL_REF_PREFIX,
     ProvisioningRefused,
     account_ref_from,
+    attach_connected_identity,
     folder_ref_from,
     handle_from,
     manual_ref_for,
@@ -226,3 +227,133 @@ class TestManualRefFor:
 
     def test_a_derived_reference_fits_the_reference_column(self):
         assert len(manual_ref_for("a" * HANDLE_MAX)) <= ACCOUNT_REF_MAX
+
+
+class _AttachExecutor:
+    """Scripts the UPDATE's rowcount and the classifying SELECT's row."""
+
+    def __init__(self, rowcount, current=None):
+        self.rowcount, self.current, self.statements = rowcount, current, []
+
+    async def execute(self, statement, params=None):
+        self.statements.append((str(statement), params))
+        executor = self
+
+        class _R:
+            rowcount = executor.rowcount
+
+            def mappings(self_inner):
+                return self_inner
+
+            def first(self_inner):
+                return executor.current
+
+        return _R()
+
+
+class TestAttachConnectedIdentityRefusesTheWrongAccount:
+    """A destination is for ONE Instagram account (#1221 review, `07` §2).
+    The UPDATE's WHERE carries the rule; these pin the WHERE's shape and the
+    named refusals when nothing moved. The rule against a real database is
+    the gate's business."""
+
+    async def test_the_update_accepts_only_the_same_real_id_or_the_matching_manual_handle(
+        self,
+    ):
+        ex = _AttachExecutor(rowcount=1)
+        await attach_connected_identity(
+            ex,
+            workspace_id="ws",
+            ig_account_id="acct",
+            provider_account_ref="17841400000000001",
+            handle="GatorTails",
+        )
+        ((sql, params),) = ex.statements
+        assert "provider_account_ref = :ref" in sql
+        assert "provider_account_ref LIKE :manual_prefix" in sql
+        assert "provider_account_ref = :expected_manual" in sql
+        assert "w.state = 'active'" in sql
+        assert params["expected_manual"] == "manual:gatortails"
+        assert params["manual_prefix"] == "manual:%"
+
+    async def test_a_profile_without_a_username_cannot_check_the_handle_and_is_allowed(
+        self,
+    ):
+        ex = _AttachExecutor(rowcount=1)
+        await attach_connected_identity(
+            ex,
+            workspace_id="ws",
+            ig_account_id="acct",
+            provider_account_ref="1784",
+            handle=None,
+        )
+        ((_, params),) = ex.statements
+        assert params["expected_manual"] is None and params["handle"] is None
+
+    async def test_a_row_on_a_different_real_account_is_refused_as_wrong_account(self):
+        ex = _AttachExecutor(
+            rowcount=0,
+            current={
+                "provider_account_ref": "999",
+                "state": "active",
+                "workspace_state": "active",
+            },
+        )
+        with pytest.raises(ProvisioningRefused) as info:
+            await attach_connected_identity(
+                ex,
+                workspace_id="ws",
+                ig_account_id="acct",
+                provider_account_ref="1784",
+                handle="x",
+            )
+        assert info.value.reason == "wrong_account"
+
+    async def test_a_typed_handle_that_is_not_the_signed_in_account_is_refused(self):
+        ex = _AttachExecutor(
+            rowcount=0,
+            current={
+                "provider_account_ref": "manual:foo",
+                "state": "active",
+                "workspace_state": "active",
+            },
+        )
+        with pytest.raises(ProvisioningRefused) as info:
+            await attach_connected_identity(
+                ex,
+                workspace_id="ws",
+                ig_account_id="acct",
+                provider_account_ref="1784",
+                handle="bar",
+            )
+        assert info.value.reason == "wrong_account"
+
+    @pytest.mark.parametrize(
+        "current",
+        [
+            None,
+            {
+                "provider_account_ref": "manual:foo",
+                "state": "moved",
+                "workspace_state": "active",
+            },
+            {
+                "provider_account_ref": "manual:foo",
+                "state": "active",
+                "workspace_state": "offboarding",
+            },
+        ],
+    )
+    async def test_a_missing_moved_or_offboarding_destination_is_not_found(
+        self, current
+    ):
+        ex = _AttachExecutor(rowcount=0, current=current)
+        with pytest.raises(ProvisioningRefused) as info:
+            await attach_connected_identity(
+                ex,
+                workspace_id="ws",
+                ig_account_id="acct",
+                provider_account_ref="1784",
+                handle="foo",
+            )
+        assert info.value.reason == "not_found"

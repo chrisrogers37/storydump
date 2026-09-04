@@ -381,14 +381,19 @@ ACCOUNT = "55555555-5555-4555-8555-555555555555"
 
 class TestInstagramCallback:
     """`GET /auth/instagram-login/callback` — the return half of the destination
-    connect (#1220 step 2). The Drive callback's shape: the state row is the
-    only thing trusted, the provider call sits between two transactions, and
-    every failure lands on the error page with `flow=instagram`.
+    connect (#1220 step 2). The Drive callback's shape: the state row is
+    trusted for what it pins, the provider call sits between two
+    transactions, and every failure lands on the error page with
+    `flow=instagram` — plus the two `07` §2 callback-time checks this leg adds:
+    the returning browser's session must be the state's user, and that user
+    must still be admin.
 
-    Everything behind a seam: the state consume, the exchange, the unit of
-    work (a fake session — the conftest engine refuses SQL), the admin
-    re-check `07` §2 asks for at the callback, and the three writes.
+    Everything behind a seam: the state consume, the session resolve, the
+    exchange, the unit of work (a fake session — the conftest engine refuses
+    SQL), the admin re-check, and the two writes.
     """
+
+    URL = "/auth/instagram-login/callback"
 
     @pytest.fixture
     def instagram(self, configured, counter, monkeypatch):
@@ -422,8 +427,26 @@ class TestInstagramCallback:
         return row
 
     @pytest.fixture
+    def browser(self, client, monkeypatch):
+        """The returning browser carries the session cookie of `holder`."""
+        holder = {"user_id": USER}
+
+        async def resolve(conn, *, token_hash):
+            if holder["user_id"] is None:
+                from src.exceptions.tenancy import TenantResolutionError
+
+                raise TenantResolutionError("invalid_session", "no such session")
+            from types import SimpleNamespace
+
+            return SimpleNamespace(id="sess-1", user_id=holder["user_id"])
+
+        monkeypatch.setattr(sessions, "resolve", resolve)
+        client.cookies.set(COOKIE, "opaque-session-value")
+        return holder
+
+    @pytest.fixture
     def writes(self, monkeypatch):
-        """The unit of work and the three writes, recorded in order."""
+        """The unit of work and the two writes, recorded in order."""
         log = []
 
         class _Session:
@@ -463,13 +486,11 @@ class TestInstagramCallback:
             log.append(("store", workspace_id, ig_account_id, token))
             return "cred-new"
 
-        log_state = {}
         monkeypatch.setattr(auth, "unit_of_work", _Uow)
         monkeypatch.setattr(tenant_resolution, "authorize_member", authorize_member)
         monkeypatch.setattr(provisioning, "attach_connected_identity", attach)
         monkeypatch.setattr(ig_login_oauth, "store_credential", store_credential)
-        log_state["log"] = log
-        return log_state
+        return {"log": log}
 
     @pytest.fixture
     def grant(self, monkeypatch):
@@ -485,6 +506,11 @@ class TestInstagramCallback:
 
         monkeypatch.setattr(ig_login_oauth, "exchange_code", exchange_code)
 
+    def _return(self, client, state="st-ig", code="c0de"):
+        return client.get(
+            f"{self.URL}?state={state}&code={code}", follow_redirects=False
+        )
+
     @pytest.mark.parametrize(
         "query, reason",
         [
@@ -496,9 +522,7 @@ class TestInstagramCallback:
     def test_denied_or_incomplete_lands_on_the_error_page_for_this_flow(
         self, client, instagram, query, reason
     ):
-        resp = client.get(
-            f"/auth/instagram-login/callback?{query}", follow_redirects=False
-        )
+        resp = client.get(f"{self.URL}?{query}", follow_redirects=False)
         assert resp.status_code == 302
         assert (
             resp.headers["location"]
@@ -506,12 +530,9 @@ class TestInstagramCallback:
         )
 
     def test_a_state_minted_for_another_leg_is_refused_by_name(
-        self, client, instagram, state_row
+        self, client, instagram, state_row, browser
     ):
-        resp = client.get(
-            "/auth/instagram-login/callback?state=st-other&code=c",
-            follow_redirects=False,
-        )
+        resp = self._return(client, state="st-other")
         assert (
             resp.headers["location"]
             == f"{FRONT}/auth/error?reason=state_refused&flow=instagram"
@@ -520,12 +541,51 @@ class TestInstagramCallback:
         assert set(state_row["seen"]["purpose"]) == {"connect", "reconnect"}
 
     def test_a_state_naming_no_account_cannot_act(
-        self, client, instagram, state_row, writes
+        self, client, instagram, state_row, browser, writes
     ):
         state_row["reconnect_target"] = None
-        resp = client.get(
-            "/auth/instagram-login/callback?state=st-ig&code=c", follow_redirects=False
+        resp = self._return(client)
+        assert (
+            resp.headers["location"]
+            == f"{FRONT}/auth/error?reason=state_refused&flow=instagram"
         )
+        assert writes["log"] == []
+
+    def test_a_browser_without_a_session_is_refused_before_the_provider_is_called(
+        self, client, instagram, state_row, writes, grant, monkeypatch
+    ):
+        """The state pins the user who STARTED the flow; a returning browser
+        carrying no session could be anyone the authorization URL was handed
+        to. Refused before the code is spent, and before any write."""
+        called = []
+
+        async def exchange_code(client_, **kw):
+            called.append(True)
+
+        monkeypatch.setattr(ig_login_oauth, "exchange_code", exchange_code)
+        resp = self._return(client)
+        assert (
+            resp.headers["location"]
+            == f"{FRONT}/auth/error?reason=state_refused&flow=instagram"
+        )
+        assert called == [] and writes["log"] == []
+
+    def test_a_browser_signed_in_as_someone_else_is_refused(
+        self, client, instagram, state_row, browser, writes, grant
+    ):
+        browser["user_id"] = "99999999-9999-4999-8999-999999999999"
+        resp = self._return(client)
+        assert (
+            resp.headers["location"]
+            == f"{FRONT}/auth/error?reason=state_refused&flow=instagram"
+        )
+        assert writes["log"] == []
+
+    def test_a_session_that_does_not_resolve_is_refused_the_same_way(
+        self, client, instagram, state_row, browser, writes, grant
+    ):
+        browser["user_id"] = None
+        resp = self._return(client)
         assert (
             resp.headers["location"]
             == f"{FRONT}/auth/error?reason=state_refused&flow=instagram"
@@ -533,15 +593,13 @@ class TestInstagramCallback:
         assert writes["log"] == []
 
     def test_a_refused_exchange_lands_on_the_error_page(
-        self, client, instagram, state_row, writes, monkeypatch
+        self, client, instagram, state_row, browser, writes, monkeypatch
     ):
         async def exchange_code(client_, **kw):
             raise ig_login_oauth.IgOAuthRefused("long_lived_failed")
 
         monkeypatch.setattr(ig_login_oauth, "exchange_code", exchange_code)
-        resp = client.get(
-            "/auth/instagram-login/callback?state=st-ig&code=c", follow_redirects=False
-        )
+        resp = self._return(client)
         assert (
             resp.headers["location"]
             == f"{FRONT}/auth/error?reason=exchange_failed&flow=instagram"
@@ -549,12 +607,9 @@ class TestInstagramCallback:
         assert writes["log"] == []
 
     def test_connect_attaches_the_real_identity_stores_the_credential_and_returns_to_settings(
-        self, client, instagram, state_row, writes, grant
+        self, client, instagram, state_row, browser, writes, grant
     ):
-        resp = client.get(
-            "/auth/instagram-login/callback?state=st-ig&code=c0de",
-            follow_redirects=False,
-        )
+        resp = self._return(client)
         assert resp.status_code == 302, resp.text
         assert (
             resp.headers["location"]
@@ -568,19 +623,16 @@ class TestInstagramCallback:
         ]
 
     def test_reconnect_takes_the_same_single_write_as_connect(
-        self, client, instagram, state_row, writes, grant
+        self, client, instagram, state_row, browser, writes, grant
     ):
         """The upsert replaces the payload in place (`07` §2); the route has
         no branch to get wrong, which is the point of it being one write."""
         state_row["purpose"] = "reconnect"
-        client.get(
-            "/auth/instagram-login/callback?state=st-ig&code=c0de",
-            follow_redirects=False,
-        )
+        self._return(client)
         assert ("store", WS, ACCOUNT, "IGQVJ-long") in writes["log"]
 
     def test_a_user_no_longer_admin_at_callback_time_is_refused(
-        self, client, instagram, state_row, writes, grant, monkeypatch
+        self, client, instagram, state_row, browser, writes, grant, monkeypatch
     ):
         from src.exceptions.tenancy import TenantResolutionError
 
@@ -590,28 +642,40 @@ class TestInstagramCallback:
             raise TenantResolutionError("insufficient_role")
 
         monkeypatch.setattr(tenant_resolution, "authorize_member", authorize_member)
-        resp = client.get(
-            "/auth/instagram-login/callback?state=st-ig&code=c0de",
-            follow_redirects=False,
-        )
+        resp = self._return(client)
         assert (
             resp.headers["location"]
             == f"{FRONT}/auth/error?reason=state_refused&flow=instagram"
         )
         assert not any(w[0] in ("attach", "store") for w in writes["log"])
 
-    def test_an_account_already_connected_elsewhere_in_the_workspace_is_named(
-        self, client, instagram, state_row, writes, grant, monkeypatch
+    @pytest.mark.parametrize(
+        "refusal, reason",
+        [
+            ("duplicate_destination", "already_connected"),
+            ("wrong_account", "wrong_account"),
+            ("not_found", "destination_gone"),
+        ],
+    )
+    def test_each_attach_refusal_has_its_own_remedy_on_the_error_page(
+        self,
+        client,
+        instagram,
+        state_row,
+        browser,
+        writes,
+        grant,
+        monkeypatch,
+        refusal,
+        reason,
     ):
         async def attach(session, **kw):
-            raise provisioning.ProvisioningRefused("duplicate_destination")
+            raise provisioning.ProvisioningRefused(refusal)
 
         monkeypatch.setattr(provisioning, "attach_connected_identity", attach)
-        resp = client.get(
-            "/auth/instagram-login/callback?state=st-ig&code=c0de",
-            follow_redirects=False,
-        )
+        resp = self._return(client)
         assert (
             resp.headers["location"]
-            == f"{FRONT}/auth/error?reason=already_connected&flow=instagram"
+            == f"{FRONT}/auth/error?reason={reason}&flow=instagram"
         )
+        assert not any(w[0] == "store" for w in writes["log"])

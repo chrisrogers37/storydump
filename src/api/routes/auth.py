@@ -389,10 +389,20 @@ async def instagram_login_callback(
     error: Optional[str] = None,
 ) -> Response:
     """The Instagram connect leg's return (#1220 step 2): consume the state,
-    exchange the code for a long-lived token and its owner, attach that
-    identity to the destination the state pinned, write the credential — the
-    Drive callback's shape, trusting the state row plus the `07` §2 admin
-    re-check."""
+    check the returning browser is the one that started the flow, exchange
+    the code for a long-lived token and its owner, attach that identity to
+    the destination the state pinned, write the credential — the Drive
+    callback's shape plus the `07` §2 callback-time checks.
+
+    **The state row is necessary and not sufficient.** It pins the user who
+    started the flow; it does not prove the browser that returned is theirs.
+    Without the session check below, an admin could mint a state, hand the
+    authorization URL to someone else, and end up holding THAT person's
+    Instagram token on their own destination. So the callback also requires
+    the session cookie the API set at sign-in (it rides the top-level return
+    navigation under SameSite=Lax) and refuses unless it resolves to the
+    state's user — the same one-line rule as the admin re-check: what the
+    issue leg established, the callback re-establishes."""
     app_id, app_secret, redirect_uri = instagram_client.configured()
     row = await _consume_callback(
         request,
@@ -407,6 +417,15 @@ async def instagram_login_callback(
         return row
     if row["reconnect_target"] is None:
         logger.warning("instagram connect: state names no destination")
+        return _fail("state_refused", flow=INSTAGRAM_FLOW)
+
+    presenter = await _presenting_user(request)
+    if presenter is None or presenter != str(row["user_id"]):
+        logger.warning(
+            "instagram connect: the returning browser's session is not the"
+            " state's user (presented=%s)",
+            "none" if presenter is None else "other",
+        )
         return _fail("state_refused", flow=INSTAGRAM_FLOW)
 
     # The provider calls sit between the two transactions, never inside one.
@@ -464,13 +483,41 @@ async def instagram_login_callback(
         return _fail("state_refused", flow=INSTAGRAM_FLOW)
     except provisioning.ProvisioningRefused as exc:
         logger.warning("instagram connect: attach refused: %s", exc)
-        reason = (
-            "already_connected"
-            if exc.reason == "duplicate_destination"
-            else "state_refused"
+        return _fail(
+            _ATTACH_REASON.get(exc.reason, "state_refused"), flow=INSTAGRAM_FLOW
         )
-        return _fail(reason, flow=INSTAGRAM_FLOW)
 
     return RedirectResponse(
         _landing("/dashboard/settings?connected=instagram"), status_code=302
     )
+
+
+#: `provisioning.attach_connected_identity`'s refusals on the error page. Each
+#: is a DIFFERENT remedy, which is why they are not folded into `state_refused`
+#: ("start again and it should work" is false for all three).
+_ATTACH_REASON = {
+    "duplicate_destination": "already_connected",
+    "wrong_account": "wrong_account",
+    "not_found": "destination_gone",
+}
+
+
+async def _presenting_user(request: Request) -> Optional[str]:
+    """The user id of the session the returning browser carries, or None.
+
+    Resolved exactly as `current_principal` resolves it (the same cookie, the
+    same `sessions.resolve`), on the engine directly: this runs before any
+    tenant is known. A refusal of any kind is None — the caller's answer is
+    the same closed `state_refused` either way, so a prober learns nothing.
+    """
+    value = presented_token(request)
+    if value is None:
+        return None
+    try:
+        async with require_engine(request).begin() as conn:
+            session = await sessions.resolve(
+                conn, token_hash=sessions.token_hash(value)
+            )
+    except TenantResolutionError:
+        return None
+    return str(session.user_id)

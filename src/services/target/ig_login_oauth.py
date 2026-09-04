@@ -72,6 +72,11 @@ logger = logging.getLogger(__name__)
 #: `05`: state token TTL, 15 minutes, every purpose. Legacy used 600s.
 STATE_TTL_SECONDS = 900
 
+#: When a freshly stored credential first comes due for refresh: the `05`
+#: row-56 cadence, which `0.4` confirmed clears Meta's 24-hour minimum age.
+#: A PostgreSQL interval literal; the value is pinned by test.
+FIRST_REFRESH_INTERVAL = "7 days"
+
 #: The scopes the proven flow requests. Carried over verbatim — #410's
 #: background turns on the app's *use case*, not on this list.
 REQUIRED_SCOPES = ("instagram_business_basic", "instagram_business_content_publish")
@@ -154,14 +159,19 @@ async def issue_state(
     if purpose == "reconnect" and reconnect_target is None:
         raise OAuthStateRefused("reconnect requires a reconnect_target")
 
-    if purpose == "reconnect":
+    if reconnect_target is not None:
+        # Last issued wins, for EVERY purpose that pins a target (`07` §2 says
+        # it of reconnect; two live `connect` states for one destination,
+        # consented with two different Instagram accounts, would let the
+        # second callback re-point the row — so a connect retires its
+        # predecessors exactly as a reconnect does).
         await conn.execute(
             text(
                 "UPDATE oauth_states SET consumed_at = now()"
-                " WHERE purpose = 'reconnect' AND reconnect_target = :target"
+                " WHERE reconnect_target = :target AND provider = :provider"
                 "   AND consumed_at IS NULL"
             ),
-            {"target": str(reconnect_target)},
+            {"target": str(reconnect_target), "provider": provider},
         )
 
     state = new_state()
@@ -354,15 +364,21 @@ async def store_credential(
             "INSERT INTO oauth_credentials"
             " (workspace_id, ig_account_id, provider, encrypted_payload,"
             "  expires_at, next_refresh_at, state)"
-            # next_refresh_at = now(): immediately due, so the next clock tick
-            # mints a refresh and that mint re-arms the cadence. Without this
-            # a stored credential is invisible to the refresh leg forever.
-            " VALUES (:ws, :acct, :provider, :payload, :exp, now(), 'active')"
+            # next_refresh_at = now() + the `05` row-56 cadence (7 days from
+            # issue), NOT now(): Meta refuses to refresh a long-lived token
+            # younger than 24 hours (`0.4` — the recorded min-age floor), and an
+            # immediately-due refresh would be a definitive 400, which the
+            # refresh leg rightly treats as "dead" and flips the account to
+            # reauth_required minutes after it was connected. Armed, so the
+            # credential is visible to the refresh leg; late enough to clear
+            # the floor. The clock re-arms the same cadence after each refresh.
+            " VALUES (:ws, :acct, :provider, :payload, :exp,"
+            f"         now() + interval '{FIRST_REFRESH_INTERVAL}', 'active')"
             " ON CONFLICT (workspace_id, ig_account_id, provider)"
             "   WHERE ig_account_id IS NOT NULL"
             " DO UPDATE SET encrypted_payload = EXCLUDED.encrypted_payload,"
             "               expires_at = EXCLUDED.expires_at,"
-            "               next_refresh_at = now(),"
+            f"               next_refresh_at = now() + interval '{FIRST_REFRESH_INTERVAL}',"
             "               state = 'active'"
             " RETURNING id"
         ),
@@ -544,7 +560,10 @@ async def exchange_code(
             "client_secret": client_secret,
             "grant_type": "authorization_code",
             "redirect_uri": redirect_uri,
-            "code": code.rstrip("#_"),
+            # Instagram appends a literal `#_` to the code it hands back; strip
+            # exactly that suffix — `rstrip` would eat a trailing `_` that is
+            # part of the code (the legacy flow's latent defect).
+            "code": code.removesuffix("#_"),
         },
     )
     if short.status_code != 200:

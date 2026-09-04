@@ -76,6 +76,7 @@ class TestExchangeCode:
             "redirect_uri": REDIRECT,
             "code": "c0de",
         }
+
         assert calls[1]["url"] == ig.LONG_LIVED_URL
         assert calls[1]["params"] == {
             "grant_type": "ig_exchange_token",
@@ -91,6 +92,15 @@ class TestExchangeCode:
         assert grant.ig_user_id == "17841400000000001"
         assert grant.username == "gatortails"
         assert grant.expires_at is not None and grant.expires_at > before
+
+    async def test_only_the_literal_fragment_suffix_is_stripped_from_the_code(
+        self, monkeypatch
+    ):
+        """`rstrip("#_")` would also eat a trailing `_` that is part of the
+        code and turn a valid grant into an intermittent `exchange_failed`."""
+        calls = queued_egress(monkeypatch, [(200, SHORT), (200, LONG), (200, PROFILE)])
+        await _exchange("AQBx_")
+        assert calls[0]["data"]["code"] == "AQBx_"
 
     async def test_every_call_goes_through_the_floor_with_a_timeout_class(
         self, monkeypatch
@@ -214,10 +224,21 @@ class TestStoreCredentialIsAnUpsert:
         assert cid == "cred-1"
         ((sql, params),) = conn.statements
         assert "ON CONFLICT (workspace_id, ig_account_id, provider)" in sql
+        # Armed for the refresh leg, but NOT immediately: Meta refuses to
+        # refresh a token younger than 24h, and an immediate refresh would be
+        # a definitive 400 that marks a brand-new credential dead.
+        assert f"now() + interval '{ig.FIRST_REFRESH_INTERVAL}'" in sql
+        assert "next_refresh_at = now()," not in sql and "now(), 'active'" not in sql
+
         assert "WHERE ig_account_id IS NOT NULL" in sql
         assert "DO UPDATE SET encrypted_payload = EXCLUDED.encrypted_payload" in sql
         assert "state = 'active'" in sql
         assert params["payload"] == "enc(t0k)" and "t0k" not in sql
+
+    def test_the_first_refresh_clears_metas_minimum_age_and_matches_the_05_cadence(
+        self,
+    ):
+        assert ig.FIRST_REFRESH_INTERVAL == "7 days"
 
 
 class TestConnectPurpose:

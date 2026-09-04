@@ -104,7 +104,15 @@ describe("the Instagram connect leg has its own table", () => {
   });
 
   it("covers every reason the Instagram leg can send, without falling to generic", () => {
-    for (const reason of ["denied", "missing_params", "state_refused", "exchange_failed", "already_connected"]) {
+    for (const reason of [
+      "denied",
+      "missing_params",
+      "state_refused",
+      "exchange_failed",
+      "already_connected",
+      "wrong_account",
+      "destination_gone",
+    ]) {
       expect(resolveContent("instagram", reason)).not.toBe(INSTAGRAM.generic);
     }
   });

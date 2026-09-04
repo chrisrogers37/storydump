@@ -77,13 +77,12 @@ import json
 import logging
 from typing import Optional
 
-from asyncpg.exceptions import UniqueViolationError
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
 from src.exceptions import StorydumpError
 from src.services.target import readers
-from src.services.target._dbapi import driver_candidates
+from src.services.target._dbapi import constraint_violated
 
 logger = logging.getLogger(__name__)
 
@@ -471,12 +470,31 @@ async def attach_connected_identity(
     `reauth_required` comes back `active` — the `07` §2 reconnect edge, on the
     account the dispatcher actually reads.
 
-    `uq_ig_account_live (workspace_id, provider_account_ref)` decides the one
-    case this cannot do: the real id is already another live row in this
-    workspace. That is two destinations for one Instagram feed, which the
-    index exists to forbid, so it is refused as ``duplicate_destination``
-    rather than merged — merging would silently move a schedule.
+    **A destination is for ONE Instagram account, and this write cannot move
+    it to another.** Two refusals make that true, both named `wrong_account`:
+
+    - a row that already carries a real Meta id accepts only THAT id — a
+      reconnect performed while signed in to some other Instagram account must
+      not silently re-home the schedule, the history and the budget keys to
+      a different feed (`07` §2: reconnect "pins the exact credential owner
+      being replaced");
+    - a row still on its typed handle accepts only the account whose username
+      is that handle (case-folded) — connecting `manual:foo` while signed in
+      as `@bar` would rename the destination to a feed nobody typed. When
+      Instagram omits the username the check cannot run and the connect is
+      allowed.
+
+    `uq_ig_account_live (workspace_id, provider_account_ref)` decides the
+    third case: the real id is already another live row in this workspace.
+    That is two destinations for one Instagram feed, which the index exists
+    to forbid, so it is refused as ``duplicate_destination`` rather than
+    merged — merging would silently move a schedule. A workspace that is no
+    longer active (offboarding) accepts no new credential either — "revoked
+    immediately" must not be undone by a state issued before the offboard.
     """
+    ref = account_ref_from(provider_account_ref)
+    display_handle = handle_from(handle) if handle else None
+    expected_manual = manual_ref_for(display_handle) if display_handle else None
     try:
         result = await executor.execute(
             text(
@@ -485,21 +503,49 @@ async def attach_connected_identity(
                 "       handle = COALESCE(:handle, handle),"
                 "       state = CASE WHEN state = 'reauth_required' THEN 'active' ELSE state END"
                 " WHERE id = :acct AND workspace_id = :ws AND state <> 'moved'"
+                "   AND (provider_account_ref = :ref"
+                "        OR (provider_account_ref LIKE :manual_prefix"
+                "            AND (:expected_manual IS NULL"
+                "                 OR provider_account_ref = :expected_manual)))"
+                "   AND EXISTS (SELECT 1 FROM workspaces w"
+                "                WHERE w.id = :ws AND w.state = 'active')"
             ),
             {
-                "ref": account_ref_from(provider_account_ref),
-                "handle": handle_from(handle) if handle else None,
+                "ref": ref,
+                "handle": display_handle,
                 "acct": str(ig_account_id),
                 "ws": str(workspace_id),
+                "manual_prefix": f"{MANUAL_REF_PREFIX}%",
+                "expected_manual": expected_manual,
             },
         )
     except DBAPIError as exc:
-        for cause in driver_candidates(exc):
-            if isinstance(cause, UniqueViolationError):
-                raise ProvisioningRefused(
-                    "duplicate_destination",
-                    "that Instagram account is already another destination here",
-                ) from exc
+        if constraint_violated(exc, "uq_ig_account_live"):
+            raise ProvisioningRefused(
+                "duplicate_destination",
+                "that Instagram account is already another destination here",
+            ) from exc
         raise
-    if result.rowcount == 0:
+    if result.rowcount:
+        return
+    # Nothing moved: say WHY, because the remedies differ. One read, no
+    # tenant widening — the same two keys the UPDATE bound.
+    current = await readers.row(
+        executor,
+        "SELECT a.provider_account_ref, a.state, w.state AS workspace_state"
+        "  FROM ig_accounts a JOIN workspaces w ON w.id = a.workspace_id"
+        " WHERE a.id = :acct AND a.workspace_id = :ws",
+        acct=str(ig_account_id),
+        ws=str(workspace_id),
+    )
+    if (
+        current is None
+        or current["state"] == "moved"
+        or current["workspace_state"] != "active"
+    ):
         raise ProvisioningRefused("not_found", f"destination {ig_account_id}")
+    raise ProvisioningRefused(
+        "wrong_account",
+        "this destination is for a different Instagram account than the one"
+        " that signed in",
+    )

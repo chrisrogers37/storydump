@@ -238,6 +238,11 @@ async def list_members(executor, *, workspace_id: str) -> list[dict]:
 #: One definition for destinations and sources: the rule it mirrors is the one
 #: `drive_credentials` / the refresh leg ENFORCE (usable iff `state = 'active'`
 #: and `expires_at` has not passed), and two copies of it could drift apart.
+#: The Instagram credential provider, as `ig_login_oauth.PROVIDER` spells it.
+#: A local name rather than an import: that module's import graph must not
+#: grow a dependency on this one.
+IG_LOGIN_PROVIDER = "ig_login"
+
 _CREDENTIAL_STATUS_SQL = (
     "CASE"
     "  WHEN c.id IS NULL THEN 'none'"
@@ -264,9 +269,10 @@ async def list_accounts(executor, *, workspace_id: str) -> list[dict]:
         "  LEFT JOIN oauth_credentials c"
         "    ON c.workspace_id = a.workspace_id"
         "   AND c.ig_account_id = a.id"
-        "   AND c.provider = 'ig_login'"
+        "   AND c.provider = :provider"
         " WHERE a.workspace_id = :ws ORDER BY a.created_at, a.id",
         ws=str(workspace_id),
+        provider=IG_LOGIN_PROVIDER,
     )
 
 

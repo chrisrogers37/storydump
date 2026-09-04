@@ -44,7 +44,11 @@ export type SigninReason = SharedReason | "identity_collision";
 export type DriveReason = SharedReason | "grant_incomplete";
 
 /** Instagram only: the real account is already another destination here. */
-export type InstagramReason = SharedReason | "already_connected";
+export type InstagramReason =
+  | SharedReason
+  | "already_connected"
+  | "wrong_account"
+  | "destination_gone";
 
 export type Content = {
   heading: string;
@@ -196,6 +200,21 @@ export const INSTAGRAM: Record<InstagramReason | "generic", Content> = {
   already_connected: {
     heading: "That Instagram account is already a destination here.",
     body: "The account you signed in with is already connected to another destination in this workspace, so it was not attached a second time. Nothing changed. Remove the duplicate destination, or connect a different account.",
+    href: "/dashboard/settings",
+    primary: "Back to settings",
+  },
+  wrong_account: {
+    // Says WHY, because the remedy is "sign in to a different account", not
+    // "try again": a destination is for ONE Instagram account, and the one
+    // that signed in is not it.
+    heading: "That is not the Instagram account this destination is for.",
+    body: "Instagram authorised a different account than this destination was set up for. Nothing was connected and the destination was not changed. Switch Instagram to that account and try again — or add the account Instagram authorised as its own destination.",
+    href: "/dashboard/settings",
+    primary: "Back to settings",
+  },
+  destination_gone: {
+    heading: "That destination is no longer here.",
+    body: "The destination you were connecting was removed, or its workspace is being deleted, while you were at Instagram. Nothing was connected.",
     href: "/dashboard/settings",
     primary: "Back to settings",
   },
