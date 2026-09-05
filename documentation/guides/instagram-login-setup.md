@@ -43,12 +43,17 @@ Once configured, the "Connect Instagram" button in the Mini App wizard will:
 
 ## Step 3: Configure OAuth Redirect URI
 
-1. Go to **Instagram** → **Basic Display** (or **Instagram Login** settings) in the left sidebar
-2. Under **Valid OAuth Redirect URIs**, add:
+1. In the left sidebar go to **Products → Instagram → API setup with Instagram business login**
+   (Basic Display no longer exists; the direct page is
+   `https://developers.facebook.com/apps/<APP_ID>/instagram-business/API-Setup/`)
+2. Under step 3, **Set up Instagram business login → Business login settings → OAuth redirect URIs**, add:
    ```
-   https://storydump-production.up.railway.app/auth/instagram-login/callback
+   https://api.storydump.app/auth/instagram-login/callback
    ```
-3. Click **Save Changes**
+   The value is `OAUTH_REDIRECT_BASE_URL` + `/auth/instagram-login/callback` — whatever host the API
+   serves from. The API moved from the Railway hostname to `api.storydump.app` on 2026-08-31, and
+   a list that still held only the old host produced Meta's *"Invalid redirect_uri"* on 2026-09-04.
+3. Click **Save Changes** — no redeploy is needed; Meta checks the list on every authorize request
 
 > **Important:** The redirect URI must match EXACTLY — including the trailing path, no trailing slash, and the correct protocol (https).
 
@@ -56,23 +61,23 @@ Once configured, the "Connect Instagram" button in the Mini App wizard will:
 
 ## Step 4: Set Railway Environment Variables
 
-Set these on **both** Railway services (worker AND API):
+Set these on the **API** service (the worker does not read them — the OAuth exchange and Meta's
+callbacks both run on the API):
 
 | Variable | Value | Where to find it |
 |----------|-------|-------------------|
 | `INSTAGRAM_APP_ID` | Your Meta App ID | App Dashboard → top of page |
 | `INSTAGRAM_APP_SECRET` | Your Meta App Secret | App Settings → Basic → App Secret |
+| `OAUTH_REDIRECT_BASE_URL` | `https://api.storydump.app` — no trailing slash or period | the API's public host |
 
 These are **separate** from `FACEBOOK_APP_ID`/`FACEBOOK_APP_SECRET` (which are for the legacy Facebook Login OAuth flow). Both can coexist.
 
 ### How to set on Railway:
 
 1. Go to [railway.app](https://railway.app) → your project
-2. Click on the **worker** service → Variables tab
-3. Add `INSTAGRAM_APP_ID` and `INSTAGRAM_APP_SECRET`
-4. Click on the **API** service → Variables tab
-5. Add the same two variables
-6. Both services will redeploy automatically
+2. Click on the **API** service → Variables tab
+3. Add the three variables above
+4. The service redeploys automatically
 
 ---
 
@@ -111,7 +116,7 @@ After setting env vars and Railway redeployment:
 |---------|-------|-----|
 | "Connect Instagram" opens Facebook OAuth | `INSTAGRAM_APP_ID` not set on API service | Check Railway env vars on the API service |
 | "OAuth not configured" error | Missing `INSTAGRAM_APP_ID` or `INSTAGRAM_APP_SECRET` | Verify both are set on API service |
-| Redirect URI mismatch error | URI in Meta dashboard doesn't match callback URL | Ensure exact match: `https://storydump-production.up.railway.app/auth/instagram-login/callback` |
+| "Invalid redirect_uri" from Meta | The URI the API sends is not in the app's OAuth redirect URI list | Add the exact value `https://api.storydump.app/auth/instagram-login/callback` (Step 3); the host must be the API's current one |
 | "Link Expired" on callback | State token older than 10 minutes | Try connecting again — don't wait too long on the consent screen |
 | User can't see consent screen | Not added as a tester | Add them via App Roles → Roles → Add People |
 | "No Business Account" error | User has a personal Instagram account | They need to switch to Business or Creator in Instagram settings |
