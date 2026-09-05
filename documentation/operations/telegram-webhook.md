@@ -83,3 +83,27 @@ Integrations shows *Linked* with the Telegram display name after a reload.
 
 If `status` reports `403` at the door after step 1, the API has not finished
 redeploying or the two values differ by a character.
+
+## Groups
+
+A workspace's approval cards and notices go to its **bound** Telegram groups.
+An admin binds one from Settings › Integrations › *Add a Telegram group*: the
+link opens Telegram's group picker, Telegram adds the bot to the chosen group
+and sends `/start bind-<state>` there, and the door binds that chat to the
+workspace (`07` §13). Only the admin who minted the link can use it, and their
+own Telegram must be linked first (Settings refuses otherwise). The bot answers
+in the group. If the bot was already in the group and nothing arrived, send the
+command the card shows — `/start@<bot> bind-…` — in the group.
+
+**Precondition:** the bot must be allowed into groups. In BotFather send
+`/setjoingroups`, pick the bot, and choose *Enable*. Without it the picker
+cannot add the bot and nothing arrives at the door.
+
+**What a tap does now (since #1239):** a handled `/start` — `link-` (identity)
+or `bind-` (group) — is acknowledged in the chat after the delivery is
+committed. Refusals stay silent.
+
+**A kicked bot is not a dead token.** A bound group that removes the bot (or a
+deleted chat) makes the next delivery fail definitively; the worker revokes the
+binding and stops minting for it. A group upgraded to a supergroup is followed
+to its new chat id. Only a 401 from Telegram means the credential itself died.

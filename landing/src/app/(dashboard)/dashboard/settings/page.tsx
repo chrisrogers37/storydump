@@ -218,7 +218,7 @@ export default async function SettingsPage({
           <IntegrationsTab
             settings={settings}
             sources={sourcesResult.data.sources ?? []}
-            bindings={bindingsResult.ok ? (bindingsResult.data.bindings ?? []) : []}
+            bindings={bindingsResult.ok ? (bindingsResult.data.bindings ?? []) : null}
             workspaceId={workspaceId}
             telegramLinked={session.telegramLinked}
             telegramDisplayName={session.telegramDisplayName}

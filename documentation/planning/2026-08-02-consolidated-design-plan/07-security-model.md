@@ -68,7 +68,7 @@ CREATE TRIGGER tg_touch_oauth_states BEFORE UPDATE ON oauth_states
 
 RLS class: `session_tokens`, `oauth_states`, and `service_tokens` are **auth-plane tables** — role-scoped `USING (true)` policies for `svc_ingress` and the sweep door's NOLOGIN owner (`02` §7), no tenant RLS, because they are the door tenant context walks through (`02` §7 states the class; their expiry/retention classes are `05` rows, and their sweep runs only through `fn_auth_plane_sweep` — the `02` §7 door, whose NOLOGIN owner carries the enumerated auth-plane policies, driven on the reaper/retention schedule).
 
-- **Issuance, by purpose.** `connect`/`reconnect`: only from an authenticated session whose user holds admin+ in `workspace_id` (checked at issue AND at callback — the row pins both, so a callback cannot be replayed into a different workspace). `link`: only from an authenticated session; the row pins the user, and the callback attaches the new identity to exactly that user (D35). `signin`: anonymous — that is its purpose; its guards are the next bullet plus the `preauth_ip` admission (§1).
+- **Issuance, by purpose.** `connect`/`reconnect`: only from an authenticated session whose user holds admin+ in `workspace_id` (checked at issue AND at callback — the row pins both, so a callback cannot be replayed into a different workspace). `link`: only from an authenticated session; the row pins the user, and the callback attaches the new identity to exactly that user (D35). `signin`: anonymous — that is its purpose; its guards are the next bullet plus the `preauth_ip` admission (§1). `bind` — an admin's session, at the admin floor of the pinned workspace, and only after that admin has linked their own Telegram (§13).
 - **Anonymous-state CSRF (`signin` — the replacement for session binding):** the issue response sets a short-TTL httpOnly cookie carrying a random nonce and stores its hash in `cookie_nonce_hash`; the callback requires the double-submit (cookie present, hash matches the row) — a cross-site victim's browser would carry no matching cookie for an attacker-supplied state. The id_token is additionally bound to the row via the OIDC `nonce` claim: the authorization request sends `nonce = SHA256(state)`, and verification requires the claim to equal the hash of the state the callback presented — a token minted for one state row cannot be replayed against another. Everything else — one-shot CAS consume, TTL, reaper — is the same machinery every purpose uses.
 - Callback consume is one-shot CAS (`… WHERE state = :s AND consumed_at IS NULL AND expires_at > now() RETURNING …`); a consumed/expired/unknown state is rejected cold. For session-bound purposes CSRF safety comes from the state being unguessable, single-use, and session-bound; for `signin` it comes from the cookie-nonce + OIDC-nonce pair above.
 - **The start-token door (one door, two named purposes — D33/D35):** the Telegram deep link `t.me/<bot>?start=<payload>` serves two flows, kept apart by a payload prefix that names the purpose. `inv-<token>` resolves **only** against `workspace_invitations.token_hash` (membership — `02` §1, `06` §2); `link-<state>` resolves **only** against `oauth_states` rows with `purpose='link', provider='telegram'` — the state value *is* the one-shot start token (unguessable, stored, CAS-consumed; a stateless signed token could not be one-shot). `/start` with a link token binds the tapping Telegram identity to the row's pinned user. An invite token cannot link identities and a link token cannot grant membership — enforced by disjoint lookup tables, not convention.
@@ -703,9 +703,21 @@ Telegram's group picker, adds the bot to the chosen group and sends
 `/start bind-<state>` there; the `/start` door consumes the state one-shot and
 binds THAT chat to the pinned workspace. The same flow binds the second and the
 tenth group. The link is admin-floored at issue, one live link per workspace
-(issuing retires the workspace's earlier live bind states), and a group another
-workspace already holds is refused silently — `uq_binding_external` decides,
-and the router's existence-oracle rule keeps the refusal mute.
+(issuing retires the workspace's earlier live bind states), and **it is not a
+bearer**: the door resolves the tapper's Telegram identity (`user_identities`,
+user-plane) and refuses, silently, unless it is the admin who minted the link —
+so a forwarded link binds nothing, and an admin links their Telegram (clause 1)
+before they bind a group (the mint route refuses `link_telegram_first`
+otherwise). Once the tapper is proven, refusals speak: a link opened in a DM
+and a group another workspace already holds (`uq_binding_external`) are
+answered in the chat rather than left as a silent spent link. The write runs on
+the door's raw connection; the consumed state row is the lane's pre-context
+path to a workspace and its ids become the transaction-local tenant/actor GUCs
+(`unit_of_work.apply_gucs`), which the governance audit trigger on
+`channel_bindings` and the tenant policies require. A bound chat that later
+refuses delivery — the bot kicked or blocked, the chat deleted — is a
+chat-level fact, never the credential's: the deliverer fails the row and
+revokes the binding, or follows a group that became a supergroup.
 
 ```sql
 -- The bind purpose (#1175 D-3, owner ruling 2026-09-05): an admin's one-shot

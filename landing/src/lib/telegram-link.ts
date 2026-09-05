@@ -147,8 +147,21 @@ export async function requestTelegramGroupLink(workspaceId: string): Promise<Tel
   return { ok: true, link, expiresInSeconds };
 }
 
+/**
+ * The command a person can send IN the group when Telegram did not deliver
+ * the picker's `/start` (the bot was already a member): `/start@<bot> <payload>`.
+ * The door parses the `@bot` suffix Telegram appends in groups.
+ */
+export function startCommandFor(groupLink: string, bot: string | undefined = botName): string {
+  const payload = new URL(groupLink).searchParams.get("startgroup") ?? "";
+  return bot ? `/start@${bot} ${payload}` : `/start ${payload}`;
+}
+
 export function telegramGroupLinkRefusalCopy(reason: unknown): string {
   switch (reason) {
+    case "link_telegram_first":
+    case "http_409":
+      return "Link your own Telegram account first (above), then add a group — only you will be able to use the link.";
     case "insufficient_role":
     case "http_403":
       return "You need to be an admin of this workspace to add a Telegram group.";

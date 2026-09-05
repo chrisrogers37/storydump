@@ -753,6 +753,13 @@ class TestTheBindPurposeOnTheRealSchema:
         from src.services.target import bindings, channel_bind
         from src.services.target.start_router import StartContext
 
+        # The door checks the tapper against the minter by linked identity.
+        _exec(
+            oauth_db,
+            "INSERT INTO user_identities (user_id, provider, external_id, display_name)"
+            " VALUES (%s, 'telegram', 'tg-1', 'ada') ON CONFLICT DO NOTHING",
+            (str(oauth_db["user"]),),
+        )
         link = _call(
             oauth_db,
             lambda c: channel_bind.issue_bind_state(

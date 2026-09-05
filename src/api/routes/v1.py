@@ -61,6 +61,13 @@ from src.services.target.ig_login_oauth import STATE_TTL_SECONDS, issue_state
 from src.services.target.unit_of_work import unit_of_work
 
 
+#: Telegram's username shape for a BOT: 5-32 characters of letters, digits and
+#: underscores, ending in "bot" (case-insensitive). Both Telegram routes refuse
+#: a `TARGET_TELEGRAM_BOT_USERNAME` outside it rather than minting a link to a
+#: bot that cannot exist.
+TELEGRAM_BOT_USERNAME_RE = re.compile(r"(?i)[a-z][a-z0-9_]{1,28}bot")
+
+
 def _target_bot_username() -> str:
     """The bot the deep links name, validated once for both Telegram routes."""
     # A username, not a handle: an operator who pastes `@storydump_app_bot`
@@ -87,12 +94,6 @@ def _target_bot_username() -> str:
         )
     return bot_username
 
-
-#: Telegram's username shape for a BOT: 5-32 characters of letters, digits and
-#: underscores, ending in "bot" (case-insensitive). The link route refuses a
-#: `TARGET_TELEGRAM_BOT_USERNAME` outside it rather than minting a link to a
-#: bot that cannot exist.
-TELEGRAM_BOT_USERNAME_RE = re.compile(r"(?i)[a-z][a-z0-9_]{1,28}bot")
 
 router = APIRouter(tags=["v1"])
 
@@ -266,6 +267,16 @@ async def telegram_group_bind_link(
     an admin act (`06` §4). One live link per workspace."""
     bot_username = _target_bot_username()
     async with _admin(request, str(ws), principal) as session:
+        # The link only works for the admin who minted it, proven by their
+        # linked Telegram identity — so an admin who has not linked would be
+        # sent into a flow that can only refuse. Say so here instead.
+        if (
+            await identity.identity_for_user(
+                session, user_id=principal.user_id, provider=channel_bind.PROVIDER
+            )
+            is None
+        ):
+            raise HTTPException(status_code=409, detail="link_telegram_first")
         link = await channel_bind.issue_bind_state(
             session,
             user_id=principal.user_id,

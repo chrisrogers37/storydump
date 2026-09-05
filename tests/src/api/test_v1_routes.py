@@ -583,8 +583,28 @@ class TestTelegramGroupBindLink:
         monkeypatch.setattr(channel_bind, "issue_bind_state", issue_bind_state)
         return seen
 
+    @pytest.fixture(autouse=True)
+    def linked(self, monkeypatch):
+        """The minting admin has linked Telegram — the route's precondition."""
+        holder = {"external_id": "tg-42"}
+
+        async def identity_for_user(session, *, user_id, provider):
+            return holder["external_id"]
+
+        monkeypatch.setattr(identity, "identity_for_user", identity_for_user)
+        return holder
+
     def test_requires_a_session(self, client, bot):
         assert client.post(self.URL).status_code == 401
+
+    def test_an_admin_who_has_not_linked_telegram_is_told_first(
+        self, client, signed_in, tenant, bot, issued, linked
+    ):
+        linked["external_id"] = None
+        resp = client.post(self.URL)
+        assert resp.status_code == 409
+        assert resp.json()["detail"] == "link_telegram_first"
+        assert issued == {}
 
     def test_unconfigured_bot_is_a_503_naming_the_setting(
         self, client, signed_in, tenant, issued, monkeypatch

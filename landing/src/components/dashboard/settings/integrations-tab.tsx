@@ -22,6 +22,7 @@ import {
   telegramLinkRefusalCopy,
 } from "@/lib/telegram-link";
 import type { ChannelBinding } from "@/lib/types";
+import { startCommandFor } from "@/lib/telegram-link";
 import { settingsRefusalCopy, submitCommand } from "@/lib/command-client";
 
 /**
@@ -96,8 +97,8 @@ export function IntegrationsTab({
   /** Whether the signed-in USER has a Telegram identity attached — a fact
    *  about the person, not this workspace (#1172 clause 1). */
   telegramLinked: boolean;
-  /** The Telegram chats this WORKSPACE's cards go to (`07` §13). */
-  bindings?: ChannelBinding[];
+  /** The Telegram chats this WORKSPACE's cards go to (`07` §13); null = could not be loaded. */
+  bindings?: ChannelBinding[] | null;
   /** Who that identity is, so a link tapped by the wrong person is visible. */
   telegramDisplayName: string | null;
 }) {
@@ -107,6 +108,7 @@ export function IntegrationsTab({
   const [groupLink, setGroupLink] = useState<{ link: string; expiresInSeconds: number } | null>(null);
   const [mintingGroupLink, setMintingGroupLink] = useState(false);
   const [groupLinkError, setGroupLinkError] = useState<string | null>(null);
+  const boundGroups = (bindings ?? []).filter((b) => b.state === "active");
 
   /** Mint the group-picker link (`07` §13) and SHOW it, like the identity link. */
   async function addTelegramGroup() {
@@ -363,11 +365,13 @@ export function IntegrationsTab({
               Adding one opens Telegram&apos;s group picker; the group you choose is bound to
               this workspace. A group can belong to one workspace only.
             </p>
-            {bindings.filter((b) => b.state === "active").length > 0 ? (
+            {bindings === null ? (
+              <p className="mt-2 text-sm text-muted-foreground">
+                Bound groups could not be loaded just now. Reload to try again.
+              </p>
+            ) : boundGroups.length > 0 ? (
               <ul className="mt-2 space-y-1 text-sm">
-                {bindings
-                  .filter((b) => b.state === "active")
-                  .map((b) => (
+                {boundGroups.map((b) => (
                     <li key={b.id} className="flex items-center gap-2">
                       <Badge variant="secondary" className="bg-green-100 text-green-800">
                         Bound
@@ -391,10 +395,12 @@ export function IntegrationsTab({
                 </Button>
                 <p className="break-all font-mono text-xs text-muted-foreground">{groupLink.link}</p>
                 <p className="text-xs text-muted-foreground">
-                  <strong>Do not share this link.</strong> Whoever opens it binds the group they pick
-                  to this workspace. It works once and expires after{" "}
+                  Only you can use this link, from the Telegram account linked to your Storydump
+                  user. It works once and expires after{" "}
                   {Math.round(groupLink.expiresInSeconds / 60)} minutes; the bot confirms in the
-                  group, then reload this page.
+                  group, then reload this page. If the bot is already in the group and nothing
+                  arrives, send this in the group instead:{" "}
+                  <code className="break-all">{startCommandFor(groupLink.link)}</code>
                 </p>
                 <Button variant="ghost" size="sm" onClick={addTelegramGroup} disabled={mintingGroupLink}>
                   {mintingGroupLink ? "Preparing link..." : "Get a new link"}
