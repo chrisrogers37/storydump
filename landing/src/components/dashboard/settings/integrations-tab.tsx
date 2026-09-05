@@ -15,7 +15,13 @@ import {
   connectRefusalCopy,
   requestSourceConnect,
 } from "@/lib/source-connect";
-import { requestTelegramLink, telegramLinkRefusalCopy } from "@/lib/telegram-link";
+import {
+  requestTelegramGroupLink,
+  requestTelegramLink,
+  telegramGroupLinkRefusalCopy,
+  telegramLinkRefusalCopy,
+} from "@/lib/telegram-link";
+import type { ChannelBinding } from "@/lib/types";
 import { settingsRefusalCopy, submitCommand } from "@/lib/command-client";
 
 /**
@@ -80,6 +86,7 @@ export function IntegrationsTab({
   sources,
   workspaceId,
   telegramLinked,
+  bindings = [],
   telegramDisplayName,
 }: {
   settings: SettingsView;
@@ -89,12 +96,30 @@ export function IntegrationsTab({
   /** Whether the signed-in USER has a Telegram identity attached — a fact
    *  about the person, not this workspace (#1172 clause 1). */
   telegramLinked: boolean;
+  /** The Telegram chats this WORKSPACE's cards go to (`07` §13). */
+  bindings?: ChannelBinding[];
   /** Who that identity is, so a link tapped by the wrong person is visible. */
   telegramDisplayName: string | null;
 }) {
   const router = useRouter();
   const [telegramLink, setTelegramLink] = useState<{ link: string; expiresInSeconds: number } | null>(null);
   const [linkingTelegram, setLinkingTelegram] = useState(false);
+  const [groupLink, setGroupLink] = useState<{ link: string; expiresInSeconds: number } | null>(null);
+  const [mintingGroupLink, setMintingGroupLink] = useState(false);
+  const [groupLinkError, setGroupLinkError] = useState<string | null>(null);
+
+  /** Mint the group-picker link (`07` §13) and SHOW it, like the identity link. */
+  async function addTelegramGroup() {
+    setGroupLinkError(null);
+    setMintingGroupLink(true);
+    const result = await requestTelegramGroupLink(workspaceId);
+    setMintingGroupLink(false);
+    if (!result.ok) {
+      setGroupLinkError(telegramGroupLinkRefusalCopy(result.error));
+      return;
+    }
+    setGroupLink({ link: result.link, expiresInSeconds: result.expiresInSeconds });
+  }
   const [syncingId, setSyncingId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [disconnectingId, setDisconnectingId] = useState<string | null>(null);
@@ -331,6 +356,56 @@ export function IntegrationsTab({
               )}
             </>
           )}
+          <div className="border-t pt-3">
+            <p className="text-sm font-medium">Telegram groups</p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Approval cards and notices for this workspace go to every group listed here.
+              Adding one opens Telegram&apos;s group picker; the group you choose is bound to
+              this workspace. A group can belong to one workspace only.
+            </p>
+            {bindings.filter((b) => b.state === "active").length > 0 ? (
+              <ul className="mt-2 space-y-1 text-sm">
+                {bindings
+                  .filter((b) => b.state === "active")
+                  .map((b) => (
+                    <li key={b.id} className="flex items-center gap-2">
+                      <Badge variant="secondary" className="bg-green-100 text-green-800">
+                        Bound
+                      </Badge>
+                      <span className="text-muted-foreground">
+                        {b.channel === "telegram_dm" ? "Direct chat" : "Group chat"} · id {b.external_ref}
+                      </span>
+                    </li>
+                  ))}
+              </ul>
+            ) : (
+              <p className="mt-2 text-sm text-muted-foreground">No Telegram group is bound yet.</p>
+            )}
+            {groupLinkError && <p className="mt-2 text-sm text-red-700">{groupLinkError}</p>}
+            {groupLink ? (
+              <div className="mt-3 space-y-2">
+                <Button asChild>
+                  <a href={groupLink.link} target="_blank" rel="noopener noreferrer">
+                    Open Telegram to choose a group
+                  </a>
+                </Button>
+                <p className="break-all font-mono text-xs text-muted-foreground">{groupLink.link}</p>
+                <p className="text-xs text-muted-foreground">
+                  <strong>Do not share this link.</strong> Whoever opens it binds the group they pick
+                  to this workspace. It works once and expires after{" "}
+                  {Math.round(groupLink.expiresInSeconds / 60)} minutes; the bot confirms in the
+                  group, then reload this page.
+                </p>
+                <Button variant="ghost" size="sm" onClick={addTelegramGroup} disabled={mintingGroupLink}>
+                  {mintingGroupLink ? "Preparing link..." : "Get a new link"}
+                </Button>
+              </div>
+            ) : (
+              <Button variant="outline" className="mt-3" onClick={addTelegramGroup} disabled={mintingGroupLink}>
+                {mintingGroupLink ? "Preparing link..." : "Add a Telegram group"}
+              </Button>
+            )}
+          </div>
         </CardContent>
       </Card>
       <Card>

@@ -45,6 +45,7 @@ from src.api.principal import Principal, current_principal, require_engine
 from src.api import google_client, instagram_client
 from src.config.settings import settings
 from src.services.target import (
+    channel_bind,
     commands,
     google_drive_oauth,
     identity,
@@ -58,6 +59,34 @@ from src.services.target import (
 from src.services.target.commands import Command, CommandResult
 from src.services.target.ig_login_oauth import STATE_TTL_SECONDS, issue_state
 from src.services.target.unit_of_work import unit_of_work
+
+
+def _target_bot_username() -> str:
+    """The bot the deep links name, validated once for both Telegram routes."""
+    # A username, not a handle: an operator who pastes `@storydump_app_bot`
+    # must not mint `t.me/@…`, which Telegram cannot open.
+    bot_username = (settings.TARGET_TELEGRAM_BOT_USERNAME or "").strip().lstrip("@")
+    if not bot_username:
+        raise HTTPException(
+            status_code=503,
+            detail="telegram linking not configured: set TARGET_TELEGRAM_BOT_USERNAME",
+        )
+    # …and a username with Telegram's shape. A stray trailing character —
+    # `storydump_app_bot.` in production on 2026-09-04 — mints a link the site
+    # refuses as a different bot, with nothing on either side saying why.
+    # Refuse the setting's shape here, naming the setting and the value, so
+    # the mistake is visible where it was made.
+    if not TELEGRAM_BOT_USERNAME_RE.fullmatch(bot_username):
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "TARGET_TELEGRAM_BOT_USERNAME is not a Telegram bot username:"
+                f" {bot_username!r} (5-32 letters, digits or underscores,"
+                " ending in 'bot')"
+            ),
+        )
+    return bot_username
+
 
 #: Telegram's username shape for a BOT: 5-32 characters of letters, digits and
 #: underscores, ending in "bot" (case-insensitive). The link route refuses a
@@ -218,32 +247,30 @@ async def telegram_link(
     for `STATE_TTL_SECONDS`; a second click mints a fresh one and retires the
     user's earlier live link (one live link per user — #1224 review).
     """
-    # A username, not a handle: an operator who pastes `@storydump_app_bot`
-    # must not mint `t.me/@…`, which Telegram cannot open.
-    bot_username = (settings.TARGET_TELEGRAM_BOT_USERNAME or "").strip().lstrip("@")
-    if not bot_username:
-        raise HTTPException(
-            status_code=503,
-            detail="telegram linking not configured: set TARGET_TELEGRAM_BOT_USERNAME",
-        )
-    # …and a username with Telegram's shape. A stray trailing character —
-    # `storydump_app_bot.` in production on 2026-09-04 — mints a link the site
-    # refuses as a different bot, with nothing on either side saying why.
-    # Refuse the setting's shape here, naming the setting and the value, so
-    # the mistake is visible where it was made.
-    if not TELEGRAM_BOT_USERNAME_RE.fullmatch(bot_username):
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "TARGET_TELEGRAM_BOT_USERNAME is not a Telegram bot username:"
-                f" {bot_username!r} (5-32 letters, digits or underscores,"
-                " ending in 'bot')"
-            ),
-        )
+    bot_username = _target_bot_username()
     engine = require_engine(request)
     async with engine.begin() as conn:
         link = await identity_link.issue_link_state(
             conn, user_id=principal.user_id, bot_username=bot_username
+        )
+    return {"link": link, "expires_in_seconds": STATE_TTL_SECONDS}
+
+
+@router.post("/workspaces/{ws}/telegram/bind-link")
+async def telegram_group_bind_link(
+    ws: uuid.UUID, request: Request, principal: Principal = Depends(current_principal)
+):
+    """The admin's one-shot link that binds a Telegram group to THIS workspace
+    (`07` §13; owner ruling 2026-09-05). Opens Telegram's group picker; the
+    `/start` door does the rest. Admin floor: where a workspace's cards go is
+    an admin act (`06` §4). One live link per workspace."""
+    bot_username = _target_bot_username()
+    async with _admin(request, str(ws), principal) as session:
+        link = await channel_bind.issue_bind_state(
+            session,
+            user_id=principal.user_id,
+            workspace_id=str(ws),
+            bot_username=bot_username,
         )
     return {"link": link, "expires_in_seconds": STATE_TTL_SECONDS}
 

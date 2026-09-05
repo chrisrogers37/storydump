@@ -14,6 +14,7 @@ import pytest
 
 from src.exceptions.tenancy import TenantResolutionError
 from src.services.target import (
+    channel_bind,
     commands,
     identity,
     identity_link,
@@ -550,6 +551,71 @@ class TestWorkspaceConnect:
         assert resp.status_code == 503
         assert "INSTAGRAM_APP_ID" in resp.json()["detail"]
         assert tenant == [] and issued == {}
+
+
+class TestTelegramGroupBindLink:
+    """`POST /workspaces/{ws}/telegram/bind-link` — the admin's one-shot link
+    that opens Telegram's group picker and binds the chosen group to THIS
+    workspace (owner ruling 2026-09-05; #1175 D-3 token, D-4 same flow for the
+    Nth group). Admin floor: deciding where a workspace's cards go is an
+    admin act (`06` §4)."""
+
+    URL = f"/api/v1/workspaces/{WS}/telegram/bind-link"
+
+    @pytest.fixture
+    def bot(self, monkeypatch):
+        from src.config.settings import settings
+
+        monkeypatch.setattr(
+            settings, "TARGET_TELEGRAM_BOT_USERNAME", "storydump_app_bot", raising=False
+        )
+
+    @pytest.fixture
+    def issued(self, monkeypatch):
+        seen = {}
+
+        async def issue_bind_state(conn, *, user_id, workspace_id, bot_username):
+            seen.update(
+                user_id=user_id, workspace_id=workspace_id, bot_username=bot_username
+            )
+            return f"https://t.me/{bot_username}?startgroup=bind-st4te"
+
+        monkeypatch.setattr(channel_bind, "issue_bind_state", issue_bind_state)
+        return seen
+
+    def test_requires_a_session(self, client, bot):
+        assert client.post(self.URL).status_code == 401
+
+    def test_unconfigured_bot_is_a_503_naming_the_setting(
+        self, client, signed_in, tenant, issued, monkeypatch
+    ):
+        from src.config.settings import settings
+
+        monkeypatch.setattr(
+            settings, "TARGET_TELEGRAM_BOT_USERNAME", None, raising=False
+        )
+        resp = client.post(self.URL)
+        assert resp.status_code == 503
+        assert "TARGET_TELEGRAM_BOT_USERNAME" in resp.json()["detail"]
+        assert issued == {} and tenant == []
+
+    def test_issues_a_group_link_at_the_admin_floor(
+        self, client, signed_in, tenant, bot, issued
+    ):
+        resp = client.post(self.URL)
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["link"] == "https://t.me/storydump_app_bot?startgroup=bind-st4te"
+        assert body["expires_in_seconds"] == ig_login_oauth.STATE_TTL_SECONDS
+        assert tenant == [
+            ("uow", WS, PRINCIPAL.user_id),
+            ("gate", WS, PRINCIPAL.user_id, "admin"),
+        ]
+        assert issued == {
+            "user_id": PRINCIPAL.user_id,
+            "workspace_id": WS,
+            "bot_username": "storydump_app_bot",
+        }
 
 
 class TestTelegramLink:

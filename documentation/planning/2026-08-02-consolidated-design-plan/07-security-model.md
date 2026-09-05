@@ -33,7 +33,7 @@ CREATE TRIGGER tg_touch_session_tokens BEFORE UPDATE ON session_tokens
 
 ## §2. OAuth flows: state tokens, sign-in/link states, and reconnect binding (L.6; signin/link widening at X.3)
 
-One state machine serves four purposes. The pass-3 table could not serve sign-in structurally (`user_id`/`workspace_id` NOT NULL, session-bound issuance) — FC-5 **widens** it rather than growing a parallel table: purposes gain `signin`/`link`, context nullability becomes purpose-conditional, and the one thing session binding used to provide (CSRF) gets a purpose-appropriate replacement for the anonymous case.
+One state machine serves five purposes (`bind` joined on 2026-09-05 — §13). The pass-3 table could not serve sign-in structurally (`user_id`/`workspace_id` NOT NULL, session-bound issuance) — FC-5 **widens** it rather than growing a parallel table: purposes gain `signin`/`link`, context nullability becomes purpose-conditional, and the one thing session binding used to provide (CSRF) gets a purpose-appropriate replacement for the anonymous case.
 
 ```sql
 CREATE TABLE oauth_states (
@@ -691,4 +691,30 @@ COMMENT ON COLUMN ig_accounts.last_no_media_notice_at IS
   'transaction as the outbox row, so a rolled-back plan takes its notice with '
   'it. The dedup window is 05 (24 h) and lives in WorkerConfig, not here: the '
   'column records WHEN, never HOW OFTEN.';
+```
+
+### §13. The `bind` purpose: a Telegram group joins a workspace by a one-shot link (067, #1175 D-3/D-4)
+
+The plan ratified `0..n` Telegram bindings per workspace (D13) and never said
+how a binding is created; `bindings.bind` existed with no caller. The owner's
+ruling (2026-09-05): **a token from Settings.** An admin presses *Add a Telegram
+group*; the site mints `t.me/<bot>?startgroup=bind-<state>`, which opens
+Telegram's group picker, adds the bot to the chosen group and sends
+`/start bind-<state>` there; the `/start` door consumes the state one-shot and
+binds THAT chat to the pinned workspace. The same flow binds the second and the
+tenth group. The link is admin-floored at issue, one live link per workspace
+(issuing retires the workspace's earlier live bind states), and a group another
+workspace already holds is refused silently — `uq_binding_external` decides,
+and the router's existence-oracle rule keeps the refusal mute.
+
+```sql
+-- The bind purpose (#1175 D-3, owner ruling 2026-09-05): an admin's one-shot
+-- `startgroup` link binds the group it is opened in to the pinned workspace.
+-- `ck_oauth_state_context`'s ELSE branch already requires BOTH user_id and
+-- workspace_id for any purpose that is not signin or link, which is exactly
+-- what a bind state must pin. Drop-and-add is the repo's shape for a CHECK
+-- edit (042, 045, 046, 049, 065).
+ALTER TABLE oauth_states DROP CONSTRAINT ck_oauth_state_purpose;
+ALTER TABLE oauth_states ADD CONSTRAINT ck_oauth_state_purpose
+  CHECK (purpose IN ('connect','reconnect','signin','link','bind'));
 ```

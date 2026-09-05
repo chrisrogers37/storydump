@@ -13,6 +13,9 @@ import {
   telegramIdentityFrom,
   telegramLinkRefusalCopy,
   telegramLinkedFrom,
+  isTelegramGroupLink,
+  requestTelegramGroupLink,
+  telegramGroupLinkRefusalCopy,
 } from "./telegram-link";
 
 let captured: { url: string; init: RequestInit }[];
@@ -131,5 +134,60 @@ describe("telegramIdentityFrom", () => {
   it("is null without a telegram identity or an unreadable list", () => {
     expect(telegramIdentityFrom([{ provider: "google" }])).toBeNull();
     expect(telegramIdentityFrom(undefined)).toBeNull();
+  });
+});
+
+describe("isTelegramGroupLink — the group picker link, pinned to our bot", () => {
+  const BOT = "storydump_app_bot";
+  it("accepts the startgroup link with a bind- payload for our bot", () => {
+    expect(isTelegramGroupLink(`https://t.me/${BOT}?startgroup=bind-abc`, BOT)).toBe(true);
+  });
+  it("refuses a link- payload, another bot, http, another host, and no payload", () => {
+    expect(isTelegramGroupLink(`https://t.me/${BOT}?startgroup=link-abc`, BOT)).toBe(false);
+    expect(isTelegramGroupLink("https://t.me/other_bot?startgroup=bind-abc", BOT)).toBe(false);
+    expect(isTelegramGroupLink(`http://t.me/${BOT}?startgroup=bind-abc`, BOT)).toBe(false);
+    expect(isTelegramGroupLink(`https://evil.example/${BOT}?startgroup=bind-abc`, BOT)).toBe(false);
+    expect(isTelegramGroupLink(`https://t.me/${BOT}?startgroup=bind-`, BOT)).toBe(false);
+    expect(isTelegramGroupLink(`https://t.me/${BOT}?start=bind-abc`, BOT)).toBe(false);
+  });
+});
+
+describe("requestTelegramGroupLink", () => {
+  const WS = "11111111-1111-4111-8111-111111111111";
+  let captured: { url: string; init: RequestInit }[] = [];
+  function stub(body: unknown, status = 200) {
+    captured = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init: RequestInit) => {
+        captured.push({ url, init });
+        return { ok: status >= 200 && status < 300, status, json: async () => body } as unknown as Response;
+      }),
+    );
+  }
+  it("asks the workspace's proxy and returns the link and its lifetime", async () => {
+    stub({ link: "https://t.me/storydump_app_bot?startgroup=bind-abc", expiresInSeconds: 900 });
+    const result = await requestTelegramGroupLink(WS);
+    expect(captured[0].url).toBe(`/api/workspaces/${WS}/telegram/bind-link`);
+    expect(captured[0].init.method).toBe("POST");
+    expect(result).toEqual({
+      ok: true,
+      link: "https://t.me/storydump_app_bot?startgroup=bind-abc",
+      expiresInSeconds: 900,
+    });
+  });
+  it("carries the proxy's refusal by name", async () => {
+    stub({ error: "insufficient_role" }, 403);
+    expect(await requestTelegramGroupLink(WS)).toEqual({ ok: false, error: "insufficient_role", status: 403 });
+  });
+});
+
+describe("telegramGroupLinkRefusalCopy", () => {
+  it("names the admin floor on a role refusal", () => {
+    expect(telegramGroupLinkRefusalCopy("insufficient_role")).toMatch(/admin/i);
+    expect(telegramGroupLinkRefusalCopy("http_403")).toMatch(/admin/i);
+  });
+  it("says the deployment is not set up on a 503", () => {
+    expect(telegramGroupLinkRefusalCopy("http_503")).toMatch(/not set up/i);
   });
 });
