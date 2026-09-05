@@ -234,8 +234,10 @@ Instagram account connection uses browser-based OAuth, which requires the web se
 ### Meta Developer Setup
 
 1. Create an app at [developers.facebook.com](https://developers.facebook.com)
-2. Add the "Instagram Basic Display" product
-3. Configure OAuth redirect URI: `https://your-app.up.railway.app/auth/instagram/callback`
+2. Add the **Instagram** product and use **API setup with Instagram business login**
+3. Configure the OAuth redirect URI: `https://<your API host>/auth/instagram-login/callback`
+   (production: `https://api.storydump.app/auth/instagram-login/callback`; see
+   [`instagram-login-setup.md`](instagram-login-setup.md) Step 3)
 4. Required permissions: `pages_show_list`, `pages_read_engagement`, `instagram_basic`, `instagram_content_publish`, `business_management`
 5. Set `FACEBOOK_APP_ID` and `FACEBOOK_APP_SECRET` env vars
 

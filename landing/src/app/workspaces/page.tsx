@@ -1,6 +1,6 @@
 import { redirect } from "next/navigation";
 import { Plus } from "lucide-react";
-import { getSession } from "@/lib/session";
+import { resolveEntrySession } from "@/lib/entry-session";
 import { listWorkspaces } from "@/lib/workspaces";
 import { WorkspaceList } from "@/components/workspace/workspace-list";
 import { CreateWorkspaceForm } from "@/components/workspace/create-workspace-form";
@@ -30,8 +30,16 @@ export const metadata = {
  * state and is a better version of it, so there is no empty state to design.
  */
 export default async function WorkspacesPage() {
-  const session = await getSession().catch(() => null);
-  if (!session) redirect("/login");
+  const entry = await resolveEntrySession();
+  if (entry.kind === "signed_out") redirect("/login");
+  if (entry.kind === "unavailable") {
+    return (
+      <Shell>
+        <RouterUnavailable what="Your account" detail="Storydump is restarting or briefly unreachable — nothing was lost. Try again in a moment." retryHref="/workspaces" />
+      </Shell>
+    );
+  }
+  const session = entry.session;
 
   const workspaces = await listWorkspaces();
 

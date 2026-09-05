@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { CloudOff } from "lucide-react";
 
 /**
@@ -14,7 +15,17 @@ import { CloudOff } from "lucide-react";
  * target router is mounted, and dressing an expected state as a fault teaches
  * people to ignore the styling that will matter later.
  */
-export function RouterUnavailable({ what }: { what: string }) {
+export function RouterUnavailable({
+  what,
+  detail = "Nothing is wrong with your account. This part of Storydump is being connected — check back shortly.",
+  retryHref,
+}: {
+  what: string;
+  /** The sentence under the heading; the default is the not-yet-wired one. */
+  detail?: string;
+  /** Where "Try again" goes — the same page, for a state that clears itself. */
+  retryHref?: string;
+}) {
   return (
     <div className="flex min-h-[40vh] items-center justify-center">
       <div className="max-w-sm space-y-4 text-center">
@@ -23,11 +34,16 @@ export function RouterUnavailable({ what }: { what: string }) {
         </div>
         <div className="space-y-1.5">
           <h2 className="font-medium">{what} is not available yet.</h2>
-          <p className="text-sm text-muted-foreground">
-            Nothing is wrong with your account. This part of Storydump is being
-            connected — check back shortly.
-          </p>
+          <p className="text-sm text-muted-foreground">{detail}</p>
         </div>
+        {retryHref && (
+          <Link
+            href={retryHref}
+            className="inline-block text-sm font-medium text-foreground underline-offset-4 hover:underline"
+          >
+            Try again
+          </Link>
+        )}
       </div>
     </div>
   );
