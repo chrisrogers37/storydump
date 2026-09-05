@@ -321,11 +321,16 @@ async def google_drive_callback(
     )
     if isinstance(row, Response):
         return row
-    if row["reconnect_target"] is None:
-        # The schema still admits a target-less connect state (closing that
-        # is a follow-up); this leg cannot act on one — the source IS what
-        # the credential is for.
-        logger.warning("drive connect: state names no source")
+    if row["reconnect_target"] is None or str(row["reconnect_target"]) != str(
+        row["workspace_id"]
+    ):
+        # The grant is the WORKSPACE's (069, `07` §15): the issue leg pins the
+        # workspace as its own target. A state that names anything else — a
+        # source id from the folder-first leg this replaced, or nothing — is
+        # not one this leg can act on.
+        logger.warning(
+            "drive connect: state does not pin its workspace as the grant's owner"
+        )
         return _fail("state_refused", flow=DRIVE_FLOW)
 
     # The provider call sits between the two transactions, never inside one.
@@ -361,20 +366,12 @@ async def google_drive_callback(
     )
     async with uow.begin() as session:
         await google_drive_oauth.store_credential(
-            session,
-            workspace_id=row["workspace_id"],
-            media_source_id=row["reconnect_target"],
-            grant=grant,
+            session, workspace_id=row["workspace_id"], grant=grant
         )
-        # F4 (a), in THIS transaction — `store_credential`'s contract. The
-        # target is the state row's, never a client-supplied id: the callback
-        # acts for the workspace and source the issue leg pinned.
-        if row["reconnect_target"] is not None:
-            await media_sync.rearm_after_connect(
-                session,
-                workspace_id=row["workspace_id"],
-                source_id=row["reconnect_target"],
-            )
+        # F4 (a), in THIS transaction — `store_credential`'s contract, now
+        # workspace-wide: every gdrive folder becomes eligible again beside
+        # the write that makes it so.
+        await media_sync.rearm_after_connect(session, workspace_id=row["workspace_id"])
 
     return RedirectResponse(
         _landing("/dashboard/settings?connected=gdrive"), status_code=302

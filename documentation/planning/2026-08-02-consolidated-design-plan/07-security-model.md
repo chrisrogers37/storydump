@@ -900,3 +900,71 @@ GRANT EXECUTE ON FUNCTION fn_resolve_binding(text, text) TO svc_ingress;
 GRANT EXECUTE ON FUNCTION fn_group_member_seen(text, text, uuid) TO svc_ingress;
 GRANT EXECUTE ON FUNCTION fn_member_remove(uuid, uuid, uuid) TO svc_ingress;
 ```
+
+### §15. The workspace-level Drive grant — one Google grant per workspace (069, #1165)
+
+**Owner ruling (2026-09-05):** a workspace connects Google Drive **once**, then
+picks folders from a browser of that Drive; the same Google account may be
+connected from another workspace (a second grant, held by that workspace), and
+the same folder may be picked in more than one workspace (each holds its own
+source, media index and history). #1165 measured this as lean (b): the browse
+needs exactly the `drive.readonly` scope the folder-first leg already asked
+for, so nothing about Google verification changes; the Picker + `drive.file`
+lean (c) stays unbuilt (per-file grants, ongoing sync doubtful).
+
+What changes in `02` §2's credential table is ownership, not shape. A `gdrive`
+credential names **no owner column** — the workspace is its owner — so
+`ck_credentials_one_owner` becomes provider-conditional (`ig_login` still
+names its account; anything else names nothing), `uq_credential_per_source`
+gives way to `uq_credential_per_workspace (workspace_id, provider)` over the
+ownerless rows, and `media_source_id` stays nullable with its FK intact and no
+writer. The read door (`drive_credentials`) resolves a source's token by the
+source's **workspace**, never by the source: every folder syncs under the one
+grant, a dead grant errors every folder on its own sync (each source keeps its
+own `state`/`alerted_at`, so the disconnect alert dedups per folder as before),
+and a reconnect re-arms every `gdrive` source of the workspace in the same
+transaction as the credential write (F4 (a), now workspace-wide).
+
+The connect leg is workspace-level (`POST /workspaces/{ws}/drive/connect`, admin
+floor; the state pins the workspace as its own `reconnect_target`, so
+last-issued-wins retires a stale connect per workspace). Folders are read
+through the grant (`GET /workspaces/{ws}/drive/folders`, admin floor — the
+grant is the workspace's, but the tree it lists is a person's Drive, so members
+do not browse it) and picked into `POST /workspaces/{ws}/sources`, which now
+refuses `drive_not_connected` when no usable grant exists and arms the new
+source for its first sync. Disconnecting Drive (`disconnect_account`, no
+arguments) revokes the one grant, pauses every folder and enqueues the
+best-effort remote revoke, as F5 (a) always said. A folder the admin REMOVES is
+paused with a marker (`config.removed`); a reconnect revives the folders a dead
+grant or a disconnect paused and never a removed one, and a sync that lands
+after a removal does not un-pause it. The picker has two roots — My Drive and
+the folders shared to the account — and says when the cap cut its listing.
+
+**Stated dependency (P5, F3 (b)):** `expires_at` on a `gdrive` row is the ACCESS
+token's expiry and the read door mints nothing from the refresh token yet, so
+"connects once" holds for an hour until the read-path refresh lands — the next
+increment, tracked as its own issue, and the reason the card offers Reconnect
+while the grant is live.
+
+```sql
+-- The workspace-level Drive grant (owner ruling 2026-09-05; #1165's lean (b) — the same
+-- drive.readonly scope, the order inverted). ONE Google grant per workspace, reused by every
+-- folder it picks: a gdrive credential names NO owner column — the workspace is its owner — so
+-- the owner XOR becomes provider-conditional, and the per-source unique key becomes a
+-- per-workspace one. media_source_id stays (nullable, its FK intact) with no writer: every
+-- gdrive row is a workspace row from here on. The ADD CONSTRAINT validates the whole table, so
+-- a per-source gdrive row anywhere would abort this file (DROP and ADD roll back together);
+-- none exists — the target tier never completed a production Drive connect before this ruling.
+ALTER TABLE oauth_credentials DROP CONSTRAINT ck_credentials_one_owner;
+
+ALTER TABLE oauth_credentials ADD CONSTRAINT ck_credentials_one_owner CHECK (
+  CASE provider
+    WHEN 'ig_login' THEN ig_account_id IS NOT NULL AND media_source_id IS NULL
+    ELSE                 ig_account_id IS NULL     AND media_source_id IS NULL
+  END);
+
+DROP INDEX uq_credential_per_source;
+
+CREATE UNIQUE INDEX uq_credential_per_workspace ON oauth_credentials (workspace_id, provider)
+  WHERE ig_account_id IS NULL AND media_source_id IS NULL;
+```

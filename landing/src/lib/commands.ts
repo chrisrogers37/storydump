@@ -197,12 +197,12 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
    * and unreachable because this table did not list it, while
    * `storydump.app/privacy` §13 committed to it publicly.
    */
-  disconnect_account: submissionCommand((raw) => {
-    if (!isUuidLike(raw.source_id)) {
-      return { ok: false, error: "invalid_source_id" };
-    }
-    return { ok: true, body: { source_id: raw.source_id } };
-  }),
+  /**
+   * Disconnect the WORKSPACE's Google Drive (069, #1165): the one grant is
+   * revoked and every folder paused. No arguments — the grant is the
+   * workspace's, so there is nothing to name.
+   */
+  disconnect_account: submissionCommand(() => ({ ok: true, body: {} })),
 
   /**
    * Remove a destination (owner decision 2026-09-04): the port's

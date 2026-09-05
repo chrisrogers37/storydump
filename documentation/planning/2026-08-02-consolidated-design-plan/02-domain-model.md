@@ -642,6 +642,18 @@ CREATE INDEX ix_case_mix_current ON category_post_case_mix (workspace_id)
 -- workspace's current rows stays service-enforced (D23).
 ```
 
+**Pass 9 amendment (069, `07` §15, owner ruling 2026-09-05 — #1165 lean (b)):** a `gdrive`
+credential is owned by the **workspace**, not by a source. `ck_credentials_one_owner` is
+provider-conditional (`ig_login` names its account; `gdrive` names nothing),
+`uq_credential_per_source` gives way to `uq_credential_per_workspace (workspace_id, provider)`
+over the ownerless rows, and `media_source_id` stays nullable with its FK intact and no
+writer. One Google grant per workspace, every folder under it; the same Google account may be
+connected from another workspace (its own grant) and the same folder picked there (its own
+source). `media_sources.config` (D37's contract) gains two display-and-decision keys the
+adapter never reads: `folder_name?` (what the picker called the folder) and `removed?` (an
+admin removed it — a reconnect revives paused folders, never removed ones). The block above
+is history — 054 as it replayed — and `07` §15 is the change.
+
 ## §3. The intent ledger (heart of the system)
 
 One durable row per posting attempt, from scheduling to a single immutable terminal state, replacing the `posting_queue`/`posting_history` split whose seam bred the known bug family (RF-G1). Three derivations converged on this shape (`03` D1). Terminality is **database-enforced** — the machinery is §4.

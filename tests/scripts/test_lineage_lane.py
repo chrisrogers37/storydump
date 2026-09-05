@@ -341,6 +341,9 @@ class TestTheBoundaryIsDerivedAndLoud:
             # 068: the resolver door (#854) and the group-membership door (#1242) —
             # the eleventh and twelfth 02 §7 doors, advertised as 07 §14.
             "068_group_membership_doors.sql",
+            # 069: the workspace-level Drive grant (#1165, owner ruling 2026-09-05) —
+            # one Google grant per workspace, folders picked under it.
+            "069_workspace_drive_grant.sql",
         ], (
             f"the target lineage is {above}. If you are landing the next F.2"
             " increment, add it here — deliberately, and at the end: arm (b)"

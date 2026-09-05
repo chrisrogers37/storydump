@@ -64,9 +64,11 @@ const DRIVE: SourceRow = {
   last_sync_success_at: null,
   alerted_at: null,
   created_at: "2026-08-01T00:00:00Z",
-  credential_status: "active",
-  credential_connected_at: "2026-08-01T00:05:00Z",
+  folder_ref: "folder-abc",
+  folder_name: "Stories",
 };
+
+const GRANT = { status: "active", connected_at: "2026-08-01T00:05:00Z" };
 
 describe("deriveSettings keeps the unsourced fields unsourced", () => {
   it("returns null — not false, not 0 — for every field the API cannot answer", () => {
@@ -109,54 +111,39 @@ describe("deriveSettings keeps the unsourced fields unsourced", () => {
     expect(v.caption_style).toBeNull();
   });
 
-  it("derives the Drive connection from the CREDENTIAL, not from the source row", () => {
+  it("derives the Drive connection from the WORKSPACE's grant, not from the source row", () => {
     /*
-     * #1081. This assertion used to read `drive !== null` — connected because a
-     * source row existed — and the test asserted that as correct. It was true
-     * the instant someone pasted a folder link, before any credential was
-     * written, so the dashboard reported connected for a source that could not
-     * be read from.
+     * #1081 moved this off `drive !== null` (a source row existing). 069 moved
+     * the credential itself to the workspace, so the answer comes from
+     * `GET /workspaces/{ws}/drive` and a source row says nothing about it.
      */
-    const connected = deriveSettings(CONFIG, [DRIVE], STATS);
+    const connected = deriveSettings(CONFIG, [DRIVE], STATS, GRANT);
     expect(connected.gdrive_connected).toBe(true);
     expect(connected.media_source_type).toBe("gdrive");
     expect(connected.media_source_state).toBe("active");
   });
 
-  it("a source that exists but was never credentialed is NOT connected", () => {
-    // The case the old derivation got backwards, and the reason for #1078.
-    const uncredentialed = deriveSettings(
-      CONFIG,
-      [{ ...DRIVE, credential_status: "none", credential_connected_at: null }],
-      STATS,
-    );
-    expect(uncredentialed.gdrive_connected).toBe(false);
-    // The SOURCE is still active and still reported honestly — it exists, it is
-    // simply not connected. Those are different facts and both are carried.
-    expect(uncredentialed.media_source_state).toBe("active");
+  it("a folder without a grant is NOT connected — and is still reported as a source", () => {
+    const ungranted = deriveSettings(CONFIG, [DRIVE], STATS, { status: "none", connected_at: null });
+    expect(ungranted.gdrive_connected).toBe(false);
+    expect(ungranted.media_source_state).toBe("active");
   });
 
-  it("an erroring source with a live credential is still connected", () => {
-    /*
-     * The half of the old reasoning that was SOUND and is deliberately kept:
-     * collapsing this to "not connected" sends someone to reconnect a source
-     * that is already there. It now turns on the credential rather than on the
-     * existence of the row.
-     */
-    const erroring = deriveSettings(CONFIG, [{ ...DRIVE, state: "error" }], STATS);
+  it("an erroring folder under a live grant is still connected", () => {
+    const erroring = deriveSettings(CONFIG, [{ ...DRIVE, state: "error" }], STATS, GRANT);
     expect(erroring.gdrive_connected).toBe(true);
     expect(erroring.media_source_state).toBe("error");
   });
 
   it("expired and revoked are not connected — they are reconnect-needed", () => {
     for (const status of ["expired", "revoked"] as const) {
-      const v = deriveSettings(CONFIG, [{ ...DRIVE, credential_status: status }], STATS);
+      const v = deriveSettings(CONFIG, [DRIVE], STATS, { status, connected_at: null });
       expect(v.gdrive_connected, status).toBe(false);
     }
   });
 
-  it("no source at all is not connected", () => {
-    const none = deriveSettings(CONFIG, [], STATS);
+  it("an unknown grant — the status could not be loaded — is not connected", () => {
+    const none = deriveSettings(CONFIG, [], STATS, null);
     expect(none.gdrive_connected).toBe(false);
     expect(none.media_source_state).toBeNull();
   });

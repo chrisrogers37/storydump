@@ -22,15 +22,18 @@ from src.api.principal import COOKIE, session_delivery_gap
 from src.api.routes import auth
 from src.config.settings import settings
 from src.services.target import (
+    google_drive_oauth,
     google_oidc,
     identity,
     ig_login_oauth,
+    media_sync,
     provisioning,
     rate_counters,
     sessions,
     tenant_resolution,
 )
 from src.services.target.ig_login_oauth import OAuthStateRefused
+from tests.src.services.target.conftest import drive_grant
 from tests.src.api.conftest import (
     API,
     COOKIE_DOMAIN,
@@ -733,3 +736,109 @@ class TestInstagramCallback:
             == f"{FRONT}/auth/error?reason={reason}&flow=instagram"
         )
         assert not any(w[0] == "store" for w in writes["log"])
+
+
+class TestDriveCallback:
+    """`GET /auth/google-drive/callback` — the return half of the WORKSPACE's
+    Drive connect (069, `07` §15). The state row is trusted for what it pins,
+    which is now the workspace itself; the provider call sits between the two
+    transactions; the grant lands as the workspace's and every folder is
+    re-armed beside it."""
+
+    URL = "/auth/google-drive/callback"
+
+    @pytest.fixture
+    def drive_row(self, monkeypatch):
+        row = {
+            "state": "st-drive",
+            "purpose": "connect",
+            "provider": "gdrive",
+            "user_id": USER,
+            "workspace_id": WS,
+            "reconnect_target": WS,
+        }
+
+        async def consume_state(
+            conn, *, state, expected_provider=None, expected_purpose=None, **kw
+        ):
+            if state != "st-drive":
+                raise OAuthStateRefused("no")
+            return dict(row)
+
+        monkeypatch.setattr(auth, "consume_state", consume_state)
+        return row
+
+    @pytest.fixture
+    def exchanged(self, monkeypatch):
+        async def exchange_code(
+            client, *, code, redirect_uri, client_id, client_secret
+        ):
+            return drive_grant()
+
+        monkeypatch.setattr(google_drive_oauth, "exchange_code", exchange_code)
+
+    @pytest.fixture
+    def writes(self, monkeypatch):
+        log = []
+
+        class _Session:
+            pass
+
+        class _Uow:
+            def __init__(self, engine, tenant_id, **kw):
+                log.append(
+                    ("uow", tenant_id, kw.get("actor_user_id"), kw.get("channel"))
+                )
+
+            def begin(self):
+                from contextlib import asynccontextmanager
+
+                @asynccontextmanager
+                async def _cm():
+                    yield _Session()
+
+                return _cm()
+
+        async def store_credential(session, *, workspace_id, grant):
+            log.append(("store", workspace_id, grant.access_token))
+            return "cred-1"
+
+        async def rearm(session, *, workspace_id, source_id=None):
+            log.append(("rearm", workspace_id, source_id))
+            return 2
+
+        monkeypatch.setattr(auth, "unit_of_work", _Uow)
+        monkeypatch.setattr(google_drive_oauth, "store_credential", store_credential)
+        monkeypatch.setattr(media_sync, "rearm_after_connect", rearm)
+        return log
+
+    def test_the_grant_lands_on_the_workspace_and_every_folder_is_rearmed(
+        self, client, configured, counter, drive_row, exchanged, writes
+    ):
+        resp = client.get(
+            self.URL,
+            params={"state": "st-drive", "code": "c0de"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 302, resp.text
+        assert resp.headers["location"].endswith("/dashboard/settings?connected=gdrive")
+        assert writes == [
+            ("uow", WS, USER, "web"),
+            ("store", WS, "ya29.access"),
+            ("rearm", WS, None),
+        ]
+
+    @pytest.mark.parametrize("target", [ACCOUNT, None])
+    def test_a_state_that_pins_anything_but_the_workspace_is_refused(
+        self, client, configured, counter, drive_row, exchanged, writes, target
+    ):
+        drive_row["reconnect_target"] = target
+        resp = client.get(
+            self.URL,
+            params={"state": "st-drive", "code": "c0de"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 302
+        assert "state_refused" in resp.headers["location"]
+        assert "flow=drive" in resp.headers["location"]
+        assert writes == []

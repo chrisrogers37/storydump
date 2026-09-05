@@ -127,12 +127,26 @@ export type SourceRow = {
   last_sync_success_at: string | null;
   alerted_at: string | null;
   created_at: string;
-  /** #1078. `none` = never connected; `expired`/`revoked` = reconnect needed. */
-  credential_status: "none" | "active" | "expired" | "revoked";
-  credential_connected_at: string | null;
+  /** The Drive folder id the source reads (`config.folder_ref`). */
+  folder_ref: string | null;
+  /** The name the picker gave it (`config.folder_name`); null for a folder added by link. */
+  folder_name: string | null;
 };
 
 export type SourcesResponse = { sources: SourceRow[] };
+
+/**
+ * `GET /workspaces/{ws}/drive` — the WORKSPACE's Google Drive grant (069,
+ * `07` §15: one per workspace, every folder under it), projected as the
+ * destinations' credentials are. `none` = never connected; `expired` and
+ * `revoked` = reconnect needed. Never a token.
+ */
+export type DriveStatus = {
+  status: "none" | "active" | "expired" | "revoked" | string;
+  connected_at: string | null;
+};
+
+export type DriveStatusResponse = { drive: DriveStatus };
 
 // ── The state sets, named once ─────────────────────────────────────────────
 //
@@ -392,11 +406,12 @@ export function deriveSettings(
   config: WorkspaceConfig,
   sources: SourceRow[],
   stats: StatsResponse,
+  drive: DriveStatus | null = null,
 ): SettingsView {
   // The first Drive source, whatever its state. State is carried rather than
   // flattened into the boolean: "connected but erroring" and "not connected"
   // are different facts with different remedies.
-  const drive = sources.find((s) => s.provider === "gdrive") ?? null;
+  const firstSource = sources.find((s) => s.provider === "gdrive") ?? null;
   const byState = stats.media_by_state ?? {};
 
   return {
@@ -413,32 +428,20 @@ export function deriveSettings(
     caption_style: config.caption_style,
 
     /*
-     * #1081. This was `drive !== null` — CONNECTED because a source ROW
-     * EXISTED, which is true the instant someone pastes a folder link and
-     * before any credential is written. It said nothing about credentials at
-     * all, and it survived because until #1078 the payload carried nothing
-     * that could answer the question.
-     *
-     * `state` is NOT the replacement and was rejected separately: a source
-     * with a dead credential flips to `error`, but a source created and never
-     * credentialed is `active` too, so it separates broken from not-broken and
-     * cannot separate connected from never-connected.
-     *
-     * Note what this keeps from the old behaviour deliberately: an ERRORING
-     * source with a live credential still reads connected. That was the sound
-     * half of the reasoning here — collapsing it to "not connected" sends
-     * someone to reconnect a source that is already there. It now turns on the
-     * credential rather than on the source row.
+     * #1081 made this the CREDENTIAL's answer rather than the source row's
+     * (a folder pasted by link existed before any grant did). Since 069
+     * (#1165) the credential is the WORKSPACE's — one grant, every folder
+     * under it — so the answer comes from `GET /workspaces/{ws}/drive`, and a
+     * source row says nothing about it either way.
      *
      * BOUND, so no caller reads more confidence into this than it has: an
-     * UNDECRYPTABLE credential reads `active`. The list query cannot know a
+     * UNDECRYPTABLE grant reads `active`. The status query cannot know a
      * payload fails to decrypt without attempting decryption, so this means
-     * "a usable-looking credential exists", not "a request will succeed"
-     * (navi, #1080 review).
+     * "a usable-looking grant exists", not "a request will succeed".
      */
-    gdrive_connected: drive?.credential_status === "active",
-    media_source_type: drive?.provider ?? null,
-    media_source_state: drive?.state ?? null,
+    gdrive_connected: drive?.status === "active",
+    media_source_type: firstSource?.provider ?? null,
+    media_source_state: firstSource?.state ?? null,
     media_count: Object.values(byState).reduce((a, n) => a + n, 0),
 
     show_verbose_notifications: null,

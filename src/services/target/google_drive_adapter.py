@@ -70,6 +70,8 @@ data-loss-wearing-a-bound's-clothing this seam was designed against.
 
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
 import logging
 from typing import Any, Mapping, Optional, Protocol
 from urllib.parse import urlencode
@@ -91,6 +93,34 @@ logger = logging.getLogger(__name__)
 
 #: Drive v3 listing endpoint. Host is already on the egress allowlist.
 FILES_URL = "https://www.googleapis.com/drive/v3/files"
+#: The folder browser's mime (#1165 lean (b)).
+FOLDER_MIME = "application/vnd.google-apps.folder"
+#: What a Drive id looks like. The browser splices `parent` into a `q`
+#: string, so a value outside this shape is refused before any request —
+#: not because Drive would be fooled, but because a query built from an
+#: unchecked string is the class of bug that only fails later and elsewhere.
+FOLDER_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+#: The most folders the browser will page through for one parent.
+FOLDER_LIST_CAP = 500
+
+
+#: The picker's second root: folders shared TO the connected account, which
+#: have no `root` parent and would otherwise be unreachable now that the
+#: paste-a-link form is gone (review of #1246). A sentinel, not a Drive id.
+SHARED_ROOT = "shared-with-me"
+
+
+def is_folder_id(value: object) -> bool:
+    return isinstance(value, str) and FOLDER_ID_RE.fullmatch(value) is not None
+
+
+@dataclass(frozen=True)
+class FolderPage:
+    """What the browser returns: the folders, and whether the cap cut them."""
+
+    folders: list[dict]
+    truncated: bool = False
+
 
 #: Requested per file. `md5Checksum` is the content hash without a download.
 FILE_FIELDS = "id,name,mimeType,size,modifiedTime,md5Checksum"
@@ -104,15 +134,15 @@ _KIND_BY_PREFIX = (("image/", "image"), ("video/", "video"))
 
 
 class TokenProvider(Protocol):
-    """Resolves a usable Drive access token for one media source.
+    """Resolves a usable Drive access token — the WORKSPACE's grant (069).
 
-    `workspace_id` is not redundant with `source_id`: `oauth_credentials` is
-    tenant-scoped by RLS, so the read needs the workspace GUC applied or it
-    returns nothing under `svc_worker` and an absent credential becomes
-    indistinguishable from an unreadable one.
+    `source_id` names the folder being synced, for the provider's own
+    messages; it is `None` from the folder browser, which syncs nothing.
+    `workspace_id` is the key: the credential is the workspace's, the read is
+    bound to it by the WHERE and, where RLS is live, by the tenant GUC too.
     """
 
-    async def __call__(self, source_id: str, *, workspace_id: str) -> str: ...
+    async def __call__(self, source_id: Optional[str], *, workspace_id: str) -> str: ...
 
 
 def _kind_for(mime_type: str) -> Optional[str]:
@@ -220,6 +250,56 @@ class GoogleDriveAdapter:
         if next_token:
             checkpoint_out["page_token"] = next_token
         return items, checkpoint_out
+
+    async def list_folders(
+        self, *, parent: Optional[str], workspace_id: str
+    ) -> FolderPage:
+        """The folders under `parent` — the Drive root when None, the
+        folders shared to the account when `SHARED_ROOT` — as ``{"id",
+        "name"}`` rows in name order: the picker's read (#1165 lean (b)). The
+        same grant and the same floored transport as `list_changes`; the token
+        is the WORKSPACE's (069), so the provider is asked with no source.
+        Pages are followed to `FOLDER_LIST_CAP`, and the page says when it
+        was cut rather than looking complete.
+        """
+        if parent is not None and parent != SHARED_ROOT and not is_folder_id(parent):
+            raise DriveTerminalError("parent is not a Drive folder id")
+        token = await self._token_provider(None, workspace_id=workspace_id)
+        scope = (
+            "sharedWithMe = true"
+            if parent == SHARED_ROOT
+            else f"'{parent or 'root'}' in parents"
+        )
+        params = {
+            "q": f"{scope} and mimeType = '{FOLDER_MIME}' and trashed = false",
+            "fields": "nextPageToken,files(id,name)",
+            "pageSize": "200",
+            "orderBy": "name_natural",
+            "spaces": "drive",
+            "supportsAllDrives": "true",
+            "includeItemsFromAllDrives": "true",
+        }
+        folders: list[dict] = []
+        page_token: Optional[str] = None
+        while True:
+            if page_token:
+                params["pageToken"] = page_token
+            payload = await self._get(
+                f"{FILES_URL}?{urlencode(params)}",
+                token,
+                source_id=f"workspace {workspace_id} (folder browser)",
+            )
+            for entry in payload.get("files") or []:
+                fid, name = entry.get("id"), entry.get("name")
+                if isinstance(fid, str) and isinstance(name, str):
+                    folders.append({"id": fid, "name": name})
+            page_token = payload.get("nextPageToken")
+            if len(folders) > FOLDER_LIST_CAP:
+                return FolderPage(folders[:FOLDER_LIST_CAP], truncated=True)
+            if not page_token:
+                return FolderPage(folders, truncated=False)
+            if len(folders) == FOLDER_LIST_CAP:
+                return FolderPage(folders, truncated=True)
 
     async def probe(
         self,

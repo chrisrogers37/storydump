@@ -176,10 +176,11 @@ class MediaSource(TargetBase):
 
 
 class OAuthCredential(TargetBase):
-    """One encrypted credential payload, owned by EXACTLY ONE of an ig_account
-    or a media_source — `ck_credentials_one_owner` enforces the exclusivity with
-    `num_nonnulls`, and the two partial unique indexes then scope liveness per
-    owner kind."""
+    """One encrypted credential payload. An `ig_login` credential is owned by
+    exactly one ig_account; a `gdrive` credential is owned by the WORKSPACE
+    (069, #1165 — one Google grant per workspace, folders picked under it) and
+    names no owner column. `ck_credentials_one_owner` is provider-conditional,
+    and the two partial unique indexes scope liveness per owner kind."""
 
     __tablename__ = "oauth_credentials"
 
@@ -203,8 +204,12 @@ class OAuthCredential(TargetBase):
         CheckConstraint(
             "state IN ('active','expired','revoked')", name="ck_credentials_state"
         ),
+        # 069 (#1165): provider-conditional. An `ig_login` credential names its
+        # account; a `gdrive` credential names nothing — the workspace is its owner.
         CheckConstraint(
-            "num_nonnulls(ig_account_id, media_source_id) = 1",
+            "CASE provider"
+            " WHEN 'ig_login' THEN ig_account_id IS NOT NULL AND media_source_id IS NULL"
+            " ELSE ig_account_id IS NULL AND media_source_id IS NULL END",
             name="ck_credentials_one_owner",
         ),
         ForeignKeyConstraint(
@@ -228,12 +233,11 @@ class OAuthCredential(TargetBase):
             postgresql_where=text("ig_account_id IS NOT NULL"),
         ),
         Index(
-            "uq_credential_per_source",
+            "uq_credential_per_workspace",
             "workspace_id",
-            "media_source_id",
             "provider",
             unique=True,
-            postgresql_where=text("media_source_id IS NOT NULL"),
+            postgresql_where=text("ig_account_id IS NULL AND media_source_id IS NULL"),
         ),
         Index(
             "ix_credentials_refresh_due",

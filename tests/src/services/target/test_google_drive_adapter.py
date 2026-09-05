@@ -26,6 +26,7 @@ from src.services.target.drive_adapter import (
 )
 from src.services.target.egress import EgressPolicy
 from src.services.target.google_drive_adapter import (
+    SHARED_ROOT,
     GoogleDriveAdapter,
     _listing_query,
 )
@@ -194,8 +195,9 @@ class TestListChanges:
 
     @pytest.mark.asyncio
     async def test_both_ids_reach_the_token_provider(self):
-        """The credential is per-source AND RLS-scoped per workspace, so an
-        adapter that dropped either would resolve another tenant's credential."""
+        """The workspace id is the credential's key (069) and the source id
+        names the folder; an adapter that dropped either would resolve the
+        wrong tenant's grant or mislabel the folder it was syncing."""
         record: list = []
         handler, _ = _json_handler({"files": []})
         await _adapter(handler, record=record).list_changes(
@@ -503,3 +505,101 @@ class TestCredentialFailurePropagates:
         adapter = _adapter(handler, token=DriveCredentialDead("no credential"))
         with pytest.raises(DriveCredentialDead):
             await adapter.list_changes(CONFIG, None, source_id=SRC, workspace_id=WS)
+
+
+class TestListFolders:
+    """The folder browser (#1165 lean (b)): the same `drive.readonly` grant,
+    the same floored transport, one more `q`."""
+
+    FOLDER_MIME = "application/vnd.google-apps.folder"
+
+    def _folder(self, fid, name):
+        return {"id": fid, "name": name}
+
+    @pytest.mark.asyncio
+    async def test_the_root_lists_folders_only_and_asks_the_workspace_token(self):
+        record = []
+        handler, seen = _json_handler({"files": [self._folder("f1", "Trips")]})
+        page = await _adapter(handler, record=record).list_folders(
+            parent=None, workspace_id=WS
+        )
+        assert (
+            page.folders == [{"id": "f1", "name": "Trips"}] and page.truncated is False
+        )
+        assert record == [(None, WS)]
+        q = seen["request"].url.params["q"]
+        assert "'root' in parents" in q and f"mimeType = '{self.FOLDER_MIME}'" in q
+        assert "trashed = false" in q
+        assert seen["request"].url.params["fields"] == "nextPageToken,files(id,name)"
+        assert seen["request"].headers["authorization"] == "Bearer tok"
+
+    @pytest.mark.asyncio
+    async def test_a_parent_narrows_the_query(self):
+        handler, seen = _json_handler({"files": []})
+        page = await _adapter(handler).list_folders(parent="abc_-123", workspace_id=WS)
+        assert page.folders == []
+        assert "'abc_-123' in parents" in seen["request"].url.params["q"]
+
+    @pytest.mark.asyncio
+    async def test_the_shared_root_lists_what_was_shared_to_the_account(self):
+        handler, seen = _json_handler(
+            {"files": [self._folder("s1", "From the client")]}
+        )
+        page = await _adapter(handler).list_folders(parent=SHARED_ROOT, workspace_id=WS)
+        assert page.folders == [{"id": "s1", "name": "From the client"}]
+        q = seen["request"].url.params["q"]
+        assert "sharedWithMe = true" in q and "in parents" not in q
+
+    @pytest.mark.asyncio
+    async def test_pages_are_followed_to_the_end(self):
+        calls = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request.url.params.get("pageToken"))
+            if len(calls) == 1:
+                return httpx.Response(
+                    200,
+                    json={"files": [self._folder("f1", "A")], "nextPageToken": "p2"},
+                )
+            return httpx.Response(200, json={"files": [self._folder("f2", "B")]})
+
+        page = await _adapter(handler).list_folders(parent=None, workspace_id=WS)
+        assert [f["id"] for f in page.folders] == ["f1", "f2"]
+        assert calls == [None, "p2"] and page.truncated is False
+
+    @pytest.mark.asyncio
+    async def test_the_cap_cuts_the_listing_and_says_so(self, monkeypatch):
+        from src.services.target import google_drive_adapter as mod
+
+        monkeypatch.setattr(mod, "FOLDER_LIST_CAP", 3)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.params.get("pageToken"):
+                return httpx.Response(200, json={"files": [self._folder("f4", "D")]})
+            return httpx.Response(
+                200,
+                json={
+                    "files": [self._folder(f"f{i}", n) for i, n in enumerate("ABC", 1)],
+                    "nextPageToken": "p2",
+                },
+            )
+
+        page = await _adapter(handler).list_folders(parent=None, workspace_id=WS)
+        assert [f["id"] for f in page.folders] == ["f1", "f2", "f3"]
+        assert page.truncated is True
+
+    @pytest.mark.asyncio
+    async def test_a_parent_that_is_not_a_drive_id_is_refused_before_any_request(self):
+        handler, seen = _json_handler({"files": []})
+        for bad in ("x' or 1=1", "abc\n", ""):
+            with pytest.raises(DriveTerminalError):
+                await _adapter(handler).list_folders(parent=bad, workspace_id=WS)
+        assert "request" not in seen
+
+    @pytest.mark.asyncio
+    async def test_a_dead_grant_is_named_as_such(self):
+        handler, _ = _json_handler(
+            {"error": {"message": "Invalid Credentials"}}, status=401
+        )
+        with pytest.raises(DriveCredentialDead):
+            await _adapter(handler).list_folders(parent=None, workspace_id=WS)

@@ -398,10 +398,11 @@ def _seed_tenant(conn, name: str) -> dict:
             (ws, f"ig:quarantined-{name}"),
         )
         cur.execute(
+            # 069: a gdrive credential is the WORKSPACE's — no owner column.
             "INSERT INTO oauth_credentials"
-            " (workspace_id, provider, encrypted_payload, media_source_id)"
-            " VALUES (%s, 'gdrive', 'ct', %s)",
-            (ws, ids["src"]),
+            " (workspace_id, provider, encrypted_payload)"
+            " VALUES (%s, 'gdrive', 'ct')",
+            (ws,),
         )
         cur.execute(
             "INSERT INTO post_locks (workspace_id, media_item_id, kind)"
