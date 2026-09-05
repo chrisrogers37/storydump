@@ -31,7 +31,7 @@ redeploys both.
 
 | # | Fix | Owner | Status |
 |---|---|---|---|
-| 1 | Add `https://api.storydump.app/auth/instagram-login/callback` to the Meta app's Instagram business login → OAuth redirect URIs (Use cases → Instagram → Business login settings). Not the App settings › Advanced "Authorize callback URL", which Instagram Login does not read. | operator | in progress |
+| 1 | Add `https://api.storydump.app/auth/instagram-login/callback` to the Meta app's Instagram business login → OAuth redirect URIs (Use cases → Instagram → Business login settings). Not the App settings › Advanced "Authorize callback URL", which Instagram Login does not read. | operator | done 2026-09-05 — the list gained the `api.storydump.app` URI (plus the deauthorize and data-deletion URLs); the next connect succeeded end to end |
 | 2 | Correct the setup guide (real host, current Meta product path, API-only variables) and `cloud-deployment.md`. | — | done, #1236 |
 | 3 | Entry pages tell "unavailable" from "signed out": `resolveEntrySession`; an unreachable API renders `RouterUnavailable` with *Try again* instead of redirecting to `/login`. | — | done, #1236 |
 | 4 | Zero-downtime hand-over on the API: `RAILWAY_DEPLOYMENT_OVERLAP_SECONDS=60` on the API service (no Railway fee; ~1 extra minute of API compute per deploy). | operator | proposed |
