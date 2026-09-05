@@ -1,6 +1,6 @@
 import { redirect } from "next/navigation";
 import { cookies } from "next/headers";
-import { getSession } from "@/lib/session";
+import { resolveEntrySession } from "@/lib/entry-session";
 import { listWorkspaces } from "@/lib/workspaces";
 import { CreateWorkspaceForm } from "@/components/workspace/create-workspace-form";
 import { SignOutButton } from "@/components/auth/sign-out-button";
@@ -37,8 +37,25 @@ export const metadata = {
  * the workspace, on /dashboard/connections.
  */
 export default async function WelcomePage() {
-  const session = await getSession().catch(() => null);
-  if (!session) redirect("/login");
+  const entry = await resolveEntrySession();
+  if (entry.kind === "signed_out") redirect("/login");
+  if (entry.kind === "unavailable") {
+    // Not "signed out": the cookie is fine, the API could not be asked (a
+    // deploy in progress, most often). Sending someone to /login here is the
+    // bounce that looked like a broken sign-in on 2026-09-04.
+    return (
+      <div className="flex min-h-svh flex-col items-center justify-center bg-background px-4 py-16">
+        <div className="w-full max-w-md">
+          <RouterUnavailable
+            what="Your account"
+            detail="Storydump is restarting or briefly unreachable — nothing was lost. Try again in a moment."
+            retryHref="/welcome"
+          />
+        </div>
+      </div>
+    );
+  }
+  const session = entry.session;
 
   // Signed in on the way to an invitation — finish that instead of greeting
   // them. The cookie is cleared where it is spent, in the accept handler.
