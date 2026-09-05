@@ -352,6 +352,8 @@ export type SettingsView = {
   posts_per_day: number | null;
   posting_hours_start: number | null;
   posting_hours_end: number | null;
+  /** IANA zone the window is read in (`workspaces.tz`, `059` `fn_next_slot`). */
+  tz: string | null;
   is_paused: boolean | null;
   dry_run_mode: boolean | null;
   /** The workspace row calls this `api_publishing_enabled`. Renamed once, here. */
@@ -401,6 +403,7 @@ export function deriveSettings(
     posts_per_day: config.posts_per_day,
     posting_hours_start: config.posting_hours_start,
     posting_hours_end: config.posting_hours_end,
+    tz: config.tz,
     is_paused: config.is_paused,
     dry_run_mode: config.dry_run_mode,
     enable_instagram_api: config.api_publishing_enabled,
