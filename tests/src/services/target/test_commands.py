@@ -107,7 +107,6 @@ class TestEveryCommandHasAFloorAndAnExecutorSlot:
         assert set(port.UNBUILT) == {
             "autopost_now",
             "move_account",
-            "remove_member",
             "change_role",
             "transfer_ownership",
             "resolve_review",
@@ -421,3 +420,101 @@ class TestACancellingCardOffersNoLever:
         with pytest.raises(port.CommandRefused) as info:
             await getattr(command_executors, kind)(object(), command)
         assert info.value.reason == "illegal_transition"
+
+
+class TestRemoveMember:
+    """`06`: "an admin removes membership explicitly" — the revoke for every
+    join edge. Owner and self are refused by name; a non-member is not found."""
+
+    def _command(self, user_id="u-2", actor="u-1"):
+        return port.Command(
+            kind="remove_member",
+            workspace_id="ws",
+            actor_user_id=actor,
+            channel="web",
+            args={"user_id": user_id},
+        )
+
+    async def test_removes_a_member_and_reports_the_role(self, monkeypatch):
+        from src.services.target import command_executors, workspaces
+
+        async def remove_member(session, *, workspace_id, user_id, by_user_id):
+            assert (workspace_id, user_id, by_user_id) == ("ws", "u-2", "u-1")
+            return "member"
+
+        monkeypatch.setattr(workspaces, "remove_member", remove_member)
+        result = await command_executors.remove_member(object(), self._command())
+        assert result.outcome == "executed"
+        assert result.data == {"user_id": "u-2", "removed_role": "member"}
+
+    @pytest.mark.parametrize(
+        "raised, reason",
+        [
+            (LookupError("not_found"), "not_found"),
+            (ValueError("owner"), "illegal_transition"),
+            (ValueError("self"), "illegal_transition"),
+        ],
+    )
+    async def test_refusals_are_named(self, monkeypatch, raised, reason):
+        from src.services.target import command_executors, workspaces
+
+        async def remove_member(session, **kw):
+            raise raised
+
+        monkeypatch.setattr(workspaces, "remove_member", remove_member)
+        with pytest.raises(port.CommandRefused) as info:
+            await command_executors.remove_member(object(), self._command())
+        assert info.value.reason == reason
+
+    def test_it_is_built_at_the_admin_floor(self):
+        assert port.REGISTRY["remove_member"] is not None
+        assert port.ROLE_FLOOR["remove_member"] == "admin"
+
+
+class TestRemoveMemberGoesThroughTheDoor:
+    """The runtime never deletes: `workspaces.remove_member` asks the
+    `fn_member_remove` door and maps its named answers."""
+
+    class _Exec:
+        def __init__(self, row):
+            self.row, self.calls = row, []
+
+        async def execute(self, statement, params=None):
+            self.calls.append((str(statement), params))
+            row = self.row
+
+            class _R:
+                def first(self_inner):
+                    return row
+
+            return _R()
+
+    async def test_removed_reports_the_role_and_names_the_door(self):
+        from src.services.target import workspaces
+
+        ex = self._Exec(("removed", "member"))
+        role = await workspaces.remove_member(
+            ex, workspace_id="ws", user_id="u2", by_user_id="u1"
+        )
+        assert role == "member"
+        ((sql, params),) = ex.calls
+        assert "fn_member_remove(" in sql and "DELETE" not in sql.upper()
+        assert params == {"ws": "ws", "u": "u2", "by": "u1"}
+
+    @pytest.mark.parametrize(
+        "row, exc, text_",
+        [
+            (("not_found", None), LookupError, "not_found"),
+            (None, LookupError, "not_found"),
+            (("owner", "owner"), ValueError, "owner"),
+            (("self", None), ValueError, "self"),
+        ],
+    )
+    async def test_the_doors_refusals_come_back_by_name(self, row, exc, text_):
+        from src.services.target import workspaces
+
+        with pytest.raises(exc) as info:
+            await workspaces.remove_member(
+                self._Exec(row), workspace_id="ws", user_id="u2", by_user_id="u1"
+            )
+        assert str(info.value) == text_

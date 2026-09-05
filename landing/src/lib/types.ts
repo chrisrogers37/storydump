@@ -62,3 +62,18 @@ export interface ChannelBinding {
 export interface BindingsResponse {
   bindings: ChannelBinding[];
 }
+
+/** A row of `GET /workspaces/{ws}/members`. `added_by_user_id` null on a member
+ * who joined from a bound Telegram group (`07` §14) rather than by invitation. */
+export interface WorkspaceMember {
+  user_id: string;
+  role: "owner" | "admin" | "member" | string;
+  added_by_user_id: string | null;
+  created_at: string;
+  primary_email: string | null;
+  user_state: string;
+}
+
+export interface MembersResponse {
+  members: WorkspaceMember[];
+}

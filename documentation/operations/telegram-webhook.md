@@ -60,7 +60,8 @@ python -m scripts.telegram_webhook register --drop-pending   # first arming of a
    exported the door is `NOT CHECKED`, and that counts as a failure.
 
 `register` calls `setWebhook` with the door URL, the secret and messages only
-(the ingress serves `/start` taps and nothing else yet — #854), then runs
+(the ingress serves `/start` taps and group messages; chat-inbound commands are
+still #854), then runs
 `status`. `--drop-pending` discards updates Telegram queued before now: use
 it when first arming a bot, never when re-registering a live one, because
 real taps would be lost. `deregister` deletes the webhook.
@@ -68,10 +69,11 @@ real taps would be lost. `deregister` deletes the webhook.
 ## What a tap does today
 
 `/start link-…` attaches the tapping Telegram account to the user who minted
-the link; `/start inv-…` accepts an invitation. **The bot does not reply** —
-the API holds no bot token and enqueues nothing on this path (#854 covers
-chat-inbound generally). The person sees the result on the site: Settings ›
-Integrations shows *Linked* with the Telegram display name after a reload.
+the link; `/start bind-…` binds the group it was opened in (see *Groups*);
+`/start inv-…` accepts an invitation. **The bot answers a handled tap in the
+chat** (since #1239) and stays silent on a refusal. A bare `/start` in a group
+is treated as speech (see *Members*), never a greeting. The person sees the
+result on the site after a reload.
 
 ## Order of operations
 
@@ -107,3 +109,15 @@ committed. Refusals stay silent.
 deleted chat) makes the next delivery fail definitively; the worker revokes the
 binding and stops minting for it. A group upgraded to a supergroup is followed
 to its new chat id. Only a 401 from Telegram means the credential itself died.
+
+**Members.** Anyone who speaks in a bound group and has linked their Telegram
+(Settings › Integrations › Link Telegram) becomes a member of that workspace
+automatically, at the member role — silently, the first time the bot sees them
+post or are added. Owners and admins keep their role. Leaving the group removes
+nobody; an admin removes people from Settings › General › Members.
+
+**Precondition for members:** under Telegram's default *privacy mode* a bot in
+a group receives only commands, replies, mentions and service messages — so it
+would see almost nobody speak. Either send `/setprivacy` to BotFather, pick the
+bot, and choose *Disable* (then remove and re-add the bot to existing groups, as
+Telegram requires), or make the bot an admin of each group.

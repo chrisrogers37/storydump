@@ -81,16 +81,19 @@ async def resolve_chat(executor, channel: str, external_ref: str) -> ResolvedTen
     Only ``state='active'`` bindings resolve: a revoked binding refuses
     (distinct reason, because "this chat WAS bound" routes differently from
     "never seen"). An RLS-filtered empty read and a genuinely absent row are
-    both refusals — under-privileged execution fails CLOSED here, which the
-    harness pins as a measured fact rather than a hope.
+    both refusals. Since 068 the read goes through the `fn_resolve_binding`
+    door, so `svc_ingress` resolves a bound chat pre-context (#854 closed);
+    an unknown chat still refuses by name.
     """
     if channel not in CHAT_CHANNELS:
         raise TenantResolutionError("unknown_channel", channel)
+    # Through the `07` §14 door (#854 (a)): svc_ingress has no pre-context read
+    # of channel_bindings, and the door exposes exactly the one row asked for.
     row = (
         await executor.execute(
             text(
-                "SELECT id, workspace_id, state FROM channel_bindings"
-                " WHERE channel = :channel AND external_ref = :ref"
+                "SELECT o_binding_id, o_workspace_id, o_state"
+                "  FROM fn_resolve_binding(:channel, :ref)"
             ),
             {"channel": channel, "ref": external_ref},
         )
