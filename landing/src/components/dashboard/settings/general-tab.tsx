@@ -21,6 +21,7 @@ import {
   submitSettingsChange,
 } from "@/lib/command-client";
 import type { SettingsView } from "@/lib/dashboard-payloads";
+import { slotLabels, timeZoneOptions } from "@/lib/schedule";
 import { CaptionStyleCard } from "./caption-style-card";
 import { DangerZoneCard } from "./danger-zone-card";
 import { RepostCadenceCard } from "./repost-cadence-card";
@@ -229,6 +230,7 @@ export function GeneralTab({
   const [hoursEnd, setHoursEnd] = useState(
     settings.posting_hours_end === null ? "" : String(settings.posting_hours_end),
   );
+  const [tz, setTz] = useState(settings.tz ?? "UTC");
   const [savingSchedule, setSavingSchedule] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -288,6 +290,7 @@ export function GeneralTab({
       posts_per_day: postsPerDay,
       posting_hours_start: Number(hoursStart),
       posting_hours_end: Number(hoursEnd),
+      tz,
     });
     setSavingSchedule(false);
 
@@ -366,7 +369,7 @@ export function GeneralTab({
           <CardTitle className="text-base">Posting Schedule</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="grid gap-4 sm:grid-cols-3">
+          <div className="grid gap-4 sm:grid-cols-4">
             <div className="space-y-2">
               <Label htmlFor="posts-per-day">Posts per day</Label>
               {settings.posts_per_day === null ? (
@@ -421,7 +424,45 @@ export function GeneralTab({
                 </Select>
               )}
             </div>
+            <div className="space-y-2">
+              <Label>Time zone</Label>
+              <Select value={tz} onValueChange={setTz} disabled={!editable}>
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {timeZoneOptions(tz).map((zone) => (
+                    <SelectItem key={zone} value={zone}>
+                      {zone}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
           </div>
+          {/*
+            The clock's slots, in the zone above — computed the way
+            `fn_next_slot` computes them, from the values on screen, so the
+            sentence changes as the person changes the schedule. A workspace
+            born on the web starts on UTC, and "2 PM" in UTC is 10 AM in New
+            York; this line is where that becomes visible before it becomes a
+            missed slot.
+          */}
+          {slotLabels(
+            hoursStart === "" ? null : Number(hoursStart),
+            hoursEnd === "" ? null : Number(hoursEnd),
+            postsPerDay,
+          ).length > 0 && (
+            <p className="text-sm text-muted-foreground">
+              Posts go out at{" "}
+              {slotLabels(
+                hoursStart === "" ? null : Number(hoursStart),
+                hoursEnd === "" ? null : Number(hoursEnd),
+                postsPerDay,
+              ).join(", ")}{" "}
+              ({tz}).
+            </p>
+          )}
           {editable && (
             <Button onClick={saveSchedule} disabled={savingSchedule}>
               {savingSchedule ? "Saving..." : "Save Schedule"}
