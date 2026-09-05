@@ -209,6 +209,17 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
    * `active → disabled` edge. The row stays for history and for the connect
    * that brings the account back, so this is not a delete.
    */
+  /**
+   * Remove a person from the workspace (`06`: "an admin removes membership
+   * explicitly") — the revoke for every join edge, the Telegram one included.
+   */
+  remove_member: submissionCommand((raw) => {
+    if (!isUuidLike(raw.user_id)) {
+      return { ok: false, error: "invalid_user_id" };
+    }
+    return { ok: true, body: { user_id: raw.user_id } };
+  }),
+
   disable_account: submissionCommand((raw) => {
     if (!isUuidLike(raw.ig_account_id)) {
       return { ok: false, error: "invalid_account_id" };

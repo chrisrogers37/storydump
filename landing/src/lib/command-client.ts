@@ -233,3 +233,30 @@ export function settingsRefusalCopy(reason: unknown, status?: number): string {
   }
   return "That did not save. Nothing changed — try again shortly.";
 }
+
+/**
+ * Remove a person from the workspace (`06`: "an admin removes membership
+ * explicitly"). The owner cannot be removed here and nobody removes
+ * themselves; the API says which.
+ */
+export function submitRemoveMember(workspaceId: string, userId: string) {
+  return submitCommand(workspaceId, "remove_member", { user_id: userId });
+}
+
+export function removeMemberRefusalCopy(reason: unknown, status?: number): string {
+  if (status === 403 || reason === "insufficient_role") {
+    return "You need to be an admin of this workspace to remove a member.";
+  }
+  switch (reason) {
+    case "not_found":
+      return "That person is no longer a member. Reload the page.";
+    case "illegal_transition":
+      return "The owner cannot be removed, and you cannot remove yourself. Nothing changed.";
+    case REPLAYED_ERROR:
+      return "That did not go through — the app sent it under a key the server had already seen. Reload and try again; report this if it repeats.";
+    case "unauthenticated":
+    case "http_401":
+      return notAuthenticatedCopy("Nothing changed.");
+  }
+  return "Could not remove that member. Nothing changed — try again shortly.";
+}

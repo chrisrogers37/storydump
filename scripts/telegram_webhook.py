@@ -54,8 +54,9 @@ SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token"
 TOKEN_VAR = "TARGET_TELEGRAM_BOT_TOKEN"
 SECRET_VAR = "TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN"
 BOT_VAR = "TARGET_TELEGRAM_BOT_USERNAME"
-#: The update kinds the target ingress serves today: `/start` taps ride
-#: `message`; nothing else is dispatched yet (#854), so nothing else is asked for.
+#: The update kinds the target ingress serves today: `/start` taps and group
+#: messages both ride `message`; chat-inbound commands (#854) are not dispatched,
+#: so nothing else is asked for.
 ALLOWED_UPDATES = ["message"]
 TIMEOUT_S = 20
 

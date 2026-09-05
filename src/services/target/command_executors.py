@@ -427,6 +427,31 @@ async def reconnect_account(session, command: Command) -> CommandResult:
     return await _begin_drive_link(session, command, expect="reconnect")
 
 
+async def remove_member(session, command: Command) -> CommandResult:
+    """`06`: "an admin removes membership explicitly." The revoke for every
+    join edge — invitations and the Telegram group path alike. The owner is
+    never removable here (`transfer_ownership` is that edge) and nobody
+    removes themselves through this command; both are `illegal_transition`."""
+    user_id = _arg(command, "user_id")
+    try:
+        role = await workspaces.remove_member(
+            session,
+            workspace_id=command.workspace_id,
+            user_id=user_id,
+            by_user_id=command.actor_user_id,
+        )
+    except LookupError:
+        raise CommandRefused("not_found", f"member {user_id}") from None
+    except ValueError as exc:
+        raise CommandRefused(
+            "illegal_transition",
+            "the owner cannot be removed"
+            if str(exc) == "owner"
+            else "you cannot remove yourself",
+        ) from None
+    return CommandResult("executed", {"user_id": user_id, "removed_role": role})
+
+
 async def disable_account(session, command: Command) -> CommandResult:
     """`02`'s "active ↔ disabled (user command, audited)" edge, the disabling
     half — what the web calls Remove (owner decision 2026-09-04).

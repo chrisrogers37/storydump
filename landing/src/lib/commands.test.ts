@@ -61,6 +61,7 @@ describe("every offered command can produce an idempotency key", () => {
     restore_workspace: { submission_id: UUID },
     disconnect_account: { submission_id: UUID, source_id: UUID2 },
     disable_account: { submission_id: UUID, ig_account_id: UUID2 },
+    remove_member: { submission_id: UUID, user_id: UUID2 },
     account_settings_change: {
       submission_id: UUID,
       ig_account_id: UUID2,

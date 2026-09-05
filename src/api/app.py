@@ -11,8 +11,9 @@ What it mounts, and why each lives where it does:
 - ``/auth`` — sign-in hosted on the API (`07` §1), see `routes/auth.py`.
 - ``/api/v1`` — reads as resources, writes as the `01` vocabulary, see
   `routes/v1.py`.
-- ``/webhooks/telegram`` — the W4 ingress route, wired for the `/start` door
-  only (#1183). Chat-inbound resolution remains #854 and is NOT enabled
+- ``/webhooks/telegram`` — the W4 ingress route: the `/start` door (#1183)
+  and the group join path (#1242). Chat-inbound COMMANDS remain #854 and are
+  not dispatched
   (`TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN` + `app.state.ingress`) rather than
   writing a new one.
 - ``/health`` — Railway's probe (`railway.toml`), which now also says whether
@@ -382,17 +383,13 @@ def create_app(
     # runtime login is verified after a deploy.
     app.state.db_role = None
 
-    # The W4 ingress seam, WIRED for the `/start` door only (#1183).
+    # The W4 ingress seam: the `/start` door (#1183) and the group join path
+    # (#1242, on #854's resolver door `fn_resolve_binding` — `07` §14).
     #
-    # ⚠ THIS DOES NOT MAKE CHAT-INBOUND WORK, and the distinction is the whole
-    # reason #1183 was filed separately from #854. A `/start` payload carries
-    # its own resolution — `link-<state>` names its user, `inv-<token>` names
-    # its workspace — so both resolve against tables `svc_ingress` already
-    # reaches pre-context (`oauth_states`, `user_identities`, `users` are all
-    # role-scoped `USING (true)`; the `fn_invitation_accept` door is already
-    # granted). An ORDINARY chat message carries neither and still needs
-    # #854's resolver, because `channel_bindings` is GUC-filtered for
-    # `svc_ingress` and there is no pre-context path to a workspace.
+    # ⚠ THIS DOES NOT DISPATCH CHAT-INBOUND COMMANDS. A `/start` payload
+    # carries its own resolution; a group message resolves its chat through
+    # the door. An "approve" typed in a group is still not dispatched — that
+    # is what #854 now tracks.
     #
     # Wired only when an engine exists: without one there is nothing to
     # `connect` to, and a runtime whose `connect` fails would convert the

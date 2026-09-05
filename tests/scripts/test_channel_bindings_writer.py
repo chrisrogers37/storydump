@@ -436,7 +436,7 @@ class TestTheStartDoorBindsAsSvcIngressWithNoContextOfItsOwn:
             world,
             "INSERT INTO user_identities (user_id, provider, external_id, display_name)"
             " VALUES (%s, 'telegram', %s, 'ada')"
-            " ON CONFLICT (provider, external_id) DO NOTHING",
+            " ON CONFLICT (user_id, provider) DO UPDATE SET external_id = EXCLUDED.external_id",
             (str(world["a"]["user"]), tg_user_id),
         )
 
@@ -453,7 +453,7 @@ class TestTheStartDoorBindsAsSvcIngressWithNoContextOfItsOwn:
             ),
         )
 
-    def _tap(self, world, state: str, *, tg_user_id: str, chat_id: str):
+    def _tap(self, world, state: str, *, tg_user_id: str, external_ref: str):
         from sqlalchemy.pool import NullPool
 
         from src.services.target import channel_bind
@@ -473,7 +473,7 @@ class TestTheStartDoorBindsAsSvcIngressWithNoContextOfItsOwn:
                         StartContext(
                             payload=state,
                             telegram_user_id=tg_user_id,
-                            chat_id=chat_id,
+                            chat_id=external_ref,
                             chat_type="supergroup",
                             display_name="ada",
                         ),
@@ -489,7 +489,7 @@ class TestTheStartDoorBindsAsSvcIngressWithNoContextOfItsOwn:
         self._linked_admin(world, "tg-admin-1")
         state = self._mint(world).rsplit("bind-", 1)[1]
         result = self._tap(
-            world, state, tg_user_id="tg-admin-1", chat_id="-1009000000001"
+            world, state, tg_user_id="tg-admin-1", external_ref="-1009000000001"
         )
         assert result.handled and result.outcome == "bound", result.outcome
         row = _row(world, "-1009000000001")
@@ -499,7 +499,7 @@ class TestTheStartDoorBindsAsSvcIngressWithNoContextOfItsOwn:
         self._linked_admin(world, "tg-admin-1")
         state = self._mint(world).rsplit("bind-", 1)[1]
         result = self._tap(
-            world, state, tg_user_id="tg-stranger", chat_id="-1009000000002"
+            world, state, tg_user_id="tg-stranger", external_ref="-1009000000002"
         )
         assert not result.handled and result.outcome == "tapper_not_minter"
         assert _row(world, "-1009000000002") is None
@@ -551,3 +551,197 @@ class TestRetiringAndFollowingAChat:
             )
             is False
         )
+
+
+class TestTheJoinPathThroughTheDoors:
+    """`06`'s Telegram join path on postgres:15, driven as a bare `svc_ingress`
+    connection with no GUCs (the door sets its own): a linked person speaking
+    in a bound group becomes a member; nothing else writes."""
+
+    def _link(self, world, user_id, tg_user_id):
+        _migrate(
+            world,
+            "INSERT INTO user_identities (user_id, provider, external_id, display_name)"
+            " VALUES (%s, 'telegram', %s, 'joiner')"
+            " ON CONFLICT (user_id, provider) DO UPDATE SET external_id = EXCLUDED.external_id",
+            (str(user_id), tg_user_id),
+        )
+
+    def _observe(self, world, *, external_ref, tg_user_id, chat_type="supergroup"):
+        from sqlalchemy.pool import NullPool
+
+        from src.services.target import membership_sync
+        from src.services.target.unit_of_work import asyncpg_url
+
+        async def go():
+            engine = create_async_engine(
+                asyncpg_url(world["ingress"]), poolclass=NullPool
+            )
+            try:
+                async with engine.connect() as conn:
+                    who = (await conn.execute(text("SELECT current_user"))).scalar()
+                    assert who == "svc_ingress", who
+                    result = await membership_sync.observe(
+                        conn,
+                        chat_type=chat_type,
+                        external_ref=external_ref,
+                        telegram_user_id=tg_user_id,
+                    )
+                    await conn.commit()
+                    return result
+            finally:
+                await engine.dispose()
+
+        return asyncio.run(go())
+
+    def _role(self, world, ws, user):
+        row = fetch_one(
+            world["stream"],
+            "SELECT role FROM workspace_members WHERE workspace_id = %s AND user_id = %s",
+            (str(ws), str(user)),
+        )
+        return None if row is None else row[0]
+
+    def test_a_linked_person_in_a_bound_group_becomes_a_member(self, world):
+        _bind(world, "-1009000000100")
+        joiner = world["b"]["user"]  # a real user, not yet in workspace A
+        self._link(world, joiner, "tg-joiner-1")
+        first = self._observe(
+            world, external_ref="-1009000000100", tg_user_id="tg-joiner-1"
+        )
+        assert first.outcome == "joined" and first.handled
+        assert self._role(world, world["a"]["ws"], joiner) == "member"
+        again = self._observe(
+            world, external_ref="-1009000000100", tg_user_id="tg-joiner-1"
+        )
+        assert again.outcome == "already_member"
+
+    def test_an_owner_seen_speaking_is_never_downgraded(self, world):
+        _bind(world, "-1009000000101")
+        self._link(world, world["a"]["user"], "tg-owner-a")
+        result = self._observe(
+            world, external_ref="-1009000000101", tg_user_id="tg-owner-a"
+        )
+        assert result.outcome == "already_member"
+        assert self._role(world, world["a"]["ws"], world["a"]["user"]) == "owner"
+
+    def test_an_unknown_identity_or_an_unbound_chat_writes_nothing(self, world):
+        _bind(world, "-1009000000102")
+        assert (
+            self._observe(
+                world, external_ref="-1009000000102", tg_user_id="tg-nobody"
+            ).outcome
+            == "unknown_identity"
+        )
+        self._link(world, world["b"]["user"], "tg-joiner-2")
+        count = lambda: fetch_one(  # noqa: E731 — a two-line probe, read twice
+            world["stream"],
+            "SELECT count(*) FROM workspace_members WHERE user_id = %s",
+            (str(world["b"]["user"]),),
+        )[0]
+        before = count()
+        assert (
+            self._observe(
+                world, external_ref="-1009000000999", tg_user_id="tg-joiner-2"
+            ).outcome
+            == "unbound_chat"
+        )
+        assert count() == before, "an unbound chat must add no membership anywhere"
+
+    def test_a_revoked_binding_is_named_for_the_join_path(self, world):
+        _bind(world, "-1009000000103")
+        row = fetch_one(
+            world["stream"],
+            "SELECT id FROM channel_bindings WHERE external_ref = %s",
+            ("-1009000000103",),
+        )
+        run(world, lambda s: bindings.revoke_by_id(s, binding_id=str(row[0])))
+        self._link(world, world["b"]["user"], "tg-joiner-3")
+        assert (
+            self._observe(
+                world, external_ref="-1009000000103", tg_user_id="tg-joiner-3"
+            ).outcome
+            == "revoked_chat"
+        )
+
+    def test_the_join_is_attributed_to_the_joiner_in_the_audit(self, world):
+        _bind(world, "-1009000000105")
+        joiner = world["b"]["user"]
+        self._link(world, joiner, "tg-joiner-5")
+        self._observe(world, external_ref="-1009000000105", tg_user_id="tg-joiner-5")
+        row = fetch_one(
+            world["stream"],
+            "SELECT actor_kind, actor_user_id::text, channel FROM audit_events"
+            " WHERE entity_kind = 'member' AND entity_id::text = %s"
+            " ORDER BY created_at DESC LIMIT 1",
+            (str(joiner),),
+        )
+        assert row is not None, "the governance audit row for the join is missing"
+        assert row == ("user", str(joiner), "telegram")
+
+    def test_a_revoked_chat_and_a_closing_workspace_are_named(self, world):
+        _bind(world, "-1009000000106")
+        rowb = fetch_one(
+            world["stream"],
+            "SELECT id FROM channel_bindings WHERE external_ref = %s",
+            ("-1009000000106",),
+        )
+        self._link(world, world["b"]["user"], "tg-joiner-6")
+        run(world, lambda s: bindings.revoke_by_id(s, binding_id=str(rowb[0])))
+        assert (
+            self._observe(
+                world, external_ref="-1009000000106", tg_user_id="tg-joiner-6"
+            ).outcome
+            == "revoked_chat"
+        )
+        _bind(world, "-1009000000107", ids=world["b"])
+        _migrate(
+            world,
+            "UPDATE workspaces SET state = 'offboarding' WHERE id = %s",
+            (str(world["b"]["ws"]),),
+        )
+        try:
+            self._link(world, world["a"]["user"], "tg-owner-a6")
+            assert (
+                self._observe(
+                    world, external_ref="-1009000000107", tg_user_id="tg-owner-a6"
+                ).outcome
+                == "workspace_inactive"
+            )
+        finally:
+            _migrate(
+                world,
+                "UPDATE workspaces SET state = 'active' WHERE id = %s",
+                (str(world["b"]["ws"]),),
+            )
+
+    def test_an_admin_removes_a_telegram_joined_member_and_never_the_owner(self, world):
+        from src.services.target import workspaces
+
+        _bind(world, "-1009000000108")
+        joiner = world["b"]["user"]
+        self._link(world, joiner, "tg-joiner-8")
+        self._observe(world, external_ref="-1009000000108", tg_user_id="tg-joiner-8")
+        assert self._role(world, world["a"]["ws"], joiner) == "member"
+        removed = run(
+            world,
+            lambda s: workspaces.remove_member(
+                s,
+                workspace_id=str(world["a"]["ws"]),
+                user_id=str(joiner),
+                by_user_id=str(world["a"]["user"]),
+            ),
+        )
+        assert removed == "member"
+        assert self._role(world, world["a"]["ws"], joiner) is None
+        with pytest.raises(ValueError):
+            run(
+                world,
+                lambda s: workspaces.remove_member(
+                    s,
+                    workspace_id=str(world["a"]["ws"]),
+                    user_id=str(world["a"]["user"]),
+                    by_user_id=str(joiner),
+                ),
+            )
+        assert self._role(world, world["a"]["ws"], world["a"]["user"]) == "owner"

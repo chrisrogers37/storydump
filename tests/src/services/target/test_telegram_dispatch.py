@@ -27,8 +27,9 @@ class TestWhatItRefusesIsSaidOutLoud:
     @pytest.mark.asyncio
     async def test_a_non_start_update_is_NAMED_not_dropped(self):
         """A silent drop is indistinguishable from a dispatcher that had
-        nothing to do — which is exactly what would make the `/start`-only
-        bound undetectable. #854 stays open; this must SAY so."""
+        nothing to do — which is exactly what would make the bound
+        undetectable. Chat-inbound commands (#854) stay unserved; this must
+        SAY so."""
         d = telegram_dispatch.TelegramDispatcher()
         r = await d(
             None,
@@ -110,3 +111,135 @@ class TestTheCompositionRoot:
         monkeypatch.setattr(app_module, "_engine_from_env", lambda env: None)
         application = app_module.create_app(env={})
         assert application.state.ingress is None
+
+
+class TestGroupMessagesReachTheMembershipStep:
+    """A person speaking in a group is observed (#1242); a DM, a callback
+    query or a senderless message is still NOT_A_START — said, not dropped."""
+
+    @pytest.mark.asyncio
+    async def test_a_group_message_is_observed(self, monkeypatch):
+        seen = {}
+
+        async def observe(conn, *, chat_type, external_ref, telegram_user_id):
+            seen.update(
+                chat_type=chat_type,
+                external_ref=external_ref,
+                telegram_user_id=telegram_user_id,
+            )
+            from src.services.target.start_router import StartResult
+
+            return StartResult(outcome="joined", handled=True)
+
+        monkeypatch.setattr(telegram_dispatch.membership_sync, "observe", observe)
+        d = telegram_dispatch.TelegramDispatcher()
+        r = await d(
+            None,
+            {
+                "message": {
+                    "text": "hi",
+                    "from": {"id": 42},
+                    "chat": {"id": -100777, "type": "supergroup"},
+                }
+            },
+        )
+        assert r.outcome == "joined"
+        assert seen == {
+            "chat_type": "supergroup",
+            "external_ref": "-100777",
+            "telegram_user_id": "42",
+        }
+
+    @pytest.mark.asyncio
+    async def test_a_dm_is_still_not_a_start(self, monkeypatch):
+        async def observe(conn, **kw):
+            raise AssertionError("a DM must not be observed as a group message")
+
+        monkeypatch.setattr(telegram_dispatch.membership_sync, "observe", observe)
+        d = telegram_dispatch.TelegramDispatcher()
+        r = await d(
+            None,
+            {
+                "message": {
+                    "text": "hello",
+                    "from": {"id": 1},
+                    "chat": {"id": 2, "type": "private"},
+                }
+            },
+        )
+        assert r.outcome == telegram_dispatch.NOT_A_START
+
+
+class TestABareStartInAGroupIsSpeechNotAGreeting:
+    @pytest.mark.asyncio
+    async def test_bare_start_in_a_group_is_observed_and_never_greets(
+        self, monkeypatch
+    ):
+        seen = []
+
+        async def observe(conn, **kw):
+            seen.append(kw["telegram_user_id"])
+            from src.services.target.start_router import StartResult
+
+            return StartResult(outcome="already_member", handled=False)
+
+        monkeypatch.setattr(telegram_dispatch.membership_sync, "observe", observe)
+        d = telegram_dispatch.TelegramDispatcher()
+        r = await d(
+            None,
+            {
+                "message": {
+                    "text": "/start@storydump_app_bot",
+                    "from": {"id": 7},
+                    "chat": {"id": -5, "type": "group"},
+                }
+            },
+        )
+        assert seen == ["7"] and r.reply is None
+
+    @pytest.mark.asyncio
+    async def test_people_added_by_a_service_message_are_observed(self, monkeypatch):
+        seen = []
+
+        async def observe(conn, **kw):
+            seen.append(kw["telegram_user_id"])
+            from src.services.target.start_router import StartResult
+
+            return StartResult(outcome="joined", handled=True)
+
+        monkeypatch.setattr(telegram_dispatch.membership_sync, "observe", observe)
+        d = telegram_dispatch.TelegramDispatcher()
+        r = await d(
+            None,
+            {
+                "message": {
+                    "from": {"id": 1},
+                    "chat": {"id": -5, "type": "supergroup"},
+                    "new_chat_members": [
+                        {"id": 2},
+                        {"id": 3, "is_bot": True},
+                        {"id": 4},
+                    ],
+                }
+            },
+        )
+        assert seen == ["1", "2", "4"] and r.outcome == "joined"
+
+    @pytest.mark.asyncio
+    async def test_a_sync_error_is_named_and_never_raised(self, monkeypatch):
+        async def observe(conn, **kw):
+            raise RuntimeError("door missing")
+
+        monkeypatch.setattr(telegram_dispatch.membership_sync, "observe", observe)
+        d = telegram_dispatch.TelegramDispatcher()
+        r = await d(
+            None,
+            {
+                "message": {
+                    "text": "hi",
+                    "from": {"id": 1},
+                    "chat": {"id": -5, "type": "group"},
+                }
+            },
+        )
+        assert r.outcome == telegram_dispatch.MEMBERSHIP_SYNC_FAILED and not r.handled

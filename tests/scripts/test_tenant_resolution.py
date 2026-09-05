@@ -185,17 +185,23 @@ class TestChatResolutionAsAPrivilegedReader:
             assert e.value.reason == "unknown_channel"
 
 
-class TestChatResolutionAsIngressIsFailClosed:
-    """The decision-fork evidence, measured: under the printed §7 policies
-    svc_ingress has no pre-context read of channel_bindings, so a binding
-    that PROVABLY exists (the privileged test above resolves it) refuses as
-    unknown. Fail-closed, never fallback — and the day a resolver door
-    lands, this test goes red and is updated deliberately."""
+class TestChatResolutionAsIngressGoesThroughTheDoor:
+    """The day the resolver door landed (068, #854 (a)) — updated
+    deliberately, as the fail-closed pin said it would be: svc_ingress now
+    resolves a bound chat pre-context through `fn_resolve_binding`, exposing
+    exactly one row; an unknown chat still refuses by name."""
 
-    async def test_existing_active_binding_refuses_as_ingress(self, world):
+    async def test_existing_active_binding_resolves_as_ingress(self, world):
+        async with _txn(world["ingress"], expect_user="svc_ingress") as conn:
+            resolved = await resolve_chat(
+                conn, "telegram_group", world["a"]["external_ref"]
+            )
+            assert str(resolved.workspace_id) == str(world["a"]["ws"])
+
+    async def test_an_unknown_chat_still_refuses_as_ingress(self, world):
         async with _txn(world["ingress"], expect_user="svc_ingress") as conn:
             with pytest.raises(TenantResolutionError) as e:
-                await resolve_chat(conn, "telegram_group", world["a"]["external_ref"])
+                await resolve_chat(conn, "telegram_group", "-100999999")
             assert e.value.reason == "unknown_binding"
 
 

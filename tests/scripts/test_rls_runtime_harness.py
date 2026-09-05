@@ -310,6 +310,15 @@ DOORS = {
         "svc_worker",
         "SELECT fn_auth_plane_sweep(interval '1 day', interval '1 day', interval '1 day', 100)",
     ),
+    "fn_resolve_binding": (
+        "svc_ingress",
+        "SELECT * FROM fn_resolve_binding('telegram_group', '-1000')",
+    ),
+    "fn_group_member_seen": (
+        "svc_ingress",
+        "SELECT * FROM fn_group_member_seen('telegram_group', '-1000',"
+        " '00000000-0000-0000-0000-000000000000'::uuid)",
+    ),
     "fn_invitation_accept": (
         "svc_ingress",
         "SELECT * FROM fn_invitation_accept('nope',"
@@ -318,6 +327,14 @@ DOORS = {
     # The tenth door (064, #1037): a user-plane READ, so its exercising call
     # carries no arguments — the caller is app.actor_user_id, read inside the
     # body, and an unclaimed session reads zero rows rather than anyone's.
+    # The thirteenth door (068, #1242): the revoke for every join edge. Three
+    # uuids that name nobody — the door answers not_found, never a raise.
+    "fn_member_remove": (
+        "svc_ingress",
+        "SELECT * FROM fn_member_remove('00000000-0000-4000-8000-000000000001'::uuid,"
+        " '00000000-0000-4000-8000-000000000002'::uuid,"
+        " '00000000-0000-4000-8000-000000000003'::uuid)",
+    ),
     "fn_memberships_for_caller": (
         "svc_ingress",
         "SELECT * FROM fn_memberships_for_caller()",
@@ -885,7 +902,7 @@ class TestDoorsAreExercisedAndExclusive:
         with pytest.raises(psycopg2.errors.InsufficientPrivilege):
             _exec(other, call)
 
-    def test_the_catalog_agrees_ten_doors_and_these_grants(self, target):
+    def test_the_catalog_agrees_thirteen_doors_and_these_grants(self, target):
         rows = _exec(
             target["owner_stream"],
             "SELECT p.proname, r.rolname FROM pg_proc p"

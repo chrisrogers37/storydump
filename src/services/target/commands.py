@@ -242,6 +242,9 @@ def _build_registry() -> dict[str, Optional[Executor]]:
             # `02` "active ↔ disabled (user command, audited)", the disabling
             # half — the web's Remove (owner decision 2026-09-04).
             "disable_account": ex.disable_account,
+            # `06`: "an admin removes membership explicitly" — the revoke for
+            # every join edge, the Telegram one included (#1242 review).
+            "remove_member": ex.remove_member,
             "settings_change": ex.settings_change,
             "account_settings_change": ex.account_settings_change,
             "pause_workspace": ex.pause_workspace,

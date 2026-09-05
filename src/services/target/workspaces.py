@@ -677,3 +677,30 @@ async def change_account_settings(
     if result.rowcount == 0:
         return None
     return cleaned
+
+
+async def remove_member(
+    executor, *, workspace_id: str, user_id: str, by_user_id: str
+) -> str:
+    """`remove_member` (`06`: "an admin removes membership explicitly" — the
+    revoke for every join edge, the Telegram one included). Returns the role
+    the person held. The runtime never deletes (the 057 grant matrix): the
+    delete lives in the `fn_member_remove` door, and this is its one caller.
+    Refusals come back by name — the owner cannot be removed
+    (`transfer_ownership` is that edge), nobody removes themselves, a
+    non-member is `not_found`."""
+    row = (
+        await executor.execute(
+            text(
+                "SELECT o_outcome, o_role FROM fn_member_remove("
+                "CAST(:ws AS uuid), CAST(:u AS uuid), CAST(:by AS uuid))"
+            ),
+            {"ws": str(workspace_id), "u": str(user_id), "by": str(by_user_id)},
+        )
+    ).first()
+    outcome = row[0] if row is not None else "not_found"
+    if outcome == "removed":
+        return str(row[1])
+    if outcome == "not_found":
+        raise LookupError("not_found")
+    raise ValueError(outcome)
