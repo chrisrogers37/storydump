@@ -32,6 +32,8 @@ documentation/
 
 ## Planning & Architecture
 
+- `planning/investigations/` — production investigations (`/investigate-app`): one folder per incident, the record plus its fix plans.
+
 ### Consolidated design plan (2026-08-02) — authoritative
 **[2026-08-02-consolidated-design-plan/](planning/2026-08-02-consolidated-design-plan/README.md)** - RATIFIED, IN EXECUTION
 - The single plan for the multi-tenant refactor: fixed constraints FC-0..FC-9, target architecture, executable domain model, decision record D1–D41, the increment sequence (Phases 0 → F → L → M → X → S), operational numbers, product lifecycles, security model
