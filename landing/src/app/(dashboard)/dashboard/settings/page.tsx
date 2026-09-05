@@ -12,7 +12,8 @@ import { RouterUnavailable } from "@/components/workspace/router-unavailable";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { GeneralTab } from "@/components/dashboard/settings/general-tab";
 import { AccountsTab } from "@/components/dashboard/settings/accounts-tab";
-import type { BindingsResponse } from "@/lib/types";
+import type { BindingsResponse, MembersResponse } from "@/lib/types";
+import { MembersCard } from "@/components/dashboard/settings/members-card";
 import { IntegrationsTab } from "@/components/dashboard/settings/integrations-tab";
 
 /**
@@ -96,12 +97,13 @@ export default async function SettingsPage({
   // predict is worse than a missing one, and the port refuses non-owners anyway.
   const isOwner = membership?.role === "owner";
 
-  const [configResult, accountsResult, sourcesResult, bindingsResult, statsResult] =
+  const [configResult, accountsResult, sourcesResult, bindingsResult, membersResult, statsResult] =
     await Promise.all([
       workspaceFetch<WorkspaceConfig>("", workspaceId),
       workspaceFetch<AccountsResponse>("accounts", workspaceId),
       workspaceFetch<SourcesResponse>("sources", workspaceId),
       workspaceFetch<BindingsResponse>("bindings", workspaceId),
+      workspaceFetch<MembersResponse>("members", workspaceId),
       workspaceFetch<StatsResponse>("stats", workspaceId),
     ]);
 
@@ -191,6 +193,14 @@ export default async function SettingsPage({
             restorableUntil={configResult.data.restorable_until}
             isOwner={isOwner}
           />
+          <div className="mt-6">
+            <MembersCard
+              workspaceId={workspaceId}
+              members={membersResult.ok ? (membersResult.data.members ?? []) : null}
+              currentUserId={session.userId}
+              canRemove={membership?.role === "owner" || membership?.role === "admin"}
+            />
+          </div>
         </TabsContent>
 
         {/*

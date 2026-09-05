@@ -273,9 +273,9 @@ class TestAgainstTheRealDocs:
         # reauth-prompt leg (062) 20, #982's refresh-leg provider guard (063)
         # 21, §10's #1037 memberships door (064) 22, §11's
         # `alert_stranded_sources` kind (065) 23, and §12's #1090 D3 no-media
-        # notice marker (066) 24, and §13's #1175 bind purpose (067) makes it
-        # 25.
-        assert classes.count("normative") == 25
+        # notice marker (066) 24, §13's #1175 bind purpose (067) 25, and §14's
+        # #854/#1242 resolver + group-membership doors (068) make it 26.
+        assert classes.count("normative") == 26
         assert classes.count("illustrative") == 4
 
     def test_real_stream_expands_the_fifteen_policies(self):

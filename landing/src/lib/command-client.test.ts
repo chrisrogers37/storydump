@@ -31,6 +31,8 @@ import {
   submitSettingsChange,
   submitDisableAccount,
   disableAccountRefusalCopy,
+  submitRemoveMember,
+  removeMemberRefusalCopy,
 } from "./command-client";
 
 const WS = "11111111-1111-4111-8111-111111111111";
@@ -341,5 +343,24 @@ describe("disableAccountRefusalCopy", () => {
 
   it("has a sentence for the unknown case that promises nothing", () => {
     expect(disableAccountRefusalCopy("something_new")).toMatch(/nothing changed/i);
+  });
+});
+
+describe("removing a member — remove_member (the revoke for every join edge)", () => {
+  const MEMBER = "66666666-6666-4666-8666-666666666666";
+
+  it("sends the user id under a fresh submission id, to the port's door", async () => {
+    stubFetch({ outcome: "executed", user_id: MEMBER, removed_role: "member" }, 200);
+    const result = await submitRemoveMember(WS, MEMBER);
+    expect(result.ok).toBe(true);
+    expect(captured[0].url).toBe(`/api/workspaces/${WS}/commands/remove_member`);
+    expect(sentBody(0).user_id).toBe(MEMBER);
+    expect(portKey(0, "remove_member")).toMatch(/^remove_member:/);
+  });
+
+  it("names the admin floor, the owner rule, and a stale screen", () => {
+    expect(removeMemberRefusalCopy("http_403", 403)).toMatch(/admin/i);
+    expect(removeMemberRefusalCopy("illegal_transition")).toMatch(/owner/i);
+    expect(removeMemberRefusalCopy("not_found")).toMatch(/reload/i);
   });
 });

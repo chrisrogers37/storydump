@@ -157,11 +157,12 @@ async def telegram_webhook(request: Request) -> dict[str, str]:
     if runtime is None:
         # THE SEAM. Refused before admission, on purpose. 503 rather than 200
         # so the delivery is not consumed: see the ordering rule in the module
-        # docstring. #854 replaces this branch by wiring `app.state.ingress`.
+        # docstring. The composition root wires `app.state.ingress` whenever an
+        # engine exists; this branch is what a deployment without one answers.
         logger.warning(
             "telegram webhook PARKED: no dispatcher wired, delivery NOT admitted "
             "(update_id=%s). The provider will redeliver; nothing is lost. "
-            "This clears when the #854 resolver is wired at the composition root.",
+            "This clears when the composition root wires app.state.ingress.",
             update_id,
         )
         raise HTTPException(status_code=503, detail="ingress not wired")

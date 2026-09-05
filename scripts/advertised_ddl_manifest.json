@@ -207,6 +207,13 @@
       "label": "§13 bind purpose (067, #1175 D-3/D-4) — ck_oauth_state_purpose widened to bind",
       "doc": "07-security-model.md",
       "ordinal": 11
+    },
+    {
+      "sha256": "eb961ae7c50c9887936fa792a97c426a3a73f375bfa3dce93a197cff21322b7f",
+      "class": "normative",
+      "label": "§14 resolver + group-membership doors (068, #854, #1242) — fn_resolve_binding, fn_group_member_seen",
+      "doc": "07-security-model.md",
+      "ordinal": 12
     }
   ],
   "policy_expansion": {
