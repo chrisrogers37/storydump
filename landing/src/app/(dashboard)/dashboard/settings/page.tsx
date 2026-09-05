@@ -12,6 +12,7 @@ import { RouterUnavailable } from "@/components/workspace/router-unavailable";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { GeneralTab } from "@/components/dashboard/settings/general-tab";
 import { AccountsTab } from "@/components/dashboard/settings/accounts-tab";
+import type { BindingsResponse } from "@/lib/types";
 import { IntegrationsTab } from "@/components/dashboard/settings/integrations-tab";
 
 /**
@@ -95,11 +96,12 @@ export default async function SettingsPage({
   // predict is worse than a missing one, and the port refuses non-owners anyway.
   const isOwner = membership?.role === "owner";
 
-  const [configResult, accountsResult, sourcesResult, statsResult] =
+  const [configResult, accountsResult, sourcesResult, bindingsResult, statsResult] =
     await Promise.all([
       workspaceFetch<WorkspaceConfig>("", workspaceId),
       workspaceFetch<AccountsResponse>("accounts", workspaceId),
       workspaceFetch<SourcesResponse>("sources", workspaceId),
+      workspaceFetch<BindingsResponse>("bindings", workspaceId),
       workspaceFetch<StatsResponse>("stats", workspaceId),
     ]);
 
@@ -216,6 +218,7 @@ export default async function SettingsPage({
           <IntegrationsTab
             settings={settings}
             sources={sourcesResult.data.sources ?? []}
+            bindings={bindingsResult.ok ? (bindingsResult.data.bindings ?? []) : null}
             workspaceId={workspaceId}
             telegramLinked={session.telegramLinked}
             telegramDisplayName={session.telegramDisplayName}

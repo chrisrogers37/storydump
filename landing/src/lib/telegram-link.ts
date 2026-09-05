@@ -106,3 +106,67 @@ export function telegramIdentityFrom(
   const name = typeof found.display_name === "string" ? found.display_name.trim() : "";
   return { displayName: name || null };
 }
+
+// --- Telegram groups: the workspace-level bind link (`07` §13) ---------------
+
+const BIND_PREFIX = "bind-";
+
+/**
+ * Our bot's `startgroup` link with a `bind-` payload — the link that opens
+ * Telegram's group picker and binds the chosen group to a workspace. Pinned to
+ * the configured bot for the same reason `isTelegramLink` is.
+ */
+export function isTelegramGroupLink(value: string, bot: string | undefined = botName): boolean {
+  if (!isHttpsUrlOnHost(value, TELEGRAM_HOST)) return false;
+  const parsed = new URL(value);
+  if (bot && parsed.pathname !== `/${bot}`) return false;
+  const start = parsed.searchParams.get("startgroup") ?? "";
+  return start.startsWith(BIND_PREFIX) && start.length > BIND_PREFIX.length;
+}
+
+export async function requestTelegramGroupLink(workspaceId: string): Promise<TelegramLinkResult> {
+  let response: Response;
+  try {
+    response = await fetch(`/api/workspaces/${workspaceId}/telegram/bind-link`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
+  } catch {
+    return { ok: false, error: "unreachable", status: 0 };
+  }
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = typeof data?.error === "string" ? data.error : `http_${response.status}`;
+    return { ok: false, error, status: response.status };
+  }
+  const link = data?.link;
+  if (typeof link !== "string" || !isTelegramGroupLink(link)) {
+    return { ok: false, error: "malformed_link", status: response.status };
+  }
+  const expiresInSeconds = typeof data?.expiresInSeconds === "number" ? data.expiresInSeconds : 0;
+  return { ok: true, link, expiresInSeconds };
+}
+
+/**
+ * The command a person can send IN the group when Telegram did not deliver
+ * the picker's `/start` (the bot was already a member): `/start@<bot> <payload>`.
+ * The door parses the `@bot` suffix Telegram appends in groups.
+ */
+export function startCommandFor(groupLink: string, bot: string | undefined = botName): string {
+  const payload = new URL(groupLink).searchParams.get("startgroup") ?? "";
+  return bot ? `/start@${bot} ${payload}` : `/start ${payload}`;
+}
+
+export function telegramGroupLinkRefusalCopy(reason: unknown): string {
+  switch (reason) {
+    case "link_telegram_first":
+    case "http_409":
+      return "Link your own Telegram account first (above), then add a group — only you will be able to use the link.";
+    case "insufficient_role":
+    case "http_403":
+      return "You need to be an admin of this workspace to add a Telegram group.";
+    case "http_503":
+      return "Telegram is not set up on this deployment yet. Nothing changed.";
+  }
+  return telegramLinkRefusalCopy(reason);
+}

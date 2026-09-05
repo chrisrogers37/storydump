@@ -423,3 +423,131 @@ class TestAFreedChatIsBindableAgain:
             "audit_events has no FK to workspaces (§0: audit outlives the "
             "tenant), so the deleted tenant's binding history is still there"
         )
+
+
+class TestTheStartDoorBindsAsSvcIngressWithNoContextOfItsOwn:
+    """The lane on the door's own connection shape (#1240 review): a bare
+    `svc_ingress` connection with NO GUCs set by the caller — the state row
+    supplies them. The fixture that first proved the lane ran as the schema
+    owner with the actor preset, which is exactly not the door."""
+
+    def _linked_admin(self, world, tg_user_id: str) -> None:
+        _migrate(
+            world,
+            "INSERT INTO user_identities (user_id, provider, external_id, display_name)"
+            " VALUES (%s, 'telegram', %s, 'ada')"
+            " ON CONFLICT (provider, external_id) DO NOTHING",
+            (str(world["a"]["user"]), tg_user_id),
+        )
+
+    def _mint(self, world):
+        from src.services.target import channel_bind
+
+        return run(
+            world,
+            lambda s: channel_bind.issue_bind_state(
+                s,
+                user_id=str(world["a"]["user"]),
+                workspace_id=str(world["a"]["ws"]),
+                bot_username="storydump_app_bot",
+            ),
+        )
+
+    def _tap(self, world, state: str, *, tg_user_id: str, chat_id: str):
+        from sqlalchemy.pool import NullPool
+
+        from src.services.target import channel_bind
+        from src.services.target.start_router import StartContext
+        from src.services.target.unit_of_work import asyncpg_url
+
+        async def go():
+            engine = create_async_engine(
+                asyncpg_url(world["ingress"]), poolclass=NullPool
+            )
+            try:
+                async with engine.connect() as conn:
+                    who = (await conn.execute(text("SELECT current_user"))).scalar()
+                    assert who == "svc_ingress", who
+                    result = await channel_bind.handle_bind(
+                        conn,
+                        StartContext(
+                            payload=state,
+                            telegram_user_id=tg_user_id,
+                            chat_id=chat_id,
+                            chat_type="supergroup",
+                            display_name="ada",
+                        ),
+                    )
+                    await conn.commit()
+                    return result
+            finally:
+                await engine.dispose()
+
+        return asyncio.run(go())
+
+    def test_the_minting_admin_binds_a_group_through_the_bare_door(self, world):
+        self._linked_admin(world, "tg-admin-1")
+        state = self._mint(world).rsplit("bind-", 1)[1]
+        result = self._tap(
+            world, state, tg_user_id="tg-admin-1", chat_id="-1009000000001"
+        )
+        assert result.handled and result.outcome == "bound", result.outcome
+        row = _row(world, "-1009000000001")
+        assert row is not None and str(row[0]) == str(world["a"]["ws"])
+
+    def test_a_stranger_holding_the_link_binds_nothing(self, world):
+        self._linked_admin(world, "tg-admin-1")
+        state = self._mint(world).rsplit("bind-", 1)[1]
+        result = self._tap(
+            world, state, tg_user_id="tg-stranger", chat_id="-1009000000002"
+        )
+        assert not result.handled and result.outcome == "tapper_not_minter"
+        assert _row(world, "-1009000000002") is None
+
+
+class TestRetiringAndFollowingAChat:
+    def test_revoke_by_id_keeps_the_row_and_flips_it(self, world):
+        _bind(world, "-1009000000010")
+        row = fetch_one(
+            world["stream"],
+            "SELECT id FROM channel_bindings WHERE external_ref = %s",
+            ("-1009000000010",),
+        )
+        moved = run(world, lambda s: bindings.revoke_by_id(s, binding_id=str(row[0])))
+        assert moved is True
+        assert _row(world, "-1009000000010")[1] == "revoked"
+        assert (
+            run(world, lambda s: bindings.revoke_by_id(s, binding_id=str(row[0])))
+            is False
+        )
+
+    def test_repoint_follows_a_supergroup_upgrade_unless_the_new_id_is_taken(
+        self, world
+    ):
+        _bind(world, "-777000001")
+        row = fetch_one(
+            world["stream"],
+            "SELECT id FROM channel_bindings WHERE external_ref = %s",
+            ("-777000001",),
+        )
+        assert (
+            run(
+                world,
+                lambda s: bindings.repoint(
+                    s, binding_id=str(row[0]), external_ref="-1009000000020"
+                ),
+            )
+            is True
+        )
+        assert _row(world, "-1009000000020")[1] == "active"
+        # Workspace B holds the id the next upgrade would land on.
+        _bind(world, "-1009000000021", ids=world["b"])
+        assert (
+            run(
+                world,
+                lambda s: bindings.repoint(
+                    s, binding_id=str(row[0]), external_ref="-1009000000021"
+                ),
+            )
+            is False
+        )

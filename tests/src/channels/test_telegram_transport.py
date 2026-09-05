@@ -24,6 +24,7 @@ from src.channels.telegram_transport import (
     TelegramAuthDead,
     TelegramSendError,
     TelegramTransport,
+    TelegramChatGone,
 )
 
 TOKEN = "8675309:AAtestSECRETtokenVALUExyz"
@@ -182,3 +183,55 @@ class TestSendText:
         t = _transport(handler)
         await t.for_chat("7")(dict(ROW, payload={"v": 1, "text": "hi"}))
         assert sent == [{"chat_id": "7", "text": "hi"}]
+
+
+class TestAChatThatIsGoneIsNotADeadToken:
+    """A kicked bot, a blocked bot or a deleted chat is a chat-level fact; only
+    a 401 is the credential's own death (#1240 review)."""
+
+    async def test_403_kicked_raises_chat_gone_not_auth_dead(self):
+        def handler(request):
+            return httpx.Response(
+                403,
+                json={
+                    "ok": False,
+                    "error_code": 403,
+                    "description": "Forbidden: bot was kicked from the supergroup chat",
+                },
+            )
+
+        t = _transport(handler)
+        with pytest.raises(TelegramChatGone) as info:
+            await t.send_text("-100777", "hi")
+        assert info.value.migrate_to is None
+        assert t.auth_failures == 0, (
+            "a kicked bot must not count as a credential failure"
+        )
+
+    async def test_400_upgraded_to_supergroup_carries_the_new_chat_id(self):
+        def handler(request):
+            return httpx.Response(
+                400,
+                json={
+                    "ok": False,
+                    "error_code": 400,
+                    "description": "Bad Request: group chat was upgraded to a supergroup chat",
+                    "parameters": {"migrate_to_chat_id": -1009999},
+                },
+            )
+
+        t = _transport(handler)
+        with pytest.raises(TelegramChatGone) as info:
+            await t.send_text("-777", "hi")
+        assert info.value.migrate_to == "-1009999"
+
+    async def test_401_is_still_the_dead_credential(self):
+        def handler(request):
+            return httpx.Response(
+                401,
+                json={"ok": False, "error_code": 401, "description": "Unauthorized"},
+            )
+
+        t = _transport(handler)
+        with pytest.raises(TelegramAuthDead):
+            await t.send_text("7", "hi")

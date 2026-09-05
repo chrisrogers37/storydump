@@ -110,6 +110,18 @@ RETRY_ONCE_KINDS = frozenset({"notification", "ack"})
 MAX_NOTIFICATION_RESENDS = 1
 
 
+class DestinationGone(StorydumpError):
+    """The transport's DEFINITIVE answer that the destination no longer takes
+    messages — the bot kicked or blocked, the chat deleted or migrated. Not a
+    lost response (that is the ambiguous case), so the row fails outright and
+    the caller retires or re-points the binding. *migrate_to* carries the
+    successor chat id when the provider named one."""
+
+    def __init__(self, detail: str = "", *, migrate_to: Optional[str] = None):
+        self.migrate_to = migrate_to
+        super().__init__(f"destination gone{': ' + detail if detail else ''}")
+
+
 class OutboxFenced(StorydumpError):
     """An outbox write found the row no longer in the state it was leaving.
 
@@ -472,6 +484,18 @@ async def deliver(
 
     try:
         ref = await transport(row)
+    except DestinationGone as exc:
+        # Definitive, not ambiguous: the provider said the chat will not take
+        # it. The row fails; the caller retires the binding so the sweep stops
+        # minting for a chat that is gone (a kicked bot is NOT a dead token).
+        await _leave_sending(session, row["id"], "failed")
+        return {
+            **row,
+            "state": "failed",
+            "external_message_ref": None,
+            "destination_gone": True,
+            "migrate_to": exc.migrate_to,
+        }
     except Exception:  # noqa: BLE001 — a lost response is the ambiguous case
         await mark_ambiguous(session, outbox_id=row["id"])
         return {**row, "state": "ambiguous", "external_message_ref": None}

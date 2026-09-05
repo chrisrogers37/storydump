@@ -65,6 +65,9 @@ from __future__ import annotations
 import re
 
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
+
+from src.services.target._dbapi import constraint_violated
 
 from src.exceptions.base import StorydumpError
 
@@ -203,4 +206,40 @@ async def revoke(
         ),
         {"ws": str(workspace_id), "ch": channel, "ref": ref},
     )
+    return result.rowcount > 0
+
+
+async def revoke_by_id(session, *, binding_id: str) -> bool:
+    """Mark one binding revoked by its id — the deliverer's spelling, for the
+    moment a send comes back "chat gone" (the bot kicked or blocked, the chat
+    deleted). Same row-kept semantics as :func:`revoke`; the sweep stops
+    minting for it on its next pass (`work_loop`: `b.state = 'active'`)."""
+    result = await session.execute(
+        text(
+            "UPDATE channel_bindings SET state = 'revoked'"
+            " WHERE id = :b AND state <> 'revoked'"
+        ),
+        {"b": str(binding_id)},
+    )
+    return result.rowcount > 0
+
+
+async def repoint(session, *, binding_id: str, external_ref: str) -> bool:
+    """A group became a supergroup: Telegram retires the old chat id and names
+    the new one. The binding follows the chat. If the new id is already
+    another binding's, the row is revoked instead — `uq_binding_external`
+    still holds one chat to one workspace."""
+    _, ref = _clean("supergroup", external_ref)
+    try:
+        result = await session.execute(
+            text(
+                "UPDATE channel_bindings SET external_ref = :ref, channel = 'telegram_group'"
+                " WHERE id = :b AND state <> 'revoked'"
+            ),
+            {"b": str(binding_id), "ref": ref},
+        )
+    except DBAPIError as exc:
+        if constraint_violated(exc, "uq_binding_external"):
+            return False
+        raise
     return result.rowcount > 0
