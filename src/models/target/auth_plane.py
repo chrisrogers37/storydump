@@ -79,7 +79,7 @@ class OAuthState(TargetBase):
             name="ck_oauth_state_provider",
         ),
         CheckConstraint(
-            "purpose IN ('connect','reconnect','signin','link')",
+            "purpose IN ('connect','reconnect','signin','link','bind')",
             name="ck_oauth_state_purpose",
         ),
         # A CASE expression rather than a conjunction: signin carries neither

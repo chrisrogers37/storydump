@@ -742,3 +742,63 @@ class TestARemovedDestinationStaysRemoved:
             fetch=True,
         )
         assert rows == [("revoked", "disabled")]
+
+
+class TestTheBindPurposeOnTheRealSchema:
+    """067 widens `ck_oauth_state_purpose` to `bind` (owner ruling 2026-09-05).
+    The whole lane on the replayed schema: mint, consume, bind — and the CHECK
+    that a bind state pins BOTH a user and a workspace."""
+
+    def test_mint_consume_and_bind_end_to_end(self, oauth_db):
+        from src.services.target import bindings, channel_bind
+        from src.services.target.start_router import StartContext
+
+        # The door checks the tapper against the minter by linked identity.
+        _exec(
+            oauth_db,
+            "INSERT INTO user_identities (user_id, provider, external_id, display_name)"
+            " VALUES (%s, 'telegram', 'tg-1', 'ada') ON CONFLICT DO NOTHING",
+            (str(oauth_db["user"]),),
+        )
+        link = _call(
+            oauth_db,
+            lambda c: channel_bind.issue_bind_state(
+                c,
+                user_id=oauth_db["user"],
+                workspace_id=oauth_db["ws"],
+                bot_username="storydump_app_bot",
+            ),
+        )
+        assert link.startswith("https://t.me/storydump_app_bot?startgroup=bind-")
+        state = link.rsplit("bind-", 1)[1]
+        ctx = StartContext(
+            payload=state,
+            telegram_user_id="tg-1",
+            chat_id="-1001234567890",
+            chat_type="supergroup",
+            display_name="ada",
+        )
+        result = _call(oauth_db, lambda c: channel_bind.handle_bind(c, ctx))
+        assert result.handled and result.outcome == "bound", result.outcome
+        rows = _exec(
+            oauth_db,
+            "SELECT channel, external_ref, state FROM channel_bindings WHERE workspace_id = %s",
+            (str(oauth_db["ws"]),),
+            fetch=True,
+        )
+        assert rows == [("telegram_group", "-1001234567890", "active")]
+        # A second tap of the same link is spent.
+        again = _call(oauth_db, lambda c: channel_bind.handle_bind(c, ctx))
+        assert not again.handled and again.outcome == "state_refused"
+        assert bindings.BOUND == "bound"
+
+    def test_a_bind_state_must_pin_a_workspace(self, oauth_db):
+        import psycopg2
+
+        with pytest.raises(psycopg2.errors.CheckViolation):
+            _exec(
+                oauth_db,
+                "INSERT INTO oauth_states (state, user_id, workspace_id, provider, purpose, expires_at)"
+                " VALUES ('bind-no-ws', %s, NULL, 'telegram', 'bind', now() + interval '15 minutes')",
+                (str(oauth_db["user"]),),
+            )

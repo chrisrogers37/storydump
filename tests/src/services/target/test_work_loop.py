@@ -15,6 +15,7 @@ Unit tier: executors and session doors are monkeypatched at the module seam —
 the DB-backed halves are exercised by tests/scripts/test_w1_worker_gate.py.
 """
 
+import pytest
 import re
 
 
@@ -675,3 +676,72 @@ class TestLaneSurvivesTransientClaimErrors:
             for _ in range(10):
                 await loop.run_once()
         assert loop.consecutive_errors == 3
+
+
+class TestDeliverOutboxRetiresAGoneChat:
+    """The deliverer's definitive "chat gone" ends the hold and retires the
+    binding — or follows a group that became a supergroup (#1240 review)."""
+
+    def _job(self):
+        return {
+            "id": "j-d",
+            "kind": "deliver_outbox",
+            "workspace_id": "ws-1",
+            "serialization_key": "binding:b-1",
+            "payload": {"binding_id": "b-1"},
+        }
+
+    def _registry(self):
+        from types import SimpleNamespace
+
+        transport = SimpleNamespace(for_chat=lambda ref: lambda row: None)
+        return build_registry(full_deps(transport=transport))
+
+    @pytest.fixture
+    def gone(self, monkeypatch):
+        seen = {"revoked": [], "repointed": [], "migrate_to": None, "repoint_ok": True}
+
+        class _Poller:
+            def __init__(self, *a, **kw):
+                self.deferred = 0
+                self.consecutive_failures = 0
+
+            async def tick(self):
+                return {
+                    "state": "failed",
+                    "destination_gone": True,
+                    "migrate_to": seen["migrate_to"],
+                }
+
+        async def revoke_by_id(session, *, binding_id):
+            seen["revoked"].append(binding_id)
+            return True
+
+        async def repoint(session, *, binding_id, external_ref):
+            seen["repointed"].append((binding_id, external_ref))
+            return seen["repoint_ok"]
+
+        monkeypatch.setattr(work_loop.outbox, "OutboxPoller", _Poller)
+        monkeypatch.setattr(work_loop.bindings, "revoke_by_id", revoke_by_id)
+        monkeypatch.setattr(work_loop.bindings, "repoint", repoint)
+        return seen
+
+    async def test_a_kicked_bot_revokes_the_binding(self, gone):
+        session = _FakeSession(
+            rows=[{"external_ref": "-100777", "workspace_id": "ws-1"}]
+        )
+        await self._registry()["deliver_outbox"](session, self._job())
+        assert gone["revoked"] == ["b-1"] and gone["repointed"] == []
+
+    async def test_a_supergroup_upgrade_follows_the_chat(self, gone):
+        gone["migrate_to"] = "-1009999"
+        session = _FakeSession(rows=[{"external_ref": "-777", "workspace_id": "ws-1"}])
+        await self._registry()["deliver_outbox"](session, self._job())
+        assert gone["repointed"] == [("b-1", "-1009999")] and gone["revoked"] == []
+
+    async def test_a_successor_another_workspace_holds_revokes_instead(self, gone):
+        gone["migrate_to"] = "-1009999"
+        gone["repoint_ok"] = False
+        session = _FakeSession(rows=[{"external_ref": "-777", "workspace_id": "ws-1"}])
+        await self._registry()["deliver_outbox"](session, self._job())
+        assert gone["revoked"] == ["b-1"]

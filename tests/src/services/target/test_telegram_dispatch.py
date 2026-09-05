@@ -84,7 +84,7 @@ class TestTheStartDoorItself:
         async def inv(conn, ctx): ...
 
         router.register("inv-", inv)  # lane C joins by registration, not a new door
-        assert set(router._handlers) == {"link-", "inv-"}
+        assert set(router._handlers) == {"link-", "inv-", "bind-"}
 
 
 class TestTheCompositionRoot:

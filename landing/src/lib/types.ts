@@ -48,3 +48,17 @@ export interface Instance {
   last_post_at: string | null;
   instance_role: string;
 }
+
+/** A Telegram chat this workspace's cards go to (`GET /workspaces/{ws}/bindings`). */
+export interface ChannelBinding {
+  id: string;
+  channel: "telegram_group" | "telegram_dm" | string;
+  /** The Telegram chat id, as text. */
+  external_ref: string;
+  state: "active" | "revoked" | string;
+  created_at: string;
+}
+
+export interface BindingsResponse {
+  bindings: ChannelBinding[];
+}

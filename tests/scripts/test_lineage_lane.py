@@ -335,6 +335,9 @@ class TestTheBoundaryIsDerivedAndLoud:
             # the 02 section 2 block that prints ig_accounts is
             # content-addressed, and arm (b) never amends.
             "066_no_media_notice_marker.sql",
+            # 067: the `bind` purpose on oauth_states — a Telegram group bound to a
+            # workspace by a one-shot link from Settings (07 §13, #1175 D-3/D-4).
+            "067_oauth_state_bind_purpose.sql",
         ], (
             f"the target lineage is {above}. If you are landing the next F.2"
             " increment, add it here — deliberately, and at the end: arm (b)"

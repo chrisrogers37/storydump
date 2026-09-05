@@ -137,6 +137,39 @@ async def _fill_primary_email(executor, *, user_id: str, email: str) -> None:
     )
 
 
+async def user_for_identity(
+    executor, *, provider: str, external_id: str
+) -> Optional[str]:
+    """The user a `(provider, external_id)` belongs to, or None. User-plane and
+    role-open, so a door may ask this BEFORE any tenant context exists — the
+    `bind-` lane checks the tapper against the minting admin with it."""
+    row = (
+        await executor.execute(
+            text(
+                "SELECT user_id FROM user_identities"
+                " WHERE provider = :p AND external_id = :sub"
+            ),
+            {"p": provider, "sub": external_id},
+        )
+    ).first()
+    return None if row is None else str(row[0])
+
+
+async def identity_for_user(executor, *, user_id: str, provider: str) -> Optional[str]:
+    """The external id *user_id* holds for *provider*, or None — "has this
+    person linked Telegram?" asked before a flow that needs it."""
+    row = (
+        await executor.execute(
+            text(
+                "SELECT external_id FROM user_identities"
+                " WHERE user_id = :u AND provider = :p"
+            ),
+            {"u": str(user_id), "p": provider},
+        )
+    ).first()
+    return None if row is None else str(row[0])
+
+
 async def get_user(executor, *, user_id: str) -> Optional[dict]:
     """The user row plus its identities — `/me`'s user half."""
     user = await readers.row(

@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from src.services.target import credential_lifecycle, email_sender, media_sync
 
 from src.services.target import (
+    bindings,
     jobs,
     offboarding,
     outbox,
@@ -356,6 +357,24 @@ def build_registry(deps: WorkerDeps) -> dict:
         while time.monotonic() < deadline:
             before = (poller.deferred, poller.consecutive_failures)
             result = await poller.tick()
+            if result is not None and result.get("destination_gone"):
+                # The chat will not take messages. Follow it (a group that
+                # became a supergroup) or retire the binding; either way this
+                # hold ends — the sweep will not mint for a revoked binding.
+                moved = result.get("migrate_to")
+                followed = bool(moved) and await bindings.repoint(
+                    session, binding_id=binding_id, external_ref=str(moved)
+                )
+                if not followed:
+                    await bindings.revoke_by_id(session, binding_id=binding_id)
+                logger.warning(
+                    "deliver_outbox %s: binding %s %s (chat gone%s)",
+                    job["id"],
+                    binding_id,
+                    "re-pointed" if followed else "revoked",
+                    f", moved to {moved}" if moved else "",
+                )
+                break
             if (
                 result is None
                 and (

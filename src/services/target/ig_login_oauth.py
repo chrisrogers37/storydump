@@ -91,7 +91,7 @@ PROFILE_URL = f"{IG_LOGIN_GRAPH_BASE}/me"
 PROVIDER = "ig_login"
 
 #: `ck_oauth_state_purpose`'s closed set.
-PURPOSES = ("connect", "reconnect", "signin", "link")
+PURPOSES = ("connect", "reconnect", "signin", "link", "bind")
 
 
 class OAuthStateRefused(StorydumpError):

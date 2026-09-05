@@ -42,14 +42,44 @@ import httpx
 
 from src.services.target import egress
 from src.services.target.egress import EgressPolicy
+from src.services.target.outbox import DestinationGone
 
 logger = logging.getLogger("channels.telegram")
 
 _API_BASE = "https://api.telegram.org"
 
 
+_CHAT_GONE_MARKERS = (
+    "bot was kicked",
+    "bot was blocked",
+    "bot is not a member",
+    "chat not found",
+    "upgraded to a supergroup",
+    "user is deactivated",
+)
+
+
+def _chat_gone(code, description: str) -> Optional[str]:
+    """Telegram's chat-level refusals, by shape: a 403 is always about THIS
+    chat for a bot (the credential's own death is a 401), and two 400s name a
+    chat that is gone or moved. Anything else is a send error."""
+    lowered = description.lower()
+    if code == 403:
+        return description or "forbidden"
+    if code == 400 and any(marker in lowered for marker in _CHAT_GONE_MARKERS):
+        return description
+    return None
+
+
 class TelegramSendError(Exception):
     """The transport could not produce an external ref for this row."""
+
+
+class TelegramChatGone(DestinationGone, TelegramSendError):
+    """The chat will not take messages: the bot was kicked or blocked, the
+    chat was deleted, or a group became a supergroup (Telegram names the
+    successor id in `parameters.migrate_to_chat_id`). A chat-level fact —
+    never the credential's."""
 
 
 class TelegramAuthDead(TelegramSendError):
@@ -97,7 +127,14 @@ class TelegramTransport:
             return body.get("result") or {}
         code = body.get("error_code", response.status_code)
         description = self._redact(str(body.get("description", "")))
-        if code in (401, 403):
+        gone = _chat_gone(code, description)
+        if gone is not None:
+            migrate_to = (body.get("parameters") or {}).get("migrate_to_chat_id")
+            raise TelegramChatGone(
+                f"{method}: {code} {description}",
+                migrate_to=None if migrate_to is None else str(migrate_to),
+            )
+        if code == 401:
             self.auth_failures += 1
             if not self._auth_dead_logged:
                 self._auth_dead_logged = True

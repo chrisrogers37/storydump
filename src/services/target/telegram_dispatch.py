@@ -30,7 +30,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from src.services.target import identity_link
+from src.services.target import channel_bind, identity_link
 from src.services.target.start_router import StartResult, StartRouter
 
 logger = logging.getLogger(__name__)
@@ -49,6 +49,7 @@ def build_router() -> StartRouter:
     """
     router = StartRouter()
     identity_link.register(router)
+    channel_bind.register(router)
     return router
 
 
