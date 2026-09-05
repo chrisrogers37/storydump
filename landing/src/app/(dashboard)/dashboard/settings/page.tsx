@@ -192,15 +192,15 @@ export default async function SettingsPage({
             workspaceState={configResult.data.state}
             restorableUntil={configResult.data.restorable_until}
             isOwner={isOwner}
+            members={
+              <MembersCard
+                workspaceId={workspaceId}
+                members={membersResult.ok ? (membersResult.data.members ?? []) : null}
+                currentUserId={session.userId}
+                canRemove={membership?.role === "owner" || membership?.role === "admin"}
+              />
+            }
           />
-          <div className="mt-6">
-            <MembersCard
-              workspaceId={workspaceId}
-              members={membersResult.ok ? (membersResult.data.members ?? []) : null}
-              currentUserId={session.userId}
-              canRemove={membership?.role === "owner" || membership?.role === "admin"}
-            />
-          </div>
         </TabsContent>
 
         {/*

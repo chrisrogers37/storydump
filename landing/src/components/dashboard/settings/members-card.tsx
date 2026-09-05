@@ -5,7 +5,11 @@ import { useRouter } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { removeMemberRefusalCopy, submitRemoveMember } from "@/lib/command-client";
+import {
+  removeMemberRefusalCopy,
+  submitRemoveMember,
+} from "@/lib/command-client";
+import { memberOrigin } from "@/lib/members";
 import type { WorkspaceMember } from "@/lib/types";
 
 const ROLE_CLASS: Record<string, string> = {
@@ -57,28 +61,37 @@ export function MembersCard({
       </CardHeader>
       <CardContent className="space-y-3">
         {error && (
-          <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">{error}</div>
+          <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+            {error}
+          </div>
         )}
         {members === null ? (
-          <p className="text-sm text-muted-foreground">Members could not be loaded just now. Reload to try again.</p>
+          <p className="text-sm text-muted-foreground">
+            Members could not be loaded just now. Reload to try again.
+          </p>
         ) : (
           <ul className="divide-y">
             {members.map((m) => {
               const isSelf = m.user_id === currentUserId;
-              const fromTelegram = m.role === "member" && m.added_by_user_id === null;
               return (
-                <li key={m.user_id} className="flex items-center justify-between gap-3 py-2">
+                <li
+                  key={m.user_id}
+                  className="flex items-center justify-between gap-3 py-2"
+                >
                   <div className="min-w-0">
                     <p className="truncate text-sm">
                       {m.primary_email ?? "No email on file"}
                       {isSelf ? " (you)" : ""}
                     </p>
                     <p className="text-xs text-muted-foreground">
-                      {fromTelegram ? "Joined from a Telegram group" : "Invited"}
+                      {memberOrigin(m)}
                     </p>
                   </div>
                   <div className="flex items-center gap-2">
-                    <Badge variant="secondary" className={ROLE_CLASS[m.role] ?? "bg-muted"}>
+                    <Badge
+                      variant="secondary"
+                      className={ROLE_CLASS[m.role] ?? "bg-muted"}
+                    >
                       {m.role}
                     </Badge>
                     {canRemove && m.role !== "owner" && !isSelf && (
@@ -98,9 +111,9 @@ export function MembersCard({
           </ul>
         )}
         <p className="text-xs text-muted-foreground">
-          People who speak in a bound Telegram group join as members automatically once their
-          Telegram is linked; leaving the group removes nobody. Removing someone here revokes
-          their access to this workspace.
+          People who speak in a bound Telegram group join as members
+          automatically once their Telegram is linked; leaving the group removes
+          nobody. Removing someone here revokes their access to this workspace.
         </p>
       </CardContent>
     </Card>

@@ -203,6 +203,7 @@ export function GeneralTab({
   workspaceState,
   restorableUntil,
   isOwner,
+  members,
 }: {
   settings: SettingsView;
   workspaceId: string;
@@ -214,6 +215,9 @@ export function GeneralTab({
   restorableUntil: string | null;
   /** The card is owner-only; the page decides from the session's role. */
   isOwner: boolean;
+  /** The Members card, rendered ABOVE the danger zone: deleting the workspace
+   * is the last thing on the page, not something people scroll past. */
+  members?: React.ReactNode;
 }) {
   const router = useRouter();
   const [name, setName] = useState(workspaceName);
@@ -524,6 +528,8 @@ export function GeneralTab({
           })}
         </CardContent>
       </Card>
+
+      {members}
 
       {/*
         Owner-only, and gated HERE rather than left to the port's 403: a delete
