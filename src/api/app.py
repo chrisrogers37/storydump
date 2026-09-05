@@ -331,6 +331,18 @@ def _cors_origins() -> list[str]:
     return [settings.web_app_origin] if settings.web_app_origin else []
 
 
+def _telegram_reply(env: Mapping[str, str]):
+    """The `/start` door's acknowledgement sender, or None without the bot
+    token — the same variable and the same transport the worker sends with,
+    so the API never holds a second credential for the one bot."""
+    token = env.get("TARGET_TELEGRAM_BOT_TOKEN")
+    if not token:
+        return None
+    from src.channels.telegram_transport import TelegramTransport
+
+    return TelegramTransport(token).send_text
+
+
 def create_app(
     *, engine: Optional[AsyncEngine] = None, env: Optional[Mapping[str, str]] = None
 ) -> FastAPI:
@@ -389,6 +401,7 @@ def create_app(
         webhooks.IngressRuntime(
             connect=app.state.engine.connect,
             dispatch=TelegramDispatcher(),
+            reply=_telegram_reply(os.environ if env is None else env),
         )
         if app.state.engine is not None
         else None

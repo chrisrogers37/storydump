@@ -103,7 +103,12 @@ class IngressRuntime:
     """
 
     connect: Callable[[], Any]
-    dispatch: Callable[[Any, dict[str, Any]], Awaitable[None]]
+    dispatch: Callable[[Any, dict[str, Any]], Awaitable[Any]]
+    #: Send *text* to a chat id — the acknowledgement a HANDLED `/start` gets
+    #: after its delivery is committed (#1224 follow-up). None means the door
+    #: stays silent by construction, which is what a deployment without the
+    #: bot token gets. Best-effort: a failure here is logged, never surfaced.
+    reply: Optional[Callable[[str, str], Awaitable[Any]]] = None
 
 
 @router.post("/telegram")
@@ -181,7 +186,32 @@ async def telegram_webhook(request: Request) -> dict[str, str]:
             )
             raise HTTPException(status_code=409, detail="admission conflict")
 
-        await runtime.dispatch(conn, payload)
+        result = await runtime.dispatch(conn, payload)
         await conn.commit()
 
+    # AFTER the commit and outside the connection: the link is durable before
+    # any provider is spoken to, so a Telegram hiccup can neither roll it back
+    # nor make Telegram redeliver (the 200 below stands regardless).
+    await _acknowledge(runtime, payload, result)
     return {"status": "admitted"}
+
+
+async def _acknowledge(runtime: IngressRuntime, payload: dict, result: Any) -> None:
+    """Answer a HANDLED `/start` in the chat that tapped it. Refusals carry no
+    reply by construction (`StartResult` enforces it), so a prober still learns
+    nothing; a dispatch that returned nothing at all is left silent."""
+    if runtime.reply is None:
+        return
+    if not getattr(result, "handled", False) or not getattr(result, "reply", None):
+        return
+    chat_id = ((payload.get("message") or {}).get("chat") or {}).get("id")
+    if chat_id is None:
+        return
+    try:
+        await runtime.reply(str(chat_id), result.reply)
+    except Exception:  # noqa: BLE001 — best-effort, and the delivery is already committed
+        logger.warning(
+            "telegram webhook: acknowledgement not delivered (update_id=%s, outcome=%s)",
+            payload.get("update_id"),
+            getattr(result, "outcome", "?"),
+        )
