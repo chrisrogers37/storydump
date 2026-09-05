@@ -118,6 +118,21 @@ class TelegramTransport:
         result = await self._call("getMe", {})
         return str(result.get("username", ""))
 
+    async def send_text(
+        self, chat_id: str, text: str, *, reply_markup: Optional[dict] = None
+    ) -> str:
+        """One `sendMessage`: the text to the chat, the message id back. The
+        outbox's per-binding sender and the `/start` door's acknowledgement
+        (#1224 follow-up) are both this call."""
+        message: dict = {"chat_id": chat_id, "text": text}
+        if reply_markup:
+            message["reply_markup"] = reply_markup
+        result = await self._call("sendMessage", message)
+        message_id = (result or {}).get("message_id")
+        if message_id is None:
+            raise TelegramSendError("sendMessage: ok response without a message_id")
+        return str(message_id)
+
     def for_chat(self, external_ref: str):
         """The per-binding sender deliver() takes: row in, message ref out."""
 
@@ -129,16 +144,9 @@ class TelegramTransport:
                     f"outbox row {row.get('id')}: payload carries no text —"
                     " nothing to send"
                 )
-            message: dict = {"chat_id": external_ref, "text": text_body}
-            if payload.get("reply_markup"):
-                message["reply_markup"] = payload["reply_markup"]
-            result = await self._call("sendMessage", message)
-            message_id = (result or {}).get("message_id")
-            if message_id is None:
-                raise TelegramSendError(
-                    f"outbox row {row.get('id')}: ok response without a message_id"
-                )
-            return str(message_id)
+            return await self.send_text(
+                external_ref, text_body, reply_markup=payload.get("reply_markup")
+            )
 
         return send
 

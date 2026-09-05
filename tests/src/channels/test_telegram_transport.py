@@ -15,6 +15,8 @@ All HTTP is faked with httpx.MockTransport — the egress floor is exercised
 for real (policy, host allowlist), the network is not.
 """
 
+import json
+
 import httpx
 import pytest
 
@@ -151,3 +153,32 @@ class TestProbe:
         with pytest.raises(TelegramAuthDead) as caught:
             await t.probe()
         assert TOKEN not in str(caught.value)
+
+
+class TestSendText:
+    """The one-off sender the API's `/start` door uses for its acknowledgement
+    (#1224 follow-up): a chat id and a text, no outbox row."""
+
+    async def test_sends_the_text_to_the_chat_and_returns_the_message_id(self):
+        captured = {}
+
+        def handler(request):
+            captured["url"] = str(request.url)
+            captured["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"ok": True, "result": {"message_id": 99}})
+
+        t = _transport(handler)
+        assert await t.send_text("555", "Linked.") == "99"
+        assert captured["url"].endswith("/sendMessage")
+        assert captured["body"] == {"chat_id": "555", "text": "Linked."}
+
+    async def test_for_chat_is_send_text_with_the_row_unpacked(self):
+        sent = []
+
+        def handler(request):
+            sent.append(json.loads(request.content))
+            return httpx.Response(200, json={"ok": True, "result": {"message_id": 1}})
+
+        t = _transport(handler)
+        await t.for_chat("7")(dict(ROW, payload={"v": 1, "text": "hi"}))
+        assert sent == [{"chat_id": "7", "text": "hi"}]

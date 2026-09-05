@@ -237,3 +237,115 @@ def test_a_conflict_is_rejected_never_swallowed_as_a_replay(
     assert r.json() == {"detail": "admission conflict"}
     assert spy["dispatch"] == []
     assert spy["conn"].commits == 0
+
+
+# --- the acknowledgement: a handled /start is answered, after commit ----------
+#
+# Nothing sent the reply text the handlers already carried (#1224 review left
+# the bot silent). The owner's verdict on 2026-09-05: a successful link should
+# say so in the chat. Refusals stay silent — the router's existence-oracle
+# rule — and the send is best-effort AFTER the delivery is committed, so a
+# provider hiccup can neither roll back the link nor make Telegram redeliver.
+
+START_UPDATE = {
+    "update_id": 7,
+    "message": {"text": "/start link-abc", "chat": {"id": 555, "type": "private"}},
+}
+
+
+@pytest.fixture
+def replying(monkeypatch):
+    """A wired runtime whose dispatch answers `outcome`, plus a reply recorder
+    that notes how many commits had happened by the time it was called."""
+    from src.services.target.start_router import StartResult
+
+    seen = {"admit": [], "replies": [], "conn": FakeConn(), "result": None}
+
+    async def fake_admit(conn, **kw):
+        seen["admit"].append(kw)
+        return {"admitted": True}
+
+    async def fake_dispatch(conn, payload):
+        return seen["result"]
+
+    async def fake_reply(chat_id, text):
+        seen["replies"].append((chat_id, text, seen["conn"].commits))
+
+    monkeypatch.setattr(webhooks, "admit", fake_admit)
+    app.state.ingress = webhooks.IngressRuntime(
+        connect=lambda: seen["conn"], dispatch=fake_dispatch, reply=fake_reply
+    )
+    seen["StartResult"] = StartResult
+    return seen
+
+
+def test_a_handled_start_is_acknowledged_in_the_chat_after_commit(
+    client, armed, replying
+):
+    replying["result"] = replying["StartResult"](
+        outcome="linked",
+        handled=True,
+        reply="Your Telegram account is now linked to Storydump.",
+    )
+    resp = _post(client, START_UPDATE)
+    assert resp.status_code == 200 and resp.json() == {"status": "admitted"}
+    assert replying["replies"] == [
+        ("555", "Your Telegram account is now linked to Storydump.", 1)
+    ], "sent to the tapping chat, once, and only after the delivery committed"
+
+
+def test_a_refused_start_stays_silent(client, armed, replying):
+    replying["result"] = replying["StartResult"](outcome="state_refused", handled=False)
+    assert _post(client, START_UPDATE).status_code == 200
+    assert replying["replies"] == []
+
+
+def test_a_failed_acknowledgement_does_not_fail_the_delivery(
+    client, armed, replying, monkeypatch
+):
+    replying["result"] = replying["StartResult"](
+        outcome="linked", handled=True, reply="Linked."
+    )
+
+    async def exploding_reply(chat_id, text):
+        raise RuntimeError("telegram is down")
+
+    app.state.ingress = webhooks.IngressRuntime(
+        connect=lambda: replying["conn"],
+        dispatch=app.state.ingress.dispatch,
+        reply=exploding_reply,
+    )
+    resp = _post(client, START_UPDATE)
+    assert resp.status_code == 200 and resp.json() == {"status": "admitted"}
+    assert replying["conn"].commits == 1, "the link stays committed"
+
+
+def test_a_runtime_without_a_sender_is_silent_by_construction(client, armed, replying):
+    replying["result"] = replying["StartResult"](
+        outcome="linked", handled=True, reply="Linked."
+    )
+    app.state.ingress = webhooks.IngressRuntime(
+        connect=lambda: replying["conn"], dispatch=app.state.ingress.dispatch
+    )
+    assert _post(client, START_UPDATE).status_code == 200
+    assert replying["replies"] == []
+
+
+class TestTheAcknowledgementIsWiredFromTheBotToken:
+    """`create_app` arms the reply sender from `TARGET_TELEGRAM_BOT_TOKEN` —
+    the worker's variable and transport — and leaves the door silent without it."""
+
+    def _app(self, env):
+        from types import SimpleNamespace
+
+        from src.api.app import create_app
+
+        return create_app(engine=SimpleNamespace(connect=lambda: None), env=env)
+
+    def test_with_the_token_the_runtime_can_reply(self):
+        built = self._app({"TARGET_TELEGRAM_BOT_TOKEN": "123:abc"})
+        assert built.state.ingress is not None and built.state.ingress.reply is not None
+
+    def test_without_the_token_the_door_is_silent(self):
+        built = self._app({})
+        assert built.state.ingress is not None and built.state.ingress.reply is None
