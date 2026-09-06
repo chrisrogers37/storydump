@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+
+from src.config.settings import settings
 import os
 import signal
 import socket
@@ -545,6 +547,15 @@ def main() -> None:
     # `publish_pipeline` straight into `meta=None` -> AttributeError -> poison.
     # That wire belongs with milestone 2, gated on media_fetch AND meta AND
     # transit.
+    if not settings.GOOGLE_CLIENT_ID or not settings.GOOGLE_CLIENT_SECRET:
+        # Said at startup, once, where an operator looks: without the client
+        # the hourly refresh (P5, #1247) cannot run here, and every folder's
+        # sync will refuse — retryably, in the log, never to a tenant — an
+        # hour after the workspace connects.
+        logger.warning(
+            "Drive read leg armed without GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET:"
+            " this worker cannot refresh a Drive grant; set both on this service"
+        )
     drive = google_drive_adapter.GoogleDriveAdapter(
         token_provider=drive_credentials.provider_from_engine(engine),
     )

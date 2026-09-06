@@ -27,6 +27,7 @@ from src.services.target.ig_login_oauth import (
     consume_state,
     issue_state,
 )
+from src.services.target.drive_adapter import DriveRetryableError
 from src.services.target.media_sync import DriveCredentialDead
 from tests.scripts.conftest import (
     _scratch,
@@ -220,7 +221,14 @@ class TestTheCredentialRow:
             conn.rollback()
             conn.close()
 
-    def test_an_expired_access_token_is_refused_until_the_read_path_mints(self, world):
+    def test_an_expired_access_token_is_minted_on_the_read_path(
+        self, world, monkeypatch
+    ):
+        """P5, F3 (b) (#1247): the read door refreshes an expired access token
+        from the stored refresh token, writes the new envelope IN PLACE (same
+        row) and hands the fresh token back — measured on the real row."""
+        from src.config.settings import settings
+
         b = world["b"]
         _store(
             world,
@@ -229,7 +237,65 @@ class TestTheCredentialRow:
                 expires_at=datetime.now(timezone.utc) - timedelta(days=1)
             ),
         )
-        with pytest.raises(DriveCredentialDead, match="expired"):
+        (before,) = _credential_rows(world, b["ws"])
+        asked = []
+
+        async def refresh_access_token(
+            client, *, refresh_token, client_id, client_secret
+        ):
+            asked.append((refresh_token, client_id))
+            return drive_grant(access_token="ya29.fresh")
+
+        monkeypatch.setattr(drive, "refresh_access_token", refresh_access_token)
+        monkeypatch.setattr(settings, "GOOGLE_CLIENT_ID", "gid", raising=False)
+        monkeypatch.setattr(settings, "GOOGLE_CLIENT_SECRET", "sec", raising=False)
+
+        assert _run(_token(world["ingress"], b["ws"])) == "ya29.fresh"
+        assert asked == [("1//refresh", "gid")]
+        (after,) = _credential_rows(world, b["ws"])
+        assert str(after["id"]) == str(before["id"]), "in place — same row"
+        assert after["expires_at"] > datetime.now(timezone.utc)
+        assert after["encrypted_payload"] != before["encrypted_payload"]
+        assert after["state"] == "active"
+        # Live now: the next read hands the token back with no refresh.
+        assert _run(_token(world["ingress"], b["ws"])) == "ya29.fresh"
+        assert len(asked) == 1
+
+    def test_googles_invalid_grant_marks_the_row_expired(self, world, monkeypatch):
+        """D31's definitive class: the grant is gone on Google's side, so the
+        row goes `expired` — `drive_status` reads reconnect, the picker
+        refuses `drive_reconnect_needed` — and the refusal says reconnect."""
+        from src.config.settings import settings
+
+        b = world["b"]
+        _store(
+            world,
+            b,
+            grant=drive_grant(
+                expires_at=datetime.now(timezone.utc) - timedelta(days=1)
+            ),
+        )
+
+        async def refresh_access_token(client, **kw):
+            raise drive.DriveOAuthRefused("grant_revoked", "invalid_grant")
+
+        monkeypatch.setattr(drive, "refresh_access_token", refresh_access_token)
+        monkeypatch.setattr(settings, "GOOGLE_CLIENT_ID", "gid", raising=False)
+        monkeypatch.setattr(settings, "GOOGLE_CLIENT_SECRET", "sec", raising=False)
+        with pytest.raises(DriveCredentialDead, match="reconnect"):
+            _run(_token(world["ingress"], b["ws"]))
+        (row,) = _credential_rows(world, b["ws"])
+        assert row["state"] == "expired"
+        # And the process that cannot refresh says which variables it lacks.
+        _store(
+            world,
+            b,
+            grant=drive_grant(
+                expires_at=datetime.now(timezone.utc) - timedelta(days=1)
+            ),
+        )
+        monkeypatch.setattr(settings, "GOOGLE_CLIENT_SECRET", None, raising=False)
+        with pytest.raises(DriveRetryableError, match="GOOGLE_CLIENT_SECRET"):
             _run(_token(world["ingress"], b["ws"]))
 
 
