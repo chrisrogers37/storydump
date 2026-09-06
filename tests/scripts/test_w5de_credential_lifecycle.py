@@ -209,10 +209,9 @@ class TestTheRefreshLegIsProviderGuarded:
         reach the state under test at all.
 
         The owner column differs by provider and the schema enforces it —
-        `ck_credentials_one_owner` requires exactly one of `ig_account_id` /
-        `media_source_id`, and `ck_sources_provider` admits only 'gdrive', so a
-        Drive credential is source-owned by construction (D37: a media-source
-        credential's provider equals its source's). Writing it account-owned
+        `ck_credentials_one_owner` (069) requires an `ig_login` credential to
+        name its account and a `gdrive` credential to name NOTHING (the
+        workspace is its owner). Writing a Drive credential account-owned
         raises CheckViolation rather than reaching the leg under test.
         """
         ig_owned = provider == "ig_login"
@@ -226,7 +225,7 @@ class TestTheRefreshLegIsProviderGuarded:
                 (
                     chain["ws"],
                     account_id if ig_owned else None,
-                    None if ig_owned else chain["src"],
+                    None,
                     provider,
                     token_label,
                 ),
@@ -591,7 +590,6 @@ class TestTheRevokeDispositionIsDecidedByTheCaller:
                     return await gdrive.store_credential(
                         session,
                         workspace_id=chain["ws"],
-                        media_source_id=chain["src"],
                         grant=gdrive.DriveGrant(
                             access_token="ya29.x",
                             refresh_token="1//revoke-me",

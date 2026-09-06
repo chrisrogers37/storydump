@@ -134,10 +134,10 @@ def _intent(off_db, ws, state="awaiting_approval", transit=None):
 def _credential(off_db, ws):
     (cid,) = _migrate(
         off_db["owner_stream"],
-        "INSERT INTO oauth_credentials (workspace_id, media_source_id, provider,"
-        " state, encrypted_payload) VALUES (%s, %s, 'gdrive', 'active', %s)"
+        "INSERT INTO oauth_credentials (workspace_id, provider,"
+        " state, encrypted_payload) VALUES (%s, 'gdrive', 'active', %s)"
         " RETURNING id",
-        (ws["ws"], ws["src"], b"x"),
+        (ws["ws"], b"x"),
     )
     return str(cid)
 

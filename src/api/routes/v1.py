@@ -44,14 +44,22 @@ from fastapi.responses import JSONResponse
 from src.api.principal import Principal, current_principal, require_engine
 from src.api import google_client, instagram_client
 from src.config.settings import settings
+from src.services.target.drive_adapter import (
+    DriveLostResponse,
+    DriveRetryableError,
+    DriveTerminalError,
+)
 from src.services.target import (
     channel_bind,
     commands,
+    drive_credentials,
+    google_drive_adapter,
     google_drive_oauth,
     identity,
     identity_link,
     ig_login_oauth,
     invitations,
+    media_sync,
     provisioning,
     tenant_resolution,
     workspaces,
@@ -556,25 +564,39 @@ async def create_account(
 async def create_source(
     ws: uuid.UUID, request: Request, principal: Principal = Depends(current_principal)
 ):
-    """Add a Drive media source from a folder the person names.
+    """Pick a Drive folder UNDER the workspace's grant (owner ruling
+    2026-09-05, #1165 lean (b); `07` §15).
 
     `ck_sources_provider` is closed to `gdrive` and `media_items.source_id` is
-    NOT NULL, so every media item hangs off a source of this shape. Reading the
-    folder is the Drive seam (#982) and is a separate build; this writes the
-    row that build will consume.
-
-    Idempotent on the folder, atomically — see
-    `provisioning.get_or_create_media_source` for why that needs a lock rather
-    than an `ON CONFLICT`.
+    NOT NULL, so every media item hangs off a source of this shape. The folder
+    is a resource (F1 (b)), idempotent under an advisory lock — see
+    `provisioning.get_or_create_media_source` — and, since the grant is the
+    workspace's, refused by name when there is no usable grant to read it
+    with (`drive_not_connected`, 409): a folder nobody can list is not a
+    source, it is a promise. With a grant the row is ARMED for its first sync
+    in this transaction (`media_sync.rearm_after_connect`), which also revives
+    a folder that was removed and picked again.
     """
     body = await _json_object(request)
     name = body.get("root_name")
+    folder_name = body.get("folder_name")
     async with _admin(request, str(ws), principal) as session:
+        grant = await workspaces.drive_status(session, workspace_id=str(ws))
+        if grant["status"] != "active":
+            raise HTTPException(status_code=409, detail="drive_not_connected")
         source_id, created = await provisioning.get_or_create_media_source(
             session,
             workspace_id=str(ws),
             folder_ref=body.get("folder_ref"),
             root_name=name if isinstance(name, str) and name.strip() else None,
+            folder_name=(
+                folder_name.strip()
+                if isinstance(folder_name, str) and folder_name.strip()
+                else None
+            ),
+        )
+        await media_sync.rearm_after_connect(
+            session, workspace_id=str(ws), source_id=source_id
         )
     return JSONResponse(
         status_code=201 if created else 200,
@@ -582,45 +604,138 @@ async def create_source(
     )
 
 
-@router.post("/workspaces/{ws}/sources/{source_id}/connect")
-async def connect_source(
+@router.delete("/workspaces/{ws}/sources/{source_id}")
+async def remove_source(
     ws: uuid.UUID,
     source_id: uuid.UUID,
     request: Request,
     principal: Principal = Depends(current_principal),
 ):
-    """Start the Drive grant for one source: mint the state the callback will
-    consume and hand back where the browser goes (the gdrive epic, P3).
+    """Remove a folder from the workspace's sync — a PAUSE, never a delete
+    (`provisioning.pause_media_source`): the media and its history stay, and
+    picking the folder again revives it. Admin floor, like adding one."""
+    async with _admin(request, str(ws), principal) as session:
+        paused = await provisioning.pause_media_source(
+            session, workspace_id=str(ws), source_id=str(source_id)
+        )
+    if not paused:
+        raise HTTPException(status_code=404, detail="not found")
+    return {"source_id": str(source_id), "state": "paused"}
+
+
+@router.get("/workspaces/{ws}/drive")
+async def drive_status(
+    ws: uuid.UUID, request: Request, principal: Principal = Depends(current_principal)
+):
+    """The workspace's Google Drive grant — presence and freshness, never a
+    token (`workspaces.drive_status`). Member floor: it says whether the
+    library can sync, which every member's screens render."""
+    async with _member(request, str(ws), principal) as session:
+        status = await workspaces.drive_status(session, workspace_id=str(ws))
+    return {"drive": status}
+
+
+@router.post("/workspaces/{ws}/drive/connect")
+async def connect_drive(
+    ws: uuid.UUID, request: Request, principal: Principal = Depends(current_principal)
+):
+    """Start the Drive grant for the WORKSPACE: mint the state the callback
+    will consume and hand back where the browser goes (owner ruling
+    2026-09-05, #1165 lean (b); `07` §15 — one Google grant per workspace,
+    folders picked under it).
 
     An OAuth leg is a browser redirect, which the command port cannot express,
-    so it lives here as a resource route at the admin floor — the same floor
+    so it lives here as a resource route at the admin floor — the floor
     `commands.ROLE_FLOOR["connect_account"]` names — and the executor stays
-    the thin chat-side door (F1 (a)). Per-SOURCE, because a Drive credential
-    is (D37): the state pins the source in `reconnect_target`, `connect` for a
-    source that has never been credentialed and `reconnect` after that, so a
-    stale reconnect state is retired by the next one (last issued wins).
+    the thin chat-side door (F1 (a)). The state pins the workspace as its own
+    `reconnect_target`: `connect` for a workspace that has never held a grant
+    and `reconnect` after that, so a stale state is retired by the next one
+    (last issued wins, per workspace).
     """
     client_id, _, redirect_uri = google_client.configured(
         google_client.DRIVE_CALLBACK_PATH
     )
     async with _admin(request, str(ws), principal) as session:
         purpose = await google_drive_oauth.connect_purpose(
-            session, workspace_id=str(ws), media_source_id=str(source_id)
+            session, workspace_id=str(ws)
         )
-        if purpose is None:
-            raise HTTPException(status_code=404, detail="not found")
         state = await issue_state(
             session,
             purpose=purpose,
             provider=google_drive_oauth.PROVIDER,
             user_id=principal.user_id,
             workspace_id=str(ws),
-            reconnect_target=str(source_id),
+            reconnect_target=str(ws),
         )
     return {
         "authorization_url": google_drive_oauth.authorization_url(
             client_id=client_id, redirect_uri=redirect_uri, state=state
         )
+    }
+
+
+def _drive_adapter(request: Request):
+    """The Drive transport for the folder browser, reading tokens through the
+    same door the worker does (`drive_credentials`). Built per request: the
+    adapter is a per-call client with no lifecycle to manage."""
+    return google_drive_adapter.GoogleDriveAdapter(
+        token_provider=drive_credentials.provider_from_engine(require_engine(request))
+    )
+
+
+@router.get("/workspaces/{ws}/drive/folders")
+async def list_drive_folders(
+    ws: uuid.UUID,
+    request: Request,
+    principal: Principal = Depends(current_principal),
+    parent: Optional[str] = Query(default=None),
+):
+    """The folders under `parent` (the Drive root when absent), read through
+    the workspace's grant — what the picker shows (#1165 lean (b)).
+
+    Admin floor, deliberately above `drive_status`'s: the grant is the
+    workspace's, but the tree it lists is a PERSON's Drive, and members have
+    no business browsing it. The provider call sits outside the unit of work
+    (the checkpoint discipline every provider door keeps); admission and the
+    status read happen first. Refusals by name: `invalid_parent` (400) before
+    any request, `drive_not_connected` (409) when the workspace never
+    connected, `drive_reconnect_needed` (409) when its grant is expired or
+    revoked, `drive_grant_refused` (409) when Google refused a grant the
+    projection thought live, `drive_unavailable` (503) when Google gave no
+    usable answer, `drive_refused` (502) for a terminal answer. `SHARED_ROOT`
+    as the parent lists the folders shared to the account.
+    """
+    async with _admin(request, str(ws), principal) as session:
+        grant = await workspaces.drive_status(session, workspace_id=str(ws))
+    # Admission first, then the shape check: a non-admin learns nothing about
+    # the parent it sent. Then the grant, by its projected status, so "never
+    # connected" and "Google now refuses the grant" are different answers
+    # (review of #1246): the former is `drive_not_connected`, the latter
+    # `drive_grant_refused` below, and a grant the projection already knows
+    # is dead is `drive_reconnect_needed` before any request.
+    if parent is not None and not (
+        parent == google_drive_adapter.SHARED_ROOT
+        or google_drive_adapter.is_folder_id(parent)
+    ):
+        raise HTTPException(status_code=400, detail="invalid_parent")
+    if grant["status"] == "none":
+        raise HTTPException(status_code=409, detail="drive_not_connected")
+    if grant["status"] != "active":
+        raise HTTPException(status_code=409, detail="drive_reconnect_needed")
+    try:
+        page = await _drive_adapter(request).list_folders(
+            parent=parent, workspace_id=str(ws)
+        )
+    except media_sync.DriveCredentialDead as exc:
+        raise HTTPException(status_code=409, detail="drive_grant_refused") from exc
+    except (DriveRetryableError, DriveLostResponse) as exc:
+        raise HTTPException(status_code=503, detail="drive_unavailable") from exc
+    except DriveTerminalError as exc:
+        raise HTTPException(status_code=502, detail="drive_refused") from exc
+    return {
+        "parent": parent or "root",
+        "folders": page.folders,
+        "truncated": page.truncated,
     }
 
 

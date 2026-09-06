@@ -274,8 +274,9 @@ class TestAgainstTheRealDocs:
         # 21, §10's #1037 memberships door (064) 22, §11's
         # `alert_stranded_sources` kind (065) 23, and §12's #1090 D3 no-media
         # notice marker (066) 24, §13's #1175 bind purpose (067) 25, and §14's
-        # #854/#1242 resolver + group-membership doors (068) make it 26.
-        assert classes.count("normative") == 26
+        # #854/#1242 resolver + group-membership doors (068) make it 26;
+        # #1165's workspace-level Drive grant (069) makes it 27.
+        assert classes.count("normative") == 27
         assert classes.count("illustrative") == 4
 
     def test_real_stream_expands_the_fifteen_policies(self):

@@ -91,7 +91,7 @@ export default function ConnectTelegram() {
           <ol className="mt-2 list-inside list-decimal space-y-1">
             <li>
               <span className="font-medium text-foreground">Integrations</span>{" "}
-              — add your Drive folder, then set up Google access for it
+              — connect Google Drive, then pick the folders to sync
             </li>
             <li>
               <span className="font-medium text-foreground">General</span> — set

@@ -332,98 +332,52 @@ async def sync_now(session, command: Command) -> CommandResult:
     )
 
 
-async def _drive_source(session, command: Command) -> str:
-    """The command's `source_id`, proven to belong to this workspace.
-
-    Both keys in the WHERE, not just the id: RLS is inert under the deployed
-    owner role (#751), so this clause is what actually binds the lookup to the
-    tenant. Drive folder ids are global and a source id is a UUID a caller
-    supplies, so an unscoped read here would be the cross-tenant hazard
-    #982 named.
-    """
-    source_id = _arg(command, "source_id")
-    row = (
-        await session.execute(
-            text(
-                "SELECT id FROM media_sources"
-                " WHERE id = :s AND workspace_id = :ws AND provider = 'gdrive'"
-            ),
-            {"s": source_id, "ws": command.workspace_id},
-        )
-    ).first()
-    if row is None:
-        raise CommandRefused("not_found", f"gdrive media source {source_id}")
-    return source_id
-
-
 async def _begin_drive_link(session, command: Command, *, expect: str) -> CommandResult:
-    """Shared body of `connect_account` / `reconnect_account`.
+    """Shared body of `connect_account` / `reconnect_account` — the chat-side
+    start of the WORKSPACE's Drive grant (069, `07` §15: one Google grant per
+    workspace, folders picked under it).
 
-    THIN BY DESIGN — F1 (a). The OAuth leg is the API route's (#1065 shipped
-    the callback); this door only initiates and records. Initiating IS minting
-    the `oauth_states` row, which is the thing nothing else does: #1065 landed
-    the callback and no start leg, so until this executor there was no way to
-    begin a Drive connect at all.
-
-    **It returns the state, not a URL, and that is a layering decision rather
-    than an omission.** Composing the URL needs `(client_id, redirect_uri)`,
-    which `src/api/google_client.py` owns — an API module that raises
-    `HTTPException`, and whose docstring says it exists so "the two legs cannot
-    disagree on a redirect URI". No module under `src/services/` imports from
-    `src.api` today. Reading settings again here to avoid that import would
-    fork the single owner of the redirect URI, which is the exact drift that
-    module was written to prevent. So the adapter renders, as it already does
-    for sign-in at `routes/auth.py:175`.
+    THIN BY DESIGN — F1 (a). The OAuth leg is the API route's; this door only
+    initiates and records. It returns the state, not a URL, because composing
+    the URL needs `(client_id, redirect_uri)`, which `src/api/google_client.py`
+    owns — the adapter renders, as it already does for sign-in.
 
     The connect/reconnect split is the SCHEMA's answer, not the caller's:
-    `connect_purpose` reports which one this source is in, and a command that
-    disagrees is refused by name rather than quietly doing the other. A
+    `connect_purpose` reports which one this workspace is in, and a command
+    that disagrees is refused by name rather than quietly doing the other. A
     reconnect that ran as a connect would skip `issue_state`'s
     invalidate-prior-states step (`07` §2, "last issued wins") and leave two
-    live callbacks for one source.
+    live callbacks for one workspace.
     """
-    source_id = await _drive_source(session, command)
     purpose = await google_drive_oauth.connect_purpose(
-        session, workspace_id=command.workspace_id, media_source_id=source_id
+        session, workspace_id=command.workspace_id
     )
-    if purpose is None:
-        raise CommandRefused("not_found", f"gdrive media source {source_id}")
     if purpose != expect:
-        # `illegal_transition`, from the closed REASONS set — this is exactly
-        # that: a move the port will not make from the state the source is in.
-        # An invented reason raises ValueError at construction (a programming
-        # error, by design), and the web adapter's status table is pinned
-        # TOTAL over REASONS, so a new member would silently have no mapping.
         raise CommandRefused(
             "illegal_transition",
-            f"source {source_id} needs {purpose}, not {expect}",
+            f"this workspace's Drive needs {purpose}, not {expect}",
         )
     state = await issue_state(
         session,
         purpose=purpose,
         user_id=command.actor_user_id,
         workspace_id=command.workspace_id,
-        reconnect_target=source_id,
+        reconnect_target=command.workspace_id,
         provider=google_drive_oauth.PROVIDER,
     )
     return CommandResult(
         "executed",
-        {
-            "source_id": source_id,
-            "provider": google_drive_oauth.PROVIDER,
-            "purpose": purpose,
-            "state": state,
-        },
+        {"provider": google_drive_oauth.PROVIDER, "purpose": purpose, "state": state},
     )
 
 
 async def connect_account(session, command: Command) -> CommandResult:
-    """Begin a Drive connect for a source that has no credential yet."""
+    """Begin the workspace's Drive connect — it holds no grant yet."""
     return await _begin_drive_link(session, command, expect="connect")
 
 
 async def reconnect_account(session, command: Command) -> CommandResult:
-    """Begin a Drive reconnect for a source whose credential exists."""
+    """Begin the workspace's Drive reconnect — it holds a grant already."""
     return await _begin_drive_link(session, command, expect="reconnect")
 
 
@@ -484,7 +438,8 @@ async def disable_account(session, command: Command) -> CommandResult:
 
 
 async def disconnect_account(session, command: Command) -> CommandResult:
-    """F5 (a): revoke the credential, KEEP the row, and pause the source.
+    """F5 (a), for the WORKSPACE's Drive grant (069, `07` §15): revoke the one
+    credential, KEEP the row, and pause every folder under it.
 
     `paused`, deliberately not `error`. A disconnect is a decision, not a
     fault, and reserving `error` for faults is what keeps the #1061 disconnect
@@ -493,50 +448,44 @@ async def disconnect_account(session, command: Command) -> CommandResult:
     would eventually silence it, taking the real faults with it. `paused` is
     outside the beat's scan by construction.
 
-    The row is kept rather than deleted because `oauth_credentials` cascades
-    from the source: deleting it erases an audit trail nobody misses until
+    The rows are kept rather than deleted: the media and its history hang off
+    the sources, and the credential row is an audit trail nobody misses until
     they need it.
 
     **The best-effort Google revoke is NOT performed here, and that is a
     scope statement rather than an oversight.** A provider call inside a unit
-    of work violates this codebase's checkpoint discipline — `transit.upload`
-    carries the same rule in its own docstring — and F5 (a) makes the remote
-    revoke best-effort precisely because it may fail and must not block the
-    local state change. What must be atomic is the pair below; the remote call
-    belongs on a job outside this transaction and is not built.
+    of work violates this codebase's checkpoint discipline, and F5 (a) makes
+    the remote revoke best-effort precisely because it may fail and must not
+    block the local state change. What must be atomic is the pair below; the
+    remote call rides a job outside this transaction.
     """
-    source_id = await _drive_source(session, command)
     revoked = (
         await session.execute(
             text(
                 "UPDATE oauth_credentials SET state = 'revoked'"
-                " WHERE workspace_id = :ws AND media_source_id = :s"
-                "   AND provider = :provider AND state <> 'revoked'"
+                " WHERE workspace_id = :ws AND provider = :provider"
+                "   AND ig_account_id IS NULL AND media_source_id IS NULL"
+                "   AND state <> 'revoked'"
                 " RETURNING id"
             ),
-            {
-                "ws": command.workspace_id,
-                "s": source_id,
-                "provider": google_drive_oauth.PROVIDER,
-            },
+            {"ws": command.workspace_id, "provider": google_drive_oauth.PROVIDER},
         )
     ).first()
-    await session.execute(
+    paused = await session.execute(
         text(
             "UPDATE media_sources SET state = 'paused', alerted_at = NULL"
-            " WHERE id = :s AND workspace_id = :ws"
+            " WHERE workspace_id = :ws AND provider = 'gdrive' AND state <> 'paused'"
         ),
-        {"s": source_id, "ws": command.workspace_id},
+        {"ws": command.workspace_id},
     )
     # The remote half (#1083), enqueued rather than called. Everything above
     # is the atomic pair; this rides a separate transaction so a Google that
     # is slow, angry or absent cannot roll back a disconnect the user has
     # already been told succeeded — which is what F5 (a)'s "best-effort"
-    # requires and what this file's own docstring said it was waiting for.
-    #
-    # Only when a row actually flipped: a repeat disconnect updates nothing,
-    # and minting a second revoke for a grant already revoked would spend a
-    # provider call to learn that. `unless_pending` covers the racing case.
+    # requires. Only when a row actually flipped: a repeat disconnect updates
+    # nothing, and minting a second revoke for a grant already revoked would
+    # spend a provider call to learn that. `unless_pending` covers the racing
+    # case.
     if revoked is not None:
         await jobs.enqueue(
             session,
@@ -549,7 +498,11 @@ async def disconnect_account(session, command: Command) -> CommandResult:
         )
     return CommandResult(
         "executed",
-        {"source_id": source_id, "credential": "revoked", "source": "paused"},
+        {
+            "provider": google_drive_oauth.PROVIDER,
+            "credential_revoked": revoked is not None,
+            "sources_paused": int(paused.rowcount or 0),
+        },
     )
 
 

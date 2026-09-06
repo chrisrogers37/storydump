@@ -530,7 +530,7 @@ def main() -> None:
 
         transport = TelegramTransport(token)
     # The Drive read leg (#982). Armed unconditionally: it needs no env of its
-    # own (the engine carries the credential lookup, the token is per-source),
+    # own (the engine carries the credential lookup, the token is the workspace's grant since 069),
     # so an env gate here would be a switch with nothing to switch on.
     #
     # Safe to arm before a `gdrive` credential writer exists. A source with no

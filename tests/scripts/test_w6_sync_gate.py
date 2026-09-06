@@ -360,14 +360,18 @@ class TestChunkChaining:
         }
 
 
-def _credential(conn, ws, src, state="active"):
-    """A gdrive credential row, so `connect_purpose` reports `reconnect`."""
+def _credential(conn, ws, state="active"):
+    """The WORKSPACE's gdrive credential row (069: one per workspace, no
+    owner column), so `connect_purpose` reports `reconnect`."""
     with conn.cursor() as cur:
         cur.execute("SET app.actor_kind = 'migration'")
         cur.execute(
-            "INSERT INTO oauth_credentials (workspace_id, media_source_id, provider,"
-            " encrypted_payload, state) VALUES (%s, %s, 'gdrive', %s, %s)",
-            (ws, src, "ciphertext-placeholder", state),
+            "INSERT INTO oauth_credentials (workspace_id, provider,"
+            " encrypted_payload, state) VALUES (%s, 'gdrive', %s, %s)"
+            " ON CONFLICT (workspace_id, provider)"
+            "   WHERE ig_account_id IS NULL AND media_source_id IS NULL"
+            " DO UPDATE SET state = EXCLUDED.state",
+            (ws, "ciphertext-placeholder", state),
         )
     conn.commit()
 
@@ -419,7 +423,7 @@ async def _rearm(lane_db, workspace_id, source_id) -> bool:
                 session, workspace_id=str(workspace_id), source_id=str(source_id)
             )
             await session.commit()
-        return moved
+        return bool(moved)
     finally:
         await engine.dispose()
 
@@ -847,18 +851,18 @@ class TestTheConnectTrioIsThinAndTenantBound:
         """F5 (a): revoke, KEEP the row, pause. `paused` not `error` — a
         disconnect is a decision, not a fault."""
         chain = seed_workspace_chain(sync_conn, "p4-disc")
-        _credential(sync_conn, chain["ws"], chain["src"])
+        _credential(sync_conn, chain["ws"])
 
-        res = await _command(
-            lane_db, "disconnect_account", chain, source_id=chain["src"]
-        )
+        res = await _command(lane_db, "disconnect_account", chain)
         assert res.outcome == "executed"
 
         assert _source_row(sync_conn, chain["src"])["state"] == "paused"
         with sync_conn.cursor() as cur:
             cur.execute(
-                "SELECT state FROM oauth_credentials WHERE media_source_id = %s",
-                (chain["src"],),
+                "SELECT state FROM oauth_credentials"
+                " WHERE workspace_id = %s AND provider = 'gdrive'"
+                "   AND media_source_id IS NULL AND ig_account_id IS NULL",
+                (chain["ws"],),
             )
             rows = cur.fetchall()
         assert rows == [("revoked",)], (
@@ -874,23 +878,44 @@ class TestTheConnectTrioIsThinAndTenantBound:
         alerted daily about it — that is how a real alert gets silenced."""
         chain = seed_workspace_chain(sync_conn, "p4-disc-quiet")
         _bind(sync_conn, chain["ws"])
-        _credential(sync_conn, chain["ws"], chain["src"])
+        _credential(sync_conn, chain["ws"])
 
-        await _command(lane_db, "disconnect_account", chain, source_id=chain["src"])
+        await _command(lane_db, "disconnect_account", chain)
         assert await _sweep(lane_db, age_seconds=0) == 0
 
     @pytest.mark.asyncio
-    async def test_another_tenants_source_is_refused_by_name(self, lane_db, sync_conn):
-        """RLS is inert under the deployed owner role (#751), so the executor's
-        own WHERE is the tenant bind. A source id is a caller-supplied UUID."""
+    async def test_a_disconnect_touches_only_this_workspaces_grant_and_folders(
+        self, lane_db, sync_conn
+    ):
+        """069: the grant is the workspace's, so the disconnect names no
+        source — and the executor's own WHERE is the tenant bind (RLS is inert
+        under the deployed owner role, #751): B's disconnect leaves A whole."""
         a = seed_workspace_chain(sync_conn, "p4-x-a")
         b = seed_workspace_chain(sync_conn, "p4-x-b")
-        _credential(sync_conn, a["ws"], a["src"])
+        _credential(sync_conn, a["ws"])
+        _credential(sync_conn, b["ws"])
 
-        with pytest.raises(CommandRefused) as exc:
-            await _command(lane_db, "disconnect_account", b, source_id=a["src"])
-        assert exc.value.reason == "not_found"
+        res = await _command(lane_db, "disconnect_account", b)
+        assert res.outcome == "executed"
+        assert res.data["credential_revoked"] is True
+        assert res.data["sources_paused"] == 1
+
         assert _source_row(sync_conn, a["src"])["state"] == "active", "untouched"
+        assert _source_row(sync_conn, b["src"])["state"] == "paused"
+        with sync_conn.cursor() as cur:
+            cur.execute(
+                "SELECT workspace_id::text, state FROM oauth_credentials"
+                " WHERE provider = 'gdrive' AND workspace_id IN (%s, %s)"
+                " ORDER BY workspace_id::text",
+                (a["ws"], b["ws"]),
+            )
+            rows = dict(cur.fetchall())
+        assert rows == {str(a["ws"]): "active", str(b["ws"]): "revoked"}
+
+        # A repeat disconnect flips nothing and says so.
+        again = await _command(lane_db, "disconnect_account", b)
+        assert again.data["credential_revoked"] is False
+        assert again.data["sources_paused"] == 0
 
     @pytest.mark.asyncio
     async def test_connect_on_a_credentialed_source_is_refused_not_silently_reconnected(
@@ -899,12 +924,12 @@ class TestTheConnectTrioIsThinAndTenantBound:
         """The split is the SCHEMA's answer, not the caller's. A reconnect run
         as a connect would skip `issue_state`'s invalidate-prior-states step
         (`07` §2, last-issued-wins) and leave two live callbacks for one
-        source."""
+        workspace."""
         chain = seed_workspace_chain(sync_conn, "p4-wrongway")
-        _credential(sync_conn, chain["ws"], chain["src"])
+        _credential(sync_conn, chain["ws"])
 
         with pytest.raises(CommandRefused) as exc:
-            await _command(lane_db, "connect_account", chain, source_id=chain["src"])
+            await _command(lane_db, "connect_account", chain)
         assert exc.value.reason == "illegal_transition"
 
     @pytest.mark.asyncio
@@ -918,7 +943,7 @@ class TestTheConnectTrioIsThinAndTenantBound:
         module imports from `src.api`."""
         chain = seed_workspace_chain(sync_conn, "p4-mint")
 
-        res = await _command(lane_db, "connect_account", chain, source_id=chain["src"])
+        res = await _command(lane_db, "connect_account", chain)
         assert res.outcome == "executed"
         assert res.data["purpose"] == "connect"
         assert res.data["provider"] == "gdrive"
@@ -933,8 +958,72 @@ class TestTheConnectTrioIsThinAndTenantBound:
             row = cur.fetchone()
         assert row is not None, "the callback has nothing to consume otherwise"
         assert str(row[0]) == str(chain["ws"])
-        assert str(row[1]) == str(chain["src"])
+        assert str(row[1]) == str(chain["ws"]), "the workspace is its own target (069)"
         assert row[2] == "gdrive" and row[3] is None
+
+
+def _remove_source(conn, source_id):
+    """What `provisioning.pause_media_source` writes — a removal."""
+    with conn.cursor() as cur:
+        cur.execute("SET app.actor_kind = 'migration'")
+        cur.execute(
+            "UPDATE media_sources SET state = 'paused',"
+            " config = config || '{\"removed\": true}'::jsonb WHERE id = %s",
+            (source_id,),
+        )
+    conn.commit()
+
+
+class TestASyncLandingAfterARemovalChangesNothing:
+    """Review of #1246: Remove is a first-class button now, and a job minted
+    before the click still runs. Neither its success stamp nor its error
+    branch may un-pause the folder — or alert about it."""
+
+    @pytest.mark.asyncio
+    async def test_the_success_stamp_does_not_revive_a_removed_folder(
+        self, lane_db, sync_conn
+    ):
+        chain = seed_workspace_chain(sync_conn, "w6-removed-ok")
+        _arm_source(sync_conn, chain["src"])
+        _tick(sync_conn)
+        assert len(_jobs(sync_conn, "sync_media_source")) == 1
+        _remove_source(sync_conn, chain["src"])
+
+        drive = ScriptedDrive([([_item("f1")], None)])
+        wl, claimed = await _run_once_w6(lane_db, drive)
+        assert claimed is True and wl.processed == 1
+
+        src = _source_row(sync_conn, chain["src"])
+        assert src["state"] == "paused", (
+            "the person removed it; the job must not undo that"
+        )
+        assert src["next_sync_at"] is None
+
+    @pytest.mark.asyncio
+    async def test_the_error_branch_neither_flips_nor_alerts_a_removed_folder(
+        self, lane_db, sync_conn
+    ):
+        from src.services.target.media_sync import DriveCredentialDead
+
+        chain = seed_workspace_chain(sync_conn, "w6-removed-err")
+        _bind(sync_conn, chain["ws"])
+        _arm_source(sync_conn, chain["src"])
+        _tick(sync_conn)
+        _remove_source(sync_conn, chain["src"])
+
+        drive = ScriptedDrive([DriveCredentialDead("grant gone")])
+        wl, claimed = await _run_once_w6(lane_db, drive)
+        assert claimed is True
+
+        src = _source_row(sync_conn, chain["src"])
+        assert src["state"] == "paused" and src["alerted_at"] is None
+        with sync_conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM channel_outbox WHERE workspace_id = %s",
+                (chain["ws"],),
+            )
+            (notices,) = cur.fetchone()
+        assert notices == 0, "no alert for a folder the person removed"
 
 
 class TestFailureRouting:

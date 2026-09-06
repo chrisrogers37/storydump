@@ -279,48 +279,46 @@ async def list_accounts(executor, *, workspace_id: str) -> list[dict]:
     )
 
 
+#: The Drive credential provider, as `google_drive_oauth.PROVIDER` spells it —
+#: a local name for the same reason `IG_LOGIN_PROVIDER` is one.
+GDRIVE_PROVIDER = "gdrive"
+
+
+async def drive_status(executor, *, workspace_id: str) -> dict:
+    """The WORKSPACE's Google Drive grant (069, `07` §15: one per workspace,
+    every folder under it), projected exactly as a destination's credential
+    is — `none` (never connected) · `active` · `expired` · `revoked` — plus
+    when it was granted. Never a token."""
+    # updated_at, not created_at: a reconnect replaces the row in place, and
+    # "connected since" is the LAST grant's time (review of #1246).
+    row = await readers.row(
+        executor,
+        "SELECT credential_status AS status, connected_at FROM ("
+        f"  SELECT {_CREDENTIAL_STATUS_SQL}, c.updated_at AS connected_at"
+        "    FROM oauth_credentials c"
+        "   WHERE c.workspace_id = :ws AND c.provider = :provider"
+        "     AND c.ig_account_id IS NULL AND c.media_source_id IS NULL"
+        ") q",
+        ws=str(workspace_id),
+        provider=GDRIVE_PROVIDER,
+    )
+    if row is None:
+        return {"status": "none", "connected_at": None}
+    return {"status": row["status"], "connected_at": row["connected_at"]}
+
+
 async def list_sources(executor, *, workspace_id: str) -> list[dict]:
-    """Sources plus their credential STATUS — presence and freshness, never a token.
-
-    `media_sources.state` cannot answer "is this connected" and must not be used
-    as a proxy for it (#1078): a source with a dead credential flips to `error`,
-    but a source created and never credentialed is `active` too. It separates
-    broken from not-broken and says nothing about whether a credential exists.
-
-    `credential_status` is DERIVED here rather than passed through, because the
-    stored `state` alone would be a field that cannot say the interesting thing.
-    Only `ig_login_oauth` writes `expired`, on the Instagram refresh path;
-    NOTHING transitions a gdrive credential, so a passed-through `state` would
-    read `active` forever and "reconnect needed" would never appear — a value
-    that looks like it answers the question and always answers no.
-
-    So the projection matches the rule `drive_credentials` actually ENFORCES:
-    usable iff state is `active` AND `expires_at` has not passed (a NULL
-    `expires_at` is no known expiry, so it does not refuse). Those two sites are
-    a display/enforcement pair and could drift; they are named in each other so
-    a change to one is findable from the other.
-
-    Values: `none` (never connected) · `active` · `expired` · `revoked`. The
-    first and the last two are DIFFERENT USER ACTIONS — connect versus
-    reconnect — which is the distinction the caller could not previously make.
-
-    The join carries `provider` as well as the source id: `uq_credential_per_source`
-    is UNIQUE(workspace_id, media_source_id, provider), and provider equality
-    between a source and its credential is service-enforced rather than a
-    constraint (D37), so joining without it is one stray row away from fanning
-    a source into two.
-    """
+    """Sources with the folder each reads — `folder_ref`, and `folder_name`
+    when the picker named it. Whether Google can be reached is the
+    WORKSPACE's question since 069 (`drive_status`), not a source's: one
+    grant, every folder under it, so no credential is joined here."""
     return await readers.rows(
         executor,
         "SELECT s.id, s.provider, s.state, s.next_sync_at, s.last_sync_success_at,"
         "       s.alerted_at, s.created_at,"
-        f"       {_CREDENTIAL_STATUS_SQL},"
-        "       c.created_at AS credential_connected_at"
+        "       s.config->>'folder_ref' AS folder_ref,"
+        "       s.config->>'folder_name' AS folder_name"
         "  FROM media_sources s"
-        "  LEFT JOIN oauth_credentials c"
-        "    ON c.workspace_id = s.workspace_id"
-        "   AND c.media_source_id = s.id"
-        "   AND c.provider = s.provider"
         " WHERE s.workspace_id = :ws ORDER BY s.created_at, s.id",
         ws=str(workspace_id),
     )

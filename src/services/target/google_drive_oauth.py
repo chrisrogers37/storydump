@@ -53,15 +53,14 @@ refresh clock is fenced to `ig_login` and minting happens on the read path,
 and :mod:`drive_credentials` owns that account (what the `063` fence guards,
 and what it does not).
 
-The row is source-owned: `media_source_id` set, `ig_account_id` NULL,
-`provider = 'gdrive'`. `ck_credentials_one_owner` only counts non-null owner
-columns, so an `ig_login` row hung off a Drive source is a shape the database
-accepts — the gate asserts all three explicitly, and this module never takes
-an account id at all. The state that leads here is source-pinned the same way:
-`oauth_states.reconnect_target` carries the source on a `connect` as well as
-on a `reconnect` — `060:95` / `07:47` describe it for `reconnect` only, and the
-prose correction rides with P6 — because a Drive credential is per-source and
-the callback has nothing else to learn the source from.
+The row is WORKSPACE-owned (069, `07` §15; owner ruling 2026-09-05): `provider =
+'gdrive'`, `media_source_id` NULL, `ig_account_id` NULL — `ck_credentials_one_owner`
+is provider-conditional and refuses any other shape for `gdrive`, and
+`uq_credential_per_workspace` admits one ownerless row per workspace and provider.
+The state that leads here is pinned the same way: `oauth_states.reconnect_target`
+carries the WORKSPACE id on a `connect` as well as on a `reconnect`, so
+`issue_state`'s last-issued-wins retires a stale state per workspace and the
+callback refuses a state that names anything else.
 
 Operational note (fleet knowledge `google-drive-token-refresh-2026-07-15`):
 while the Google OAuth app is in Testing mode, Google expires refresh tokens
@@ -246,57 +245,49 @@ def decode_payload(plaintext: str) -> DrivePayload:
     return DrivePayload(**tokens)
 
 
-async def connect_purpose(conn, *, workspace_id, media_source_id) -> Optional[str]:
-    """Which state the connect route mints for this source, in one query:
-    ``None`` when the source is not this workspace's (the route answers 404 —
-    never 403, since a source's existence is not disclosed across tenants),
-    ``"connect"`` when it has never been credentialed, ``"reconnect"`` once it
-    has — so `issue_state`'s last-issued-wins retires a stale state."""
+async def connect_purpose(conn, *, workspace_id) -> str:
+    """Which state the connect route mints for this WORKSPACE (069, `07` §15:
+    one Google grant per workspace): ``"connect"`` when it holds no `gdrive`
+    credential, ``"reconnect"`` once it does, in any state — so `issue_state`'s
+    last-issued-wins retires a stale state per workspace."""
     credentialed = (
         await conn.execute(
             text(
                 "SELECT EXISTS ("
                 "  SELECT 1 FROM oauth_credentials c"
-                "   WHERE c.media_source_id = s.id AND c.provider = :provider"
-                ") AS credentialed"
-                "  FROM media_sources s"
-                " WHERE s.id = :sid AND s.workspace_id = :ws"
+                "   WHERE c.workspace_id = :ws AND c.provider = :provider"
+                "     AND c.ig_account_id IS NULL AND c.media_source_id IS NULL"
+                ")"
             ),
-            {
-                "sid": str(media_source_id),
-                "ws": str(workspace_id),
-                "provider": PROVIDER,
-            },
+            {"ws": str(workspace_id), "provider": PROVIDER},
         )
     ).scalar()
-    if credentialed is None:
-        return None
     return "reconnect" if credentialed else "connect"
 
 
-async def store_credential(
-    conn, *, workspace_id, media_source_id, grant: DriveGrant
-) -> str:
-    """Write the source's `gdrive` credential — or replace the one it already
-    has, in place, on a reconnect (`uq_credential_per_source` admits one row
-    per source and provider; same id, no gap, no second row). Returns the id.
+async def store_credential(conn, *, workspace_id, grant: DriveGrant) -> str:
+    """Write the WORKSPACE's `gdrive` credential — or replace the one it
+    already holds, in place, on a reconnect (`uq_credential_per_workspace`
+    admits one ownerless row per workspace and provider; same id, no gap, no
+    second row). Returns the id. A `gdrive` credential names no owner column:
+    the workspace is its owner (069, #1165).
 
     On the CALLER's connection, inside the caller's transaction — the F4 (a)
     contract: the tenant and actor GUCs are the unit of work's, `p_tenant`
-    binds the row to the workspace, and P4's re-arm of the source
-    (`state='active'`, `alerted_at=NULL`, `next_sync_at=now()`) lands beside
-    this write, so "a credential now exists" and "this source is eligible
-    again" become one fact that cannot drift.
+    binds the row to the workspace, and the re-arm of every `gdrive` source
+    (`media_sync.rearm_after_connect`, workspace-wide) lands beside this
+    write, so "a grant now exists" and "these folders are eligible again"
+    become one fact that cannot drift.
     """
     result = await conn.execute(
         text(
             "INSERT INTO oauth_credentials"
-            " (workspace_id, media_source_id, provider, encrypted_payload,"
+            " (workspace_id, provider, encrypted_payload,"
             "  expires_at, next_refresh_at, state)"
             # next_refresh_at NULL — the read door's header has the fence.
-            " VALUES (:ws, :src, :provider, :payload, :exp, NULL, 'active')"
-            " ON CONFLICT (workspace_id, media_source_id, provider)"
-            "   WHERE media_source_id IS NOT NULL"
+            " VALUES (:ws, :provider, :payload, :exp, NULL, 'active')"
+            " ON CONFLICT (workspace_id, provider)"
+            "   WHERE ig_account_id IS NULL AND media_source_id IS NULL"
             " DO UPDATE SET encrypted_payload = EXCLUDED.encrypted_payload,"
             "               expires_at = EXCLUDED.expires_at,"
             "               next_refresh_at = NULL,"
@@ -305,7 +296,6 @@ async def store_credential(
         ),
         {
             "ws": str(workspace_id),
-            "src": str(media_source_id),
             "provider": PROVIDER,
             "payload": ring().encrypt(encode_payload(grant)),
             "exp": grant.expires_at,

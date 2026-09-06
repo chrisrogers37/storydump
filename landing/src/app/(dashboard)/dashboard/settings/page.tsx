@@ -4,6 +4,7 @@ import { workspaceFetch } from "@/lib/workspaces";
 import {
   deriveSettings,
   type AccountsResponse,
+  type DriveStatusResponse,
   type SourcesResponse,
   type StatsResponse,
   type WorkspaceConfig,
@@ -41,9 +42,9 @@ import { IntegrationsTab } from "@/components/dashboard/settings/integrations-ta
  * the shape #1051 refused — "a save button that silently 404s".
  *
  * Both connect flows targeted `oauth-url/<provider>` and were DELETED rather
- * than gated (#1070): per-workspace against a per-source route, never wirable
- * as written, and behind `editable` they would have come back the moment this
- * change landed. That deletion is what makes flipping the flag here safe;
+ * than gated (#1070). The Drive one is BACK since 069 (#1165): per-workspace
+ * against a per-workspace route, which is the shape it always wanted. That
+ * deletion is what made flipping the flag here safe;
  * `editable` gates ONE kind of thing, controls that are pending and coming
  * back, so it cannot resurrect anything removed as invalid.
  *
@@ -72,7 +73,7 @@ import { IntegrationsTab } from "@/components/dashboard/settings/integrations-ta
 export default async function SettingsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ connected?: string }>;
+  searchParams: Promise<{ tab?: string; connected?: string }>;
 }) {
   // `auth.py:364` has always redirected here with `?connected=gdrive` on a
   // successful Drive grant. This page took NO searchParams at all, so the
@@ -97,14 +98,22 @@ export default async function SettingsPage({
   // predict is worse than a missing one, and the port refuses non-owners anyway.
   const isOwner = membership?.role === "owner";
 
-  const [configResult, accountsResult, sourcesResult, bindingsResult, membersResult, statsResult] =
-    await Promise.all([
+  const [
+    configResult,
+    accountsResult,
+    sourcesResult,
+    bindingsResult,
+    membersResult,
+    statsResult,
+    driveResult,
+  ] = await Promise.all([
       workspaceFetch<WorkspaceConfig>("", workspaceId),
       workspaceFetch<AccountsResponse>("accounts", workspaceId),
       workspaceFetch<SourcesResponse>("sources", workspaceId),
       workspaceFetch<BindingsResponse>("bindings", workspaceId),
       workspaceFetch<MembersResponse>("members", workspaceId),
       workspaceFetch<StatsResponse>("stats", workspaceId),
+      workspaceFetch<DriveStatusResponse>("drive", workspaceId),
     ]);
 
   // All four, for the reason above: every tab on this screen renders current
@@ -119,10 +128,23 @@ export default async function SettingsPage({
     return <RouterUnavailable what="Settings" />;
   }
 
+  // The grant is one read; a failed read is a null the card names, not a
+  // redirect — every other tab stands without it.
+  const drive = driveResult.ok ? driveResult.data.drive : null;
+  // `?tab=` opens a tab directly (the Media page links to Integrations), and
+  // the Drive callback's `?connected=gdrive` lands where the grant is shown.
+  const params = await searchParams;
+  const initialTab =
+    params.tab === "integrations" || params.connected === "gdrive"
+      ? "integrations"
+      : params.tab === "accounts"
+        ? "accounts"
+        : "general";
   const settings = deriveSettings(
     configResult.data,
     sourcesResult.data.sources ?? [],
     statsResult.data,
+    drive,
   );
   const accounts = accountsResult.data.accounts ?? [];
 
@@ -172,11 +194,11 @@ export default async function SettingsPage({
         >
           <span className="font-medium">Google Drive access was granted.</span>{" "}
           The grant completed, so an empty library is not a failed connection.
-          Its current state is shown on the source under Integrations.
+          Its current state is shown on the Google Drive card under Integrations.
         </div>
       )}
 
-      <Tabs defaultValue="general">
+      <Tabs defaultValue={initialTab}>
         <TabsList>
           <TabsTrigger value="general">General</TabsTrigger>
           <TabsTrigger value="accounts">Accounts</TabsTrigger>
@@ -218,16 +240,16 @@ export default async function SettingsPage({
         </TabsContent>
 
         {/*
-          `editable` stays false HERE too, and it now gates less than it used
-          to: `sync-media` is P4 and `disconnect-gdrive` is P6, so those two
-          stay disabled. The per-source Connect button is NOT behind it — it
-          calls a route that exists (#1065), so gating it would be the
-          reads-without-writes harm inverted, hiding a control that works.
+          `editable` stays false HERE too. Nothing on the Drive card is behind
+          it: Connect, the folder picker, Sync Now, Remove and Disconnect all
+          call routes that exist (069, #1165), and gating them would be the
+          reads-without-writes harm inverted, hiding controls that work.
         */}
         <TabsContent value="integrations">
           <IntegrationsTab
             settings={settings}
             sources={sourcesResult.data.sources ?? []}
+            drive={drive}
             bindings={bindingsResult.ok ? (bindingsResult.data.bindings ?? []) : null}
             workspaceId={workspaceId}
             telegramLinked={session.telegramLinked}

@@ -7,7 +7,7 @@ import {
   notAuthenticatedCopy,
   type RefusalOutcome,
 } from "./refusal-copy";
-import { addSourceRefusalCopy, connectRefusalCopy } from "./source-connect";
+import { addFolderRefusalCopy, driveConnectRefusalCopy } from "./drive";
 
 /**
  * #1140 — the six sites that collapsed roughly seven causes into one confident
@@ -45,15 +45,15 @@ const SITES: ReadonlyArray<{
   reasons: readonly string[];
 }> = [
   {
-    name: "addSourceRefusalCopy",
+    name: "addFolderRefusalCopy",
     outcome: "Nothing was added.",
-    copy: addSourceRefusalCopy,
+    copy: addFolderRefusalCopy,
     reasons: ["unauthenticated", "http_401"],
   },
   {
-    name: "connectRefusalCopy",
+    name: "driveConnectRefusalCopy",
     outcome: "Nothing changed.",
-    copy: connectRefusalCopy,
+    copy: driveConnectRefusalCopy,
     reasons: ["unauthenticated", "http_401"],
   },
   {

@@ -16,14 +16,18 @@ from src.exceptions.tenancy import TenantResolutionError
 from src.services.target import (
     channel_bind,
     commands,
+    google_drive_oauth,
     identity,
     identity_link,
     ig_login_oauth,
     invitations,
+    media_sync,
+    provisioning,
     sessions,
     webhook_ingress,
     workspaces,
 )
+from src.services.target.drive_adapter import DriveRetryableError
 from src.services.target.commands import CommandNotBuilt, CommandRefused, CommandResult
 from src.services.target.webhook_ingress import AdmissionConflict, DeliveryReplayed
 from tests.src.api.conftest import INTENT, PRINCIPAL, WS
@@ -729,3 +733,292 @@ class TestTelegramLink:
             "user_id": PRINCIPAL.user_id,
             "bot_username": "storydump_app_bot",
         }
+
+
+SRC = "33333333-3333-4333-8333-333333333333"
+
+
+@pytest.fixture
+def drive_configured(monkeypatch):
+    """The Google client configured for the Drive leg."""
+    from src.config.settings import settings
+
+    monkeypatch.setattr(settings, "GOOGLE_CLIENT_ID", "gid", raising=False)
+    monkeypatch.setattr(settings, "GOOGLE_CLIENT_SECRET", "sec", raising=False)
+    monkeypatch.setattr(
+        settings, "OAUTH_REDIRECT_BASE_URL", "https://api.example.test", raising=False
+    )
+
+
+class TestDriveConnect:
+    """`POST /workspaces/{ws}/drive/connect` — the workspace connects Google
+    Drive ONCE (owner ruling 2026-09-05, #1165 lean (b); `07` §15). Admin
+    floor; the state pins the workspace as its own target, so last-issued-wins
+    retires a stale connect per workspace."""
+
+    URL = f"/api/v1/workspaces/{WS}/drive/connect"
+
+    @pytest.fixture
+    def purpose(self, monkeypatch):
+        holder = {"value": "connect", "asked": None}
+
+        async def connect_purpose(session, *, workspace_id):
+            holder["asked"] = workspace_id
+            return holder["value"]
+
+        monkeypatch.setattr(google_drive_oauth, "connect_purpose", connect_purpose)
+        return holder
+
+    def test_mints_a_state_pinned_to_the_workspace_and_says_where_to_go(
+        self, client, signed_in, tenant, drive_configured, purpose, issued
+    ):
+        resp = client.post(self.URL)
+        assert resp.status_code == 200, resp.text
+        url = resp.json()["authorization_url"]
+        assert url.startswith("https://accounts.google.com/")
+        assert "state=st4te" in url and "google-drive%2Fcallback" in url
+        assert tenant == [
+            ("uow", WS, PRINCIPAL.user_id),
+            ("gate", WS, PRINCIPAL.user_id, "admin"),
+        ]
+        assert purpose["asked"] == WS
+        assert issued["purpose"] == "connect"
+        assert issued["provider"] == google_drive_oauth.PROVIDER
+        assert issued["reconnect_target"] == WS
+        assert issued["workspace_id"] == WS and issued["user_id"] == PRINCIPAL.user_id
+
+    def test_a_workspace_that_holds_a_grant_mints_a_reconnect(
+        self, client, signed_in, tenant, drive_configured, purpose, issued
+    ):
+        purpose["value"] = "reconnect"
+        assert client.post(self.URL).status_code == 200
+        assert issued["purpose"] == "reconnect" and issued["reconnect_target"] == WS
+
+    def test_unconfigured_google_refuses_503_before_any_seam(
+        self, client, signed_in, tenant, purpose, issued, monkeypatch
+    ):
+        from src.config.settings import settings
+
+        monkeypatch.setattr(settings, "GOOGLE_CLIENT_ID", None, raising=False)
+        resp = client.post(self.URL)
+        assert resp.status_code == 503
+        assert "GOOGLE_CLIENT_ID" in resp.json()["detail"]
+        assert tenant == [] and issued == {}
+
+    def test_the_per_folder_connect_route_is_gone(self, client, signed_in, tenant):
+        resp = client.post(f"/api/v1/workspaces/{WS}/sources/{SRC}/connect")
+        assert resp.status_code in (404, 405)
+        assert tenant == []
+
+
+class TestDriveFolders:
+    """`GET /workspaces/{ws}/drive/folders` — the browser the picker reads,
+    through the workspace's grant. Admin floor: the grant is the workspace's,
+    the tree is a person's Drive. Every refusal by name (review of #1246)."""
+
+    URL = f"/api/v1/workspaces/{WS}/drive/folders"
+
+    @pytest.fixture
+    def browser(self, monkeypatch):
+        from src.services.target.google_drive_adapter import FolderPage
+
+        holder = {
+            "folders": [{"id": "f1", "name": "Trips"}],
+            "truncated": False,
+            "raise": None,
+            "asked": None,
+            "status": "active",
+        }
+
+        class _Adapter:
+            async def list_folders(self, *, parent, workspace_id):
+                holder["asked"] = (parent, workspace_id)
+                if holder["raise"] is not None:
+                    raise holder["raise"]
+                return FolderPage(holder["folders"], holder["truncated"])
+
+        async def drive_status(session, *, workspace_id):
+            return {"status": holder["status"], "connected_at": None}
+
+        from src.api.routes import v1
+
+        monkeypatch.setattr(v1, "_drive_adapter", lambda request: _Adapter())
+        monkeypatch.setattr(workspaces, "drive_status", drive_status)
+        return holder
+
+    def test_lists_the_root_at_the_admin_floor(
+        self, client, signed_in, tenant, browser
+    ):
+        resp = client.get(self.URL)
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {
+            "parent": "root",
+            "folders": [{"id": "f1", "name": "Trips"}],
+            "truncated": False,
+        }
+        assert tenant == [
+            ("uow", WS, PRINCIPAL.user_id),
+            ("gate", WS, PRINCIPAL.user_id, "admin"),
+        ]
+        assert browser["asked"] == (None, WS)
+
+    def test_a_parent_narrows_the_listing(self, client, signed_in, tenant, browser):
+        resp = client.get(self.URL + "?parent=abc_-1")
+        assert resp.status_code == 200
+        assert resp.json()["parent"] == "abc_-1" and browser["asked"] == ("abc_-1", WS)
+
+    def test_the_shared_root_is_a_parent_the_route_admits(
+        self, client, signed_in, tenant, browser
+    ):
+        resp = client.get(self.URL + "?parent=shared-with-me")
+        assert resp.status_code == 200 and browser["asked"] == ("shared-with-me", WS)
+
+    def test_a_parent_that_is_not_a_drive_id_is_400_after_admission(
+        self, client, signed_in, tenant, browser
+    ):
+        resp = client.get(self.URL + "?parent=x'%20or%201")
+        assert resp.status_code == 400 and resp.json()["detail"] == "invalid_parent"
+        assert browser["asked"] is None
+        assert ("gate", WS, PRINCIPAL.user_id, "admin") in tenant
+
+    def test_never_connected_is_409_drive_not_connected_before_any_request(
+        self, client, signed_in, tenant, browser
+    ):
+        browser["status"] = "none"
+        resp = client.get(self.URL)
+        assert (
+            resp.status_code == 409 and resp.json()["detail"] == "drive_not_connected"
+        )
+        assert browser["asked"] is None
+
+    @pytest.mark.parametrize("status", ["expired", "revoked"])
+    def test_a_dead_grant_is_409_drive_reconnect_needed(
+        self, client, signed_in, tenant, browser, status
+    ):
+        browser["status"] = status
+        resp = client.get(self.URL)
+        assert (
+            resp.status_code == 409
+            and resp.json()["detail"] == "drive_reconnect_needed"
+        )
+        assert browser["asked"] is None
+
+    def test_google_refusing_a_live_looking_grant_is_409_drive_grant_refused(
+        self, client, signed_in, tenant, browser
+    ):
+        browser["raise"] = media_sync.DriveCredentialDead("401 from drive")
+        resp = client.get(self.URL)
+        assert (
+            resp.status_code == 409 and resp.json()["detail"] == "drive_grant_refused"
+        )
+
+    def test_google_unreachable_is_503(self, client, signed_in, tenant, browser):
+        browser["raise"] = DriveRetryableError("503 from drive")
+        resp = client.get(self.URL)
+        assert resp.status_code == 503 and resp.json()["detail"] == "drive_unavailable"
+
+    def test_a_cut_listing_says_so(self, client, signed_in, tenant, browser):
+        browser["truncated"] = True
+        assert client.get(self.URL).json()["truncated"] is True
+
+
+class TestDriveStatus:
+    """`GET /workspaces/{ws}/drive` — the workspace's grant, projected as the
+    destinations' credentials are (`none` · `active` · `expired` · `revoked`)."""
+
+    def test_reads_at_the_member_floor(self, client, signed_in, tenant, monkeypatch):
+        async def drive_status(session, *, workspace_id):
+            assert workspace_id == WS
+            return {"status": "active", "connected_at": "2026-09-05T00:00:00+00:00"}
+
+        monkeypatch.setattr(workspaces, "drive_status", drive_status)
+        resp = client.get(f"/api/v1/workspaces/{WS}/drive")
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "drive": {"status": "active", "connected_at": "2026-09-05T00:00:00+00:00"}
+        }
+        assert tenant == [
+            ("uow", WS, PRINCIPAL.user_id),
+            ("gate", WS, PRINCIPAL.user_id, "member"),
+        ]
+
+
+class TestSourcesUnderTheWorkspaceGrant:
+    """`POST /workspaces/{ws}/sources` picks a folder UNDER the grant: refused
+    by name without one, armed for its first sync with one. `DELETE` pauses a
+    folder — never deletes it."""
+
+    URL = f"/api/v1/workspaces/{WS}/sources"
+
+    @pytest.fixture
+    def grant(self, monkeypatch):
+        holder = {"status": "active"}
+
+        async def drive_status(session, *, workspace_id):
+            return {"status": holder["status"], "connected_at": None}
+
+        monkeypatch.setattr(workspaces, "drive_status", drive_status)
+        return holder
+
+    @pytest.fixture
+    def created(self, monkeypatch):
+        log = {}
+
+        async def get_or_create_media_source(
+            session, *, workspace_id, folder_ref, root_name=None, folder_name=None
+        ):
+            log["source"] = (workspace_id, folder_ref, root_name, folder_name)
+            return SRC, True
+
+        async def rearm_after_connect(session, *, workspace_id, source_id=None):
+            log["armed"] = (workspace_id, source_id)
+            return True
+
+        monkeypatch.setattr(
+            provisioning, "get_or_create_media_source", get_or_create_media_source
+        )
+        monkeypatch.setattr(media_sync, "rearm_after_connect", rearm_after_connect)
+        return log
+
+    def test_a_picked_folder_is_created_named_and_armed(
+        self, client, signed_in, tenant, grant, created
+    ):
+        resp = client.post(self.URL, json={"folder_ref": "f1", "folder_name": "Trips"})
+        assert resp.status_code == 201, resp.text
+        assert resp.json() == {"source_id": SRC, "created": True}
+        assert created["source"] == (WS, "f1", None, "Trips")
+        assert created["armed"] == (WS, SRC)
+        assert ("gate", WS, PRINCIPAL.user_id, "admin") in tenant
+
+    def test_without_a_usable_grant_nothing_is_created(
+        self, client, signed_in, tenant, grant, created
+    ):
+        grant["status"] = "none"
+        resp = client.post(self.URL, json={"folder_ref": "f1"})
+        assert (
+            resp.status_code == 409 and resp.json()["detail"] == "drive_not_connected"
+        )
+        assert created == {}
+
+    def test_removing_a_folder_pauses_it(self, client, signed_in, tenant, monkeypatch):
+        asked = {}
+
+        async def pause_media_source(session, *, workspace_id, source_id):
+            asked["pause"] = (workspace_id, source_id)
+            return True
+
+        monkeypatch.setattr(provisioning, "pause_media_source", pause_media_source)
+        resp = client.delete(f"{self.URL}/{SRC}")
+        assert resp.status_code == 200
+        assert resp.json() == {"source_id": SRC, "state": "paused"}
+        assert asked["pause"] == (WS, SRC)
+        assert ("gate", WS, PRINCIPAL.user_id, "admin") in tenant
+
+    def test_removing_a_folder_that_is_not_here_is_404(
+        self, client, signed_in, tenant, monkeypatch
+    ):
+        async def pause_media_source(session, *, workspace_id, source_id):
+            return False
+
+        monkeypatch.setattr(provisioning, "pause_media_source", pause_media_source)
+        assert client.delete(f"{self.URL}/{SRC}").status_code == 404

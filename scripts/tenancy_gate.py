@@ -94,6 +94,11 @@ _TENANCY_IRRELEVANT: tuple[str, ...] = (
     # RLS bit (the reducing hazards the refusal names are all table-shaped).
     "COMMENT ON ",
     "DROP FUNCTION ",
+    # 069 (#1165) drops a partial unique index. An index is not a column, a
+    # policy or an RLS bit — the four facts have exactly one writer each in
+    # `expected_tenancy` and none of them is an index — so DROP INDEX is inert
+    # here exactly as CREATE INDEX above already is.
+    "DROP INDEX ",
 )
 
 

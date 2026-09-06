@@ -107,7 +107,8 @@ export function MediaGrid({
             <EmptyState
               icon={ImageOff}
               title="No media items found"
-              description="Connect Google Drive to sync your content library."
+              description="Connect Google Drive and pick the folders to sync your content library."
+              action={{ href: "/dashboard/settings?tab=integrations", label: "Set up Google Drive" }}
             />
           </div>
         ) : (
