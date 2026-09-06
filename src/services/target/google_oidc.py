@@ -140,6 +140,35 @@ async def code_grant(
     return response.status_code, body
 
 
+async def refresh_grant(
+    client, *, refresh_token: str, client_id: str, client_secret: str
+) -> tuple[int, Any]:
+    """POST the refresh-token grant to the token endpoint, through the egress
+    floor, and hand back ``(status, body)`` exactly as :func:`code_grant` does
+    — the Drive read path (P5, F3 (b), #1247) mints its hourly access token
+    with this. What a non-200 MEANS is the caller's to say: a 400
+    ``invalid_grant`` is a grant Google no longer honours, everything else is
+    transient. The body is never logged — it carries a bearer token.
+    """
+    response = await egress.request(
+        client,
+        "POST",
+        TOKEN_URL,
+        policy=EgressPolicy(timeout_class="standard"),
+        data={
+            "refresh_token": refresh_token,
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "grant_type": "refresh_token",
+        },
+    )
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    return response.status_code, body
+
+
 async def revoke_token(client, *, token: str) -> int:
     """Ask Google to invalidate a grant. Returns the HTTP status, and raises
     only what the FLOOR raises.

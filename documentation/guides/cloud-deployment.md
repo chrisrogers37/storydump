@@ -265,7 +265,7 @@ Google Drive is the recommended media source for cloud deployments.
 2. Enable the **Google Drive API**
 3. Create **OAuth 2.0 Client ID** (Web application type)
 4. Add authorized redirect URI: `https://your-app.up.railway.app/auth/google-drive/callback`
-5. Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` env vars
+5. Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` env vars on the **API and the worker** — both read Google Drive through the same credential door, and the worker refreshes the hourly access token from the stored refresh token (#1247); a service without them refuses by naming the variables
 
 ### How It Works (Post-Phase 05)
 

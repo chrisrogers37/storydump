@@ -20,6 +20,7 @@ from src.services.target import (
     provisioning,
     workspaces,
 )
+from src.services.target.drive_adapter import DriveRetryableError
 from src.services.target.media_sync import DriveCredentialDead
 from tests.src.services.target.conftest import drive_grant
 
@@ -176,21 +177,195 @@ class TestTheReadDoorResolvesByWorkspace:
         [
             (None, "never connected"),
             ("revoked", "'revoked'"),
-            ("expired-at", "expired"),
+            ("expired", "'expired'"),
         ],
     )
     async def test_every_refusal_names_the_workspace_and_its_cause(
         self, credential, row, said
     ):
-        if row is None:
-            credential["row"] = None
-        elif row == "expired-at":
-            credential["row"] = self._row(expires_in=-1)
-        else:
-            credential["row"] = self._row(state=row)
+        credential["row"] = None if row is None else self._row(state=row)
         with pytest.raises(DriveCredentialDead) as info:
             await drive_credentials.token_for_workspace(object(), WS)
         assert said in str(info.value) and WS in str(info.value)
+
+
+class TestAnExpiredAccessTokenIsMintedOnTheReadPath:
+    """P5, F3 (b) (#1247): the stored grant's ACCESS token expires hourly; the
+    read door refreshes it from the refresh token, writes the new payload in
+    place, and hands back the fresh token — so "connects once" is true."""
+
+    @pytest.fixture
+    def world(self, monkeypatch):
+        holder = {"row": None, "refreshed": [], "writes": [], "answer": None}
+
+        def poller_session_factory(engine, workspace_id):
+            ex = _Exec(row=holder["row"])
+
+            class _Factory:
+                def __call__(self_inner):
+                    class _Ctx:
+                        async def __aenter__(self_ctx):
+                            return ex
+
+                        async def __aexit__(self_ctx, *exc):
+                            return False
+
+                    return _Ctx()
+
+            return _Factory()
+
+        async def refresh_access_token(
+            client, *, refresh_token, client_id, client_secret
+        ):
+            holder["refreshed"].append((refresh_token, client_id, client_secret))
+            answer = holder["answer"]
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+
+        class _Uow:
+            def __init__(self, engine, tenant_id, **gucs):
+                holder["writes"].append(("uow", tenant_id, gucs))
+                self.ex = _Exec(rowcount=1)
+
+            def begin(self):
+                ex = self.ex
+
+                class _Ctx:
+                    async def __aenter__(self_ctx):
+                        return ex
+
+                    async def __aexit__(self_ctx, *exc):
+                        holder["writes"].extend(ex.calls)
+                        return False
+
+                return _Ctx()
+
+        from src.services.target import work_loop
+
+        monkeypatch.setattr(work_loop, "poller_session_factory", poller_session_factory)
+        monkeypatch.setattr(drive_credentials, "ring", lambda: _Ring())
+        monkeypatch.setattr(
+            google_drive_oauth, "refresh_access_token", refresh_access_token
+        )
+        monkeypatch.setattr(drive_credentials, "unit_of_work", _Uow)
+        monkeypatch.setattr(
+            drive_credentials.settings, "GOOGLE_CLIENT_ID", "gid", raising=False
+        )
+        monkeypatch.setattr(
+            drive_credentials.settings, "GOOGLE_CLIENT_SECRET", "sec", raising=False
+        )
+        return holder
+
+    def _expired_row(self):
+        return {
+            "encrypted_payload": "ct:"
+            + google_drive_oauth.encode_payload(drive_grant()),
+            "state": "active",
+            "expires_at": datetime.now(timezone.utc) - timedelta(minutes=5),
+        }
+
+    async def test_an_expired_token_is_refreshed_written_in_place_and_returned(
+        self, world
+    ):
+        world["row"] = self._expired_row()
+        world["answer"] = drive_grant(access_token="ya29.fresh")
+        token = await drive_credentials.token_for_workspace(object(), WS)
+        assert token == "ya29.fresh"
+        assert world["refreshed"] == [("1//refresh", "gid", "sec")]
+        (uow, (sql, params)) = world["writes"]
+        assert uow == ("uow", WS, {"actor_kind": "system"})
+        assert (
+            "UPDATE oauth_credentials" in sql and "encrypted_payload = :payload" in sql
+        )
+        assert "expires_at = :exp" in sql
+        assert "workspace_id = :ws" in sql and "state = 'active'" in sql
+        assert "ig_account_id IS NULL AND media_source_id IS NULL" in sql
+        # Compare-and-swap on the ciphertext the read saw: a reconnect that
+        # landed during the Google round-trip is never overwritten.
+        assert "encrypted_payload = :seen" in sql
+        assert params["seen"] == world["row"]["encrypted_payload"]
+        assert params["ws"] == WS and params["payload"].startswith("ct:")
+        assert "ya29.fresh" in _Ring().decrypt(params["payload"])
+
+    async def test_a_token_about_to_expire_is_refreshed_early(self, world):
+        row = self._expired_row()
+        row["expires_at"] = datetime.now(timezone.utc) + timedelta(seconds=20)
+        world["row"] = row
+        world["answer"] = drive_grant(access_token="ya29.early")
+        assert await drive_credentials.token_for_workspace(object(), WS) == "ya29.early"
+
+    async def test_invalid_grant_marks_the_row_expired_and_says_reconnect(self, world):
+        world["row"] = self._expired_row()
+        world["answer"] = google_drive_oauth.DriveOAuthRefused(
+            "grant_revoked", "invalid_grant"
+        )
+        with pytest.raises(DriveCredentialDead) as info:
+            await drive_credentials.token_for_workspace(object(), WS)
+        assert "reconnect" in str(info.value).lower() and WS in str(info.value)
+        (uow, (sql, params)) = world["writes"]
+        assert "SET state = 'expired'" in sql and "state = 'active'" in sql
+        assert "encrypted_payload = :seen" in sql
+        assert params == {
+            "ws": WS,
+            "provider": "gdrive",
+            "seen": world["row"]["encrypted_payload"],
+        }
+
+    async def test_a_transient_refresh_failure_is_retryable_and_changes_nothing(
+        self, world
+    ):
+        """One bad minute at Google must not strand a folder: the sync's
+        persistent branch reads `DriveCredentialDead`; this is NOT that."""
+        world["row"] = self._expired_row()
+        world["answer"] = google_drive_oauth.DriveOAuthRefused("refresh_failed", "503")
+        with pytest.raises(DriveRetryableError) as info:
+            await drive_credentials.token_for_workspace(object(), WS)
+        assert "transient" in str(info.value).lower()
+        assert world["writes"] == []
+
+    async def test_our_misconfiguration_is_retryable_and_names_the_fix(self, world):
+        world["row"] = self._expired_row()
+        world["answer"] = google_drive_oauth.DriveOAuthRefused(
+            "client_misconfigured", "x"
+        )
+        with pytest.raises(DriveRetryableError) as info:
+            await drive_credentials.token_for_workspace(object(), WS)
+        assert "GOOGLE_CLIENT_ID" in str(info.value) and world["writes"] == []
+
+    async def test_without_client_credentials_the_refusal_names_the_variables(
+        self, world
+    ):
+        """Retryable, in the log, never to a tenant: configuration is the
+        operator's to fix, and a stranded folder would not fix it."""
+        world["row"] = self._expired_row()
+        drive_credentials.settings.GOOGLE_CLIENT_SECRET = None
+        with pytest.raises(DriveRetryableError) as info:
+            await drive_credentials.token_for_workspace(object(), WS)
+        assert "GOOGLE_CLIENT_SECRET" in str(info.value)
+        assert world["refreshed"] == [] and world["writes"] == []
+
+    async def test_fresh_forces_a_refresh_of_a_live_token(self, world):
+        """The adapter's one retry after Google refused a token the door
+        thought live."""
+        row = self._expired_row()
+        row["expires_at"] = datetime.now(timezone.utc) + timedelta(hours=1)
+        world["row"] = row
+        world["answer"] = drive_grant(access_token="ya29.forced")
+        assert (
+            await drive_credentials.token_for_workspace(object(), WS, fresh=True)
+            == "ya29.forced"
+        )
+        assert len(world["refreshed"]) == 1
+
+    async def test_a_live_token_is_handed_back_without_a_refresh(self, world):
+        row = self._expired_row()
+        row["expires_at"] = datetime.now(timezone.utc) + timedelta(hours=1)
+        world["row"] = row
+        assert (
+            await drive_credentials.token_for_workspace(object(), WS) == "ya29.access"
+        )
+        assert world["refreshed"] == [] and world["writes"] == []
 
 
 class TestAReconnectRearmsEveryFolder:
@@ -235,7 +410,9 @@ class TestTheWorkspaceStatusProjection:
 
     async def test_the_row_is_projected_as_the_destinations_are(self, monkeypatch):
         async def row(executor, sql, **params):
-            assert "credential_status" in sql
+            # `state` alone: a past access-token expiry says nothing about a gdrive
+            # grant, which the read door refreshes on demand (P5).
+            assert "expires_at" not in sql and "c.state" in sql
             return {"status": "expired", "connected_at": "2026-09-05T00:00:00+00:00"}
 
         monkeypatch.setattr(workspaces.readers, "row", row)

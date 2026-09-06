@@ -286,19 +286,26 @@ GDRIVE_PROVIDER = "gdrive"
 
 async def drive_status(executor, *, workspace_id: str) -> dict:
     """The WORKSPACE's Google Drive grant (069, `07` §15: one per workspace,
-    every folder under it), projected exactly as a destination's credential
-    is — `none` (never connected) · `active` · `expired` · `revoked` — plus
-    when it was granted. Never a token."""
-    # updated_at, not created_at: a reconnect replaces the row in place, and
-    # "connected since" is the LAST grant's time (review of #1246).
+    every folder under it) — `none` (never connected) · `active` · `expired` ·
+    `revoked` — plus when it was last granted. Never a token.
+
+    Deliberately NOT `_CREDENTIAL_STATUS_SQL`: for `gdrive`, `expires_at` is the
+    ACCESS token's hourly expiry and the read door refreshes it on demand (P5,
+    `drive_credentials._refresh`), so a past `expires_at` says nothing about the
+    grant. `state` is the whole answer — the read door writes `expired` when
+    Google answers `invalid_grant`, and a disconnect writes `revoked`. The
+    Instagram projection keeps its expiry clause because its refresh is the
+    clock's, and a token past expiry there means the clock failed.
+    """
     row = await readers.row(
         executor,
-        "SELECT credential_status AS status, connected_at FROM ("
-        f"  SELECT {_CREDENTIAL_STATUS_SQL}, c.updated_at AS connected_at"
-        "    FROM oauth_credentials c"
-        "   WHERE c.workspace_id = :ws AND c.provider = :provider"
-        "     AND c.ig_account_id IS NULL AND c.media_source_id IS NULL"
-        ") q",
+        # updated_at, not created_at: a reconnect (and every refresh) replaces
+        # the row in place, and "connected since" is the LAST grant's time.
+        "SELECT CASE WHEN c.state <> 'active' THEN c.state ELSE 'active' END AS status,"
+        "       c.updated_at AS connected_at"
+        "  FROM oauth_credentials c"
+        " WHERE c.workspace_id = :ws AND c.provider = :provider"
+        "   AND c.ig_account_id IS NULL AND c.media_source_id IS NULL",
         ws=str(workspace_id),
         provider=GDRIVE_PROVIDER,
     )
