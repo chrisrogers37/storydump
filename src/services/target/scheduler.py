@@ -71,6 +71,7 @@ here hardcodes them.
 from __future__ import annotations
 
 import logging
+import random
 
 from dataclasses import dataclass
 from typing import Optional, Union
@@ -311,6 +312,7 @@ async def execute_plan_slot(
     provider_account_ref: str,
     approval_mode: str,
     no_media_notice_after_seconds: int,
+    rng: Optional[random.Random] = None,
 ) -> "SlotOutcome":
     """The `plan_slot` executor: mint the intent for one slot, or nothing.
 
@@ -346,28 +348,107 @@ async def execute_plan_slot(
     resolves only names in ``pg_constraint``; the prose form does not run. The
     inference form is equivalent and is what the gate exercises.
 
-    Media selection is deliberately the simple eligible-and-not-already-live
-    rule. `06` §3's case-mix weighting is a product rule that wants its own
-    increment; this is the mechanism it will plug into, and the empty case is
-    handled here rather than deferred because "no media" is the outcome `02`
-    §5 names for it.
+    **Selection honours the category mix (`06` §3; owner ruling 2026-09-06).**
+    The workspace's current `category_post_case_mix` rows are weights over
+    categories — a folder's subfolders, as the sync tags them. The draw is
+    weighted-random over the mix categories that HAVE eligible media (a
+    weighted category with nothing to post is never drawn, and the others
+    absorb its share), then oldest-first within the drawn category. No mix,
+    or every weighted category empty, falls back to oldest-first over the
+    whole pool — the rule this function always had. `rng` is injectable so a
+    test can seed the draw; production uses the system generator.
     """
-    media = (
-        await session.execute(
-            text(
-                "SELECT m.id FROM media_items m"
-                " WHERE m.workspace_id = :ws"
-                "   AND NOT EXISTS (SELECT 1 FROM post_intents p"
-                "                   WHERE p.workspace_id = m.workspace_id"
-                "                     AND p.media_item_id = m.id"
-                "                     AND p.ig_account_id = :acct"
-                "                     AND p.state NOT IN ('posted','skipped','rejected',"
-                "                                         'expired','failed','cancelled'))"
-                " ORDER BY m.created_at LIMIT 1"
-            ),
-            {"ws": workspace_id, "acct": ig_account_id},
+    draw = rng if rng is not None else random.SystemRandom()
+    # `06` §3's rule in full: available, not already live for this account,
+    # minus the workspace-wide locks (skip/reject/hold/seasonal/unsupported)
+    # and minus THIS account's own `recent` locks — a live lock is one with no
+    # expiry or an expiry still ahead. Ordered least-recently-posted first, so
+    # a small category rotates through its files instead of repeating the
+    # oldest one (review of #1251).
+    eligible = (
+        " WHERE m.workspace_id = :ws AND m.state = 'available'"
+        "   AND NOT EXISTS (SELECT 1 FROM post_intents p"
+        "                   WHERE p.workspace_id = m.workspace_id"
+        "                     AND p.media_item_id = m.id"
+        "                     AND p.ig_account_id = :acct"
+        "                     AND p.state NOT IN ('posted','skipped','rejected',"
+        "                                         'expired','failed','cancelled'))"
+        "   AND NOT EXISTS (SELECT 1 FROM post_locks l"
+        "                   WHERE l.workspace_id = m.workspace_id"
+        "                     AND l.media_item_id = m.id"
+        "                     AND (l.expires_at IS NULL OR l.expires_at > now())"
+        "                     AND (l.ig_account_id IS NULL OR l.ig_account_id = :acct))"
+    )
+    order = " ORDER BY m.last_posted_at NULLS FIRST, m.created_at LIMIT 1"
+    mix = (
+        (
+            await session.execute(
+                text(
+                    "SELECT category, ratio FROM category_post_case_mix"
+                    " WHERE workspace_id = :ws AND effective_to IS NULL"
+                ),
+                {"ws": workspace_id},
+            )
         )
-    ).first()
+        .mappings()
+        .all()
+    )
+    counts = (
+        (
+            await session.execute(
+                text(
+                    "SELECT m.category, count(*) AS n FROM media_items m"
+                    + eligible
+                    + " GROUP BY m.category"
+                ),
+                {"ws": workspace_id, "acct": ig_account_id},
+            )
+        )
+        .mappings()
+        .all()
+    )
+    have = {row["category"]: int(row["n"]) for row in counts}
+    weighted = [
+        (str(row["category"]), float(row["ratio"]))
+        for row in mix
+        if have.get(row["category"], 0) > 0 and float(row["ratio"]) > 0
+    ]
+    chosen: Optional[str] = None
+    if weighted:
+        total = sum(w for _, w in weighted)
+        point = draw.random() * total
+        for category, weight in weighted:
+            point -= weight
+            if point < 0:
+                chosen = category
+                break
+        else:
+            chosen = weighted[-1][0]
+    elif mix:
+        logger.info(
+            "plan_slot: no weighted category has media for workspace %s — falling"
+            " back to the whole pool",
+            workspace_id,
+        )
+    if chosen is not None:
+        media = (
+            await session.execute(
+                text(
+                    "SELECT m.id FROM media_items m"
+                    + eligible
+                    + "   AND m.category = :category"
+                    + order
+                ),
+                {"ws": workspace_id, "acct": ig_account_id, "category": chosen},
+            )
+        ).first()
+    else:
+        media = (
+            await session.execute(
+                text("SELECT m.id FROM media_items m" + eligible + order),
+                {"ws": workspace_id, "acct": ig_account_id},
+            )
+        ).first()
     if media is None:
         from src.services.target import outbox
 

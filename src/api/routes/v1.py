@@ -50,6 +50,7 @@ from src.services.target.drive_adapter import (
     DriveTerminalError,
 )
 from src.services.target import (
+    category_mix,
     channel_bind,
     commands,
     drive_credentials,
@@ -621,6 +622,44 @@ async def remove_source(
     if not paused:
         raise HTTPException(status_code=404, detail="not found")
     return {"source_id": str(source_id), "state": "paused"}
+
+
+@router.get("/workspaces/{ws}/category-mix")
+async def get_category_mix(
+    ws: uuid.UUID, request: Request, principal: Principal = Depends(current_principal)
+):
+    """The workspace's category mix (D23's SCD, current rows) and the
+    categories the sync has discovered with their media counts — what the
+    Settings card renders. Member floor: it explains what will post."""
+    async with _member(request, str(ws), principal) as session:
+        mix = await category_mix.current_mix(session, workspace_id=str(ws))
+        categories = await category_mix.discovered_categories(
+            session, workspace_id=str(ws)
+        )
+    return {"mix": mix, "categories": categories}
+
+
+@router.put("/workspaces/{ws}/category-mix")
+async def put_category_mix(
+    ws: uuid.UUID, request: Request, principal: Principal = Depends(current_principal)
+):
+    """Replace the workspace's category mix (owner ruling 2026-09-06: memes
+    70 / merch 30). A resource, not a command word (F1 (b)): the mix is a
+    table of rows the closed vocabulary has no name for, like a folder. Admin
+    floor. Body ``{"mix": [{"category", "ratio"}, …]}`` with ratios summing to
+    one; an empty list clears the weighting. Refused by name (400,
+    ``reason = invalid_mix_<reason>``) before anything is written."""
+    body = await _json_object(request)
+    async with _admin(request, str(ws), principal) as session:
+        # `MixInvalid` is answered by the app's handler as 400 with
+        # `reason = invalid_mix_<reason>` — the shape the web reads.
+        stored = await category_mix.set_mix(
+            session,
+            workspace_id=str(ws),
+            mix=body.get("mix"),
+            by_user_id=principal.user_id,
+        )
+    return {"mix": stored}
 
 
 @router.get("/workspaces/{ws}/drive")

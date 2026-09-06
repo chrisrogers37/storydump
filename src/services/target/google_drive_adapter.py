@@ -133,6 +133,17 @@ DEFAULT_PAGE_SIZE = 200
 _KIND_BY_PREFIX = (("image/", "image"), ("video/", "video"))
 
 
+class _TokenBox:
+    """The token one listing call is using. A re-mint inside `_get_as_workspace`
+    replaces it here, so the NEXT request of the same call (the media page after
+    the subfolder listing) does not resend the token Google just refused."""
+
+    __slots__ = ("value",)
+
+    def __init__(self, value: str) -> None:
+        self.value = value
+
+
 class TokenProvider(Protocol):
     """Resolves a usable Drive access token — the WORKSPACE's grant (069).
 
@@ -156,18 +167,25 @@ def _kind_for(mime_type: str) -> Optional[str]:
     return None
 
 
-def _listing_query(config: Mapping[str, Any]) -> str:
-    """`q` for one folder's images and videos, trashed excluded.
+def _listing_query(folder_ref: str) -> str:
+    """`q` for ONE folder's images and videos, trashed excluded. The walk
+    (`list_changes`) calls it once per folder: the picked root, then each
+    immediate subfolder, whose name is the items' category.
 
-    `root_name` is deliberately NOT expressed here. It names a SUBFOLDER, whose
-    resolution is a second round trip, and a query that silently ignored it
-    would list the parent — the exact wrong-place-looks-correct failure
-    `validate_source_config` exists to refuse. Until subfolder resolution
-    lands, a source carrying `root_name` is refused rather than mislisted.
+    `root_name` is deliberately NOT expressed here. It names a SUBFOLDER to
+    scope the listing to, and a query that silently ignored it would list the
+    parent — the exact wrong-place-looks-correct failure
+    `validate_source_config` exists to refuse. A source carrying `root_name`
+    is refused rather than mislisted.
     """
-    folder_ref = config["folder_ref"]
     kinds = " or ".join(f"mimeType contains '{p}'" for p, _ in _KIND_BY_PREFIX)
     return f"'{folder_ref}' in parents and trashed = false and ({kinds})"
+
+
+def _subfolder_query(folder_ref: str) -> str:
+    return (
+        f"'{folder_ref}' in parents and mimeType = '{FOLDER_MIME}' and trashed = false"
+    )
 
 
 def _refuse_unsupported_config(config: Mapping[str, Any]) -> None:
@@ -220,40 +238,199 @@ class GoogleDriveAdapter:
     ) -> tuple[list[dict], dict]:
         """One page of a source's media, plus the checkpoint that resumes it.
 
+        THE WALK (owner ruling 2026-09-06, legacy parity): the picked folder's
+        own files first, then each immediate SUBFOLDER's files, and a file's
+        category is the subfolder it sits in (None at the root). One level
+        deep, as the legacy `google_drive_provider.list_files` was. The
+        cursor rides the checkpoint so a walk of any size is resumable:
+
+            {"v": 1,
+             "current": {"id": <folder>, "name": <category or None>},
+             "queue":   [{"id", "name"}, …],      # folders still to list
+             "page_token": <within current>}        # only while more pages
+
+        A call with no `current` STARTS the walk: one request lists the root's
+        subfolders (name order; capped, and the cap said), then the root's
+        first media page. Every later call lists ONE media page and advances
+        the cursor; when the current folder is exhausted the next one is
+        popped from the queue. The bare ``{"v": 1}`` — nothing pending — is
+        the only statement that the walk is complete (`checkpoint_incomplete`
+        is the one definition the sync's chain reads).
+
         Returns ``(items, checkpoint')``. `items` carry D37's canonical stable
-        ref (the Drive file id, never a path). `checkpoint'` carries
-        ``page_token`` only when the provider said more exist.
+        ref (the Drive file id, never a path) and `category`.
         """
         _refuse_unsupported_config(config)
+        cp = dict(checkpoint or {})
+        root = str(config["folder_ref"])
+        box = _TokenBox(
+            await self._token_provider(source_id, workspace_id=workspace_id)
+        )
+        if cp.get("current"):
+            current: dict = dict(cp["current"])
+            queue = [dict(f) for f in (cp.get("queue") or [])]
+            page_token = cp.get("page_token")
+        elif cp.get("page_token"):
+            # The pre-walk shape, and the walk's own shape for a paged ROOT
+            # with no subfolders left: more pages of the root, nothing queued.
+            current, queue, page_token = (
+                {"id": root, "name": None},
+                [],
+                cp["page_token"],
+            )
+        else:
+            queue = await self._subfolders(
+                root, source_id=source_id, workspace_id=workspace_id, box=box
+            )
+            current, page_token = {"id": root, "name": None}, None
+
         params = {
-            "q": _listing_query(config),
+            "q": _listing_query(str(current["id"])),
             "fields": f"nextPageToken,files({FILE_FIELDS})",
             "pageSize": str(self._page_size),
             "spaces": "drive",
             "supportsAllDrives": "true",
             "includeItemsFromAllDrives": "true",
         }
-        page_token = (checkpoint or {}).get("page_token")
         if page_token:
             params["pageToken"] = page_token
 
-        payload = await self._get_as_workspace(
-            f"{FILES_URL}?{urlencode(params)}",
-            source_id=source_id,
-            workspace_id=workspace_id,
-        )
+        def advanced() -> dict:
+            # The cursor past `current`: the next queued folder, or done.
+            return (
+                {"v": 1, "current": queue[0], "queue": queue[1:]} if queue else {"v": 1}
+            )
 
+        try:
+            payload = await self._get_as_workspace(
+                f"{FILES_URL}?{urlencode(params)}",
+                source_id=source_id,
+                workspace_id=workspace_id,
+                box=box,
+            )
+        except DriveSourceGone:
+            if current["id"] == root:
+                raise  # the picked folder itself is gone: the source's fault to report
+            # A SUBFOLDER deleted or unshared mid-walk is not the source's fault
+            # and must not wedge it: said once, skipped, the walk goes on
+            # (review of #1251 — the stored cursor would otherwise point at
+            # the dead folder forever).
+            logger.warning(
+                "drive source %s: subfolder %r (%s) is gone mid-walk — skipped",
+                source_id,
+                current.get("name"),
+                current["id"],
+            )
+            return [], advanced()
+        except DriveTerminalError:
+            if not page_token:
+                raise
+            # An expired or invalid page token (a long stall between chunks):
+            # restart THIS folder from its first page rather than fail the
+            # source; the upsert is idempotent, so re-listing costs nothing.
+            logger.warning(
+                "drive source %s: page token for folder %r refused — restarting the folder",
+                source_id,
+                current.get("name"),
+            )
+            return [], {"v": 1, "current": current, "queue": queue}
+
+        category = current.get("name")
         items: list[dict] = []
         for entry in payload.get("files") or []:
             item = self._item_for(entry)
             if item is not None:
+                if category is not None:
+                    # Absent = uncategorized (the root's own files); the sync
+                    # reads `.get`, so the flat shape is unchanged for them.
+                    item["category"] = category
                 items.append(item)
 
         next_token = payload.get("nextPageToken")
-        checkpoint_out: dict = {"v": 1}
+        at_root_alone = current["id"] == root and not queue
         if next_token:
-            checkpoint_out["page_token"] = next_token
-        return items, checkpoint_out
+            if at_root_alone:
+                return items, {"v": 1, "page_token": next_token}
+            return items, {
+                "v": 1,
+                "current": current,
+                "queue": queue,
+                "page_token": next_token,
+            }
+        if queue:
+            return items, {"v": 1, "current": queue[0], "queue": queue[1:]}
+        return items, {"v": 1}
+
+    async def _subfolders(
+        self,
+        root: str,
+        *,
+        source_id: str,
+        workspace_id: str,
+        box: Optional[_TokenBox] = None,
+    ) -> list[dict]:
+        """The root's immediate subfolders — the categories — in name order.
+        Paged to `FOLDER_LIST_CAP` and the cut is SAID (one warning), never
+        absorbed: a category past the cap would otherwise be a folder that
+        quietly never syncs. A provider handing the same page token back
+        forever (a stub, or a Drive bug) ends the listing, said once."""
+        params = {
+            "q": _subfolder_query(root),
+            "fields": "nextPageToken,files(id,name,mimeType)",
+            "pageSize": "200",
+            "orderBy": "name_natural",
+            "spaces": "drive",
+            "supportsAllDrives": "true",
+            "includeItemsFromAllDrives": "true",
+        }
+        folders: list[dict] = []
+        page: Optional[str] = None
+        seen_tokens: set[str] = set()
+        while True:
+            if page:
+                if page in seen_tokens:
+                    logger.warning(
+                        "drive source %s: subfolder listing repeated page token; stopping",
+                        source_id,
+                    )
+                    return folders
+                seen_tokens.add(page)
+                params["pageToken"] = page
+            payload = await self._get_as_workspace(
+                f"{FILES_URL}?{urlencode(params)}",
+                source_id=source_id,
+                workspace_id=workspace_id,
+                box=box,
+            )
+            for entry in payload.get("files") or []:
+                fid, name = entry.get("id"), entry.get("name")
+                # The query asks for folders; the mime is checked again because
+                # a provider answering something else must not become a
+                # "category" that is really a file.
+                if (
+                    isinstance(fid, str)
+                    and isinstance(name, str)
+                    and name.strip()
+                    and entry.get("mimeType") == FOLDER_MIME
+                ):
+                    # Stripped: the mix service trims names, and a weight must
+                    # match the category the sync writes.
+                    folders.append({"id": fid, "name": name.strip()})
+            page = payload.get("nextPageToken")
+            if len(folders) > FOLDER_LIST_CAP or (
+                len(folders) == FOLDER_LIST_CAP and page
+            ):
+                logger.warning(
+                    "drive source %s: more than %d subfolders under %s — only the first"
+                    " %d are categories; the rest never sync",
+                    source_id,
+                    FOLDER_LIST_CAP,
+                    root,
+                    FOLDER_LIST_CAP,
+                )
+                return folders[:FOLDER_LIST_CAP]
+            if not page:
+                return folders
 
     async def list_folders(
         self, *, parent: Optional[str], workspace_id: str
@@ -346,7 +523,7 @@ class GoogleDriveAdapter:
             _refuse_unsupported_config(config)
             token = await self._token_provider(source_id, workspace_id=workspace_id)
             params = {
-                "q": _listing_query(config),
+                "q": _listing_query(str(config["folder_ref"])),
                 "fields": f"files({FILE_FIELDS})",
                 "pageSize": "1",
                 "spaces": "drive",
@@ -420,26 +597,35 @@ class GoogleDriveAdapter:
         )
 
     async def _get_as_workspace(
-        self, url: str, *, source_id: Optional[str], workspace_id: str
+        self,
+        url: str,
+        *,
+        source_id: Optional[str],
+        workspace_id: str,
+        box: Optional[_TokenBox] = None,
     ) -> dict:
         """One GET under the workspace's token, with ONE re-mint: a token the
         door handed out can die inside the request it was minted for, and
         Google can invalidate one early. On Google's 401/403 the provider is
         asked once more with `fresh=True` and the GET retried; a second
-        refusal is the grant's, and propagates (P5, #1247)."""
+        refusal is the grant's, and propagates (P5, #1247). `box` lets a
+        multi-request call (the walk) share one token and see the re-mint."""
         label = (
             source_id
             if source_id is not None
             else f"workspace {workspace_id} (folder browser)"
         )
-        token = await self._token_provider(source_id, workspace_id=workspace_id)
+        if box is None:
+            box = _TokenBox(
+                await self._token_provider(source_id, workspace_id=workspace_id)
+            )
         try:
-            return await self._get(url, token, source_id=label)
+            return await self._get(url, box.value, source_id=label)
         except DriveCredentialDead:
-            token = await self._token_provider(
+            box.value = await self._token_provider(
                 source_id, workspace_id=workspace_id, fresh=True
             )
-            return await self._get(url, token, source_id=label)
+            return await self._get(url, box.value, source_id=label)
 
     async def _get(self, url: str, token: str, *, source_id: str) -> dict:
         """One floored GET, with the status mapped to the routing vocabulary."""

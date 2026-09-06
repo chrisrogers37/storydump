@@ -954,3 +954,137 @@ class TestTheClockReadsTheDatabaseClock:
             fetch=True,
         )[0][0]
         assert "timestamp" not in args.lower(), args
+
+
+def _new_media_in(clock_db, category):
+    tag = uuid.uuid4().hex[:12]
+    return str(
+        _owner_exec(
+            clock_db,
+            "INSERT INTO media_items (workspace_id, source_id, content_hash,"
+            " file_name, media_kind, provider_file_ref, category)"
+            " VALUES (%s, %s, %s, %s, 'image', %s, %s) RETURNING id",
+            (clock_db["ws"], clock_db["src"], tag, f"{tag}.jpg", tag, category),
+            fetch=True,
+        )[0][0]
+    )
+
+
+def _set_mix(clock_db, mix):
+    _owner_exec(
+        clock_db,
+        "UPDATE category_post_case_mix SET effective_to = now()"
+        " WHERE workspace_id = %s AND effective_to IS NULL",
+        (clock_db["ws"],),
+    )
+    for category, ratio in mix:
+        _owner_exec(
+            clock_db,
+            "INSERT INTO category_post_case_mix (workspace_id, category, ratio)"
+            " VALUES (%s, %s, %s)",
+            (clock_db["ws"], category, ratio),
+        )
+
+
+class TestTheCategoryMixShapesTheDraw:
+    """`06` §3 on the real table (owner ruling 2026-09-06: memes 70 / merch
+    30). The draw is weighted over the mix categories that have eligible
+    media; a weighted category with nothing to post is never drawn; no mix
+    means the whole pool, oldest first."""
+
+    async def _tenant(self, conn, clock_db):
+        from sqlalchemy import text as _t
+
+        await conn.execute(
+            _t("SELECT set_config('app.tenant_id', :v, false)"), {"v": clock_db["ws"]}
+        )
+        await conn.execute(_t("SELECT set_config('app.actor_kind', 'system', false)"))
+
+    def _engine(self, clock_db):
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        return create_async_engine(
+            clock_db["worker"].replace("postgresql://", "postgresql+asyncpg://", 1)
+        )
+
+    async def _plan(self, clock_db, account, seed):
+        import random
+
+        from src.services.target.scheduler import execute_plan_slot
+
+        slot = _owner_exec(
+            clock_db, "SELECT now() + make_interval(secs => %s)", (seed,), fetch=True
+        )[0][0]
+        engine = self._engine(clock_db)
+        try:
+            async with engine.connect() as conn:
+                await self._tenant(conn, clock_db)
+                out = await execute_plan_slot(
+                    conn,
+                    workspace_id=clock_db["ws"],
+                    ig_account_id=account,
+                    slot_at=slot,
+                    provider_account_ref=f"ref-{uuid.uuid4().hex[:8]}",
+                    approval_mode="manual",
+                    no_media_notice_after_seconds=24 * 3600,
+                    rng=random.Random(seed),
+                )
+                await conn.commit()
+        finally:
+            await engine.dispose()
+        return out
+
+    def _category_of(self, clock_db, intent_id):
+        return _owner_exec(
+            clock_db,
+            "SELECT m.category FROM post_intents p JOIN media_items m ON m.id = p.media_item_id"
+            " WHERE p.id = %s",
+            (intent_id,),
+            fetch=True,
+        )[0][0]
+
+    @pytest.mark.asyncio
+    async def test_a_one_category_mix_draws_only_that_category(self, clock_db):
+        account = _new_account(clock_db)
+        for _ in range(3):
+            _new_media_in(clock_db, "memes")
+            _new_media_in(clock_db, "merch")
+        _set_mix(clock_db, [("merch", 1.0)])
+        drawn = set()
+        for seed in range(3):
+            out = await self._plan(clock_db, account, seed)
+            assert out.intent_id is not None
+            drawn.add(self._category_of(clock_db, out.intent_id))
+        assert drawn == {"merch"}
+
+    @pytest.mark.asyncio
+    async def test_a_weighted_category_with_no_media_yields_to_the_others(
+        self, clock_db
+    ):
+        account = _new_account(clock_db)
+        _new_media_in(clock_db, "memes")
+        _set_mix(clock_db, [("memes", 0.3), ("ghosts", 0.7)])
+        out = await self._plan(clock_db, account, 7)
+        assert out.intent_id is not None
+        assert self._category_of(clock_db, out.intent_id) == "memes"
+
+    @pytest.mark.asyncio
+    async def test_a_locked_item_is_never_drawn(self, clock_db):
+        """`06` §3: minus the workspace-wide locks. Every `memes` item in the
+        pool is put on hold (the pool is workspace-wide and other tests seed
+        it), so the weighted category has nothing eligible and the pool answers
+        with something that is not `memes`."""
+        account = _new_account(clock_db)
+        _new_media_in(clock_db, "memes")
+        _new_media_in(clock_db, "merch")
+        _owner_exec(
+            clock_db,
+            "INSERT INTO post_locks (workspace_id, media_item_id, kind)"
+            " SELECT workspace_id, id, 'hold' FROM media_items"
+            " WHERE workspace_id = %s AND category = 'memes'",
+            (clock_db["ws"],),
+        )
+        _set_mix(clock_db, [("memes", 1.0)])
+        out = await self._plan(clock_db, account, 11)
+        assert out.intent_id is not None
+        assert self._category_of(clock_db, out.intent_id) != "memes"

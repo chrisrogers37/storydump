@@ -15,6 +15,8 @@ import { GeneralTab } from "@/components/dashboard/settings/general-tab";
 import { AccountsTab } from "@/components/dashboard/settings/accounts-tab";
 import type { BindingsResponse, MembersResponse } from "@/lib/types";
 import { MembersCard } from "@/components/dashboard/settings/members-card";
+import { CategoryWeightsCard } from "@/components/dashboard/settings/category-weights-card";
+import type { CategoryMixResponse } from "@/lib/category-mix";
 import { IntegrationsTab } from "@/components/dashboard/settings/integrations-tab";
 
 /**
@@ -106,6 +108,7 @@ export default async function SettingsPage({
     membersResult,
     statsResult,
     driveResult,
+    mixResult,
   ] = await Promise.all([
       workspaceFetch<WorkspaceConfig>("", workspaceId),
       workspaceFetch<AccountsResponse>("accounts", workspaceId),
@@ -114,6 +117,7 @@ export default async function SettingsPage({
       workspaceFetch<MembersResponse>("members", workspaceId),
       workspaceFetch<StatsResponse>("stats", workspaceId),
       workspaceFetch<DriveStatusResponse>("drive", workspaceId),
+      workspaceFetch<CategoryMixResponse>("category-mix", workspaceId),
     ]);
 
   // All four, for the reason above: every tab on this screen renders current
@@ -214,6 +218,13 @@ export default async function SettingsPage({
             workspaceState={configResult.data.state}
             restorableUntil={configResult.data.restorable_until}
             isOwner={isOwner}
+            categoryMix={
+              <CategoryWeightsCard
+                workspaceId={workspaceId}
+                data={mixResult.ok ? mixResult.data : null}
+                editable={membership?.role === "owner" || membership?.role === "admin"}
+              />
+            }
             members={
               <MembersCard
                 workspaceId={workspaceId}
