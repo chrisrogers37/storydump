@@ -54,9 +54,13 @@ def _file(fid, name="a.jpg", mime="image/jpeg", md5="hash1", size="10"):
 
 
 def _adapter(handler, *, token="tok", record=None, page_size=200):
-    async def token_provider(source_id, *, workspace_id):
+    async def token_provider(source_id, *, workspace_id, fresh=False):
         if record is not None:
-            record.append((source_id, workspace_id))
+            record.append(
+                (source_id, workspace_id)
+                if not fresh
+                else (source_id, workspace_id, "fresh")
+            )
         if isinstance(token, Exception):
             raise token
         return token
@@ -603,3 +607,52 @@ class TestListFolders:
         )
         with pytest.raises(DriveCredentialDead):
             await _adapter(handler).list_folders(parent=None, workspace_id=WS)
+
+
+class TestOneRemintOnARefusedToken:
+    """P5 (#1247): a token the door handed out can die inside the request it
+    was minted for. Google's 401 buys exactly one re-mint (`fresh=True`) and
+    one retry; a second refusal is the grant's and propagates."""
+
+    @pytest.mark.asyncio
+    async def test_a_401_is_retried_once_with_a_fresh_token(self):
+        calls = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request.headers["authorization"])
+            if len(calls) == 1:
+                return httpx.Response(
+                    401, json={"error": {"message": "Invalid Credentials"}}
+                )
+            return httpx.Response(200, json={"files": [_file("f1")]})
+
+        record: list = []
+        tokens = iter(["tok-stale", "tok-fresh"])
+
+        async def token_provider(source_id, *, workspace_id, fresh=False):
+            record.append(fresh)
+            return next(tokens)
+
+        adapter = GoogleDriveAdapter(
+            token_provider=token_provider,
+            client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+            policy=_policy(),
+        )
+        items, _ = await adapter.list_changes(
+            CONFIG, None, source_id=SRC, workspace_id=WS
+        )
+        assert [i["ref"] for i in items] == ["f1"]
+        assert record == [False, True]
+        assert calls == ["Bearer tok-stale", "Bearer tok-fresh"]
+
+    @pytest.mark.asyncio
+    async def test_a_second_refusal_is_the_grants(self):
+        handler, _ = _json_handler(
+            {"error": {"message": "Invalid Credentials"}}, status=401
+        )
+        record: list = []
+        with pytest.raises(DriveCredentialDead):
+            await _adapter(handler, record=record).list_folders(
+                parent=None, workspace_id=WS
+            )
+        assert record == [(None, WS), (None, WS, "fresh")]

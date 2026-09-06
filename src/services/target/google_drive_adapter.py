@@ -140,9 +140,13 @@ class TokenProvider(Protocol):
     messages; it is `None` from the folder browser, which syncs nothing.
     `workspace_id` is the key: the credential is the workspace's, the read is
     bound to it by the WHERE and, where RLS is live, by the tenant GUC too.
+    `fresh=True` asks for a re-minted token — the adapter's one retry after
+    Google refused a token the door thought live (P5, #1247).
     """
 
-    async def __call__(self, source_id: Optional[str], *, workspace_id: str) -> str: ...
+    async def __call__(
+        self, source_id: Optional[str], *, workspace_id: str, fresh: bool = False
+    ) -> str: ...
 
 
 def _kind_for(mime_type: str) -> Optional[str]:
@@ -221,8 +225,6 @@ class GoogleDriveAdapter:
         ``page_token`` only when the provider said more exist.
         """
         _refuse_unsupported_config(config)
-
-        token = await self._token_provider(source_id, workspace_id=workspace_id)
         params = {
             "q": _listing_query(config),
             "fields": f"nextPageToken,files({FILE_FIELDS})",
@@ -235,8 +237,10 @@ class GoogleDriveAdapter:
         if page_token:
             params["pageToken"] = page_token
 
-        payload = await self._get(
-            f"{FILES_URL}?{urlencode(params)}", token, source_id=source_id
+        payload = await self._get_as_workspace(
+            f"{FILES_URL}?{urlencode(params)}",
+            source_id=source_id,
+            workspace_id=workspace_id,
         )
 
         items: list[dict] = []
@@ -264,7 +268,6 @@ class GoogleDriveAdapter:
         """
         if parent is not None and parent != SHARED_ROOT and not is_folder_id(parent):
             raise DriveTerminalError("parent is not a Drive folder id")
-        token = await self._token_provider(None, workspace_id=workspace_id)
         scope = (
             "sharedWithMe = true"
             if parent == SHARED_ROOT
@@ -284,10 +287,10 @@ class GoogleDriveAdapter:
         while True:
             if page_token:
                 params["pageToken"] = page_token
-            payload = await self._get(
+            payload = await self._get_as_workspace(
                 f"{FILES_URL}?{urlencode(params)}",
-                token,
-                source_id=f"workspace {workspace_id} (folder browser)",
+                source_id=None,
+                workspace_id=workspace_id,
             )
             for entry in payload.get("files") or []:
                 fid, name = entry.get("id"), entry.get("name")
@@ -415,6 +418,28 @@ class GoogleDriveAdapter:
             policy=self._policy,
             headers={"Authorization": f"Bearer {token}"},
         )
+
+    async def _get_as_workspace(
+        self, url: str, *, source_id: Optional[str], workspace_id: str
+    ) -> dict:
+        """One GET under the workspace's token, with ONE re-mint: a token the
+        door handed out can die inside the request it was minted for, and
+        Google can invalidate one early. On Google's 401/403 the provider is
+        asked once more with `fresh=True` and the GET retried; a second
+        refusal is the grant's, and propagates (P5, #1247)."""
+        label = (
+            source_id
+            if source_id is not None
+            else f"workspace {workspace_id} (folder browser)"
+        )
+        token = await self._token_provider(source_id, workspace_id=workspace_id)
+        try:
+            return await self._get(url, token, source_id=label)
+        except DriveCredentialDead:
+            token = await self._token_provider(
+                source_id, workspace_id=workspace_id, fresh=True
+            )
+            return await self._get(url, token, source_id=label)
 
     async def _get(self, url: str, token: str, *, source_id: str) -> dict:
         """One floored GET, with the status mapped to the routing vocabulary."""

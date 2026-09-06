@@ -711,17 +711,18 @@ class TestTheWorkspaceDriveStatus:
         status = _drive(world)
         assert status["status"] == "active" and status["connected_at"] is not None
 
-    def test_a_past_expiry_reads_expired_even_though_state_says_active(self, world):
-        """The case a passed-through `state` gets WRONG: nothing in the target
-        tier transitions a gdrive credential, so a stored `state` reads
-        `active` forever. The status is derived from the rule
-        `drive_credentials` enforces."""
+    def test_a_past_access_token_expiry_still_reads_active(self, world):
+        """P5 (#1247): for `gdrive`, `expires_at` is the ACCESS token's hourly
+        expiry and the read door refreshes it on demand, so the projection
+        reads `state` alone — a grant whose token lapsed is still connected.
+        (The Instagram projection keeps its expiry clause: its refresh is the
+        clock's.)"""
         _credential(
             world,
             state="active",
             expires_at=datetime.now(timezone.utc) - timedelta(hours=1),
         )
-        assert _drive(world)["status"] == "expired"
+        assert _drive(world)["status"] == "active"
 
     def test_a_null_expiry_is_not_an_expiry(self, world):
         _credential(world, state="active", expires_at=None)

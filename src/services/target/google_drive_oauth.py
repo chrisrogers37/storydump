@@ -79,7 +79,7 @@ from urllib.parse import urlencode
 from sqlalchemy import text
 
 from src.exceptions.base import RefusalError, StorydumpError
-from src.services.target.google_oidc import AUTHORIZE_URL, code_grant
+from src.services.target.google_oidc import AUTHORIZE_URL, code_grant, refresh_grant
 from src.services.target.ig_login_oauth import ring
 
 #: `ck_credentials_provider` / `ck_sources_provider` / `ck_oauth_state_provider`.
@@ -104,13 +104,23 @@ REDIRECT_REASON = {
     "malformed_response": "exchange_failed",
     "no_refresh_token": "grant_incomplete",
     "scope_not_granted": "grant_incomplete",
+    # The read-path refresh (P5, #1247) never reaches the callback, but its two
+    # refusals live in the one vocabulary so `DriveOAuthRefused` stays total:
+    # `grant_revoked` is Google's `invalid_grant` — definitive, the row goes
+    # `expired` — and `refresh_failed` is everything transient.
+    "grant_revoked": "exchange_failed",
+    "refresh_failed": "exchange_failed",
+    # `invalid_client` / `unauthorized_client`: OUR client id or secret is
+    # wrong — configuration, not the grant and not the weather.
+    "client_misconfigured": "exchange_failed",
 }
 
 
 class DriveOAuthRefused(RefusalError):
     """The grant could not be completed. ``reason`` is :data:`REDIRECT_REASON`'s
     key set — exchange_failed | malformed_response | no_refresh_token |
-    scope_not_granted — and no token ever rides in the message."""
+    scope_not_granted | grant_revoked | refresh_failed | client_misconfigured —
+    and no token ever rides in the message."""
 
     _prefix = "drive grant refused"
 
@@ -210,6 +220,67 @@ async def exchange_code(
     return DriveGrant(
         access_token=access_token,
         refresh_token=refresh_token,
+        expires_at=expires_at,
+    )
+
+
+async def refresh_access_token(
+    client, *, refresh_token: str, client_id: str, client_secret: str
+) -> DriveGrant:
+    """Mint a fresh access token from the stored refresh token (P5, F3 (b),
+    #1247), through the egress floor (`google_oidc.refresh_grant`).
+
+    Google issues no new refresh token on a refresh as a rule, so the stored
+    one rides on in the returned grant; when it does rotate one, the rotated
+    token is kept. Refuses by name: ``grant_revoked`` for a 400
+    ``invalid_grant`` (the grant is gone on Google's side — revoked by the
+    person, or the app removed; D31's definitive class), ``refresh_failed``
+    for any other non-200 (transient: this call refuses, the row stands),
+    ``malformed_response`` for an answer without a token.
+    """
+    status, body = await refresh_grant(
+        client,
+        refresh_token=refresh_token,
+        client_id=client_id,
+        client_secret=client_secret,
+    )
+    if status != 200:
+        error = body.get("error") if isinstance(body, dict) else None
+        # `invalid_grant` is definitive whatever the status Google chose to
+        # put it on (400 today; a 401 has been seen) — the grant is gone.
+        if error == "invalid_grant":
+            raise DriveOAuthRefused(
+                "grant_revoked",
+                "the token endpoint no longer honours this refresh token",
+            )
+        if error in ("invalid_client", "unauthorized_client"):
+            raise DriveOAuthRefused(
+                "client_misconfigured",
+                f"the token endpoint rejected this client ({error}): GOOGLE_CLIENT_ID /"
+                " GOOGLE_CLIENT_SECRET are wrong for this project",
+            )
+        raise DriveOAuthRefused("refresh_failed", f"token endpoint answered {status}")
+    if not isinstance(body, dict):
+        raise DriveOAuthRefused(
+            "malformed_response", "token endpoint body is not a JSON object"
+        )
+    access_token = body.get("access_token")
+    if not isinstance(access_token, str) or not access_token:
+        raise DriveOAuthRefused("malformed_response", "no access token in the refresh")
+    rotated = body.get("refresh_token")
+    expires_in = body.get("expires_in")
+    # No `expires_in` (Google always sends one; a proxy might not): assume
+    # Google's hour rather than write NULL, which would read as "no known
+    # expiry" and never be refreshed again.
+    seconds = 3600
+    if isinstance(expires_in, (int, float)) and not isinstance(expires_in, bool):
+        seconds = int(expires_in)
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=seconds)
+    return DriveGrant(
+        access_token=access_token,
+        refresh_token=rotated
+        if isinstance(rotated, str) and rotated
+        else refresh_token,
         expires_at=expires_at,
     )
 

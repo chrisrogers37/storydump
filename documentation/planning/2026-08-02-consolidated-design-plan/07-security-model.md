@@ -940,11 +940,24 @@ grant or a disconnect paused and never a removed one, and a sync that lands
 after a removal does not un-pause it. The picker has two roots — My Drive and
 the folders shared to the account — and says when the cap cut its listing.
 
-**Stated dependency (P5, F3 (b)):** `expires_at` on a `gdrive` row is the ACCESS
-token's expiry and the read door mints nothing from the refresh token yet, so
-"connects once" holds for an hour until the read-path refresh lands — the next
-increment, tracked as its own issue, and the reason the card offers Reconnect
-while the grant is live.
+**The read-path refresh (P5, F3 (b), #1247) — landed.** `expires_at` on a
+`gdrive` row is the ACCESS token's expiry; `drive_credentials._refresh` mints a
+fresh one from the stored refresh token when a read finds the token at or past
+its expiry (less a 60-second skew), writes the new envelope in place under a
+`system` unit of work, and hands the fresh token back — so "connects once" is
+true. Google's `invalid_grant` is D31's definitive class: the row goes
+`expired`, the card and the picker say reconnect. Anything transient is TYPED
+retryable — the job ladder retries, the API answers unavailable, nothing is
+written or flipped — so one bad minute at Google cannot strand a folder. Both
+writes compare-and-swap on the ciphertext the read saw, so a reconnect that
+lands during the round-trip is never overwritten nor flipped. The adapter buys
+one re-mint on Google's 401 and retries the request once. `drive_status` reads
+`state` alone for `gdrive`: a past access-token expiry says nothing about the
+grant. The process needs
+`GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`: the API always had them; the
+worker, which syncs through the same door, needs them too, and a process
+without them refuses by naming the variables. The refresh clock stays fenced
+to `ig_login` (`063`): Drive mints on read, as the plan always said.
 
 ```sql
 -- The workspace-level Drive grant (owner ruling 2026-09-05; #1165's lean (b) — the same
