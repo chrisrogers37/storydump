@@ -745,3 +745,119 @@ class TestDeliverOutboxRetiresAGoneChat:
         session = _FakeSession(rows=[{"external_ref": "-777", "workspace_id": "ws-1"}])
         await self._registry()["deliver_outbox"](session, self._job())
         assert gone["revoked"] == ["b-1"]
+
+
+class TestWeightedCategorySelection:
+    """`06` §3: selection draws by the workspace's category mix. A seeded
+    generator makes the draw deterministic; the statements the executor sends
+    are pinned by shape, since the port's own SQL is the contract."""
+
+    def _session(self, *, mix, counts, pick_id="media-1", intent_id="intent-1"):
+
+        answers = [mix, counts, [{"id": pick_id}], [{"id": intent_id}]]
+
+        class _S:
+            def __init__(self):
+                self.statements = []
+
+            async def execute(self, stmt, params=None):
+                self.statements.append((str(stmt), params))
+                rows = answers.pop(0) if answers else []
+
+                class _M:
+                    def all(self_inner):
+                        return rows
+
+                    def first(self_inner):
+                        return rows[0] if rows else None
+
+                class _R:
+                    def mappings(self_inner):
+                        return _M()
+
+                    def first(self_inner):
+                        r = rows[0] if rows else None
+                        if r is None:
+                            return None
+                        return tuple(r.values())
+
+                    def all(self_inner):
+                        return [tuple(r.values()) for r in rows]
+
+                return _R()
+
+        return _S()
+
+    async def _plan(self, session, rng):
+        import random
+
+        from src.services.target.scheduler import execute_plan_slot
+
+        return await execute_plan_slot(
+            session,
+            workspace_id="ws-1",
+            ig_account_id="acct-1",
+            slot_at="2026-09-06T22:00:00+00:00",
+            provider_account_ref="ref",
+            approval_mode="manual",
+            no_media_notice_after_seconds=86400,
+            rng=random.Random(rng),
+        )
+
+    async def test_the_draw_follows_the_weights_over_categories_that_have_media(self):
+        picks = {}
+        for seed in range(40):
+            s = self._session(
+                mix=[
+                    {"category": "memes", "ratio": 0.7},
+                    {"category": "merch", "ratio": 0.3},
+                ],
+                counts=[
+                    {"category": "memes", "n": 5},
+                    {"category": "merch", "n": 5},
+                    {"category": None, "n": 3},
+                ],
+            )
+            out = await self._plan(s, seed)
+            assert out.intent_id == "intent-1"
+            pick_sql, pick_params = s.statements[2]
+            assert (
+                "m.category = :category" in pick_sql
+                and "state = 'available'" in pick_sql
+            )
+            picks[pick_params["category"]] = picks.get(pick_params["category"], 0) + 1
+        assert set(picks) == {"memes", "merch"}
+        assert picks["memes"] > picks["merch"], picks
+
+    async def test_a_weighted_category_with_no_media_is_never_drawn(self):
+        for seed in range(20):
+            s = self._session(
+                mix=[
+                    {"category": "memes", "ratio": 0.7},
+                    {"category": "merch", "ratio": 0.3},
+                ],
+                counts=[{"category": "memes", "n": 5}],
+            )
+            await self._plan(s, seed)
+            assert s.statements[2][1]["category"] == "memes"
+
+    async def test_without_a_mix_the_pick_is_the_old_oldest_first_over_the_whole_pool(
+        self,
+    ):
+        s = self._session(mix=[], counts=[{"category": None, "n": 3}])
+        out = await self._plan(s, 1)
+        assert out.intent_id == "intent-1"
+        pick_sql, pick_params = s.statements[2]
+        assert "m.category" not in pick_sql and "category" not in pick_params
+        assert "ORDER BY m.last_posted_at NULLS FIRST, m.created_at" in pick_sql
+        # `06` §3 in full: the workspace-wide locks and this account's recent ones.
+        assert "FROM post_locks l" in pick_sql and "l.ig_account_id = :acct" in pick_sql
+
+    async def test_when_every_weighted_category_is_empty_the_pool_is_the_fallback(self):
+        s = self._session(
+            mix=[{"category": "memes", "ratio": 1.0}],
+            counts=[{"category": None, "n": 2}],
+        )
+        out = await self._plan(s, 1)
+        assert out.intent_id == "intent-1"
+        assert "m.category" not in s.statements[2][0]

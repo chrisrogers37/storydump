@@ -63,6 +63,7 @@ from src.config.settings import settings
 from src.exceptions.tenancy import TenantResolutionError
 from src.services.target.commands import CommandNotBuilt, CommandRefused
 from src.services.target.invitations import InvitationRefused
+from src.services.target.category_mix import MixInvalid
 from src.services.target.provisioning import ProvisioningRefused
 from src.services.target import scheduling_health
 from src.services.target.unit_of_work import (
@@ -268,6 +269,17 @@ def _register_handlers(app: FastAPI) -> None:
         logger.info("refused %s %s: %s", request.method, request.url.path, exc)
         return JSONResponse(
             status_code=status, content={"detail": str(exc), "reason": exc.reason}
+        )
+
+    @app.exception_handler(MixInvalid)
+    async def _mix(request: Request, exc: MixInvalid):
+        # The web's one code carrier is `reason` (`target-api.ts::readError`),
+        # matched as `[a-z0-9_]+` — so the refusal travels as
+        # `invalid_mix_<reason>`, not in `detail`.
+        logger.info("refused %s %s: %s", request.method, request.url.path, exc)
+        return JSONResponse(
+            status_code=400,
+            content={"detail": str(exc), "reason": f"invalid_mix_{exc.reason}"},
         )
 
     @app.exception_handler(InvitationRefused)

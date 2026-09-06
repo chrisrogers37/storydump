@@ -14,6 +14,7 @@ import pytest
 
 from src.exceptions.tenancy import TenantResolutionError
 from src.services.target import (
+    category_mix,
     channel_bind,
     commands,
     google_drive_oauth,
@@ -1022,3 +1023,73 @@ class TestSourcesUnderTheWorkspaceGrant:
 
         monkeypatch.setattr(provisioning, "pause_media_source", pause_media_source)
         assert client.delete(f"{self.URL}/{SRC}").status_code == 404
+
+
+class TestCategoryMix:
+    """`GET`/`PUT /workspaces/{ws}/category-mix` — the weights that drive the
+    slot draw (owner ruling 2026-09-06). Member read, admin write, and a
+    refusal travels as `reason = invalid_mix_<reason>`, the one code carrier
+    the web reads."""
+
+    URL = f"/api/v1/workspaces/{WS}/category-mix"
+
+    def test_get_reads_the_mix_and_the_discovered_categories(
+        self, client, signed_in, tenant, monkeypatch
+    ):
+        async def current_mix(session, *, workspace_id):
+            return [{"category": "memes", "ratio": 0.7}]
+
+        async def discovered(session, *, workspace_id):
+            return [
+                {"category": "memes", "media_count": 3},
+                {"category": None, "media_count": 1},
+            ]
+
+        monkeypatch.setattr(category_mix, "current_mix", current_mix)
+        monkeypatch.setattr(category_mix, "discovered_categories", discovered)
+        resp = client.get(self.URL)
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "mix": [{"category": "memes", "ratio": 0.7}],
+            "categories": [
+                {"category": "memes", "media_count": 3},
+                {"category": None, "media_count": 1},
+            ],
+        }
+        assert ("gate", WS, PRINCIPAL.user_id, "member") in tenant
+
+    def test_put_replaces_the_mix_at_the_admin_floor(
+        self, client, signed_in, tenant, monkeypatch
+    ):
+        seen = {}
+
+        async def set_mix(session, *, workspace_id, mix, by_user_id):
+            seen.update(ws=workspace_id, mix=mix, by=by_user_id)
+            return [
+                {"category": "memes", "ratio": 0.7},
+                {"category": "merch", "ratio": 0.3},
+            ]
+
+        monkeypatch.setattr(category_mix, "set_mix", set_mix)
+        body = {
+            "mix": [
+                {"category": "memes", "ratio": 0.7},
+                {"category": "merch", "ratio": 0.3},
+            ]
+        }
+        resp = client.put(self.URL, json=body)
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["mix"][1] == {"category": "merch", "ratio": 0.3}
+        assert seen == {"ws": WS, "mix": body["mix"], "by": PRINCIPAL.user_id}
+        assert ("gate", WS, PRINCIPAL.user_id, "admin") in tenant
+
+    def test_a_refused_mix_is_400_with_the_reason_the_web_reads(
+        self, client, signed_in, tenant, monkeypatch
+    ):
+        async def set_mix(session, *, workspace_id, mix, by_user_id):
+            raise category_mix.MixInvalid("sum_not_one", "sum is 0.9000")
+
+        monkeypatch.setattr(category_mix, "set_mix", set_mix)
+        resp = client.put(self.URL, json={"mix": [{"category": "memes", "ratio": 0.9}]})
+        assert resp.status_code == 400
+        assert resp.json()["reason"] == "invalid_mix_sum_not_one"

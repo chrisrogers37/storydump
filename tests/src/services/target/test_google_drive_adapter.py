@@ -317,7 +317,7 @@ class TestProbe:
         )
         listing_url = str(seen2["request"].url)
 
-        q = "q=" + quote_plus(_listing_query(CONFIG))
+        q = "q=" + quote_plus(_listing_query(CONFIG["folder_ref"]))
         assert q in probe_url and q in listing_url
         assert "pageSize=1" in probe_url
         assert seen["request"].headers["authorization"] == "Bearer tok"
@@ -624,7 +624,7 @@ class TestOneRemintOnARefusedToken:
                 return httpx.Response(
                     401, json={"error": {"message": "Invalid Credentials"}}
                 )
-            return httpx.Response(200, json={"files": [_file("f1")]})
+            return httpx.Response(200, json={"files": [{"id": "f1", "name": "Trips"}]})
 
         record: list = []
         tokens = iter(["tok-stale", "tok-fresh"])
@@ -638,12 +638,40 @@ class TestOneRemintOnARefusedToken:
             client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
             policy=_policy(),
         )
-        items, _ = await adapter.list_changes(
-            CONFIG, None, source_id=SRC, workspace_id=WS
-        )
-        assert [i["ref"] for i in items] == ["f1"]
+        page = await adapter.list_folders(parent=None, workspace_id=WS)
+        assert [f["id"] for f in page.folders] == ["f1"]
         assert record == [False, True]
         assert calls == ["Bearer tok-stale", "Bearer tok-fresh"]
+
+    @pytest.mark.asyncio
+    async def test_a_remint_inside_the_walk_carries_to_the_next_request(self):
+        """The subfolder listing gets the 401; the media page that follows must
+        use the FRESH token, not resend the refused one."""
+        calls = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request.headers["authorization"])
+            if len(calls) == 1:
+                return httpx.Response(
+                    401, json={"error": {"message": "Invalid Credentials"}}
+                )
+            return httpx.Response(200, json={"files": []})
+
+        tokens = iter(["tok-stale", "tok-fresh"])
+
+        async def token_provider(source_id, *, workspace_id, fresh=False):
+            return next(tokens)
+
+        adapter = GoogleDriveAdapter(
+            token_provider=token_provider,
+            client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+            policy=_policy(),
+        )
+        items, cp = await adapter.list_changes(
+            CONFIG, None, source_id=SRC, workspace_id=WS
+        )
+        assert items == [] and cp == {"v": 1}
+        assert calls == ["Bearer tok-stale", "Bearer tok-fresh", "Bearer tok-fresh"]
 
     @pytest.mark.asyncio
     async def test_a_second_refusal_is_the_grants(self):
@@ -656,3 +684,225 @@ class TestOneRemintOnARefusedToken:
                 parent=None, workspace_id=WS
             )
         assert record == [(None, WS), (None, WS, "fresh")]
+
+
+def _folder_entry(fid, name):
+    return {"id": fid, "name": name, "mimeType": "application/vnd.google-apps.folder"}
+
+
+class TestTheWalkOverSubfolders:
+    """Owner ruling 2026-09-06: a picked folder's SUBFOLDERS are categories, as
+    in the legacy product (`google_drive_provider.list_files`). The walk is one
+    level deep, one media page per call, and the cursor rides the checkpoint:
+    `current` (the folder being listed, with its name = the category), `queue`
+    (folders still to list), `page_token` (within the current folder). A
+    checkpoint of exactly `{"v": 1}` is the only statement that the walk is
+    complete — the bound stays announced, never absorbed."""
+
+    ROOT = "FOLDER123"
+
+    def _drive(self, *, root_files, subfolders, folder_files, pages=None):
+        """A Drive with `root_files` directly in the root, `subfolders`
+        [(id, name)], and `folder_files` {folder_id: [files]}. `pages` lets a
+        folder answer in two pages: {folder_id: split_index}."""
+        pages = pages or {}
+        calls: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            q = request.url.params["q"]
+            token = request.url.params.get("pageToken")
+            calls.append({"q": q, "pageToken": token})
+            if "mimeType = 'application/vnd.google-apps.folder'" in q:
+                return httpx.Response(
+                    200, json={"files": [_folder_entry(i, n) for i, n in subfolders]}
+                )
+            parent = q.split("'")[1]
+            files = root_files if parent == self.ROOT else folder_files.get(parent, [])
+            if parent in pages:
+                split = pages[parent]
+                if token is None:
+                    return httpx.Response(
+                        200,
+                        json={"files": files[:split], "nextPageToken": f"{parent}-p2"},
+                    )
+                return httpx.Response(200, json={"files": files[split:]})
+            return httpx.Response(200, json={"files": files})
+
+        return _adapter(handler), calls
+
+    @pytest.mark.asyncio
+    async def test_the_root_and_each_subfolder_are_listed_and_the_subfolder_names_the_category(
+        self,
+    ):
+        adapter, calls = self._drive(
+            root_files=[_file("r1", name="loose.jpg")],
+            subfolders=[("MEMES", "memes"), ("MERCH", "merch")],
+            folder_files={
+                "MEMES": [_file("m1", name="a.jpg")],
+                "MERCH": [_file("s1", name="shirt.mp4", mime="video/mp4")],
+            },
+        )
+        seen = []
+        checkpoint = None
+        for _ in range(10):
+            items, checkpoint = await adapter.list_changes(
+                CONFIG, checkpoint, source_id=SRC, workspace_id=WS
+            )
+            seen.extend((i["ref"], i.get("category")) for i in items)
+            if checkpoint == {"v": 1}:
+                break
+        assert checkpoint == {"v": 1}, (
+            "the walk must end with the bare complete checkpoint"
+        )
+        assert seen == [("r1", None), ("m1", "memes"), ("s1", "merch")]
+        # One subfolder listing, then one media page per folder — three folders.
+        folder_listings = [
+            c for c in calls if "application/vnd.google-apps.folder" in c["q"]
+        ]
+        assert len(folder_listings) == 1
+        assert f"'{self.ROOT}' in parents" in folder_listings[0]["q"]
+        assert len(calls) == 4
+
+    @pytest.mark.asyncio
+    async def test_the_cursor_survives_a_paged_folder_and_resumes_where_it_stopped(
+        self,
+    ):
+        adapter, calls = self._drive(
+            root_files=[],
+            subfolders=[("MEMES", "memes")],
+            folder_files={"MEMES": [_file("m1"), _file("m2"), _file("m3")]},
+            pages={"MEMES": 2},
+        )
+        items, cp = await adapter.list_changes(
+            CONFIG, None, source_id=SRC, workspace_id=WS
+        )
+        # First call: the root (empty) — the cursor moves to `memes`.
+        assert (
+            items == [] and cp["current"]["name"] == "memes" and cp.get("queue") == []
+        )
+        items, cp = await adapter.list_changes(
+            CONFIG, cp, source_id=SRC, workspace_id=WS
+        )
+        assert [i["ref"] for i in items] == ["m1", "m2"] and cp[
+            "page_token"
+        ] == "MEMES-p2"
+        assert cp["current"]["name"] == "memes"
+        items, cp = await adapter.list_changes(
+            CONFIG, cp, source_id=SRC, workspace_id=WS
+        )
+        assert [i["ref"] for i in items] == ["m3"] and cp == {"v": 1}
+        assert calls[-1]["pageToken"] == "MEMES-p2"
+
+    @pytest.mark.asyncio
+    async def test_a_folder_with_no_subfolders_is_the_old_flat_listing(self):
+        adapter, calls = self._drive(
+            root_files=[_file("r1")], subfolders=[], folder_files={}
+        )
+        items, cp = await adapter.list_changes(
+            CONFIG, None, source_id=SRC, workspace_id=WS
+        )
+        assert [i["ref"] for i in items] == ["r1"] and cp == {"v": 1}
+        assert all(i.get("category") is None for i in items)
+
+    def test_only_the_bare_checkpoint_is_complete(self):
+        from src.services.target.drive_adapter import checkpoint_incomplete
+
+        assert checkpoint_incomplete({"v": 1}) is False
+        assert checkpoint_incomplete(None) is False
+        assert checkpoint_incomplete({"v": 1, "page_token": "p2"}) is True
+        assert (
+            checkpoint_incomplete(
+                {"v": 1, "current": {"id": "X", "name": "x"}, "queue": []}
+            )
+            is True
+        )
+        assert (
+            checkpoint_incomplete({"v": 1, "queue": [{"id": "Y", "name": "y"}]}) is True
+        )
+
+
+class TestAWalkSurvivesWhatDriveDoesMidWalk:
+    """Review of #1251: a subfolder deleted or unshared while the walk is on
+    it must not wedge the source, and an expired page token must not either."""
+
+    ROOT = "FOLDER123"
+
+    def _adapter_with(self, handler):
+        return _adapter(handler)
+
+    @pytest.mark.asyncio
+    async def test_a_vanished_subfolder_is_skipped_and_the_walk_goes_on(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            q = request.url.params["q"]
+            if "vnd.google-apps.folder" in q:
+                return httpx.Response(
+                    200,
+                    json={
+                        "files": [
+                            _folder_entry("GONE", "gone"),
+                            _folder_entry("KEEP", "keep"),
+                        ]
+                    },
+                )
+            parent = q.split("'")[1]
+            if parent == "GONE":
+                return httpx.Response(
+                    404, json={"error": {"message": "File not found"}}
+                )
+            return httpx.Response(
+                200, json={"files": [_file("k1")] if parent == "KEEP" else []}
+            )
+
+        adapter = self._adapter_with(handler)
+        items, cp = await adapter.list_changes(
+            CONFIG, None, source_id=SRC, workspace_id=WS
+        )
+        assert items == [] and cp["current"]["id"] == "GONE"
+        items, cp = await adapter.list_changes(
+            CONFIG, cp, source_id=SRC, workspace_id=WS
+        )
+        assert items == [] and cp["current"]["id"] == "KEEP", (
+            "skipped, and the cursor advanced"
+        )
+        items, cp = await adapter.list_changes(
+            CONFIG, cp, source_id=SRC, workspace_id=WS
+        )
+        assert [i["ref"] for i in items] == ["k1"] and cp == {"v": 1}
+
+    @pytest.mark.asyncio
+    async def test_the_root_itself_gone_is_still_the_sources_fault(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if "vnd.google-apps.folder" in request.url.params["q"]:
+                return httpx.Response(200, json={"files": []})
+            return httpx.Response(404, json={"error": {"message": "File not found"}})
+
+        with pytest.raises(DriveSourceGone):
+            await self._adapter_with(handler).list_changes(
+                CONFIG, None, source_id=SRC, workspace_id=WS
+            )
+
+    @pytest.mark.asyncio
+    async def test_an_expired_page_token_restarts_the_folder_not_the_source(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.params.get("pageToken"):
+                return httpx.Response(400, json={"error": {"message": "Invalid Value"}})
+            return httpx.Response(200, json={"files": [_file("m1")]})
+
+        cp = {
+            "v": 1,
+            "current": {"id": "MEMES", "name": "memes"},
+            "queue": [],
+            "page_token": "stale",
+        }
+        items, cp2 = await self._adapter_with(handler).list_changes(
+            CONFIG, cp, source_id=SRC, workspace_id=WS
+        )
+        assert items == [] and cp2 == {
+            "v": 1,
+            "current": {"id": "MEMES", "name": "memes"},
+            "queue": [],
+        }
+        items, cp3 = await self._adapter_with(handler).list_changes(
+            CONFIG, cp2, source_id=SRC, workspace_id=WS
+        )
+        assert [i["ref"] for i in items] == ["m1"] and cp3 == {"v": 1}
