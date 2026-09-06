@@ -133,6 +133,17 @@ class DriveLostResponse(Exception):
     """
 
 
+def checkpoint_incomplete(checkpoint: Optional[Mapping[str, Any]]) -> bool:
+    """Whether a listing has more to give. The ONLY complete checkpoint is the
+    bare ``{"v": 1}``: a `page_token` (more pages of the current folder), a
+    `current` (a folder being listed) or a `queue` (folders still to list)
+    each say the walk is not finished — the bound announced, never absorbed.
+    The chunk chain and the stub agree on this one definition."""
+    if not checkpoint:
+        return False
+    return any(checkpoint.get(k) for k in ("page_token", "current", "queue"))
+
+
 def validate_source_config(config: Mapping[str, Any]) -> None:
     """Refuse a config the door cannot honour. PART OF THE SEAM CONTRACT.
 

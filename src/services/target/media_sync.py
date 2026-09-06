@@ -48,6 +48,8 @@ from typing import Optional, Any
 
 from sqlalchemy import text
 
+from src.services.target.drive_adapter import checkpoint_incomplete
+
 from src.exceptions.base import StorydumpError
 
 logger = logging.getLogger(__name__)
@@ -153,7 +155,9 @@ async def rearm_after_connect(
             text(
                 "UPDATE media_sources"
                 "   SET state = 'active', alerted_at = NULL, next_sync_at = now(),"
-                "       config = config - 'removed'"
+                "       config = config - 'removed',"
+                # A pick or a re-pick is a fresh start: no stale walk cursor.
+                "       sync_checkpoint = NULL"
                 " WHERE id = :s AND workspace_id = :ws"
             ),
             {"s": str(source_id), "ws": str(workspace_id)},
@@ -298,8 +302,17 @@ async def _run_sync(deps, job, *, page_token, reason) -> str:
     if row is None:
         logger.warning("sync %s: source %s has no row", job["id"], source_id)
         return "missing"
+    # The STORED checkpoint is the cursor, always: the walk over subfolders
+    # (owner ruling 2026-09-06) carries `current` and `queue` beside
+    # `page_token`, and the chunk that chains this job was enqueued in the
+    # same transaction that stored it — the two cannot disagree. A chunk
+    # payload's `page_token` is honoured only when the row carries no cursor
+    # at all (the pre-walk shape), so an in-flight chain keeps working.
+    stored: Any = row["sync_checkpoint"] or None
     checkpoint: Any = (
-        {"v": 1, "page_token": page_token} if page_token else row["sync_checkpoint"]
+        {"v": 1, "page_token": page_token}
+        if page_token and not checkpoint_incomplete(stored)
+        else stored
     )
 
     # Phase 2 — the provider door, outside any transaction.
@@ -318,7 +331,11 @@ async def _run_sync(deps, job, *, page_token, reason) -> str:
                     # disconnected) is NOT flipped to error, and NOT alerted
                     # about: the person chose that, and `paused` is what keeps
                     # the stranded-source beat honest (review of #1246).
-                    "UPDATE media_sources SET state = 'error', alerted_at = now()"
+                    # The cursor is dropped with the fault: whatever re-arms this
+                    # source (a reconnect, a re-pick) starts a fresh walk rather
+                    # than resuming at the folder that failed (review of #1251).
+                    "UPDATE media_sources SET state = 'error', alerted_at = now(),"
+                    "  sync_checkpoint = CAST('{\"v\": 1}' AS jsonb)"
                     " WHERE id = :s AND state <> 'paused'"
                     " RETURNING id"
                 ),
@@ -373,9 +390,20 @@ async def _run_sync(deps, job, *, page_token, reason) -> str:
                 text(
                     "INSERT INTO media_items (workspace_id, source_id,"
                     " content_hash, file_name, media_kind, mime_type,"
-                    " provider_file_ref)"
-                    " VALUES (:ws, :src, :hash, :name, :kind, :mime, :ref)"
-                    " ON CONFLICT ON CONSTRAINT uq_media_dedup DO NOTHING"
+                    " provider_file_ref, category)"
+                    " VALUES (:ws, :src, :hash, :name, :kind, :mime, :ref, :category)"
+                    # A file that MOVED between subfolders changes category on
+                    # the next walk; nothing else about a known row is touched
+                    # (the dedup is per workspace by content hash, `uq_media_dedup`).
+                    " ON CONFLICT ON CONSTRAINT uq_media_dedup DO UPDATE"
+                    "   SET category = EXCLUDED.category"
+                    # Only the SAME file moving re-categorizes: a different file
+                    # with identical bytes in another folder (or another source)
+                    # shares the row by content hash and must not flap it.
+                    " WHERE media_items.category IS DISTINCT FROM EXCLUDED.category"
+                    "   AND media_items.source_id = EXCLUDED.source_id"
+                    "   AND media_items.provider_file_ref = EXCLUDED.provider_file_ref"
+                    " RETURNING (xmax = 0) AS inserted"
                 ),
                 {
                     "ws": workspace_id,
@@ -383,6 +411,7 @@ async def _run_sync(deps, job, *, page_token, reason) -> str:
                     "hash": item["content_hash"],
                     "name": item.get("name") or item["ref"],
                     "kind": item["kind"],
+                    "category": item.get("category"),
                     # `.get`, not `[...]`: the column is nullable and an adapter
                     # that cannot know the content type must be able to say so.
                     # Absent stays NULL — the same row this wrote before — so a
@@ -391,7 +420,7 @@ async def _run_sync(deps, job, *, page_token, reason) -> str:
                     "ref": item["ref"],
                 },
             )
-            kept += result.rowcount
+            kept += sum(1 for (inserted,) in result.all() if inserted)
         next_token = (new_checkpoint or {}).get("page_token")
         await s.execute(
             text(
@@ -400,7 +429,7 @@ async def _run_sync(deps, job, *, page_token, reason) -> str:
             ),
             {"cp": _json(new_checkpoint), "s": source_id},
         )
-        if next_token:
+        if checkpoint_incomplete(new_checkpoint):
             # More pages: chain the next chunk and do NOT re-arm — the chain
             # is the carrier. The serialized key orders it after this job.
             await s.execute(
@@ -442,7 +471,7 @@ async def _run_sync(deps, job, *, page_token, reason) -> str:
         reason,
         kept,
         skipped_kind,
-        bool(next_token),
+        checkpoint_incomplete(new_checkpoint),
     )
     return "chained" if next_token else "synced"
 

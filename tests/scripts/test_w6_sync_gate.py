@@ -1111,3 +1111,50 @@ class TestFailureRouting:
         src = _source_row(sync_conn, chain["src"])
         assert src["state"] == "active", "recovery is the successful sync itself"
         assert src["alerted_at"] is None, "recovery clears the alert dedup"
+
+
+class TestSubfoldersAreCategories:
+    """Owner ruling 2026-09-06: a picked folder's subfolders are categories.
+    The adapter tags each item with its subfolder; the sync writes it, and a
+    file that MOVES between subfolders changes category on the next walk —
+    nothing else about a known row is touched."""
+
+    def _categories(self, conn, ws):
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT provider_file_ref, category FROM media_items WHERE workspace_id = %s"
+                "   AND provider_file_ref IN ('loose-1', 'meme-1', 'shirt-1')"
+                " ORDER BY provider_file_ref",
+                (ws,),
+            )
+            return cur.fetchall()
+
+    @pytest.mark.asyncio
+    async def test_items_carry_their_subfolder_and_a_move_is_followed(
+        self, lane_db, sync_conn
+    ):
+        chain = seed_workspace_chain(sync_conn, "w6-cats")
+        _arm_source(sync_conn, chain["src"])
+        _tick(sync_conn)
+        first = _item("meme-1")
+        first["category"] = "memes"
+        shirt = _item("shirt-1", kind="video")
+        shirt["category"] = "merch"
+        loose = _item("loose-1")
+        drive = ScriptedDrive([([first, shirt, loose], None)])
+        wl, claimed = await _run_once_w6(lane_db, drive)
+        assert claimed is True and wl.processed == 1
+        assert self._categories(sync_conn, chain["ws"]) == [
+            ("loose-1", None),
+            ("meme-1", "memes"),
+            ("shirt-1", "merch"),
+        ]
+
+        # The same file, now under `merch`: the row's category follows.
+        _arm_source(sync_conn, chain["src"])
+        _tick(sync_conn)
+        moved = _item("meme-1")
+        moved["category"] = "merch"
+        wl, claimed = await _run_once_w6(lane_db, ScriptedDrive([([moved], None)]))
+        assert claimed is True
+        assert ("meme-1", "merch") in self._categories(sync_conn, chain["ws"])

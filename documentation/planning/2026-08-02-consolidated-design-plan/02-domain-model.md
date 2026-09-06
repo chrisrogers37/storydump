@@ -651,7 +651,12 @@ writer. One Google grant per workspace, every folder under it; the same Google a
 connected from another workspace (its own grant) and the same folder picked there (its own
 source). `media_sources.config` (D37's contract) gains two display-and-decision keys the
 adapter never reads: `folder_name?` (what the picker called the folder) and `removed?` (an
-admin removed it — a reconnect revives paused folders, never removed ones). The block above
+admin removed it — a reconnect revives paused folders, never removed ones). `sync_checkpoint`
+(D37: `{v:1, page_token?}`) gains the walk's cursor (owner ruling 2026-09-06 — subfolders are
+categories): `current` (the folder being listed and its name, the items' category) and `queue`
+(folders still to list); the bare `{v:1}` is the only complete checkpoint
+(`drive_adapter.checkpoint_incomplete`). `media_items.category` is the subfolder a file sits in,
+NULL for the picked folder's own files, and follows the file when it moves. The block above
 is history — 054 as it replayed — and `07` §15 is the change.
 
 ## §3. The intent ledger (heart of the system)

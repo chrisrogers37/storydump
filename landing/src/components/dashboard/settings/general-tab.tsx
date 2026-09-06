@@ -205,6 +205,7 @@ export function GeneralTab({
   restorableUntil,
   isOwner,
   members,
+  categoryMix,
 }: {
   settings: SettingsView;
   workspaceId: string;
@@ -219,6 +220,8 @@ export function GeneralTab({
   /** The Members card, rendered ABOVE the danger zone: deleting the workspace
    * is the last thing on the page, not something people scroll past. */
   members?: React.ReactNode;
+  /** The Category mix card, rendered right after the schedule it shapes. */
+  categoryMix?: React.ReactNode;
 }) {
   const router = useRouter();
   const [name, setName] = useState(workspaceName);
@@ -470,6 +473,8 @@ export function GeneralTab({
           )}
         </CardContent>
       </Card>
+
+      {categoryMix}
 
       <CaptionStyleCard
         captionStyle={settings.caption_style}
