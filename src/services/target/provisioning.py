@@ -398,6 +398,7 @@ async def get_or_create_media_source(
     workspace_id: str,
     folder_ref: str,
     root_name: Optional[str] = None,
+    folder_name: Optional[str] = None,
 ) -> tuple[str, bool]:
     """The source for *folder_ref* in this workspace. ``(id, created)``.
 
@@ -434,9 +435,23 @@ async def get_or_create_media_source(
         folder=ref,
     )
     if existing is not None:
+        if folder_name:
+            # The picker named it; a row added by link or under an older name
+            # takes the name it has now. Display only — the adapter reads
+            # `folder_ref` and refuses `root_name`, never this key.
+            await executor.execute(
+                text(
+                    "UPDATE media_sources"
+                    "   SET config = config || jsonb_build_object('folder_name', CAST(:n AS text))"
+                    " WHERE id = :s AND workspace_id = :ws"
+                ),
+                {"n": folder_name, "s": str(existing["id"]), "ws": str(workspace_id)},
+            )
         return str(existing["id"]), False
 
     config: dict[str, object] = {"v": GDRIVE_CONFIG_VERSION, "folder_ref": ref}
+    if folder_name:
+        config["folder_name"] = folder_name
     if root_name:
         config["root_name"] = root_name
     result = await executor.execute(
@@ -762,3 +777,29 @@ async def disable_destination(
         "intents_flagged": flagged.rowcount,
         "states_retired": retired.rowcount,
     }
+
+
+async def pause_media_source(session, *, workspace_id: str, source_id: str) -> bool:
+    """Remove a folder from the workspace's sync — PAUSE, never delete. The
+    media rows and their history hang off the source, and `06` §1 keeps them;
+    picking the same folder again revives the row (`get_or_create` finds it,
+    the route re-arms it and clears the marker). `paused` rather than `error`:
+    a removal is a decision, not a fault, so the stranded-source alert stays
+    meaningful — and `config.removed` is what keeps a later RECONNECT from
+    reviving it alongside the folders a dead grant had paused."""
+    row = (
+        await session.execute(
+            text(
+                # `config.removed` tells a removal apart from the pause a
+                # disconnect writes: a reconnect revives the latter, never the
+                # former (`media_sync.rearm_after_connect`).
+                "UPDATE media_sources"
+                "   SET state = 'paused', alerted_at = NULL,"
+                "       config = config || '{\"removed\": true}'::jsonb"
+                " WHERE id = :s AND workspace_id = :ws AND provider = 'gdrive'"
+                " RETURNING id"
+            ),
+            {"s": str(source_id), "ws": str(workspace_id)},
+        )
+    ).first()
+    return row is not None

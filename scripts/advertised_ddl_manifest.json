@@ -214,6 +214,13 @@
       "label": "§14 resolver + group-membership doors (068, #854, #1242) — fn_resolve_binding, fn_group_member_seen",
       "doc": "07-security-model.md",
       "ordinal": 12
+    },
+    {
+      "sha256": "207c8f6b3b7ee68873f2fefc24326c5d73484534e5de4e9ffdce3122afff1af1",
+      "class": "normative",
+      "label": "§15 workspace-level Drive grant (069, #1165) — ck_credentials_one_owner provider-conditional, uq_credential_per_workspace",
+      "doc": "07-security-model.md",
+      "ordinal": 13
     }
   ],
   "policy_expansion": {

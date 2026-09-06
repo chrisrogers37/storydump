@@ -111,7 +111,7 @@ describe("destinationStateBadge", () => {
 
 describe("isInstagramAuthorizationUrl", () => {
   // The value is NAVIGATED TO, so the guard sits at the navigation. Equality on
-  // the host, never `endsWith` — same trap `source-connect.ts` names.
+  // the host, never `endsWith` — same trap `drive.ts` names.
   it("accepts Instagram's authorize host over https", () => {
     expect(
       isInstagramAuthorizationUrl("https://api.instagram.com/oauth/authorize?client_id=1"),

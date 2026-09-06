@@ -513,6 +513,22 @@ class TestExpectedTenancyDerivation:
             expected_tenancy(["CREATE SEQUENCE s START 1"])
 
 
+class TestDroppingAnIndexIsInert:
+    """069 (#1165) is the first migration to DROP an index. An index is none
+    of the four facts, so the kind is allowlisted beside CREATE INDEX — and
+    this is the control that proves the entry is reachable, not decorative."""
+
+    def test_drop_index_moves_no_fact(self):
+        sig = expected_tenancy(
+            [
+                "CREATE TABLE t ( id uuid, workspace_id uuid )",
+                "CREATE UNIQUE INDEX uq_t ON t (workspace_id) WHERE id IS NOT NULL",
+                "DROP INDEX uq_t",
+            ]
+        )
+        assert sig["t"]["tenant_keyed"] is True and sig["t"]["policies"] == 0
+
+
 class TestConstraintEditsAreBoundedTheSameWay:
     """#1061: `065` is the first migration to edit a CHECK constraint, and the
     derivation had no branch for it — a loud refusal, correctly.

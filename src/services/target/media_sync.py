@@ -14,14 +14,12 @@ The seam is `01` :76's port signature — ``list_changes(config, checkpoint) →
 ``source_id``. Items carry the adapter's canonical stable ref (D37: the Drive
 file id, never a path), name, kind, and content hash.
 
-``source_id`` is additive to `01` :76 and the reason is structural, not
-convenience: `media_sources` carries **no credential column** — `oauth_credentials`
-points AT the source (`media_source_id`, exclusive per `ck_credentials_one_owner`)
-— so a per-source credential is reachable only from the source's identity, which
-neither the two-argument form nor D37's `config` carries. Putting the id in
-`config` instead would fork the ownership the schema already settled, and a
-lookup by Drive file id inside the adapter would be a cross-tenant hazard
-(astrid, #982). Keyword-only so the two-argument shape stays legible.
+``source_id`` is additive to `01` :76 and, since 069 (`07` §15), names the
+folder being synced rather than the credential: a Drive credential is the
+WORKSPACE's, so the token is `workspace_id`'s grant and the source id is what
+the adapter's messages and the sync's own writes are about. A lookup by Drive
+file id inside the adapter would still be a cross-tenant hazard (astrid, #982).
+Keyword-only so the two-argument shape stays legible.
 
 ## Failure routing (`02` §2's source state machine)
 
@@ -46,7 +44,7 @@ from __future__ import annotations
 
 import logging
 import random
-from typing import Any
+from typing import Optional, Any
 
 from sqlalchemy import text
 
@@ -90,7 +88,9 @@ async def first_ingest_chunk(deps, session, job) -> str:
     )
 
 
-async def rearm_after_connect(session, *, workspace_id: str, source_id: str) -> bool:
+async def rearm_after_connect(
+    session, *, workspace_id: str, source_id: Optional[str] = None
+) -> int:
     """F4 (a): make a source eligible again, in the CALLER's transaction.
 
     Called beside `google_drive_oauth.store_credential` so that "a credential
@@ -124,18 +124,41 @@ async def rearm_after_connect(session, *, workspace_id: str, source_id: str) -> 
     `workspace_id` as well as id: RLS is inert under the deployed owner role
     (#751), so the WHERE clause is what actually binds the row to its tenant.
 
-    Returns True when a row moved; False means no such source in this
-    workspace, which the caller may treat as it likes.
+    Since 069 (`07` §15) the grant is the WORKSPACE's, so a reconnect names no
+    source: with `source_id` None every `gdrive` source of the workspace is
+    re-armed — one grant, every folder eligible again. A single source is
+    still re-armed alone when a folder is picked or re-added under a grant.
+
+    Returns the number of rows moved; 0 means nothing matched, which the
+    caller may treat as it likes.
     """
-    result = await session.execute(
-        text(
-            "UPDATE media_sources"
-            "   SET state = 'active', alerted_at = NULL, next_sync_at = now()"
-            " WHERE id = :s AND workspace_id = :ws"
-        ),
-        {"s": str(source_id), "ws": str(workspace_id)},
-    )
-    return bool(result.rowcount)
+    if source_id is None:
+        # A folder the admin REMOVED stays removed: `pause_media_source` marks
+        # it (`config.removed`), and a reconnect revives only what a dead
+        # grant or a disconnect had paused (review of #1246 — without this a
+        # reconnect an hour later resurrected every removed folder).
+        result = await session.execute(
+            text(
+                "UPDATE media_sources"
+                "   SET state = 'active', alerted_at = NULL, next_sync_at = now()"
+                " WHERE workspace_id = :ws AND provider = 'gdrive'"
+                "   AND NOT COALESCE((config->>'removed')::boolean, false)"
+            ),
+            {"ws": str(workspace_id)},
+        )
+    else:
+        # Picked (or picked again): the removal marker clears with the re-arm,
+        # in the same statement, so the two cannot drift.
+        result = await session.execute(
+            text(
+                "UPDATE media_sources"
+                "   SET state = 'active', alerted_at = NULL, next_sync_at = now(),"
+                "       config = config - 'removed'"
+                " WHERE id = :s AND workspace_id = :ws"
+            ),
+            {"s": str(source_id), "ws": str(workspace_id)},
+        )
+    return int(result.rowcount or 0)
 
 
 async def alert_stranded_sources(
@@ -291,12 +314,27 @@ async def _run_sync(deps, job, *, page_token, reason) -> str:
         async with factory() as s:
             await s.execute(
                 text(
+                    # A folder paused meanwhile (removed, or its grant
+                    # disconnected) is NOT flipped to error, and NOT alerted
+                    # about: the person chose that, and `paused` is what keeps
+                    # the stranded-source beat honest (review of #1246).
                     "UPDATE media_sources SET state = 'error', alerted_at = now()"
-                    " WHERE id = :s"
+                    " WHERE id = :s AND state <> 'paused'"
+                    " RETURNING id"
                 ),
                 {"s": source_id},
             )
-            bindings = await prompts.push_bindings(s, workspace_id)
+            flipped = (
+                await s.execute(
+                    text("SELECT state FROM media_sources WHERE id = :s"),
+                    {"s": source_id},
+                )
+            ).scalar()
+            bindings = (
+                await prompts.push_bindings(s, workspace_id)
+                if flipped == "error"
+                else []
+            )
             for binding_id in bindings:
                 from src.services.target import outbox
 
@@ -390,7 +428,9 @@ async def _run_sync(deps, job, *, page_token, reason) -> str:
                     "  alerted_at = NULL,"
                     "  last_sync_success_at = now(),"
                     "  next_sync_at = now() + make_interval(secs => :secs)"
-                    " WHERE id = :s"
+                    # Removed or disconnected while this job ran: the success
+                    # stamp must not un-pause it (review of #1246).
+                    " WHERE id = :s AND state <> 'paused'"
                 ),
                 {"secs": BASELINE_SECONDS + jitter, "s": source_id},
             )

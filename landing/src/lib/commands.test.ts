@@ -59,7 +59,7 @@ describe("every offered command can produce an idempotency key", () => {
     rename_workspace: { submission_id: UUID, name: "Northside Coffee" },
     offboard_workspace: { submission_id: UUID, confirm: true },
     restore_workspace: { submission_id: UUID },
-    disconnect_account: { submission_id: UUID, source_id: UUID2 },
+    disconnect_account: { submission_id: UUID },
     disable_account: { submission_id: UUID, ig_account_id: UUID2 },
     remove_member: { submission_id: UUID, user_id: UUID2 },
     account_settings_change: {
@@ -271,27 +271,12 @@ describe("disconnect_account", () => {
     expect(isOfferedCommand("disconnect_account")).toBe(true);
   });
 
-  it("carries the source id the executor refuses without", () => {
+  it("takes no arguments — the grant is the workspace's (069), so nothing is named", () => {
     expect(spec.parse({ submission_id: UUID, source_id: UUID2 })).toEqual({
       ok: true,
-      body: { source_id: UUID2 },
+      body: {},
       identity: UUID,
     });
-  });
-
-  it("refuses a non-id before it becomes a database lookup", () => {
-    for (const bad of ["", "not-a-uuid", 7, null, undefined]) {
-      expect(spec.parse({ submission_id: UUID, source_id: bad })).toEqual({
-        ok: false,
-        error: "invalid_source_id",
-      });
-    }
-  });
-
-  it("shares sync_now's shape, since they take the same argument", () => {
-    const a = spec.parse({ submission_id: UUID, source_id: UUID2 });
-    const b = COMMAND_SPECS.sync_now.parse({ submission_id: UUID, source_id: UUID2 });
-    expect(a).toEqual(b);
   });
 });
 

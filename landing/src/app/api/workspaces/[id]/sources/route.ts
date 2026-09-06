@@ -3,8 +3,9 @@ import { getSessionToken, isWorkspaceId } from "@/lib/session";
 import { targetFetch } from "@/lib/target-api";
 
 /**
- * POST /api/workspaces/[id]/sources — add a Drive folder as a media source
- * (epic P4; the target route is #1053's `POST /workspaces/{ws}/sources`).
+ * POST /api/workspaces/[id]/sources — pick a Drive folder as a media source
+ * UNDER the workspace's grant (owner ruling 2026-09-05; the target route is
+ * `POST /workspaces/{ws}/sources`, which refuses `drive_not_connected`).
  *
  * ## Why this is REST and not a command
  *
@@ -47,7 +48,7 @@ export async function POST(
     return NextResponse.json({ error: "malformed_body" }, { status: 400 });
   }
 
-  const body = raw as { folder_ref?: unknown; root_name?: unknown };
+  const body = raw as { folder_ref?: unknown; root_name?: unknown; folder_name?: unknown };
   const folderRef = typeof body?.folder_ref === "string" ? body.folder_ref.trim() : "";
   if (!folderRef) {
     return NextResponse.json({ error: "folder_required" }, { status: 400 });
@@ -60,15 +61,20 @@ export async function POST(
   // markerless URL used to reduce to `https:` and silently merge two unrelated
   // folders onto one source.
   const rootName = typeof body?.root_name === "string" ? body.root_name.trim() : "";
+  // The picker's display name for the folder (`config.folder_name`): what
+  // the card shows, never what the adapter reads.
+  const folderName = typeof body?.folder_name === "string" ? body.folder_name.trim() : "";
 
   const result = await targetFetch<{ source_id?: string; created?: boolean }>(
     `/workspaces/${id}/sources`,
     token,
     {
       method: "POST",
-      body: JSON.stringify(
-        rootName ? { folder_ref: folderRef, root_name: rootName } : { folder_ref: folderRef },
-      ),
+      body: JSON.stringify({
+        folder_ref: folderRef,
+        ...(rootName ? { root_name: rootName } : {}),
+        ...(folderName ? { folder_name: folderName } : {}),
+      }),
     },
   );
 

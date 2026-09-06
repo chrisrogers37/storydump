@@ -11,7 +11,7 @@ import type { GrantResult } from "./start-grant";
  * #1089 records. This module is named for the noun so the confusion cannot be
  * re-made from the client side.
  *
- * Separate from `source-connect.ts` for the same reason: those functions are
+ * Separate from `drive.ts` for the same reason: those functions are
  * about Drive, and folding a destination into them would put the two nouns back
  * in one file the day after the issue was filed for conflating them.
  */
@@ -98,7 +98,7 @@ export function destinationStateBadge(
 const INSTAGRAM_AUTHORIZATION_HOST = "api.instagram.com";
 
 /**
- * HTTPS, and Instagram's authorize host exactly — `source-connect.ts`'s guard
+ * HTTPS, and Instagram's authorize host exactly — `drive.ts`'s guard
  * for the other provider, and for the same reason: the value is NAVIGATED TO.
  * Equality on `host`, never `endsWith`, so `evil-api.instagram.com` and
  * `api.instagram.com.evil.example` are both refused, and a non-default port
