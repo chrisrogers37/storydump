@@ -17,7 +17,7 @@ links:
 
 Mission alignment (`PROJECT_MISSION.md`): *zero-friction content automation* and *simple over powerful* — a folder rename or a new subfolder must never require a settings change or produce silent non-posting; the registry makes folder structure a fact the product tracks rather than a string a person maintains.
 
-**Relation to #1220.** The target tier has not yet published a post (#1220 step 3 is the next program build). Phase 1a (the walk) removes the one failure of this epic observed in production and lands first; whether phases 1b–3 wait for the first real post is the owner's sequencing call, recorded under Decision Forks (S1).
+**Relation to #1220.** The target tier has not yet published a post (#1220 step 3 is the next program build). The owner ruled (S1, 2026-09-07) that all four phases of this epic land first and #1220 step 3 follows; phase 1a (the walk) still lands first within the epic because it removes the one failure observed in production.
 
 ## Evidence (current state, verified 2026-09-07 on `main` at 40b8b7f)
 
@@ -44,13 +44,13 @@ Mission alignment (`PROJECT_MISSION.md`): *zero-friction content automation* and
 
 **Lifecycle.** `media_sources.walk_seq` counts completed walks; the cursor's `walk` token is `walk_seq + 1` at the walk's start. Each walk stamps the registry rows it lists with `last_seen_walk = walk`; when a walk completes **with the same token it started with**, `walk_seq` becomes that token and rows of the source with `last_seen_walk < walk_seq` become `gone`; a completing cursor with a stale token (a re-pick mid-walk) completes without sweeping. A gone folder seen again becomes `active` with its name refreshed. Renames change `name` only.
 
-**Weights (phase 2).** `category_post_case_mix.category_id UUID NULL` (indexed, partial-unique among current rows; no FK) becomes the key; `category` text stays as a label; `uq_case_mix_current` (the name key) is dropped. The planner joins current mix rows to active registry rows by id and counts eligible media by `category_id`. An explicit ratio of 0 means **Off** (never drawn, excluded from automatic maths). **Automatic weights (F4, rule under re-lock):** an active registry row with eligible media and no mix row is drawn by the F4 rule; the card shows the effective percentage. When the weighted set has no eligible media the slot falls back to the whole pool, oldest first, as today. Discovery is said once per walk at walk completion (F9).
+**Weights (phase 2).** `category_post_case_mix.category_id UUID NULL` (indexed, partial-unique among current rows; no FK) becomes the key; `category` text stays as a label; `uq_case_mix_current` (the name key) is dropped. The planner joins current mix rows to active registry rows by id and counts eligible media by `category_id`. An explicit ratio of 0 means **Off** (never drawn, excluded from automatic maths). **Automatic weights (F4, locked):** automatic rows (active, eligible media, no mix row) together take the smaller of their combined media share and the smallest explicit weight, split among themselves by media share; explicit rows share the rest by their ratios; a newly found folder with media takes the first eligible slot after discovery (`debuted_at`), then follows the rule; the card shows the effective percentage. When the weighted set has no eligible media the slot falls back to the whole pool, oldest first, as today. Discovery is said once per walk at walk completion (F9).
 
 **Web (phase 3).** The card lists registry rows with two columns: "Your weight" (an input, "Automatic", or "Off") and "Posts about" (the API's effective %, which sums to 100). Gone rows appear only while they hold a weight, with "Remove weight". Unsorted is hidden at 0 files and no weight. Renames are invisible.
 
 ## Decision Forks
 
-All seven original forks were served one at a time and locked by the owner on 2026-09-07; the ironclad cycle-1 review (PR #1254 comment) reopened F4 on a defect in the ratified formula and added F8, F9 and S1.
+All seven original forks were served one at a time and locked by the owner on 2026-09-07; the ironclad cycle-1 review (PR #1254 comment) reopened F4 on a defect in the ratified formula and added F8, F9 and S1; F4 and S1 were re-served and locked the same day.
 
 **F1 — Registry shape.** Context: where does a category's identity live? Options: (a) a new tenant table `media_categories` with `media_items.category_id`; (b) reuse `media_items.category` as the folder id and add a names table; (c) a JSON registry inside `media_sources.config`. Lean: **(a)**. Ratifier: owner. Status: **locked** 2026-09-07.
 
@@ -58,7 +58,7 @@ All seven original forks were served one at a time and locked by the owner on 20
 
 **F3 — Files directly in the picked folder.** Context: today they have no category and post only as a fallback. Options: (a) a real registry row "Unsorted" (`is_root`) that can be weighted like any other; (b) uncategorized (`NULL`). Lean: **(a)**; the card hides the row at 0 files and no weight. Ratifier: owner. Status: **locked** 2026-09-07.
 
-**F4 — Folders discovered after the mix was set.** Context: the owner sets memes 70 / merch 30; a folder "events" appears later. The ratified intent (2026-09-07) was "a sensible rate, never takes over, never goes silent"; the ratified formula (media share × mean explicit weight) does not deliver it — explicit weights sum to one, so the mean is `1/n` and a 10-file folder draws at ≈0.1 % while a 50,000-file archive takes ≈31 %. Options: (a) **proportional pool, capped, with a debut**: automatic folders together take the smaller of their combined media share and the smallest explicit weight, split among themselves by media share; explicit rows share the rest by their ratios; a newly discovered folder with media takes the first eligible slot after discovery (`debuted_at`), then follows the rule; (b) a floor: each automatic folder draws at least half the smallest explicit weight; (c) every automatic folder is one more equal row. Lean: **(a)** — sayable ("new folders post in proportion to their files, together never more than your smallest weight, and each gets one post right away"), no takeover, no silence, and no dependence on how many categories exist. Ratifier: owner. Status: **open — re-lock pending** (reopened by ironclad cycle 1).
+**F4 — Folders discovered after the mix was set.** Context: the owner sets memes 70 / merch 30; a folder "events" appears later. The ratified intent (2026-09-07) was "a sensible rate, never takes over, never goes silent"; the ratified formula (media share × mean explicit weight) does not deliver it — explicit weights sum to one, so the mean is `1/n` and a 10-file folder draws at ≈0.1 % while a 50,000-file archive takes ≈31 %. Options: (a) **proportional pool, capped, with a debut**: automatic folders together take the smaller of their combined media share and the smallest explicit weight, split among themselves by media share; explicit rows share the rest by their ratios; a newly discovered folder with media takes the first eligible slot after discovery (`debuted_at`), then follows the rule; (b) a floor: each automatic folder draws at least half the smallest explicit weight; (c) every automatic folder is one more equal row. Lean: **(a)** — sayable ("new folders post in proportion to their files, together never more than your smallest weight, and each gets one post right away"), no takeover, no silence, and no dependence on how many categories exist. Ratifier: owner. Status: **locked** 2026-09-07 (re-locked by the owner after ironclad cycle 1: "Proportional, capped, with a debut").
 
 **F5 — Transition of name-keyed weight rows.** Context: production held zero `category_post_case_mix` rows on 2026-09-07 (read-only check; media counts memes 3,477 / merch 1,077). Options: (a) no carry-over — ids only; a name-keyed row set before phase 2 is ignored by the planner and superseded by the first save from the new card; (b) adopt-by-name on the first walk; (c) a migration-time backfill (impossible). Lean: **(a)**. Ratifier: owner. Status: **locked** 2026-09-07 (owner: "New system with newly synced items should have the ID approach").
 
@@ -70,7 +70,7 @@ All seven original forks were served one at a time and locked by the owner on 20
 
 **F9 — The discovery notice.** Context: the ratified auto rule already makes a new folder post; the notice exists so people know it did. Options: (a) one message per walk at walk completion — the first walk lists the folders found; later walks list new folders with counts and effective %, 0-file folders skipped, `announced_at` per row; (b) one message per registry row at creation (count 0 at that moment); (c) no notice. Lean: **(a)**. Ratifier: owner (via review). Status: locked 2026-09-07 by the plan author; the owner may reopen.
 
-**S1 — Sequencing against #1220 (owner's call, not a design fork).** Options: (a) phase 1a now; 1b–3 after the first real Instagram post (#1220 step 3); (b) all phases now, #1220 after. Lean: none — product priority. Ratifier: owner. Status: open.
+**S1 — Sequencing against #1220 (owner's call, not a design fork).** Options: (a) phase 1a now; 1b–3 after the first real Instagram post (#1220 step 3); (b) all phases now, #1220 after. Lean: none — product priority. Ratifier: owner. Status: **locked** 2026-09-07 (owner: all four phases now, #1220 after).
 
 ## Implementation Plan
 
@@ -135,7 +135,7 @@ area: sync · scheduler · api · web · docs — effort: M + L + M + M — risk
 |---|---|---|---|
 | 1a Lazy full-depth walk (v2 cursor) | M | — | — |
 | 1b Registry, migration 070, lifecycle, `category_id` on media | L | 1a | — |
-| 2 Weights by id, the F4 rule, API v2 beside v1, walk-completion notice | M | 1b, F4 re-lock | — |
+| 2 Weights by id, the F4 rule, API v2 beside v1, walk-completion notice | M | 1b | — |
 | 3 Web card on the registry, wizard card retired, docs close-out | M | 2 | — |
 
 Critical path: 1a → 1b → 2 → 3. Each phase is one PR, reviewed with the two-lens round the repo uses, tests first at unit, gate and web tiers.
