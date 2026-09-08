@@ -684,12 +684,22 @@ class GoogleDriveAdapter:
         # own pattern), rather than one credential read per level.
         box = _TokenBox(await self._token_provider(None, workspace_id=workspace_id))
         for _ in range(ANCESTOR_CAP):
-            meta = await self._get_as_workspace(
-                f"{FILES_URL}/{current}?{urlencode(params)}",
-                source_id=None,
-                workspace_id=workspace_id,
-                box=box,
-            )
+            try:
+                meta = await self._get_as_workspace(
+                    f"{FILES_URL}/{current}?{urlencode(params)}",
+                    source_id=None,
+                    workspace_id=workspace_id,
+                    box=box,
+                )
+            except (DriveSourceGone, DriveCredentialDead):
+                if current == folder_ref:
+                    raise  # the folder itself: gone, or the grant's refusal
+                # A parent the grant cannot read (a folder shared into the
+                # account names its owner's parent) ends the chain here.
+                break
+            # Drive v3 gives a file ONE parent (multi-parenting ended in 2020);
+            # a legacy multi-parent folder reports the first, which is the
+            # path Drive itself shows.
             parents = meta.get("parents") or []
             parent = parents[0] if parents else None
             if not is_folder_id(parent) or parent in chain or parent == folder_ref:

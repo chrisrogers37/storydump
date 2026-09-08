@@ -206,6 +206,9 @@ _PROVISIONING_STATUS = {
     # 2026-09-08: connected folders are disjoint). A conflict with what is
     # here, not a typo — 409, like `drive_not_connected`.
     "source_nested": 409,
+    # The connected folders changed between the pick's check and its write
+    # (two admins at once): a conflict to retry, not a typo.
+    "sources_changed": 409,
 }
 
 #: `InvitationRefused.reason` → status, total over `invitations.REASONS`.

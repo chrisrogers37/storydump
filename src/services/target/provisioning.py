@@ -400,6 +400,38 @@ def folder_ref_from(value: object) -> str:
     return ref
 
 
+def connected_refs(sources: list[dict]) -> frozenset[str]:
+    """The folder refs of the CONNECTED sources in a `list_sources` result —
+    what the disjointness rule was checked against."""
+    return frozenset(
+        str(s["folder_ref"])
+        for s in sources
+        if not s.get("removed") and s.get("folder_ref")
+    )
+
+
+async def assert_sources_unchanged(
+    executor, *, workspace_id: str, expected: frozenset
+) -> None:
+    """The pick's disjointness check ran outside the unit of work; under the
+    workspace's sources lock, refuse (`sources_changed`) if the connected set
+    is no longer the one it was checked against — two admins picking a parent
+    and its child at once would otherwise both pass. The lock dies with the
+    transaction; `get_or_create_media_source`'s per-folder lock nests inside
+    it in one order everywhere, so the two cannot deadlock."""
+    from src.services.target import workspaces
+
+    await executor.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": f"sources:{workspace_id}"},
+    )
+    now = await workspaces.list_sources(executor, workspace_id=workspace_id)
+    if connected_refs(now) != expected:
+        raise ProvisioningRefused(
+            "sources_changed", "the connected folders changed while checking"
+        )
+
+
 async def refuse_nested_pick(
     *, sources: list[dict], ref: str, label: str, ancestors_of
 ) -> None:

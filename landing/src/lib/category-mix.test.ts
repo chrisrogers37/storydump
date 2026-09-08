@@ -129,6 +129,15 @@ describe("toMixBySource — the card's rows become the API's rows", () => {
       ],
     });
   });
+  it("tolerates three times 33.3 despite floating point", () => {
+    expect(
+      toMixBySource([
+        explicit(S1, 33.3),
+        explicit(S2, 33.3),
+        explicit(S3, 33.3),
+      ]).ok,
+    ).toBe(true);
+  });
   it("tolerates a thirds split", () => {
     expect(
       toMixBySource([

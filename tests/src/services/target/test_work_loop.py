@@ -754,7 +754,13 @@ class TestWeightedCategorySelection:
     since the port's own SQL is the contract."""
 
     def _session(self, *, rows, counts, pick_id="media-1", intent_id="intent-1"):
-        answers = [rows, counts, [{"id": pick_id}], [{"id": intent_id}]]
+        # `pick_id=None`: no draw is expected, and the no-media notice's
+        # UPDATE … RETURNING finds nothing due.
+        answers = (
+            [rows, counts, [{"id": pick_id}], [{"id": intent_id}]]
+            if pick_id is not None
+            else [rows, counts, []]
+        )
 
         class _S:
             def __init__(self):
@@ -861,7 +867,7 @@ class TestWeightedCategorySelection:
         assert set(picks) == {self.MEMES, self.MERCH, self.EVENTS}
         assert picks[self.MEMES] > picks[self.EVENTS] > 0, picks
 
-    async def test_an_off_folder_is_never_drawn_not_even_as_the_fallback(self):
+    async def test_an_off_folder_is_never_drawn(self):
         for seed in range(10):
             s = self._session(
                 rows=self._rows(**{self.MEMES: 1.0, self.OLD: 0.0}),
@@ -872,19 +878,19 @@ class TestWeightedCategorySelection:
             )
             await self._plan(s, seed)
             assert s.statements[2][1]["source_id"] == self.MEMES
-        # Every weighted folder empty: the pool answers, minus the Off folder.
+        # Every weighted folder empty: nothing is drawn — an Off folder, or a
+        # removed one (never in `rows`), is not a pool to fall back on.
         s = self._session(
             rows=self._rows(**{self.MEMES: 1.0, self.OLD: 0.0}),
             counts=[
                 {"source_id": self.OLD, "n": 5},
                 {"source_id": self.EVENTS, "n": 2},
             ],
+            pick_id=None,
         )
         out = await self._plan(s, 3)
-        assert out.intent_id == "intent-1"
-        pick_sql, pick_params = s.statements[2]
-        assert "source_id = :source_id" not in pick_sql
-        assert "<> ALL" in pick_sql and pick_params["off"] == [self.OLD]
+        assert out.intent_id is None
+        assert not any("SELECT m.id FROM media_items" in st[0] for st in s.statements)
 
     async def test_without_a_mix_every_folder_is_automatic_and_shares_by_media(self):
         picks = {}
@@ -901,15 +907,17 @@ class TestWeightedCategorySelection:
             picks[sid] = picks.get(sid, 0) + 1
         assert picks.get(self.MEMES, 0) > picks.get(self.MERCH, 0)
 
-    async def test_when_nothing_weighted_has_media_the_pool_is_the_fallback(self):
-        s = self._session(
-            rows=self._rows(**{self.MEMES: 1.0}),
-            counts=[],
-        )
+    async def test_when_no_connected_folder_has_media_nothing_is_drawn(self):
+        s = self._session(rows=self._rows(**{self.MEMES: 1.0}), counts=[], pick_id=None)
         out = await self._plan(s, 1)
-        assert out.intent_id == "intent-1"
-        pick_sql, pick_params = s.statements[2]
-        assert "source_id = :source_id" not in pick_sql and pick_params["off"] == []
-        assert "ORDER BY m.last_posted_at NULLS FIRST, m.created_at" in pick_sql
-        # `06` §3 in full: the workspace-wide locks and this account's recent ones.
-        assert "FROM post_locks l" in pick_sql and "l.ig_account_id = :acct" in pick_sql
+        assert out.intent_id is None
+        assert not any("SELECT m.id FROM media_items" in st[0] for st in s.statements)
+        rows_sql = s.statements[0][0]
+        assert "s.state <> 'error'" in rows_sql, "a folder gone in Drive is never drawn"
+        # `06` §3 in full still holds on the pick: the workspace-wide locks and
+        # this account's recent ones ride the eligibility clause.
+        counts_sql = s.statements[1][0]
+        assert (
+            "FROM post_locks l" in counts_sql
+            and "l.ig_account_id = :acct" in counts_sql
+        )

@@ -49,8 +49,9 @@ _LABEL = "COALESCE(s.config->>'folder_name', s.config->>'folder_ref', 'folder')"
 
 class MixInvalid(StorydumpError):
     """The mix cannot be stored as sent. `reason` is one of: not_a_list ·
-    empty_source · duplicate_source · bad_ratio · sum_not_one · all_off ·
-    too_many_sources · unknown_source · ambiguous_name."""
+    empty_source · duplicate_source · bad_ratio · sum_not_one ·
+    too_many_sources (from `normalize`) · unknown_source · all_off (from
+    `set_mix`, against the connected folders) · ambiguous_name (v1)."""
 
     def __init__(self, reason: str, detail: str = ""):
         self.reason = reason
@@ -74,8 +75,6 @@ def _ratio(value: Any, label: str) -> float:
 
 def _sum_to_one(rows: list[tuple[str, float]]) -> None:
     positives = [r for _, r in rows if r > 0]
-    if rows and not positives:
-        raise MixInvalid("all_off")
     total = round(sum(positives), 4)
     if positives and round(abs(total - 1.0), 4) > SUM_TOLERANCE:
         raise MixInvalid("sum_not_one", f"sum is {total:.4f}")
@@ -146,37 +145,16 @@ def weights(rows: list[dict]) -> dict[str, float]:
     for sid, ratio, _ in explicit:
         out[sid] = (1 - pool) * ratio / total_ratio
     return out
-    n_auto = sum(n for _, n in auto)
-    if explicit and auto:
-        total_ratio = sum(r for _, r, _ in explicit)
-        r_min = min(r / total_ratio for _, r, _ in explicit)
-        share_auto = n_auto / (n_auto + sum(n for _, _, n in explicit))
-        pool = min(share_auto, r_min / (1 + r_min))
-    elif auto:
-        pool = 1.0
-    else:
-        pool = 0.0
-    for source_id, n in auto:
-        out[source_id] = pool * n / n_auto
-    if explicit:
-        total_ratio = sum(r for _, r, _ in explicit)
-        for source_id, ratio, _ in explicit:
-            out[source_id] = (1 - pool) * ratio / total_ratio
-    return out
 
 
-async def _connected(executor, *, workspace_id: str, ids: Optional[list[str]] = None):
-    """The workspace's connected folders — `id`, `label` — all of them, or
-    the named ones (for a save's validation)."""
-    sql = (
+async def _connected(executor, *, workspace_id: str):
+    """The workspace's connected folders — `id`, `label`."""
+    return await readers.rows(
+        executor,
         f"SELECT s.id, {_LABEL} AS label FROM media_sources s"
-        f" WHERE s.workspace_id = :ws AND {CONNECTED_SQL}"
+        f" WHERE s.workspace_id = :ws AND {CONNECTED_SQL} ORDER BY s.created_at, s.id",
+        ws=str(workspace_id),
     )
-    params: dict[str, Any] = {"ws": str(workspace_id)}
-    if ids is not None:
-        sql += " AND CAST(s.id AS text) = ANY(CAST(:ids AS text[]))"
-        params["ids"] = list(ids)
-    return await readers.rows(executor, sql + " ORDER BY s.created_at, s.id", **params)
 
 
 async def set_mix(
@@ -190,13 +168,17 @@ async def set_mix(
     rows = normalize(mix)
     labels: dict[str, str] = {}
     if rows:
-        found = await _connected(
-            executor, workspace_id=workspace_id, ids=[sid for sid, _ in rows]
-        )
+        found = await _connected(executor, workspace_id=workspace_id)
         labels = {str(r["id"]): str(r["label"]) for r in found}
         for source_id, _ in rows:
             if source_id not in labels:
                 raise MixInvalid("unknown_source", source_id)
+        # Something must post. A folder the save does not name is AUTOMATIC
+        # and posts, so all-zero rows are refused only when they cover every
+        # connected folder (review of the weights PR: "one Off, one
+        # Automatic" is a legal mix).
+        if all(r == 0 for _, r in rows) and set(labels) <= {sid for sid, _ in rows}:
+            raise MixInvalid("all_off")
     # One writer at a time per workspace: two admins saving at once would
     # both supersede, and the loser's inserts would hit the unique index as a
     # raw integrity error. The lock dies with the transaction.
@@ -263,9 +245,16 @@ async def mix_view(executor, *, workspace_id: str) -> list[dict]:
         }
         for r in rows
     ]
+    # A source in `error` (its folder is gone in Drive) is listed, with its
+    # state, but weighs nothing: the planner skips it too, since nothing it
+    # would draw can be fetched.
     share = weights(
         [
-            {"source_id": r["source_id"], "ratio": r["ratio"], "n": r["media_count"]}
+            {
+                "source_id": r["source_id"],
+                "ratio": r["ratio"],
+                "n": 0 if r["state"] == "error" else r["media_count"],
+            }
             for r in shaped
         ]
     )

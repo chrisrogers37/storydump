@@ -38,8 +38,10 @@ export type CardRow = {
 };
 
 /** The card's rows: every connected folder, with how it is weighted. */
-export function cardRows(data: { rows: MixSourceRow[] }): CardRow[] {
-  return data.rows.map((r) => ({
+export function cardRows(data: { rows?: MixSourceRow[] }): CardRow[] {
+  // An API deployed before this phase answers without `rows`: no folders,
+  // not a crash, until it catches up.
+  return (data.rows ?? []).map((r) => ({
     sourceId: r.source_id,
     name: r.name,
     mediaCount: r.media_count,
@@ -73,7 +75,9 @@ export function toMixBySource(rows: CardRow[]): ToMixResult {
   }
   // Zeros add nothing, so "some explicit weight" is "the total is above 0".
   const total = explicit.reduce((a, r) => a + r.percent, 0);
-  if (total > 0 && Math.abs(total - 100) > 0.1) {
+  // Rounded before the comparison: 33.3 × 3 is 99.89999… in floating point
+  // and must read as the 99.9 the service tolerates.
+  if (total > 0 && round1(Math.abs(total - 100)) > 0.1) {
     return { ok: false, error: "sum_not_100", total: round1(total) };
   }
   if (

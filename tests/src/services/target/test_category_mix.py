@@ -64,7 +64,6 @@ class TestValidation:
             ([_row(S1, float("nan"))], "bad_ratio"),
             ([_row(S1, True)], "bad_ratio"),
             ([_row(S1, 0.7), _row(S2, 0.2)], "sum_not_one"),
-            ([_row(S1, 0.0), _row(S2, 0.0)], "all_off"),
         ],
     )
     def test_refuses_by_name(self, mix, reason):
@@ -205,7 +204,7 @@ class TestSetMixIsOneSupersedeThenInserts:
             {"source_id": S2, "ratio": 0.3},
         ]
         sqls = [c[0] for c in ex.calls]
-        assert "FROM media_sources" in sqls[0] and "workspace_id = :ws" in sqls[0]
+        assert "FROM media_sources" in sqls[0] and "s.workspace_id = :ws" in sqls[0]
         assert "pg_advisory_xact_lock" in sqls[1]
         assert "SET effective_to = now()" in sqls[2] and "workspace_id = :ws" in sqls[2]
         inserts = [c for c in ex.calls if "INSERT INTO category_post_case_mix" in c[0]]
@@ -227,6 +226,29 @@ class TestSetMixIsOneSupersedeThenInserts:
             )
         assert exc.value.reason == "unknown_source"
         assert not any("UPDATE" in c[0] or "INSERT" in c[0] for c in ex.calls)
+
+    async def test_all_zero_rows_are_off_only_when_another_folder_stays_automatic(self):
+        # One connected folder not named → it is automatic → the mix is legal.
+        ex = _Exec(
+            rows=[[{"id": S1, "label": "memes"}, {"id": S2, "label": "archive"}]]
+        )
+        stored = await category_mix.set_mix(
+            ex, workspace_id="ws-1", mix=[_row(S2, 0.0)], by_user_id=None
+        )
+        assert stored == [{"source_id": S2, "ratio": 0.0}]
+        # Every connected folder named at 0 → nothing would post → refused.
+        ex = _Exec(
+            rows=[[{"id": S1, "label": "memes"}, {"id": S2, "label": "archive"}]]
+        )
+        with pytest.raises(category_mix.MixInvalid) as exc:
+            await category_mix.set_mix(
+                ex,
+                workspace_id="ws-1",
+                mix=[_row(S1, 0.0), _row(S2, 0.0)],
+                by_user_id=None,
+            )
+        assert exc.value.reason == "all_off"
+        assert not any("INSERT" in c[0] for c in ex.calls)
 
     async def test_an_empty_mix_only_supersedes(self):
         ex = _Exec()

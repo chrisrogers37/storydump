@@ -1443,3 +1443,13 @@ class TestFolderAncestors:
         adapter, calls = self._drive({"CHILD": "bad id", "bad id": None})
         assert await adapter.folder_ancestors(workspace_id=WS, folder_ref="CHILD") == []
         assert len(calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_parent_the_grant_cannot_read_ends_the_chain(self):
+        adapter, calls = self._drive({"CHILD": "OWNERS", "OWNERS": None})
+        # OWNERS is not in the map's readable set: the 404 on it ends the chain.
+        adapter2, calls2 = self._drive({"CHILD": "OWNERS"})
+        assert await adapter2.folder_ancestors(workspace_id=WS, folder_ref="CHILD") == [
+            "OWNERS"
+        ]
+        assert len(calls2) == 2

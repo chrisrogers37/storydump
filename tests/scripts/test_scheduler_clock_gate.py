@@ -1162,6 +1162,23 @@ class TestTheCategoryMixShapesTheDraw:
         assert drawn == {memes, events}, "the automatic folder posts too, never alone"
 
     @pytest.mark.asyncio
+    async def test_a_removed_folders_media_never_posts(self, clock_db):
+        """Remove is a pause with a flag; the media rows stay. They are not a
+        pool to fall back on — the ruling's whole point."""
+        account = _new_account(clock_db)
+        memes, gone = _new_source(clock_db, "memes"), _new_source(clock_db, "gone")
+        _new_media_in(clock_db, gone)
+        _owner_exec(
+            clock_db,
+            "UPDATE media_sources SET state = 'paused',"
+            " config = config || '{\"removed\": true}'::jsonb WHERE id = %s",
+            (gone,),
+        )
+        _set_mix(clock_db, [(memes, 1.0)])
+        out = await self._plan(clock_db, account, 2)
+        assert out.intent_id is None, "memes is empty and the removed folder is no pool"
+
+    @pytest.mark.asyncio
     async def test_a_name_keyed_row_from_before_071_is_ignored(self, clock_db):
         """A row set by the old card (no source_id) shapes nothing: every
         folder is automatic until the new card saves."""

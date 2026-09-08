@@ -316,49 +316,17 @@ async def execute_plan_slot(
     no_media_notice_after_seconds: int,
     rng: Optional[random.Random] = None,
 ) -> "SlotOutcome":
-    """The `plan_slot` executor: mint the intent for one slot, or nothing.
+    """One slot for one account: the draw and the intent.
 
-    Returns a :class:`SlotOutcome`. Its `intent_id` is None when the slot
-    already had one or no media was available — both ordinary outcomes, not
-    failures — and its `notice` reports whether an empty library went
-    unreported for want of a delivery surface.
-
-    **The two Nones are not the same fact, and only one of them speaks.** A
-    slot that already had an intent is the idempotency guard doing its job and
-    the customer has nothing to learn from it; a slot that found no media is
-    `06` §5's "slot missed" row, which the customer is owed a notice about
-    ("you are told once — not silently nothing", #1090 D3). The return value
-    stays `Optional[str]` because no caller needs to tell them apart — the
-    notice is emitted here, where the empty case already lives — and its
-    fate rides back on `SlotOutcome.notice`, because the caller finalizes the
-    job and a notice nobody received must not finalize as a success.
-
-    *no_media_notice_after_seconds* is `05`'s dedup window (24 h) and is
-    **required, not defaulted**: a dedup window that can be silently omitted is
-    how a once-a-day notice becomes either a flood or a silence, and there is
-    exactly one production caller to pass it.
-
-    **Idempotent by key 1, not by checking first.** The insert carries
-    ``ON CONFLICT … DO NOTHING`` against `uq_intent_slot`, so a duplicate
-    `plan_slot` job — which the clock's own `NOT EXISTS` cannot rule out, and
-    which a lease cannot either — mints no second intent. A read-then-write
-    would be the #883 shape: correct in a test, wrong under two workers.
-
-    Note the conflict target is spelled as **columns**, not
-    ``ON CONFLICT ON CONSTRAINT uq_intent_slot`` as `02` §5's prose has it.
-    Key 1 ships as a bare ``CREATE UNIQUE INDEX``, and ``ON CONSTRAINT``
-    resolves only names in ``pg_constraint``; the prose form does not run. The
-    inference form is equivalent and is what the gate exercises.
-
-    **Selection honours the category mix (`06` §3; owner ruling 2026-09-06).**
-    The workspace's current `category_post_case_mix` rows are weights over
-    categories — a folder's subfolders, as the sync tags them. The draw is
-    weighted-random over the mix categories that HAVE eligible media (a
-    weighted category with nothing to post is never drawn, and the others
-    absorb its share), then oldest-first within the drawn category. No mix,
-    or every weighted category empty, falls back to oldest-first over the
-    whole pool — the rule this function always had. `rng` is injectable so a
-    test can seed the draw; production uses the system generator.
+    `06` §3, keyed on the CONNECTED FOLDER since 2026-09-08: the connected
+    folders that have eligible media are drawn by `category_mix.weights`
+    (explicit weights by ratio; folders without a weight in proportion to their
+    files, together never more than the smallest explicit weight; Off never;
+    a folder gone in Drive never), then oldest-first within the drawn one. No
+    pool behind that set: a removed folder's rows and an Off folder's are the
+    two things that must never post, and they are all that would be left.
+    `rng` is injectable so a test can seed the draw; production uses the
+    system generator.
     """
     draw = rng if rng is not None else random.SystemRandom()
     # `06` §3's rule in full: available, not already live for this account,
@@ -394,7 +362,8 @@ async def execute_plan_slot(
                     "  LEFT JOIN category_post_case_mix x"
                     "    ON x.workspace_id = s.workspace_id AND x.source_id = s.id"
                     "   AND x.effective_to IS NULL"
-                    " WHERE s.workspace_id = :ws AND " + workspaces.CONNECTED_SQL
+                    " WHERE s.workspace_id = :ws AND s.state <> 'error'"
+                    "   AND " + workspaces.CONNECTED_SQL
                 ),
                 {"ws": workspace_id},
             )
@@ -427,9 +396,11 @@ async def execute_plan_slot(
     ]
     share = category_mix.weights(shaped)
     weighted = [(sid, w) for sid, w in share.items() if w > 0]
-    # Off (ratio 0) is the person's explicit "never post from this folder":
-    # excluded from the draw AND from the pool the fallback answers with.
-    off = [r["source_id"] for r in shaped if r["ratio"] == 0]
+    # No pool behind the weighted set: every connected folder that may post
+    # is in `weighted` once it has eligible media, so anything left would
+    # belong to a removed folder or an Off one — the two things that must
+    # never post (review of the weights PR). Nothing eligible is the no-media
+    # path below.
     chosen: Optional[str] = None
     if weighted:
         total = sum(w for _, w in weighted)
@@ -441,12 +412,12 @@ async def execute_plan_slot(
                 break
         else:
             chosen = weighted[-1][0]
-    elif any(r["ratio"] for r in shaped):
+    else:
         logger.info(
-            "plan_slot: no weighted folder has media for workspace %s — falling"
-            " back to the whole pool",
+            "plan_slot: no connected folder has eligible media for workspace %s",
             workspace_id,
         )
+    media = None
     if chosen is not None:
         media = (
             await session.execute(
@@ -457,19 +428,6 @@ async def execute_plan_slot(
                     + order
                 ),
                 {"ws": workspace_id, "acct": ig_account_id, "source_id": chosen},
-            )
-        ).first()
-    else:
-        # The pool, minus Off (`<> ALL` of an empty list is every row).
-        media = (
-            await session.execute(
-                text(
-                    "SELECT m.id FROM media_items m"
-                    + eligible
-                    + "   AND CAST(m.source_id AS text) <> ALL(CAST(:off AS text[]))"
-                    + order
-                ),
-                {"ws": workspace_id, "acct": ig_account_id, "off": off},
             )
         ).first()
     if media is None:

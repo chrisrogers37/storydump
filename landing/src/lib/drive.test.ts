@@ -162,5 +162,6 @@ describe("connected folders and nested picks", () => {
   });
   it("says why a nested folder pick was refused", () => {
     expect(addFolderRefusalCopy("source_nested")).toMatch(/already connected/);
+    expect(addFolderRefusalCopy("sources_changed")).toMatch(/Try again/);
   });
 });

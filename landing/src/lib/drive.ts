@@ -238,6 +238,13 @@ export function addFolderRefusalCopy(reason: unknown): string {
   switch (reason) {
     case "drive_not_connected":
       return "Google Drive is not connected to this workspace yet. Connect it first. Nothing was added.";
+    case "sources_changed":
+      return "The connected folders changed while checking this one. Try again. Nothing was added.";
+    case "drive_grant_refused":
+    case "drive_reconnect_needed":
+    case "drive_unavailable":
+    case "drive_refused":
+      return driveFoldersRefusalCopy(reason);
     case "source_nested":
       return "That folder is inside, or contains, a folder that is already connected — everything inside a connected folder already syncs. Connect folders that don't contain each other. Nothing was added.";
     case "invalid_args":

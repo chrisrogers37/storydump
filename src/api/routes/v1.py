@@ -595,16 +595,34 @@ async def create_source(
     # sources take part: a removed folder blocks nothing.
     ref = provisioning.folder_ref_from(body.get("folder_ref"))
     folder_name = folder_name.strip() if isinstance(folder_name, str) else ""
+    adapter = _drive_adapter(request)
+
+    async def ancestors_of(folder_ref: str) -> list[str]:
+        try:
+            return await adapter.folder_ancestors(
+                workspace_id=str(ws), folder_ref=folder_ref
+            )
+        except media_sync.DriveSourceGone:
+            if folder_ref == ref:
+                raise  # the candidate itself is gone: refused as such below
+            # A connected folder that is gone in Drive (its sync sits in
+            # `error`) contains nothing and must not fail an unrelated pick.
+            return []
+
     async with _drive_read():
         await provisioning.refuse_nested_pick(
             sources=sources,
             ref=ref,
             label=folder_name or ref,
-            ancestors_of=lambda folder_ref: _drive_adapter(request).folder_ancestors(
-                workspace_id=str(ws), folder_ref=folder_ref
-            ),
+            ancestors_of=ancestors_of,
         )
     async with _admin(request, str(ws), principal) as session:
+        # The check above ran outside this unit of work: under the workspace's
+        # sources lock, a changed set of connected folders is refused
+        # (`sources_changed`, 409) and the person retries.
+        await provisioning.assert_sources_unchanged(
+            session, workspace_id=str(ws), expected=provisioning.connected_refs(sources)
+        )
         source_id, created = await provisioning.get_or_create_media_source(
             session,
             workspace_id=str(ws),

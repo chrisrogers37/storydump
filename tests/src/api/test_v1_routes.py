@@ -984,8 +984,14 @@ class TestSourcesUnderTheWorkspaceGrant:
             log["armed"] = (workspace_id, source_id)
             return True
 
+        async def assert_sources_unchanged(session, *, workspace_id, expected):
+            log["rechecked"] = expected
+
         monkeypatch.setattr(
             provisioning, "get_or_create_media_source", get_or_create_media_source
+        )
+        monkeypatch.setattr(
+            provisioning, "assert_sources_unchanged", assert_sources_unchanged
         )
         monkeypatch.setattr(media_sync, "rearm_after_connect", rearm_after_connect)
         return log
@@ -1026,6 +1032,8 @@ class TestSourcesUnderTheWorkspaceGrant:
 
             async def folder_ancestors(self, *, workspace_id, folder_ref):
                 self.asked.append(folder_ref)
+                if folder_ref == "DEAD":
+                    raise media_sync.DriveSourceGone("gone in Drive")
                 return list(chains.get(folder_ref, []))
 
         async def list_sources(session, *, workspace_id):
@@ -1045,6 +1053,14 @@ class TestSourcesUnderTheWorkspaceGrant:
                     "folder_ref": "GONE",
                     "folder_name": "Old",
                     "removed": True,
+                },
+                {
+                    "id": "dead",
+                    "provider": "gdrive",
+                    "state": "error",
+                    "folder_ref": "DEAD",
+                    "folder_name": "Dead",
+                    "removed": False,
                 },
             ]
 
@@ -1093,6 +1109,32 @@ class TestSourcesUnderTheWorkspaceGrant:
         assert len(connected.asked) == before, (
             "a re-pick of the same folder asks no chain"
         )
+
+    def test_a_connected_folder_gone_in_drive_does_not_fail_an_unrelated_pick(
+        self, client, signed_in, tenant, grant, created, connected
+    ):
+        resp = client.post(
+            self.URL, json={"folder_ref": "ELSEWHERE", "folder_name": "Other"}
+        )
+        assert resp.status_code == 201, resp.text
+        assert "DEAD" in connected.asked, (
+            "the dead folder was checked, and contains nothing"
+        )
+
+    def test_folders_that_changed_between_the_check_and_the_write_are_refused(
+        self, client, signed_in, tenant, grant, created, connected, monkeypatch
+    ):
+        async def assert_sources_unchanged(session, *, workspace_id, expected):
+            raise provisioning.ProvisioningRefused("sources_changed", "changed")
+
+        monkeypatch.setattr(
+            provisioning, "assert_sources_unchanged", assert_sources_unchanged
+        )
+        resp = client.post(
+            self.URL, json={"folder_ref": "FRESH", "folder_name": "Fresh"}
+        )
+        assert resp.status_code == 409 and resp.json()["reason"] == "sources_changed"
+        assert "source" not in created
 
     def test_a_removed_source_does_not_block_a_pick_inside_it(
         self, client, signed_in, tenant, grant, created, connected

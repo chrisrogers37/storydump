@@ -55,7 +55,7 @@ export function CategoryWeightsCard({
         .reduce((a, r) => a + r.percent, 0) * 10,
     ) / 10;
   const parsed = toMixBySource(rows);
-  const dirty = rows !== baseline;
+  const dirty = JSON.stringify(rows) !== JSON.stringify(baseline);
 
   function update(index: number, patch: Partial<CardRow>) {
     const next = rows.slice();
