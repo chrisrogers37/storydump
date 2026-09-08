@@ -680,11 +680,15 @@ class GoogleDriveAdapter:
         chain: list[str] = []
         current = folder_ref
         params = {"fields": "parents", "supportsAllDrives": "true"}
+        # One token for the whole chain, re-minted at most once (the walk's
+        # own pattern), rather than one credential read per level.
+        box = _TokenBox(await self._token_provider(None, workspace_id=workspace_id))
         for _ in range(ANCESTOR_CAP):
             meta = await self._get_as_workspace(
                 f"{FILES_URL}/{current}?{urlencode(params)}",
                 source_id=None,
                 workspace_id=workspace_id,
+                box=box,
             )
             parents = meta.get("parents") or []
             parent = parents[0] if parents else None

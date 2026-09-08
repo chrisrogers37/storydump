@@ -32,6 +32,7 @@ import {
   removeFolderRefusalCopy,
   requestDriveConnect,
   SHARED_ROOT,
+  connectedFolderRefs,
 } from "@/lib/drive";
 import type { DriveFolder } from "@/lib/drive";
 import {
@@ -178,11 +179,7 @@ export function IntegrationsTab({
    *  picker — a re-pick is a no-op and a pick inside one is refused by the
    *  API (`source_nested`, owner ruling 2026-09-08: connected folders are
    *  disjoint). */
-  const connectedRefs = new Set(
-    sources
-      .filter((s) => s.state === "active" && s.folder_ref)
-      .map((s) => s.folder_ref as string),
-  );
+  const connectedRefs = connectedFolderRefs(sources);
 
   /** The folder browser: one listing per level, read through the grant. */
   async function loadFolders(stack: DriveFolder[], root: "mine" | "shared") {

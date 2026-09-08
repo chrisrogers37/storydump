@@ -78,7 +78,7 @@ from typing import Optional, Union
 
 from sqlalchemy import text
 
-from src.services.target import category_mix
+from src.services.target import category_mix, workspaces
 
 from src.exceptions.base import StorydumpError
 
@@ -394,8 +394,7 @@ async def execute_plan_slot(
                     "  LEFT JOIN category_post_case_mix x"
                     "    ON x.workspace_id = s.workspace_id AND x.source_id = s.id"
                     "   AND x.effective_to IS NULL"
-                    " WHERE s.workspace_id = :ws"
-                    "   AND NOT COALESCE((s.config->>'removed')::boolean, false)"
+                    " WHERE s.workspace_id = :ws AND " + workspaces.CONNECTED_SQL
                 ),
                 {"ws": workspace_id},
             )
@@ -430,7 +429,7 @@ async def execute_plan_slot(
     weighted = [(sid, w) for sid, w in share.items() if w > 0]
     # Off (ratio 0) is the person's explicit "never post from this folder":
     # excluded from the draw AND from the pool the fallback answers with.
-    off = [r["source_id"] for r in shaped if r["ratio"] is not None and r["ratio"] == 0]
+    off = [r["source_id"] for r in shaped if r["ratio"] == 0]
     chosen: Optional[str] = None
     if weighted:
         total = sum(w for _, w in weighted)
@@ -460,7 +459,8 @@ async def execute_plan_slot(
                 {"ws": workspace_id, "acct": ig_account_id, "source_id": chosen},
             )
         ).first()
-    elif off:
+    else:
+        # The pool, minus Off (`<> ALL` of an empty list is every row).
         media = (
             await session.execute(
                 text(
@@ -470,13 +470,6 @@ async def execute_plan_slot(
                     + order
                 ),
                 {"ws": workspace_id, "acct": ig_account_id, "off": off},
-            )
-        ).first()
-    else:
-        media = (
-            await session.execute(
-                text("SELECT m.id FROM media_items m" + eligible + order),
-                {"ws": workspace_id, "acct": ig_account_id},
             )
         ).first()
     if media is None:

@@ -1036,6 +1036,7 @@ class TestSourcesUnderTheWorkspaceGrant:
                     "state": "active",
                     "folder_ref": "PARENT",
                     "folder_name": "Trips",
+                    "removed": False,
                 },
                 {
                     "id": "old",
@@ -1043,6 +1044,7 @@ class TestSourcesUnderTheWorkspaceGrant:
                     "state": "paused",
                     "folder_ref": "GONE",
                     "folder_name": "Old",
+                    "removed": True,
                 },
             ]
 
@@ -1164,7 +1166,7 @@ class TestCategoryMix:
         resp = client.get(self.URL)
         assert resp.status_code == 200
         body = resp.json()
-        assert body["rows"] == self.ROWS and body["explicit_total"] == 1.0
+        assert body["rows"] == self.ROWS and "explicit_total" not in body
         assert body["mix"] == [
             {"category": "memes", "ratio": 0.7},
             {"category": "merch", "ratio": 0.3},
@@ -1209,7 +1211,7 @@ class TestCategoryMix:
     ):
         seen = {}
 
-        async def resolve_names(session, *, workspace_id, mix):
+        def resolve_names(rows, mix):
             seen["names"] = mix
             return [{"source_id": "11111111-1111-4111-8111-111111111111", "ratio": 1.0}]
 

@@ -909,7 +909,7 @@ class TestWeightedCategorySelection:
         out = await self._plan(s, 1)
         assert out.intent_id == "intent-1"
         pick_sql, pick_params = s.statements[2]
-        assert "source_id = :source_id" not in pick_sql and "off" not in pick_params
+        assert "source_id = :source_id" not in pick_sql and pick_params["off"] == []
         assert "ORDER BY m.last_posted_at NULLS FIRST, m.created_at" in pick_sql
         # `06` §3 in full: the workspace-wide locks and this account's recent ones.
         assert "FROM post_locks l" in pick_sql and "l.ig_account_id = :acct" in pick_sql

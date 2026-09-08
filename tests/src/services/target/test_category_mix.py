@@ -247,17 +247,6 @@ class TestSetMixIsOneSupersedeThenInserts:
 
 
 class TestReads:
-    async def test_current_mix_reads_the_live_rows_keyed_by_source(self):
-        ex = _Exec(
-            rows=[[{"source_id": S1, "ratio": 0.7}, {"source_id": S2, "ratio": 0.3}]]
-        )
-        assert await category_mix.current_mix(ex, workspace_id="ws-1") == [
-            {"source_id": S1, "ratio": 0.7},
-            {"source_id": S2, "ratio": 0.3},
-        ]
-        sql = ex.calls[0][0]
-        assert "effective_to IS NULL" in sql and "source_id IS NOT NULL" in sql
-
     async def test_the_view_carries_each_connected_folder_with_its_effective_share(
         self,
     ):
@@ -328,28 +317,18 @@ class TestReads:
             ],
         }
 
-    async def test_a_v1_body_by_name_resolves_to_sources_or_is_refused(self):
-        ex = _Exec(
-            rows=[
-                [
-                    {"id": S1, "label": "memes"},
-                    {"id": S2, "label": "merch"},
-                    {"id": S3, "label": "merch"},
-                ]
-            ]
-        )
+    def test_a_v1_body_by_name_resolves_to_sources_or_is_refused(self):
+        view = [
+            {"source_id": S1, "name": "memes"},
+            {"source_id": S2, "name": "merch"},
+            {"source_id": S3, "name": "merch"},
+        ]
         with pytest.raises(category_mix.MixInvalid) as exc:
-            await category_mix.resolve_names(
-                ex, workspace_id="ws-1", mix=[{"category": "merch", "ratio": 1.0}]
-            )
+            category_mix.resolve_names(view, [{"category": "merch", "ratio": 1.0}])
         assert exc.value.reason == "ambiguous_name"
-        ex = _Exec(rows=[[{"id": S1, "label": "memes"}]])
-        assert await category_mix.resolve_names(
-            ex, workspace_id="ws-1", mix=[{"category": "memes", "ratio": 1.0}]
+        assert category_mix.resolve_names(
+            view, [{"category": "memes", "ratio": 1.0}]
         ) == [{"source_id": S1, "ratio": 1.0}]
-        ex = _Exec(rows=[[{"id": S1, "label": "memes"}]])
         with pytest.raises(category_mix.MixInvalid) as exc:
-            await category_mix.resolve_names(
-                ex, workspace_id="ws-1", mix=[{"category": "ghost", "ratio": 1.0}]
-            )
+            category_mix.resolve_names(view, [{"category": "ghost", "ratio": 1.0}])
         assert exc.value.reason == "unknown_source"

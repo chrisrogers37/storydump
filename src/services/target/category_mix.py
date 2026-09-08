@@ -34,6 +34,7 @@ from sqlalchemy import text
 
 from src.exceptions.base import StorydumpError
 from src.services.target import readers
+from src.services.target.workspaces import CONNECTED_SQL
 
 #: Sum-to-one tolerance: four decimal places per row, so a three-way split
 #: cannot hit 1.0000 exactly and must not be refused for it.
@@ -41,11 +42,9 @@ SUM_TOLERANCE = 0.001
 #: More rows than this is not a mix anyone typed by hand; refused by name.
 MAX_SOURCES = 500
 
-#: A connected folder: not removed. Removal is a flag on the row (a pause
-#: with `config.removed`), never a delete — the folder's media and history
-#: stay, and a re-pick revives it (#1233).
-_CONNECTED = "NOT COALESCE((config->>'removed')::boolean, false)"
-_LABEL = "COALESCE(config->>'folder_name', config->>'folder_ref', 'folder')"
+#: The label a source row shows — its folder name, else its ref. Every query
+#: here aliases `media_sources` as `s`, as `CONNECTED_SQL` expects.
+_LABEL = "COALESCE(s.config->>'folder_name', s.config->>'folder_ref', 'folder')"
 
 
 class MixInvalid(StorydumpError):
@@ -121,19 +120,32 @@ def weights(rows: list[dict]) -> dict[str, float]:
     and a row with no eligible media weigh 0 and shape nothing. Returns a
     weight per source_id; they sum to 1 when anything is drawable.
     """
-    out = {str(r["source_id"]): 0.0 for r in rows}
-    explicit = [
-        (str(r["source_id"]), float(r["ratio"]), int(r["n"]))
+    shaped = [
+        (
+            str(r["source_id"]),
+            None if r.get("ratio") is None else float(r["ratio"]),
+            int(r["n"]),
+        )
         for r in rows
-        if r.get("ratio") is not None and float(r["ratio"]) > 0 and int(r["n"]) > 0
     ]
-    auto = [
-        (str(r["source_id"]), int(r["n"]))
-        for r in rows
-        if r.get("ratio") is None and int(r["n"]) > 0
-    ]
-    if not explicit and not auto:
-        return out
+    out = {sid: 0.0 for sid, _, _ in shaped}
+    explicit = [(sid, ratio, n) for sid, ratio, n in shaped if ratio and n > 0]
+    auto = [(sid, n) for sid, ratio, n in shaped if ratio is None and n > 0]
+    n_auto = sum(n for _, n in auto)
+    total_ratio = sum(ratio for _, ratio, _ in explicit)
+    if not explicit:
+        pool = 1.0
+    elif not auto:
+        pool = 0.0
+    else:
+        r_min = min(ratio / total_ratio for _, ratio, _ in explicit)
+        share_auto = n_auto / (n_auto + sum(n for _, _, n in explicit))
+        pool = min(share_auto, r_min / (1 + r_min))
+    for sid, n in auto:
+        out[sid] = pool * n / n_auto
+    for sid, ratio, _ in explicit:
+        out[sid] = (1 - pool) * ratio / total_ratio
+    return out
     n_auto = sum(n for _, n in auto)
     if explicit and auto:
         total_ratio = sum(r for _, r, _ in explicit)
@@ -157,14 +169,14 @@ async def _connected(executor, *, workspace_id: str, ids: Optional[list[str]] = 
     """The workspace's connected folders — `id`, `label` — all of them, or
     the named ones (for a save's validation)."""
     sql = (
-        f"SELECT id, {_LABEL} AS label FROM media_sources"
-        f" WHERE workspace_id = :ws AND {_CONNECTED}"
+        f"SELECT s.id, {_LABEL} AS label FROM media_sources s"
+        f" WHERE s.workspace_id = :ws AND {CONNECTED_SQL}"
     )
     params: dict[str, Any] = {"ws": str(workspace_id)}
     if ids is not None:
-        sql += " AND CAST(id AS text) = ANY(CAST(:ids AS text[]))"
+        sql += " AND CAST(s.id AS text) = ANY(CAST(:ids AS text[]))"
         params["ids"] = list(ids)
-    return await readers.rows(executor, sql + " ORDER BY created_at, id", **params)
+    return await readers.rows(executor, sql + " ORDER BY s.created_at, s.id", **params)
 
 
 async def set_mix(
@@ -218,20 +230,6 @@ async def set_mix(
     return [{"source_id": source_id, "ratio": ratio} for source_id, ratio in rows]
 
 
-async def current_mix(executor, *, workspace_id: str) -> list[dict]:
-    """The current rows keyed on the source, as `[{"source_id", "ratio"}]`."""
-    rows = await readers.rows(
-        executor,
-        "SELECT source_id, ratio FROM category_post_case_mix"
-        " WHERE workspace_id = :ws AND effective_to IS NULL"
-        "   AND source_id IS NOT NULL ORDER BY category, source_id",
-        ws=str(workspace_id),
-    )
-    return [
-        {"source_id": str(r["source_id"]), "ratio": float(r["ratio"])} for r in rows
-    ]
-
-
 async def mix_view(executor, *, workspace_id: str) -> list[dict]:
     """What the card renders: every connected folder with its label, state,
     available media count, current ratio (None = automatic, 0 = Off) and the
@@ -240,9 +238,7 @@ async def mix_view(executor, *, workspace_id: str) -> list[dict]:
     live intents and locks on top, so the card's number is approximate)."""
     rows = await readers.rows(
         executor,
-        "SELECT s.id AS source_id, s.provider, "
-        + _LABEL.replace("config", "s.config")
-        + " AS name, s.state,"
+        "SELECT s.id AS source_id, s.provider, " + _LABEL + " AS name, s.state,"
         "       (SELECT count(*) FROM media_items m"
         "         WHERE m.workspace_id = s.workspace_id AND m.source_id = s.id"
         "           AND m.state = 'available') AS media_count,"
@@ -252,7 +248,7 @@ async def mix_view(executor, *, workspace_id: str) -> list[dict]:
         "    ON x.workspace_id = s.workspace_id AND x.source_id = s.id"
         "   AND x.effective_to IS NULL"
         " WHERE s.workspace_id = :ws AND "
-        + _CONNECTED.replace("config", "s.config")
+        + CONNECTED_SQL
         + " ORDER BY s.created_at, s.id",
         ws=str(workspace_id),
     )
@@ -278,10 +274,14 @@ async def mix_view(executor, *, workspace_id: str) -> list[dict]:
     return shaped
 
 
+# ---- v1 compat — the card deployed before this phase (delete with the v1
+# keys; nothing else here depends on it) ----------------------------------
+
+
 def v1_shape(rows: list[dict]) -> dict:
-    """The keys the card deployed before this phase reads (`mix` by name,
-    `categories` with counts) — derived from the view for ONE release, so the
-    API can deploy ahead of the web without the Settings page breaking."""
+    """The keys the old card reads (`mix` by name, `categories` with counts),
+    derived from the view for ONE release so the API can deploy ahead of the
+    web without the Settings page breaking."""
     return {
         "mix": [
             {"category": r["name"], "ratio": r["ratio"]}
@@ -294,17 +294,16 @@ def v1_shape(rows: list[dict]) -> dict:
     }
 
 
-async def resolve_names(executor, *, workspace_id: str, mix: Any) -> list[dict]:
-    """The v1 `PUT` body — `[{"category", "ratio"}]` by folder name — turned
-    into rows by source, for the card deployed before this phase. A name
-    that is two connected folders is `ambiguous_name`; one that is none is
-    `unknown_source`. Gone with the v1 keys."""
+def resolve_names(rows: list[dict], mix: Any) -> list[dict]:
+    """The old card's `PUT` body — `[{"category", "ratio"}]` by folder name —
+    turned into rows by source, from the view (which carries name and id). A
+    name that is two connected folders is `ambiguous_name`; one that is none
+    is `unknown_source`."""
     if not isinstance(mix, list):
         raise MixInvalid("not_a_list")
-    found = await _connected(executor, workspace_id=workspace_id)
     by_name: dict[str, list[str]] = {}
-    for r in found:
-        by_name.setdefault(str(r["label"]), []).append(str(r["id"]))
+    for r in rows:
+        by_name.setdefault(str(r["name"]), []).append(str(r["source_id"]))
     out: list[dict] = []
     for entry in mix:
         if not isinstance(entry, dict):

@@ -7,7 +7,6 @@ import {
   toMixBySource,
   type MixSourceRow,
 } from "./category-mix";
-import { addFolderRefusalCopy } from "./drive";
 
 const WS = "11111111-1111-4111-8111-111111111111";
 const S1 = "11111111-1111-4111-8111-aaaaaaaaaaaa";
@@ -185,7 +184,6 @@ describe("saveCategoryMix", () => {
     const captured: { url: string; init?: RequestInit }[] = [];
     const view = {
       rows: [row({ ratio: 1, effective: 100 })],
-      explicit_total: 1,
     };
     vi.stubGlobal(
       "fetch",
@@ -214,8 +212,5 @@ describe("refusal copy", () => {
     );
     expect(mixRefusalCopy("invalid_mix_all_off")).toMatch(/at least one/i);
     expect(mixRefusalCopy("invalid_mix_sum_not_one")).toMatch(/100/);
-  });
-  it("says why a nested folder pick was refused", () => {
-    expect(addFolderRefusalCopy("source_nested")).toMatch(/already connected/);
   });
 });

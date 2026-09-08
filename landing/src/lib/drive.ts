@@ -219,6 +219,21 @@ export async function addDriveFolder(
   return { ok: true, sourceId: data.sourceId, created: data.created === true };
 }
 
+/** The Drive folder ids that are CONNECTED here — sources not removed — for the picker to grey out. */
+export function connectedFolderRefs(
+  sources: { folder_ref: string | null; removed?: boolean; state?: string }[],
+): Set<string> {
+  return new Set(
+    sources
+      .filter(
+        (s) =>
+          s.folder_ref &&
+          (s.removed === undefined ? s.state !== "paused" : !s.removed),
+      )
+      .map((s) => s.folder_ref as string),
+  );
+}
+
 export function addFolderRefusalCopy(reason: unknown): string {
   switch (reason) {
     case "drive_not_connected":

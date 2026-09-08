@@ -44,7 +44,6 @@ from fastapi.responses import JSONResponse
 from src.api.principal import Principal, current_principal, require_engine
 from src.api import google_client, instagram_client
 from src.config.settings import settings
-from src.services.target.provisioning import ProvisioningRefused
 from src.services.target.drive_adapter import (
     DriveLostResponse,
     DriveRetryableError,
@@ -595,55 +594,23 @@ async def create_source(
     # browser's read; a re-pick of the same folder asks nothing. Only active
     # sources take part: a removed folder blocks nothing.
     ref = provisioning.folder_ref_from(body.get("folder_ref"))
-    active = [
-        s
-        for s in sources
-        if s.get("state") == "active" and s.get("folder_ref") and s["folder_ref"] != ref
-    ]
-    exact = any(s.get("folder_ref") == ref for s in sources)
-    if active and not exact:
-        label = (
-            folder_name.strip()
-            if isinstance(folder_name, str) and folder_name.strip()
-            else ref
+    folder_name = folder_name.strip() if isinstance(folder_name, str) else ""
+    async with _drive_read():
+        await provisioning.refuse_nested_pick(
+            sources=sources,
+            ref=ref,
+            label=folder_name or ref,
+            ancestors_of=lambda folder_ref: _drive_adapter(request).folder_ancestors(
+                workspace_id=str(ws), folder_ref=folder_ref
+            ),
         )
-        adapter = _drive_adapter(request)
-        try:
-            chain = await adapter.folder_ancestors(workspace_id=str(ws), folder_ref=ref)
-            for s in active:
-                if s["folder_ref"] in chain:
-                    raise ProvisioningRefused(
-                        "source_nested",
-                        f"{label} is inside {s.get('folder_name') or s['folder_ref']},"
-                        " which is already connected",
-                    )
-            for s in active:
-                above = await adapter.folder_ancestors(
-                    workspace_id=str(ws), folder_ref=s["folder_ref"]
-                )
-                if ref in above:
-                    raise ProvisioningRefused(
-                        "source_nested",
-                        f"{label} contains {s.get('folder_name') or s['folder_ref']},"
-                        " which is already connected",
-                    )
-        except media_sync.DriveCredentialDead as exc:
-            raise HTTPException(status_code=409, detail="drive_grant_refused") from exc
-        except (DriveRetryableError, DriveLostResponse) as exc:
-            raise HTTPException(status_code=503, detail="drive_unavailable") from exc
-        except (DriveTerminalError, media_sync.DriveSourceGone) as exc:
-            raise HTTPException(status_code=502, detail="drive_refused") from exc
     async with _admin(request, str(ws), principal) as session:
         source_id, created = await provisioning.get_or_create_media_source(
             session,
             workspace_id=str(ws),
             folder_ref=body.get("folder_ref"),
             root_name=name if isinstance(name, str) and name.strip() else None,
-            folder_name=(
-                folder_name.strip()
-                if isinstance(folder_name, str) and folder_name.strip()
-                else None
-            ),
+            folder_name=folder_name or None,
         )
         await media_sync.rearm_after_connect(
             session, workspace_id=str(ws), source_id=source_id
@@ -690,12 +657,8 @@ async def get_category_mix(
 
 
 def _mix_response(rows: list[dict]) -> dict:
-    explicit_total = round(sum(r["ratio"] for r in rows if r["ratio"]), 4)
-    return {
-        "rows": rows,
-        "explicit_total": explicit_total,
-        **category_mix.v1_shape(rows),
-    }
+    # `rows` is the shape; the v1 keys ride along for one release (v1 compat).
+    return {"rows": rows, **category_mix.v1_shape(rows)}
 
 
 @router.put("/workspaces/{ws}/category-mix")
@@ -717,9 +680,10 @@ async def put_category_mix(
         # `MixInvalid` is answered by the app's handler as 400 with
         # `reason = invalid_mix_<reason>` — the shape the web reads.
         rows = body.get("rows")
-        if rows is None and "mix" in body:
-            rows = await category_mix.resolve_names(
-                session, workspace_id=str(ws), mix=body.get("mix")
+        if rows is None and "mix" in body:  # v1 compat: the old card's body
+            rows = category_mix.resolve_names(
+                await category_mix.mix_view(session, workspace_id=str(ws)),
+                body.get("mix"),
             )
         await category_mix.set_mix(
             session, workspace_id=str(ws), mix=rows, by_user_id=principal.user_id
@@ -779,6 +743,23 @@ async def connect_drive(
     }
 
 
+@asynccontextmanager
+async def _drive_read():
+    """A provider read outside the unit of work, its refusals named the one
+    way every Drive route names them: `drive_grant_refused` (409) when Google
+    refused a grant the projection thought live, `drive_unavailable` (503)
+    when Google gave no usable answer, `drive_refused` (502) for a terminal
+    answer or a folder that is gone."""
+    try:
+        yield
+    except media_sync.DriveCredentialDead as exc:
+        raise HTTPException(status_code=409, detail="drive_grant_refused") from exc
+    except (DriveRetryableError, DriveLostResponse) as exc:
+        raise HTTPException(status_code=503, detail="drive_unavailable") from exc
+    except (DriveTerminalError, media_sync.DriveSourceGone) as exc:
+        raise HTTPException(status_code=502, detail="drive_refused") from exc
+
+
 def _drive_adapter(request: Request):
     """The Drive transport for the folder browser, reading tokens through the
     same door the worker does (`drive_credentials`). Built per request: the
@@ -827,16 +808,10 @@ async def list_drive_folders(
         raise HTTPException(status_code=409, detail="drive_not_connected")
     if grant["status"] != "active":
         raise HTTPException(status_code=409, detail="drive_reconnect_needed")
-    try:
+    async with _drive_read():
         page = await _drive_adapter(request).list_folders(
             parent=parent, workspace_id=str(ws)
         )
-    except media_sync.DriveCredentialDead as exc:
-        raise HTTPException(status_code=409, detail="drive_grant_refused") from exc
-    except (DriveRetryableError, DriveLostResponse) as exc:
-        raise HTTPException(status_code=503, detail="drive_unavailable") from exc
-    except DriveTerminalError as exc:
-        raise HTTPException(status_code=502, detail="drive_refused") from exc
     return {
         "parent": parent or "root",
         "folders": page.folders,

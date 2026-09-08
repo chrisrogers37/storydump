@@ -22,10 +22,7 @@ export type MixSourceRow = {
   /** The share of posts this folder gets, in percent, as the planner draws it. */
   effective: number;
 };
-export type CategoryMixResponse = {
-  rows: MixSourceRow[];
-  explicit_total: number;
-};
+export type CategoryMixResponse = { rows: MixSourceRow[] };
 export type MixWrite = { source_id: string; ratio: number };
 
 export type WeightMode = "explicit" | "automatic" | "off";
@@ -74,27 +71,26 @@ export function toMixBySource(rows: CardRow[]): ToMixResult {
       return { ok: false, error: "bad_percent" };
     }
   }
-  const positive = explicit.filter((r) => r.percent > 0);
-  const total = positive.reduce((a, r) => a + r.percent, 0);
-  if (positive.length > 0 && Math.abs(total - 100) > 0.1) {
+  // Zeros add nothing, so "some explicit weight" is "the total is above 0".
+  const total = explicit.reduce((a, r) => a + r.percent, 0);
+  if (total > 0 && Math.abs(total - 100) > 0.1) {
     return { ok: false, error: "sum_not_100", total: round1(total) };
   }
-  const off = rows.filter(
-    (r) => r.mode === "off" || (r.mode === "explicit" && r.percent === 0),
-  );
-  const automatic = rows.filter((r) => r.mode === "automatic");
-  if (rows.length > 0 && positive.length === 0 && automatic.length === 0) {
+  if (
+    rows.length > 0 &&
+    total === 0 &&
+    !rows.some((r) => r.mode === "automatic")
+  ) {
     return { ok: false, error: "all_off" };
   }
   return {
     ok: true,
-    rows: [
-      ...positive.map((r) => ({
+    rows: rows
+      .filter((r) => r.mode !== "automatic")
+      .map((r) => ({
         source_id: r.sourceId,
-        ratio: Math.round(r.percent * 100) / 10000,
+        ratio: r.mode === "off" ? 0 : Math.round(r.percent * 100) / 10000,
       })),
-      ...off.map((r) => ({ source_id: r.sourceId, ratio: 0 })),
-    ],
   };
 }
 

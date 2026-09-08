@@ -7,6 +7,8 @@ import {
   isGoogleAuthorizationUrl,
   removeDriveFolder,
   requestDriveConnect,
+  addFolderRefusalCopy,
+  connectedFolderRefs,
 } from "./drive";
 
 const WS = "11111111-1111-4111-8111-111111111111";
@@ -144,5 +146,21 @@ describe("picking and removing folders", () => {
     expect(result.ok).toBe(true);
     expect(captured[0].url).toBe(`/api/workspaces/${WS}/sources/${SRC}`);
     expect(captured[0].init?.method).toBe("DELETE");
+  });
+});
+
+describe("connected folders and nested picks", () => {
+  it("greys the folders that are sources here and not removed", () => {
+    const refs = connectedFolderRefs([
+      { folder_ref: "A", removed: false },
+      { folder_ref: "B", removed: true },
+      { folder_ref: null, removed: false },
+      { folder_ref: "C", state: "active" },
+      { folder_ref: "D", state: "paused" },
+    ]);
+    expect([...refs].sort()).toEqual(["A", "C"]);
+  });
+  it("says why a nested folder pick was refused", () => {
+    expect(addFolderRefusalCopy("source_nested")).toMatch(/already connected/);
   });
 });

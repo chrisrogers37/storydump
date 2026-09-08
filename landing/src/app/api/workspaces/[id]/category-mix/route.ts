@@ -32,13 +32,14 @@ export async function PUT(
       { status: 400 },
     );
   }
-  const result = await targetFetch<{
-    rows?: unknown[];
-    explicit_total?: number;
-  }>(`/workspaces/${id}/category-mix`, token, {
-    method: "PUT",
-    body: JSON.stringify({ rows }),
-  });
+  const result = await targetFetch<{ rows?: unknown[] }>(
+    `/workspaces/${id}/category-mix`,
+    token,
+    {
+      method: "PUT",
+      body: JSON.stringify({ rows }),
+    },
+  );
   if (!result.ok) {
     return NextResponse.json(
       { error: result.error },
@@ -47,9 +48,5 @@ export async function PUT(
   }
   return NextResponse.json({
     rows: Array.isArray(result.data?.rows) ? result.data.rows : [],
-    explicit_total:
-      typeof result.data?.explicit_total === "number"
-        ? result.data.explicit_total
-        : 0,
   });
 }

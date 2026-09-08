@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -36,18 +36,15 @@ export function CategoryWeightsCard({
   editable: boolean;
 }) {
   const router = useRouter();
-  const [rows, setRows] = useState<CardRow[]>(() =>
-    data ? cardRows(data) : [],
-  );
-  // Re-seed when the server's picture changes (a refresh after a save, a
-  // newly connected folder); a person mid-edit before a refresh keeps
+  // The server's picture, re-derived when it changes (a refresh after a
+  // save, a newly connected folder); a person mid-edit before a refresh keeps
   // nothing, which is the honest outcome — the numbers on screen are the
   // server's again.
   const seed = data ? JSON.stringify(data.rows) : "";
-  useEffect(() => {
-    setRows(data ? cardRows(data) : []);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [seed]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const baseline = useMemo(() => (data ? cardRows(data) : []), [seed]);
+  const [rows, setRows] = useState<CardRow[]>(baseline);
+  useEffect(() => setRows(baseline), [baseline]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -58,9 +55,7 @@ export function CategoryWeightsCard({
         .reduce((a, r) => a + r.percent, 0) * 10,
     ) / 10;
   const parsed = toMixBySource(rows);
-  const dirty = data
-    ? JSON.stringify(cardRows(data)) !== JSON.stringify(rows)
-    : false;
+  const dirty = rows !== baseline;
 
   function update(index: number, patch: Partial<CardRow>) {
     const next = rows.slice();
@@ -94,7 +89,7 @@ export function CategoryWeightsCard({
         parsed.error === "sum_not_100"
           ? `The percentages add up to ${parsed.total}, not 100. Folders set to Automatic take the rest on their own.`
           : parsed.error === "all_off"
-            ? "At least one folder has to post: give a folder a percentage or set it to Automatic."
+            ? mixRefusalCopy("invalid_mix_all_off")
             : "Every percentage must be a number between 0 and 100.",
       );
       return;
