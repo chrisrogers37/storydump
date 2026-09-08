@@ -260,3 +260,35 @@ class TestReMintThroughTheRealSweeper:
             assert cur.fetchone()[0] == "sent"
             cur.execute("SELECT count(*) FROM jobs WHERE state = 'leased'")
             assert cur.fetchone()[0] == 0
+
+
+class TestTheClaimedRowVouchesForItsWorkspace:
+    """Review of #1259: the transport holds a card's media block against the
+    ROW's workspace before it asks the grant. That only works if the row the
+    outbox hands the transport carries one — through `claim_next`, not a
+    hand-built dict."""
+
+    @pytest.mark.asyncio
+    async def test_every_row_the_transport_sees_carries_the_bindings_workspace(
+        self, lane_db, sync_conn
+    ):
+        chain, binding = _seed_binding_with_pending(sync_conn, "w2-ws", rows=2)
+        engine = create_async_engine(_async_url(lane_db))
+        seen = []
+
+        class Recording(_FakeTransport):
+            def for_chat(self, external_ref):
+                inner = super().for_chat(external_ref)
+
+                async def send(row):
+                    seen.append(row.get("workspace_id"))
+                    return await inner(row)
+
+                return send
+
+        try:
+            await _sweep(engine)
+            await _run_interactive_once(lane_db, engine, Recording())
+        finally:
+            await engine.dispose()
+        assert seen and all(ws == str(chain["ws"]) for ws in seen), seen

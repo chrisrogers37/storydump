@@ -300,10 +300,11 @@ class TelegramTransport:
             ):
                 fetched = None
                 row_ws = row.get("workspace_id")
-                if row_ws is not None and str(media.get("workspace_id")) != str(row_ws):
+                if row_ws is None or str(media.get("workspace_id")) != str(row_ws):
                     # The media block is written in-process, but the grant it
                     # selects is the payload's word alone (BYPASSRLS): a row
-                    # whose block names another workspace is refused, loudly.
+                    # whose block names another workspace — or a row that
+                    # cannot vouch for one at all — is refused, loudly.
                     self.media_fetch_failures += 1
                     logger.error(
                         "outbox row %s: media block names workspace %s but the row"
@@ -323,10 +324,21 @@ class TelegramTransport:
                         )
                     except MediaTransient as exc:
                         # Nothing reached Telegram: ambiguous by the outbox's
-                        # book, resent later with the photo intact.
-                        raise TelegramSendError(
-                            f"media fetch got no answer: {self._redact(str(exc))}"
-                        ) from exc
+                        # book, resent later with the photo intact — ONCE.
+                        # An ambiguous approval_prompt returns to pending with
+                        # no attempts cap, so a provider outage would otherwise
+                        # loop the card forever; the second attempt sends the
+                        # text card (review of #1259).
+                        if int(row.get("attempts") or 1) < 2:
+                            raise TelegramSendError(
+                                f"media fetch got no answer: {self._redact(str(exc))}"
+                            ) from exc
+                        logger.warning(
+                            "outbox row %s: media fetch got no answer again (%s) —"
+                            " sending the text card",
+                            row.get("id"),
+                            self._redact(str(exc)),
+                        )
                     except Exception as exc:  # noqa: BLE001 — degraded, but never quietly
                         self.media_fetch_failures += 1
                         logger.error(

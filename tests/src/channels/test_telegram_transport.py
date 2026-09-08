@@ -261,6 +261,7 @@ MEDIA_ROW = {
     },
     "attempts": 1,
     "intent_id": "i-1",
+    "workspace_id": "ws-1",
 }
 
 
@@ -493,6 +494,9 @@ class TestMediaCardsStayHonest:
         with pytest.raises(TelegramSendError):
             await t.for_chat("7")(MEDIA_ROW)
         assert calls == [] and t.media_fetch_failures == 0, "no text card for a blip"
+        # The second attempt does not loop the card forever: the text card goes.
+        assert await t.for_chat("7")(dict(MEDIA_ROW, attempts=2)) == "3"
+        assert calls == ["sendMessage"] and t.media_fetch_failures == 0
 
     async def test_a_mime_telegram_will_not_take_as_a_photo_goes_as_a_document(self):
         seen = {}
@@ -540,3 +544,22 @@ class TestMediaCardsStayHonest:
         t = TelegramTransport(TOKEN, client=_client(handler), media_fetch=_fetch_ok)
         assert await t.for_chat("7")(MEDIA_ROW) == "6"
         assert calls == ["sendPhoto", "sendMessage"]
+
+    async def test_a_row_that_cannot_vouch_for_its_workspace_is_refused_too(self):
+        calls = []
+        fetched = []
+
+        async def fetch(media):
+            fetched.append(media)
+            return b"x", "a.jpg", "image/jpeg"
+
+        def handler(request):
+            calls.append(str(request.url).rsplit("/", 1)[1])
+            return httpx.Response(200, json={"ok": True, "result": {"message_id": 4}})
+
+        t = TelegramTransport(TOKEN, client=_client(handler), media_fetch=fetch)
+        row = {k: v for k, v in MEDIA_ROW.items() if k != "workspace_id"}
+        assert await t.for_chat("7")(row) == "4"
+        assert (
+            fetched == [] and calls == ["sendMessage"] and t.media_fetch_failures == 1
+        )
