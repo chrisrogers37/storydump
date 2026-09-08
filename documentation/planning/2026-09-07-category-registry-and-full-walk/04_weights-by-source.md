@@ -46,7 +46,7 @@ The transitional-keys follow-up (step 6). #1220 step 3 follows this epic by S1.
 - Unit (`tests/src/services/target/test_work_loop.py`): the draw over sources; the arithmetic (70/30 + an automatic 10-file source; a 50,000-file automatic source capped at 23 %; one explicit source at 100 + a large automatic one capped at 50 %; an explicit source with no eligible media dropped before the cap; no explicit rows → proportional); a removed source never drawn; the whole-pool fallback; locks and rotation preserved; name-keyed rows ignored.
 - Unit (`test_category_mix.py`): validation by source id (`unknown_source`, duplicates, sum-to-one, 0 refused), `mix_view.effective` equals the planner's weights (one function, both called), v1 keys derived from the view.
 - Unit (`tests/src/api/test_v1_routes.py`): GET carries `rows` and the v1 keys; PUT by source at the admin floor; the by-name body refused; the PUT response is the GET shape.
-- Gate (`tests/scripts/test_scheduler_clock_gate.py`): weights by source on the real table (the by-name seed at `:976-985` moves to sources); the automatic share; a removed source excluded. Gates: advertised DDL (28), lineage, replay, adopt; tenancy unchanged (no new table).
+- Gate (`tests/scripts/test_scheduler_clock_gate.py`): weights by source on the real table (the by-name seed at `:976-985` moves to sources); the automatic share; a removed source excluded. Gates: advertised DDL (29), lineage, replay, adopt; tenancy unchanged (no new table).
 - Web (`landing/src/lib/category-mix.test.ts` + a component test): rows, automatic vs explicit, sum over explicit rows, 0 refused, request and response shapes; `vitest`, `tsc`, `eslint`.
 
 ## Verification Checklist
