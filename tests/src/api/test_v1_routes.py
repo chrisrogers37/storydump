@@ -844,7 +844,12 @@ class TestDriveFolders:
         from src.api.routes import v1
 
         monkeypatch.setattr(v1, "_drive_adapter", lambda request: _Adapter())
+
+        async def list_sources(session, *, workspace_id):
+            return []
+
         monkeypatch.setattr(workspaces, "drive_status", drive_status)
+        monkeypatch.setattr(workspaces, "list_sources", list_sources)
         return holder
 
     def test_lists_the_root_at_the_admin_floor(
@@ -958,7 +963,11 @@ class TestSourcesUnderTheWorkspaceGrant:
         async def drive_status(session, *, workspace_id):
             return {"status": holder["status"], "connected_at": None}
 
+        async def list_sources(session, *, workspace_id):
+            return []
+
         monkeypatch.setattr(workspaces, "drive_status", drive_status)
+        monkeypatch.setattr(workspaces, "list_sources", list_sources)
         return holder
 
     @pytest.fixture
@@ -975,8 +984,14 @@ class TestSourcesUnderTheWorkspaceGrant:
             log["armed"] = (workspace_id, source_id)
             return True
 
+        async def assert_sources_unchanged(session, *, workspace_id, expected):
+            log["rechecked"] = expected
+
         monkeypatch.setattr(
             provisioning, "get_or_create_media_source", get_or_create_media_source
+        )
+        monkeypatch.setattr(
+            provisioning, "assert_sources_unchanged", assert_sources_unchanged
         )
         monkeypatch.setattr(media_sync, "rearm_after_connect", rearm_after_connect)
         return log
@@ -1000,6 +1015,135 @@ class TestSourcesUnderTheWorkspaceGrant:
             resp.status_code == 409 and resp.json()["detail"] == "drive_not_connected"
         )
         assert created == {}
+
+    @pytest.fixture
+    def connected(self, monkeypatch):
+        """One active source already here — folder PARENT, named Trips — and a
+        Drive whose parent chains are scripted per folder id."""
+        chains = {
+            "CHILD": ["PARENT", "ROOT"],
+            "PARENT": ["GRAND", "ROOT"],
+            "GRAND": ["ROOT"],
+            "ELSEWHERE": ["ROOT"],
+        }
+
+        class _Drive:
+            asked = []
+
+            async def folder_ancestors(self, *, workspace_id, folder_ref):
+                self.asked.append(folder_ref)
+                if folder_ref == "DEAD":
+                    raise media_sync.DriveSourceGone("gone in Drive")
+                return list(chains.get(folder_ref, []))
+
+        async def list_sources(session, *, workspace_id):
+            return [
+                {
+                    "id": SRC,
+                    "provider": "gdrive",
+                    "state": "active",
+                    "folder_ref": "PARENT",
+                    "folder_name": "Trips",
+                    "removed": False,
+                },
+                {
+                    "id": "old",
+                    "provider": "gdrive",
+                    "state": "paused",
+                    "folder_ref": "GONE",
+                    "folder_name": "Old",
+                    "removed": True,
+                },
+                {
+                    "id": "dead",
+                    "provider": "gdrive",
+                    "state": "error",
+                    "folder_ref": "DEAD",
+                    "folder_name": "Dead",
+                    "removed": False,
+                },
+            ]
+
+        from src.api.routes import v1
+
+        monkeypatch.setattr(v1, "_drive_adapter", lambda request: _Drive())
+        monkeypatch.setattr(workspaces, "list_sources", list_sources)
+        return _Drive
+
+    def test_a_folder_inside_a_connected_one_is_refused_by_name(
+        self, client, signed_in, tenant, grant, created, connected
+    ):
+        resp = client.post(
+            self.URL, json={"folder_ref": "CHILD", "folder_name": "Summer"}
+        )
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["reason"] == "source_nested"
+        assert "Trips" in resp.json()["detail"], "the refusal names the folder"
+        assert created == {}
+
+    def test_a_folder_that_contains_a_connected_one_is_refused_too(
+        self, client, signed_in, tenant, grant, created, connected
+    ):
+        resp = client.post(
+            self.URL, json={"folder_ref": "GRAND", "folder_name": "Everything"}
+        )
+        assert resp.status_code == 409 and resp.json()["reason"] == "source_nested"
+        assert created == {}
+
+    def test_a_disjoint_folder_and_a_re_pick_are_allowed(
+        self, client, signed_in, tenant, grant, created, connected
+    ):
+        assert (
+            client.post(
+                self.URL, json={"folder_ref": "ELSEWHERE", "folder_name": "Other"}
+            ).status_code
+            == 201
+        )
+        before = len(connected.asked)
+        assert (
+            client.post(
+                self.URL, json={"folder_ref": "PARENT", "folder_name": "Trips"}
+            ).status_code
+            == 201
+        )
+        assert len(connected.asked) == before, (
+            "a re-pick of the same folder asks no chain"
+        )
+
+    def test_a_connected_folder_gone_in_drive_does_not_fail_an_unrelated_pick(
+        self, client, signed_in, tenant, grant, created, connected
+    ):
+        resp = client.post(
+            self.URL, json={"folder_ref": "ELSEWHERE", "folder_name": "Other"}
+        )
+        assert resp.status_code == 201, resp.text
+        assert "DEAD" in connected.asked, (
+            "the dead folder was checked, and contains nothing"
+        )
+
+    def test_folders_that_changed_between_the_check_and_the_write_are_refused(
+        self, client, signed_in, tenant, grant, created, connected, monkeypatch
+    ):
+        async def assert_sources_unchanged(session, *, workspace_id, expected):
+            raise provisioning.ProvisioningRefused("sources_changed", "changed")
+
+        monkeypatch.setattr(
+            provisioning, "assert_sources_unchanged", assert_sources_unchanged
+        )
+        resp = client.post(
+            self.URL, json={"folder_ref": "FRESH", "folder_name": "Fresh"}
+        )
+        assert resp.status_code == 409 and resp.json()["reason"] == "sources_changed"
+        assert "source" not in created
+
+    def test_a_removed_source_does_not_block_a_pick_inside_it(
+        self, client, signed_in, tenant, grant, created, connected
+    ):
+        # GONE is paused (removed); its chain is never asked, and a folder that
+        # was under it is a fresh pick.
+        resp = client.post(self.URL, json={"folder_ref": "ELSEWHERE"})
+        assert resp.status_code == 201
+        assert "GONE" not in connected.asked
 
     def test_removing_a_folder_pauses_it(self, client, signed_in, tenant, monkeypatch):
         asked = {}
@@ -1027,38 +1171,55 @@ class TestSourcesUnderTheWorkspaceGrant:
 
 class TestCategoryMix:
     """`GET`/`PUT /workspaces/{ws}/category-mix` — the weights that drive the
-    slot draw (owner ruling 2026-09-06). Member read, admin write, and a
-    refusal travels as `reason = invalid_mix_<reason>`, the one code carrier
-    the web reads."""
+    slot draw, keyed on the CONNECTED FOLDER (owner ruling 2026-09-08). Member
+    read, admin write; the v1 keys ride along for one release so the card
+    already deployed keeps working across the API/web deploy window; a
+    refusal travels as `reason = invalid_mix_<reason>`."""
 
     URL = f"/api/v1/workspaces/{WS}/category-mix"
+    ROWS = [
+        {
+            "source_id": "11111111-1111-4111-8111-111111111111",
+            "provider": "gdrive",
+            "name": "memes",
+            "state": "active",
+            "media_count": 30,
+            "ratio": 0.7,
+            "effective": 70.0,
+        },
+        {
+            "source_id": "22222222-2222-4222-8222-222222222222",
+            "provider": "gdrive",
+            "name": "merch",
+            "state": "active",
+            "media_count": 10,
+            "ratio": 0.3,
+            "effective": 30.0,
+        },
+    ]
 
-    def test_get_reads_the_mix_and_the_discovered_categories(
+    def test_get_reads_the_view_and_carries_the_v1_keys(
         self, client, signed_in, tenant, monkeypatch
     ):
-        async def current_mix(session, *, workspace_id):
-            return [{"category": "memes", "ratio": 0.7}]
+        async def mix_view(session, *, workspace_id):
+            return list(self.ROWS)
 
-        async def discovered(session, *, workspace_id):
-            return [
-                {"category": "memes", "media_count": 3},
-                {"category": None, "media_count": 1},
-            ]
-
-        monkeypatch.setattr(category_mix, "current_mix", current_mix)
-        monkeypatch.setattr(category_mix, "discovered_categories", discovered)
+        monkeypatch.setattr(category_mix, "mix_view", mix_view)
         resp = client.get(self.URL)
         assert resp.status_code == 200
-        assert resp.json() == {
-            "mix": [{"category": "memes", "ratio": 0.7}],
-            "categories": [
-                {"category": "memes", "media_count": 3},
-                {"category": None, "media_count": 1},
-            ],
-        }
+        body = resp.json()
+        assert body["rows"] == self.ROWS and "explicit_total" not in body
+        assert body["mix"] == [
+            {"category": "memes", "ratio": 0.7},
+            {"category": "merch", "ratio": 0.3},
+        ]
+        assert body["categories"] == [
+            {"category": "memes", "media_count": 30},
+            {"category": "merch", "media_count": 10},
+        ]
         assert ("gate", WS, PRINCIPAL.user_id, "member") in tenant
 
-    def test_put_replaces_the_mix_at_the_admin_floor(
+    def test_put_by_source_replaces_the_mix_at_the_admin_floor(
         self, client, signed_in, tenant, monkeypatch
     ):
         seen = {}
@@ -1066,30 +1227,69 @@ class TestCategoryMix:
         async def set_mix(session, *, workspace_id, mix, by_user_id):
             seen.update(ws=workspace_id, mix=mix, by=by_user_id)
             return [
-                {"category": "memes", "ratio": 0.7},
-                {"category": "merch", "ratio": 0.3},
+                {"source_id": "11111111-1111-4111-8111-111111111111", "ratio": 0.7},
+                {"source_id": "22222222-2222-4222-8222-222222222222", "ratio": 0.3},
             ]
 
+        async def mix_view(session, *, workspace_id):
+            return list(self.ROWS)
+
         monkeypatch.setattr(category_mix, "set_mix", set_mix)
+        monkeypatch.setattr(category_mix, "mix_view", mix_view)
         body = {
-            "mix": [
-                {"category": "memes", "ratio": 0.7},
-                {"category": "merch", "ratio": 0.3},
+            "rows": [
+                {"source_id": "11111111-1111-4111-8111-111111111111", "ratio": 0.7},
+                {"source_id": "22222222-2222-4222-8222-222222222222", "ratio": 0.3},
             ]
         }
         resp = client.put(self.URL, json=body)
         assert resp.status_code == 200, resp.text
-        assert resp.json()["mix"][1] == {"category": "merch", "ratio": 0.3}
-        assert seen == {"ws": WS, "mix": body["mix"], "by": PRINCIPAL.user_id}
+        assert resp.json()["rows"] == self.ROWS, "the PUT answers with the GET shape"
+        assert seen == {"ws": WS, "mix": body["rows"], "by": PRINCIPAL.user_id}
         assert ("gate", WS, PRINCIPAL.user_id, "admin") in tenant
+
+    def test_a_v1_body_by_name_is_resolved_to_sources_for_one_release(
+        self, client, signed_in, tenant, monkeypatch
+    ):
+        seen = {}
+
+        def resolve_names(rows, mix):
+            seen["names"] = mix
+            return [{"source_id": "11111111-1111-4111-8111-111111111111", "ratio": 1.0}]
+
+        async def set_mix(session, *, workspace_id, mix, by_user_id):
+            seen["mix"] = mix
+            return mix
+
+        async def mix_view(session, *, workspace_id):
+            return list(self.ROWS)
+
+        monkeypatch.setattr(category_mix, "resolve_names", resolve_names)
+        monkeypatch.setattr(category_mix, "set_mix", set_mix)
+        monkeypatch.setattr(category_mix, "mix_view", mix_view)
+        resp = client.put(self.URL, json={"mix": [{"category": "memes", "ratio": 1.0}]})
+        assert resp.status_code == 200, resp.text
+        assert seen["names"] == [{"category": "memes", "ratio": 1.0}]
+        assert seen["mix"] == [
+            {"source_id": "11111111-1111-4111-8111-111111111111", "ratio": 1.0}
+        ]
 
     def test_a_refused_mix_is_400_with_the_reason_the_web_reads(
         self, client, signed_in, tenant, monkeypatch
     ):
         async def set_mix(session, *, workspace_id, mix, by_user_id):
-            raise category_mix.MixInvalid("sum_not_one", "sum is 0.9000")
+            raise category_mix.MixInvalid(
+                "unknown_source", "22222222-2222-4222-8222-222222222222"
+            )
 
         monkeypatch.setattr(category_mix, "set_mix", set_mix)
-        resp = client.put(self.URL, json={"mix": [{"category": "memes", "ratio": 0.9}]})
+        resp = client.put(
+            self.URL,
+            json={
+                "rows": [
+                    {"source_id": "22222222-2222-4222-8222-222222222222", "ratio": 1.0}
+                ]
+            },
+        )
         assert resp.status_code == 400
-        assert resp.json()["reason"] == "invalid_mix_sum_not_one"
+        assert resp.json()["reason"] == "invalid_mix_unknown_source"

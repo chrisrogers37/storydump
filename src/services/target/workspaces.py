@@ -314,6 +314,14 @@ async def drive_status(executor, *, workspace_id: str) -> dict:
     return {"status": row["status"], "connected_at": row["connected_at"]}
 
 
+#: A `media_sources` row's `config.removed`, as a boolean — the flag Remove
+#: sets (#1233). Alias the table `s` wherever these are spliced.
+CONNECTED_FLAG_SQL = "COALESCE((s.config->>'removed')::boolean, false)"
+#: The predicate for a CONNECTED folder: not removed. State is not part of it
+#: — a folder whose grant died is paused, still connected, still weighted.
+CONNECTED_SQL = "NOT " + CONNECTED_FLAG_SQL
+
+
 async def list_sources(executor, *, workspace_id: str) -> list[dict]:
     """Sources with the folder each reads — `folder_ref`, and `folder_name`
     when the picker named it. Whether Google can be reached is the
@@ -324,7 +332,12 @@ async def list_sources(executor, *, workspace_id: str) -> list[dict]:
         "SELECT s.id, s.provider, s.state, s.next_sync_at, s.last_sync_success_at,"
         "       s.alerted_at, s.created_at,"
         "       s.config->>'folder_ref' AS folder_ref,"
-        "       s.config->>'folder_name' AS folder_name"
+        "       s.config->>'folder_name' AS folder_name,"
+        # Removed = a pause with the flag (#1233): the row stays, its media
+        # and history stay, a re-pick revives it. NOT removed is "connected"
+        # — the one definition the mix, the planner, the pick check and the
+        # picker share (`CONNECTED_SQL`).
+        "       " + CONNECTED_FLAG_SQL + " AS removed"
         "  FROM media_sources s"
         " WHERE s.workspace_id = :ws ORDER BY s.created_at, s.id",
         ws=str(workspace_id),

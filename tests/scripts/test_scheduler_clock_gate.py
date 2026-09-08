@@ -956,7 +956,28 @@ class TestTheClockReadsTheDatabaseClock:
         assert "timestamp" not in args.lower(), args
 
 
-def _new_media_in(clock_db, category):
+def _new_source(clock_db, name):
+    """A second connected folder (owner ruling 2026-09-08: the connected folder
+    is the group the mix weights)."""
+    return str(
+        _owner_exec(
+            clock_db,
+            "INSERT INTO media_sources (workspace_id, provider, config)"
+            " VALUES (%s, 'gdrive', %s) RETURNING id",
+            (
+                clock_db["ws"],
+                '{"v": 1, "folder_ref": "'
+                + uuid.uuid4().hex[:10]
+                + '", "folder_name": "'
+                + name
+                + '"}',
+            ),
+            fetch=True,
+        )[0][0]
+    )
+
+
+def _new_media_in(clock_db, source_id, category=None):
     tag = uuid.uuid4().hex[:12]
     return str(
         _owner_exec(
@@ -964,25 +985,37 @@ def _new_media_in(clock_db, category):
             "INSERT INTO media_items (workspace_id, source_id, content_hash,"
             " file_name, media_kind, provider_file_ref, category)"
             " VALUES (%s, %s, %s, %s, 'image', %s, %s) RETURNING id",
-            (clock_db["ws"], clock_db["src"], tag, f"{tag}.jpg", tag, category),
+            (clock_db["ws"], source_id, tag, f"{tag}.jpg", tag, category),
             fetch=True,
         )[0][0]
     )
 
 
-def _set_mix(clock_db, mix):
+def _set_mix(clock_db, mix, *, automatic=()):
+    """`[(source_id, ratio)]`; the label rides along as `category`. The pool
+    is workspace-wide and every earlier test leaves sources with media behind,
+    and an unweighted folder is AUTOMATIC (it takes a share) — so every other
+    connected folder is set Off here, except the ones named `automatic`."""
     _owner_exec(
         clock_db,
         "UPDATE category_post_case_mix SET effective_to = now()"
         " WHERE workspace_id = %s AND effective_to IS NULL",
         (clock_db["ws"],),
     )
-    for category, ratio in mix:
+    named = {str(s) for s, _ in mix} | {str(s) for s in automatic}
+    others = _owner_exec(
+        clock_db,
+        "SELECT id FROM media_sources WHERE workspace_id = %s",
+        (clock_db["ws"],),
+        fetch=True,
+    )
+    rows = list(mix) + [(str(r[0]), 0.0) for r in others if str(r[0]) not in named]
+    for source_id, ratio in rows:
         _owner_exec(
             clock_db,
-            "INSERT INTO category_post_case_mix (workspace_id, category, ratio)"
-            " VALUES (%s, %s, %s)",
-            (clock_db["ws"], category, ratio),
+            "INSERT INTO category_post_case_mix (workspace_id, source_id, category, ratio)"
+            " VALUES (%s, %s, 'label', %s)",
+            (clock_db["ws"], source_id, ratio),
         )
 
 
@@ -1034,57 +1067,129 @@ class TestTheCategoryMixShapesTheDraw:
             await engine.dispose()
         return out
 
-    def _category_of(self, clock_db, intent_id):
-        return _owner_exec(
-            clock_db,
-            "SELECT m.category FROM post_intents p JOIN media_items m ON m.id = p.media_item_id"
-            " WHERE p.id = %s",
-            (intent_id,),
-            fetch=True,
-        )[0][0]
+    def _source_of(self, clock_db, intent_id):
+        return str(
+            _owner_exec(
+                clock_db,
+                "SELECT m.source_id FROM post_intents p JOIN media_items m ON m.id = p.media_item_id"
+                " WHERE p.id = %s",
+                (intent_id,),
+                fetch=True,
+            )[0][0]
+        )
 
     @pytest.mark.asyncio
-    async def test_a_one_category_mix_draws_only_that_category(self, clock_db):
+    async def test_a_one_folder_mix_draws_only_that_folder(self, clock_db):
         account = _new_account(clock_db)
+        memes, merch = _new_source(clock_db, "memes"), _new_source(clock_db, "merch")
         for _ in range(3):
-            _new_media_in(clock_db, "memes")
-            _new_media_in(clock_db, "merch")
-        _set_mix(clock_db, [("merch", 1.0)])
+            _new_media_in(clock_db, memes)
+            _new_media_in(clock_db, merch)
+        _set_mix(clock_db, [(merch, 1.0)])
         drawn = set()
         for seed in range(3):
             out = await self._plan(clock_db, account, seed)
             assert out.intent_id is not None
-            drawn.add(self._category_of(clock_db, out.intent_id))
-        assert drawn == {"merch"}
+            drawn.add(self._source_of(clock_db, out.intent_id))
+        assert drawn == {merch}
 
     @pytest.mark.asyncio
-    async def test_a_weighted_category_with_no_media_yields_to_the_others(
-        self, clock_db
-    ):
+    async def test_a_weighted_folder_with_no_media_yields_to_the_others(self, clock_db):
         account = _new_account(clock_db)
-        _new_media_in(clock_db, "memes")
-        _set_mix(clock_db, [("memes", 0.3), ("ghosts", 0.7)])
+        memes, ghosts = _new_source(clock_db, "memes"), _new_source(clock_db, "ghosts")
+        _new_media_in(clock_db, memes)
+        _set_mix(clock_db, [(memes, 0.3), (ghosts, 0.7)])
         out = await self._plan(clock_db, account, 7)
         assert out.intent_id is not None
-        assert self._category_of(clock_db, out.intent_id) == "memes"
+        assert self._source_of(clock_db, out.intent_id) == memes
+
+    @pytest.mark.asyncio
+    async def test_an_off_folder_is_never_drawn(self, clock_db):
+        account = _new_account(clock_db)
+        memes, archive = (
+            _new_source(clock_db, "memes"),
+            _new_source(clock_db, "archive"),
+        )
+        # One file per draw: a drawn file carries a live intent for this
+        # account and leaves the eligible pool until it resolves.
+        for _ in range(4):
+            _new_media_in(clock_db, memes)
+            _new_media_in(clock_db, archive)
+        _set_mix(clock_db, [(memes, 1.0), (archive, 0.0)])
+        for seed in range(4):
+            out = await self._plan(clock_db, account, seed)
+            assert out.intent_id is not None
+            assert self._source_of(clock_db, out.intent_id) != archive
 
     @pytest.mark.asyncio
     async def test_a_locked_item_is_never_drawn(self, clock_db):
-        """`06` §3: minus the workspace-wide locks. Every `memes` item in the
-        pool is put on hold (the pool is workspace-wide and other tests seed
-        it), so the weighted category has nothing eligible and the pool answers
-        with something that is not `memes`."""
+        """`06` §3: minus the workspace-wide locks. Every item of the weighted
+        folder is put on hold, so it has nothing eligible and the pool answers
+        with something from another folder."""
         account = _new_account(clock_db)
-        _new_media_in(clock_db, "memes")
-        _new_media_in(clock_db, "merch")
+        memes, merch = _new_source(clock_db, "memes"), _new_source(clock_db, "merch")
+        _new_media_in(clock_db, memes)
+        _new_media_in(clock_db, merch)
         _owner_exec(
             clock_db,
             "INSERT INTO post_locks (workspace_id, media_item_id, kind)"
             " SELECT workspace_id, id, 'hold' FROM media_items"
-            " WHERE workspace_id = %s AND category = 'memes'",
-            (clock_db["ws"],),
+            " WHERE workspace_id = %s AND source_id = %s",
+            (clock_db["ws"], memes),
         )
-        _set_mix(clock_db, [("memes", 1.0)])
+        _set_mix(clock_db, [(memes, 1.0)], automatic=[merch])
         out = await self._plan(clock_db, account, 11)
         assert out.intent_id is not None
-        assert self._category_of(clock_db, out.intent_id) != "memes"
+        assert self._source_of(clock_db, out.intent_id) != memes
+
+    @pytest.mark.asyncio
+    async def test_an_unweighted_folder_is_automatic_and_shares_by_its_media(
+        self, clock_db
+    ):
+        """F4 as re-locked: a folder with no row posts in proportion to its
+        files, capped at the smallest explicit weight on the final split."""
+        account = _new_account(clock_db)
+        memes, events = _new_source(clock_db, "memes"), _new_source(clock_db, "events")
+        for _ in range(8):
+            _new_media_in(clock_db, memes)
+            _new_media_in(clock_db, events)
+        _set_mix(clock_db, [(memes, 1.0)], automatic=[events])
+        drawn = set()
+        for seed in range(8):
+            out = await self._plan(clock_db, account, seed)
+            assert out.intent_id is not None
+            drawn.add(self._source_of(clock_db, out.intent_id))
+        assert drawn == {memes, events}, "the automatic folder posts too, never alone"
+
+    @pytest.mark.asyncio
+    async def test_a_removed_folders_media_never_posts(self, clock_db):
+        """Remove is a pause with a flag; the media rows stay. They are not a
+        pool to fall back on — the ruling's whole point."""
+        account = _new_account(clock_db)
+        memes, gone = _new_source(clock_db, "memes"), _new_source(clock_db, "gone")
+        _new_media_in(clock_db, gone)
+        _owner_exec(
+            clock_db,
+            "UPDATE media_sources SET state = 'paused',"
+            " config = config || '{\"removed\": true}'::jsonb WHERE id = %s",
+            (gone,),
+        )
+        _set_mix(clock_db, [(memes, 1.0)])
+        out = await self._plan(clock_db, account, 2)
+        assert out.intent_id is None, "memes is empty and the removed folder is no pool"
+
+    @pytest.mark.asyncio
+    async def test_a_name_keyed_row_from_before_071_is_ignored(self, clock_db):
+        """A row set by the old card (no source_id) shapes nothing: every
+        folder is automatic until the new card saves."""
+        account = _new_account(clock_db)
+        memes = _new_source(clock_db, "memes")
+        _new_media_in(clock_db, memes)
+        _owner_exec(
+            clock_db,
+            "INSERT INTO category_post_case_mix (workspace_id, category, ratio)"
+            " VALUES (%s, 'ghost', 1.0)",
+            (clock_db["ws"],),
+        )
+        out = await self._plan(clock_db, account, 5)
+        assert out.intent_id is not None

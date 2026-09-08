@@ -1,45 +1,181 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { evenSplit, percentRows, saveCategoryMix, toMix } from "./category-mix";
+import {
+  cardRows,
+  evenSplit,
+  mixRefusalCopy,
+  saveCategoryMix,
+  toMixBySource,
+  type MixSourceRow,
+} from "./category-mix";
 
 const WS = "11111111-1111-4111-8111-111111111111";
+const S1 = "11111111-1111-4111-8111-aaaaaaaaaaaa";
+const S2 = "22222222-2222-4222-8222-bbbbbbbbbbbb";
+const S3 = "33333333-3333-4333-8333-cccccccccccc";
 
-describe("percentRows — what the card shows", () => {
-  it("unions the folders the sync found with the categories already weighted", () => {
-    const rows = percentRows(
-      { mix: [{ category: "memes", ratio: 0.7 }, { category: "old", ratio: 0.3 }] },
-      { categories: [{ category: "memes", media_count: 12 }, { category: "merch", media_count: 4 }, { category: null, media_count: 2 }] },
-    );
+const row = (over: Partial<MixSourceRow>): MixSourceRow => ({
+  source_id: S1,
+  provider: "gdrive",
+  name: "memes",
+  state: "active",
+  media_count: 10,
+  ratio: null,
+  effective: 0,
+  ...over,
+});
+
+describe("cardRows — every connected folder, with how it is weighted", () => {
+  it("reads explicit, automatic and off from the ratio", () => {
+    const rows = cardRows({
+      rows: [
+        row({
+          source_id: S1,
+          name: "memes",
+          ratio: 0.7,
+          effective: 69.3,
+          media_count: 30,
+        }),
+        row({
+          source_id: S2,
+          name: "events",
+          ratio: null,
+          effective: 1.0,
+          media_count: 4,
+        }),
+        row({
+          source_id: S3,
+          name: "archive",
+          ratio: 0,
+          effective: 0,
+          media_count: 500,
+        }),
+      ],
+    });
     expect(rows).toEqual([
-      { category: "memes", percent: 70, mediaCount: 12, discovered: true },
-      { category: "merch", percent: 0, mediaCount: 4, discovered: true },
-      { category: "old", percent: 30, mediaCount: 0, discovered: false },
+      {
+        sourceId: S1,
+        name: "memes",
+        mediaCount: 30,
+        state: "active",
+        mode: "explicit",
+        percent: 70,
+        effective: 69.3,
+      },
+      {
+        sourceId: S2,
+        name: "events",
+        mediaCount: 4,
+        state: "active",
+        mode: "automatic",
+        percent: 0,
+        effective: 1.0,
+      },
+      {
+        sourceId: S3,
+        name: "archive",
+        mediaCount: 500,
+        state: "active",
+        mode: "off",
+        percent: 0,
+        effective: 0,
+      },
     ]);
-  });
-  it("leaves the root's uncategorized files out of the weighted rows", () => {
-    const rows = percentRows({ mix: [] }, { categories: [{ category: null, media_count: 9 }] });
-    expect(rows).toEqual([]);
   });
 });
 
-describe("toMix — the card's numbers become the API's ratios", () => {
-  const rows = (...percents: number[]) =>
-    percents.map((p, i) => ({ category: `c${i}`, percent: p, mediaCount: 1, discovered: true }));
-  it("converts percentages summing to 100 into ratios summing to 1", () => {
-    expect(toMix(rows(70, 30))).toEqual({ ok: true, mix: [{ category: "c0", ratio: 0.7 }, { category: "c1", ratio: 0.3 }] });
+describe("toMixBySource — the card's rows become the API's rows", () => {
+  const explicit = (sourceId: string, percent: number) => ({
+    sourceId,
+    name: sourceId,
+    mediaCount: 1,
+    state: "active",
+    mode: "explicit" as const,
+    percent,
+    effective: 0,
+  });
+  const automatic = (sourceId: string) => ({
+    sourceId,
+    name: sourceId,
+    mediaCount: 1,
+    state: "active",
+    mode: "automatic" as const,
+    percent: 0,
+    effective: 0,
+  });
+  const off = (sourceId: string) => ({
+    sourceId,
+    name: sourceId,
+    mediaCount: 1,
+    state: "active",
+    mode: "off" as const,
+    percent: 0,
+    effective: 0,
+  });
+
+  it("sends explicit rows summing to 100 as ratios, off as 0, and leaves automatic rows out", () => {
+    expect(
+      toMixBySource([
+        explicit(S1, 70),
+        explicit(S2, 30),
+        automatic(S3),
+        off("s4"),
+      ]),
+    ).toEqual({
+      ok: true,
+      rows: [
+        { source_id: S1, ratio: 0.7 },
+        { source_id: S2, ratio: 0.3 },
+        { source_id: "s4", ratio: 0 },
+      ],
+    });
+  });
+  it("tolerates three times 33.3 despite floating point", () => {
+    expect(
+      toMixBySource([
+        explicit(S1, 33.3),
+        explicit(S2, 33.3),
+        explicit(S3, 33.3),
+      ]).ok,
+    ).toBe(true);
   });
   it("tolerates a thirds split", () => {
-    const out = toMix(rows(33.3, 33.3, 33.4));
-    expect(out.ok).toBe(true);
+    expect(
+      toMixBySource([
+        explicit(S1, 33.3),
+        explicit(S2, 33.3),
+        explicit(S3, 33.4),
+      ]).ok,
+    ).toBe(true);
   });
-  it("refuses a total that is not 100", () => {
-    expect(toMix(rows(70, 20))).toEqual({ ok: false, error: "sum_not_100", total: 90 });
+  it("refuses explicit rows that do not add up to 100", () => {
+    expect(
+      toMixBySource([explicit(S1, 70), explicit(S2, 20), automatic(S3)]),
+    ).toEqual({ ok: false, error: "sum_not_100", total: 90 });
   });
-  it("refuses a negative or non-numeric entry by name", () => {
-    expect(toMix(rows(110, -10)).ok).toBe(false);
-    expect(toMix([{ category: "a", percent: Number.NaN, mediaCount: 1, discovered: true }]).ok).toBe(false);
+  it("refuses a bad percentage by name", () => {
+    expect(toMixBySource([explicit(S1, 120)]).ok).toBe(false);
+    expect(toMixBySource([explicit(S1, Number.NaN)]).ok).toBe(false);
   });
-  it("all zeros clears the weighting", () => {
-    expect(toMix(rows(0, 0))).toEqual({ ok: true, mix: [] });
+  it("every folder automatic is an empty mix", () => {
+    expect(toMixBySource([automatic(S1), automatic(S2)])).toEqual({
+      ok: true,
+      rows: [],
+    });
+  });
+  it("every folder off is refused: something must post", () => {
+    expect(toMixBySource([off(S1), off(S2)])).toEqual({
+      ok: false,
+      error: "all_off",
+    });
+  });
+  it("an explicit row at 0 counts as off, never dropped", () => {
+    expect(toMixBySource([explicit(S1, 100), explicit(S2, 0)])).toEqual({
+      ok: true,
+      rows: [
+        { source_id: S1, ratio: 1 },
+        { source_id: S2, ratio: 0 },
+      ],
+    });
   });
 });
 
@@ -53,19 +189,37 @@ describe("evenSplit", () => {
 
 describe("saveCategoryMix", () => {
   afterEach(() => vi.unstubAllGlobals());
-  it("PUTs the mix to the workspace's resource", async () => {
+  it("PUTs rows by source and reads the view back", async () => {
     const captured: { url: string; init?: RequestInit }[] = [];
+    const view = {
+      rows: [row({ ratio: 1, effective: 100 })],
+    };
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string, init?: RequestInit) => {
         captured.push({ url, init });
-        return new Response(JSON.stringify({ mix: [{ category: "memes", ratio: 1 }] }), { status: 200, headers: { "Content-Type": "application/json" } });
+        return new Response(JSON.stringify(view), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
       }),
     );
-    const result = await saveCategoryMix(WS, [{ category: "memes", ratio: 1 }]);
-    expect(result.ok).toBe(true);
+    const result = await saveCategoryMix(WS, [{ source_id: S1, ratio: 1 }]);
+    expect(result).toEqual({ ok: true, rows: view.rows });
     expect(captured[0].url).toBe(`/api/workspaces/${WS}/category-mix`);
     expect(captured[0].init?.method).toBe("PUT");
-    expect(JSON.parse(String(captured[0].init?.body))).toEqual({ mix: [{ category: "memes", ratio: 1 }] });
+    expect(JSON.parse(String(captured[0].init?.body))).toEqual({
+      rows: [{ source_id: S1, ratio: 1 }],
+    });
+  });
+});
+
+describe("refusal copy", () => {
+  it("names the mix refusals a person can act on", () => {
+    expect(mixRefusalCopy("invalid_mix_unknown_source")).toMatch(
+      /no longer connected/,
+    );
+    expect(mixRefusalCopy("invalid_mix_all_off")).toMatch(/at least one/i);
+    expect(mixRefusalCopy("invalid_mix_sum_not_one")).toMatch(/100/);
   });
 });
