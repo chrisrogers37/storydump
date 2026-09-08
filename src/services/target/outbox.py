@@ -262,7 +262,7 @@ async def claim_next(session, *, binding_id: str) -> Optional[dict]:
                 "             WHERE binding_id = :b AND state = 'pending'"
                 "             ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED)"
                 "   AND state = 'pending'"
-                " RETURNING id, kind, payload, attempts, intent_id"
+                " RETURNING id, kind, payload, attempts, intent_id, workspace_id"
             ),
             {"b": binding_id},
         )

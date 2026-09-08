@@ -125,9 +125,11 @@ def render_card(intent: dict, *, api_publishing_enabled: bool) -> dict:
         # transport fetches these bytes under the workspace grant and sends
         # them with `caption`; `text` stays as the card when it cannot.
         handle = intent.get("handle")
-        who = f"@{handle}" if handle else file_name
+        # Bounded: Telegram captions stop at 1024 characters, and a Drive
+        # file name has no bound of its own.
+        who = f"@{handle}" if handle else file_name[:200]
         payload["media"] = {
-            "workspace_id": str(intent.get("workspace_id")),
+            "workspace_id": str(intent["workspace_id"]),
             "source_id": str(intent["source_id"]),
             "ref": str(intent["provider_file_ref"]),
             "kind": intent.get("media_kind"),
@@ -226,7 +228,9 @@ async def sweep_due_prompts(session, *, limit: int = 50) -> dict:
                     "  FROM post_intents i"
                     "  JOIN workspaces w ON w.id = i.workspace_id"
                     "  JOIN media_items m ON m.id = i.media_item_id"
+                    "   AND m.workspace_id = i.workspace_id"
                     "  LEFT JOIN ig_accounts a ON a.id = i.ig_account_id"
+                    "   AND a.workspace_id = i.workspace_id"
                     " WHERE i.state = 'scheduled' AND i.schedule_slot_at <= now()"
                     "   AND w.state = 'active' AND NOT w.is_paused"
                     " ORDER BY i.schedule_slot_at LIMIT :lim"

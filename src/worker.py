@@ -247,7 +247,10 @@ def status_line(
     )
     line = f"{lanes} {clock_part} {hb_part}"
     if transport is not None:
-        line += f" transport[auth_failures={transport.auth_failures}]"
+        line += (
+            f" transport[auth_failures={transport.auth_failures},"
+            f" media_fetch_failures={getattr(transport, 'media_fetch_failures', 0)}]"
+        )
     if sweeper is not None:
         line += f" sweeper[sweeps={sweeper.sweeps} mints={sweeper.mints}]"
     if prompt_sweeper is not None:
@@ -518,16 +521,34 @@ def _card_media_fetch(drive):
     mime) under the workspace grant, capped at Telegram's upload limit for
     the kind so an oversize file is refused from metadata, never downloaded."""
 
+    from src.channels.telegram_transport import MediaTransient, MediaUnavailable
+    from src.services.target.drive_adapter import (
+        DriveLostResponse,
+        DriveRetryableError,
+        DriveTerminalError,
+    )
+
     async def fetch(media: dict) -> tuple[bytes, str, Optional[str]]:
         cap = google_drive_adapter.MEDIA_CARD_MAX_BYTES.get(
             str(media.get("kind")), google_drive_adapter.MEDIA_CARD_MAX_BYTES["image"]
         )
-        return await drive.fetch_bytes(
-            source_id=str(media["source_id"]),
-            workspace_id=str(media["workspace_id"]),
-            file_ref=str(media["ref"]),
-            max_bytes=cap,
-        )
+        try:
+            return await drive.fetch_bytes(
+                source_id=str(media["source_id"]),
+                workspace_id=str(media["workspace_id"]),
+                file_ref=str(media["ref"]),
+                max_bytes=cap,
+            )
+        except DriveTerminalError as exc:
+            # The FILE's fault, for good (too large, gone, refused): the text
+            # card, at WARNING.
+            raise MediaUnavailable(str(exc)) from exc
+        except (DriveRetryableError, DriveLostResponse) as exc:
+            # A blip: nothing reached Telegram, so the send propagates as
+            # ambiguous and is resent with the photo intact. A dead grant
+            # (DriveCredentialDead) is in neither list on purpose — it is
+            # loud, and counted.
+            raise MediaTransient(str(exc)) from exc
 
     return fetch
 

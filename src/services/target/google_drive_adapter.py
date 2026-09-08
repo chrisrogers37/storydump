@@ -72,6 +72,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from dataclasses import replace as _replace
 from dataclasses import dataclass
 import logging
 from typing import Any, Mapping, Optional, Protocol
@@ -81,8 +82,6 @@ import httpx
 
 from src.services.target import egress
 from src.services.target.egress import EgressPolicy
-from dataclasses import replace as _replace
-
 from src.services.target.drive_adapter import (
     DriveMediaGone,
     DriveMediaTooLarge,
@@ -150,6 +149,15 @@ class FolderPage:
 #: Telegram's bot-upload limits, which bound the approval card's media fetch
 #: (owner, 2026-09-08 — the card is the photo, as it was in the legacy product).
 MEDIA_CARD_MAX_BYTES = {"image": 10 * 1024 * 1024, "video": 50 * 1024 * 1024}
+#: A fetch holds about two copies of the file in memory (the capped read and
+#: the multipart body): ~100 MB per in-flight video card, one sender per
+#: binding, `ws_lane_cap=2` — bounded, and noted here so nobody raises the
+#: cap without raising the worker.
+#: The media fetch runs under the upload timeout class with its own budget:
+#: a 50 MB video on a modest link needs more than the 30 s default.
+MEDIA_FETCH_BUDGET_S = 120.0
+#: The byte cap's floor on the download leg: enough for a refusal's JSON body.
+MEDIA_CAP_FLOOR_BYTES = 16 * 1024
 
 #: Requested per file. `md5Checksum` is the content hash without a download.
 FILE_FIELDS = "id,name,mimeType,size,modifiedTime,md5Checksum"
@@ -617,8 +625,18 @@ class GoogleDriveAdapter:
                 f"drive file {file_ref} is {size} bytes; the cap is {max_bytes}"
             )
         media_params = {"alt": "media", "supportsAllDrives": "true"}
+        # The worker builds this adapter without a policy (the floor's
+        # default applies per call); the media policy derives from whichever
+        # is in force, never from None (review of #1259).
+        base = self._policy or EgressPolicy()
         policy = _replace(
-            self._policy, timeout_class="upload", max_response_bytes=max_bytes
+            base,
+            timeout_class="upload",
+            # The cap bounds a body that outgrows its metadata; its floor
+            # leaves room for the JSON body of a refusal (a 401/403 must
+            # still be READ to be routed, not cut off as "too large").
+            max_response_bytes=max(max_bytes, MEDIA_CAP_FLOOR_BYTES),
+            total_budget_s=max(base.total_budget_s, MEDIA_FETCH_BUDGET_S),
         )
         try:
             response = await self._fetch_as_workspace(
@@ -631,6 +649,13 @@ class GoogleDriveAdapter:
         except DriveSourceGone as exc:
             raise DriveMediaGone(
                 f"drive file {file_ref} vanished mid-fetch for source {source_id}: {exc}"
+            ) from exc
+        except DriveCredentialDead as exc:
+            # The metadata leg just succeeded under this grant (with the one
+            # re-mint inside the fetch), so a refusal on the bytes is the
+            # FILE's — `cannotDownloadFile`, an abuse flag — not the grant's.
+            raise DriveMediaGone(
+                f"drive refuses the bytes of file {file_ref} for source {source_id}: {exc}"
             ) from exc
         except egress.ResponseTooLarge as exc:
             raise DriveMediaTooLarge(str(exc)) from exc
@@ -822,12 +847,7 @@ class GoogleDriveAdapter:
         response = await self._fetch_as_workspace(
             url, source_id=source_id, workspace_id=workspace_id, box=box
         )
-        try:
-            return response.json()
-        except ValueError as exc:
-            raise DriveRetryableError(
-                "drive answered 200 with a body that is not JSON"
-            ) from exc
+        return _json_body(response)
 
     async def _fetch_as_workspace(
         self,
@@ -865,12 +885,7 @@ class GoogleDriveAdapter:
     async def _get(self, url: str, token: str, *, source_id: str) -> dict:
         """One floored GET whose 200 body is JSON (the listing calls)."""
         response = await self._get_response(url, token, source_id=source_id)
-        try:
-            return response.json()
-        except ValueError as exc:
-            raise DriveRetryableError(
-                "drive answered 200 with a body that is not JSON"
-            ) from exc
+        return _json_body(response)
 
     async def _get_response(
         self,
@@ -924,6 +939,16 @@ class GoogleDriveAdapter:
         if status == 429 or status >= 500:
             raise DriveRetryableError(f"drive answered {status}: {detail}")
         raise DriveTerminalError(f"drive answered {status}: {detail}")
+
+
+def _json_body(response: httpx.Response) -> dict:
+    """A 200's body as JSON, or the retryable refusal a non-JSON body earns."""
+    try:
+        return response.json()
+    except ValueError as exc:
+        raise DriveRetryableError(
+            "drive answered 200 with a body that is not JSON"
+        ) from exc
 
 
 def _reason(response: httpx.Response) -> str:

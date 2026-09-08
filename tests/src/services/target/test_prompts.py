@@ -252,3 +252,10 @@ class TestTheCardCarriesTheMedia:
 
     def test_the_media_payload_is_json_serializable(self):
         json.dumps(prompts.render_card(self._with_media(), api_publishing_enabled=True))
+
+    def test_a_caption_without_a_handle_is_bounded(self):
+        payload = prompts.render_card(
+            self._with_media(handle=None, file_name="x" * 900),
+            api_publishing_enabled=False,
+        )
+        assert len(payload["caption"]) <= 1024

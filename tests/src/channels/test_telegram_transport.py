@@ -21,6 +21,9 @@ import httpx
 import pytest
 
 from src.channels.telegram_transport import (
+    MediaTransient,
+    MediaUnavailable,
+    TelegramRefused,
     TelegramAuthDead,
     TelegramSendError,
     TelegramTransport,
@@ -390,3 +393,150 @@ class TestMediaCards:
         t = _transport(handler)
         assert await t.for_chat("7")(MEDIA_ROW) == "8"
         assert calls[0].endswith("/sendMessage")
+
+
+class TestMediaCardsStayHonest:
+    """Review of #1259: only a DEFINITIVE refusal of the upload falls back —
+    a lost answer, a 429 or a 5xx may have posted the card and propagate for
+    the outbox's ambiguity policy; a dead token is a dead token; and a fetch
+    that fails for a reason that is not the file's is loud and counted."""
+
+    async def test_a_lost_upload_answer_propagates_without_a_text_fallback(self):
+        calls = []
+
+        def handler(request):
+            calls.append(str(request.url).rsplit("/", 1)[1])
+            raise httpx.ConnectError("boom")
+
+        t = TelegramTransport(TOKEN, client=_client(handler), media_fetch=_fetch_ok)
+        with pytest.raises(TelegramSendError):
+            await t.for_chat("7")(MEDIA_ROW)
+        assert calls == ["sendPhoto"], "one attempt, no re-upload, no text card"
+
+    @pytest.mark.parametrize("code", [429, 500, 502])
+    async def test_a_429_or_5xx_on_the_upload_is_ambiguous_not_a_refusal(self, code):
+        calls = []
+
+        def handler(request):
+            calls.append(str(request.url).rsplit("/", 1)[1])
+            return httpx.Response(
+                code, json={"ok": False, "error_code": code, "description": "try later"}
+            )
+
+        t = TelegramTransport(TOKEN, client=_client(handler), media_fetch=_fetch_ok)
+        with pytest.raises(TelegramSendError) as exc:
+            await t.for_chat("7")(MEDIA_ROW)
+        assert not isinstance(exc.value, TelegramRefused)
+        assert calls == ["sendPhoto"]
+
+    async def test_a_401_on_the_upload_is_the_dead_credential(self):
+        def handler(request):
+            return httpx.Response(
+                401,
+                json={"ok": False, "error_code": 401, "description": "Unauthorized"},
+            )
+
+        t = TelegramTransport(TOKEN, client=_client(handler), media_fetch=_fetch_ok)
+        with pytest.raises(TelegramAuthDead):
+            await t.for_chat("7")(MEDIA_ROW)
+        assert t.auth_failures == 1
+
+    async def test_a_media_block_for_another_workspace_is_refused_loudly(self):
+        calls = []
+        fetched = []
+
+        async def fetch(media):
+            fetched.append(media)
+            return b"x", "a.jpg", "image/jpeg"
+
+        def handler(request):
+            calls.append(str(request.url).rsplit("/", 1)[1])
+            return httpx.Response(200, json={"ok": True, "result": {"message_id": 9}})
+
+        t = TelegramTransport(TOKEN, client=_client(handler), media_fetch=fetch)
+        row = dict(MEDIA_ROW, workspace_id="ws-OTHER")
+        assert await t.for_chat("7")(row) == "9"
+        assert fetched == [], "the grant is never asked for another tenant's file"
+        assert calls == ["sendMessage"] and t.media_fetch_failures == 1
+
+    async def test_the_files_own_failure_is_quiet_but_anything_else_is_counted(self):
+        calls = []
+
+        def handler(request):
+            calls.append(str(request.url).rsplit("/", 1)[1])
+            return httpx.Response(200, json={"ok": True, "result": {"message_id": 3}})
+
+        async def too_large(media):
+            raise MediaUnavailable("11 bytes; the cap is 10")
+
+        t = TelegramTransport(TOKEN, client=_client(handler), media_fetch=too_large)
+        assert await t.for_chat("7")(MEDIA_ROW) == "3"
+        assert t.media_fetch_failures == 0
+
+        t2 = TelegramTransport(TOKEN, client=_client(handler), media_fetch=_fetch_fails)
+        assert await t2.for_chat("7")(MEDIA_ROW) == "3"
+        assert t2.media_fetch_failures == 1
+
+    async def test_a_transient_fetch_failure_propagates_so_the_photo_is_resent_later(
+        self,
+    ):
+        calls = []
+
+        def handler(request):
+            calls.append(str(request.url).rsplit("/", 1)[1])
+            return httpx.Response(200, json={"ok": True, "result": {"message_id": 3}})
+
+        async def blip(media):
+            raise MediaTransient("drive answered 503")
+
+        t = TelegramTransport(TOKEN, client=_client(handler), media_fetch=blip)
+        with pytest.raises(TelegramSendError):
+            await t.for_chat("7")(MEDIA_ROW)
+        assert calls == [] and t.media_fetch_failures == 0, "no text card for a blip"
+
+    async def test_a_mime_telegram_will_not_take_as_a_photo_goes_as_a_document(self):
+        seen = {}
+
+        def handler(request):
+            seen["url"] = str(request.url)
+            seen["body"] = _multipart(request)
+            return httpx.Response(200, json={"ok": True, "result": {"message_id": 12}})
+
+        async def fetch(media):
+            return b"HEICBYTES", "shot.heic", "image/heic"
+
+        row = dict(
+            MEDIA_ROW,
+            payload={
+                **MEDIA_ROW["payload"],
+                "media": {
+                    **MEDIA_ROW["payload"]["media"],
+                    "mime": "image/heic",
+                    "file_name": "shot.heic",
+                },
+            },
+        )
+        t = TelegramTransport(TOKEN, client=_client(handler), media_fetch=fetch)
+        assert await t.for_chat("7")(row) == "12"
+        assert seen["url"].endswith("/sendDocument")
+        assert b'name="document"; filename="shot.heic"' in seen["body"]
+
+    async def test_a_413_is_a_definitive_refusal_and_falls_back(self):
+        calls = []
+
+        def handler(request):
+            calls.append(str(request.url).rsplit("/", 1)[1])
+            if calls[-1] == "sendPhoto":
+                return httpx.Response(
+                    413,
+                    json={
+                        "ok": False,
+                        "error_code": 413,
+                        "description": "Request Entity Too Large",
+                    },
+                )
+            return httpx.Response(200, json={"ok": True, "result": {"message_id": 6}})
+
+        t = TelegramTransport(TOKEN, client=_client(handler), media_fetch=_fetch_ok)
+        assert await t.for_chat("7")(MEDIA_ROW) == "6"
+        assert calls == ["sendPhoto", "sendMessage"]

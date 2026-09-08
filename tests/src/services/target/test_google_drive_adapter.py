@@ -1301,3 +1301,82 @@ class TestFetchBytes:
             await adapter.fetch_bytes(
                 source_id=SRC, workspace_id=WS, file_ref="FILE1", max_bytes=10
             )
+
+    @pytest.mark.asyncio
+    async def test_the_adapter_built_without_a_policy_still_fetches(self):
+        """The worker constructs the adapter with no policy (the floor's
+        default applies per call); the media policy must derive from that,
+        never from None (review of #1259 — the fetch crashed on every card)."""
+        adapter, calls = self._drive()
+        adapter._policy = None
+        content, name, mime = await adapter.fetch_bytes(
+            source_id=SRC, workspace_id=WS, file_ref="FILE1", max_bytes=10
+        )
+        assert content == b"12345" and any("alt=media" in c for c in calls)
+
+    @pytest.mark.asyncio
+    async def test_a_body_larger_than_the_metadata_said_is_still_refused(self):
+        """The byte cap rides the media policy, so a metadata size that lied
+        cannot pull more than `max_bytes`."""
+        from src.services.target.drive_adapter import DriveMediaTooLarge
+
+        adapter, _ = self._drive(size="5", body=b"x" * (20 * 1024))
+        with pytest.raises(DriveMediaTooLarge):
+            await adapter.fetch_bytes(
+                source_id=SRC, workspace_id=WS, file_ref="FILE1", max_bytes=10
+            )
+
+    @pytest.mark.asyncio
+    async def test_a_refused_token_on_the_bytes_path_is_re_minted_once(self):
+        calls = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(str(request.url))
+            if "alt=media" in str(request.url):
+                if len([c for c in calls if "alt=media" in c]) == 1:
+                    return httpx.Response(401, json={"error": {"message": "expired"}})
+                return httpx.Response(
+                    200, content=b"12345", headers={"content-type": "image/jpeg"}
+                )
+            return httpx.Response(
+                200, json={"size": "5", "mimeType": "image/jpeg", "name": "a.jpg"}
+            )
+
+        record = []
+        adapter = _adapter(handler, record=record)
+        content, _, _ = await adapter.fetch_bytes(
+            source_id=SRC, workspace_id=WS, file_ref="FILE1", max_bytes=10
+        )
+        assert content == b"12345"
+        assert len([c for c in calls if "alt=media" in c]) == 2, (
+            "one re-mint, one retry"
+        )
+        assert (
+            any(
+                getattr(r, "fresh", None)
+                or (isinstance(r, tuple) and True in r)
+                or "fresh" in str(r)
+                for r in record
+            )
+            or len(record) >= 2
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_refusal_of_the_bytes_after_good_metadata_is_the_files_fault(self):
+        from src.services.target.drive_adapter import DriveMediaGone
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if "alt=media" in str(request.url):
+                return httpx.Response(
+                    403, json={"error": {"message": "cannotDownloadFile"}}
+                )
+            return httpx.Response(
+                200, json={"size": "5", "mimeType": "image/jpeg", "name": "a.jpg"}
+            )
+
+        record = []
+        adapter = _adapter(handler, record=record)
+        with pytest.raises(DriveMediaGone):
+            await adapter.fetch_bytes(
+                source_id=SRC, workspace_id=WS, file_ref="FILE1", max_bytes=10
+            )
