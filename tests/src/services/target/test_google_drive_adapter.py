@@ -1446,10 +1446,29 @@ class TestFolderAncestors:
 
     @pytest.mark.asyncio
     async def test_a_parent_the_grant_cannot_read_ends_the_chain(self):
-        adapter, calls = self._drive({"CHILD": "OWNERS", "OWNERS": None})
         # OWNERS is not in the map's readable set: the 404 on it ends the chain.
         adapter2, calls2 = self._drive({"CHILD": "OWNERS"})
         assert await adapter2.folder_ancestors(workspace_id=WS, folder_ref="CHILD") == [
             "OWNERS"
         ]
         assert len(calls2) == 2
+
+    @pytest.mark.asyncio
+    async def test_a_grant_dying_mid_chain_is_the_grants_fault_not_a_shorter_chain(
+        self,
+    ):
+        from src.services.target.media_sync import DriveCredentialDead
+
+        calls = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(str(request.url))
+            fid = str(request.url).split("/files/")[1].split("?")[0]
+            if fid == "CHILD":
+                return httpx.Response(200, json={"id": "CHILD", "parents": ["PARENT"]})
+            return httpx.Response(401, json={"error": {"message": "expired"}})
+
+        with pytest.raises(DriveCredentialDead):
+            await _adapter(handler).folder_ancestors(
+                workspace_id=WS, folder_ref="CHILD"
+            )

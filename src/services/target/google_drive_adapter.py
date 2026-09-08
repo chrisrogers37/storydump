@@ -691,11 +691,13 @@ class GoogleDriveAdapter:
                     workspace_id=workspace_id,
                     box=box,
                 )
-            except (DriveSourceGone, DriveCredentialDead):
+            except DriveSourceGone:
                 if current == folder_ref:
-                    raise  # the folder itself: gone, or the grant's refusal
-                # A parent the grant cannot read (a folder shared into the
-                # account names its owner's parent) ends the chain here.
+                    raise  # the folder itself is gone
+                # A parent the grant cannot see (a folder shared into the
+                # account names its owner's parent) ends the chain here. A
+                # dead grant is NOT this: `DriveCredentialDead` propagates, so
+                # a grant dying mid-walk never passes as a shorter chain.
                 break
             # Drive v3 gives a file ONE parent (multi-parenting ended in 2020);
             # a legacy multi-parent folder reports the first, which is the
