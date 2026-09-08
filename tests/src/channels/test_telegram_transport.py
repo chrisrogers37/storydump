@@ -235,3 +235,158 @@ class TestAChatThatIsGoneIsNotADeadToken:
         t = _transport(handler)
         with pytest.raises(TelegramAuthDead):
             await t.send_text("7", "hi")
+
+
+MEDIA_ROW = {
+    "id": "ob-2",
+    "kind": "approval_prompt",
+    "payload": {
+        "v": 2,
+        "text": "📸 sunset.jpg (image)\nSlot: 2026-08-21 14:30 America/New_York",
+        "caption": "📸 @gatortails\nSlot: 2026-08-21 14:30 America/New_York",
+        "reply_markup": {
+            "inline_keyboard": [[{"text": "✅ Posted", "callback_data": "v1:posted:x"}]]
+        },
+        "media": {
+            "workspace_id": "ws-1",
+            "source_id": "src-1",
+            "ref": "file-1",
+            "kind": "image",
+            "mime": "image/jpeg",
+            "file_name": "sunset.jpg",
+        },
+    },
+    "attempts": 1,
+    "intent_id": "i-1",
+}
+
+
+async def _fetch_ok(media):
+    return b"JPEGBYTES", media["file_name"], media["mime"]
+
+
+async def _fetch_fails(media):
+    raise RuntimeError("drive said no")
+
+
+def _multipart(request):
+    body = request.read()
+    assert request.headers["content-type"].startswith("multipart/form-data"), (
+        "a media card is a multipart upload"
+    )
+    return body
+
+
+class TestMediaCards:
+    """Legacy parity (owner, 2026-09-08): the card IS the photo or video, the
+    account and slot its caption. The transport fetches the bytes through the
+    injected `media_fetch` and uploads them; when the file cannot be fetched
+    or Telegram refuses the upload, the text card is sent instead — a chat that
+    is gone, or a dead token, still propagate."""
+
+    async def test_an_image_card_is_a_sendphoto_upload_with_caption_and_keyboard(self):
+        seen = {}
+
+        def handler(request):
+            seen["url"] = str(request.url)
+            seen["body"] = _multipart(request)
+            return httpx.Response(200, json={"ok": True, "result": {"message_id": 77}})
+
+        t = TelegramTransport(TOKEN, client=_client(handler), media_fetch=_fetch_ok)
+        assert await t.for_chat("7")(MEDIA_ROW) == "77"
+        assert seen["url"].endswith("/sendPhoto")
+        body = seen["body"]
+        assert b'name="photo"; filename="sunset.jpg"' in body
+        assert b"Content-Type: image/jpeg" in body and b"JPEGBYTES" in body
+        assert b'name="chat_id"' in body and b"\r\n7\r\n" in body
+        assert b'name="caption"' in body and "@gatortails".encode() in body
+        assert b'name="reply_markup"' in body and b"v1:posted:x" in body
+
+    async def test_a_video_card_is_a_sendvideo_upload(self):
+        seen = {}
+
+        def handler(request):
+            seen["url"] = str(request.url)
+            seen["body"] = _multipart(request)
+            return httpx.Response(200, json={"ok": True, "result": {"message_id": 78}})
+
+        async def fetch(media):
+            return b"MP4BYTES", "clip.mp4", "video/mp4"
+
+        row = dict(
+            MEDIA_ROW,
+            payload={
+                **MEDIA_ROW["payload"],
+                "media": {
+                    **MEDIA_ROW["payload"]["media"],
+                    "kind": "video",
+                    "mime": "video/mp4",
+                    "file_name": "clip.mp4",
+                },
+            },
+        )
+        t = TelegramTransport(TOKEN, client=_client(handler), media_fetch=fetch)
+        assert await t.for_chat("7")(row) == "78"
+        assert seen["url"].endswith("/sendVideo")
+        assert b'name="video"; filename="clip.mp4"' in seen["body"]
+
+    async def test_a_failed_fetch_falls_back_to_the_text_card(self):
+        calls = []
+
+        def handler(request):
+            calls.append(str(request.url))
+            return httpx.Response(200, json={"ok": True, "result": {"message_id": 5}})
+
+        t = TelegramTransport(TOKEN, client=_client(handler), media_fetch=_fetch_fails)
+        assert await t.for_chat("7")(MEDIA_ROW) == "5"
+        assert len(calls) == 1 and calls[0].endswith("/sendMessage")
+
+    async def test_a_refused_upload_falls_back_to_the_text_card_once(self):
+        calls = []
+
+        def handler(request):
+            calls.append(str(request.url))
+            if calls[-1].endswith("/sendPhoto"):
+                return httpx.Response(
+                    400,
+                    json={
+                        "ok": False,
+                        "error_code": 400,
+                        "description": "Bad Request: PHOTO_INVALID_DIMENSIONS",
+                    },
+                )
+            return httpx.Response(200, json={"ok": True, "result": {"message_id": 6}})
+
+        t = TelegramTransport(TOKEN, client=_client(handler), media_fetch=_fetch_ok)
+        assert await t.for_chat("7")(MEDIA_ROW) == "6"
+        assert [c.rsplit("/", 1)[1] for c in calls] == ["sendPhoto", "sendMessage"]
+
+    async def test_a_chat_that_is_gone_propagates_without_a_fallback(self):
+        calls = []
+
+        def handler(request):
+            calls.append(str(request.url))
+            return httpx.Response(
+                403,
+                json={
+                    "ok": False,
+                    "error_code": 403,
+                    "description": "Forbidden: bot was kicked from the group chat",
+                },
+            )
+
+        t = TelegramTransport(TOKEN, client=_client(handler), media_fetch=_fetch_ok)
+        with pytest.raises(TelegramChatGone):
+            await t.for_chat("7")(MEDIA_ROW)
+        assert len(calls) == 1, "no text fallback into a chat that is gone"
+
+    async def test_without_a_media_fetch_the_text_card_is_sent(self):
+        calls = []
+
+        def handler(request):
+            calls.append(str(request.url))
+            return httpx.Response(200, json={"ok": True, "result": {"message_id": 8}})
+
+        t = _transport(handler)
+        assert await t.for_chat("7")(MEDIA_ROW) == "8"
+        assert calls[0].endswith("/sendMessage")

@@ -1235,3 +1235,69 @@ class TestTheWalkGoesToAnyDepth:
             "once the cap is hit, a popped folder is not asked for its subfolders"
         )
         assert cursors[-1].get("truncated") is True
+
+
+class TestFetchBytes:
+    """The media bytes for the approval card (owner, 2026-09-08 — legacy
+    parity): metadata first, so a file over the cap is refused before a
+    download; then `alt=media` under the workspace grant."""
+
+    def _drive(self, *, size="5", body=b"12345", status=200):
+        calls = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(str(request.url))
+            if "alt=media" in str(request.url):
+                return httpx.Response(
+                    200, content=body, headers={"content-type": "image/jpeg"}
+                )
+            if status != 200:
+                return httpx.Response(
+                    status, json={"error": {"message": "File not found"}}
+                )
+            return httpx.Response(
+                200, json={"size": size, "mimeType": "image/jpeg", "name": "a.jpg"}
+            )
+
+        return _adapter(handler), calls
+
+    @pytest.mark.asyncio
+    async def test_bytes_name_and_mime_come_back_under_the_grant(self):
+        adapter, calls = self._drive()
+        content, name, mime = await adapter.fetch_bytes(
+            source_id=SRC, workspace_id=WS, file_ref="FILE1", max_bytes=10
+        )
+        assert (content, name, mime) == (b"12345", "a.jpg", "image/jpeg")
+        assert any("alt=media" in c and "/files/FILE1" in c for c in calls)
+
+    @pytest.mark.asyncio
+    async def test_a_file_over_the_cap_is_refused_before_any_download(self):
+        from src.services.target.drive_adapter import DriveMediaTooLarge
+
+        adapter, calls = self._drive(size="11")
+        with pytest.raises(DriveMediaTooLarge):
+            await adapter.fetch_bytes(
+                source_id=SRC, workspace_id=WS, file_ref="FILE1", max_bytes=10
+            )
+        assert not any("alt=media" in c for c in calls)
+
+    @pytest.mark.asyncio
+    async def test_a_ref_outside_the_drive_id_shape_is_refused_before_any_request(self):
+        from src.services.target.drive_adapter import DriveTerminalError
+
+        adapter, calls = self._drive()
+        with pytest.raises(DriveTerminalError):
+            await adapter.fetch_bytes(
+                source_id=SRC, workspace_id=WS, file_ref="x/../y", max_bytes=10
+            )
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_a_missing_file_is_named_as_such(self):
+        from src.services.target.drive_adapter import DriveMediaGone
+
+        adapter, _ = self._drive(status=404)
+        with pytest.raises(DriveMediaGone):
+            await adapter.fetch_bytes(
+                source_id=SRC, workspace_id=WS, file_ref="FILE1", max_bytes=10
+            )

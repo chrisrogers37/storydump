@@ -80,7 +80,12 @@ from urllib.parse import urlencode
 import httpx
 
 from src.services.target import egress
+from src.services.target.egress import EgressPolicy
+from dataclasses import replace as _replace
+
 from src.services.target.drive_adapter import (
+    DriveMediaGone,
+    DriveMediaTooLarge,
     DriveError,
     DriveLostResponse,
     DriveRetryableError,
@@ -141,6 +146,10 @@ class FolderPage:
     folders: list[dict]
     truncated: bool = False
 
+
+#: Telegram's bot-upload limits, which bound the approval card's media fetch
+#: (owner, 2026-09-08 — the card is the photo, as it was in the legacy product).
+MEDIA_CARD_MAX_BYTES = {"image": 10 * 1024 * 1024, "video": 50 * 1024 * 1024}
 
 #: Requested per file. `md5Checksum` is the content hash without a download.
 FILE_FIELDS = "id,name,mimeType,size,modifiedTime,md5Checksum"
@@ -571,6 +580,62 @@ class GoogleDriveAdapter:
             if not page:
                 return folders
 
+    async def fetch_bytes(
+        self,
+        *,
+        source_id: str,
+        workspace_id: str,
+        file_ref: str,
+        max_bytes: int,
+    ) -> tuple[bytes, str, Optional[str]]:
+        """A file's bytes, name and mime under the workspace grant — the
+        approval card's media (owner, 2026-09-08). Metadata first, so a file
+        over `max_bytes` is refused (`DriveMediaTooLarge`) before a download;
+        a file that is gone is `DriveMediaGone`, never the source's fault. The
+        download runs under the upload timeout class with the byte cap set to
+        `max_bytes`, so a metadata size that lied cannot pull more."""
+        if not is_folder_id(file_ref):  # file ids share the folder-id alphabet
+            raise DriveTerminalError("file_ref is not a Drive id")
+        box = _TokenBox(
+            await self._token_provider(source_id, workspace_id=workspace_id)
+        )
+        meta_params = {"fields": "size,mimeType,name", "supportsAllDrives": "true"}
+        try:
+            meta = await self._get_as_workspace(
+                f"{FILES_URL}/{file_ref}?{urlencode(meta_params)}",
+                source_id=source_id,
+                workspace_id=workspace_id,
+                box=box,
+            )
+        except DriveSourceGone as exc:
+            raise DriveMediaGone(
+                f"drive file {file_ref} is gone for source {source_id}: {exc}"
+            ) from exc
+        size = int(meta.get("size") or 0)
+        if size > max_bytes:
+            raise DriveMediaTooLarge(
+                f"drive file {file_ref} is {size} bytes; the cap is {max_bytes}"
+            )
+        media_params = {"alt": "media", "supportsAllDrives": "true"}
+        policy = _replace(
+            self._policy, timeout_class="upload", max_response_bytes=max_bytes
+        )
+        try:
+            response = await self._fetch_as_workspace(
+                f"{FILES_URL}/{file_ref}?{urlencode(media_params)}",
+                source_id=source_id,
+                workspace_id=workspace_id,
+                box=box,
+                policy=policy,
+            )
+        except DriveSourceGone as exc:
+            raise DriveMediaGone(
+                f"drive file {file_ref} vanished mid-fetch for source {source_id}: {exc}"
+            ) from exc
+        except egress.ResponseTooLarge as exc:
+            raise DriveMediaTooLarge(str(exc)) from exc
+        return response.content, str(meta.get("name") or file_ref), meta.get("mimeType")
+
     async def list_folders(
         self, *, parent: Optional[str], workspace_id: str
     ) -> FolderPage:
@@ -725,13 +790,18 @@ class GoogleDriveAdapter:
         }
 
     async def _floored_get(
-        self, client: httpx.AsyncClient, url: str, token: str
+        self,
+        client: httpx.AsyncClient,
+        url: str,
+        token: str,
+        *,
+        policy: Optional[EgressPolicy] = None,
     ) -> httpx.Response:
         return await egress.request(
             client,
             "GET",
             url,
-            policy=self._policy,
+            policy=policy or self._policy,
             headers={"Authorization": f"Bearer {token}"},
         )
 
@@ -749,6 +819,28 @@ class GoogleDriveAdapter:
         asked once more with `fresh=True` and the GET retried; a second
         refusal is the grant's, and propagates (P5, #1247). `box` lets a
         multi-request call (the walk) share one token and see the re-mint."""
+        response = await self._fetch_as_workspace(
+            url, source_id=source_id, workspace_id=workspace_id, box=box
+        )
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise DriveRetryableError(
+                "drive answered 200 with a body that is not JSON"
+            ) from exc
+
+    async def _fetch_as_workspace(
+        self,
+        url: str,
+        *,
+        source_id: Optional[str],
+        workspace_id: str,
+        box: Optional[_TokenBox] = None,
+        policy: Optional[EgressPolicy] = None,
+    ) -> httpx.Response:
+        """`_get_as_workspace` before the JSON step: the 200 response itself,
+        for a body that is bytes (the card's media) — same token, same one
+        re-mint, same status routing."""
         label = (
             source_id
             if source_id is not None
@@ -759,21 +851,45 @@ class GoogleDriveAdapter:
                 await self._token_provider(source_id, workspace_id=workspace_id)
             )
         try:
-            return await self._get(url, box.value, source_id=label)
+            return await self._get_response(
+                url, box.value, source_id=label, policy=policy
+            )
         except DriveCredentialDead:
             box.value = await self._token_provider(
                 source_id, workspace_id=workspace_id, fresh=True
             )
-            return await self._get(url, box.value, source_id=label)
+            return await self._get_response(
+                url, box.value, source_id=label, policy=policy
+            )
 
     async def _get(self, url: str, token: str, *, source_id: str) -> dict:
-        """One floored GET, with the status mapped to the routing vocabulary."""
+        """One floored GET whose 200 body is JSON (the listing calls)."""
+        response = await self._get_response(url, token, source_id=source_id)
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise DriveRetryableError(
+                "drive answered 200 with a body that is not JSON"
+            ) from exc
+
+    async def _get_response(
+        self,
+        url: str,
+        token: str,
+        *,
+        source_id: str,
+        policy: Optional[EgressPolicy] = None,
+    ) -> httpx.Response:
+        """One floored GET, with the status mapped to the routing vocabulary;
+        a 200 comes back whole for the caller to read."""
         try:
             if self._client is not None:
-                response = await self._floored_get(self._client, url, token)
+                response = await self._floored_get(
+                    self._client, url, token, policy=policy
+                )
             else:
                 async with httpx.AsyncClient() as own:
-                    response = await self._floored_get(own, url, token)
+                    response = await self._floored_get(own, url, token, policy=policy)
         except egress.EgressBudgetExhausted as exc:
             # The floor retries transport failures internally and then raises
             # THIS rather than the original error, so a bare
@@ -788,12 +904,7 @@ class GoogleDriveAdapter:
 
         status = response.status_code
         if status == 200:
-            try:
-                return response.json()
-            except ValueError as exc:
-                raise DriveRetryableError(
-                    f"drive answered {status} with a body that is not JSON"
-                ) from exc
+            return response
 
         detail = _reason(response)
         if status in (401, 403):

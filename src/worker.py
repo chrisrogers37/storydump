@@ -23,6 +23,7 @@ own; this process only chooses the recurring singletons it can actually run.
 from __future__ import annotations
 
 import asyncio
+from typing import Optional
 import logging
 
 from src.config.settings import settings
@@ -512,6 +513,25 @@ async def run(app: WorkerApp, *, stop: asyncio.Event | None = None) -> None:
             )
 
 
+def _card_media_fetch(drive):
+    """`TelegramTransport.media_fetch`: a card's media block → (bytes, name,
+    mime) under the workspace grant, capped at Telegram's upload limit for
+    the kind so an oversize file is refused from metadata, never downloaded."""
+
+    async def fetch(media: dict) -> tuple[bytes, str, Optional[str]]:
+        cap = google_drive_adapter.MEDIA_CARD_MAX_BYTES.get(
+            str(media.get("kind")), google_drive_adapter.MEDIA_CARD_MAX_BYTES["image"]
+        )
+        return await drive.fetch_bytes(
+            source_id=str(media["source_id"]),
+            workspace_id=str(media["workspace_id"]),
+            file_ref=str(media["ref"]),
+            max_bytes=cap,
+        )
+
+    return fetch
+
+
 def main() -> None:
     logging.basicConfig(
         level=os.environ.get("WORKER_LOG_LEVEL", "INFO"),
@@ -527,10 +547,6 @@ def main() -> None:
     engine = unit_of_work.create_engine(unit_of_work.engine_url_from_env(env))
     transport = None
     token = env.get("TARGET_TELEGRAM_BOT_TOKEN")
-    if token:
-        from src.channels.telegram_transport import TelegramTransport
-
-        transport = TelegramTransport(token)
     # The Drive read leg (#982). Armed unconditionally: it needs no env of its
     # own (the engine carries the credential lookup, the token is the workspace's grant since 069),
     # so an env gate here would be a switch with nothing to switch on.
@@ -559,6 +575,14 @@ def main() -> None:
     drive = google_drive_adapter.GoogleDriveAdapter(
         token_provider=drive_credentials.provider_from_engine(engine),
     )
+    if token:
+        from src.channels.telegram_transport import TelegramTransport
+
+        # The approval card is the photo (owner, 2026-09-08): the transport
+        # fetches a card's media through the same Drive read leg. This is NOT
+        # the publish pipeline's `media_fetch` seam (above) — that one stays
+        # unwired until milestone 2, for the reason given there.
+        transport = TelegramTransport(token, media_fetch=_card_media_fetch(drive))
     app = compose(
         engine=engine, config=config, env=env, transport=transport, drive=drive
     )
