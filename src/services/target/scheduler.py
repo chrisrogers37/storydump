@@ -316,18 +316,49 @@ async def execute_plan_slot(
     no_media_notice_after_seconds: int,
     rng: Optional[random.Random] = None,
 ) -> "SlotOutcome":
-    """One slot for one account: the draw and the intent.
+    """The `plan_slot` executor: mint the intent for one slot, or nothing.
 
-    `06` §3, keyed on the CONNECTED FOLDER since 2026-09-08: the connected
-    folders that have eligible media are drawn by `category_mix.weights`
-    (explicit weights by ratio; folders without a weight in proportion to their
-    files, together never more than the smallest explicit weight; Off never;
-    a folder gone in Drive never), then oldest-first within the drawn one. No
-    pool behind that set: a removed folder's rows and an Off folder's are the
-    two things that must never post, and they are all that would be left.
-    `rng` is injectable so a test can seed the draw; production uses the
-    system generator.
-    """
+    Returns a :class:`SlotOutcome`. Its `intent_id` is None when the slot
+    already had one or no media was available — both ordinary outcomes, not
+    failures — and its `notice` reports whether an empty library went
+    unreported for want of a delivery surface.
+
+    **The two Nones are not the same fact, and only one of them speaks.** A
+    slot that already had an intent is the idempotency guard doing its job and
+    the customer has nothing to learn from it; a slot that found no media is
+    `06` §5's "slot missed" row, which the customer is owed a notice about
+    ("you are told once — not silently nothing", #1090 D3). The return value
+    stays `Optional[str]` because no caller needs to tell them apart — the
+    notice is emitted here, where the empty case already lives — and its
+    fate rides back on `SlotOutcome.notice`, because the caller finalizes the
+    job and a notice nobody received must not finalize as a success.
+
+    *no_media_notice_after_seconds* is `05`'s dedup window (24 h) and is
+    **required, not defaulted**: a dedup window that can be silently omitted is
+    how a once-a-day notice becomes either a flood or a silence, and there is
+    exactly one production caller to pass it.
+
+    **Idempotent by key 1, not by checking first.** The insert carries
+    ``ON CONFLICT … DO NOTHING`` against `uq_intent_slot`, so a duplicate
+    `plan_slot` job — which the clock's own `NOT EXISTS` cannot rule out, and
+    which a lease cannot either — mints no second intent. A read-then-write
+    would be the #883 shape: correct in a test, wrong under two workers.
+
+    Note the conflict target is spelled as **columns**, not
+    ``ON CONFLICT ON CONSTRAINT uq_intent_slot`` as `02` §5's prose has it.
+    Key 1 ships as a bare ``CREATE UNIQUE INDEX``, and ``ON CONSTRAINT``
+    resolves only names in ``pg_constraint``; the prose form does not run. The
+    inference form is equivalent and is what the gate exercises.
+
+    Selection (`06` §3), keyed on the CONNECTED FOLDER since 2026-09-08: the
+    connected folders that have eligible media are drawn by
+    `category_mix.weights` (explicit weights by ratio; folders without a
+    weight in proportion to their files, together never more than the smallest
+    explicit weight; Off never; a folder gone in Drive never), then
+    oldest-first within the drawn one. No pool behind that set: a removed
+    folder's rows and an Off folder's are the two things that must never post,
+    and they are all that would be left. `rng` is injectable so a test can
+    seed the draw; production uses the system generator."""
     draw = rng if rng is not None else random.SystemRandom()
     # `06` §3's rule in full: available, not already live for this account,
     # minus the workspace-wide locks (skip/reject/hold/seasonal/unsupported)
