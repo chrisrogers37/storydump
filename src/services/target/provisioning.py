@@ -365,12 +365,13 @@ def folder_ref_from(value: object) -> str:
     silently returns the first source. One person, two links, one source, no
     signal.
 
-    The guard is a denylist of characters no Drive id carries rather than an
-    allowlist of ones it does: Google publishes no guarantee about the id
-    charset, so "this still looks like a URL" is the claim we can actually
-    defend, while an allowlist would risk refusing a legitimate id on a
-    character nobody here anticipated. Refusing costs a person one clear error;
-    accepting costs them a silently merged source.
+    Two guards. A denylist of characters no Drive id carries catches what still
+    looks like a URL; then the id must fit the shape the adapter itself
+    requires (`google_drive_adapter.FOLDER_ID_RE` — the same shape the folder
+    browser lists, #1246, and the walk splices into its `q` strings, #1256).
+    A value the adapter would refuse must be refused HERE, at the pick, rather
+    than become a source that errors on every sync forever. Refusing costs a
+    person one clear error; accepting costs them a dead source.
     """
     if not isinstance(value, str) or not value.strip():
         raise ProvisioningRefused("folder_required")
@@ -385,6 +386,13 @@ def folder_ref_from(value: object) -> str:
     if not ref:
         raise ProvisioningRefused("folder_required")
     if any(ch in ref for ch in ":. \t\r\n"):
+        raise ProvisioningRefused(
+            "folder_not_a_drive_folder",
+            "expected a Drive folder link or a bare folder id",
+        )
+    from src.services.target.google_drive_adapter import is_folder_id  # no import cycle
+
+    if not is_folder_id(ref):
         raise ProvisioningRefused(
             "folder_not_a_drive_folder",
             "expected a Drive folder link or a bare folder id",

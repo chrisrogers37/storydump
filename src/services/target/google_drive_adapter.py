@@ -118,7 +118,7 @@ def is_folder_id(value: object) -> bool:
     return isinstance(value, str) and FOLDER_ID_RE.fullmatch(value) is not None
 
 
-def _cursor_folder(entry: Mapping[str, Any], root: str) -> dict:
+def _cursor_folder(entry: Mapping[str, Any]) -> dict:
     """A queue/current entry read back from a stored cursor, with every field
     the walk reads present: a missing one gets its default (the entry's own id
     as `top`; an empty path) rather than a KeyError the retry ladder would
@@ -305,9 +305,9 @@ class GoogleDriveAdapter:
         if resumed and is_folder_id(resumed.get("id")):
             # Healed, not trusted: a field a stored cursor lacks gets its
             # default rather than a KeyError that would retry forever.
-            current: dict = _cursor_folder(resumed, root)
+            current: dict = _cursor_folder(resumed)
             queue = [
-                _cursor_folder(f, root)
+                _cursor_folder(f)
                 for f in (cp.get("queue") or [])
                 if is_folder_id((f or {}).get("id"))
             ]
@@ -318,7 +318,8 @@ class GoogleDriveAdapter:
         else:
             if cp.get("current") or cp.get("page_token"):
                 logger.warning(
-                    "drive source %s: a pre-v2 cursor was stored mid-walk — starting over",
+                    "drive source %s: the stored cursor cannot be resumed (pre-v2, or"
+                    " malformed) — starting over",
                     source_id,
                 )
             walk = walk or uuid.uuid4().hex

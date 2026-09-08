@@ -326,28 +326,41 @@ async def _run_sync(deps, job, *, reason) -> str:
         and isinstance(stored.get("walk"), str)
         and stored.get("walk")
     )
-    if reason == "chunk":
-        # A chunk is a carrier for ONE walk — the one it names. A chunk that
-        # finds the row on another walk, or complete, is stale: a re-pick
-        # reset the cursor, a lease was lost after the page had been
-        # committed, or a parallel carrier finished first. It does nothing —
-        # above all it does not mint a walk, which would re-walk the whole
-        # tree once per stray chunk (review of #1256).
-        if not in_flight or stored.get("walk") != payload.get("walk"):
+    if reason == "chunk" and in_flight:
+        # A chunk is a carrier for ONE walk — the one it names. On another
+        # walk it is stale: a re-pick or a reset started a new one, or a
+        # parallel carrier is further along. It does nothing (review of #1256).
+        if stored.get("walk") != payload.get("walk"):
             logger.info(
                 "sync %s: chunk for walk %s is stale (row holds %s) — dropped",
                 job["id"],
                 payload.get("walk"),
-                (stored or {}).get("walk"),
+                stored.get("walk"),
             )
             return "stale"
         checkpoint: Any = stored
+    elif reason == "chunk" and not checkpoint_incomplete(stored):
+        # The walk this chunk carried is complete (a parallel carrier finished,
+        # or a lease was lost after the last page committed), or a re-pick
+        # nulled the cursor and re-armed the clock. Above all a stray chunk
+        # never MINTS a walk — that would re-walk the whole tree once per
+        # chunk (review of #1256).
+        logger.info(
+            "sync %s: chunk for walk %s finds the row complete — dropped",
+            job["id"],
+            payload.get("walk"),
+        )
+        return "stale"
     elif in_flight:
         # A baseline or demand sync that finds a walk in flight joins it as a
         # carrier (the chain may have died); the cursor CAS below keeps two
         # carriers from ever overwriting each other.
         checkpoint = stored
     else:
+        # Nothing worth resuming: nothing stored, or a pre-v2 cursor still in
+        # flight at deploy. For a chunk that is the sole carrier of that old
+        # chain, so it starts the walk over rather than leaving the source
+        # with `next_sync_at` NULL and no carrier (re-verification of #1256).
         if checkpoint_incomplete(stored):
             logger.warning(
                 "sync %s: source %s stored a pre-v2 cursor mid-walk — starting over",

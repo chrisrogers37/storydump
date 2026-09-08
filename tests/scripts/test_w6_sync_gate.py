@@ -1274,14 +1274,16 @@ def _set_cursor(conn, src, cursor):
     conn.commit()
 
 
-def _enqueue_chunk(conn, ws, src, walk):
-    """A first_ingest_chunk as the sync chains it (media_sync `_run_sync`)."""
+def _enqueue_chunk(conn, ws, src, walk, *, payload=None):
+    """A first_ingest_chunk as the sync chains it (media_sync `_run_sync`);
+    `payload` overrides the shape (the pre-#1256 chunk carried a page token)."""
+    body = payload if payload is not None else {"v": 2, "source_id": src, "walk": walk}
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO jobs (kind, workspace_id, lane, serialization_key, run_at,"
             " max_attempts, payload) VALUES ('first_ingest_chunk', %s, 'bulk', %s,"
             " now(), 5, %s::jsonb)",
-            (ws, f"src:{src}", json.dumps({"v": 2, "source_id": src, "walk": walk})),
+            (ws, f"src:{src}", json.dumps(body)),
         )
     conn.commit()
 
@@ -1356,6 +1358,43 @@ class TestAChunkCarriesOneWalk:
         assert claimed is True and drive.calls == [], "a removed folder's chain stops"
         assert _source_row(sync_conn, chain["src"])["state"] == "paused"
         assert _jobs(sync_conn, "first_ingest_chunk")[0]["state"] == "succeeded"
+
+    @pytest.mark.asyncio
+    async def test_a_pre_v2_chain_in_flight_at_deploy_starts_over_from_its_chunk(
+        self, lane_db, sync_conn
+    ):
+        """Re-verification of #1256: the one-level chain of 2026-09-06 still in
+        flight at deploy has a chunk queued with no walk and a row with
+        `next_sync_at` NULL. That chunk is the chain's only carrier, so it
+        starts the walk over rather than being dropped as stale — which would
+        leave the source silently dead."""
+        chain = seed_workspace_chain(sync_conn, "w6-prev2-chunk")
+        _set_cursor(
+            sync_conn,
+            chain["src"],
+            {
+                "v": 1,
+                "current": {"id": "X", "name": "x"},
+                "queue": [],
+                "page_token": "p",
+            },
+        )
+        _enqueue_chunk(
+            sync_conn,
+            chain["ws"],
+            chain["src"],
+            None,
+            payload={"v": 1, "source_id": chain["src"], "page_token": "p"},
+        )
+        drive = ScriptedDrive([([_item("n2")], None)])
+        wl, claimed = await _run_once_w6(lane_db, drive)
+        assert claimed is True and len(drive.calls) == 1
+        start = drive.calls[0]["checkpoint"]
+        assert start["v"] == 2 and start["walk"] and "current" not in start
+        src = _source_row(sync_conn, chain["src"])
+        assert not checkpoint_incomplete(src["sync_checkpoint"])
+        assert src["next_sync_at"] is not None, "the walk completed and re-armed"
+        assert "n2" in [r[0] for r in _items(sync_conn, chain["ws"])]
 
     @pytest.mark.asyncio
     async def test_a_cursor_moved_under_a_carrier_is_not_overwritten(
