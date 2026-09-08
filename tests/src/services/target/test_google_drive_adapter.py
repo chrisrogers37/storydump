@@ -20,6 +20,7 @@ import httpx
 import pytest
 
 from src.services.target.drive_adapter import (
+    checkpoint_incomplete,
     DriveLostResponse,
     DriveRetryableError,
     DriveTerminalError,
@@ -103,11 +104,12 @@ class TestListChanges:
                 "content_hash": "hash1",
                 "size_bytes": 10,
                 "modified_at": "2026-08-01T00:00:00Z",
+                "folder_path": "",
             }
         ]
         # media_sync reads exactly these five; the rest are additive.
         assert {"ref", "name", "kind", "mime_type", "content_hash"} <= set(items[0])
-        assert checkpoint == {"v": 1}
+        assert not checkpoint_incomplete(checkpoint)
 
     @pytest.mark.asyncio
     async def test_video_mime_maps_to_the_video_kind(self):
@@ -168,7 +170,8 @@ class TestListChanges:
         _, checkpoint = await _adapter(handler, page_size=200).list_changes(
             CONFIG, None, source_id=SRC, workspace_id=WS
         )
-        assert checkpoint == {"v": 1, "page_token": "MORE"}
+        assert checkpoint["page_token"] == "MORE"
+        assert checkpoint["current"]["id"] == "FOLDER123", "never the bare token shape"
 
         handler2, _ = _json_handler({"files": [_file("f1")]})
         _, done = await _adapter(handler2).list_changes(
@@ -179,8 +182,25 @@ class TestListChanges:
     @pytest.mark.asyncio
     async def test_a_checkpoint_token_is_sent_back_as_pageToken(self):
         handler, seen = _json_handler({"files": []})
+        at_root = {
+            "id": "FOLDER123",
+            "name": None,
+            "top": "FOLDER123",
+            "top_name": None,
+            "path": "",
+            "listed": True,
+        }
         await _adapter(handler).list_changes(
-            CONFIG, {"v": 1, "page_token": "RESUME"}, source_id=SRC, workspace_id=WS
+            CONFIG,
+            {
+                "v": 2,
+                "walk": "w",
+                "current": at_root,
+                "queue": [],
+                "page_token": "RESUME",
+            },
+            source_id=SRC,
+            workspace_id=WS,
         )
         assert "pageToken=RESUME" in str(seen["request"].url)
 
@@ -670,7 +690,7 @@ class TestOneRemintOnARefusedToken:
         items, cp = await adapter.list_changes(
             CONFIG, None, source_id=SRC, workspace_id=WS
         )
-        assert items == [] and cp == {"v": 1}
+        assert items == [] and not checkpoint_incomplete(cp)
         assert calls == ["Bearer tok-stale", "Bearer tok-fresh", "Bearer tok-fresh"]
 
     @pytest.mark.asyncio
@@ -712,11 +732,14 @@ class TestTheWalkOverSubfolders:
             q = request.url.params["q"]
             token = request.url.params.get("pageToken")
             calls.append({"q": q, "pageToken": token})
-            if "mimeType = 'application/vnd.google-apps.folder'" in q:
-                return httpx.Response(
-                    200, json={"files": [_folder_entry(i, n) for i, n in subfolders]}
-                )
             parent = q.split("'")[1]
+            if "mimeType = 'application/vnd.google-apps.folder'" in q:
+                # Lazy walk (ruling 2026-09-08): every popped folder is asked
+                # for ITS subfolders once; only the root has any here.
+                children = subfolders if parent == self.ROOT else []
+                return httpx.Response(
+                    200, json={"files": [_folder_entry(i, n) for i, n in children]}
+                )
             files = root_files if parent == self.ROOT else folder_files.get(parent, [])
             if parent in pages:
                 split = pages[parent]
@@ -749,19 +772,20 @@ class TestTheWalkOverSubfolders:
                 CONFIG, checkpoint, source_id=SRC, workspace_id=WS
             )
             seen.extend((i["ref"], i.get("category")) for i in items)
-            if checkpoint == {"v": 1}:
+            if not checkpoint_incomplete(checkpoint):
                 break
-        assert checkpoint == {"v": 1}, (
-            "the walk must end with the bare complete checkpoint"
+        assert not checkpoint_incomplete(checkpoint), (
+            "the walk must end with a complete checkpoint"
         )
         assert seen == [("r1", None), ("m1", "memes"), ("s1", "merch")]
-        # One subfolder listing, then one media page per folder — three folders.
+        # Each folder is asked for its subfolders exactly once as it is
+        # popped (the lazy walk), then paged for media: three of each.
         folder_listings = [
             c for c in calls if "application/vnd.google-apps.folder" in c["q"]
         ]
-        assert len(folder_listings) == 1
+        assert len(folder_listings) == 3
         assert f"'{self.ROOT}' in parents" in folder_listings[0]["q"]
-        assert len(calls) == 4
+        assert len(calls) == 6
 
     @pytest.mark.asyncio
     async def test_the_cursor_survives_a_paged_folder_and_resumes_where_it_stopped(
@@ -790,7 +814,7 @@ class TestTheWalkOverSubfolders:
         items, cp = await adapter.list_changes(
             CONFIG, cp, source_id=SRC, workspace_id=WS
         )
-        assert [i["ref"] for i in items] == ["m3"] and cp == {"v": 1}
+        assert [i["ref"] for i in items] == ["m3"] and not checkpoint_incomplete(cp)
         assert calls[-1]["pageToken"] == "MEMES-p2"
 
     @pytest.mark.asyncio
@@ -801,7 +825,7 @@ class TestTheWalkOverSubfolders:
         items, cp = await adapter.list_changes(
             CONFIG, None, source_id=SRC, workspace_id=WS
         )
-        assert [i["ref"] for i in items] == ["r1"] and cp == {"v": 1}
+        assert [i["ref"] for i in items] == ["r1"] and not checkpoint_incomplete(cp)
         assert all(i.get("category") is None for i in items)
 
     def test_only_the_bare_checkpoint_is_complete(self):
@@ -819,6 +843,16 @@ class TestTheWalkOverSubfolders:
         assert (
             checkpoint_incomplete({"v": 1, "queue": [{"id": "Y", "name": "y"}]}) is True
         )
+        # The v2 walk (ruling 2026-09-08): a token alone, with or without the
+        # cap's `truncated` mark, is complete; a `current` is not.
+        assert checkpoint_incomplete({"v": 2, "walk": "w"}) is False
+        assert checkpoint_incomplete({"v": 2, "walk": "w", "truncated": True}) is False
+        assert (
+            checkpoint_incomplete(
+                {"v": 2, "walk": "w", "current": {"id": "X", "name": "x"}, "queue": []}
+            )
+            is True
+        )
 
 
 class TestAWalkSurvivesWhatDriveDoesMidWalk:
@@ -834,17 +868,14 @@ class TestAWalkSurvivesWhatDriveDoesMidWalk:
     async def test_a_vanished_subfolder_is_skipped_and_the_walk_goes_on(self):
         def handler(request: httpx.Request) -> httpx.Response:
             q = request.url.params["q"]
-            if "vnd.google-apps.folder" in q:
-                return httpx.Response(
-                    200,
-                    json={
-                        "files": [
-                            _folder_entry("GONE", "gone"),
-                            _folder_entry("KEEP", "keep"),
-                        ]
-                    },
-                )
             parent = q.split("'")[1]
+            if "vnd.google-apps.folder" in q:
+                children = (
+                    [_folder_entry("GONE", "gone"), _folder_entry("KEEP", "keep")]
+                    if parent == self.ROOT
+                    else []
+                )
+                return httpx.Response(200, json={"files": children})
             if parent == "GONE":
                 return httpx.Response(
                     404, json={"error": {"message": "File not found"}}
@@ -867,7 +898,7 @@ class TestAWalkSurvivesWhatDriveDoesMidWalk:
         items, cp = await adapter.list_changes(
             CONFIG, cp, source_id=SRC, workspace_id=WS
         )
-        assert [i["ref"] for i in items] == ["k1"] and cp == {"v": 1}
+        assert [i["ref"] for i in items] == ["k1"] and not checkpoint_incomplete(cp)
 
     @pytest.mark.asyncio
     async def test_the_root_itself_gone_is_still_the_sources_fault(self):
@@ -888,21 +919,319 @@ class TestAWalkSurvivesWhatDriveDoesMidWalk:
                 return httpx.Response(400, json={"error": {"message": "Invalid Value"}})
             return httpx.Response(200, json={"files": [_file("m1")]})
 
+        current = {
+            "id": "MEMES",
+            "name": "memes",
+            "top": "MEMES",
+            "top_name": "memes",
+            "path": "memes",
+            "listed": True,
+        }
         cp = {
-            "v": 1,
-            "current": {"id": "MEMES", "name": "memes"},
+            "v": 2,
+            "walk": "w1",
+            "current": current,
             "queue": [],
             "page_token": "stale",
         }
         items, cp2 = await self._adapter_with(handler).list_changes(
             CONFIG, cp, source_id=SRC, workspace_id=WS
         )
-        assert items == [] and cp2 == {
-            "v": 1,
-            "current": {"id": "MEMES", "name": "memes"},
-            "queue": [],
-        }
+        assert items == [] and cp2["current"] == current and cp2["queue"] == []
+        assert "page_token" not in cp2 and cp2["walk"] == "w1"
         items, cp3 = await self._adapter_with(handler).list_changes(
             CONFIG, cp2, source_id=SRC, workspace_id=WS
         )
-        assert [i["ref"] for i in items] == ["m1"] and cp3 == {"v": 1}
+        assert [i["ref"] for i in items] == ["m1"] and not checkpoint_incomplete(cp3)
+
+
+class TestTheWalkGoesToAnyDepth:
+    """Owner ruling 2026-09-08 (sources are the groups): every folder under a
+    connected folder is walked, lazily — a folder is asked for its subfolders
+    once, when it is popped — and a file's `category` is the TOP-LEVEL folder
+    it sits under (None for the root's own files), with `folder_path` the
+    folder's path under the root. The cursor is v2 and carries a walk token
+    the sync mints; a pre-v2 in-flight cursor starts the walk over; no cursor
+    is ever the bare `page_token` shape."""
+
+    ROOT = "FOLDER123"
+
+    def _tree(self, tree, files, *, pages=None, gone_listing=(), stale=()):
+        """`tree` {parent_id: [(id, name)]}, `files` {folder_id: [entries]};
+        `pages` {folder_id: split} answers a folder in two pages; a folder in
+        `gone_listing` answers 404 to its subfolder listing; a pageToken in
+        `stale` is refused with 400."""
+        pages = pages or {}
+        stale = set(stale)  # a refused token is refused ONCE, then honoured
+        calls: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            q = request.url.params["q"]
+            token = request.url.params.get("pageToken")
+            parent = q.split("'")[1]
+            is_listing = "mimeType = 'application/vnd.google-apps.folder'" in q
+            calls.append(
+                {"q": q, "pageToken": token, "parent": parent, "listing": is_listing}
+            )
+            if is_listing:
+                if parent in gone_listing:
+                    return httpx.Response(
+                        404, json={"error": {"message": "File not found"}}
+                    )
+                return httpx.Response(
+                    200,
+                    json={
+                        "files": [_folder_entry(i, n) for i, n in tree.get(parent, [])]
+                    },
+                )
+            if token in stale:
+                stale.discard(token)
+                return httpx.Response(400, json={"error": {"message": "Invalid Value"}})
+            entries = files.get(parent, [])
+            if parent in pages:
+                split = pages[parent]
+                if token is None:
+                    return httpx.Response(
+                        200,
+                        json={
+                            "files": entries[:split],
+                            "nextPageToken": f"{parent}-p2",
+                        },
+                    )
+                return httpx.Response(200, json={"files": entries[split:]})
+            return httpx.Response(200, json={"files": entries})
+
+        return _adapter(handler), calls
+
+    async def _walk(self, adapter, checkpoint=None, limit=30):
+        seen, cursors = [], []
+        for _ in range(limit):
+            items, checkpoint = await adapter.list_changes(
+                CONFIG, checkpoint, source_id=SRC, workspace_id=WS
+            )
+            cursors.append(checkpoint)
+            seen.extend(
+                (i["ref"], i.get("category"), i.get("folder_path")) for i in items
+            )
+            if not checkpoint_incomplete(checkpoint):
+                return seen, cursors
+        raise AssertionError("the walk did not complete")
+
+    @pytest.mark.asyncio
+    async def test_files_at_any_depth_carry_their_top_level_folder_and_their_path(self):
+        adapter, calls = self._tree(
+            tree={
+                self.ROOT: [("MEMES", "memes"), ("MERCH", "merch")],
+                "MEMES": [("Y2025", "2025")],
+                "Y2025": [("JULY", "july")],
+            },
+            files={
+                self.ROOT: [_file("r1")],
+                "MEMES": [_file("m1")],
+                "Y2025": [_file("m2")],
+                "JULY": [_file("m3")],
+                "MERCH": [_file("s1", name="shirt.mp4", mime="video/mp4")],
+            },
+        )
+        seen, cursors = await self._walk(adapter)
+        # Breadth-first: the root, its two folders, then what they contain.
+        assert seen == [
+            ("r1", None, ""),
+            ("m1", "memes", "memes"),
+            ("s1", "merch", "merch"),
+            ("m2", "memes", "memes/2025"),
+            ("m3", "memes", "memes/2025/july"),
+        ]
+        listings = [c["parent"] for c in calls if c["listing"]]
+        assert sorted(listings) == sorted(
+            [self.ROOT, "MEMES", "MERCH", "Y2025", "JULY"]
+        ), "each folder is asked for its subfolders exactly once"
+        final = cursors[-1]
+        assert final["v"] == 2 and isinstance(final["walk"], str) and final["walk"]
+        assert {c["walk"] for c in cursors} == {final["walk"]}, "one token per walk"
+
+    @pytest.mark.asyncio
+    async def test_the_start_cursors_token_is_carried_through_unchanged(self):
+        adapter, _ = self._tree(
+            tree={self.ROOT: [("MEMES", "memes")]},
+            files={self.ROOT: [_file("r1")], "MEMES": [_file("m1")]},
+        )
+        seen, cursors = await self._walk(
+            adapter, {"v": 2, "walk": "minted-by-the-sync"}
+        )
+        assert [r for r, _, _ in seen] == ["r1", "m1"]
+        assert all(c["walk"] == "minted-by-the-sync" for c in cursors)
+        assert cursors[-1] == {"v": 2, "walk": "minted-by-the-sync", "seen": 1}, (
+            "complete: the token and the folder count, nothing pending"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_pre_v2_in_flight_cursor_is_ignored_and_the_walk_starts_over(self):
+        adapter, calls = self._tree(
+            tree={self.ROOT: [("MEMES", "memes")]},
+            files={self.ROOT: [_file("r1")], "MEMES": [_file("m1")]},
+        )
+        stale = {
+            "v": 1,
+            "current": {"id": "MEMES", "name": "memes"},
+            "queue": [],
+            "page_token": "p9",
+        }
+        items, cp = await adapter.list_changes(
+            CONFIG, stale, source_id=SRC, workspace_id=WS
+        )
+        assert calls[0]["listing"] and calls[0]["parent"] == self.ROOT, (
+            "started over at the root"
+        )
+        assert [i["ref"] for i in items] == ["r1"] and cp["v"] == 2 and cp["walk"]
+        assert cp["current"]["id"] == "MEMES"
+
+    @pytest.mark.asyncio
+    async def test_no_cursor_is_ever_the_bare_page_token_shape(self):
+        adapter, calls = self._tree(
+            tree={self.ROOT: []},
+            files={self.ROOT: [_file("r1"), _file("r2"), _file("r3")]},
+            pages={self.ROOT: 2},
+        )
+        items, cp = await adapter.list_changes(
+            CONFIG, None, source_id=SRC, workspace_id=WS
+        )
+        assert [i["ref"] for i in items] == ["r1", "r2"]
+        assert (
+            cp["page_token"] == f"{self.ROOT}-p2" and cp["current"]["id"] == self.ROOT
+        )
+        items, cp = await adapter.list_changes(
+            CONFIG, cp, source_id=SRC, workspace_id=WS
+        )
+        assert [i["ref"] for i in items] == ["r3"] and not checkpoint_incomplete(cp)
+        assert calls[-1]["pageToken"] == f"{self.ROOT}-p2"
+
+    @pytest.mark.asyncio
+    async def test_the_walk_cap_stops_queuing_and_is_carried_to_completion(
+        self, monkeypatch
+    ):
+        from src.services.target import google_drive_adapter as mod
+
+        monkeypatch.setattr(mod, "FOLDER_WALK_CAP", 2)
+        adapter, calls = self._tree(
+            tree={self.ROOT: [("A", "a"), ("B", "b"), ("C", "c")], "A": [("A1", "a1")]},
+            files={
+                "A": [_file("fa")],
+                "B": [_file("fb")],
+                "C": [_file("fc")],
+                "A1": [_file("fa1")],
+            },
+        )
+        seen, cursors = await self._walk(adapter)
+        assert [r for r, _, _ in seen] == ["fa", "fb"], (
+            "folders past the cap never sync"
+        )
+        assert cursors[-1].get("truncated") is True, "the cut is carried to completion"
+        assert not checkpoint_incomplete(cursors[-1])
+
+    @pytest.mark.asyncio
+    async def test_an_expired_token_restart_does_not_relist_the_folder(self):
+        adapter, calls = self._tree(
+            tree={self.ROOT: [("MEMES", "memes")], "MEMES": [("SUB", "sub")]},
+            files={"MEMES": [_file("m1"), _file("m2")], "SUB": [_file("z1")]},
+            pages={"MEMES": 1},
+            stale={"MEMES-p2"},
+        )
+        seen, cursors = await self._walk(adapter)
+        # The first page of memes is listed twice (the restart), its
+        # subfolders are asked for once, and `sub` is walked once.
+        assert [c["parent"] for c in calls if c["listing"]].count("MEMES") == 1
+        assert [r for r, _, _ in seen].count("z1") == 1
+        assert ("m1", "memes", "memes") in seen
+
+    @pytest.mark.asyncio
+    async def test_a_vanished_nested_folder_is_skipped_including_a_404_on_its_listing(
+        self,
+    ):
+        adapter, calls = self._tree(
+            tree={self.ROOT: [("GONE", "gone"), ("KEEP", "keep")]},
+            files={"KEEP": [_file("k1")]},
+            gone_listing={"GONE"},
+        )
+        seen, cursors = await self._walk(adapter)
+        assert [r for r, _, _ in seen] == ["k1"]
+
+    @pytest.mark.asyncio
+    async def test_a_folder_reachable_twice_is_walked_once_and_a_cycle_does_not_spin(
+        self,
+    ):
+        adapter, calls = self._tree(
+            tree={
+                self.ROOT: [("A", "a")],
+                "A": [("B", "b")],
+                "B": [("A", "a"), (self.ROOT, "root")],  # a cycle, and the root again
+            },
+            files={"A": [_file("fa")], "B": [_file("fb")]},
+        )
+        seen, cursors = await self._walk(adapter)
+        assert [r for r, _, _ in seen] == ["fa", "fb"], "each file once"
+        listings = [c["parent"] for c in calls if c["listing"]]
+        assert sorted(listings) == sorted([self.ROOT, "A", "B"]), (
+            "each folder listed once"
+        )
+        assert not cursors[-1].get("truncated"), "a cycle is not a size cap"
+
+    @pytest.mark.asyncio
+    async def test_a_child_id_outside_the_drive_id_shape_is_skipped(self):
+        adapter, calls = self._tree(
+            tree={self.ROOT: [("X' or 'a'='a", "evil"), ("OK1", "ok")]},
+            files={"OK1": [_file("k1")]},
+        )
+        seen, _ = await self._walk(adapter)
+        assert [r for r, _, _ in seen] == ["k1"]
+        assert not any("X' or" in c["q"] for c in calls), "never spliced into a query"
+
+    @pytest.mark.asyncio
+    async def test_a_root_outside_the_drive_id_shape_is_refused_before_any_request(
+        self,
+    ):
+        from src.services.target.drive_adapter import DriveTerminalError
+
+        adapter, calls = self._tree(tree={}, files={})
+        with pytest.raises(DriveTerminalError):
+            await adapter.list_changes(
+                {**CONFIG, "folder_ref": "X' or 'a'='a"},
+                None,
+                source_id=SRC,
+                workspace_id=WS,
+            )
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_a_stored_cursor_missing_walk_fields_is_healed_not_crashed(self):
+        adapter, calls = self._tree(
+            tree={self.ROOT: [("MEMES", "memes")]},
+            files={"MEMES": [_file("m1")]},
+        )
+        thin = {
+            "v": 2,
+            "walk": "w",
+            "current": {"id": "MEMES", "name": "memes"},
+            "queue": [],
+        }
+        items, cp = await adapter.list_changes(
+            CONFIG, thin, source_id=SRC, workspace_id=WS
+        )
+        assert [i["ref"] for i in items] == ["m1"] and items[0]["folder_path"] == ""
+        assert not checkpoint_incomplete(cp)
+
+    @pytest.mark.asyncio
+    async def test_past_the_cap_no_listing_request_is_spent(self, monkeypatch):
+        from src.services.target import google_drive_adapter as mod
+
+        monkeypatch.setattr(mod, "FOLDER_WALK_CAP", 1)
+        adapter, calls = self._tree(
+            tree={self.ROOT: [("A", "a"), ("B", "b")], "A": [("A1", "a1")]},
+            files={"A": [_file("fa")], "A1": [_file("fa1")]},
+        )
+        seen, cursors = await self._walk(adapter)
+        assert [r for r, _, _ in seen] == ["fa"]
+        assert [c["parent"] for c in calls if c["listing"]] == [self.ROOT], (
+            "once the cap is hit, a popped folder is not asked for its subfolders"
+        )
+        assert cursors[-1].get("truncated") is True

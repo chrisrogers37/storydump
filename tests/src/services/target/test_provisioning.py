@@ -125,6 +125,15 @@ class TestFolderRefFrom:
             folder_ref_from(markerless)
         assert exc.value.reason == "folder_not_a_drive_folder"
 
+    @pytest.mark.parametrize("bad", ["X' or 'a'='a", "abc def", "id;drop", "x" * 129])
+    def test_an_id_outside_the_adapters_shape_is_refused_at_the_pick(self, bad):
+        """The walk splices the id into a Drive `q` string and refuses one
+        outside `FOLDER_ID_RE` (#1256); a pick the adapter would refuse must
+        fail here, not as a source that errors on every sync."""
+        with pytest.raises(ProvisioningRefused) as exc:
+            folder_ref_from(bad)
+        assert exc.value.reason == "folder_not_a_drive_folder"
+
     def test_two_different_markerless_urls_cannot_collide_on_one_ref(self):
         """The bite was collision, not just a nonsense id.
 

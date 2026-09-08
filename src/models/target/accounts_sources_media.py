@@ -263,6 +263,9 @@ class MediaItem(TargetBase):
     file_name = Column(Text, nullable=False)
     file_size = Column(BigInteger, nullable=True)
     category = Column(Text, nullable=True)
+    folder_path = Column(
+        Text, nullable=True
+    )  # 070: the folder's path under the connected folder
     title = Column(Text, nullable=True)
     caption = Column(Text, nullable=True)
     generated_caption = Column(Text, nullable=True)

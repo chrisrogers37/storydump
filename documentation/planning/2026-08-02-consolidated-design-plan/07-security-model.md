@@ -981,3 +981,23 @@ DROP INDEX uq_credential_per_source;
 CREATE UNIQUE INDEX uq_credential_per_workspace ON oauth_credentials (workspace_id, provider)
   WHERE ig_account_id IS NULL AND media_source_id IS NULL;
 ```
+
+### §16. The folder path of a media item — the full-depth walk (070, owner ruling 2026-09-08)
+
+**Owner ruling (2026-09-08, `03` post-ratification rulings — sources are the groups):** every
+folder under a connected Drive folder is walked, to any depth, lazily (a folder is asked for its
+subfolders once, when the walk reaches it); subfolders are structure, never groups. What changes
+in `02` §2's `media_items` is one label: `folder_path`, the folder's path under the connected
+folder, refreshed with `category` (the top-level folder's name) on every walk. Neither is a key —
+the unit that carries a posting weight is the connected folder itself (`media_sources`), which the
+next increment keys the mix table on. No policy, grant or door changes: the column rides the
+table's existing `p_tenant` policy and grants.
+
+```sql
+-- The folder path of a media item under its connected folder (owner ruling 2026-09-08 — sources
+-- are the groups; every folder under a connected folder is walked, to any depth, lazily). "" for
+-- a file directly in the connected folder; NULL for an adapter that has no notion of folders. A
+-- label the sync refreshes on every walk beside `category` (the TOP-LEVEL folder's name): nothing
+-- is keyed by either — the group that carries a weight is the source (`media_sources`), next PR.
+ALTER TABLE media_items ADD COLUMN folder_path TEXT NULL;
+```

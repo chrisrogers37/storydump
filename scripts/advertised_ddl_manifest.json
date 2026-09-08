@@ -221,6 +221,13 @@
       "label": "§15 workspace-level Drive grant (069, #1165) — ck_credentials_one_owner provider-conditional, uq_credential_per_workspace",
       "doc": "07-security-model.md",
       "ordinal": 13
+    },
+    {
+      "sha256": "43dfd8ad4f189b8504ce51521ca167475866ec81b2266029092aaed227683eb7",
+      "class": "normative",
+      "label": "§16 media_items.folder_path — the full-depth walk (070, owner ruling 2026-09-08)",
+      "doc": "07-security-model.md",
+      "ordinal": 14
     }
   ],
   "policy_expansion": {

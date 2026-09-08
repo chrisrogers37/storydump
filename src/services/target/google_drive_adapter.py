@@ -71,6 +71,7 @@ data-loss-wearing-a-bound's-clothing this seam was designed against.
 from __future__ import annotations
 
 import re
+import uuid
 from dataclasses import dataclass
 import logging
 from typing import Any, Mapping, Optional, Protocol
@@ -102,6 +103,9 @@ FOLDER_MIME = "application/vnd.google-apps.folder"
 FOLDER_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 #: The most folders the browser will page through for one parent.
 FOLDER_LIST_CAP = 500
+#: The most folders one WALK will queue (ruling 2026-09-08: the tree is walked
+#: to any depth, lazily); past it the rest is skipped and the cut is said.
+FOLDER_WALK_CAP = 2000
 
 
 #: The picker's second root: folders shared TO the connected account, which
@@ -112,6 +116,22 @@ SHARED_ROOT = "shared-with-me"
 
 def is_folder_id(value: object) -> bool:
     return isinstance(value, str) and FOLDER_ID_RE.fullmatch(value) is not None
+
+
+def _cursor_folder(entry: Mapping[str, Any]) -> dict:
+    """A queue/current entry read back from a stored cursor, with every field
+    the walk reads present: a missing one gets its default (the entry's own id
+    as `top`; an empty path) rather than a KeyError the retry ladder would
+    repeat forever."""
+    fid = str(entry["id"])
+    return {
+        "id": fid,
+        "name": entry.get("name"),
+        "top": entry.get("top") or fid,
+        "top_name": entry.get("top_name"),
+        "path": entry.get("path") or "",
+        "listed": bool(entry.get("listed")),
+    }
 
 
 @dataclass(frozen=True)
@@ -198,6 +218,10 @@ def _refuse_unsupported_config(config: Mapping[str, Any]) -> None:
     the same set, which is a property that only holds if there is one set.
     """
     validate_source_config(config)
+    if not is_folder_id(config.get("folder_ref")):
+        # The id is spliced into a Drive `q` string; a value outside the id
+        # shape is refused here rather than trusted there (review of #1256).
+        raise DriveTerminalError("folder_ref is not a Drive folder id")
     if "root_name" in config and config["root_name"]:
         raise DriveTerminalError(
             "config carries root_name, which scopes listing to a subfolder"
@@ -238,27 +262,34 @@ class GoogleDriveAdapter:
     ) -> tuple[list[dict], dict]:
         """One page of a source's media, plus the checkpoint that resumes it.
 
-        THE WALK (owner ruling 2026-09-06, legacy parity): the picked folder's
-        own files first, then each immediate SUBFOLDER's files, and a file's
-        category is the subfolder it sits in (None at the root). One level
-        deep, as the legacy `google_drive_provider.list_files` was. The
-        cursor rides the checkpoint so a walk of any size is resumable:
+        THE WALK (owner ruling 2026-09-08 — sources are the groups): every
+        folder under the connected folder is walked, to any depth, LAZILY. A
+        folder is asked for its subfolders once, when it is popped, and they
+        join the queue carrying the top-level folder they sit under; then the
+        folder's media is paged. A file's `category` is that TOP-LEVEL folder's
+        name (None for the root's own files — a label the sync stores, never a
+        key) and `folder_path` is its folder's path under the root. The cursor
+        rides the checkpoint so a walk of any size is resumable:
 
-            {"v": 1,
-             "current": {"id": <folder>, "name": <category or None>},
-             "queue":   [{"id", "name"}, …],      # folders still to list
-             "page_token": <within current>}        # only while more pages
+            {"v": 2, "walk": <token>,
+             "seen": <folders queued so far>, "truncated": <cap hit>,
+             "current": {"id", "name", "top", "top_name", "path", "listed"},
+             "queue":   [ … the same shape … ],   # folders still to list
+             "page_token": <within current>}       # only while more pages
 
-        A call with no `current` STARTS the walk: one request lists the root's
-        subfolders (name order; capped, and the cap said), then the root's
-        first media page. Every later call lists ONE media page and advances
-        the cursor; when the current folder is exhausted the next one is
-        popped from the queue. The bare ``{"v": 1}`` — nothing pending — is
-        the only statement that the walk is complete (`checkpoint_incomplete`
-        is the one definition the sync's chain reads).
+        `walk` is minted by the SYNC for each walk and carried through unchanged
+        (a cursor handed in without one — the first call of a walk from a caller
+        that did not mint — gets a fresh token here). A pre-v2 cursor with a
+        `current` (the one-level walk of 2026-09-06, in flight at deploy) is
+        ignored and the walk starts over. The complete checkpoint is
+        `{"v": 2, "walk": …}` with at most `truncated` beside it: no
+        `current`, `queue` or `page_token` (`checkpoint_incomplete` is the one
+        definition the sync's chain reads), and the bare `page_token` shape is
+        never emitted.
 
-        Returns ``(items, checkpoint')``. `items` carry D37's canonical stable
-        ref (the Drive file id, never a path) and `category`.
+        `FOLDER_WALK_CAP` bounds the folders queued per walk; past it the rest
+        is skipped and the cut is SAID (one warning) and carried to completion
+        as `truncated`, never absorbed.
         """
         _refuse_unsupported_config(config)
         cp = dict(checkpoint or {})
@@ -266,23 +297,136 @@ class GoogleDriveAdapter:
         box = _TokenBox(
             await self._token_provider(source_id, workspace_id=workspace_id)
         )
-        if cp.get("current"):
-            current: dict = dict(cp["current"])
-            queue = [dict(f) for f in (cp.get("queue") or [])]
+
+        walk = cp.get("walk")
+        if not (cp.get("v") == 2 and isinstance(walk, str) and walk):
+            walk = None
+        resumed = cp.get("current") if walk is not None else None
+        if resumed and is_folder_id(resumed.get("id")):
+            # Healed, not trusted: a field a stored cursor lacks gets its
+            # default rather than a KeyError that would retry forever.
+            current: dict = _cursor_folder(resumed)
+            queue = [
+                _cursor_folder(f)
+                for f in (cp.get("queue") or [])
+                if is_folder_id((f or {}).get("id"))
+            ]
             page_token = cp.get("page_token")
-        elif cp.get("page_token"):
-            # The pre-walk shape, and the walk's own shape for a paged ROOT
-            # with no subfolders left: more pages of the root, nothing queued.
-            current, queue, page_token = (
-                {"id": root, "name": None},
-                [],
-                cp["page_token"],
-            )
+            seen = int(cp.get("seen") or 0)
+            truncated = bool(cp.get("truncated"))
+            visited = [v for v in (cp.get("visited") or []) if isinstance(v, str)]
         else:
-            queue = await self._subfolders(
-                root, source_id=source_id, workspace_id=workspace_id, box=box
-            )
-            current, page_token = {"id": root, "name": None}, None
+            if cp.get("current") or cp.get("page_token"):
+                logger.warning(
+                    "drive source %s: the stored cursor cannot be resumed (pre-v2, or"
+                    " malformed) — starting over",
+                    source_id,
+                )
+            walk = walk or uuid.uuid4().hex
+            current = {
+                "id": root,
+                "name": None,
+                "top": root,
+                "top_name": None,
+                "path": "",
+                "listed": False,
+            }
+            queue, page_token, seen, truncated, visited = [], None, 0, False, []
+
+        def cursor(**extra: Any) -> dict:
+            # `seen` and `truncated` ride to completion (the log reads them);
+            # `visited` only while the walk is in flight.
+            out: dict = {"v": 2, "walk": walk}
+            if seen:
+                out["seen"] = seen
+            if truncated:
+                out["truncated"] = True
+            if extra:
+                out["visited"] = visited
+                out.update(extra)
+            return out
+
+        def advanced() -> dict:
+            # The cursor past `current`: the next queued folder, or done.
+            return cursor(current=queue[0], queue=queue[1:]) if queue else cursor()
+
+        if not current.get("listed") and seen >= FOLDER_WALK_CAP:
+            # Past the cap no listing is even asked for: every child would be
+            # discarded, and a 2,000-folder tree would otherwise spend 2,000
+            # requests per walk on nothing (review of #1256).
+            if not truncated:
+                logger.warning(
+                    "drive source %s: more than %d folders under %s in one walk —"
+                    " the rest are skipped this walk (truncated)",
+                    source_id,
+                    FOLDER_WALK_CAP,
+                    root,
+                )
+                truncated = True
+            current["listed"] = True
+        if not current.get("listed"):
+            # Lazy discovery: this folder's subfolders, once, as it is popped.
+            try:
+                children = await self._subfolders(
+                    str(current["id"]),
+                    source_id=source_id,
+                    workspace_id=workspace_id,
+                    box=box,
+                )
+            except DriveSourceGone:
+                if current["id"] == root:
+                    raise  # the connected folder itself is gone: the source's fault
+                logger.warning(
+                    "drive source %s: folder %r (%s) vanished before it was listed — skipped",
+                    source_id,
+                    current.get("path"),
+                    current["id"],
+                )
+                return [], advanced()
+            known = set(visited) | {str(current["id"])} | {str(f["id"]) for f in queue}
+            for child in children:
+                if child["id"] in known:
+                    # Reachable by two paths (a multi-parent folder) or a cycle
+                    # (a provider handing back an ancestor): walked once, and
+                    # never spun to the cap (review of #1256).
+                    logger.warning(
+                        "drive source %s: folder %r (%s) reached twice under %s — skipped",
+                        source_id,
+                        child["name"],
+                        child["id"],
+                        current.get("path") or root,
+                    )
+                    continue
+                if seen >= FOLDER_WALK_CAP:
+                    if not truncated:
+                        logger.warning(
+                            "drive source %s: more than %d folders under %s in one walk —"
+                            " the rest are skipped this walk (truncated)",
+                            source_id,
+                            FOLDER_WALK_CAP,
+                            root,
+                        )
+                        truncated = True
+                    break
+                if current["id"] == root:
+                    top, top_name, path = child["id"], child["name"], child["name"]
+                else:
+                    top, top_name = current["top"], current["top_name"]
+                    path = f"{current['path']}/{child['name']}"
+                queue.append(
+                    {
+                        "id": child["id"],
+                        "name": child["name"],
+                        "top": top,
+                        "top_name": top_name,
+                        "path": path,
+                        "listed": False,
+                    }
+                )
+                seen += 1
+                known.add(child["id"])
+            visited.append(str(current["id"]))
+            current["listed"] = True
 
         params = {
             "q": _listing_query(str(current["id"])),
@@ -295,12 +439,6 @@ class GoogleDriveAdapter:
         if page_token:
             params["pageToken"] = page_token
 
-        def advanced() -> dict:
-            # The cursor past `current`: the next queued folder, or done.
-            return (
-                {"v": 1, "current": queue[0], "queue": queue[1:]} if queue else {"v": 1}
-            )
-
         try:
             payload = await self._get_as_workspace(
                 f"{FILES_URL}?{urlencode(params)}",
@@ -310,15 +448,15 @@ class GoogleDriveAdapter:
             )
         except DriveSourceGone:
             if current["id"] == root:
-                raise  # the picked folder itself is gone: the source's fault to report
-            # A SUBFOLDER deleted or unshared mid-walk is not the source's fault
+                raise  # the connected folder itself is gone: the source's fault to report
+            # A folder deleted or unshared mid-walk is not the source's fault
             # and must not wedge it: said once, skipped, the walk goes on
             # (review of #1251 — the stored cursor would otherwise point at
             # the dead folder forever).
             logger.warning(
-                "drive source %s: subfolder %r (%s) is gone mid-walk — skipped",
+                "drive source %s: folder %r (%s) is gone mid-walk — skipped",
                 source_id,
-                current.get("name"),
+                current.get("path"),
                 current["id"],
             )
             return [], advanced()
@@ -328,54 +466,45 @@ class GoogleDriveAdapter:
             # An expired or invalid page token (a long stall between chunks):
             # restart THIS folder from its first page rather than fail the
             # source; the upsert is idempotent, so re-listing costs nothing.
+            # `listed` rides along, so its subfolders are not queued twice.
             logger.warning(
                 "drive source %s: page token for folder %r refused — restarting the folder",
                 source_id,
-                current.get("name"),
+                current.get("path"),
             )
-            return [], {"v": 1, "current": current, "queue": queue}
+            return [], cursor(current=current, queue=queue)
 
-        category = current.get("name")
+        category = current.get("top_name")
         items: list[dict] = []
         for entry in payload.get("files") or []:
             item = self._item_for(entry)
             if item is not None:
                 if category is not None:
-                    # Absent = uncategorized (the root's own files); the sync
-                    # reads `.get`, so the flat shape is unchanged for them.
+                    # Absent = the root's own files; the sync reads `.get`.
                     item["category"] = category
+                item["folder_path"] = current.get("path") or ""
                 items.append(item)
 
         next_token = payload.get("nextPageToken")
-        at_root_alone = current["id"] == root and not queue
         if next_token:
-            if at_root_alone:
-                return items, {"v": 1, "page_token": next_token}
-            return items, {
-                "v": 1,
-                "current": current,
-                "queue": queue,
-                "page_token": next_token,
-            }
-        if queue:
-            return items, {"v": 1, "current": queue[0], "queue": queue[1:]}
-        return items, {"v": 1}
+            return items, cursor(current=current, queue=queue, page_token=next_token)
+        return items, advanced()
 
     async def _subfolders(
         self,
-        root: str,
+        parent: str,
         *,
         source_id: str,
         workspace_id: str,
         box: Optional[_TokenBox] = None,
     ) -> list[dict]:
-        """The root's immediate subfolders — the categories — in name order.
-        Paged to `FOLDER_LIST_CAP` and the cut is SAID (one warning), never
-        absorbed: a category past the cap would otherwise be a folder that
-        quietly never syncs. A provider handing the same page token back
-        forever (a stub, or a Drive bug) ends the listing, said once."""
+        """A folder's immediate subfolders in name order. Paged to
+        `FOLDER_LIST_CAP` and the cut is SAID (one warning), never absorbed: a
+        folder past the cap would otherwise quietly never sync. A provider
+        handing the same page token back forever (a stub, or a Drive bug) ends
+        the listing, said once."""
         params = {
-            "q": _subfolder_query(root),
+            "q": _subfolder_query(parent),
             "fields": "nextPageToken,files(id,name,mimeType)",
             "pageSize": "200",
             "orderBy": "name_natural",
@@ -406,15 +535,25 @@ class GoogleDriveAdapter:
                 fid, name = entry.get("id"), entry.get("name")
                 # The query asks for folders; the mime is checked again because
                 # a provider answering something else must not become a
-                # "category" that is really a file.
+                # folder that is really a file.
+                if isinstance(fid, str) and not is_folder_id(fid):
+                    # Spliced into a `q` string next: a shape outside the id
+                    # alphabet is skipped and said, never trusted.
+                    logger.warning(
+                        "drive source %s: folder id %r under %s is not a Drive id — skipped",
+                        source_id,
+                        fid,
+                        parent,
+                    )
+                    continue
                 if (
                     isinstance(fid, str)
                     and isinstance(name, str)
                     and name.strip()
                     and entry.get("mimeType") == FOLDER_MIME
                 ):
-                    # Stripped: the mix service trims names, and a weight must
-                    # match the category the sync writes.
+                    # Stripped: the label the sync stores is trimmed, as the
+                    # mix service trims what it compares against.
                     folders.append({"id": fid, "name": name.strip()})
             page = payload.get("nextPageToken")
             if len(folders) > FOLDER_LIST_CAP or (
@@ -422,10 +561,10 @@ class GoogleDriveAdapter:
             ):
                 logger.warning(
                     "drive source %s: more than %d subfolders under %s — only the first"
-                    " %d are categories; the rest never sync",
+                    " %d are walked; the rest never sync",
                     source_id,
                     FOLDER_LIST_CAP,
-                    root,
+                    parent,
                     FOLDER_LIST_CAP,
                 )
                 return folders[:FOLDER_LIST_CAP]
