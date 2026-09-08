@@ -344,6 +344,9 @@ class TestTheBoundaryIsDerivedAndLoud:
             # 069: the workspace-level Drive grant (#1165, owner ruling 2026-09-05) —
             # one Google grant per workspace, folders picked under it.
             "069_workspace_drive_grant.sql",
+            # 070: media_items.folder_path — the full-depth walk (07 §16, owner
+            # ruling 2026-09-08: sources are the groups).
+            "070_media_item_folder_path.sql",
         ], (
             f"the target lineage is {above}. If you are landing the next F.2"
             " increment, add it here — deliberately, and at the end: arm (b)"
