@@ -1,11 +1,13 @@
 ---
 title: Phase 3 — the Category mix card on the registry, and the close-out
 type: plan
-status: draft
+status: superseded
 owner: chris
 created: 2026-09-07
 tags: [plan, web, settings, docs, phase-3]
 ---
+
+> **Superseded 2026-09-08** by the sources-are-groups ruling (`03-decision-record.md`); the card is specified in `04_weights-by-source.md`. Kept as the record.
 
 # Phase 3 — the Category mix card on the registry, and the close-out
 
