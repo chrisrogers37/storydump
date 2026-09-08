@@ -1,7 +1,7 @@
 ---
 title: Phase 2 (revised) — weights by connected folder
 type: plan
-status: active
+status: completed
 owner: chris
 created: 2026-09-08
 tags: [plan, scheduler, category-mix, api, web, phase-2]
@@ -9,7 +9,7 @@ tags: [plan, scheduler, category-mix, api, web, phase-2]
 
 # Phase 2 (revised) — weights by connected folder
 
-> **Status:** IN PROGRESS — started 2026-09-08 (`/build`, branch `implement/weights-by-source`); challenge round folded the same day.
+> **Status:** COMPLETE — built 2026-09-08 as PR #1262 (`/build`; challenge round folded the same day: a typed 0 is Off, stats tiles unchanged, nested picks refused in the same PR). Step 7 (removing the v1 keys after the Vercel deploy) is the one follow-up.
 
 ## Summary
 
