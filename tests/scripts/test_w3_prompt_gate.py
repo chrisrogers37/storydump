@@ -104,6 +104,23 @@ class TestDueScheduledGainsItsCard:
             payload = cards[0][2]
             assert "Posted myself" in str(payload)
             assert "Post now" not in str(payload), "api flag is off in this world"
+            # The card IS the photo (owner, 2026-09-08): the payload names the
+            # media for the transport to fetch, and captions it with the slot.
+            with sync_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT m.provider_file_ref, m.source_id, i.workspace_id"
+                    "  FROM post_intents i JOIN media_items m ON m.id = i.media_item_id"
+                    " WHERE i.id = %s",
+                    (chain["intent"],),
+                )
+                ref, source_id, ws = cur.fetchone()
+            assert payload["v"] == 2
+            assert payload["media"]["ref"] == ref
+            assert payload["media"]["source_id"] == str(source_id)
+            assert payload["media"]["workspace_id"] == str(ws)
+            assert (
+                payload["caption"].startswith("📸 ") and "Slot:" in payload["caption"]
+            )
 
             again = await _sweep(engine)
             assert again == {"prompted": 0, "advanced": 0}, "idempotent: no double card"

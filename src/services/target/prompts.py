@@ -83,11 +83,16 @@ def _canonical_fraction(value: str) -> str:
 
 def render_card(intent: dict, *, api_publishing_enabled: bool) -> dict:
     """The approval-prompt payload in the transport contract
-    (``{"v": 1, "text": ..., "reply_markup": ...}``).
+    (``{"v": 2, "text", "reply_markup", "media"?, "caption"?}``).
 
     *intent* carries ``intent_id``, ``file_name``, ``media_kind``,
-    ``schedule_slot_at`` (ISO string or datetime) and ``tz``. The slot renders
-    in the WORKSPACE's timezone — a solo user reads his own clock, never UTC.
+    ``schedule_slot_at`` (ISO string or datetime) and ``tz``; with
+    ``source_id`` + ``provider_file_ref`` (and ``workspace_id``, ``mime_type``,
+    ``handle``) the card carries the MEDIA: the transport fetches the bytes and
+    sends the photo or video with ``caption`` — the account and the slot, as
+    the legacy card did (owner, 2026-09-08) — and ``text`` is the card when it
+    cannot. The slot renders in the WORKSPACE's timezone — a solo user reads
+    his own clock, never UTC.
     """
     intent_id = str(intent["intent_id"])
     slot = intent.get("schedule_slot_at")
@@ -95,10 +100,9 @@ def render_card(intent: dict, *, api_publishing_enabled: bool) -> dict:
         slot = datetime.fromisoformat(_canonical_fraction(slot))
     tz = intent.get("tz") or "UTC"
     local = slot.astimezone(ZoneInfo(tz))
-    text = (
-        f"📸 {intent.get('file_name', 'media')} ({intent.get('media_kind', '?')})\n"
-        f"Slot: {local.strftime('%Y-%m-%d %H:%M')} {tz}"
-    )
+    slot_line = f"Slot: {local.strftime('%Y-%m-%d %H:%M')} {tz}"
+    file_name = intent.get("file_name") or "media"
+    text = f"📸 {file_name} ({intent.get('media_kind', '?')})\n{slot_line}"
     actions = _ACTIONS_API if api_publishing_enabled else _ACTIONS_MANUAL
     rows = [
         [
@@ -111,11 +115,29 @@ def render_card(intent: dict, *, api_publishing_enabled: bool) -> dict:
         ],
         [{"text": "📱 Open Instagram", "url": INSTAGRAM_DEEPLINK_URL}],
     ]
-    return {
-        "v": 1,
+    payload: dict = {
+        "v": 2,
         "text": text,
         "reply_markup": {"inline_keyboard": [r for r in rows if r]},
     }
+    if intent.get("provider_file_ref") and intent.get("source_id"):
+        # The card IS the photo (owner, 2026-09-08 — legacy parity): the
+        # transport fetches these bytes under the workspace grant and sends
+        # them with `caption`; `text` stays as the card when it cannot.
+        handle = intent.get("handle")
+        # Bounded: Telegram captions stop at 1024 characters, and a Drive
+        # file name has no bound of its own.
+        who = f"@{handle}" if handle else file_name[:200]
+        payload["media"] = {
+            "workspace_id": str(intent["workspace_id"]),
+            "source_id": str(intent["source_id"]),
+            "ref": str(intent["provider_file_ref"]),
+            "kind": intent.get("media_kind"),
+            "mime": intent.get("mime_type"),
+            "file_name": file_name,
+        }
+        payload["caption"] = f"📸 {who}\n{slot_line}"
+    return payload
 
 
 async def prompt_intent(session, intent_row: dict, bindings: list) -> None:
@@ -130,8 +152,13 @@ async def prompt_intent(session, intent_row: dict, bindings: list) -> None:
     payload = render_card(
         {
             "intent_id": intent_id,
+            "workspace_id": intent_row.get("workspace_id"),
             "file_name": intent_row.get("file_name"),
             "media_kind": intent_row.get("media_kind"),
+            "mime_type": intent_row.get("mime_type"),
+            "source_id": intent_row.get("source_id"),
+            "provider_file_ref": intent_row.get("provider_file_ref"),
+            "handle": intent_row.get("handle"),
             "schedule_slot_at": intent_row.get("schedule_slot_at"),
             "tz": intent_row.get("tz"),
         },
@@ -195,11 +222,15 @@ async def sweep_due_prompts(session, *, limit: int = 50) -> dict:
             await session.execute(
                 text(
                     "SELECT i.id, i.workspace_id, i.schedule_slot_at,"
-                    "       m.file_name, m.media_kind, w.tz,"
+                    "       m.file_name, m.media_kind, m.mime_type,"
+                    "       m.source_id, m.provider_file_ref, a.handle, w.tz,"
                     "       w.api_publishing_enabled"
                     "  FROM post_intents i"
                     "  JOIN workspaces w ON w.id = i.workspace_id"
                     "  JOIN media_items m ON m.id = i.media_item_id"
+                    "   AND m.workspace_id = i.workspace_id"
+                    "  LEFT JOIN ig_accounts a ON a.id = i.ig_account_id"
+                    "   AND a.workspace_id = i.workspace_id"
                     " WHERE i.state = 'scheduled' AND i.schedule_slot_at <= now()"
                     "   AND w.state = 'active' AND NOT w.is_paused"
                     " ORDER BY i.schedule_slot_at LIMIT :lim"

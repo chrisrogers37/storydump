@@ -262,7 +262,7 @@ async def claim_next(session, *, binding_id: str) -> Optional[dict]:
                 "             WHERE binding_id = :b AND state = 'pending'"
                 "             ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED)"
                 "   AND state = 'pending'"
-                " RETURNING id, kind, payload, attempts, intent_id"
+                " RETURNING id, kind, payload, attempts, intent_id, workspace_id"
             ),
             {"b": binding_id},
         )
@@ -275,6 +275,9 @@ async def claim_next(session, *, binding_id: str) -> Optional[dict]:
         "payload": row[2],
         "attempts": row[3],
         "intent_id": None if row[4] is None else str(row[4]),
+        # The row's own tenant, for the transport to hold a payload against
+        # (a media block naming another workspace is refused — #1259).
+        "workspace_id": str(row[5]),
     }
 
 
