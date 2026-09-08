@@ -128,11 +128,14 @@ class ScriptedDrive:
     """The #982 seam, scripted. `pages` is a list of (items, next_page_token);
     an exception instance anywhere in the list is RAISED at that call."""
 
-    def __init__(self, pages):
+    def __init__(self, pages, *, on_call=None):
         self.pages = list(pages)
         self.calls = []
+        self.on_call = on_call  # a side effect run inside the provider call
 
     async def list_changes(self, config, checkpoint, *, source_id, workspace_id):
+        if self.on_call is not None:
+            self.on_call()
         # Both ids are RECORDED, not just accepted. They are the only channel a
         # per-source credential can travel on (`oauth_credentials` points at the
         # source and is RLS-scoped to the workspace), so a fake that swallowed
@@ -1195,6 +1198,46 @@ class TestSubfoldersAreCategories:
             sync_conn, chain["ws"]
         )
 
+        # A move that changes only the path (same top-level folder) follows too.
+        _arm_source(sync_conn, chain["src"])
+        _tick(sync_conn)
+        deeper = _item("shirt-1", kind="video")
+        deeper["category"], deeper["folder_path"] = "merch", "merch/2026"
+        wl, claimed = await _run_once_w6(lane_db, ScriptedDrive([([deeper], None)]))
+        assert claimed is True
+        assert ("shirt-1", "merch", "merch/2026") in self._categories(
+            sync_conn, chain["ws"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_different_file_with_the_same_bytes_never_relabels_the_row(
+        self, lane_db, sync_conn
+    ):
+        """The dedup is per workspace by content hash; only the SAME file
+        (source + provider ref) moving may change the row's label or path."""
+        chain = seed_workspace_chain(sync_conn, "w6-samebytes")
+        _arm_source(sync_conn, chain["src"])
+        _tick(sync_conn)
+        a = _item("dup-a", h="samehash")
+        a["category"], a["folder_path"] = "memes", "memes"
+        wl, claimed = await _run_once_w6(lane_db, ScriptedDrive([([a], None)]))
+        assert claimed is True
+
+        _arm_source(sync_conn, chain["src"])
+        _tick(sync_conn)
+        b = _item("dup-b", h="samehash")
+        b["category"], b["folder_path"] = "merch", "merch"
+        wl, claimed = await _run_once_w6(lane_db, ScriptedDrive([([b], None)]))
+        assert claimed is True
+        with sync_conn.cursor() as cur:
+            cur.execute(
+                "SELECT provider_file_ref, category, folder_path FROM media_items"
+                " WHERE workspace_id = %s AND content_hash = 'samehash'",
+                (chain["ws"],),
+            )
+            rows = cur.fetchall()
+        assert rows == [("dup-a", "memes", "memes")], "one row, its label untouched"
+
     @pytest.mark.asyncio
     async def test_a_pre_v2_cursor_stored_mid_walk_starts_the_walk_over(
         self, lane_db, sync_conn
@@ -1220,3 +1263,123 @@ class TestSubfoldersAreCategories:
         start = drive.calls[0]["checkpoint"]
         assert start["v"] == 2 and start["walk"] and "current" not in start
         assert "page_token" not in start
+
+
+def _set_cursor(conn, src, cursor):
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE media_sources SET sync_checkpoint = %s::jsonb WHERE id = %s",
+            (json.dumps(cursor) if cursor is not None else None, src),
+        )
+    conn.commit()
+
+
+def _enqueue_chunk(conn, ws, src, walk):
+    """A first_ingest_chunk as the sync chains it (media_sync `_run_sync`)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO jobs (kind, workspace_id, lane, serialization_key, run_at,"
+            " max_attempts, payload) VALUES ('first_ingest_chunk', %s, 'bulk', %s,"
+            " now(), 5, %s::jsonb)",
+            (ws, f"src:{src}", json.dumps({"v": 2, "source_id": src, "walk": walk})),
+        )
+    conn.commit()
+
+
+IN_FLIGHT = {
+    "v": 2,
+    "walk": "w-row",
+    "current": {
+        "id": "MEMES",
+        "name": "memes",
+        "top": "MEMES",
+        "top_name": "memes",
+        "path": "memes",
+        "listed": True,
+    },
+    "queue": [],
+    "page_token": "p2",
+}
+
+
+class TestAChunkCarriesOneWalk:
+    """Review of #1256: a chunk is a carrier for the walk it names. On another
+    walk, or a completed one, it does nothing — above all it never mints a
+    walk, which would re-walk the whole tree once per stray chunk."""
+
+    @pytest.mark.asyncio
+    async def test_a_chunk_for_another_walk_is_dropped_without_a_provider_call(
+        self, lane_db, sync_conn
+    ):
+        chain = seed_workspace_chain(sync_conn, "w6-stale-chunk")
+        _set_cursor(sync_conn, chain["src"], IN_FLIGHT)
+        _enqueue_chunk(sync_conn, chain["ws"], chain["src"], "w-old")
+        drive = ScriptedDrive([([_item("never")], None)])
+        wl, claimed = await _run_once_w6(lane_db, drive)
+        assert claimed is True and drive.calls == [], (
+            "no provider call for a stale chunk"
+        )
+        src = _source_row(sync_conn, chain["src"])
+        assert src["sync_checkpoint"] == IN_FLIGHT, "the row's walk is untouched"
+        assert "never" not in [r[0] for r in _items(sync_conn, chain["ws"])]
+        assert _jobs(sync_conn, "first_ingest_chunk")[0]["state"] == "succeeded"
+
+    @pytest.mark.asyncio
+    async def test_a_chunk_after_completion_does_not_start_a_new_walk(
+        self, lane_db, sync_conn
+    ):
+        chain = seed_workspace_chain(sync_conn, "w6-late-chunk")
+        _set_cursor(sync_conn, chain["src"], {"v": 2, "walk": "w-done", "seen": 2})
+        _enqueue_chunk(sync_conn, chain["ws"], chain["src"], "w-done")
+        drive = ScriptedDrive([([_item("never")], None)])
+        wl, claimed = await _run_once_w6(lane_db, drive)
+        assert claimed is True and drive.calls == []
+        assert _source_row(sync_conn, chain["src"])["sync_checkpoint"] == {
+            "v": 2,
+            "walk": "w-done",
+            "seen": 2,
+        }
+
+    @pytest.mark.asyncio
+    async def test_a_paused_source_ends_its_chain(self, lane_db, sync_conn):
+        chain = seed_workspace_chain(sync_conn, "w6-paused-chain")
+        _set_cursor(sync_conn, chain["src"], IN_FLIGHT)
+        with sync_conn.cursor() as cur:
+            cur.execute(
+                "UPDATE media_sources SET state = 'paused' WHERE id = %s",
+                (chain["src"],),
+            )
+        sync_conn.commit()
+        _enqueue_chunk(sync_conn, chain["ws"], chain["src"], "w-row")
+        drive = ScriptedDrive([([_item("never")], None)])
+        wl, claimed = await _run_once_w6(lane_db, drive)
+        assert claimed is True and drive.calls == [], "a removed folder's chain stops"
+        assert _source_row(sync_conn, chain["src"])["state"] == "paused"
+        assert _jobs(sync_conn, "first_ingest_chunk")[0]["state"] == "succeeded"
+
+    @pytest.mark.asyncio
+    async def test_a_cursor_moved_under_a_carrier_is_not_overwritten(
+        self, lane_db, sync_conn
+    ):
+        """The cursor write is a compare-and-swap against what the carrier
+        read: a re-pick, a reset or a parallel carrier that moved it first wins,
+        and this carrier writes nothing — not the cursor, not the rows, not a
+        chunk."""
+        chain = seed_workspace_chain(sync_conn, "w6-cas")
+        _arm_source(sync_conn, chain["src"])
+        _tick(sync_conn)
+        other = {**IN_FLIGHT, "walk": "w-other"}
+
+        def moved_under():
+            _set_cursor(sync_conn, chain["src"], other)
+
+        drive = ScriptedDrive([([_item("c1")], "tok-2")], on_call=moved_under)
+        wl, claimed = await _run_once_w6(lane_db, drive)
+        assert claimed is True and len(drive.calls) == 1
+        assert _source_row(sync_conn, chain["src"])["sync_checkpoint"] == other, (
+            "the other carrier's cursor stands"
+        )
+        assert "c1" not in [r[0] for r in _items(sync_conn, chain["ws"])], (
+            "no rows from the dropped carrier"
+        )
+        assert _jobs(sync_conn, "first_ingest_chunk") == [], "no chunk chained"

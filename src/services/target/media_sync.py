@@ -81,14 +81,11 @@ class DriveCredentialDead(StorydumpError):
 
 async def sync_media_source(deps, session, job) -> str:
     payload = job.get("payload") or {}
-    return await _run_sync(deps, job, page_token=None, reason=payload.get("reason"))
+    return await _run_sync(deps, job, reason=payload.get("reason"))
 
 
 async def first_ingest_chunk(deps, session, job) -> str:
-    payload = job.get("payload") or {}
-    return await _run_sync(
-        deps, job, page_token=payload.get("page_token"), reason="chunk"
-    )
+    return await _run_sync(deps, job, reason="chunk")
 
 
 async def rearm_after_connect(
@@ -276,7 +273,7 @@ async def alert_stranded_sources(
     return len(rows)
 
 
-async def _run_sync(deps, job, *, page_token, reason) -> str:
+async def _run_sync(deps, job, *, reason) -> str:
     from src.services.target import prompts
     from src.services.target.work_loop import poller_session_factory
 
@@ -292,9 +289,9 @@ async def _run_sync(deps, job, *, page_token, reason) -> str:
                 await s.execute(
                     text(
                         "SELECT config, sync_checkpoint, state FROM media_sources"
-                        " WHERE id = :s"
+                        " WHERE id = :s AND workspace_id = :ws"
                     ),
-                    {"s": source_id},
+                    {"s": source_id, "ws": workspace_id},
                 )
             )
             .mappings()
@@ -303,6 +300,14 @@ async def _run_sync(deps, job, *, page_token, reason) -> str:
     if row is None:
         logger.warning("sync %s: source %s has no row", job["id"], source_id)
         return "missing"
+    if row["state"] == "paused":
+        # Removed, or its grant disconnected, while this job (a chunk of a
+        # long walk, most likely) was queued: the person chose that. No
+        # provider call, no rows, and the chain ends here (review of #1256).
+        logger.info(
+            "sync %s: source %s is paused — nothing to do", job["id"], source_id
+        )
+        return "paused"
     # The STORED checkpoint is the cursor, always: the walk (owner ruling
     # 2026-09-08 — every folder under the connected one, lazily) carries
     # `current` and `queue` beside `page_token`, and the chunk that chains
@@ -315,13 +320,33 @@ async def _run_sync(deps, job, *, page_token, reason) -> str:
     # never resumes a foreign page: its payload's `walk` is recorded for the
     # log, but the cursor of record is the row's.
     stored: Any = row["sync_checkpoint"] or None
-    if (
+    in_flight = bool(
         checkpoint_incomplete(stored)
         and stored.get("v") == 2
         and isinstance(stored.get("walk"), str)
         and stored.get("walk")
-    ):
+    )
+    if reason == "chunk":
+        # A chunk is a carrier for ONE walk — the one it names. A chunk that
+        # finds the row on another walk, or complete, is stale: a re-pick
+        # reset the cursor, a lease was lost after the page had been
+        # committed, or a parallel carrier finished first. It does nothing —
+        # above all it does not mint a walk, which would re-walk the whole
+        # tree once per stray chunk (review of #1256).
+        if not in_flight or stored.get("walk") != payload.get("walk"):
+            logger.info(
+                "sync %s: chunk for walk %s is stale (row holds %s) — dropped",
+                job["id"],
+                payload.get("walk"),
+                (stored or {}).get("walk"),
+            )
+            return "stale"
         checkpoint: Any = stored
+    elif in_flight:
+        # A baseline or demand sync that finds a walk in flight joins it as a
+        # carrier (the chain may have died); the cursor CAS below keeps two
+        # carriers from ever overwriting each other.
+        checkpoint = stored
     else:
         if checkpoint_incomplete(stored):
             logger.warning(
@@ -353,15 +378,18 @@ async def _run_sync(deps, job, *, page_token, reason) -> str:
                     # than resuming at the folder that failed (review of #1251).
                     "UPDATE media_sources SET state = 'error', alerted_at = now(),"
                     "  sync_checkpoint = CAST('{\"v\": 2}' AS jsonb)"
-                    " WHERE id = :s AND state <> 'paused'"
+                    " WHERE id = :s AND workspace_id = :ws AND state <> 'paused'"
                     " RETURNING id"
                 ),
-                {"s": source_id},
+                {"s": source_id, "ws": workspace_id},
             )
             flipped = (
                 await s.execute(
-                    text("SELECT state FROM media_sources WHERE id = :s"),
-                    {"s": source_id},
+                    text(
+                        "SELECT state FROM media_sources"
+                        " WHERE id = :s AND workspace_id = :ws"
+                    ),
+                    {"s": source_id, "ws": workspace_id},
                 )
             ).scalar()
             bindings = (
@@ -396,9 +424,42 @@ async def _run_sync(deps, job, *, page_token, reason) -> str:
         )
         return "source-error"
 
-    # Phase 3 — upsert + checkpoint + chain-or-rearm, one transaction.
+    # Phase 3 — checkpoint CAS + upsert + chain-or-rearm, one transaction.
     kept = skipped_kind = 0
     async with factory() as s:
+        # The cursor advances by compare-and-swap against what THIS carrier
+        # read. A re-pick that nulled it, a persistent failure that reset it,
+        # or a parallel carrier that got here first all leave a different
+        # value, and this carrier then writes NOTHING — not the cursor, not
+        # the rows, not a chunk (review of #1256). `{}` stands for SQL NULL on
+        # both sides; no writer ever stores an empty object.
+        moved = (
+            await s.execute(
+                text(
+                    "UPDATE media_sources SET sync_checkpoint = CAST(:cp AS jsonb)"
+                    " WHERE id = :s AND workspace_id = :ws"
+                    "   AND COALESCE(sync_checkpoint, CAST('{}' AS jsonb))"
+                    "       = CAST(:old AS jsonb)"
+                    " RETURNING id"
+                ),
+                {
+                    "cp": _json(new_checkpoint),
+                    "old": _json(stored if stored is not None else {}),
+                    "s": source_id,
+                    "ws": workspace_id,
+                },
+            )
+        ).first()
+        if moved is None:
+            await s.rollback()
+            logger.warning(
+                "sync %s: source %s cursor moved under this carrier (walk %s) —"
+                " dropped without writes",
+                job["id"],
+                source_id,
+                walk,
+            )
+            return "stale"
         for item in items:
             if item.get("kind") not in _ALLOWED_KINDS:
                 skipped_kind += 1
@@ -448,13 +509,6 @@ async def _run_sync(deps, job, *, page_token, reason) -> str:
                 },
             )
             kept += sum(1 for (inserted,) in result.all() if inserted)
-        await s.execute(
-            text(
-                "UPDATE media_sources SET sync_checkpoint = CAST(:cp AS jsonb)"
-                " WHERE id = :s"
-            ),
-            {"cp": _json(new_checkpoint), "s": source_id},
-        )
         if checkpoint_incomplete(new_checkpoint):
             # More pages: chain the next chunk and do NOT re-arm — the chain
             # is the carrier. The serialized key orders it after this job.
@@ -485,9 +539,9 @@ async def _run_sync(deps, job, *, page_token, reason) -> str:
                     "  next_sync_at = now() + make_interval(secs => :secs)"
                     # Removed or disconnected while this job ran: the success
                     # stamp must not un-pause it (review of #1246).
-                    " WHERE id = :s AND state <> 'paused'"
+                    " WHERE id = :s AND workspace_id = :ws AND state <> 'paused'"
                 ),
-                {"secs": BASELINE_SECONDS + jitter, "s": source_id},
+                {"secs": BASELINE_SECONDS + jitter, "s": source_id, "ws": workspace_id},
             )
         await s.commit()
     logger.info(
@@ -509,4 +563,4 @@ async def _run_sync(deps, job, *, page_token, reason) -> str:
 def _json(value) -> str:
     import json
 
-    return json.dumps(value if value is not None else {"v": 1})
+    return json.dumps(value if value is not None else {"v": 2})

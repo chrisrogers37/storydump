@@ -668,7 +668,9 @@ starts over; `{v:2, walk}` (with at most `truncated`) is the complete shape, and
 path under the connected folder (`""` at its root), refreshed with `category` (the TOP-LEVEL
 folder's name) on every walk. Both are labels: the unit that carries a posting weight is the
 connected folder (`media_sources`), per `03`'s 2026-09-08 ruling (the mix table is keyed on it in
-the next increment).
+the next increment). Connected folders are meant to be **disjoint**: a folder inside a connected
+folder is already synced by its parent, and the next increment refuses such a pick (`source_nested`);
+until then two overlapping sources share rows by content hash, attributed to whichever listed first.
 
 ## §3. The intent ledger (heart of the system)
 

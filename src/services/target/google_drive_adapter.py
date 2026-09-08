@@ -118,6 +118,22 @@ def is_folder_id(value: object) -> bool:
     return isinstance(value, str) and FOLDER_ID_RE.fullmatch(value) is not None
 
 
+def _cursor_folder(entry: Mapping[str, Any], root: str) -> dict:
+    """A queue/current entry read back from a stored cursor, with every field
+    the walk reads present: a missing one gets its default (the entry's own id
+    as `top`; an empty path) rather than a KeyError the retry ladder would
+    repeat forever."""
+    fid = str(entry["id"])
+    return {
+        "id": fid,
+        "name": entry.get("name"),
+        "top": entry.get("top") or fid,
+        "top_name": entry.get("top_name"),
+        "path": entry.get("path") or "",
+        "listed": bool(entry.get("listed")),
+    }
+
+
 @dataclass(frozen=True)
 class FolderPage:
     """What the browser returns: the folders, and whether the cap cut them."""
@@ -202,6 +218,10 @@ def _refuse_unsupported_config(config: Mapping[str, Any]) -> None:
     the same set, which is a property that only holds if there is one set.
     """
     validate_source_config(config)
+    if not is_folder_id(config.get("folder_ref")):
+        # The id is spliced into a Drive `q` string; a value outside the id
+        # shape is refused here rather than trusted there (review of #1256).
+        raise DriveTerminalError("folder_ref is not a Drive folder id")
     if "root_name" in config and config["root_name"]:
         raise DriveTerminalError(
             "config carries root_name, which scopes listing to a subfolder"
@@ -281,12 +301,20 @@ class GoogleDriveAdapter:
         walk = cp.get("walk")
         if not (cp.get("v") == 2 and isinstance(walk, str) and walk):
             walk = None
-        if walk is not None and cp.get("current"):
-            current: dict = dict(cp["current"])
-            queue = [dict(f) for f in (cp.get("queue") or [])]
+        resumed = cp.get("current") if walk is not None else None
+        if resumed and is_folder_id(resumed.get("id")):
+            # Healed, not trusted: a field a stored cursor lacks gets its
+            # default rather than a KeyError that would retry forever.
+            current: dict = _cursor_folder(resumed, root)
+            queue = [
+                _cursor_folder(f, root)
+                for f in (cp.get("queue") or [])
+                if is_folder_id((f or {}).get("id"))
+            ]
             page_token = cp.get("page_token")
             seen = int(cp.get("seen") or 0)
             truncated = bool(cp.get("truncated"))
+            visited = [v for v in (cp.get("visited") or []) if isinstance(v, str)]
         else:
             if cp.get("current") or cp.get("page_token"):
                 logger.warning(
@@ -302,15 +330,18 @@ class GoogleDriveAdapter:
                 "path": "",
                 "listed": False,
             }
-            queue, page_token, seen, truncated = [], None, 0, False
+            queue, page_token, seen, truncated, visited = [], None, 0, False, []
 
         def cursor(**extra: Any) -> dict:
+            # `seen` and `truncated` ride to completion (the log reads them);
+            # `visited` only while the walk is in flight.
             out: dict = {"v": 2, "walk": walk}
+            if seen:
+                out["seen"] = seen
             if truncated:
                 out["truncated"] = True
             if extra:
-                if seen:
-                    out["seen"] = seen
+                out["visited"] = visited
                 out.update(extra)
             return out
 
@@ -318,6 +349,20 @@ class GoogleDriveAdapter:
             # The cursor past `current`: the next queued folder, or done.
             return cursor(current=queue[0], queue=queue[1:]) if queue else cursor()
 
+        if not current.get("listed") and seen >= FOLDER_WALK_CAP:
+            # Past the cap no listing is even asked for: every child would be
+            # discarded, and a 2,000-folder tree would otherwise spend 2,000
+            # requests per walk on nothing (review of #1256).
+            if not truncated:
+                logger.warning(
+                    "drive source %s: more than %d folders under %s in one walk —"
+                    " the rest are skipped this walk (truncated)",
+                    source_id,
+                    FOLDER_WALK_CAP,
+                    root,
+                )
+                truncated = True
+            current["listed"] = True
         if not current.get("listed"):
             # Lazy discovery: this folder's subfolders, once, as it is popped.
             try:
@@ -337,7 +382,20 @@ class GoogleDriveAdapter:
                     current["id"],
                 )
                 return [], advanced()
+            known = set(visited) | {str(current["id"])} | {str(f["id"]) for f in queue}
             for child in children:
+                if child["id"] in known:
+                    # Reachable by two paths (a multi-parent folder) or a cycle
+                    # (a provider handing back an ancestor): walked once, and
+                    # never spun to the cap (review of #1256).
+                    logger.warning(
+                        "drive source %s: folder %r (%s) reached twice under %s — skipped",
+                        source_id,
+                        child["name"],
+                        child["id"],
+                        current.get("path") or root,
+                    )
+                    continue
                 if seen >= FOLDER_WALK_CAP:
                     if not truncated:
                         logger.warning(
@@ -365,6 +423,8 @@ class GoogleDriveAdapter:
                     }
                 )
                 seen += 1
+                known.add(child["id"])
+            visited.append(str(current["id"]))
             current["listed"] = True
 
         params = {
@@ -475,6 +535,16 @@ class GoogleDriveAdapter:
                 # The query asks for folders; the mime is checked again because
                 # a provider answering something else must not become a
                 # folder that is really a file.
+                if isinstance(fid, str) and not is_folder_id(fid):
+                    # Spliced into a `q` string next: a shape outside the id
+                    # alphabet is skipped and said, never trusted.
+                    logger.warning(
+                        "drive source %s: folder id %r under %s is not a Drive id — skipped",
+                        source_id,
+                        fid,
+                        parent,
+                    )
+                    continue
                 if (
                     isinstance(fid, str)
                     and isinstance(name, str)

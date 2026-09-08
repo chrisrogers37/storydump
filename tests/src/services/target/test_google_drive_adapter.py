@@ -1061,7 +1061,9 @@ class TestTheWalkGoesToAnyDepth:
         )
         assert [r for r, _, _ in seen] == ["r1", "m1"]
         assert all(c["walk"] == "minted-by-the-sync" for c in cursors)
-        assert cursors[-1] == {"v": 2, "walk": "minted-by-the-sync"}
+        assert cursors[-1] == {"v": 2, "walk": "minted-by-the-sync", "seen": 1}, (
+            "complete: the token and the folder count, nothing pending"
+        )
 
     @pytest.mark.asyncio
     async def test_a_pre_v2_in_flight_cursor_is_ignored_and_the_walk_starts_over(self):
@@ -1153,3 +1155,83 @@ class TestTheWalkGoesToAnyDepth:
         )
         seen, cursors = await self._walk(adapter)
         assert [r for r, _, _ in seen] == ["k1"]
+
+    @pytest.mark.asyncio
+    async def test_a_folder_reachable_twice_is_walked_once_and_a_cycle_does_not_spin(
+        self,
+    ):
+        adapter, calls = self._tree(
+            tree={
+                self.ROOT: [("A", "a")],
+                "A": [("B", "b")],
+                "B": [("A", "a"), (self.ROOT, "root")],  # a cycle, and the root again
+            },
+            files={"A": [_file("fa")], "B": [_file("fb")]},
+        )
+        seen, cursors = await self._walk(adapter)
+        assert [r for r, _, _ in seen] == ["fa", "fb"], "each file once"
+        listings = [c["parent"] for c in calls if c["listing"]]
+        assert sorted(listings) == sorted([self.ROOT, "A", "B"]), (
+            "each folder listed once"
+        )
+        assert not cursors[-1].get("truncated"), "a cycle is not a size cap"
+
+    @pytest.mark.asyncio
+    async def test_a_child_id_outside_the_drive_id_shape_is_skipped(self):
+        adapter, calls = self._tree(
+            tree={self.ROOT: [("X' or 'a'='a", "evil"), ("OK1", "ok")]},
+            files={"OK1": [_file("k1")]},
+        )
+        seen, _ = await self._walk(adapter)
+        assert [r for r, _, _ in seen] == ["k1"]
+        assert not any("X' or" in c["q"] for c in calls), "never spliced into a query"
+
+    @pytest.mark.asyncio
+    async def test_a_root_outside_the_drive_id_shape_is_refused_before_any_request(
+        self,
+    ):
+        from src.services.target.drive_adapter import DriveTerminalError
+
+        adapter, calls = self._tree(tree={}, files={})
+        with pytest.raises(DriveTerminalError):
+            await adapter.list_changes(
+                {**CONFIG, "folder_ref": "X' or 'a'='a"},
+                None,
+                source_id=SRC,
+                workspace_id=WS,
+            )
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_a_stored_cursor_missing_walk_fields_is_healed_not_crashed(self):
+        adapter, calls = self._tree(
+            tree={self.ROOT: [("MEMES", "memes")]},
+            files={"MEMES": [_file("m1")]},
+        )
+        thin = {
+            "v": 2,
+            "walk": "w",
+            "current": {"id": "MEMES", "name": "memes"},
+            "queue": [],
+        }
+        items, cp = await adapter.list_changes(
+            CONFIG, thin, source_id=SRC, workspace_id=WS
+        )
+        assert [i["ref"] for i in items] == ["m1"] and items[0]["folder_path"] == ""
+        assert not checkpoint_incomplete(cp)
+
+    @pytest.mark.asyncio
+    async def test_past_the_cap_no_listing_request_is_spent(self, monkeypatch):
+        from src.services.target import google_drive_adapter as mod
+
+        monkeypatch.setattr(mod, "FOLDER_WALK_CAP", 1)
+        adapter, calls = self._tree(
+            tree={self.ROOT: [("A", "a"), ("B", "b")], "A": [("A1", "a1")]},
+            files={"A": [_file("fa")], "A1": [_file("fa1")]},
+        )
+        seen, cursors = await self._walk(adapter)
+        assert [r for r, _, _ in seen] == ["fa"]
+        assert [c["parent"] for c in calls if c["listing"]] == [self.ROOT], (
+            "once the cap is hit, a popped folder is not asked for its subfolders"
+        )
+        assert cursors[-1].get("truncated") is True
