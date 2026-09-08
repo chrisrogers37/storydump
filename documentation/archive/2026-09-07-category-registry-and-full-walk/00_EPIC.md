@@ -1,13 +1,15 @@
 ---
 title: Category registry keyed by folder id, and a full-depth Drive walk (epic)
 type: plan
-status: draft
+status: completed
 owner: chris
 created: 2026-09-07
 tags: [plan, drive, media-sync, categories, scheduler, web, epic]
 links:
   - https://github.com/chrisrogers37/storydump/pull/1254
 ---
+
+> **ARCHIVED 2026-09-08 — built.** Phase 1a landed as #1256 (the lazy full-depth walk, migration 070); phases 1b, 2 and 3 were superseded by the 2026-09-08 ruling *sources are the groups* and replaced by `04_weights-by-source.md`, built as #1262 (migration 071). One follow-up remains: removing the v1 category-mix keys after the Vercel deploy (#1263). Kept as the record of the hardened registry design a customer with an unsplittable folder could still call for.
 
 > **Ruling 2026-09-08 — sources are the groups** (`03-decision-record.md`, post-ratification rulings). After an adversarial weigh of this plan the owner ruled that the **connected folder** (`media_sources` row) is the unit that carries a weight, not a subfolder. **Phase 1a (the lazy full-depth walk) stands and is built first.** Phases 1b, 2 and 3 — the registry keyed by folder id, weights per folder, the automatic rule with a debut, and the per-folder card — are **superseded** by `04_weights-by-source.md`. Forks F1–F4, F8 and F9 are superseded by the ruling; F5, F6, F7 and S1 stand. The superseded text is kept as the record of a hardened design that a customer with an unsplittable folder could still call for.
 
