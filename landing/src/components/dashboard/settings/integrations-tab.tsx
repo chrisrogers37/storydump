@@ -1,5 +1,6 @@
 "use client";
 
+import { ChevronRight } from "lucide-react";
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -13,7 +14,11 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import type { DriveStatus, SettingsView, SourceRow } from "@/lib/dashboard-payloads";
+import type {
+  DriveStatus,
+  SettingsView,
+  SourceRow,
+} from "@/lib/dashboard-payloads";
 import {
   addDriveFolder,
   addFolderRefusalCopy,
@@ -90,9 +95,15 @@ export function IntegrationsTab({
   telegramDisplayName: string | null;
 }) {
   const router = useRouter();
-  const [telegramLink, setTelegramLink] = useState<{ link: string; expiresInSeconds: number } | null>(null);
+  const [telegramLink, setTelegramLink] = useState<{
+    link: string;
+    expiresInSeconds: number;
+  } | null>(null);
   const [linkingTelegram, setLinkingTelegram] = useState(false);
-  const [groupLink, setGroupLink] = useState<{ link: string; expiresInSeconds: number } | null>(null);
+  const [groupLink, setGroupLink] = useState<{
+    link: string;
+    expiresInSeconds: number;
+  } | null>(null);
   const [mintingGroupLink, setMintingGroupLink] = useState(false);
   const [groupLinkError, setGroupLinkError] = useState<string | null>(null);
   const boundGroups = (bindings ?? []).filter((b) => b.state === "active");
@@ -107,7 +118,10 @@ export function IntegrationsTab({
       setGroupLinkError(telegramGroupLinkRefusalCopy(result.error));
       return;
     }
-    setGroupLink({ link: result.link, expiresInSeconds: result.expiresInSeconds });
+    setGroupLink({
+      link: result.link,
+      expiresInSeconds: result.expiresInSeconds,
+    });
   }
   const [syncingId, setSyncingId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -116,7 +130,9 @@ export function IntegrationsTab({
   const [removingId, setRemovingId] = useState<string | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerStack, setPickerStack] = useState<DriveFolder[]>([]);
-  const [pickerFolders, setPickerFolders] = useState<DriveFolder[] | null>(null);
+  const [pickerFolders, setPickerFolders] = useState<DriveFolder[] | null>(
+    null,
+  );
   const [pickerLoading, setPickerLoading] = useState(false);
   const [pickerError, setPickerError] = useState<string | null>(null);
   const [pickingId, setPickingId] = useState<string | null>(null);
@@ -126,11 +142,14 @@ export function IntegrationsTab({
 
   // A removed folder is a PAUSED source (nothing is deleted); it leaves the
   // list and comes back when picked again.
-  const driveSources = sources.filter((s) => s.provider === "gdrive" && s.state !== "paused");
+  const driveSources = sources.filter(
+    (s) => s.provider === "gdrive" && s.state !== "paused",
+  );
   const grant = driveStatusBadge(drive?.status);
   const connectControl = drive ? driveConnectControl(drive.status) : null;
   const driveActive = drive?.status === "active";
-  const pickerCurrent = pickerStack.length > 0 ? pickerStack[pickerStack.length - 1] : null;
+  const pickerCurrent =
+    pickerStack.length > 0 ? pickerStack[pickerStack.length - 1] : null;
 
   /**
    * Start the WORKSPACE's grant, then hand the browser to Google.
@@ -162,7 +181,11 @@ export function IntegrationsTab({
     setPickerFolders(null);
     setPickerTruncated(false);
     const parent =
-      stack.length > 0 ? stack[stack.length - 1].id : root === "shared" ? SHARED_ROOT : null;
+      stack.length > 0
+        ? stack[stack.length - 1].id
+        : root === "shared"
+          ? SHARED_ROOT
+          : null;
     const result = await fetchDriveFolders(workspaceId, parent);
     setPickerLoading(false);
     if (!result.ok) {
@@ -243,7 +266,9 @@ export function IntegrationsTab({
       setError(removeFolderRefusalCopy(result.error));
       return;
     }
-    setNotice("Folder removed from syncing. What was already synced stays; pick it again to resume.");
+    setNotice(
+      "Folder removed from syncing. What was already synced stays; pick it again to resume.",
+    );
     router.refresh();
   }
 
@@ -275,7 +300,10 @@ export function IntegrationsTab({
       setError(telegramLinkRefusalCopy(result.error));
       return;
     }
-    setTelegramLink({ link: result.link, expiresInSeconds: result.expiresInSeconds });
+    setTelegramLink({
+      link: result.link,
+      expiresInSeconds: result.expiresInSeconds,
+    });
   }
 
   async function disconnectDrive() {
@@ -337,7 +365,9 @@ export function IntegrationsTab({
         </div>
       )}
       {notice && (
-        <div className="mb-4 rounded-md border bg-muted/40 p-3 text-sm">{notice}</div>
+        <div className="mb-4 rounded-md border bg-muted/40 p-3 text-sm">
+          {notice}
+        </div>
       )}
       <Card>
         <CardHeader>
@@ -346,7 +376,10 @@ export function IntegrationsTab({
         <CardContent className="space-y-3">
           {telegramLinked ? (
             <div className="flex items-center gap-2">
-              <Badge variant="secondary" className="bg-green-100 text-green-800">
+              <Badge
+                variant="secondary"
+                className="bg-green-100 text-green-800"
+              >
                 Linked
               </Badge>
               <p className="text-sm text-muted-foreground">
@@ -370,7 +403,11 @@ export function IntegrationsTab({
               {telegramLink ? (
                 <div className="space-y-2">
                   <Button asChild>
-                    <a href={telegramLink.link} target="_blank" rel="noopener noreferrer">
+                    <a
+                      href={telegramLink.link}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
                       Open Telegram to finish linking
                     </a>
                   </Button>
@@ -378,18 +415,27 @@ export function IntegrationsTab({
                     {telegramLink.link}
                   </p>
                   <p className="text-xs text-muted-foreground">
-                    <strong>Do not share this link.</strong> Whoever taps it links
-                    their Telegram to your account. Tap Start in the chat that
-                    opens — the bot confirms in the chat — then reload this page; it shows
-                    Linked once the bot has heard from you. Asking for a new link
-                    retires this one.
+                    <strong>Do not share this link.</strong> Whoever taps it
+                    links their Telegram to your account. Tap Start in the chat
+                    that opens — the bot confirms in the chat — then reload this
+                    page; it shows Linked once the bot has heard from you.
+                    Asking for a new link retires this one.
                   </p>
-                  <Button variant="ghost" size="sm" onClick={linkTelegram} disabled={linkingTelegram}>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={linkTelegram}
+                    disabled={linkingTelegram}
+                  >
                     {linkingTelegram ? "Preparing link..." : "Get a new link"}
                   </Button>
                 </div>
               ) : (
-                <Button variant="outline" onClick={linkTelegram} disabled={linkingTelegram}>
+                <Button
+                  variant="outline"
+                  onClick={linkTelegram}
+                  disabled={linkingTelegram}
+                >
                   {linkingTelegram ? "Preparing link..." : "Link Telegram"}
                 </Button>
               )}
@@ -398,9 +444,10 @@ export function IntegrationsTab({
           <div className="border-t pt-3">
             <p className="text-sm font-medium">Telegram groups</p>
             <p className="mt-1 text-xs text-muted-foreground">
-              Approval cards and notices for this workspace go to every group listed here.
-              Adding one opens Telegram&apos;s group picker; the group you choose is bound to
-              this workspace. A group can belong to one workspace only.
+              Approval cards and notices for this workspace go to every group
+              listed here. Adding one opens Telegram&apos;s group picker; the
+              group you choose is bound to this workspace. A group can belong to
+              one workspace only.
             </p>
             {bindings === null ? (
               <p className="mt-2 text-sm text-muted-foreground">
@@ -409,43 +456,74 @@ export function IntegrationsTab({
             ) : boundGroups.length > 0 ? (
               <ul className="mt-2 space-y-1 text-sm">
                 {boundGroups.map((b) => (
-                    <li key={b.id} className="flex items-center gap-2">
-                      <Badge variant="secondary" className="bg-green-100 text-green-800">
-                        Bound
-                      </Badge>
-                      <span className="text-muted-foreground">
-                        {b.channel === "telegram_dm" ? "Direct chat" : "Group chat"} · id {b.external_ref}
-                      </span>
-                    </li>
-                  ))}
+                  <li key={b.id} className="flex items-center gap-2">
+                    <Badge
+                      variant="secondary"
+                      className="bg-green-100 text-green-800"
+                    >
+                      Bound
+                    </Badge>
+                    <span className="text-muted-foreground">
+                      {b.channel === "telegram_dm"
+                        ? "Direct chat"
+                        : "Group chat"}{" "}
+                      · id {b.external_ref}
+                    </span>
+                  </li>
+                ))}
               </ul>
             ) : (
-              <p className="mt-2 text-sm text-muted-foreground">No Telegram group is bound yet.</p>
+              <p className="mt-2 text-sm text-muted-foreground">
+                No Telegram group is bound yet.
+              </p>
             )}
-            {groupLinkError && <p className="mt-2 text-sm text-red-700">{groupLinkError}</p>}
+            {groupLinkError && (
+              <p className="mt-2 text-sm text-red-700">{groupLinkError}</p>
+            )}
             {groupLink ? (
               <div className="mt-3 space-y-2">
                 <Button asChild>
-                  <a href={groupLink.link} target="_blank" rel="noopener noreferrer">
+                  <a
+                    href={groupLink.link}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
                     Open Telegram to choose a group
                   </a>
                 </Button>
-                <p className="break-all font-mono text-xs text-muted-foreground">{groupLink.link}</p>
-                <p className="text-xs text-muted-foreground">
-                  Only you can use this link, from the Telegram account linked to your Storydump
-                  user. It works once and expires after{" "}
-                  {Math.round(groupLink.expiresInSeconds / 60)} minutes; the bot confirms in the
-                  group, then reload this page. If the bot is already in the group and nothing
-                  arrives, send this in the group instead:{" "}
-                  <code className="break-all">{startCommandFor(groupLink.link)}</code>
+                <p className="break-all font-mono text-xs text-muted-foreground">
+                  {groupLink.link}
                 </p>
-                <Button variant="ghost" size="sm" onClick={addTelegramGroup} disabled={mintingGroupLink}>
+                <p className="text-xs text-muted-foreground">
+                  Only you can use this link, from the Telegram account linked
+                  to your Storydump user. It works once and expires after{" "}
+                  {Math.round(groupLink.expiresInSeconds / 60)} minutes; the bot
+                  confirms in the group, then reload this page. If the bot is
+                  already in the group and nothing arrives, send this in the
+                  group instead:{" "}
+                  <code className="break-all">
+                    {startCommandFor(groupLink.link)}
+                  </code>
+                </p>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={addTelegramGroup}
+                  disabled={mintingGroupLink}
+                >
                   {mintingGroupLink ? "Preparing link..." : "Get a new link"}
                 </Button>
               </div>
             ) : (
-              <Button variant="outline" className="mt-3" onClick={addTelegramGroup} disabled={mintingGroupLink}>
-                {mintingGroupLink ? "Preparing link..." : "Add a Telegram group"}
+              <Button
+                variant="outline"
+                className="mt-3"
+                onClick={addTelegramGroup}
+                disabled={mintingGroupLink}
+              >
+                {mintingGroupLink
+                  ? "Preparing link..."
+                  : "Add a Telegram group"}
               </Button>
             )}
           </div>
@@ -458,7 +536,8 @@ export function IntegrationsTab({
         <CardContent className="space-y-4">
           {drive === null ? (
             <p className="text-sm text-muted-foreground">
-              The Google Drive connection could not be loaded just now. Reload to try again.
+              The Google Drive connection could not be loaded just now. Reload
+              to try again.
             </p>
           ) : (
             <div className="flex flex-wrap items-center justify-between gap-3">
@@ -513,7 +592,12 @@ export function IntegrationsTab({
           <div className="space-y-2 border-t pt-4">
             <div className="flex items-center justify-between gap-3">
               <p className="text-sm font-medium">Folders</p>
-              <Button size="sm" variant="outline" onClick={openPicker} disabled={!driveActive}>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={openPicker}
+                disabled={!driveActive}
+              >
                 Add folder
               </Button>
             </div>
@@ -532,11 +616,16 @@ export function IntegrationsTab({
                   >
                     <div className="space-y-0.5">
                       <div className="flex items-center gap-2">
-                        <p className="font-medium">{source.folder_name ?? "Drive folder"}</p>
+                        <p className="font-medium">
+                          {source.folder_name ?? "Drive folder"}
+                        </p>
                         {/* The source's own operating state, coloured only
                             when it is a problem: healthy is unremarkable. */}
                         {source.state !== "active" && (
-                          <Badge variant="secondary" className="bg-amber-100 text-amber-900">
+                          <Badge
+                            variant="secondary"
+                            className="bg-amber-100 text-amber-900"
+                          >
                             {source.state}
                           </Badge>
                         )}
@@ -573,9 +662,9 @@ export function IntegrationsTab({
               </ul>
             )}
             <p className="text-xs text-muted-foreground">
-              Removing a folder stops syncing it; what was already synced stays. Disconnecting
-              Google Drive pauses every folder and revokes access here, and asks Google to revoke
-              it on their side.
+              Removing a folder stops syncing it; what was already synced stays.
+              Disconnecting Google Drive pauses every folder and revokes access
+              here, and asks Google to revoke it on their side.
             </p>
           </div>
         </CardContent>
@@ -591,8 +680,10 @@ export function IntegrationsTab({
           <DialogHeader>
             <DialogTitle>Pick a Drive folder</DialogTitle>
             <DialogDescription>
-              Storydump syncs the images and videos in the folder you pick. Open a folder to look
-              inside it.
+              Each folder you connect is a group of its own: everything inside
+              it syncs, at any depth. Open a folder to pick one of its
+              subfolders — to weight two subfolders separately, connect each as
+              its own folder.
             </DialogDescription>
           </DialogHeader>
           <div className="flex gap-2">
@@ -637,15 +728,19 @@ export function IntegrationsTab({
           {pickerError && <p className="text-sm text-red-700">{pickerError}</p>}
           {pickerTruncated && (
             <p className="text-xs text-muted-foreground">
-              Showing the first folders alphabetically — this level has more. Open a folder to
-              narrow the list.
+              Showing the first folders alphabetically — this level has more.
+              Open a folder to narrow the list.
             </p>
           )}
           <div className="max-h-72 overflow-y-auto rounded-md border">
             {pickerLoading ? (
-              <p className="p-3 text-sm text-muted-foreground">Loading folders...</p>
+              <p className="p-3 text-sm text-muted-foreground">
+                Loading folders...
+              </p>
             ) : pickerFolders !== null && pickerFolders.length === 0 ? (
-              <p className="p-3 text-sm text-muted-foreground">No folders inside this one.</p>
+              <p className="p-3 text-sm text-muted-foreground">
+                No folders inside this one.
+              </p>
             ) : (
               (pickerFolders ?? []).map((f) => (
                 <div
@@ -654,10 +749,16 @@ export function IntegrationsTab({
                 >
                   <button
                     type="button"
-                    className="min-w-0 flex-1 truncate text-left text-sm hover:underline"
+                    className="flex min-w-0 flex-1 items-center gap-1 text-left text-sm hover:underline"
                     onClick={() => enterFolder(f)}
+                    aria-label={`Open ${f.name}`}
+                    title="Open this folder"
                   >
-                    {f.name}
+                    <span className="truncate">{f.name}</span>
+                    <ChevronRight
+                      className="size-4 shrink-0 text-muted-foreground"
+                      aria-hidden
+                    />
                   </button>
                   <Button
                     size="sm"
@@ -673,8 +774,13 @@ export function IntegrationsTab({
           </div>
           <DialogFooter>
             {pickerCurrent && (
-              <Button onClick={() => pickFolder(pickerCurrent)} disabled={pickingId !== null}>
-                {pickingId === pickerCurrent.id ? "Adding..." : `Use "${pickerCurrent.name}"`}
+              <Button
+                onClick={() => pickFolder(pickerCurrent)}
+                disabled={pickingId !== null}
+              >
+                {pickingId === pickerCurrent.id
+                  ? "Adding..."
+                  : `Use "${pickerCurrent.name}"`}
               </Button>
             )}
             <Button variant="ghost" onClick={closePicker}>
