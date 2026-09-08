@@ -174,6 +174,16 @@ export function IntegrationsTab({
     window.location.assign(result.authorizationUrl);
   }
 
+  /** Folders that are sources here already (active ones): greyed in the
+   *  picker — a re-pick is a no-op and a pick inside one is refused by the
+   *  API (`source_nested`, owner ruling 2026-09-08: connected folders are
+   *  disjoint). */
+  const connectedRefs = new Set(
+    sources
+      .filter((s) => s.state === "active" && s.folder_ref)
+      .map((s) => s.folder_ref as string),
+  );
+
   /** The folder browser: one listing per level, read through the grant. */
   async function loadFolders(stack: DriveFolder[], root: "mine" | "shared") {
     setPickerLoading(true);
@@ -760,14 +770,20 @@ export function IntegrationsTab({
                       aria-hidden
                     />
                   </button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => pickFolder(f)}
-                    disabled={pickingId !== null}
-                  >
-                    {pickingId === f.id ? "Adding..." : "Use this folder"}
-                  </Button>
+                  {connectedRefs.has(f.id) ? (
+                    <span className="text-xs text-muted-foreground">
+                      Already connected
+                    </span>
+                  ) : (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => pickFolder(f)}
+                      disabled={pickingId !== null}
+                    >
+                      {pickingId === f.id ? "Adding..." : "Use this folder"}
+                    </Button>
+                  )}
                 </div>
               ))
             )}

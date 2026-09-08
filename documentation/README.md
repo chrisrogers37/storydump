@@ -47,7 +47,7 @@ documentation/
 - **[2026-08-17-m1-transform-spec/](planning/2026-08-17-m1-transform-spec/README.md)** — M.1 legacy → target transform — ABANDONED by owner ruling 2026-09-02 (legacy data not migrated; spec retained as the record)
 - **[2026-08-17-m2-rehearsal-spec/](planning/2026-08-17-m2-rehearsal-spec/README.md)** — M.2 window rehearsal — NOT EXECUTED
 - **[2026-08-17-m3-parity-bar-mapping/](planning/2026-08-17-m3-parity-bar-mapping/README.md)** — M.3 Telegram parity bar — DEFERRED (#854)
-- **[2026-09-07-category-registry-and-full-walk/](planning/2026-09-07-category-registry-and-full-walk/00_EPIC.md)** — Full-depth Drive walk + weights by connected folder (ruling 2026-09-08: sources are the groups; the id-keyed registry phases are superseded and kept as the record) — DRAFT; two PRs: the lazy walk (§1a), then `04_weights-by-source.md`
+- **[2026-09-07-category-registry-and-full-walk/](planning/2026-09-07-category-registry-and-full-walk/00_EPIC.md)** — Full-depth Drive walk + weights by connected folder (ruling 2026-09-08: sources are the groups; the id-keyed registry phases are superseded and kept as the record) — IN EXECUTION; the lazy walk landed as #1256, `04_weights-by-source.md` (weights by connected folder, 071) is the second PR
 
 ### Archive
 **[archive/README.md](archive/README.md)** — index of completed, superseded and abandoned plans, moved out of `planning/` on 2026-09-02: the two 2026-07-29 design packages the consolidated plan adjudicated, the 2026-07 full-system review, the 2026-05/06 Instagram investigations, the pre-refactor product phases (Shopify, Printify, LLM, order email, dashboard) and roadmap, and the completed credential-refactor, session-isolation, web-app-migration and Meta-launch plans.

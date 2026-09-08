@@ -1380,3 +1380,66 @@ class TestFetchBytes:
             await adapter.fetch_bytes(
                 source_id=SRC, workspace_id=WS, file_ref="FILE1", max_bytes=10
             )
+
+
+class TestFolderAncestors:
+    """The chain of a folder's parents up to the Drive root (owner ruling
+    2026-09-08: connected folders are disjoint, so a pick is checked against
+    the folders already connected). Read under the workspace grant; bounded;
+    a folder with no parent, or a shared-drive root, ends the chain."""
+
+    def _drive(self, parents):
+        calls = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(str(request.url))
+            fid = str(request.url).split("/files/")[1].split("?")[0]
+            if fid not in parents:
+                return httpx.Response(
+                    404, json={"error": {"message": "File not found"}}
+                )
+            body = {"id": fid}
+            if parents[fid]:
+                body["parents"] = [parents[fid]]
+            return httpx.Response(200, json=body)
+
+        return _adapter(handler), calls
+
+    @pytest.mark.asyncio
+    async def test_the_chain_is_walked_to_the_root(self):
+        adapter, calls = self._drive(
+            {"CHILD": "PARENT", "PARENT": "GRAND", "GRAND": "ROOT", "ROOT": None}
+        )
+        chain = await adapter.folder_ancestors(workspace_id=WS, folder_ref="CHILD")
+        assert chain == ["PARENT", "GRAND", "ROOT"]
+        assert all("fields=parents" in c for c in calls) and len(calls) == 4
+
+    @pytest.mark.asyncio
+    async def test_a_folder_with_no_parent_is_its_own_chain_end(self):
+        adapter, calls = self._drive({"LONE": None})
+        assert await adapter.folder_ancestors(workspace_id=WS, folder_ref="LONE") == []
+
+    @pytest.mark.asyncio
+    async def test_the_walk_is_bounded(self, monkeypatch):
+        from src.services.target import google_drive_adapter as mod
+
+        monkeypatch.setattr(mod, "ANCESTOR_CAP", 3)
+        parents = {f"F{i}": f"F{i + 1}" for i in range(10)}
+        adapter, calls = self._drive(parents)
+        chain = await adapter.folder_ancestors(workspace_id=WS, folder_ref="F0")
+        assert len(chain) == 3 and len(calls) == 3
+
+    @pytest.mark.asyncio
+    async def test_a_ref_outside_the_id_shape_is_refused_before_any_request(self):
+        from src.services.target.drive_adapter import DriveTerminalError
+
+        adapter, calls = self._drive({})
+        with pytest.raises(DriveTerminalError):
+            await adapter.folder_ancestors(workspace_id=WS, folder_ref="x y")
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_a_parent_that_is_not_an_id_ends_the_chain_rather_than_a_query(self):
+        adapter, calls = self._drive({"CHILD": "bad id", "bad id": None})
+        assert await adapter.folder_ancestors(workspace_id=WS, folder_ref="CHILD") == []
+        assert len(calls) == 1

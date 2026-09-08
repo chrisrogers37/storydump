@@ -1,23 +1,28 @@
-"""The category mix — `category_post_case_mix`, D23's Type 2 SCD table — and
-the ONE service that writes it (owner ruling 2026-09-06).
+"""The posting mix — `category_post_case_mix`, D23's Type 2 SCD table — keyed
+on the CONNECTED FOLDER (owner ruling 2026-09-08: sources are the groups),
+and the ONE service that writes it.
 
-A picked Drive folder's subfolders are categories (the sync tags each file
-with the subfolder it sits in — `media_sync`, `google_drive_adapter`), and the
-workspace weights how often each posts: memes 70 / merch 30. `scheduler.
-execute_plan_slot` draws a category by these weights before it picks a file.
+A workspace connects folders (`media_sources`); everything inside a connected
+folder syncs, at any depth (the walk of #1256); and the workspace weights how
+often each connected folder posts: memes 70 / merch 30. To weight two
+subfolders separately, connect each as its own folder. `scheduler.
+execute_plan_slot` draws a folder by these weights before it picks a file —
+through :func:`weights`, the ONE function that also feeds the card's
+"Posts about" column, so the two can never disagree.
 
-D23: the table keeps its row shape (one row per category per effective
-period; `effective_to IS NULL` is the current row, `uq_case_mix_current`
-makes two current rows for a category impossible) and **sum-to-one is
-service-enforced HERE** — a deferred cross-row trigger was considered and
-rejected, so this module is where the invariant lives. Setting a mix is one
-supersede (close every current row) then one insert per category, in the
-caller's transaction. Ratios are fractions in [0, 1] summing to 1 within a
+D23: the table keeps its row shape (one row per source per effective period;
+`effective_to IS NULL` is the current row, `uq_case_mix_current_by_source`
+makes two current rows for a source impossible) and **sum-to-one is
+service-enforced HERE**. Setting a mix is one supersede (close every current
+row) then one insert per source, in the caller's transaction. Ratios are
+fractions in [0, 1]; a **0 is Off** (the folder stays connected and synced,
+never posts, and shapes nothing); the ratios above 0 sum to 1 within a
 rounding tolerance; the web converts percentages. An empty mix is legal and
-means "no weighting" — the planner falls back to oldest-first over the pool.
+means every folder is automatic.
 
-Files directly in the picked folder have no category (`NULL`) and cannot be
-weighted by name; they post only when no weighted category has media.
+`category` stays on the row as the LABEL the card shows — the source's
+folder name at save time — never a key. A row written before 071 carries no
+`source_id`: the planner ignores it, the first save supersedes it.
 """
 
 from __future__ import annotations
@@ -33,74 +38,156 @@ from src.services.target import readers
 #: Sum-to-one tolerance: four decimal places per row, so a three-way split
 #: cannot hit 1.0000 exactly and must not be refused for it.
 SUM_TOLERANCE = 0.001
-MAX_CATEGORY_LEN = 100
-#: More categories than this is not a mix anyone typed by hand; refused by name.
-MAX_CATEGORIES = 500
+#: More rows than this is not a mix anyone typed by hand; refused by name.
+MAX_SOURCES = 500
+
+#: A connected folder: not removed. Removal is a flag on the row (a pause
+#: with `config.removed`), never a delete — the folder's media and history
+#: stay, and a re-pick revives it (#1233).
+_CONNECTED = "NOT COALESCE((config->>'removed')::boolean, false)"
+_LABEL = "COALESCE(config->>'folder_name', config->>'folder_ref', 'folder')"
 
 
 class MixInvalid(StorydumpError):
     """The mix cannot be stored as sent. `reason` is one of: not_a_list ·
-    empty_category · category_too_long · duplicate_category · bad_ratio ·
-    sum_not_one."""
+    empty_source · duplicate_source · bad_ratio · sum_not_one · all_off ·
+    too_many_sources · unknown_source · ambiguous_name."""
 
     def __init__(self, reason: str, detail: str = ""):
         self.reason = reason
-        super().__init__(
-            f"category mix invalid: {reason}" + (f" — {detail}" if detail else "")
-        )
+        super().__init__(f"mix invalid: {reason}" + (f" — {detail}" if detail else ""))
+
+
+def _ratio(value: Any, label: str) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+    ):
+        # NaN passes every comparison and NUMERIC stores it; D23's invariant
+        # would be bypassable by one JSON `NaN` (review of #1251).
+        raise MixInvalid("bad_ratio", label)
+    ratio = round(float(value), 4)
+    if ratio < 0 or ratio > 1:
+        raise MixInvalid("bad_ratio", label)
+    return ratio
+
+
+def _sum_to_one(rows: list[tuple[str, float]]) -> None:
+    positives = [r for _, r in rows if r > 0]
+    if rows and not positives:
+        raise MixInvalid("all_off")
+    total = round(sum(positives), 4)
+    if positives and round(abs(total - 1.0), 4) > SUM_TOLERANCE:
+        raise MixInvalid("sum_not_one", f"sum is {total:.4f}")
 
 
 def normalize(mix: Any) -> list[tuple[str, float]]:
-    """Validate and normalize `[{"category", "ratio"}, …]` to `[(name, ratio)]`
-    with trimmed names and ratios rounded to the table's four places. Refuses
-    by name; an empty list is legal."""
+    """Validate and normalize `[{"source_id", "ratio"}, …]` to
+    `[(source_id, ratio)]` with ratios rounded to the table's four places.
+    Refuses by name; an empty list is legal; a 0 is Off and is kept."""
     if not isinstance(mix, list):
         raise MixInvalid("not_a_list")
-    if len(mix) > MAX_CATEGORIES:
-        raise MixInvalid("too_many_categories", str(len(mix)))
+    if len(mix) > MAX_SOURCES:
+        raise MixInvalid("too_many_sources", str(len(mix)))
     rows: list[tuple[str, float]] = []
     seen: set[str] = set()
     for entry in mix:
         if not isinstance(entry, dict):
             raise MixInvalid("not_a_list", "each entry must be an object")
-        name = entry.get("category")
-        if not isinstance(name, str) or not name.strip():
-            raise MixInvalid("empty_category")
-        name = name.strip()
-        if len(name) > MAX_CATEGORY_LEN:
-            raise MixInvalid("category_too_long", name[:20])
-        if name in seen:
-            raise MixInvalid("duplicate_category", name)
-        seen.add(name)
-        ratio = entry.get("ratio")
-        if (
-            isinstance(ratio, bool)
-            or not isinstance(ratio, (int, float))
-            or not math.isfinite(float(ratio))
-        ):
-            # NaN passes every comparison and NUMERIC stores it; D23's
-            # invariant would be bypassable by one JSON `NaN` (review of #1251).
-            raise MixInvalid("bad_ratio", name)
-        ratio = round(float(ratio), 4)
-        if ratio < 0 or ratio > 1:
-            raise MixInvalid("bad_ratio", name)
-        rows.append((name, ratio))
-    total = round(sum(r for _, r in rows), 4)
-    if rows and round(abs(total - 1.0), 4) > SUM_TOLERANCE:
-        raise MixInvalid("sum_not_one", f"sum is {total:.4f}")
+        source_id = entry.get("source_id")
+        if not isinstance(source_id, str) or not source_id.strip():
+            raise MixInvalid("empty_source")
+        source_id = source_id.strip()
+        if source_id in seen:
+            raise MixInvalid("duplicate_source", source_id)
+        seen.add(source_id)
+        rows.append((source_id, _ratio(entry.get("ratio"), source_id)))
+    _sum_to_one(rows)
     return rows
+
+
+def weights(rows: list[dict]) -> dict[str, float]:
+    """The draw's arithmetic — ONE function for the planner and the card.
+
+    *rows*: `{"source_id", "ratio": float | None, "n": eligible media}` per
+    connected folder. Explicit rows (ratio > 0) share by ratio; automatic rows
+    (no row: ratio None) share the rest in proportion to their media; together
+    the automatic rows never take more than the smallest explicit weight on
+    the FINAL split (F4 as re-locked 2026-09-07): with explicit weights
+    summing to one and `r_min` the smallest of the explicit rows that have
+    media, the automatic pool is `A = min(share_auto, r_min / (1 + r_min))`.
+    With no explicit rows everything is automatic (`A = 1`). Off (ratio 0)
+    and a row with no eligible media weigh 0 and shape nothing. Returns a
+    weight per source_id; they sum to 1 when anything is drawable.
+    """
+    out = {str(r["source_id"]): 0.0 for r in rows}
+    explicit = [
+        (str(r["source_id"]), float(r["ratio"]), int(r["n"]))
+        for r in rows
+        if r.get("ratio") is not None and float(r["ratio"]) > 0 and int(r["n"]) > 0
+    ]
+    auto = [
+        (str(r["source_id"]), int(r["n"]))
+        for r in rows
+        if r.get("ratio") is None and int(r["n"]) > 0
+    ]
+    if not explicit and not auto:
+        return out
+    n_auto = sum(n for _, n in auto)
+    if explicit and auto:
+        total_ratio = sum(r for _, r, _ in explicit)
+        r_min = min(r / total_ratio for _, r, _ in explicit)
+        share_auto = n_auto / (n_auto + sum(n for _, _, n in explicit))
+        pool = min(share_auto, r_min / (1 + r_min))
+    elif auto:
+        pool = 1.0
+    else:
+        pool = 0.0
+    for source_id, n in auto:
+        out[source_id] = pool * n / n_auto
+    if explicit:
+        total_ratio = sum(r for _, r, _ in explicit)
+        for source_id, ratio, _ in explicit:
+            out[source_id] = (1 - pool) * ratio / total_ratio
+    return out
+
+
+async def _connected(executor, *, workspace_id: str, ids: Optional[list[str]] = None):
+    """The workspace's connected folders — `id`, `label` — all of them, or
+    the named ones (for a save's validation)."""
+    sql = (
+        f"SELECT id, {_LABEL} AS label FROM media_sources"
+        f" WHERE workspace_id = :ws AND {_CONNECTED}"
+    )
+    params: dict[str, Any] = {"ws": str(workspace_id)}
+    if ids is not None:
+        sql += " AND CAST(id AS text) = ANY(CAST(:ids AS text[]))"
+        params["ids"] = list(ids)
+    return await readers.rows(executor, sql + " ORDER BY created_at, id", **params)
 
 
 async def set_mix(
     executor, *, workspace_id: str, mix: Any, by_user_id: Optional[str]
 ) -> list[dict]:
-    """Replace the workspace's current mix: supersede every current row, then
-    insert the new ones — in the CALLER's transaction, so the table never
-    shows half a mix. Returns the mix as stored."""
+    """Replace the workspace's current mix: supersede every current row (the
+    id-less ones from before 071 included), then insert the new ones — in the
+    CALLER's transaction, so the table never shows half a mix. Every id must
+    be a connected folder of THIS workspace (`unknown_source` otherwise,
+    before anything is written). Returns the mix as stored."""
     rows = normalize(mix)
+    labels: dict[str, str] = {}
+    if rows:
+        found = await _connected(
+            executor, workspace_id=workspace_id, ids=[sid for sid, _ in rows]
+        )
+        labels = {str(r["id"]): str(r["label"]) for r in found}
+        for source_id, _ in rows:
+            if source_id not in labels:
+                raise MixInvalid("unknown_source", source_id)
     # One writer at a time per workspace: two admins saving at once would
-    # both supersede, and the loser's inserts would hit `uq_case_mix_current`
-    # as a raw integrity error. The lock dies with the transaction.
+    # both supersede, and the loser's inserts would hit the unique index as a
+    # raw integrity error. The lock dies with the transaction.
     await executor.execute(
         text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
         {"key": f"case_mix:{workspace_id}"},
@@ -112,45 +199,121 @@ async def set_mix(
         ),
         {"ws": str(workspace_id)},
     )
-    for name, ratio in rows:
+    for source_id, ratio in rows:
         await executor.execute(
             text(
                 "INSERT INTO category_post_case_mix"
-                " (workspace_id, category, ratio, created_by_user_id)"
-                " VALUES (:ws, :category, :ratio, CAST(:by AS uuid))"
+                " (workspace_id, source_id, category, ratio, created_by_user_id)"
+                " VALUES (:ws, CAST(:source_id AS uuid), :category, :ratio,"
+                "         CAST(:by AS uuid))"
             ),
             {
                 "ws": str(workspace_id),
-                "category": name,
+                "source_id": source_id,
+                "category": labels[source_id],
                 "ratio": ratio,
                 "by": by_user_id,
             },
         )
-    return [{"category": name, "ratio": ratio} for name, ratio in rows]
+    return [{"source_id": source_id, "ratio": ratio} for source_id, ratio in rows]
 
 
 async def current_mix(executor, *, workspace_id: str) -> list[dict]:
-    """The current rows, as `[{"category", "ratio"}]` — ratios as floats."""
+    """The current rows keyed on the source, as `[{"source_id", "ratio"}]`."""
     rows = await readers.rows(
         executor,
-        "SELECT category, ratio FROM category_post_case_mix"
-        " WHERE workspace_id = :ws AND effective_to IS NULL ORDER BY category",
-        ws=str(workspace_id),
-    )
-    return [{"category": r["category"], "ratio": float(r["ratio"])} for r in rows]
-
-
-async def discovered_categories(executor, *, workspace_id: str) -> list[dict]:
-    """What the sync has found: each category with its count of AVAILABLE
-    media, the root's uncategorized files as `category: None`. What the card
-    lists, so a person weights folders that exist rather than typing names."""
-    rows = await readers.rows(
-        executor,
-        "SELECT category, count(*) AS media_count FROM media_items"
-        " WHERE workspace_id = :ws AND state = 'available'"
-        " GROUP BY category ORDER BY category NULLS LAST",
+        "SELECT source_id, ratio FROM category_post_case_mix"
+        " WHERE workspace_id = :ws AND effective_to IS NULL"
+        "   AND source_id IS NOT NULL ORDER BY category, source_id",
         ws=str(workspace_id),
     )
     return [
-        {"category": r["category"], "media_count": int(r["media_count"])} for r in rows
+        {"source_id": str(r["source_id"]), "ratio": float(r["ratio"])} for r in rows
     ]
+
+
+async def mix_view(executor, *, workspace_id: str) -> list[dict]:
+    """What the card renders: every connected folder with its label, state,
+    available media count, current ratio (None = automatic, 0 = Off) and the
+    share of posts it gets — `effective`, a percentage from :func:`weights`
+    over workspace-wide eligibility (the planner subtracts one account's own
+    live intents and locks on top, so the card's number is approximate)."""
+    rows = await readers.rows(
+        executor,
+        "SELECT s.id AS source_id, s.provider, "
+        + _LABEL.replace("config", "s.config")
+        + " AS name, s.state,"
+        "       (SELECT count(*) FROM media_items m"
+        "         WHERE m.workspace_id = s.workspace_id AND m.source_id = s.id"
+        "           AND m.state = 'available') AS media_count,"
+        "       x.ratio"
+        "  FROM media_sources s"
+        "  LEFT JOIN category_post_case_mix x"
+        "    ON x.workspace_id = s.workspace_id AND x.source_id = s.id"
+        "   AND x.effective_to IS NULL"
+        " WHERE s.workspace_id = :ws AND "
+        + _CONNECTED.replace("config", "s.config")
+        + " ORDER BY s.created_at, s.id",
+        ws=str(workspace_id),
+    )
+    shaped = [
+        {
+            "source_id": str(r["source_id"]),
+            "provider": r["provider"],
+            "name": r["name"],
+            "state": r["state"],
+            "media_count": int(r["media_count"] or 0),
+            "ratio": None if r["ratio"] is None else float(r["ratio"]),
+        }
+        for r in rows
+    ]
+    share = weights(
+        [
+            {"source_id": r["source_id"], "ratio": r["ratio"], "n": r["media_count"]}
+            for r in shaped
+        ]
+    )
+    for r in shaped:
+        r["effective"] = round(share[r["source_id"]] * 100, 1)
+    return shaped
+
+
+def v1_shape(rows: list[dict]) -> dict:
+    """The keys the card deployed before this phase reads (`mix` by name,
+    `categories` with counts) — derived from the view for ONE release, so the
+    API can deploy ahead of the web without the Settings page breaking."""
+    return {
+        "mix": [
+            {"category": r["name"], "ratio": r["ratio"]}
+            for r in rows
+            if r["ratio"] is not None and r["ratio"] > 0
+        ],
+        "categories": [
+            {"category": r["name"], "media_count": r["media_count"]} for r in rows
+        ],
+    }
+
+
+async def resolve_names(executor, *, workspace_id: str, mix: Any) -> list[dict]:
+    """The v1 `PUT` body — `[{"category", "ratio"}]` by folder name — turned
+    into rows by source, for the card deployed before this phase. A name
+    that is two connected folders is `ambiguous_name`; one that is none is
+    `unknown_source`. Gone with the v1 keys."""
+    if not isinstance(mix, list):
+        raise MixInvalid("not_a_list")
+    found = await _connected(executor, workspace_id=workspace_id)
+    by_name: dict[str, list[str]] = {}
+    for r in found:
+        by_name.setdefault(str(r["label"]), []).append(str(r["id"]))
+    out: list[dict] = []
+    for entry in mix:
+        if not isinstance(entry, dict):
+            raise MixInvalid("not_a_list", "each entry must be an object")
+        name = entry.get("category")
+        ids = by_name.get(name.strip()) if isinstance(name, str) else None
+        if not ids:
+            raise MixInvalid("unknown_source", str(name)[:40])
+        if len(ids) > 1:
+            raise MixInvalid("ambiguous_name", str(name)[:40])
+        out.append({"source_id": ids[0], "ratio": entry.get("ratio")})
+    return out

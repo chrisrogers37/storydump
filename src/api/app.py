@@ -202,6 +202,10 @@ _PROVISIONING_STATUS = {
     "handle_too_long": 400,
     "folder_required": 400,
     "folder_not_a_drive_folder": 400,
+    # A pick inside, or containing, a folder already connected (owner ruling
+    # 2026-09-08: connected folders are disjoint). A conflict with what is
+    # here, not a typo — 409, like `drive_not_connected`.
+    "source_nested": 409,
 }
 
 #: `InvitationRefused.reason` → status, total over `invitations.REASONS`.

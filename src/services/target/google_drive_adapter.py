@@ -159,6 +159,10 @@ MEDIA_FETCH_BUDGET_S = 120.0
 #: The byte cap's floor on the download leg: enough for a refusal's JSON body.
 MEDIA_CAP_FLOOR_BYTES = 16 * 1024
 
+#: The most parents a pick's ancestry walk follows (Drive trees are shallow;
+#: a chain this long is a loop or a lie, and stops here).
+ANCESTOR_CAP = 32
+
 #: Requested per file. `md5Checksum` is the content hash without a download.
 FILE_FIELDS = "id,name,mimeType,size,modifiedTime,md5Checksum"
 
@@ -660,6 +664,35 @@ class GoogleDriveAdapter:
         except egress.ResponseTooLarge as exc:
             raise DriveMediaTooLarge(str(exc)) from exc
         return response.content, str(meta.get("name") or file_ref), meta.get("mimeType")
+
+    async def folder_ancestors(
+        self, *, workspace_id: str, folder_ref: str
+    ) -> list[str]:
+        """A folder's parents up to the Drive root, nearest first — the pick
+        check's read (owner ruling 2026-09-08: connected folders are disjoint).
+        `files/{id}?fields=parents` under the workspace grant, one call per
+        level, bounded at `ANCESTOR_CAP`; a folder with no parent (My Drive's
+        root, a shared-drive root, a folder shared into the account) ends the
+        chain, and so does a parent outside the id shape rather than a query
+        built from it."""
+        if not is_folder_id(folder_ref):
+            raise DriveTerminalError("folder_ref is not a Drive folder id")
+        chain: list[str] = []
+        current = folder_ref
+        params = {"fields": "parents", "supportsAllDrives": "true"}
+        for _ in range(ANCESTOR_CAP):
+            meta = await self._get_as_workspace(
+                f"{FILES_URL}/{current}?{urlencode(params)}",
+                source_id=None,
+                workspace_id=workspace_id,
+            )
+            parents = meta.get("parents") or []
+            parent = parents[0] if parents else None
+            if not is_folder_id(parent) or parent in chain or parent == folder_ref:
+                break
+            chain.append(parent)
+            current = parent
+        return chain
 
     async def list_folders(
         self, *, parent: Optional[str], workspace_id: str

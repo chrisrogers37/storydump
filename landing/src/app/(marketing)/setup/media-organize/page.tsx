@@ -1,19 +1,19 @@
-import type { Metadata } from "next"
-import Link from "next/link"
-import { ArrowLeft, ArrowRight } from "lucide-react"
-import { StepCard } from "@/components/setup/step-card"
-import { Callout } from "@/components/setup/callout"
-import { ogMeta } from "@/lib/og"
+import type { Metadata } from "next";
+import Link from "next/link";
+import { ArrowLeft, ArrowRight } from "lucide-react";
+import { StepCard } from "@/components/setup/step-card";
+import { Callout } from "@/components/setup/callout";
+import { ogMeta } from "@/lib/og";
 
 const description =
-  "How to structure your Google Drive folders for Storydump. Folder layout determines content categories and posting mix for your Instagram Stories."
+  "How to structure your Google Drive folders for Storydump. Folder layout determines content categories and posting mix for your Instagram Stories.";
 
 export const metadata: Metadata = {
   title: "Organize Your Media",
   description,
   alternates: { canonical: "/setup/media-organize" },
   ...ogMeta("Organize Your Media", description),
-}
+};
 
 export default function MediaOrganize() {
   return (
@@ -22,32 +22,28 @@ export default function MediaOrganize() {
         Organizing Your Media
       </h1>
       <p className="mt-4 text-lg text-muted-foreground">
-        Storydump reads media from your Google Drive. How you organize your
-        folders determines your content categories and posting mix.
+        Storydump reads media from your Google Drive. The folders you connect
+        are the groups of your posting mix.
       </p>
 
       <div className="mt-10 space-y-10">
-        <StepCard number={1} title="Folder structure = categories">
+        <StepCard number={1} title="Connected folders = groups">
           <p>
-            Storydump treats each subfolder in your root media folder as a
-            category. Here&apos;s the recommended structure:
+            Each folder you connect is a group of its own: everything inside it
+            syncs, at any depth, and the group can carry a share of your posts.
+            To weight two kinds of content separately, connect them as two
+            folders — subfolders inside a connected folder are just structure.
+            Rename folders freely; the weight follows the folder.
           </p>
           <pre className="mt-3 overflow-x-auto rounded-lg bg-muted p-4 text-sm">
-            {`My Instagram Stories/          ← root folder
-├── memes/                     ← category: "memes"
-│   ├── funny-cat.jpg
-│   ├── monday-mood.png
-│   └── ...
-├── products/                  ← category: "products"
-│   ├── new-tshirt.jpg
-│   ├── sale-banner.png
-│   └── ...
-├── behind-the-scenes/         ← category: "behind-the-scenes"
-│   ├── studio-shot.jpg
-│   └── ...
-└── announcements/             ← category: "announcements"
-    ├── holiday-hours.png
-    └── ...`}
+            {`My Instagram Stories/
+├── memes/                     ← connect this folder  (group "memes", 70%)
+│   ├── 2025/
+│   │   └── funny-cat.jpg      ← synced: any depth
+│   └── monday-mood.png
+└── merch/                     ← connect this folder  (group "merch", 30%)
+    ├── new-tshirt.jpg
+    └── sale-banner.png`}
           </pre>
         </StepCard>
 
@@ -140,5 +136,5 @@ export default function MediaOrganize() {
         </Link>
       </div>
     </div>
-  )
+  );
 }

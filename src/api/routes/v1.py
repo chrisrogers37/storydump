@@ -44,6 +44,7 @@ from fastapi.responses import JSONResponse
 from src.api.principal import Principal, current_principal, require_engine
 from src.api import google_client, instagram_client
 from src.config.settings import settings
+from src.services.target.provisioning import ProvisioningRefused
 from src.services.target.drive_adapter import (
     DriveLostResponse,
     DriveRetryableError,
@@ -585,6 +586,54 @@ async def create_source(
         grant = await workspaces.drive_status(session, workspace_id=str(ws))
         if grant["status"] != "active":
             raise HTTPException(status_code=409, detail="drive_not_connected")
+        sources = await workspaces.list_sources(session, workspace_id=str(ws))
+    # Connected folders are DISJOINT (owner ruling 2026-09-08): a folder
+    # inside a connected one is already synced by its parent, and a folder
+    # that contains one would make two sources share rows and freeze
+    # attribution to whichever listed first (review of #1256). The chains are
+    # read through the grant OUTSIDE the unit of work, like the folder
+    # browser's read; a re-pick of the same folder asks nothing. Only active
+    # sources take part: a removed folder blocks nothing.
+    ref = provisioning.folder_ref_from(body.get("folder_ref"))
+    active = [
+        s
+        for s in sources
+        if s.get("state") == "active" and s.get("folder_ref") and s["folder_ref"] != ref
+    ]
+    exact = any(s.get("folder_ref") == ref for s in sources)
+    if active and not exact:
+        label = (
+            folder_name.strip()
+            if isinstance(folder_name, str) and folder_name.strip()
+            else ref
+        )
+        adapter = _drive_adapter(request)
+        try:
+            chain = await adapter.folder_ancestors(workspace_id=str(ws), folder_ref=ref)
+            for s in active:
+                if s["folder_ref"] in chain:
+                    raise ProvisioningRefused(
+                        "source_nested",
+                        f"{label} is inside {s.get('folder_name') or s['folder_ref']},"
+                        " which is already connected",
+                    )
+            for s in active:
+                above = await adapter.folder_ancestors(
+                    workspace_id=str(ws), folder_ref=s["folder_ref"]
+                )
+                if ref in above:
+                    raise ProvisioningRefused(
+                        "source_nested",
+                        f"{label} contains {s.get('folder_name') or s['folder_ref']},"
+                        " which is already connected",
+                    )
+        except media_sync.DriveCredentialDead as exc:
+            raise HTTPException(status_code=409, detail="drive_grant_refused") from exc
+        except (DriveRetryableError, DriveLostResponse) as exc:
+            raise HTTPException(status_code=503, detail="drive_unavailable") from exc
+        except (DriveTerminalError, media_sync.DriveSourceGone) as exc:
+            raise HTTPException(status_code=502, detail="drive_refused") from exc
+    async with _admin(request, str(ws), principal) as session:
         source_id, created = await provisioning.get_or_create_media_source(
             session,
             workspace_id=str(ws),
@@ -628,38 +677,55 @@ async def remove_source(
 async def get_category_mix(
     ws: uuid.UUID, request: Request, principal: Principal = Depends(current_principal)
 ):
-    """The workspace's category mix (D23's SCD, current rows) and the
-    categories the sync has discovered with their media counts — what the
-    Settings card renders. Member floor: it explains what will post."""
+    """The workspace's posting mix, keyed on the CONNECTED FOLDER (owner
+    ruling 2026-09-08): every connected folder with its label, media count,
+    current ratio (null = automatic, 0 = Off) and the share of posts it gets —
+    what the Settings card renders. The v1 keys (`mix` by name, `categories`)
+    ride along for one release so the card deployed before this phase keeps
+    working while the API and the web deploy apart. Member floor: it explains
+    what will post."""
     async with _member(request, str(ws), principal) as session:
-        mix = await category_mix.current_mix(session, workspace_id=str(ws))
-        categories = await category_mix.discovered_categories(
-            session, workspace_id=str(ws)
-        )
-    return {"mix": mix, "categories": categories}
+        rows = await category_mix.mix_view(session, workspace_id=str(ws))
+    return _mix_response(rows)
+
+
+def _mix_response(rows: list[dict]) -> dict:
+    explicit_total = round(sum(r["ratio"] for r in rows if r["ratio"]), 4)
+    return {
+        "rows": rows,
+        "explicit_total": explicit_total,
+        **category_mix.v1_shape(rows),
+    }
 
 
 @router.put("/workspaces/{ws}/category-mix")
 async def put_category_mix(
     ws: uuid.UUID, request: Request, principal: Principal = Depends(current_principal)
 ):
-    """Replace the workspace's category mix (owner ruling 2026-09-06: memes
-    70 / merch 30). A resource, not a command word (F1 (b)): the mix is a
-    table of rows the closed vocabulary has no name for, like a folder. Admin
-    floor. Body ``{"mix": [{"category", "ratio"}, …]}`` with ratios summing to
-    one; an empty list clears the weighting. Refused by name (400,
-    ``reason = invalid_mix_<reason>``) before anything is written."""
+    """Replace the workspace's posting mix (owner ruling 2026-09-08: the
+    connected folder is the group — memes 70 / merch 30 as two connected
+    folders). A resource, not a command word (F1 (b)). Admin floor. Body
+    ``{"rows": [{"source_id", "ratio"}, …]}`` — ratios above 0 summing to one,
+    0 = Off, an empty list makes every folder automatic. The v1 body
+    ``{"mix": [{"category", "ratio"}]}`` by folder name is still accepted for
+    one release (resolved to sources; `ambiguous_name` when two connected
+    folders share a name). Refused by name (400, ``reason =
+    invalid_mix_<reason>``) before anything is written; answers with the
+    GET's shape."""
     body = await _json_object(request)
     async with _admin(request, str(ws), principal) as session:
         # `MixInvalid` is answered by the app's handler as 400 with
         # `reason = invalid_mix_<reason>` — the shape the web reads.
-        stored = await category_mix.set_mix(
-            session,
-            workspace_id=str(ws),
-            mix=body.get("mix"),
-            by_user_id=principal.user_id,
+        rows = body.get("rows")
+        if rows is None and "mix" in body:
+            rows = await category_mix.resolve_names(
+                session, workspace_id=str(ws), mix=body.get("mix")
+            )
+        await category_mix.set_mix(
+            session, workspace_id=str(ws), mix=rows, by_user_id=principal.user_id
         )
-    return {"mix": stored}
+        view = await category_mix.mix_view(session, workspace_id=str(ws))
+    return _mix_response(view)
 
 
 @router.get("/workspaces/{ws}/drive")
