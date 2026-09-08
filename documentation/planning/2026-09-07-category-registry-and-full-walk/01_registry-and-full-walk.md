@@ -7,6 +7,8 @@ created: 2026-09-07
 tags: [plan, drive, media-sync, migration, phase-1]
 ---
 
+> **Ruling 2026-09-08:** §1a below is live and builds first (plus one current folder-path column per media row, see `04_weights-by-source.md` §Evidence). §1b — the registry and migration 070 — is **superseded** by the sources-are-groups ruling (`03-decision-record.md`) and is kept only as the record.
+
 # Phase 1 — the lazy full-depth walk (1a) and the category registry (1b)
 
 ## Summary

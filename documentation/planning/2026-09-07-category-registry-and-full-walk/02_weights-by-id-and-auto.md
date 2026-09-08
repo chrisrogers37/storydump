@@ -1,11 +1,13 @@
 ---
 title: Phase 2 — weights by id, automatic weights, API v2 beside v1, the walk-completion notice
 type: plan
-status: draft
+status: superseded
 owner: chris
 created: 2026-09-07
 tags: [plan, scheduler, category-mix, api, phase-2]
 ---
+
+> **Superseded 2026-09-08** by the sources-are-groups ruling (`03-decision-record.md`); replaced by `04_weights-by-source.md`. Kept as the record.
 
 # Phase 2 — weights by id, automatic weights, API v2 beside v1, the walk-completion notice
 
