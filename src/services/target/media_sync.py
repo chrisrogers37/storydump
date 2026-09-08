@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import logging
 import random
+import uuid
 from typing import Optional, Any
 
 from sqlalchemy import text
@@ -302,18 +303,34 @@ async def _run_sync(deps, job, *, page_token, reason) -> str:
     if row is None:
         logger.warning("sync %s: source %s has no row", job["id"], source_id)
         return "missing"
-    # The STORED checkpoint is the cursor, always: the walk over subfolders
-    # (owner ruling 2026-09-06) carries `current` and `queue` beside
-    # `page_token`, and the chunk that chains this job was enqueued in the
-    # same transaction that stored it — the two cannot disagree. A chunk
-    # payload's `page_token` is honoured only when the row carries no cursor
-    # at all (the pre-walk shape), so an in-flight chain keeps working.
+    # The STORED checkpoint is the cursor, always: the walk (owner ruling
+    # 2026-09-08 — every folder under the connected one, lazily) carries
+    # `current` and `queue` beside `page_token`, and the chunk that chains
+    # this job was enqueued in the same transaction that stored it — the two
+    # cannot disagree. The SYNC mints the walk token: whenever the row holds
+    # no in-flight v2 cursor (nothing stored, a completed walk, a re-pick that
+    # nulled it, a persistent failure that reset it, or the one-level cursor
+    # of 2026-09-06 still in flight at deploy) this call STARTS a walk with a
+    # fresh token, and the adapter carries it through unchanged. A chunk
+    # never resumes a foreign page: its payload's `walk` is recorded for the
+    # log, but the cursor of record is the row's.
     stored: Any = row["sync_checkpoint"] or None
-    checkpoint: Any = (
-        {"v": 1, "page_token": page_token}
-        if page_token and not checkpoint_incomplete(stored)
-        else stored
-    )
+    if (
+        checkpoint_incomplete(stored)
+        and stored.get("v") == 2
+        and isinstance(stored.get("walk"), str)
+        and stored.get("walk")
+    ):
+        checkpoint: Any = stored
+    else:
+        if checkpoint_incomplete(stored):
+            logger.warning(
+                "sync %s: source %s stored a pre-v2 cursor mid-walk — starting over",
+                job["id"],
+                source_id,
+            )
+        checkpoint = {"v": 2, "walk": uuid.uuid4().hex}
+    walk = checkpoint["walk"]
 
     # Phase 2 — the provider door, outside any transaction.
     try:
@@ -335,7 +352,7 @@ async def _run_sync(deps, job, *, page_token, reason) -> str:
                     # source (a reconnect, a re-pick) starts a fresh walk rather
                     # than resuming at the folder that failed (review of #1251).
                     "UPDATE media_sources SET state = 'error', alerted_at = now(),"
-                    "  sync_checkpoint = CAST('{\"v\": 1}' AS jsonb)"
+                    "  sync_checkpoint = CAST('{\"v\": 2}' AS jsonb)"
                     " WHERE id = :s AND state <> 'paused'"
                     " RETURNING id"
                 ),
@@ -390,17 +407,23 @@ async def _run_sync(deps, job, *, page_token, reason) -> str:
                 text(
                     "INSERT INTO media_items (workspace_id, source_id,"
                     " content_hash, file_name, media_kind, mime_type,"
-                    " provider_file_ref, category)"
-                    " VALUES (:ws, :src, :hash, :name, :kind, :mime, :ref, :category)"
-                    # A file that MOVED between subfolders changes category on
-                    # the next walk; nothing else about a known row is touched
-                    # (the dedup is per workspace by content hash, `uq_media_dedup`).
+                    " provider_file_ref, category, folder_path)"
+                    " VALUES (:ws, :src, :hash, :name, :kind, :mime, :ref,"
+                    "  :category, :folder_path)"
+                    # A file that MOVED between folders changes its label and
+                    # path on the next walk; nothing else about a known row is
+                    # touched (the dedup is per workspace by content hash,
+                    # `uq_media_dedup`).
                     " ON CONFLICT ON CONSTRAINT uq_media_dedup DO UPDATE"
-                    "   SET category = EXCLUDED.category"
-                    # Only the SAME file moving re-categorizes: a different file
+                    "   SET category = EXCLUDED.category,"
+                    "       folder_path = EXCLUDED.folder_path"
+                    # Only the SAME file moving is followed: a different file
                     # with identical bytes in another folder (or another source)
-                    # shares the row by content hash and must not flap it.
-                    " WHERE media_items.category IS DISTINCT FROM EXCLUDED.category"
+                    # shares the row by content hash and must not flap it. The
+                    # two conditions are parenthesised so the same-file guard
+                    # binds both columns.
+                    " WHERE (media_items.category IS DISTINCT FROM EXCLUDED.category"
+                    "     OR media_items.folder_path IS DISTINCT FROM EXCLUDED.folder_path)"
                     "   AND media_items.source_id = EXCLUDED.source_id"
                     "   AND media_items.provider_file_ref = EXCLUDED.provider_file_ref"
                     " RETURNING (xmax = 0) AS inserted"
@@ -412,6 +435,10 @@ async def _run_sync(deps, job, *, page_token, reason) -> str:
                     "name": item.get("name") or item["ref"],
                     "kind": item["kind"],
                     "category": item.get("category"),
+                    # The folder's path under the connected folder ("" at its
+                    # root); an adapter that has no notion of folders says
+                    # nothing and the column stays NULL.
+                    "folder_path": item.get("folder_path"),
                     # `.get`, not `[...]`: the column is nullable and an adapter
                     # that cannot know the content type must be able to say so.
                     # Absent stays NULL — the same row this wrote before — so a
@@ -421,7 +448,6 @@ async def _run_sync(deps, job, *, page_token, reason) -> str:
                 },
             )
             kept += sum(1 for (inserted,) in result.all() if inserted)
-        next_token = (new_checkpoint or {}).get("page_token")
         await s.execute(
             text(
                 "UPDATE media_sources SET sync_checkpoint = CAST(:cp AS jsonb)"
@@ -442,9 +468,9 @@ async def _run_sync(deps, job, *, page_token, reason) -> str:
                 {
                     "ws": workspace_id,
                     "key": f"src:{source_id}",
-                    "p": _json(
-                        {"v": 1, "source_id": source_id, "page_token": next_token}
-                    ),
+                    # The chunk names the walk it belongs to; the row's cursor
+                    # is the one resumed (see the cursor rule above).
+                    "p": _json({"v": 2, "source_id": source_id, "walk": walk}),
                 },
             )
         else:
@@ -465,15 +491,19 @@ async def _run_sync(deps, job, *, page_token, reason) -> str:
             )
         await s.commit()
     logger.info(
-        "sync %s: source %s reason=%s kept=%d skipped_kind=%d chained=%s",
+        "sync %s: source %s reason=%s walk=%s kept=%d skipped_kind=%d chained=%s"
+        " folders_seen=%s truncated=%s",
         job["id"],
         source_id,
         reason,
+        walk,
         kept,
         skipped_kind,
         checkpoint_incomplete(new_checkpoint),
+        (new_checkpoint or {}).get("seen", 0),
+        bool((new_checkpoint or {}).get("truncated")),
     )
-    return "chained" if next_token else "synced"
+    return "chained" if checkpoint_incomplete(new_checkpoint) else "synced"
 
 
 def _json(value) -> str:

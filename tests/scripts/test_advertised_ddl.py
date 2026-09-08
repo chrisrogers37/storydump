@@ -275,8 +275,10 @@ class TestAgainstTheRealDocs:
         # `alert_stranded_sources` kind (065) 23, and §12's #1090 D3 no-media
         # notice marker (066) 24, §13's #1175 bind purpose (067) 25, and §14's
         # #854/#1242 resolver + group-membership doors (068) make it 26;
-        # #1165's workspace-level Drive grant (069) makes it 27.
-        assert classes.count("normative") == 27
+        # #1165's workspace-level Drive grant (069) makes it 27; §16's
+        # `media_items.folder_path` for the full-depth walk (070, ruling
+        # 2026-09-08) makes it 28.
+        assert classes.count("normative") == 28
         assert classes.count("illustrative") == 4
 
     def test_real_stream_expands_the_fifteen_policies(self):

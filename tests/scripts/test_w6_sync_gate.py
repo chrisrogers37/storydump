@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from src.services.target.commands import CommandRefused
 from src.services.target.work_loop import WorkerConfig
 from src.worker import compose
+from src.services.target.drive_adapter import checkpoint_incomplete
 from tests.scripts.conftest import seed_workspace_chain
 from tests.scripts.test_lineage_lane import run_lane
 
@@ -149,7 +150,26 @@ class ScriptedDrive:
         if isinstance(step, Exception):
             raise step
         items, token = step
-        return items, {"v": 1, **({"page_token": token} if token else {})}
+        # v2 (ruling 2026-09-08): the walk token the sync minted is echoed, and
+        # "more pages" is never the bare token shape — `current` rides along.
+        walk = (checkpoint or {}).get("walk") or "scripted"
+        if not token:
+            return items, {"v": 2, "walk": walk}
+        at_root = {
+            "id": "root",
+            "name": None,
+            "top": "root",
+            "top_name": None,
+            "path": "",
+            "listed": True,
+        }
+        return items, {
+            "v": 2,
+            "walk": walk,
+            "current": at_root,
+            "queue": [],
+            "page_token": token,
+        }
 
 
 #: What the real adapter emits for each `kind`. Kept beside `_item` so the
@@ -211,16 +231,20 @@ class TestBaselineSyncEndToEnd:
         src = _source_row(sync_conn, chain["src"])
         assert src["state"] == "active"
         assert src["last_sync_success_at"] is not None
-        assert src["sync_checkpoint"] == {"v": 1}
+        assert src["sync_checkpoint"]["v"] == 2 and not checkpoint_incomplete(
+            src["sync_checkpoint"]
+        ), "a completed walk leaves its token and nothing pending"
         assert src["next_sync_at"] is not None, "the executor must re-arm"
         eta = (src["next_sync_at"] - datetime.now(timezone.utc)).total_seconds()
         assert 5 * 3600 < eta < 8 * 3600, (
             f"re-arm must be the 05 baseline (6h jittered), got {eta}s"
         )
         assert _jobs(sync_conn, "sync_media_source")[0]["state"] == "succeeded"
-        assert drive.calls[0]["checkpoint"] is None or drive.calls[0]["checkpoint"] == {
-            "v": 1
-        }
+        start = drive.calls[0]["checkpoint"]
+        assert start["v"] == 2 and isinstance(start["walk"], str) and start["walk"], (
+            "the sync mints the walk token and hands the adapter a start cursor"
+        )
+        assert src["sync_checkpoint"]["walk"] == start["walk"]
 
     @pytest.mark.asyncio
     async def test_the_workspace_hash_dedup_is_respected_not_violated(
@@ -338,8 +362,13 @@ class TestChunkChaining:
         wl, _ = await _run_once_w6(lane_db, drive)
         assert wl.processed == 1
         chunks = _jobs(sync_conn, "first_ingest_chunk")
-        assert len(chunks) == 1 and chunks[0]["payload"]["page_token"] == "tok-2", (
-            "a page remaining must chain a first_ingest_chunk with the token"
+        walk = drive.calls[0]["checkpoint"]["walk"]
+        assert len(chunks) == 1 and chunks[0]["payload"]["walk"] == walk, (
+            "a page remaining must chain a first_ingest_chunk naming the walk"
+        )
+        assert (
+            _source_row(sync_conn, chain["src"])["sync_checkpoint"]["page_token"]
+            == "tok-2"
         )
         assert _source_row(sync_conn, chain["src"])["next_sync_at"] is None, (
             "mid-chain must NOT re-arm — the chain is the carrier"
@@ -347,7 +376,10 @@ class TestChunkChaining:
 
         wl, _ = await _run_once_w6(lane_db, drive)
         chunks = _jobs(sync_conn, "first_ingest_chunk")
-        assert len(chunks) == 2 and chunks[1]["payload"]["page_token"] == "tok-3"
+        assert len(chunks) == 2 and chunks[1]["payload"]["walk"] == walk
+        assert drive.calls[1]["checkpoint"]["page_token"] == "tok-2", (
+            "the chunk resumes the ROW's cursor, token and all"
+        )
 
         wl, _ = await _run_once_w6(lane_db, drive)
         src = _source_row(sync_conn, chain["src"])
@@ -1122,7 +1154,8 @@ class TestSubfoldersAreCategories:
     def _categories(self, conn, ws):
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT provider_file_ref, category FROM media_items WHERE workspace_id = %s"
+                "SELECT provider_file_ref, category, folder_path FROM media_items"
+                " WHERE workspace_id = %s"
                 "   AND provider_file_ref IN ('loose-1', 'meme-1', 'shirt-1')"
                 " ORDER BY provider_file_ref",
                 (ws,),
@@ -1137,24 +1170,53 @@ class TestSubfoldersAreCategories:
         _arm_source(sync_conn, chain["src"])
         _tick(sync_conn)
         first = _item("meme-1")
-        first["category"] = "memes"
+        first["category"], first["folder_path"] = "memes", "memes/2025/july"
         shirt = _item("shirt-1", kind="video")
-        shirt["category"] = "merch"
+        shirt["category"], shirt["folder_path"] = "merch", "merch"
         loose = _item("loose-1")
+        loose["folder_path"] = ""
         drive = ScriptedDrive([([first, shirt, loose], None)])
         wl, claimed = await _run_once_w6(lane_db, drive)
         assert claimed is True and wl.processed == 1
         assert self._categories(sync_conn, chain["ws"]) == [
-            ("loose-1", None),
-            ("meme-1", "memes"),
-            ("shirt-1", "merch"),
-        ]
+            ("loose-1", None, ""),
+            ("meme-1", "memes", "memes/2025/july"),
+            ("shirt-1", "merch", "merch"),
+        ], "a nested file carries its top-level folder as the label and its path"
 
-        # The same file, now under `merch`: the row's category follows.
+        # The same file, now under `merch`: the row's label and path follow.
         _arm_source(sync_conn, chain["src"])
         _tick(sync_conn)
         moved = _item("meme-1")
-        moved["category"] = "merch"
+        moved["category"], moved["folder_path"] = "merch", "merch/sale"
         wl, claimed = await _run_once_w6(lane_db, ScriptedDrive([([moved], None)]))
         assert claimed is True
-        assert ("meme-1", "merch") in self._categories(sync_conn, chain["ws"])
+        assert ("meme-1", "merch", "merch/sale") in self._categories(
+            sync_conn, chain["ws"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_pre_v2_cursor_stored_mid_walk_starts_the_walk_over(
+        self, lane_db, sync_conn
+    ):
+        """The one-level cursor of 2026-09-06 still in flight at deploy is not
+        resumed: the sync mints a token and the adapter starts over."""
+        chain = seed_workspace_chain(sync_conn, "w6-prev2")
+        with sync_conn.cursor() as cur:
+            cur.execute(
+                "UPDATE media_sources SET sync_checkpoint = %s WHERE id = %s",
+                (
+                    '{"v": 1, "current": {"id": "X", "name": "x"}, "queue": [],'
+                    ' "page_token": "stale"}',
+                    chain["src"],
+                ),
+            )
+        sync_conn.commit()
+        _arm_source(sync_conn, chain["src"])
+        _tick(sync_conn)
+        drive = ScriptedDrive([([_item("n1")], None)])
+        wl, claimed = await _run_once_w6(lane_db, drive)
+        assert claimed is True
+        start = drive.calls[0]["checkpoint"]
+        assert start["v"] == 2 and start["walk"] and "current" not in start
+        assert "page_token" not in start

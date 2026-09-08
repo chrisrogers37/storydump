@@ -659,6 +659,17 @@ categories): `current` (the folder being listed and its name, the items' categor
 NULL for the picked folder's own files, and follows the file when it moves. The block above
 is history — 054 as it replayed — and `07` §15 is the change.
 
+**Amendment (070, `07` §16, owner ruling 2026-09-08 — sources are the groups):** the walk goes
+to any depth, lazily, and the gdrive cursor is **v2** — `{v:2, walk, seen?, truncated?,
+current?:{id, name, top, top_name, path, listed}, queue?:[…], page_token?}`. The SYNC mints `walk`
+once per walk and the adapter carries it through unchanged; a pre-v2 cursor still in flight
+starts over; `{v:2, walk}` (with at most `truncated`) is the complete shape, and the bare
+`page_token` shape is never emitted. `media_items` gains `folder_path TEXT NULL` — the folder's
+path under the connected folder (`""` at its root), refreshed with `category` (the TOP-LEVEL
+folder's name) on every walk. Both are labels: the unit that carries a posting weight is the
+connected folder (`media_sources`), per `03`'s 2026-09-08 ruling (the mix table is keyed on it in
+the next increment).
+
 ## §3. The intent ledger (heart of the system)
 
 One durable row per posting attempt, from scheduling to a single immutable terminal state, replacing the `posting_queue`/`posting_history` split whose seam bred the known bug family (RF-G1). Three derivations converged on this shape (`03` D1). Terminality is **database-enforced** — the machinery is §4.
