@@ -667,8 +667,14 @@ starts over; `{v:2, walk}` (with at most `truncated`) is the complete shape, and
 `page_token` shape is never emitted. `media_items` gains `folder_path TEXT NULL` — the folder's
 path under the connected folder (`""` at its root), refreshed with `category` (the TOP-LEVEL
 folder's name) on every walk. Both are labels: the unit that carries a posting weight is the
-connected folder (`media_sources`), per `03`'s 2026-09-08 ruling (the mix table is keyed on it in
-the next increment). Connected folders are meant to be **disjoint**: a folder inside a connected
+connected folder (`media_sources`), per `03`'s 2026-09-08 ruling — and since 071 (`07` §17) the mix
+table IS keyed on it: `category_post_case_mix.source_id` (nullable, no FK; the name-keyed
+`uq_case_mix_current` gives way to `uq_case_mix_current_by_source`), `category` carrying the folder's
+name as a label. A ratio of 0 is Off (synced, never posted); a connected folder with no row is
+automatic (`category_mix.weights`: it posts in proportion to its files, the automatic folders together
+never more than the smallest explicit weight on the final split). Connected folders are disjoint:
+`POST /workspaces/{ws}/sources` refuses a pick inside, or containing, a connected folder
+(`source_nested`, read through the grant's `folder_ancestors`). Connected folders are meant to be **disjoint**: a folder inside a connected
 folder is already synced by its parent, and the next increment refuses such a pick (`source_nested`);
 until then two overlapping sources share rows by content hash, attributed to whichever listed first.
 

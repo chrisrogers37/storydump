@@ -228,6 +228,13 @@
       "label": "§16 media_items.folder_path — the full-depth walk (070, owner ruling 2026-09-08)",
       "doc": "07-security-model.md",
       "ordinal": 14
+    },
+    {
+      "sha256": "7fc6155d6925d532dd577941b0ade8b6da119bb60300ebb7b5100f5fe6ca2321",
+      "class": "normative",
+      "label": "§17 category_post_case_mix.source_id — the mix keyed on the connected folder (071, owner ruling 2026-09-08)",
+      "doc": "07-security-model.md",
+      "ordinal": 15
     }
   ],
   "policy_expansion": {

@@ -62,7 +62,10 @@ class CategoryPostCaseMix(TargetBase):
 
     id = pk()
     workspace_id = fk("workspaces.id", "CASCADE", nullable=False)
-    category = Column(Text, nullable=False)
+    category = Column(Text, nullable=False)  # the label the card shows (071)
+    source_id = Column(
+        UUID(as_uuid=True), nullable=True
+    )  # 071: the connected folder — the key
     ratio = Column(Numeric(5, 4), nullable=False)
     effective_from = Column(TZ, nullable=False, server_default=text("now()"))
     effective_to = Column(TZ, nullable=True)
@@ -72,11 +75,11 @@ class CategoryPostCaseMix(TargetBase):
     __table_args__ = (
         CheckConstraint("ratio >= 0", name="ck_case_mix_ratio"),
         Index(
-            "uq_case_mix_current",
+            "uq_case_mix_current_by_source",
             "workspace_id",
-            "category",
+            "source_id",
             unique=True,
-            postgresql_where=text("effective_to IS NULL"),
+            postgresql_where=text("effective_to IS NULL AND source_id IS NOT NULL"),
         ),
         Index(
             "ix_case_mix_current",

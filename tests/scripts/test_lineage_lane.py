@@ -347,6 +347,9 @@ class TestTheBoundaryIsDerivedAndLoud:
             # 070: media_items.folder_path — the full-depth walk (07 §16, owner
             # ruling 2026-09-08: sources are the groups).
             "070_media_item_folder_path.sql",
+            # 071: category_post_case_mix.source_id — the mix keyed on the connected
+            # folder (07 §17, owner ruling 2026-09-08: sources are the groups).
+            "071_case_mix_by_source.sql",
         ], (
             f"the target lineage is {above}. If you are landing the next F.2"
             " increment, add it here — deliberately, and at the end: arm (b)"

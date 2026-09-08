@@ -621,3 +621,117 @@ class TestDisableDestination:
         with pytest.raises(ProvisioningRefused) as info:
             await disable_destination(ex, workspace_id="ws", ig_account_id="acct")
         assert info.value.reason == "already_disabled"
+
+
+class TestConnectedFoldersAreDisjoint:
+    """Owner ruling 2026-09-08: a pick inside, or containing, a connected
+    folder is refused by name; a re-pick asks nothing; a removed folder
+    blocks nothing."""
+
+    SOURCES = [
+        {"id": "s1", "folder_ref": "PARENT", "folder_name": "Trips", "removed": False},
+        {"id": "s2", "folder_ref": "GONE", "folder_name": "Old", "removed": True},
+    ]
+
+    def _chains(self, chains):
+        asked = []
+
+        async def ancestors_of(folder_ref):
+            asked.append(folder_ref)
+            return list(chains.get(folder_ref, []))
+
+        return ancestors_of, asked
+
+    @pytest.mark.asyncio
+    async def test_inside_a_connected_folder_is_refused_naming_it(self):
+        from src.services.target.provisioning import (
+            ProvisioningRefused,
+            refuse_nested_pick,
+        )
+
+        ancestors_of, _ = self._chains({"CHILD": ["PARENT", "ROOT"]})
+        with pytest.raises(ProvisioningRefused) as exc:
+            await refuse_nested_pick(
+                sources=self.SOURCES,
+                ref="CHILD",
+                label="Summer",
+                ancestors_of=ancestors_of,
+            )
+        assert exc.value.reason == "source_nested" and "Trips" in str(exc.value)
+
+    @pytest.mark.asyncio
+    async def test_containing_a_connected_folder_is_refused_too(self):
+        from src.services.target.provisioning import (
+            ProvisioningRefused,
+            refuse_nested_pick,
+        )
+
+        ancestors_of, _ = self._chains({"GRAND": ["ROOT"], "PARENT": ["GRAND", "ROOT"]})
+        with pytest.raises(ProvisioningRefused) as exc:
+            await refuse_nested_pick(
+                sources=self.SOURCES,
+                ref="GRAND",
+                label="All",
+                ancestors_of=ancestors_of,
+            )
+        assert exc.value.reason == "source_nested" and "contains" in str(exc.value)
+
+    @pytest.mark.asyncio
+    async def test_a_re_pick_asks_nothing_and_a_removed_folder_blocks_nothing(self):
+        from src.services.target.provisioning import refuse_nested_pick
+
+        ancestors_of, asked = self._chains({"PARENT": ["GRAND"]})
+        await refuse_nested_pick(
+            sources=self.SOURCES, ref="PARENT", label="Trips", ancestors_of=ancestors_of
+        )
+        assert asked == []
+        ancestors_of, asked = self._chains(
+            {"UNDER_GONE": ["GONE", "ROOT"], "PARENT": ["ROOT"]}
+        )
+        await refuse_nested_pick(
+            sources=self.SOURCES, ref="UNDER_GONE", label="X", ancestors_of=ancestors_of
+        )
+        assert "GONE" not in asked
+
+    @pytest.mark.asyncio
+    async def test_the_write_refuses_when_the_connected_set_moved(self):
+        from src.services.target.provisioning import (
+            ProvisioningRefused,
+            assert_sources_unchanged,
+            connected_refs,
+        )
+
+        class _Exec:
+            def __init__(self, rows):
+                self.rows, self.calls = list(rows), []
+
+            async def execute(self, statement, params=None):
+                self.calls.append(str(statement))
+                rows = self.rows.pop(0) if self.rows else []
+
+                class _M:
+                    def all(self_inner):
+                        return rows
+
+                    def __iter__(self_inner):
+                        return iter(rows)
+
+                class _R:
+                    def mappings(self_inner):
+                        return _M()
+
+                return _R()
+
+        same = [{"id": "s1", "folder_ref": "PARENT", "removed": False}]
+        ex = _Exec(rows=[[], same])
+        await assert_sources_unchanged(
+            ex, workspace_id="ws-1", expected=connected_refs(same)
+        )
+        assert "pg_advisory_xact_lock" in ex.calls[0]
+        moved = same + [{"id": "s3", "folder_ref": "NEW", "removed": False}]
+        ex = _Exec(rows=[[], moved])
+        with pytest.raises(ProvisioningRefused) as exc:
+            await assert_sources_unchanged(
+                ex, workspace_id="ws-1", expected=connected_refs(same)
+            )
+        assert exc.value.reason == "sources_changed"

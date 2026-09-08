@@ -110,15 +110,15 @@ export default async function SettingsPage({
     driveResult,
     mixResult,
   ] = await Promise.all([
-      workspaceFetch<WorkspaceConfig>("", workspaceId),
-      workspaceFetch<AccountsResponse>("accounts", workspaceId),
-      workspaceFetch<SourcesResponse>("sources", workspaceId),
-      workspaceFetch<BindingsResponse>("bindings", workspaceId),
-      workspaceFetch<MembersResponse>("members", workspaceId),
-      workspaceFetch<StatsResponse>("stats", workspaceId),
-      workspaceFetch<DriveStatusResponse>("drive", workspaceId),
-      workspaceFetch<CategoryMixResponse>("category-mix", workspaceId),
-    ]);
+    workspaceFetch<WorkspaceConfig>("", workspaceId),
+    workspaceFetch<AccountsResponse>("accounts", workspaceId),
+    workspaceFetch<SourcesResponse>("sources", workspaceId),
+    workspaceFetch<BindingsResponse>("bindings", workspaceId),
+    workspaceFetch<MembersResponse>("members", workspaceId),
+    workspaceFetch<StatsResponse>("stats", workspaceId),
+    workspaceFetch<DriveStatusResponse>("drive", workspaceId),
+    workspaceFetch<CategoryMixResponse>("category-mix", workspaceId),
+  ]);
 
   // All four, for the reason above: every tab on this screen renders current
   // state, so any one of them missing means some control shows a value that is
@@ -198,7 +198,8 @@ export default async function SettingsPage({
         >
           <span className="font-medium">Google Drive access was granted.</span>{" "}
           The grant completed, so an empty library is not a failed connection.
-          Its current state is shown on the Google Drive card under Integrations.
+          Its current state is shown on the Google Drive card under
+          Integrations.
         </div>
       )}
 
@@ -221,16 +222,26 @@ export default async function SettingsPage({
             categoryMix={
               <CategoryWeightsCard
                 workspaceId={workspaceId}
-                data={mixResult.ok ? mixResult.data : null}
-                editable={membership?.role === "owner" || membership?.role === "admin"}
+                data={
+                  mixResult.ok && Array.isArray(mixResult.data?.rows)
+                    ? mixResult.data
+                    : null
+                }
+                editable={
+                  membership?.role === "owner" || membership?.role === "admin"
+                }
               />
             }
             members={
               <MembersCard
                 workspaceId={workspaceId}
-                members={membersResult.ok ? (membersResult.data.members ?? []) : null}
+                members={
+                  membersResult.ok ? (membersResult.data.members ?? []) : null
+                }
                 currentUserId={session.userId}
-                canRemove={membership?.role === "owner" || membership?.role === "admin"}
+                canRemove={
+                  membership?.role === "owner" || membership?.role === "admin"
+                }
               />
             }
           />
@@ -261,7 +272,9 @@ export default async function SettingsPage({
             settings={settings}
             sources={sourcesResult.data.sources ?? []}
             drive={drive}
-            bindings={bindingsResult.ok ? (bindingsResult.data.bindings ?? []) : null}
+            bindings={
+              bindingsResult.ok ? (bindingsResult.data.bindings ?? []) : null
+            }
             workspaceId={workspaceId}
             telegramLinked={session.telegramLinked}
             telegramDisplayName={session.telegramDisplayName}

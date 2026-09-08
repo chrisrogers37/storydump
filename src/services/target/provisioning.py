@@ -400,6 +400,68 @@ def folder_ref_from(value: object) -> str:
     return ref
 
 
+def connected_refs(sources: list[dict]) -> frozenset[str]:
+    """The folder refs of the CONNECTED sources in a `list_sources` result —
+    what the disjointness rule was checked against."""
+    return frozenset(
+        str(s["folder_ref"])
+        for s in sources
+        if not s.get("removed") and s.get("folder_ref")
+    )
+
+
+async def assert_sources_unchanged(
+    executor, *, workspace_id: str, expected: frozenset
+) -> None:
+    """The pick's disjointness check ran outside the unit of work; under the
+    workspace's sources lock, refuse (`sources_changed`) if the connected set
+    is no longer the one it was checked against — two admins picking a parent
+    and its child at once would otherwise both pass. The lock dies with the
+    transaction; `get_or_create_media_source`'s per-folder lock nests inside
+    it in one order everywhere, so the two cannot deadlock."""
+    from src.services.target import workspaces
+
+    await executor.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": f"sources:{workspace_id}"},
+    )
+    now = await workspaces.list_sources(executor, workspace_id=workspace_id)
+    if connected_refs(now) != expected:
+        raise ProvisioningRefused(
+            "sources_changed", "the connected folders changed while checking"
+        )
+
+
+async def refuse_nested_pick(
+    *, sources: list[dict], ref: str, label: str, ancestors_of
+) -> None:
+    """Connected folders are DISJOINT (owner ruling 2026-09-08): a folder
+    inside a connected one is already synced by its parent, and one that
+    contains a connected folder would make two sources share rows and freeze
+    attribution to whichever listed first (review of #1256). Refuses by name
+    (`source_nested`, the detail naming the other folder) when the candidate's
+    parent chain holds a connected folder, or a connected folder's chain holds
+    the candidate. A re-pick of the same folder asks nothing; a removed folder
+    blocks nothing. `ancestors_of(folder_ref)` is the grant's read — async,
+    nearest parent first — supplied by the caller so this rule needs no
+    transport of its own."""
+    connected = [s for s in sources if not s.get("removed") and s.get("folder_ref")]
+    if any(s["folder_ref"] == ref for s in connected) or not connected:
+        return
+    chain = set(await ancestors_of(ref))
+    for s in connected:
+        other = s.get("folder_name") or s["folder_ref"]
+        if s["folder_ref"] in chain:
+            raise ProvisioningRefused(
+                "source_nested",
+                f"{label} is inside {other}, which is already connected",
+            )
+        if ref in await ancestors_of(s["folder_ref"]):
+            raise ProvisioningRefused(
+                "source_nested", f"{label} contains {other}, which is already connected"
+            )
+
+
 async def get_or_create_media_source(
     executor,
     *,

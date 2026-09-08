@@ -131,6 +131,8 @@ export type SourceRow = {
   folder_ref: string | null;
   /** The name the picker gave it (`config.folder_name`); null for a folder added by link. */
   folder_name: string | null;
+  /** Removed under Integrations (a pause with a flag); false = connected. */
+  removed?: boolean;
 };
 
 export type SourcesResponse = { sources: SourceRow[] };

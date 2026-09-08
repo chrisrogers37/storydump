@@ -78,6 +78,8 @@ from typing import Optional, Union
 
 from sqlalchemy import text
 
+from src.services.target import category_mix, workspaces
+
 from src.exceptions.base import StorydumpError
 
 #: The advisory-lock key the clock elects on. A single fixed key, because there
@@ -348,16 +350,15 @@ async def execute_plan_slot(
     resolves only names in ``pg_constraint``; the prose form does not run. The
     inference form is equivalent and is what the gate exercises.
 
-    **Selection honours the category mix (`06` §3; owner ruling 2026-09-06).**
-    The workspace's current `category_post_case_mix` rows are weights over
-    categories — a folder's subfolders, as the sync tags them. The draw is
-    weighted-random over the mix categories that HAVE eligible media (a
-    weighted category with nothing to post is never drawn, and the others
-    absorb its share), then oldest-first within the drawn category. No mix,
-    or every weighted category empty, falls back to oldest-first over the
-    whole pool — the rule this function always had. `rng` is injectable so a
-    test can seed the draw; production uses the system generator.
-    """
+    Selection (`06` §3), keyed on the CONNECTED FOLDER since 2026-09-08: the
+    connected folders that have eligible media are drawn by
+    `category_mix.weights` (explicit weights by ratio; folders without a
+    weight in proportion to their files, together never more than the smallest
+    explicit weight; Off never; a folder gone in Drive never), then
+    oldest-first within the drawn one. No pool behind that set: a removed
+    folder's rows and an Off folder's are the two things that must never post,
+    and they are all that would be left. `rng` is injectable so a test can
+    seed the draw; production uses the system generator."""
     draw = rng if rng is not None else random.SystemRandom()
     # `06` §3's rule in full: available, not already live for this account,
     # minus the workspace-wide locks (skip/reject/hold/seasonal/unsupported)
@@ -380,12 +381,20 @@ async def execute_plan_slot(
         "                     AND (l.ig_account_id IS NULL OR l.ig_account_id = :acct))"
     )
     order = " ORDER BY m.last_posted_at NULLS FIRST, m.created_at LIMIT 1"
-    mix = (
+    # The connected folders and their current weights (owner ruling
+    # 2026-09-08: the mix is keyed on the source; a name is a label). A row
+    # without a source_id — set before 071 — is not joined and shapes nothing.
+    rows = (
         (
             await session.execute(
                 text(
-                    "SELECT category, ratio FROM category_post_case_mix"
-                    " WHERE workspace_id = :ws AND effective_to IS NULL"
+                    "SELECT s.id AS source_id, x.ratio"
+                    "  FROM media_sources s"
+                    "  LEFT JOIN category_post_case_mix x"
+                    "    ON x.workspace_id = s.workspace_id AND x.source_id = s.id"
+                    "   AND x.effective_to IS NULL"
+                    " WHERE s.workspace_id = :ws AND s.state <> 'error'"
+                    "   AND " + workspaces.CONNECTED_SQL
                 ),
                 {"ws": workspace_id},
             )
@@ -397,9 +406,9 @@ async def execute_plan_slot(
         (
             await session.execute(
                 text(
-                    "SELECT m.category, count(*) AS n FROM media_items m"
+                    "SELECT m.source_id, count(*) AS n FROM media_items m"
                     + eligible
-                    + " GROUP BY m.category"
+                    + " GROUP BY m.source_id"
                 ),
                 {"ws": workspace_id, "acct": ig_account_id},
             )
@@ -407,46 +416,49 @@ async def execute_plan_slot(
         .mappings()
         .all()
     )
-    have = {row["category"]: int(row["n"]) for row in counts}
-    weighted = [
-        (str(row["category"]), float(row["ratio"]))
-        for row in mix
-        if have.get(row["category"], 0) > 0 and float(row["ratio"]) > 0
+    have = {str(row["source_id"]): int(row["n"]) for row in counts}
+    shaped = [
+        {
+            "source_id": str(row["source_id"]),
+            "ratio": None if row["ratio"] is None else float(row["ratio"]),
+            "n": have.get(str(row["source_id"]), 0),
+        }
+        for row in rows
     ]
+    share = category_mix.weights(shaped)
+    weighted = [(sid, w) for sid, w in share.items() if w > 0]
+    # No pool behind the weighted set: every connected folder that may post
+    # is in `weighted` once it has eligible media, so anything left would
+    # belong to a removed folder or an Off one — the two things that must
+    # never post (review of the weights PR). Nothing eligible is the no-media
+    # path below.
     chosen: Optional[str] = None
     if weighted:
         total = sum(w for _, w in weighted)
         point = draw.random() * total
-        for category, weight in weighted:
+        for source_id, weight in weighted:
             point -= weight
             if point < 0:
-                chosen = category
+                chosen = source_id
                 break
         else:
             chosen = weighted[-1][0]
-    elif mix:
+    else:
         logger.info(
-            "plan_slot: no weighted category has media for workspace %s — falling"
-            " back to the whole pool",
+            "plan_slot: no connected folder has eligible media for workspace %s",
             workspace_id,
         )
+    media = None
     if chosen is not None:
         media = (
             await session.execute(
                 text(
                     "SELECT m.id FROM media_items m"
                     + eligible
-                    + "   AND m.category = :category"
+                    + "   AND m.source_id = CAST(:source_id AS uuid)"
                     + order
                 ),
-                {"ws": workspace_id, "acct": ig_account_id, "category": chosen},
-            )
-        ).first()
-    else:
-        media = (
-            await session.execute(
-                text("SELECT m.id FROM media_items m" + eligible + order),
-                {"ws": workspace_id, "acct": ig_account_id},
+                {"ws": workspace_id, "acct": ig_account_id, "source_id": chosen},
             )
         ).first()
     if media is None:

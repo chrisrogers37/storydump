@@ -1001,3 +1001,26 @@ table's existing `p_tenant` policy and grants.
 -- is keyed by either — the group that carries a weight is the source (`media_sources`), next PR.
 ALTER TABLE media_items ADD COLUMN folder_path TEXT NULL;
 ```
+
+### §17. The posting mix keyed on the connected folder (071, owner ruling 2026-09-08)
+
+**Owner ruling (2026-09-08, `03` post-ratification rulings — sources are the groups):** the unit
+that carries a posting weight is the connected folder — the `media_sources` row — never a folder
+name. `category_post_case_mix` gains `source_id`; the name-keyed current-row index gives way to
+one keyed on the source; `category` stays as the label the card shows. A row written before 071
+carries no `source_id`: the planner ignores it and the first save from the new card supersedes it.
+No policy, grant or door changes: the column rides the table's existing `p_tenant` policy.
+
+```sql
+-- The posting mix keyed on the CONNECTED FOLDER (owner ruling 2026-09-08 — sources are the
+-- groups): a weight belongs to a media_sources row, never to a folder name. `category` stays as
+-- the label the card shows (the source's folder_name at save time). Rows written before this
+-- migration carry no source_id: the planner ignores them and the first save supersedes them.
+-- No FK: the tenancy lane refuses ADD FOREIGN KEY, and a source is removed by flag, never deleted.
+ALTER TABLE category_post_case_mix ADD COLUMN source_id UUID NULL;
+
+DROP INDEX uq_case_mix_current;
+
+CREATE UNIQUE INDEX uq_case_mix_current_by_source ON category_post_case_mix (workspace_id, source_id)
+  WHERE effective_to IS NULL AND source_id IS NOT NULL;
+```

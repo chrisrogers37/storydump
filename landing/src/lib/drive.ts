@@ -219,10 +219,34 @@ export async function addDriveFolder(
   return { ok: true, sourceId: data.sourceId, created: data.created === true };
 }
 
+/** The Drive folder ids that are CONNECTED here — sources not removed — for the picker to grey out. */
+export function connectedFolderRefs(
+  sources: { folder_ref: string | null; removed?: boolean; state?: string }[],
+): Set<string> {
+  return new Set(
+    sources
+      .filter(
+        (s) =>
+          s.folder_ref &&
+          (s.removed === undefined ? s.state !== "paused" : !s.removed),
+      )
+      .map((s) => s.folder_ref as string),
+  );
+}
+
 export function addFolderRefusalCopy(reason: unknown): string {
   switch (reason) {
     case "drive_not_connected":
       return "Google Drive is not connected to this workspace yet. Connect it first. Nothing was added.";
+    case "sources_changed":
+      return "The connected folders changed while checking this one. Try again. Nothing was added.";
+    case "drive_grant_refused":
+    case "drive_reconnect_needed":
+    case "drive_unavailable":
+    case "drive_refused":
+      return driveFoldersRefusalCopy(reason);
+    case "source_nested":
+      return "That folder is inside, or contains, a folder that is already connected — everything inside a connected folder already syncs. Connect folders that don't contain each other. Nothing was added.";
     case "invalid_args":
     case "folder_required":
       return "That does not look like a Drive folder. Nothing was added.";
