@@ -105,7 +105,7 @@ class TestStringSlotWidths:
 class TestCardRender:
     def test_api_enabled_card_carries_the_ruled_four_plus_deeplink(self):
         payload = prompts.render_card(_card_input(), api_publishing_enabled=True)
-        assert payload["v"] == 1 and payload["text"]
+        assert payload["v"] == 2 and payload["text"]
         labels = [b.get("text") for b in _buttons(payload)]
         assert any("Post now" in n for n in labels), "Fork 1: a tap publishes"
         assert any("Posted" in n for n in labels)
@@ -199,3 +199,63 @@ class TestPromptIntent:
         row = {"id": "i-1", "workspace_id": "ws-1", "api_publishing_enabled": False}
         await prompts.prompt_intent(object(), row, [])
         assert called == ["prompt_pending"]
+
+
+class TestTheCardCarriesTheMedia:
+    """Legacy parity (owner, 2026-09-08): the approval card is the PHOTO (or
+    video) with the account and the slot as its caption — not a filename. The
+    renderer names the media for the transport to fetch; the text stays as the
+    fallback card when the file cannot be sent."""
+
+    def _with_media(self, **over):
+        fields = dict(
+            handle="gatortails",
+            workspace_id="ws-1",
+            source_id="src-1",
+            provider_file_ref="file-1",
+            mime_type="image/jpeg",
+        )
+        fields.update(over)
+        return _card_input(**fields)
+
+    def test_the_payload_names_the_media_for_the_transport(self):
+        payload = prompts.render_card(self._with_media(), api_publishing_enabled=False)
+        assert payload["v"] == 2
+        assert payload["media"] == {
+            "workspace_id": "ws-1",
+            "source_id": "src-1",
+            "ref": "file-1",
+            "kind": "image",
+            "mime": "image/jpeg",
+            "file_name": "sunset.jpg",
+        }
+
+    def test_the_caption_is_the_account_and_the_slot_in_workspace_time(self):
+        payload = prompts.render_card(self._with_media(), api_publishing_enabled=False)
+        assert payload["caption"].startswith("📸 @gatortails")
+        assert "14:30" in payload["caption"]
+        assert "sunset.jpg" not in payload["caption"], "the file name is not the story"
+
+    def test_without_a_handle_the_caption_falls_back_to_the_file_name(self):
+        payload = prompts.render_card(
+            self._with_media(handle=None), api_publishing_enabled=False
+        )
+        assert payload["caption"].startswith("📸 sunset.jpg")
+
+    def test_the_text_remains_the_fallback_card(self):
+        payload = prompts.render_card(self._with_media(), api_publishing_enabled=False)
+        assert "sunset.jpg" in payload["text"] and "14:30" in payload["text"]
+
+    def test_an_intent_without_a_file_reference_renders_a_text_only_card(self):
+        payload = prompts.render_card(_card_input(), api_publishing_enabled=False)
+        assert "media" not in payload and "caption" not in payload
+
+    def test_the_media_payload_is_json_serializable(self):
+        json.dumps(prompts.render_card(self._with_media(), api_publishing_enabled=True))
+
+    def test_a_caption_without_a_handle_is_bounded(self):
+        payload = prompts.render_card(
+            self._with_media(handle=None, file_name="x" * 900),
+            api_publishing_enabled=False,
+        )
+        assert len(payload["caption"]) <= 1024

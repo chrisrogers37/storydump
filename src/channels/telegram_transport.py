@@ -36,7 +36,8 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Optional
+from dataclasses import replace as _replace
+from typing import Awaitable, Callable, Optional
 
 import httpx
 
@@ -71,6 +72,28 @@ def _chat_gone(code, description: str) -> Optional[str]:
     return None
 
 
+#: The upload method and its multipart part name, by what Telegram will take
+#: as a photo or a video; anything else (HEIC, GIF, BMP, TIFF, a codec Telegram
+#: will not play) goes as a document, which still previews inline and never
+#: earns a refusal for its dimensions or its container.
+_PHOTO_MIMES = frozenset({"image/jpeg", "image/png"})
+_VIDEO_MIMES = frozenset({"video/mp4", "video/quicktime"})
+_MEDIA_KINDS = frozenset({"image", "video"})
+
+
+def _method_for(kind: str, mime: Optional[str]) -> tuple[str, str]:
+    m = (mime or "").lower()
+    if kind == "image" and m in _PHOTO_MIMES:
+        return "sendPhoto", "photo"
+    if kind == "video" and m in _VIDEO_MIMES:
+        return "sendVideo", "video"
+    return "sendDocument", "document"
+
+
+#: A 50 MB video over a slow link needs more than the 30 s default budget.
+_UPLOAD_BUDGET_S = 120.0
+
+
 class TelegramSendError(Exception):
     """The transport could not produce an external ref for this row."""
 
@@ -80,6 +103,28 @@ class TelegramChatGone(DestinationGone, TelegramSendError):
     chat was deleted, or a group became a supergroup (Telegram names the
     successor id in `parameters.migrate_to_chat_id`). A chat-level fact —
     never the credential's."""
+
+
+class TelegramRefused(TelegramSendError):
+    """Telegram answered, and said no for good: `ok: false` with a 4xx that is
+    neither a gone chat, a dead token nor 429 — a DEFINITIVE refusal, so a
+    caller may try another shape of the same message. A transport failure, a
+    429 or a 5xx is NOT this: the message may have landed, and only the
+    outbox's ambiguity policy may decide what happens next."""
+
+
+class MediaUnavailable(Exception):
+    """A card's media cannot be fetched for a reason that is the FILE's and
+    will not change — too large, gone, refused by the provider. The text card
+    goes, at WARNING."""
+
+
+class MediaTransient(Exception):
+    """The fetch got no usable answer (the provider is rate-limiting, erroring
+    or not answering). Nothing reached Telegram, so the send propagates as
+    ambiguous and the outbox's policy resends later — the photo card is not
+    given up for a blip. Anything else a fetch raises (a dead grant, a bug)
+    is loud: ERROR, counted, and the text card goes."""
 
 
 class TelegramAuthDead(TelegramSendError):
@@ -96,22 +141,44 @@ class TelegramTransport:
         client: Optional[httpx.AsyncClient] = None,
         policy: Optional[EgressPolicy] = None,
         api_base: str = _API_BASE,
+        media_fetch: Optional[
+            Callable[[dict], Awaitable[tuple[bytes, str, Optional[str]]]]
+        ] = None,
     ):
         self._token = token
         self._client = client or httpx.AsyncClient()
         self._policy = policy or EgressPolicy()
         self._api_base = api_base
+        # `media_fetch(media) -> (bytes, filename, mime)`: how a card's media
+        # block becomes bytes to upload (the worker wires the Drive adapter).
+        # None = every card is its text.
+        self._media_fetch = media_fetch
+        #: Fetches that failed for a reason that was NOT the file's (a dead
+        #: grant, a bug): each is an ERROR line and a tick here, surfaced in
+        #: the worker's status line.
+        self.media_fetch_failures = 0
         self.auth_failures = 0
         self._auth_dead_logged = False
 
     def _redact(self, text: str) -> str:
         return text.replace(self._token, "<TOKEN>")
 
-    async def _call(self, method: str, payload: dict) -> dict:
+    async def _call(
+        self,
+        method: str,
+        payload: Optional[dict] = None,
+        *,
+        data: Optional[dict] = None,
+        files: Optional[dict] = None,
+        policy: Optional[EgressPolicy] = None,
+    ) -> dict:
         url = f"{self._api_base}/bot{self._token}/{method}"
+        body_kwargs = (
+            {"data": data, "files": files} if files is not None else {"json": payload}
+        )
         try:
             response = await egress.request(
-                self._client, "POST", url, policy=self._policy, json=payload
+                self._client, "POST", url, policy=policy or self._policy, **body_kwargs
             )
         except Exception as exc:  # noqa: BLE001 — every path may embed the URL
             raise TelegramSendError(
@@ -147,6 +214,11 @@ class TelegramTransport:
                     description,
                 )
             raise TelegramAuthDead(f"{method}: {code} {description}")
+        if code in (400, 413):
+            # Bad Request / Payload Too Large: the message as shaped will
+            # never be accepted. 429 and 5xx are NOT this — the card may have
+            # landed, and only the outbox's policy may decide.
+            raise TelegramRefused(f"{method}: {code} {description}")
         raise TelegramSendError(f"{method}: {code} {description}")
 
     async def probe(self) -> str:
@@ -170,12 +242,130 @@ class TelegramTransport:
             raise TelegramSendError("sendMessage: ok response without a message_id")
         return str(message_id)
 
+    async def send_media(
+        self,
+        chat_id: str,
+        *,
+        kind: str,
+        content: bytes,
+        filename: str,
+        mime: Optional[str],
+        caption: str,
+        reply_markup: Optional[dict] = None,
+    ) -> str:
+        """One `sendPhoto` / `sendVideo` / `sendDocument` upload — the card
+        as the legacy product sent it: the media, the caption, the keyboard.
+        Runs under the upload timeout class with a budget wide enough for the
+        bytes. Note the outbox paces inside the sender's transaction, so the
+        global rate row stays locked for the upload's duration (#1260)."""
+        method, part = _method_for(kind, mime)
+        data: dict = {"chat_id": chat_id, "caption": caption[:1024]}
+        if reply_markup:
+            data["reply_markup"] = json.dumps(reply_markup)
+        files = {part: (filename, content, mime or "application/octet-stream")}
+        # ONE attempt: the floor retries a POST whose answer was lost, and a
+        # re-sent upload is a second card the supersede path cannot see
+        # (review of #1259). A lost answer propagates as ambiguous instead.
+        policy = _replace(
+            self._policy,
+            timeout_class="upload",
+            total_budget_s=max(self._policy.total_budget_s, _UPLOAD_BUDGET_S),
+            max_attempts=1,
+        )
+        result = await self._call(method, data=data, files=files, policy=policy)
+        message_id = (result or {}).get("message_id")
+        if message_id is None:
+            raise TelegramSendError(f"{method}: ok response without a message_id")
+        return str(message_id)
+
     def for_chat(self, external_ref: str):
-        """The per-binding sender deliver() takes: row in, message ref out."""
+        """The per-binding sender deliver() takes: row in, message ref out.
+
+        A payload with a `media` block is sent as the photo or video with its
+        `caption` when the bytes can be fetched and Telegram accepts them;
+        otherwise the `text` card goes. Only a DEFINITIVE refusal of the
+        upload falls back — a transport failure may have landed the card, and
+        propagates for the outbox's ambiguity policy, as every send does; a
+        gone chat and a dead token propagate too.
+        """
 
         async def send(row: dict) -> str:
             payload = row.get("payload") or {}
             text_body = payload.get("text")
+            media = payload.get("media")
+            if (
+                media
+                and self._media_fetch is not None
+                and media.get("kind") in _MEDIA_KINDS
+            ):
+                fetched = None
+                row_ws = row.get("workspace_id")
+                if row_ws is None or str(media.get("workspace_id")) != str(row_ws):
+                    # The media block is written in-process, but the grant it
+                    # selects is the payload's word alone (BYPASSRLS): a row
+                    # whose block names another workspace — or a row that
+                    # cannot vouch for one at all — is refused, loudly.
+                    self.media_fetch_failures += 1
+                    logger.error(
+                        "outbox row %s: media block names workspace %s but the row"
+                        " belongs to %s — fetch refused; sending the text card",
+                        row.get("id"),
+                        media.get("workspace_id"),
+                        row_ws,
+                    )
+                else:
+                    try:
+                        fetched = await self._media_fetch(media)
+                    except MediaUnavailable as exc:
+                        logger.warning(
+                            "outbox row %s: media unavailable (%s) — sending the text card",
+                            row.get("id"),
+                            self._redact(str(exc)),
+                        )
+                    except MediaTransient as exc:
+                        # Nothing reached Telegram: ambiguous by the outbox's
+                        # book, resent later with the photo intact — ONCE.
+                        # An ambiguous approval_prompt returns to pending with
+                        # no attempts cap, so a provider outage would otherwise
+                        # loop the card forever; the second attempt sends the
+                        # text card (review of #1259).
+                        if int(row.get("attempts") or 1) < 2:
+                            raise TelegramSendError(
+                                f"media fetch got no answer: {self._redact(str(exc))}"
+                            ) from exc
+                        logger.warning(
+                            "outbox row %s: media fetch got no answer again (%s) —"
+                            " sending the text card",
+                            row.get("id"),
+                            self._redact(str(exc)),
+                        )
+                    except Exception as exc:  # noqa: BLE001 — degraded, but never quietly
+                        self.media_fetch_failures += 1
+                        logger.error(
+                            "outbox row %s: media fetch FAILED (%s: %s) — sending the"
+                            " text card; this is not the file's fault",
+                            row.get("id"),
+                            type(exc).__name__,
+                            self._redact(str(exc)),
+                        )
+                if fetched is not None:
+                    content, filename, mime = fetched
+                    try:
+                        return await self.send_media(
+                            external_ref,
+                            kind=str(media["kind"]),
+                            content=content,
+                            filename=filename,
+                            mime=mime,
+                            caption=str(payload.get("caption") or text_body or ""),
+                            reply_markup=payload.get("reply_markup"),
+                        )
+                    except TelegramRefused as exc:
+                        logger.warning(
+                            "outbox row %s: upload refused (%s) — sending the text card",
+                            row.get("id"),
+                            self._redact(str(exc)),
+                        )
             if not text_body:
                 raise TelegramSendError(
                     f"outbox row {row.get('id')}: payload carries no text —"

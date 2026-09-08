@@ -126,6 +126,15 @@ class DriveAuthError(DriveError):
     """The credential is the problem — routes to the lifecycle, not the ladder."""
 
 
+class DriveMediaTooLarge(DriveTerminalError):
+    """A file over the cap the caller can carry (the approval card's upload
+    limit): known from metadata, refused before any download."""
+
+
+class DriveMediaGone(DriveTerminalError):
+    """The FILE is gone (deleted or unshared) — the source is fine."""
+
+
 class DriveLostResponse(Exception):
     """The transport died; the call may or may not have landed.
 
