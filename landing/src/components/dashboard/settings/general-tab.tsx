@@ -112,6 +112,8 @@ type ToggleKey =
  * is restored (the tick skips it). Exported so the wording is pinned.
  */
 export function scheduleSavedNotice(workspaceState: string): string {
+  // `ck_ws_state` also admits `suspended`, which nothing writes today; it
+  // would read "restored" here, which is the closest true sentence.
   if (workspaceState !== "active") {
     return "Schedule saved. It applies once the workspace is restored.";
   }
@@ -263,6 +265,10 @@ export function GeneralTab({
   const [notice, setNotice] = useState<{
     card: "name" | "schedule";
     text: string;
+    // The schedule copy speaks of the workspace's clock as it was at save
+    // time; a Delete on this tab changes that, so the box shows only while
+    // the state it described still holds.
+    state: string;
   } | null>(null);
   // The child cards report through `onError`; a refusal there must not leave
   // a green "saved" standing above the red box it caused.
@@ -315,7 +321,11 @@ export function GeneralTab({
       setError(settingsRefusalCopy(result.error, result.status));
       return;
     }
-    setNotice({ card: "name", text: "Workspace name saved." });
+    setNotice({
+      card: "name",
+      text: "Workspace name saved.",
+      state: workspaceState,
+    });
     // Re-read: the name is rendered in the header and the workspace switcher
     // too, and leaving those showing the old one would be the same half-written
     // screen the schedule save avoids.
@@ -338,7 +348,11 @@ export function GeneralTab({
       setError(settingsRefusalCopy(result.error, result.status));
       return;
     }
-    setNotice({ card: "schedule", text: scheduleSavedNotice(workspaceState) });
+    setNotice({
+      card: "schedule",
+      text: scheduleSavedNotice(workspaceState),
+      state: workspaceState,
+    });
     // Re-read rather than keep the submitted values on screen. This card is
     // not the only thing rendered from `settings`, and a write that updated
     // only the boxes it was typed into would leave the rest of the tab showing
@@ -518,7 +532,7 @@ export function GeneralTab({
           )}
           {editable && (
             <>
-              {notice?.card === "schedule" && (
+              {notice?.card === "schedule" && notice.state === workspaceState && (
                 <div
                   role="status"
                   className="rounded-md border border-green-200 bg-green-50 p-3 text-sm text-green-800"
