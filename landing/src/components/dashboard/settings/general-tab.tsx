@@ -241,7 +241,16 @@ export function GeneralTab({
   // typed — indistinguishable from a save that never happened. The mix card
   // already confirms; the owner could not tell whether the schedule had
   // caught (2026-09-09).
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{
+    card: "name" | "schedule";
+    text: string;
+  } | null>(null);
+  // The child cards report through `onError`; a refusal there must not leave
+  // a green "saved" standing above the red box it caused.
+  const report = (message: string | null) => {
+    setNotice(null);
+    setError(message);
+  };
 
   /**
    * The switch positions, which move optimistically and are put back if the
@@ -287,7 +296,7 @@ export function GeneralTab({
       setError(settingsRefusalCopy(result.error, result.status));
       return;
     }
-    setNotice("Workspace name saved.");
+    setNotice({ card: "name", text: "Workspace name saved." });
     // Re-read: the name is rendered in the header and the workspace switcher
     // too, and leaving those showing the old one would be the same half-written
     // screen the schedule save avoids.
@@ -314,9 +323,10 @@ export function GeneralTab({
     // holds (`fn_next_slot`, under the settings in force at that moment), so a
     // post already on the clock keeps its time and the new schedule runs on
     // from there.
-    setNotice(
-      "Schedule saved. A post already on the clock keeps its time; the new hours and cadence take over after it.",
-    );
+    setNotice({
+      card: "schedule",
+      text: "Schedule saved. A post already on the clock keeps its time; the new hours and cadence take over after it.",
+    });
     // Re-read rather than keep the submitted values on screen. This card is
     // not the only thing rendered from `settings`, and a write that updated
     // only the boxes it was typed into would leave the rest of the tab showing
@@ -353,13 +363,11 @@ export function GeneralTab({
   return (
     <div className="space-y-6 pt-4">
       {error && (
-        <div className="mb-4 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+        <div
+          role="alert"
+          className="mb-4 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800"
+        >
           {error}
-        </div>
-      )}
-      {notice && (
-        <div className="mb-4 rounded-md border border-green-200 bg-green-50 p-3 text-sm text-green-800">
-          {notice}
         </div>
       )}
 
@@ -378,6 +386,14 @@ export function GeneralTab({
               placeholder="e.g. Northside Coffee"
             />
           </div>
+          {notice?.card === "name" && (
+            <div
+              role="status"
+              className="rounded-md border border-green-200 bg-green-50 p-3 text-sm text-green-800"
+            >
+              {notice.text}
+            </div>
+          )}
           <Button
             onClick={saveName}
             disabled={
@@ -489,9 +505,19 @@ export function GeneralTab({
             </p>
           )}
           {editable && (
-            <Button onClick={saveSchedule} disabled={savingSchedule}>
-              {savingSchedule ? "Saving..." : "Save Schedule"}
-            </Button>
+            <>
+              {notice?.card === "schedule" && (
+                <div
+                  role="status"
+                  className="rounded-md border border-green-200 bg-green-50 p-3 text-sm text-green-800"
+                >
+                  {notice.text}
+                </div>
+              )}
+              <Button onClick={saveSchedule} disabled={savingSchedule}>
+                {savingSchedule ? "Saving..." : "Save Schedule"}
+              </Button>
+            </>
           )}
         </CardContent>
       </Card>
@@ -502,7 +528,7 @@ export function GeneralTab({
         captionStyle={settings.caption_style}
         workspaceId={workspaceId}
         editable={editable}
-        onError={setError}
+        onError={report}
       />
 
       {/*
@@ -533,7 +559,7 @@ export function GeneralTab({
         skipTtlDays={settings.skip_ttl_days}
         workspaceId={workspaceId}
         editable={editable}
-        onError={setError}
+        onError={report}
       />
 
       <Card>
