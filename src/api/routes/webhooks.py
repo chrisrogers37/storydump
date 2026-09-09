@@ -196,6 +196,7 @@ async def telegram_webhook(request: Request) -> dict[str, str]:
         )
         raise HTTPException(status_code=503, detail="ingress not wired")
 
+    replayed = False
     async with runtime.connect() as conn:
         try:
             await admit(
@@ -208,8 +209,7 @@ async def telegram_webhook(request: Request) -> dict[str, str]:
         except DeliveryReplayed:
             # Acknowledged WITHOUT re-execution — the two obligations L.8 names.
             logger.info("telegram webhook: replay of update_id=%s", update_id)
-            await _toast_replayed_tap(runtime, payload)
-            return {"status": "replayed"}
+            replayed = True
         except AdmissionConflict:
             # Never swallowed as a replay: same key, different content.
             logger.warning(
@@ -217,8 +217,14 @@ async def telegram_webhook(request: Request) -> dict[str, str]:
             )
             raise HTTPException(status_code=409, detail="admission conflict")
 
-        result = await runtime.dispatch(conn, payload)
-        await conn.commit()
+        if not replayed:
+            result = await runtime.dispatch(conn, payload)
+            await conn.commit()
+
+    if replayed:
+        # OUTSIDE the connection: no pool slot is held across a provider call.
+        await _toast_replayed_tap(runtime, payload)
+        return {"status": "replayed"}
 
     # AFTER the commit and outside the connection: the link is durable before
     # any provider is spoken to, so a Telegram hiccup can neither roll it back

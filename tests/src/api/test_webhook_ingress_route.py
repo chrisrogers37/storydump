@@ -21,15 +21,17 @@ URL = "/webhooks/telegram"
 
 
 class FakeConn:
-    """Minimal async connection: records commits, nothing else."""
+    """Minimal async connection: records commits and when it was released."""
 
     def __init__(self) -> None:
         self.commits = 0
+        self.released = False
 
     async def __aenter__(self):
         return self
 
     async def __aexit__(self, *exc):
+        self.released = True
         return False
 
     async def commit(self):
@@ -431,3 +433,59 @@ def test_a_tap_is_answered_and_stripped_through_the_real_transport(
     }
     after = app.state.tap_metrics.snapshot()
     assert after["taps_total"] == before + 1 and after["answer_failed"] == 0
+
+
+def test_a_replayed_tap_is_toasted_after_the_connection_is_released(
+    client, armed, monkeypatch
+):
+    """Telegram redelivered a tap the route already handled: the redelivered
+    query still has a spinner, so it gets a toast — sent AFTER the pool
+    connection is released, never across a provider call (the discipline the
+    sender's split exists for)."""
+    import json as _json
+
+    import httpx
+
+    from src.channels.telegram_transport import TelegramTransport
+
+    conn = FakeConn()
+    seen = {}
+
+    def bot(request):
+        seen["released_at_call"] = conn.released
+        seen["json"] = _json.loads(request.content)
+        return httpx.Response(200, json={"ok": True, "result": True})
+
+    transport = TelegramTransport(
+        "8675309:AAtest", client=httpx.AsyncClient(transport=httpx.MockTransport(bot))
+    )
+
+    async def replayed_admit(conn_, **kw):
+        raise DeliveryReplayed("update 77 was admitted before")
+
+    async def never_dispatch(
+        conn_, payload
+    ):  # pragma: no cover — a replay is not dispatched
+        raise AssertionError("a replayed delivery must not be dispatched")
+
+    monkeypatch.setattr(webhooks, "admit", replayed_admit)
+    app.state.ingress = webhooks.IngressRuntime(
+        connect=lambda: conn,
+        dispatch=never_dispatch,
+        answer_callback=transport.answer_callback,
+    )
+    response = _post(
+        client,
+        {
+            "update_id": 77,
+            "callback_query": {
+                "id": "q-again",
+                "data": "v1:skip:x",
+                "message": {"message_id": 555, "chat": {"id": -100}},
+            },
+        },
+    )
+    assert response.status_code == 200 and response.json() == {"status": "replayed"}
+    assert seen["released_at_call"] is True, "the toast must not hold the pool slot"
+    assert seen["json"]["callback_query_id"] == "q-again"
+    assert conn.commits == 0
