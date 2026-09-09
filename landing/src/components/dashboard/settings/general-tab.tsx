@@ -102,6 +102,27 @@ type ToggleKey =
  * in the first place — a hand-rolled copy of a shipped rule is a copy that can
  * be wrong on its own.
  */
+/**
+ * What a saved schedule means, said exactly. The clock advances an account's
+ * cursor from the slot it already holds (`fn_next_slot`, under the settings
+ * in force at that tick), so a post already on the clock keeps its time; an
+ * account carrying its own posting override never adopts the workspace's
+ * hours (`COALESCE(account, workspace)` in the tick), hence "accounts on the
+ * workspace schedule"; and a workspace being deleted has no clock until it
+ * is restored (the tick skips it). Exported so the wording is pinned.
+ */
+export function scheduleSavedNotice(workspaceState: string): string {
+  // `ck_ws_state` also admits `suspended`, which nothing writes today; it
+  // would read "restored" here, which is the closest true sentence.
+  if (workspaceState !== "active") {
+    return "Schedule saved. It applies once the workspace is restored.";
+  }
+  return (
+    "Schedule saved. A post already on the clock keeps its time; from the next one, " +
+    "accounts on the workspace schedule follow the new hours and cadence."
+  );
+}
+
 export function isLiveToggle(row: { settingsKey: string | null; inertReason?: string }): boolean {
   return row.settingsKey !== null && !row.inertReason;
 }
@@ -236,6 +257,25 @@ export function GeneralTab({
   const [tz, setTz] = useState(settings.tz ?? "UTC");
   const [savingSchedule, setSavingSchedule] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // A successful save says so. The card re-reads the workspace after a write
+  // (`router.refresh()`), which leaves the boxes showing exactly what was
+  // typed — indistinguishable from a save that never happened. The mix card
+  // already confirms; the owner could not tell whether the schedule had
+  // caught (2026-09-09).
+  const [notice, setNotice] = useState<{
+    card: "name" | "schedule";
+    text: string;
+    // The schedule copy speaks of the workspace's clock as it was at save
+    // time; a Delete on this tab changes that, so the box shows only while
+    // the state it described still holds.
+    state: string;
+  } | null>(null);
+  // The child cards report through `onError`; a refusal there must not leave
+  // a green "saved" standing above the red box it caused.
+  const report = (message: string | null) => {
+    setNotice(null);
+    setError(message);
+  };
 
   /**
    * The switch positions, which move optimistically and are put back if the
@@ -272,6 +312,7 @@ export function GeneralTab({
    */
   async function saveName() {
     setError(null);
+    setNotice(null);
     setSavingName(true);
     const result = await submitRenameWorkspace(workspaceId, name);
     setSavingName(false);
@@ -280,6 +321,11 @@ export function GeneralTab({
       setError(settingsRefusalCopy(result.error, result.status));
       return;
     }
+    setNotice({
+      card: "name",
+      text: "Workspace name saved.",
+      state: workspaceState,
+    });
     // Re-read: the name is rendered in the header and the workspace switcher
     // too, and leaving those showing the old one would be the same half-written
     // screen the schedule save avoids.
@@ -288,6 +334,7 @@ export function GeneralTab({
 
   async function saveSchedule() {
     setError(null);
+    setNotice(null);
     setSavingSchedule(true);
     const result = await submitSettingsChange(workspaceId, {
       posts_per_day: postsPerDay,
@@ -301,6 +348,11 @@ export function GeneralTab({
       setError(settingsRefusalCopy(result.error, result.status));
       return;
     }
+    setNotice({
+      card: "schedule",
+      text: scheduleSavedNotice(workspaceState),
+      state: workspaceState,
+    });
     // Re-read rather than keep the submitted values on screen. This card is
     // not the only thing rendered from `settings`, and a write that updated
     // only the boxes it was typed into would leave the rest of the tab showing
@@ -316,6 +368,7 @@ export function GeneralTab({
    */
   async function toggle(key: ToggleKey, settingsKey: string, next: boolean) {
     setError(null);
+    setNotice(null);
     setTogglingKey(key);
     const previous = toggleState[key];
     setToggleState((prev) => ({ ...prev, [key]: next }));
@@ -336,7 +389,10 @@ export function GeneralTab({
   return (
     <div className="space-y-6 pt-4">
       {error && (
-        <div className="mb-4 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+        <div
+          role="alert"
+          className="mb-4 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800"
+        >
           {error}
         </div>
       )}
@@ -356,6 +412,14 @@ export function GeneralTab({
               placeholder="e.g. Northside Coffee"
             />
           </div>
+          {notice?.card === "name" && (
+            <div
+              role="status"
+              className="rounded-md border border-green-200 bg-green-50 p-3 text-sm text-green-800"
+            >
+              {notice.text}
+            </div>
+          )}
           <Button
             onClick={saveName}
             disabled={
@@ -467,9 +531,19 @@ export function GeneralTab({
             </p>
           )}
           {editable && (
-            <Button onClick={saveSchedule} disabled={savingSchedule}>
-              {savingSchedule ? "Saving..." : "Save Schedule"}
-            </Button>
+            <>
+              {notice?.card === "schedule" && notice.state === workspaceState && (
+                <div
+                  role="status"
+                  className="rounded-md border border-green-200 bg-green-50 p-3 text-sm text-green-800"
+                >
+                  {notice.text}
+                </div>
+              )}
+              <Button onClick={saveSchedule} disabled={savingSchedule}>
+                {savingSchedule ? "Saving..." : "Save Schedule"}
+              </Button>
+            </>
           )}
         </CardContent>
       </Card>
@@ -480,7 +554,7 @@ export function GeneralTab({
         captionStyle={settings.caption_style}
         workspaceId={workspaceId}
         editable={editable}
-        onError={setError}
+        onError={report}
       />
 
       {/*
@@ -511,7 +585,7 @@ export function GeneralTab({
         skipTtlDays={settings.skip_ttl_days}
         workspaceId={workspaceId}
         editable={editable}
-        onError={setError}
+        onError={report}
       />
 
       <Card>
