@@ -349,7 +349,14 @@ class TestPostingHealthIsATHIRDSurface:
             seen.append(("destinations", executor))
             return {
                 "accounts_active": accounts_active,
-                "oldest_active_destination_age_seconds": 604800,
+                # DERIVED, never a constant. The count and the age are one fact
+                # told twice — `max()` over no rows is NULL — and `classify`
+                # refuses a payload where they disagree. A fixed age here made
+                # the `accounts_active=0` case an estate that cannot exist, and
+                # the pair guard caught this stub the moment it was added.
+                "oldest_active_destination_age_seconds": (
+                    604800 if accounts_active else None
+                ),
             }
 
         monkeypatch.setattr(posting_health, "posting_freshness", fake_posting)
@@ -383,6 +390,17 @@ class TestPostingHealthIsATHIRDSurface:
         assert payload["ledger_days"] == 0
         assert payload["accounts_active"] == 2
         assert payload["oldest_active_destination_age_seconds"] == 604800
+        # Every count/age pair the poller cross-checks must arrive agreeing, or
+        # the real `classify` below would answer `unreachable` on a live estate.
+        assert (payload["posted_ever"] > 0) is (
+            payload["last_post_age_seconds"] is not None
+        )
+        assert (payload["intents_ever"] > 0) is (
+            payload["oldest_intent_age_seconds"] is not None
+        )
+        assert (payload["accounts_active"] > 0) is (
+            payload["oldest_active_destination_age_seconds"] is not None
+        )
         assert {kind for kind, _ in seen} == {"posting", "attempts", "destinations"}
         # The services name their parameter `executor`, so a connection is a
         # legal argument — the duck type that lets the route drop the unit of

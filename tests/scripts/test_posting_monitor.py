@@ -95,11 +95,18 @@ class TestNoPostYetIsOnADeadline:
     """`never-posted` must EXPIRE into an alert. The sibling's `no-signal` does
     not, and a permanent one here would have excused all sixteen days."""
 
-    #: No landings AND no database-side ladder rung, so each test below opts
-    #: exactly one anchor back in and nothing else can trip the grace for it.
+    #: No landings and no destination rung, so each test below opts exactly one
+    #: anchor back in and nothing else can trip the grace for it.
+    #:
+    #: `accounts_active=0` travels WITH the null destination age deliberately:
+    #: they are one fact told twice, and the pair guard in `classify` refuses a
+    #: payload where they disagree. An earlier version of this fixture carried
+    #: the base `accounts_active=2` beside a null age — an estate that cannot
+    #: exist — and the guard caught it the moment it was added.
     NEVER = dict(
         posted_ever=0,
         last_post_age_seconds=None,
+        accounts_active=0,
         oldest_active_destination_age_seconds=None,
         debited_total=0,
         ledger_days=0,
@@ -172,12 +179,7 @@ class TestNoPostYetIsOnADeadline:
         destinations idle for six days.
         """
         v = read(
-            payload(
-                **{**self.NEVER, "oldest_active_destination_age_seconds": None},
-                intents_ever=0,
-                oldest_intent_age_seconds=None,
-                accounts_active=2,
-            ),
+            payload(**self.NEVER, intents_ever=0, oldest_intent_age_seconds=None),
             watched_s=0.0,
         )
         assert v.state == NEVER_POSTED, "no rung yet — this must still be a notice"
@@ -186,11 +188,11 @@ class TestNoPostYetIsOnADeadline:
             payload(
                 **{
                     **self.NEVER,
+                    "accounts_active": 2,
                     "oldest_active_destination_age_seconds": GRACE + HOUR,
                 },
                 intents_ever=0,
                 oldest_intent_age_seconds=None,
-                accounts_active=2,
             ),
             watched_s=0.0,
         )
@@ -211,6 +213,7 @@ class TestNoPostYetIsOnADeadline:
             payload(
                 **{
                     **self.NEVER,
+                    "accounts_active": 2,
                     "oldest_active_destination_age_seconds": GRACE + HOUR,
                 },
                 oldest_intent_age_seconds=GRACE + 10 * HOUR,
@@ -219,7 +222,10 @@ class TestNoPostYetIsOnADeadline:
         )
         assert "the oldest intent" in v.detail
 
-        v = read(payload(**self.NEVER, oldest_intent_age_seconds=None), watched_s=0.0)
+        v = read(
+            payload(**self.NEVER, intents_ever=0, oldest_intent_age_seconds=None),
+            watched_s=0.0,
+        )
         assert "this monitor started watching" in v.detail
 
     def test_a_young_intent_cannot_SHORTEN_the_watch_clock(self):
@@ -260,20 +266,25 @@ def test_an_empty_estate_still_alerts():
 
 
 def test_the_destination_count_never_reaches_the_verdict():
-    """`accounts_active` is alert TEXT and nothing else. Two readings differing
-    only in it must classify identically."""
+    """`accounts_active` is alert TEXT and nothing else.
+
+    Isolated between two NONZERO counts at the same destination age, because
+    the pair guard binds the count to the age: zero destinations forces a null
+    age, which would change the ladder as well as the count and stop isolating
+    anything. The zero case is `test_an_empty_estate_still_alerts`.
+    """
     never = dict(
         posted_ever=0,
         last_post_age_seconds=None,
         intents_ever=6,
         oldest_intent_age_seconds=2 * 24 * HOUR,
-        oldest_active_destination_age_seconds=None,
+        oldest_active_destination_age_seconds=3 * 24 * HOUR,
         debited_total=0,
         ledger_days=0,
     )
-    empty = read(payload(**never, accounts_active=0), watched_s=GRACE + HOUR)
-    full = read(payload(**never, accounts_active=5), watched_s=GRACE + HOUR)
-    assert empty.state == full.state == NEVER_POSTED_OVERDUE
+    one = read(payload(**never, accounts_active=1), watched_s=GRACE + HOUR)
+    many = read(payload(**never, accounts_active=5), watched_s=GRACE + HOUR)
+    assert one.state == many.state == NEVER_POSTED_OVERDUE
 
 
 class TestBothPhasesOfTheOutageAreFalse:
@@ -409,8 +420,8 @@ class TestAMalformedAnswerIsNeverAHealthyOne:
             # payload has to make the null legal or this would exercise the
             # contradiction path while claiming to test the sentinel.
             ("last_post_age_seconds", {"posted_ever": 0}),
-            ("oldest_intent_age_seconds", {}),
-            ("oldest_active_destination_age_seconds", {}),
+            ("oldest_intent_age_seconds", {"intents_ever": 0}),
+            ("oldest_active_destination_age_seconds", {"accounts_active": 0}),
         ],
     )
     def test_a_missing_age_is_unreachable_even_though_NULL_is_legal(
@@ -418,7 +429,12 @@ class TestAMalformedAnswerIsNeverAHealthyOne:
     ):
         """The sentinel's whole job. `null` means "there has never been one";
         an absent key means the endpoint is not serving the field, and reading
-        the second as the first would invent a fact."""
+        the second as the first would invent a fact.
+
+        Each case zeroes the age's PAIRED COUNT, because a null age beside a
+        nonzero count is a contradiction the pair guard refuses — a different
+        rejection from the one under test here.
+        """
         body = json.loads(payload(**null_is_legal_when))
         del body[key]
         assert read(json.dumps(body)).state == UNREACHABLE
@@ -452,29 +468,101 @@ class TestAMalformedAnswerIsNeverAHealthyOne:
         assert "Name or service not known" in v.detail
 
 
-class TestTheCountAndTheAgeMustAgree:
+class TestEveryCountAndAgePairMustAgree:
     """One fact from two directions, so they can contradict — and a
-    contradiction is an instrument fault neither field reveals alone."""
+    contradiction is an instrument fault neither field reveals alone.
 
-    def test_posts_recorded_but_no_age_is_unreachable(self):
-        assert (
-            read(payload(posted_ever=7, last_post_age_seconds=None)).state
-            == UNREACHABLE
-        )
+    **All three pairs, and the asymmetry is the thing being tested.** Only the
+    landing pair was guarded at first; the two feeding the grace ladder were
+    not, and a null age there fell into `float(None or 0)` and contributed zero
+    elapsed. Found by adversarial review on PR #1269.
+    """
 
-    def test_an_age_with_no_posts_recorded_is_unreachable(self):
-        assert (
-            read(payload(posted_ever=0, last_post_age_seconds=100)).state == UNREACHABLE
-        )
+    #: (count field, age field, a count that must force a non-null age)
+    PAIRS = [
+        ("posted_ever", "last_post_age_seconds", 7),
+        ("intents_ever", "oldest_intent_age_seconds", 6),
+        ("accounts_active", "oldest_active_destination_age_seconds", 2),
+    ]
 
-    def test_it_is_not_resolved_toward_the_reassuring_reading(self):
-        """A contradiction resolved toward `posting` would be the fail-toward-
-        good-news class this whole instrument exists for."""
+    @pytest.mark.parametrize("count_key, age_key, n", PAIRS)
+    def test_a_count_with_no_age_is_unreachable(self, count_key, age_key, n):
+        v = read(payload(**{count_key: n, age_key: None}))
+        assert v.state == UNREACHABLE
+        assert count_key in v.detail and age_key in v.detail
+
+    @pytest.mark.parametrize("count_key, age_key, n", PAIRS)
+    def test_an_age_with_a_zero_count_is_unreachable(self, count_key, age_key, n):
+        assert read(payload(**{count_key: 0, age_key: 100})).state == UNREACHABLE
+
+    @pytest.mark.parametrize("count_key, age_key, n", PAIRS)
+    def test_it_is_not_resolved_toward_the_reassuring_reading(
+        self, count_key, age_key, n
+    ):
+        """A contradiction resolved toward the healthy branch would be the
+        fail-toward-good-news class this whole instrument exists for."""
         for v in (
-            read(payload(posted_ever=7, last_post_age_seconds=None)),
-            read(payload(posted_ever=0, last_post_age_seconds=100)),
+            read(payload(**{count_key: n, age_key: None})),
+            read(payload(**{count_key: 0, age_key: 100})),
         ):
             assert v.state != POSTING
+
+
+class TestAMissingLadderAgeCannotSILENCEAnOverdueEstate:
+    """The failure the pair guard exists to stop, stated as its consequence.
+
+    A null age on a ladder pair used to read as **zero elapsed**, so the rung
+    contributed nothing. The verdict did not degrade to something obviously
+    wrong — it dropped from `never-posted-overdue` (FLEET ALERT, pages on the
+    first reading) to `never-posted` (a notice that re-states weekly) while the
+    estate was genuinely overdue. Quietly, in the direction that looks fine,
+    which is the exact shape of the outage this whole PR is about.
+
+    Not reachable from today's SQL — each pair comes from one `count(*)` and one
+    `max(...)` over one population in one statement. This is the guard for the
+    edit that decouples them, and `posting_health` already filters one side of
+    one pair deliberately (`_REAL_POST`), so that edit has a precedent in the
+    very file that produces these fields.
+    """
+
+    OVERDUE = dict(
+        posted_ever=0,
+        last_post_age_seconds=None,
+        intents_ever=6,
+        oldest_intent_age_seconds=400000,
+        accounts_active=2,
+        oldest_active_destination_age_seconds=400000,
+        debited_total=0,
+        ledger_days=0,
+    )
+
+    LADDER_AGES = ["oldest_intent_age_seconds", "oldest_active_destination_age_seconds"]
+
+    def test_the_control_is_a_paging_alert(self):
+        v = read(payload(**self.OVERDUE), watched_s=0.0)
+        assert v.state == NEVER_POSTED_OVERDUE
+        assert decide(v, {}, 1000.0)[1].startswith("FLEET ALERT")
+
+    @pytest.mark.parametrize("age_key", LADDER_AGES)
+    def test_nulling_a_ladder_age_refuses_instead_of_going_quiet(self, age_key):
+        v = read(payload(**{**self.OVERDUE, age_key: None}), watched_s=0.0)
+        assert v.state == UNREACHABLE, (
+            "a null ladder age must not read as zero elapsed — that turns a "
+            "FLEET ALERT into a weekly notice on an overdue estate"
+        )
+        assert v.state != NEVER_POSTED
+
+    @pytest.mark.parametrize("age_key", LADDER_AGES)
+    def test_and_it_still_says_something_rather_than_nothing(self, age_key):
+        """`unreachable` is not silence: it pages on the second consecutive
+        reading. The estate goes from one alert to a different alert, never
+        from an alert to quiet."""
+        v = read(payload(**{**self.OVERDUE, age_key: None}), watched_s=0.0)
+        state, first = step(v, {}, 1000.0)
+        assert first is None, "one failed reading is a dropped packet"
+        _, second = step(v, state, 2000.0)
+        assert second.startswith("FLEET ALERT")
+        assert "cannot look" in second
 
 
 class TestConfirmationIsAsymmetricBecauseTheSignalsAre:
@@ -510,7 +598,9 @@ class TestItRepeatsWhileBrokenAndAnnouncesRecovery:
             payload(
                 posted_ever=0,
                 last_post_age_seconds=None,
+                intents_ever=0,
                 oldest_intent_age_seconds=None,
+                accounts_active=0,
                 oldest_active_destination_age_seconds=None,
             ),
             watched_s=HOUR,
@@ -671,6 +761,7 @@ class TestMainEndToEnd:
             last_post_age_seconds=None,
             intents_ever=0,
             oldest_intent_age_seconds=None,
+            accounts_active=0,
             oldest_active_destination_age_seconds=None,
         )
         grace = ["--grace", "100"]

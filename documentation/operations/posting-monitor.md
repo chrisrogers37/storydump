@@ -64,7 +64,7 @@ silently.
 | `posted_ever > 0`, age > threshold | **`silent`** | FLEET ALERT on the **first** reading; repeats every 6h |
 | `posted_ever == 0`, grace **not** elapsed | `never-posted` | says so once, then quiet; re-states weekly. **Never an alert, never an all-clear.** |
 | `posted_ever == 0`, grace elapsed | **`never-posted-overdue`** | FLEET ALERT on the **first** reading; repeats every 6h |
-| anything else — non-200, timeout, malformed body, self-contradicting payload | **`unreachable`** | FLEET ALERT on the **second consecutive** reading; repeats every 6h |
+| anything else — non-200, timeout, malformed body, or a count/age pair that disagrees | **`unreachable`** | FLEET ALERT on the **second consecutive** reading; repeats every 6h |
 
 ### `never-posted` EXPIRES, and that is the whole design
 
@@ -106,6 +106,22 @@ The middle rung is not decoration. Production held two active destinations and
 to date anything from, so a monitor installed then would have had no
 database-side anchor at all and would have sat on a *notice* for 72h while two
 destinations idled for six days.
+
+**Each rung arrives as a COUNT and an AGE, and the poller refuses a reading
+where they disagree.** They are one fact told twice — `max()` over no rows is
+`NULL`, exactly when `count(*)` is 0 — so a nonzero count beside a null age is
+an instrument fault, and `classify` answers `unreachable` rather than trusting
+either field. The reason it must, rather than picking the safe-looking reading:
+a null age would otherwise fall into `max(…, age or 0)` as **zero elapsed**, and
+the verdict would drop from `never-posted-overdue` (pages on the first reading)
+to `never-posted` (a weekly notice) *while the estate was genuinely overdue* —
+not a degradation, a silence, in the direction that looks fine.
+
+This is defence in depth, not a live bug: today each pair is one `count(*)` and
+one `max(...)` over one population in a single statement, so they cannot
+diverge. It fires the moment an edit decouples a pair — and `posting_health`
+already filters one side of one pair deliberately (`_REAL_POST`), so that edit
+has a precedent in the very file that produces these fields.
 
 In phase (a) the tier was empty, so the local clock is the only rung — which is
 the honest answer and the reason it cannot be removed. In phase (b) both

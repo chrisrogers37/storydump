@@ -193,6 +193,15 @@ _AGES = (
     "oldest_active_destination_age_seconds",
 )
 
+#: (count, age) over ONE population, so `count > 0` and `age is not None` are
+#: the same fact told twice and MUST agree. Every pair is checked, not just the
+#: first — see `classify`. Adding an axis means adding its pair here.
+_PAIRS = (
+    ("posted_ever", "last_post_age_seconds"),
+    ("intents_ever", "oldest_intent_age_seconds"),
+    ("accounts_active", "oldest_active_destination_age_seconds"),
+)
+
 
 class Verdict:
     """What one reading means, before any history is applied."""
@@ -338,19 +347,36 @@ def classify(
         if not _is_count_or_null(data.get(key, _ABSENT)):
             return Verdict(UNREACHABLE, f"{key} was neither null nor an integer")
 
-    posted, age = data["posted_ever"], data["last_post_age_seconds"]
+    # EVERY pair, not just the landing one. Each names ONE fact from two
+    # directions, so a disagreement is an instrument fault neither field
+    # reveals alone — reported as `unreachable` rather than resolved toward
+    # either, because a count and an age that contradict each other cannot be
+    # trusted in the direction they happen to favour.
+    #
+    # THE ASYMMETRY THAT USED TO BE HERE WAS THE BUG. Only the landing pair was
+    # guarded, and the two ladder pairs were not — so a null age with a nonzero
+    # count fell into `float(None or 0)` and contributed **zero elapsed** to the
+    # grace clock. That is the same reassuring `0` this module rejects two
+    # docstrings above, and its effect is worse than a wrong number: the verdict
+    # drops from `never-posted-overdue` (FLEET ALERT, first reading) to
+    # `never-posted` (a weekly notice) while the estate is genuinely overdue. It
+    # does not degrade, it goes quiet, in the direction that looks fine.
+    #
+    # Not reachable from today's SQL — each pair is one `count(*)` and one
+    # `max(...)` over one population in one statement. It becomes reachable the
+    # moment a filter lands on one side of a pair, which `posting_health`
+    # already does deliberately once (`_REAL_POST`), so the precedent for the
+    # decoupling lives in the very file that produces these fields.
+    for count_key, age_key in _PAIRS:
+        count, paired_age = data[count_key], data[age_key]
+        if (count > 0) != (paired_age is not None):
+            return Verdict(
+                UNREACHABLE,
+                f"{count_key}={count} contradicts {age_key}="
+                f"{'null' if paired_age is None else paired_age}",
+            )
 
-    # The two fields describe ONE fact from two directions, so they can
-    # disagree — and a disagreement is an instrument fault that neither field
-    # reveals alone. Reported as `unreachable` rather than resolved toward
-    # either: a count and an age that contradict each other mean the reading
-    # cannot be trusted in the direction it happens to favour.
-    if (posted > 0) != (age is not None):
-        return Verdict(
-            UNREACHABLE,
-            f"posted_ever={posted} contradicts last_post_age_seconds="
-            f"{'null' if age is None else age}",
-        )
+    posted, age = data["posted_ever"], data["last_post_age_seconds"]
 
     if posted > 0:
         if age > silence_s:
