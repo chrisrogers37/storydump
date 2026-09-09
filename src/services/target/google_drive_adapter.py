@@ -229,6 +229,22 @@ def _subfolder_query(folder_ref: str) -> str:
     )
 
 
+def _folder_label(config: Mapping[str, Any]) -> Optional[str]:
+    """The connected folder's own name — the label of the files directly in it.
+
+    A file's `category` is the name of the top-level folder it sits under
+    (owner ruling 2026-09-08: a display label no weight keys on). For a file
+    directly in the connected folder that top-level folder IS the connected
+    folder, so its picked name labels them; a folder picked without a name
+    (a legacy row) labels nothing, as before. This is what keeps a subfolder
+    connected in place of its parent carrying the labels its files had — the
+    2026-09-09 adoption would otherwise blank every label in production
+    (adversarial review).
+    """
+    name = config.get("folder_name")
+    return name.strip() if isinstance(name, str) and name.strip() else None
+
+
 def _refuse_unsupported_config(config: Mapping[str, Any]) -> None:
     """Every refusal a config earns BEFORE a provider call, in one place.
 
@@ -348,7 +364,7 @@ class GoogleDriveAdapter:
                 "id": root,
                 "name": None,
                 "top": root,
-                "top_name": None,
+                "top_name": _folder_label(config),
                 "path": "",
                 "listed": False,
             }

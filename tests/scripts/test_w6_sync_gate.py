@@ -20,7 +20,7 @@ from pathlib import Path
 
 import psycopg2
 import pytest
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from src.services.target.commands import CommandRefused
 from src.services.target.work_loop import WorkerConfig
@@ -1422,3 +1422,253 @@ class TestAChunkCarriesOneWalk:
             "no rows from the dropped carrier"
         )
         assert _jobs(sync_conn, "first_ingest_chunk") == [], "no chunk chained"
+
+
+def _media_rows(conn, ws):
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT content_hash, source_id, state, category, folder_path, provider_file_ref"
+            "  FROM media_items WHERE workspace_id = %s ORDER BY content_hash",
+            (ws,),
+        )
+        return [
+            {
+                "hash": r[0],
+                "source_id": str(r[1]),
+                "state": r[2],
+                "category": r[3],
+                "path": r[4],
+                "ref": r[5],
+            }
+            for r in cur.fetchall()
+        ]
+
+
+def _second_source(conn, ws, name):
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO media_sources (workspace_id, provider, config)"
+            " VALUES (%s, 'gdrive', %s) RETURNING id",
+            (
+                ws,
+                json.dumps(
+                    {"v": 1, "folder_ref": uuid.uuid4().hex[:12], "folder_name": name}
+                ),
+            ),
+        )
+        sid = str(cur.fetchone()[0])
+    conn.commit()
+    return sid
+
+
+async def _in_session(lane_db, fn):
+    engine = create_async_engine(_async_url(lane_db))
+    try:
+        maker = async_sessionmaker(engine, expire_on_commit=False)
+        async with maker() as session:
+            async with session.begin():
+                return await fn(session)
+    finally:
+        await engine.dispose()
+
+
+class TestMediaFollowsTheConnectedFolder:
+    """Owner ruling 2026-09-09: the media row is the ENTITY (posting history
+    and locks hang off it), never deleted. Removing a folder retires its media
+    (`state = 'removed'`: out of the library, never drawn); picking the folder
+    again revives it; and a connected folder that lists the same bytes ADOPTS
+    the row — the same item, revived, with its new folder, label and path.
+    Two connected folders that share bytes keep the first owner, as before."""
+
+    @pytest.mark.asyncio
+    async def test_removing_a_folder_retires_its_media_and_a_re_pick_revives_it(
+        self, lane_db, sync_conn
+    ):
+        from src.services.target import media_sync as ms, provisioning
+
+        chain = seed_workspace_chain(sync_conn, "w6-retire")
+        assert _media_rows(sync_conn, chain["ws"])[0]["state"] == "available"
+
+        async def remove(session):
+            return await provisioning.pause_media_source(
+                session, workspace_id=chain["ws"], source_id=chain["src"]
+            )
+
+        assert await _in_session(lane_db, remove) is True
+        assert {r["state"] for r in _media_rows(sync_conn, chain["ws"])} == {"removed"}
+
+        async def repick(session):
+            return await ms.rearm_after_connect(
+                session, workspace_id=chain["ws"], source_id=chain["src"]
+            )
+
+        assert await _in_session(lane_db, repick) == 1
+        assert {r["state"] for r in _media_rows(sync_conn, chain["ws"])} == {
+            "available"
+        }
+
+    @pytest.mark.asyncio
+    async def test_a_connected_folder_that_lists_the_same_bytes_adopts_a_retired_row(
+        self, lane_db, sync_conn
+    ):
+        from src.services.target import provisioning
+
+        chain = seed_workspace_chain(sync_conn, "w6-adopt")
+        parent_rows = _media_rows(sync_conn, chain["ws"])
+        assert len(parent_rows) == 1 and parent_rows[0]["source_id"] == str(
+            chain["src"]
+        )
+
+        async def remove(session):
+            return await provisioning.pause_media_source(
+                session, workspace_id=chain["ws"], source_id=chain["src"]
+            )
+
+        await _in_session(lane_db, remove)
+        child = _second_source(sync_conn, chain["ws"], "memes")
+        _arm_source(sync_conn, child)
+        _tick(sync_conn)
+        same_bytes = _item("memes-copy", h=parent_rows[0]["hash"])
+        same_bytes["category"], same_bytes["folder_path"] = "memes", "memes/2026"
+        wl, claimed = await _run_once_w6(lane_db, ScriptedDrive([([same_bytes], None)]))
+        assert claimed is True
+        rows = _media_rows(sync_conn, chain["ws"])
+        assert len(rows) == 1, "the same item, not a second row"
+        assert rows[0]["source_id"] == child and rows[0]["state"] == "available"
+        assert rows[0]["category"] == "memes" and rows[0]["path"] == "memes/2026"
+        assert rows[0]["ref"] == "memes-copy", (
+            "the new folder's reference, so its walk follows the file"
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_same_bytes_in_two_connected_folders_stay_with_the_first(
+        self, lane_db, sync_conn
+    ):
+        chain = seed_workspace_chain(sync_conn, "w6-twoowners")
+        first = _media_rows(sync_conn, chain["ws"])[0]
+        other = _second_source(sync_conn, chain["ws"], "merch")
+        _arm_source(sync_conn, other)
+        _tick(sync_conn)
+        dup = _item("dup", h=first["hash"])
+        dup["category"], dup["folder_path"] = "merch", "merch"
+        wl, claimed = await _run_once_w6(lane_db, ScriptedDrive([([dup], None)]))
+        assert claimed is True
+        rows = _media_rows(sync_conn, chain["ws"])
+        assert len(rows) == 1 and rows[0]["source_id"] == str(chain["src"])
+        assert rows[0]["ref"] == first["ref"], "a connected owner keeps its file"
+
+    @pytest.mark.asyncio
+    async def test_a_remove_landing_mid_walk_keeps_the_rows_retired(
+        self, lane_db, sync_conn
+    ):
+        """The removed folder's own in-flight chunk must not land its page: the
+        cursor CAS is fenced on `state <> 'paused'`, and a source never adopts
+        its own retired rows (review of the media-follows-the-folder PR)."""
+        chain = seed_workspace_chain(sync_conn, "w6-remove-midwalk")
+        _arm_source(sync_conn, chain["src"])
+        _tick(sync_conn)
+        first = _media_rows(sync_conn, chain["ws"])[0]
+
+        def remove_between_phases():
+            with sync_conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE media_sources SET state = 'paused',"
+                    " config = config || '{\"removed\": true}'::jsonb WHERE id = %s",
+                    (chain["src"],),
+                )
+                cur.execute(
+                    "UPDATE media_items SET state = 'removed'"
+                    " WHERE workspace_id = %s AND source_id = %s AND state = 'available'",
+                    (chain["ws"], chain["src"]),
+                )
+            sync_conn.commit()
+
+        same_file = _item(first["ref"], h=first["hash"])
+        same_file["category"], same_file["folder_path"] = "memes", "memes"
+        drive = ScriptedDrive(
+            [([same_file, _item("brand-new")], None)], on_call=remove_between_phases
+        )
+        wl, claimed = await _run_once_w6(lane_db, drive)
+        assert claimed is True and len(drive.calls) == 1
+        rows = _media_rows(sync_conn, chain["ws"])
+        assert {r["state"] for r in rows} == {"removed"}, (
+            "the retired rows stay retired"
+        )
+        assert "brand-new" not in [r["ref"] for r in rows], "the page did not land"
+        src = _source_row(sync_conn, chain["src"])
+        assert src["state"] == "paused" and src["sync_checkpoint"] is None
+
+    @pytest.mark.asyncio
+    async def test_a_remove_made_before_this_rule_is_reconciled_by_the_next_walk(
+        self, lane_db, sync_conn
+    ):
+        """Production on 2026-09-09: the parent was removed BEFORE Remove
+        retired media, so its rows are still `available`; a connected
+        subfolder listing the same bytes would sync to nothing. The next walk
+        in the workspace (here the subfolder's, however it was started —
+        Sync Now, the schedule, a pick) retires them first and adopts what it
+        lists; what it does not list stays retired."""
+        chain = seed_workspace_chain(sync_conn, "w6-predeploy")
+        first = _media_rows(sync_conn, chain["ws"])[0]
+        # The old Remove: the source is marked, its media is not — plus a
+        # second file only the parent's root ever held.
+        with sync_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO media_items (workspace_id, source_id, content_hash,"
+                " file_name, media_kind, provider_file_ref)"
+                " VALUES (%s, %s, 'hash-root-only', 'root.jpg', 'image', 'ref-root')",
+                (chain["ws"], chain["src"]),
+            )
+            cur.execute(
+                "UPDATE media_sources SET state = 'paused',"
+                " config = config || '{\"removed\": true}'::jsonb WHERE id = %s",
+                (chain["src"],),
+            )
+        sync_conn.commit()
+        assert {r["state"] for r in _media_rows(sync_conn, chain["ws"])} == {
+            "available"
+        }
+        child = _second_source(sync_conn, chain["ws"], "memes")
+        _arm_source(sync_conn, child)
+        _tick(sync_conn)
+        same_file = _item("memes-ref", h=first["hash"])
+        same_file["category"], same_file["folder_path"] = "memes", "memes"
+        wl, claimed = await _run_once_w6(lane_db, ScriptedDrive([([same_file], None)]))
+        assert claimed is True
+        rows = {r["hash"]: r for r in _media_rows(sync_conn, chain["ws"])}
+        assert len(rows) == 2
+        adopted, root_only = rows[first["hash"]], rows["hash-root-only"]
+        assert adopted["source_id"] == child and adopted["state"] == "available"
+        assert adopted["category"] == "memes" and adopted["ref"] == "memes-ref"
+        assert root_only["state"] == "removed" and root_only["source_id"] == str(
+            chain["src"]
+        ), "what no connected folder lists stays retired under the removed one"
+
+    @pytest.mark.asyncio
+    async def test_a_connected_folders_walk_revives_its_own_row_found_retired(
+        self, lane_db, sync_conn
+    ):
+        """A row retired under a CONNECTED folder is an anomaly (a reconcile
+        racing a re-pick); the folder's own walk heals it, even when the file
+        is otherwise unchanged (adversarial review)."""
+        chain = seed_workspace_chain(sync_conn, "w6-selfheal")
+        first = _media_rows(sync_conn, chain["ws"])[0]
+        with sync_conn.cursor() as cur:
+            cur.execute("SET app.actor_kind = 'migration'")
+            cur.execute(
+                "UPDATE media_items SET state = 'removed' WHERE content_hash = %s",
+                (first["hash"],),
+            )
+        sync_conn.commit()
+        _arm_source(sync_conn, chain["src"])
+        _tick(sync_conn)
+        unchanged = _item(first["ref"], h=first["hash"])
+        unchanged["category"], unchanged["folder_path"] = (
+            first["category"],
+            first["path"],
+        )
+        wl, claimed = await _run_once_w6(lane_db, ScriptedDrive([([unchanged], None)]))
+        assert claimed is True
+        rows = _media_rows(sync_conn, chain["ws"])
+        assert len(rows) == 1 and rows[0]["state"] == "available"
+        assert rows[0]["source_id"] == str(chain["src"])

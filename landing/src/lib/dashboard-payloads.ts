@@ -444,7 +444,10 @@ export function deriveSettings(
     gdrive_connected: drive?.status === "active",
     media_source_type: firstSource?.provider ?? null,
     media_source_state: firstSource?.state ?? null,
-    media_count: Object.values(byState).reduce((a, n) => a + n, 0),
+    // What is connected: a removed folder's rows are retired (`removed`) and
+    // out of the library until the folder, or another one listing the same
+    // bytes, brings them back.
+    media_count: byState.available ?? 0,
 
     show_verbose_notifications: null,
     send_lifecycle_notifications: null,

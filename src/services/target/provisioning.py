@@ -852,8 +852,9 @@ async def disable_destination(
 async def pause_media_source(session, *, workspace_id: str, source_id: str) -> bool:
     """Remove a folder from the workspace's sync — PAUSE, never delete. The
     media rows and their history hang off the source, and `06` §1 keeps them;
-    picking the same folder again revives the row (`get_or_create` finds it,
-    the route re-arms it and clears the marker). `paused` rather than `error`:
+    the rows retire (`state = 'removed'`) and picking the same folder again
+    revives them with the source (`get_or_create` finds it, the route re-arms
+    it and clears the marker). `paused` rather than `error`:
     a removal is a decision, not a fault, so the stranded-source alert stays
     meaningful — and `config.removed` is what keeps a later RECONNECT from
     reviving it alongside the folders a dead grant had paused."""
@@ -872,4 +873,18 @@ async def pause_media_source(session, *, workspace_id: str, source_id: str) -> b
             {"s": str(source_id), "ws": str(workspace_id)},
         )
     ).first()
-    return row is not None
+    if row is None:
+        return False
+    # The folder's media RETIRES with it (owner ruling 2026-09-09): out of the
+    # library and never drawn, but the rows stay — posting history and locks
+    # hang off them — and come back when the folder is picked again or when
+    # another connected folder lists the same bytes (`media_sync`'s upsert
+    # adopts a retired row). `unsupported` rows are left as they are.
+    await session.execute(
+        text(
+            "UPDATE media_items SET state = 'removed'"
+            " WHERE workspace_id = :ws AND source_id = :s AND state = 'available'"
+        ),
+        {"s": str(source_id), "ws": str(workspace_id)},
+    )
+    return True
