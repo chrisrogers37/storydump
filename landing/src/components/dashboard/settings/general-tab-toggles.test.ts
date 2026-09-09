@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { isLiveToggle, TOGGLES } from "./general-tab";
+import { isLiveToggle, scheduleSavedNotice, TOGGLES } from "./general-tab";
 
 /**
  * #1155 — a switch may be live only if the port accepts the write AND
@@ -57,7 +57,11 @@ describe("a live switch requires a consumer, not just a column", () => {
     // Saying `null` would claim the port has no such setting — false, and it
     // would send the next person to add a command that already exists. The
     // reason they are inert is the missing CONSUMER, not a missing command.
-    for (const key of ["dry_run_mode", "enable_instagram_api", "enable_ai_captions"]) {
+    for (const key of [
+      "dry_run_mode",
+      "enable_instagram_api",
+      "enable_ai_captions",
+    ]) {
       const row = TOGGLES.find((t) => t.key === key);
       expect(row, key).toBeDefined();
       expect(row!.settingsKey, key).not.toBeNull();
@@ -74,7 +78,24 @@ describe("a live switch requires a consumer, not just a column", () => {
       if (!t.inertReason) continue;
       expect(t.inertReason.length, t.key).toBeGreaterThan(12);
       expect(t.inertReason.toLowerCase(), t.key).not.toContain("error");
-      expect(t.inertReason.toLowerCase(), t.key).not.toContain("something went wrong");
+      expect(t.inertReason.toLowerCase(), t.key).not.toContain(
+        "something went wrong",
+      );
     }
+  });
+});
+
+describe("scheduleSavedNotice", () => {
+  it("says a post already on the clock keeps its time, for accounts on the workspace schedule", () => {
+    const text = scheduleSavedNotice("active");
+    expect(text).toMatch(/^Schedule saved\./);
+    expect(text).toContain("keeps its time");
+    expect(text).toContain("accounts on the workspace schedule");
+  });
+
+  it("says a deleted workspace's schedule applies once it is restored", () => {
+    expect(scheduleSavedNotice("offboarding")).toBe(
+      "Schedule saved. It applies once the workspace is restored.",
+    );
   });
 });

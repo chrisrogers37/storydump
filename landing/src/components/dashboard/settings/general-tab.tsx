@@ -102,6 +102,25 @@ type ToggleKey =
  * in the first place — a hand-rolled copy of a shipped rule is a copy that can
  * be wrong on its own.
  */
+/**
+ * What a saved schedule means, said exactly. The clock advances an account's
+ * cursor from the slot it already holds (`fn_next_slot`, under the settings
+ * in force at that tick), so a post already on the clock keeps its time; an
+ * account carrying its own posting override never adopts the workspace's
+ * hours (`COALESCE(account, workspace)` in the tick), hence "accounts on the
+ * workspace schedule"; and a workspace being deleted has no clock until it
+ * is restored (the tick skips it). Exported so the wording is pinned.
+ */
+export function scheduleSavedNotice(workspaceState: string): string {
+  if (workspaceState !== "active") {
+    return "Schedule saved. It applies once the workspace is restored.";
+  }
+  return (
+    "Schedule saved. A post already on the clock keeps its time; from the next one, " +
+    "accounts on the workspace schedule follow the new hours and cadence."
+  );
+}
+
 export function isLiveToggle(row: { settingsKey: string | null; inertReason?: string }): boolean {
   return row.settingsKey !== null && !row.inertReason;
 }
@@ -319,14 +338,7 @@ export function GeneralTab({
       setError(settingsRefusalCopy(result.error, result.status));
       return;
     }
-    // The clock advances an account's slot cursor from the slot it already
-    // holds (`fn_next_slot`, under the settings in force at that moment), so a
-    // post already on the clock keeps its time and the new schedule runs on
-    // from there.
-    setNotice({
-      card: "schedule",
-      text: "Schedule saved. A post already on the clock keeps its time; the new hours and cadence take over after it.",
-    });
+    setNotice({ card: "schedule", text: scheduleSavedNotice(workspaceState) });
     // Re-read rather than keep the submitted values on screen. This card is
     // not the only thing rendered from `settings`, and a write that updated
     // only the boxes it was typed into would leave the rest of the tab showing
