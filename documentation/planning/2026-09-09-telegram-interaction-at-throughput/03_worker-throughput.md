@@ -1,7 +1,7 @@
 ---
 title: "Phase 3 — Worker throughput: retries that end, a 429 that holds durably, a backpressure signal (3a); parallel runs without pinned connections (3b)"
 type: plan
-status: draft
+status: active
 owner: chris
 created: 2026-09-09
 tags: [plan, worker, outbox, jobs, pacing, observability]

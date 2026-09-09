@@ -1,7 +1,7 @@
 ---
 title: "Phase 1 — The tap: a button on a card flips the intent, once, and answers"
 type: plan
-status: draft
+status: active
 owner: chris
 created: 2026-09-09
 tags: [plan, telegram, ingress, commands, outbox]

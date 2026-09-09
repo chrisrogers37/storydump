@@ -1,7 +1,7 @@
 ---
 title: "Phase 2 — The API under load: admission, a timeout boundary, the process shape, and the harness that proves it"
 type: plan
-status: draft
+status: active
 owner: chris
 created: 2026-09-09
 tags: [plan, ingress, admission, load, harness]

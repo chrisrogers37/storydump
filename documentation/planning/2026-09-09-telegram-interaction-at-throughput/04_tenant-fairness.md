@@ -1,7 +1,7 @@
 ---
 title: "Phase 4 — Tenant fairness (flagged; built only on evidence)"
 type: plan
-status: draft
+status: active
 owner: chris
 created: 2026-09-09
 tags: [plan, worker, fairness, flagged]
