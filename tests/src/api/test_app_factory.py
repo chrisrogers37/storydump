@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 
 from src.api.app import create_app
 from src.config.settings import settings
-from src.services.target import scheduling_health
+from src.services.target import posting_health, scheduling_health
 
 
 class TestEngineConfiguration:
@@ -300,6 +300,121 @@ class TestSchedulingHealthIsASecondSurface:
         assert payload["accounts_active"] == 0
         assert payload["worker"]["succeeded_ever"] == 78
         assert payload["worker"]["last_success_age_seconds"] == 3600
+
+
+class TestPostingHealthIsATHIRDSurface:
+    """#1268. `/health/scheduling` reads the clock and the worker, and both
+    stayed true through a sixteen-day silence in which nothing posted — 1936
+    consecutive `healthy` readings. This route answers the one question false
+    across both halves of that outage: did a post LAND."""
+
+    def test_it_is_its_own_route_beside_the_other_two(self):
+        app = create_app(env={})
+        paths = {r.path for r in app.routes}
+        assert {"/health", "/health/scheduling", "/health/posting"} <= paths
+
+    def test_it_refuses_rather_than_reassures_when_it_cannot_look(self):
+        """ "posting is fine" and "I could not look" must never collapse — an
+        absent engine is a 503 and never a cheerful zero, which would read as
+        *nothing has posted* and page for the wrong reason."""
+        app = create_app(env={})
+        assert app.state.engine is None
+        assert TestClient(app).get("/health/posting").status_code == 503
+
+    @staticmethod
+    def _stub_seams(monkeypatch, *, accounts_active=2):
+        """Patch all THREE route seams and return what each was called with.
+
+        One helper rather than two verbatim copies: the conftest's `FakeSession`
+        hard-fails on unstubbed SQL, so a fourth seam would otherwise be three
+        edits across two tests, one of which fails with an assertion about SQL
+        rather than about the missing stub.
+        """
+        seen = []
+
+        async def fake_posting(executor):
+            seen.append(("posting", executor))
+            return {
+                "posted_ever": 0,
+                "last_post_age_seconds": None,
+                "intents_ever": 6,
+                "oldest_intent_age_seconds": 172800,
+            }
+
+        async def fake_attempts(executor):
+            seen.append(("attempts", executor))
+            return {"debited_total": 0, "ledger_days": 0}
+
+        async def fake_destinations(executor):
+            seen.append(("destinations", executor))
+            return {
+                "accounts_active": accounts_active,
+                "oldest_active_destination_age_seconds": 604800,
+            }
+
+        monkeypatch.setattr(posting_health, "posting_freshness", fake_posting)
+        monkeypatch.setattr(posting_health, "publish_attempts", fake_attempts)
+        monkeypatch.setattr(posting_health, "destinations", fake_destinations)
+        return seen
+
+    def test_it_reaches_its_seams_when_an_engine_is_present(self, client, monkeypatch):
+        """The branch the two tests above never take.
+
+        This class's sibling records the finding the hard way: both of ITS
+        first tests built `create_app(env={})`, returned at the 503 branch one
+        line above the production path, and every green signal they produced was
+        true about code that does not execute. So this one supplies an engine
+        and stubs all three seams — the conftest's fake session refuses
+        `execute`, so a route that grows a query without a seam fails here.
+        """
+        seen = self._stub_seams(monkeypatch)
+        resp = client.get("/health/posting")
+
+        assert resp.status_code == 200, resp.text
+        # Every key the poller is strict about, asserted individually: a
+        # whole-dict equality would make ADDING an axis a breakage, while
+        # dropping one of these must stay one.
+        payload = resp.json()
+        assert payload["posted_ever"] == 0
+        assert payload["last_post_age_seconds"] is None
+        assert payload["intents_ever"] == 6
+        assert payload["oldest_intent_age_seconds"] == 172800
+        assert payload["debited_total"] == 0
+        assert payload["ledger_days"] == 0
+        assert payload["accounts_active"] == 2
+        assert payload["oldest_active_destination_age_seconds"] == 604800
+        assert {kind for kind, _ in seen} == {"posting", "attempts", "destinations"}
+        # The services name their parameter `executor`, so a connection is a
+        # legal argument — the duck type that lets the route drop the unit of
+        # work, which refuses a blank tenant at construction.
+        assert all(hasattr(ex, "execute") for _, ex in seen)
+
+    def test_the_payload_satisfies_the_pollers_strictness(self, client, monkeypatch):
+        """The two halves of #1268 are one repo and one test suite on purpose,
+        so the wire contract cannot drift. `classify` rejects a missing or
+        mistyped key as `unreachable`; this drives the REAL classifier over the
+        REAL route body rather than asserting a hand-written copy of it."""
+        from scripts.posting_monitor import NEVER_POSTED_OVERDUE, classify
+
+        self._stub_seams(monkeypatch, accounts_active=0)
+        resp = client.get("/health/posting")
+
+        verdict = classify(
+            resp.status_code,
+            resp.text,
+            silence_s=48 * 3600,
+            grace_s=72 * 3600,
+            watched_s=16 * 24 * 3600,
+        )
+        # Not merely "parsed": the 2026-09 payload classifies as the outage.
+        assert verdict.state == NEVER_POSTED_OVERDUE
+
+    def test_the_railway_probe_still_opens_no_connection(self):
+        """Three health surfaces now, and the reason for the split is unchanged:
+        liveness must not open a connection or a database blip takes the service
+        down for a fault no restart repairs."""
+        app = create_app(env={})
+        assert TestClient(app).get("/health").status_code == 200
 
 
 class _RoleResult:
