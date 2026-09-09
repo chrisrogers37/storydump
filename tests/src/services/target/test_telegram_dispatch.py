@@ -7,10 +7,20 @@ bound observable from outside the process.
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 
-from src.services.target import telegram_dispatch
+from src.services.target import (
+    commands,
+    identity,
+    telegram_dispatch,
+    tenant_resolution,
+    unit_of_work,
+)
+from src.services.target.commands import CommandRefused, CommandResult
 from src.services.target.start_router import GREETED, UNROUTED
+from src.services.target.tenant_resolution import ResolvedTenant, TenantResolutionError
 
 
 def start(text="/start", uid=7, cid=99):
@@ -46,10 +56,10 @@ class TestWhatItRefusesIsSaidOutLoud:
 
     @pytest.mark.asyncio
     async def test_a_non_message_update_is_also_named(self):
-        """An edit, a callback query, a channel post — none is a /start, and
-        none may vanish silently either."""
+        """An edit, a channel post — none is a /start, and none may vanish
+        silently either. (A callback query IS served now: see TestTheTap.)"""
         d = telegram_dispatch.TelegramDispatcher()
-        r = await d(None, {"callback_query": {"id": "x"}})
+        r = await d(None, {"edited_message": {"text": "x"}})
         assert r.outcome == telegram_dispatch.NOT_A_START
         assert r.handled is False
 
@@ -243,3 +253,214 @@ class TestABareStartInAGroupIsSpeechNotAGreeting:
             },
         )
         assert r.outcome == telegram_dispatch.MEMBERSHIP_SYNC_FAILED and not r.handled
+
+
+# ---------------------------------------------------------------------------
+# The tap (phase 1 of the 2026-09-09 plan): a callback_query is served.
+# ---------------------------------------------------------------------------
+
+INTENT = str(uuid.uuid4())
+
+
+def tap(action="skip", *, data=None, with_message=True, uid=7, cid=-100):
+    cq = {
+        "id": "q1",
+        "from": {"id": uid, "first_name": "Ada"},
+        "data": data or f"v1:{action}:{INTENT}",
+    }
+    if with_message:
+        cq["message"] = {"message_id": 555, "chat": {"id": cid, "type": "supergroup"}}
+    return {"update_id": 1, "callback_query": cq}
+
+
+@pytest.fixture
+def seams(monkeypatch):
+    """Everything `_tap` reaches through, scripted and recorded."""
+    log = {"executed": [], "gucs": []}
+    state = {
+        "tenant": ResolvedTenant(
+            workspace_id="ws", channel_binding_id="b1", via="chat"
+        ),
+        "user": "u1",
+        "result": CommandResult(
+            "executed", {"intent_id": INTENT, "state": "skipped", "lock_days": 7}
+        ),
+        "raise": None,
+    }
+
+    async def resolve_chat(executor, channel, external_ref):
+        if isinstance(state["tenant"], Exception):
+            raise state["tenant"]
+        return state["tenant"]
+
+    async def user_for_identity(executor, *, provider, external_id):
+        return state["user"]
+
+    async def apply_gucs(executor, **kw):
+        log["gucs"].append(kw)
+
+    async def execute(session, command):
+        log["executed"].append(command)
+        if state["raise"] is not None:
+            raise state["raise"]
+        return state["result"]
+
+    monkeypatch.setattr(tenant_resolution, "resolve_chat", resolve_chat)
+    monkeypatch.setattr(identity, "user_for_identity", user_for_identity)
+    monkeypatch.setattr(unit_of_work, "apply_gucs", apply_gucs)
+    monkeypatch.setattr(commands, "execute", execute)
+    state["log"] = log
+    return state
+
+
+class TestTheTap:
+    @pytest.mark.asyncio
+    async def test_an_executed_tap_is_handled_and_answered(self, seams):
+        d = telegram_dispatch.TelegramDispatcher()
+        r = await d(None, tap("skip"))
+        assert isinstance(r, telegram_dispatch.TapResult)
+        assert r.handled is True and r.outcome == "executed"
+        assert r.callback_query_id == "q1"
+        assert (r.chat_ref, r.message_ref) == ("-100", "555")
+        assert "Skipped" in r.answer_text and r.show_alert is False
+        cmd = seams["log"]["executed"][0]
+        assert (cmd.kind, cmd.workspace_id, cmd.actor_user_id, cmd.channel) == (
+            "skip",
+            "ws",
+            "u1",
+            "telegram",
+        )
+        assert cmd.args == {"intent_id": INTENT}
+        gucs = seams["log"]["gucs"][0]
+        assert gucs["tenant_id"] == "ws" and gucs["actor_kind"] == "user"
+        assert gucs["actor_user_id"] == "u1" and gucs["channel"] == "telegram"
+
+    @pytest.mark.asyncio
+    async def test_post_maps_to_approve_and_tells_the_truth_about_publishing(
+        self, seams
+    ):
+        seams["result"] = CommandResult(
+            "enqueued",
+            {"intent_id": INTENT, "state": "approved", "job": "publish_pipeline"},
+        )
+        d = telegram_dispatch.TelegramDispatcher()
+        r = await d(None, tap("post"))
+        assert seams["log"]["executed"][0].kind == "approve"
+        assert r.outcome == "executed"
+        if telegram_dispatch.PUBLISH_LEG_LIVE:
+            assert "posting shortly" in r.answer_text.lower()
+        else:
+            assert "isn't live yet" in r.answer_text
+
+    @pytest.mark.asyncio
+    async def test_an_answered_result_reads_back_the_cards_state(self, seams):
+        seams["result"] = CommandResult(
+            "answered",
+            {
+                "intent_id": INTENT,
+                "state": "approved",
+                "settled_by": "Chris",
+                "settled_at": "2026-09-09 14:14 UTC",
+            },
+        )
+        d = telegram_dispatch.TelegramDispatcher()
+        r = await d(None, tap("skip"))
+        assert r.outcome == "answered" and r.handled is True
+        assert "Already" in r.answer_text and "Chris" in r.answer_text
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_token_is_answered_as_an_older_card(self, seams):
+        d = telegram_dispatch.TelegramDispatcher()
+        r = await d(None, tap(data="v9:zap:" + INTENT))
+        assert r.outcome == "older_card" and r.show_alert is True
+        assert seams["log"]["executed"] == []
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_chat_is_answered_not_connected(self, seams):
+        seams["tenant"] = TenantResolutionError("unknown_binding")
+        d = telegram_dispatch.TelegramDispatcher()
+        r = await d(None, tap())
+        assert r.outcome == "unknown_binding" and r.show_alert is True
+        assert seams["log"]["executed"] == []
+
+    @pytest.mark.asyncio
+    async def test_an_unlinked_tapper_is_told_where_to_link_and_nothing_flips(
+        self, seams
+    ):
+        seams["user"] = None
+        d = telegram_dispatch.TelegramDispatcher()
+        r = await d(None, tap())
+        assert r.outcome == "unlinked" and r.show_alert is True
+        assert "Settings" in r.answer_text
+        assert seams["log"]["executed"] == []
+
+    @pytest.mark.asyncio
+    async def test_a_member_below_the_floor_is_answered(self, seams):
+        seams["raise"] = TenantResolutionError("insufficient_role", "member < admin")
+        d = telegram_dispatch.TelegramDispatcher()
+        r = await d(None, tap())
+        assert r.outcome == "insufficient_role" and r.handled is True
+
+    @pytest.mark.asyncio
+    async def test_a_refusal_is_answered_by_its_reason(self, seams):
+        seams["raise"] = CommandRefused("manual_mode", "posts by hand")
+        d = telegram_dispatch.TelegramDispatcher()
+        r = await d(None, tap("post"))
+        assert r.outcome == "manual_mode" and r.show_alert is True
+        assert "Posted myself" in r.answer_text
+
+    @pytest.mark.asyncio
+    async def test_a_query_without_a_message_is_a_named_failure_never_a_raise(
+        self, seams
+    ):
+        d = telegram_dispatch.TelegramDispatcher()
+        r = await d(None, tap(with_message=False))
+        assert r.outcome == "no_message" and r.handled is True
+        assert seams["log"]["executed"] == []
+
+    @pytest.mark.asyncio
+    async def test_a_bug_in_the_tap_is_tap_failed_never_a_raise(self, seams):
+        seams["raise"] = RuntimeError("boom")
+        d = telegram_dispatch.TelegramDispatcher()
+        r = await d(None, tap())
+        assert r.outcome == "tap_failed" and r.handled is True
+        assert r.callback_query_id == "q1"
+
+    @pytest.mark.asyncio
+    async def test_a_database_error_escapes_to_the_route(self, seams):
+        from sqlalchemy.exc import DBAPIError
+
+        seams["raise"] = DBAPIError("stmt", {}, Exception("down"))
+        d = telegram_dispatch.TelegramDispatcher()
+        with pytest.raises(DBAPIError):
+            await d(None, tap())
+
+
+class TestEveryReasonHasAnAnswer:
+    def test_every_command_refusal_reason_has_an_entry(self):
+        for reason in commands.REASONS:
+            text, alert = telegram_dispatch.answer_for(reason)
+            assert text
+
+    @pytest.mark.parametrize(
+        "reason",
+        [
+            "not_a_member",
+            "insufficient_role",
+            "unknown_binding",
+            "revoked_binding",
+            "unknown_channel",
+        ],
+    )
+    def test_every_resolver_refusal_has_an_entry(self, reason):
+        text, _ = telegram_dispatch.answer_for(reason)
+        assert text
+
+    @pytest.mark.parametrize("outcome", telegram_dispatch.TAP_OUTCOMES)
+    def test_every_tap_outcome_has_an_entry(self, outcome):
+        text, _ = telegram_dispatch.answer_for(outcome)
+        assert text
+
+    def test_an_unknown_reason_falls_back_to_the_web(self):
+        text, alert = telegram_dispatch.answer_for("something_new")
+        assert "web" in text.lower() and alert is True

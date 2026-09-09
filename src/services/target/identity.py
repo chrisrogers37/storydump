@@ -170,6 +170,21 @@ async def identity_for_user(executor, *, user_id: str, provider: str) -> Optiona
     return None if row is None else str(row[0])
 
 
+async def display_name_for(executor, *, user_id: str) -> str:
+    """The name a shared chat may see for *user_id*: the Telegram identity's
+    display name first (the group already sees it), else another identity's,
+    never an email — an address in a group chat is a disclosure (phase 1 of the
+    2026-09-09 tap plan, F3)."""
+    rows = await readers.rows(
+        executor,
+        "SELECT provider, display_name FROM user_identities"
+        " WHERE user_id = :u AND display_name IS NOT NULL AND display_name <> ''"
+        " ORDER BY (provider = 'telegram') DESC, created_at",
+        u=str(user_id),
+    )
+    return str(rows[0]["display_name"]) if rows else "a teammate"
+
+
 async def get_user(executor, *, user_id: str) -> Optional[dict]:
     """The user row plus its identities — `/me`'s user half."""
     user = await readers.row(

@@ -131,6 +131,35 @@ class TelegramAuthDead(TelegramSendError):
     """Telegram rejected the credential itself (401/403) — the loud class."""
 
 
+class SendReceipt(str):
+    """The message ref a send returned, carrying HOW the card went out —
+    ``sent_as`` is ``"media"`` (a photo or video with a caption), ``"text"``
+    or ``"edit"`` — so the outbox can record it and a later edit knows whether
+    to call `editMessageCaption` or `editMessageText` (phase 1 of the
+    2026-09-09 tap plan, step 5). A `str`, so every consumer that stored the
+    ref as a string still does."""
+
+    sent_as: Optional[str]
+
+    def __new__(cls, ref: str, *, sent_as: Optional[str] = None):
+        obj = super().__new__(cls, ref)
+        obj.sent_as = sent_as
+        return obj
+
+
+_NOT_MODIFIED = "message is not modified"
+_EMPTY_KEYBOARD = {"inline_keyboard": []}
+
+
+def _message_id(ref: str):
+    """Telegram wants the integer it issued; a ref that is not one is passed
+    through so the API's own refusal names it."""
+    try:
+        return int(ref)
+    except (TypeError, ValueError):
+        return ref
+
+
 class TelegramTransport:
     """One bot credential; `for_chat` binds it to a binding's external ref."""
 
@@ -221,6 +250,107 @@ class TelegramTransport:
             raise TelegramRefused(f"{method}: {code} {description}")
         raise TelegramSendError(f"{method}: {code} {description}")
 
+    async def answer_callback(
+        self, callback_query_id: str, text: str, *, show_alert: bool = False
+    ) -> bool:
+        """`answerCallbackQuery` — the tap's toast (or alert). Best effort by
+        contract: it is the client's spinner, worthless late and harmless lost,
+        so a failure is logged and False, never raised past the route."""
+        try:
+            await self._call(
+                "answerCallbackQuery",
+                {
+                    "callback_query_id": str(callback_query_id),
+                    "text": text,
+                    "show_alert": bool(show_alert),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 — best effort, by contract
+            logger.warning(
+                "answerCallbackQuery %s not delivered: %s",
+                callback_query_id,
+                self._redact(str(exc)),
+            )
+            return False
+        return True
+
+    async def _edit(self, method: str, payload: dict) -> None:
+        """One editMessage* call. Telegram's "message is not modified" is a
+        400 that means the edit already stands — success here (#682)."""
+        try:
+            await self._call(method, payload)
+        except TelegramRefused as exc:
+            if _NOT_MODIFIED in str(exc):
+                return
+            raise
+
+    async def _edit_quietly(self, method: str, payload: dict) -> bool:
+        try:
+            await self._edit(method, payload)
+        except TelegramSendError as exc:
+            logger.warning("%s failed: %s", method, self._redact(str(exc)))
+            return False
+        return True
+
+    async def edit_reply_markup(
+        self, chat_id: str, message_ref: str, reply_markup: dict
+    ) -> bool:
+        return await self._edit_quietly(
+            "editMessageReplyMarkup",
+            {
+                "chat_id": chat_id,
+                "message_id": _message_id(message_ref),
+                "reply_markup": reply_markup,
+            },
+        )
+
+    async def strip_keyboard(self, chat_id: str, message_ref: str) -> bool:
+        """The tapped card loses its buttons at once (unpaced, best effort):
+        the ref is the callback's own message, so the known-ref rule holds."""
+        return await self.edit_reply_markup(chat_id, message_ref, _EMPTY_KEYBOARD)
+
+    async def edit_caption(self, chat_id: str, message_ref: str, caption: str) -> bool:
+        return await self._edit_quietly(
+            "editMessageCaption",
+            {
+                "chat_id": chat_id,
+                "message_id": _message_id(message_ref),
+                "caption": caption,
+            },
+        )
+
+    async def edit_text(self, chat_id: str, message_ref: str, text: str) -> bool:
+        return await self._edit_quietly(
+            "editMessageText",
+            {"chat_id": chat_id, "message_id": _message_id(message_ref), "text": text},
+        )
+
+    async def _supersede(self, external_ref: str, row: dict) -> SendReceipt:
+        """A `prompt_supersede` row edits the card it names: the keyboard goes
+        FIRST — type-agnostic, the call that must land; a refusal fails the row
+        — then, when the row carries an outcome, the original header plus the
+        outcome line, as a caption for a media card and as text otherwise,
+        best effort (F4 (a))."""
+        payload = row.get("payload") or {}
+        ref = str(payload["supersedes_ref"])
+        await self._edit(
+            "editMessageReplyMarkup",
+            {
+                "chat_id": external_ref,
+                "message_id": _message_id(ref),
+                "reply_markup": _EMPTY_KEYBOARD,
+            },
+        )
+        outcome = payload.get("outcome_text")
+        if outcome:
+            header = payload.get("header")
+            body = f"{header}\n{outcome}" if header else str(outcome)
+            if payload.get("sent_as") == "media":
+                await self.edit_caption(external_ref, ref, body[:1024])
+            else:
+                await self.edit_text(external_ref, ref, body[:4096])
+        return SendReceipt(ref, sent_as="edit")
+
     async def probe(self) -> str:
         """`getMe` — the composition-time liveness check. Returns the bot
         username; raises :class:`TelegramAuthDead` on a rejected credential."""
@@ -289,7 +419,9 @@ class TelegramTransport:
         gone chat and a dead token propagate too.
         """
 
-        async def send(row: dict) -> str:
+        async def send(row: dict) -> SendReceipt:
+            if row.get("kind") == "prompt_supersede":
+                return await self._supersede(external_ref, row)
             payload = row.get("payload") or {}
             text_body = payload.get("text")
             media = payload.get("media")
@@ -351,14 +483,17 @@ class TelegramTransport:
                 if fetched is not None:
                     content, filename, mime = fetched
                     try:
-                        return await self.send_media(
-                            external_ref,
-                            kind=str(media["kind"]),
-                            content=content,
-                            filename=filename,
-                            mime=mime,
-                            caption=str(payload.get("caption") or text_body or ""),
-                            reply_markup=payload.get("reply_markup"),
+                        return SendReceipt(
+                            await self.send_media(
+                                external_ref,
+                                kind=str(media["kind"]),
+                                content=content,
+                                filename=filename,
+                                mime=mime,
+                                caption=str(payload.get("caption") or text_body or ""),
+                                reply_markup=payload.get("reply_markup"),
+                            ),
+                            sent_as="media",
                         )
                     except TelegramRefused as exc:
                         logger.warning(
@@ -371,8 +506,11 @@ class TelegramTransport:
                     f"outbox row {row.get('id')}: payload carries no text —"
                     " nothing to send"
                 )
-            return await self.send_text(
-                external_ref, text_body, reply_markup=payload.get("reply_markup")
+            return SendReceipt(
+                await self.send_text(
+                    external_ref, text_body, reply_markup=payload.get("reply_markup")
+                ),
+                sent_as="text",
             )
 
         return send

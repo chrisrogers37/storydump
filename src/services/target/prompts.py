@@ -40,16 +40,52 @@ from __future__ import annotations
 import re
 
 from datetime import datetime
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 
 from src.services.target import intent_ledger, outbox
+from src.services.target.callback_tokens import ACTIONS, token as _token
 
 INSTAGRAM_DEEPLINK_URL = "https://www.instagram.com/"
 
-_ACTIONS_API = ("post", "posted", "skip", "reject")
+_ACTIONS_API = ACTIONS
 _ACTIONS_MANUAL = ("posted", "skip", "reject")
+
+#: The word a card shows for each state a tap can find it in — the outcome
+#: line (phase 1 of the 2026-09-09 tap plan, step 5) and the answer a repeat
+#: tap gets both read from here, so the two never disagree.
+OUTCOME_WORDS = {
+    "scheduled": "🗓 Scheduled",
+    "prompt_pending": "⏳ Awaiting approval",
+    "awaiting_approval": "⏳ Awaiting approval",
+    "approved": "✅ Approved",
+    "publishing": "🚀 Posting…",
+    "publishing_ambiguous": "🚀 Posting… (confirming)",
+    "review_required": "👀 Needs review",
+    "posted": "✅ Posted",
+    "skipped": "⏭️ Skipped",
+    "rejected": "🚫 Rejected",
+    "expired": "⌛ Expired — slot passed",
+    "cancelled": "🚫 Cancelled",
+    "failed": "⚠️ Failed",
+    "account_disabled": "⏸ Account disabled",
+}
+
+
+def stamp(at: datetime, tz: str) -> str:
+    """`%Y-%m-%d %H:%M <tz>` in the WORKSPACE's timezone — the slot line and
+    the outcome line share this one spelling."""
+    return f"{at.astimezone(ZoneInfo(tz)).strftime('%Y-%m-%d %H:%M')} {tz}"
+
+
+def outcome_line(state: str, *, by: Optional[str], at: datetime, tz: str) -> str:
+    """What a settled card says under its header: the state's word, who, when."""
+    word = OUTCOME_WORDS.get(state, state)
+    who = f" by {by}" if by else ""
+    return f"{word}{who} · {stamp(at, tz)}"
+
 
 _LABELS = {
     "post": "🚀 Post now",
@@ -57,13 +93,6 @@ _LABELS = {
     "skip": "⏭️ Skip",
     "reject": "🚫 Reject",
 }
-
-
-def _token(action: str, intent_id: str) -> str:
-    token = f"v1:{action}:{intent_id}"
-    if len(token.encode()) > 64:  # Telegram's callback_data bound
-        raise ValueError(f"callback token exceeds 64 bytes: {token!r}")
-    return token
 
 
 def _canonical_fraction(value: str) -> str:
@@ -99,8 +128,7 @@ def render_card(intent: dict, *, api_publishing_enabled: bool) -> dict:
     if isinstance(slot, str):
         slot = datetime.fromisoformat(_canonical_fraction(slot))
     tz = intent.get("tz") or "UTC"
-    local = slot.astimezone(ZoneInfo(tz))
-    slot_line = f"Slot: {local.strftime('%Y-%m-%d %H:%M')} {tz}"
+    slot_line = f"Slot: {stamp(slot, tz)}"
     file_name = intent.get("file_name") or "media"
     text = f"📸 {file_name} ({intent.get('media_kind', '?')})\n{slot_line}"
     actions = _ACTIONS_API if api_publishing_enabled else _ACTIONS_MANUAL
@@ -197,6 +225,62 @@ async def push_bindings(session, workspace_id: str) -> list[str]:
         .all()
     )
     return [str(r["id"]) for r in rows]
+
+
+async def sweep_settled_cards(session, *, limit: int = 50) -> int:
+    """Cards end in EVERY terminal state (phase 1 of the 2026-09-09 tap plan,
+    step 7): whoever ended the intent — the reaper's expiry, the pipeline's
+    `posted`, the worker's cancellation — its live cards lose their buttons
+    and gain the terminal line. One mechanism for every writer, run on the
+    prompt sweep's cadence; a tap's own supersede is immediate and this is the
+    backstop. Returns the intents healed."""
+    rows = (
+        (
+            await session.execute(
+                text(
+                    "SELECT DISTINCT o.intent_id, o.workspace_id, i.state,"
+                    "       i.entered_state_at, w.tz"
+                    "  FROM channel_outbox o"
+                    "  JOIN post_intents i ON i.id = o.intent_id"
+                    "  JOIN workspaces w ON w.id = i.workspace_id"
+                    " WHERE o.kind = 'approval_prompt'"
+                    "   AND o.state IN ('pending', 'sending', 'sent', 'ambiguous')"
+                    "   AND i.state IN ('posted','skipped','rejected','expired',"
+                    "                   'failed','cancelled')"
+                    " LIMIT :lim"
+                ),
+                {"lim": int(limit)},
+            )
+        )
+        .mappings()
+        .all()
+    )
+    for row in rows:
+        settled = await intent_ledger.settlement(
+            session,
+            workspace_id=str(row["workspace_id"]),
+            intent_id=str(row["intent_id"]),
+        )
+        by = None
+        if settled.get("by_user_id"):
+            from src.services.target import identity  # noqa: PLC0415 — cycle
+
+            by = await identity.display_name_for(session, user_id=settled["by_user_id"])
+        line = outcome_line(
+            str(row["state"]),
+            by=by,
+            at=settled.get("at") or row["entered_state_at"],
+            tz=str(row["tz"] or "UTC"),
+        )
+        for binding_id in await push_bindings(session, str(row["workspace_id"])):
+            await outbox.supersede_all(
+                session,
+                workspace_id=str(row["workspace_id"]),
+                binding_id=binding_id,
+                intent_id=str(row["intent_id"]),
+                outcome_text=line,
+            )
+    return len(rows)
 
 
 async def sweep_due_prompts(session, *, limit: int = 50) -> dict:

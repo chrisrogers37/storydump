@@ -210,6 +210,9 @@ def build_registry(deps: WorkerDeps) -> dict:
             approval_ttl_seconds=cfg.approval_ttl_seconds,
             approved_ttl_seconds=cfg.approved_ttl_seconds,
         )
+        # The cards of what the reaper (or anyone) ended lose their buttons
+        # and gain the terminal line — phase 1 of the 2026-09-09 tap plan.
+        await prompts.sweep_settled_cards(session, limit=cfg.reap_limit)
 
     async def reconcile_ambiguous(session, job):
         """The `02` §6 sweep. TWO reasons, and only one of them needs a poll.

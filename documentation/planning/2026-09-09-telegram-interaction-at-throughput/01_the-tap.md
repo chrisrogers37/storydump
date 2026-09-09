@@ -2,6 +2,7 @@
 title: "Phase 1 — The tap: a button on a card flips the intent, once, and answers"
 type: plan
 status: active
+started: 2026-09-09
 owner: chris
 created: 2026-09-09
 tags: [plan, telegram, ingress, commands, outbox]
@@ -9,6 +10,8 @@ links: []
 ---
 
 # Phase 1 — The tap
+
+> **IN PROGRESS — started 2026-09-09** on branch `implement/telegram-tap`. Build-time adjustments (codebase comparison): (1) the unlinked tapper's alert names the web path ("Link your Telegram account first: Settings › Integrations") — a `link` start token is minted for a signed-in web user and the tapper is by definition unknown, and `answerCallbackQuery`'s `url` is for games only, so no URL and no DM card; (2) `settled_by` shows the tapper's Telegram display name (what the group already sees; `user_identities.display_name`), else the sign-in display name, never an email — there is no per-workspace display name; (3) `outbox.deliver` keeps its never-commits contract (the sender gate pins that a fenced finalize rolls the write back); the checkpointing lands in `OutboxPoller.tick`, the production path: pace-and-claim, commit, send, settle, commit.
 
 ## Summary
 

@@ -91,12 +91,15 @@ the same review-blocking defect as one in a door body.
 from __future__ import annotations
 
 import json
-from typing import Optional
+import logging
+from typing import Any, Optional
 
 from sqlalchemy import text
 
 from src.exceptions.base import StorydumpError
 from src.services.target.rate_counters import increment, window_start
+
+logger = logging.getLogger(__name__)
 
 #: `02` §6 kinds whose ambiguity resolves by resend rather than retry-once.
 #: Two live cards are tolerable; a duplicate notification is not.
@@ -262,7 +265,8 @@ async def claim_next(session, *, binding_id: str) -> Optional[dict]:
                 "             WHERE binding_id = :b AND state = 'pending'"
                 "             ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED)"
                 "   AND state = 'pending'"
-                " RETURNING id, kind, payload, attempts, intent_id, workspace_id"
+                " RETURNING id, kind, payload, attempts, intent_id, workspace_id,"
+                "           binding_id"
             ),
             {"b": binding_id},
         )
@@ -278,6 +282,8 @@ async def claim_next(session, *, binding_id: str) -> Optional[dict]:
         # The row's own tenant, for the transport to hold a payload against
         # (a media block naming another workspace is refused — #1259).
         "workspace_id": str(row[5]),
+        # Its binding, for the sender's own post-send edit (phase 1 step 8).
+        "binding_id": str(row[6]),
     }
 
 
@@ -293,6 +299,13 @@ async def _leave_sending(session, outbox_id: str, to_state: str, **extra) -> Non
     if "external_message_ref" in extra:
         sets.append("external_message_ref = :ref")
         params["ref"] = extra["external_message_ref"]
+    if extra.get("sent_as"):
+        # How the card went out (media or text), so a later edit knows which
+        # editMessage* to call — on the JSONB payload, no migration.
+        sets.append(
+            "payload = payload || jsonb_build_object('sent_as', CAST(:sent_as AS text))"
+        )
+        params["sent_as"] = str(extra["sent_as"])
     result = await session.execute(
         text(
             f"UPDATE channel_outbox SET {', '.join(sets)}"
@@ -307,10 +320,21 @@ async def _leave_sending(session, outbox_id: str, to_state: str, **extra) -> Non
         )
 
 
-async def mark_sent(session, *, outbox_id: str, external_message_ref: str) -> None:
-    """`sending → sent`, recording the ref the channel returned."""
+async def mark_sent(
+    session,
+    *,
+    outbox_id: str,
+    external_message_ref: str,
+    sent_as: Optional[str] = None,
+) -> None:
+    """`sending → sent`, recording the ref the channel returned and how the
+    card went out."""
     await _leave_sending(
-        session, outbox_id, "sent", external_message_ref=external_message_ref
+        session,
+        outbox_id,
+        "sent",
+        external_message_ref=str(external_message_ref),
+        sent_as=sent_as,
     )
 
 
@@ -363,8 +387,31 @@ async def resolve_ambiguous(session, *, outbox_id: str) -> str:
     return to_state
 
 
+def _supersede_payload(ref: str, payload: Any, outcome_text: Optional[str]) -> dict:
+    """What the sender needs to edit the card it names: the ref, the outcome
+    line, the original header (a media card's caption or a text card's text —
+    the edit keeps it and appends the outcome) and how the card went out."""
+    if isinstance(payload, str):
+        payload = json.loads(payload)
+    payload = payload or {}
+    body: dict = {"v": 1, "supersedes_ref": str(ref)}
+    if outcome_text:
+        body["outcome_text"] = outcome_text
+    header = payload.get("caption") or payload.get("text")
+    if header:
+        body["header"] = header
+    if payload.get("sent_as"):
+        body["sent_as"] = payload["sent_as"]
+    return body
+
+
 async def supersede_all(
-    session, *, workspace_id: str, binding_id: str, intent_id: str
+    session,
+    *,
+    workspace_id: str,
+    binding_id: str,
+    intent_id: str,
+    outcome_text: Optional[str] = None,
 ) -> int:
     """Supersede every live card for *intent_id* and queue the supersede rows.
 
@@ -373,8 +420,14 @@ async def supersede_all(
     Returns the number of cards superseded.
 
     This is also the only edit path — "edits always go supersede-then-send,
-    never edit-in-place on an ambiguous ref". A caller wanting to change a card
-    calls this and then :func:`enqueue`.
+    never edit-in-place on an ambiguous ref". With *outcome_text* the edit
+    writes the card's header plus that line under it (phase 1 of the
+    2026-09-09 tap plan, step 5); without it the keyboard is only stripped.
+
+    A row in `sending` is superseded too: the sender commits its claim before
+    the provider call (phase 1 step 8), so `sending` is a committed state a
+    tap can meet; the sender finds its `mark_sent` fenced and edits the card
+    it just sent itself (`OutboxPoller`).
     """
     live = (
         await session.execute(
@@ -382,22 +435,22 @@ async def supersede_all(
                 "UPDATE channel_outbox SET state = 'superseded'"
                 " WHERE workspace_id = :ws AND binding_id = :b AND intent_id = :i"
                 "   AND kind IN ('approval_prompt', 'invitation')"
-                "   AND state IN ('pending', 'sent', 'ambiguous')"
-                " RETURNING external_message_ref"
+                "   AND state IN ('pending', 'sending', 'sent', 'ambiguous')"
+                " RETURNING external_message_ref, payload"
             ),
             {"ws": workspace_id, "b": binding_id, "i": intent_id},
         )
     ).fetchall()
 
-    for (ref,) in live:
+    for ref, payload in live:
         if ref is None:
-            continue  # the ref was lost; the card ages out under R6
+            continue  # the ref was lost (or never sent); the card ages out under R6
         await enqueue(
             session,
             workspace_id=workspace_id,
             binding_id=binding_id,
             kind="prompt_supersede",
-            payload={"v": 1, "supersedes_ref": ref},
+            payload=_supersede_payload(str(ref), payload, outcome_text),
             intent_id=intent_id,
         )
     return len(live)
@@ -460,6 +513,39 @@ async def deliver(
     about send-state, not about Telegram, and a real client here would make
     every gate test a network test.
     """
+    row = await pace_and_claim(
+        session,
+        binding_id=binding_id,
+        now=now,
+        chat_limit=chat_limit,
+        chat_window_seconds=chat_window_seconds,
+        global_limit=global_limit,
+        global_window_seconds=global_window_seconds,
+    )
+    if row is None:
+        return None
+    receipt, error = None, None
+    try:
+        receipt = await transport(row)
+    except Exception as exc:  # noqa: BLE001 — classified in `settle`
+        error = exc
+    return await settle(session, row, receipt=receipt, error=error)
+
+
+async def pace_and_claim(
+    session,
+    *,
+    binding_id: str,
+    now,
+    chat_limit: int,
+    chat_window_seconds: int,
+    global_limit: int,
+    global_window_seconds: int,
+) -> Optional[dict]:
+    """Recover → pace → claim: everything BEFORE the provider is spoken to,
+    in the caller's transaction. The poller commits this before it sends
+    (phase 1 of the 2026-09-09 tap plan, step 8 / F8 (a)), so the `tg_global`
+    rate row and the claimed row are never locked across the call (#1260)."""
     stranded = await recover_stranded(session, binding_id=binding_id)
     for outbox_id in stranded:
         await resolve_ambiguous(session, outbox_id=outbox_id)
@@ -481,13 +567,15 @@ async def deliver(
                 " stays pending and the next poll takes it"
             )
 
-    row = await claim_next(session, binding_id=binding_id)
-    if row is None:
-        return None
+    return await claim_next(session, binding_id=binding_id)
 
-    try:
-        ref = await transport(row)
-    except DestinationGone as exc:
+
+async def settle(session, row: dict, *, receipt=None, error=None) -> dict:
+    """Everything AFTER the provider answered, in the caller's transaction:
+    the row's exit from `sending` by R8's taxonomy. *receipt* is the ref the
+    channel returned (a `SendReceipt` also says how the card went out);
+    *error* is what the transport raised instead."""
+    if isinstance(error, DestinationGone):
         # Definitive, not ambiguous: the provider said the chat will not take
         # it. The row fails; the caller retires the binding so the sweep stops
         # minting for a chat that is gone (a kicked bot is NOT a dead token).
@@ -497,14 +585,75 @@ async def deliver(
             "state": "failed",
             "external_message_ref": None,
             "destination_gone": True,
-            "migrate_to": exc.migrate_to,
+            "migrate_to": error.migrate_to,
         }
-    except Exception:  # noqa: BLE001 — a lost response is the ambiguous case
+    if error is not None:
+        # A lost response is the ambiguous case.
         await mark_ambiguous(session, outbox_id=row["id"])
         return {**row, "state": "ambiguous", "external_message_ref": None}
 
-    await mark_sent(session, outbox_id=row["id"], external_message_ref=ref)
-    return {**row, "state": "sent", "external_message_ref": ref}
+    await mark_sent(
+        session,
+        outbox_id=row["id"],
+        external_message_ref=str(receipt),
+        sent_as=getattr(receipt, "sent_as", None),
+    )
+    return {**row, "state": "sent", "external_message_ref": str(receipt)}
+
+
+async def _edit_sent_card(session, row: dict, ref: str, *, force: bool) -> bool:
+    """R6 after a send: re-read the intent an `approval_prompt` card is for;
+    if it has moved past `awaiting_approval` since the claim (a tap, the web
+    queue, the reaper), the card just sent must not keep live buttons — queue
+    the supersede for the ref we just received. *force* is the fenced case
+    (the row was superseded in flight), where the edit is owed regardless.
+    Returns whether an edit was queued."""
+    if row.get("kind") != "approval_prompt" or not row.get("intent_id"):
+        return False
+    from src.services.target import identity, intent_ledger, prompts  # noqa: PLC0415 — cycle
+
+    found = await intent_ledger.settlement(
+        session, workspace_id=str(row["workspace_id"]), intent_id=str(row["intent_id"])
+    )
+    state = found["state"]
+    if state is None or (
+        not force and state in ("scheduled", "prompt_pending", "awaiting_approval")
+    ):
+        return False
+    tz_row = (
+        await session.execute(
+            text("SELECT tz FROM workspaces WHERE id = :ws"),
+            {"ws": str(row["workspace_id"])},
+        )
+    ).first()
+    tz = str(tz_row[0]) if tz_row and tz_row[0] else "UTC"
+    outcome = None
+    if state not in ("scheduled", "prompt_pending", "awaiting_approval"):
+        by = (
+            await identity.display_name_for(session, user_id=found["by_user_id"])
+            if found.get("by_user_id")
+            else None
+        )
+        from datetime import datetime, timezone  # noqa: PLC0415
+
+        outcome = prompts.outcome_line(
+            state, by=by, at=found["at"] or datetime.now(timezone.utc), tz=tz
+        )
+    payload = row.get("payload") or {}
+    if isinstance(payload, str):
+        payload = json.loads(payload)
+    sent_as = getattr(ref, "sent_as", None) or payload.get("sent_as")
+    await enqueue(
+        session,
+        workspace_id=str(row["workspace_id"]),
+        binding_id=str(row["binding_id"]),
+        kind="prompt_supersede",
+        payload=_supersede_payload(
+            ref, {**payload, **({"sent_as": sent_as} if sent_as else {})}, outcome
+        ),
+        intent_id=str(row["intent_id"]),
+    )
+    return True
 
 
 class OutboxPoller:
@@ -563,15 +712,19 @@ class OutboxPoller:
         self._task = None
 
     async def tick(self) -> Optional[dict]:
-        """One poll. Never raises: a tick that failed is an observable, not an
-        exception the loop has to survive twice."""
+        """One poll, transaction-per-checkpoint (`02:1254`; phase 1 of the
+        2026-09-09 tap plan, step 8): pace and claim, COMMIT, speak to the
+        provider with no transaction open, then settle in a fresh one. The
+        `tg_global` rate row is never held across the call (#1260), and the
+        claimed row's `sending` is a committed state a tap can supersede.
+        Never raises: a tick that failed is an observable, not an exception
+        the loop has to survive twice."""
         self.ticks += 1
         try:
             async with self._session_factory() as session:
-                result = await deliver(
+                row = await pace_and_claim(
                     session,
                     binding_id=self._binding_id,
-                    transport=self._transport,
                     now=self._clock(),
                     **self._budgets,
                 )
@@ -583,8 +736,46 @@ class OutboxPoller:
         except Exception:  # noqa: BLE001 — the counter IS the report
             self.consecutive_failures += 1
             return None
+        if row is None:
+            self.consecutive_failures = 0
+            return None
+
+        receipt, error = None, None
+        try:
+            receipt = await self._transport(row)
+        except Exception as exc:  # noqa: BLE001 — classified in `settle`
+            error = exc
+
+        try:
+            async with self._session_factory() as session:
+                try:
+                    result = await settle(session, row, receipt=receipt, error=error)
+                except OutboxFenced:
+                    # Superseded while in flight: a tap retired the card between
+                    # the claim and the send, and its ref was unknown to the
+                    # supersede. The card is out there with buttons — edit it
+                    # ourselves (R6), with the intent's current outcome.
+                    result = {
+                        **row,
+                        "state": "superseded",
+                        "external_message_ref": receipt,
+                    }
+                    if receipt is not None:
+                        await _edit_sent_card(session, row, str(receipt), force=True)
+                else:
+                    if result["state"] == "sent":
+                        await _edit_sent_card(session, row, str(receipt), force=False)
+                await session.commit()
+        except Exception as exc:  # noqa: BLE001 — the counter IS the report
+            self.consecutive_failures += 1
+            logger.warning(
+                "outbox tick: settling row %s after the send failed: %r",
+                row.get("id"),
+                exc,
+            )
+            return None
         self.consecutive_failures = 0
-        if result is not None and result["state"] == "sent":
+        if result["state"] == "sent":
             self.sent += 1
         return result
 

@@ -65,7 +65,9 @@ connection over leaves that choice where the knowledge is.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import time
+
+from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 
 from fastapi import APIRouter, HTTPException, Request
@@ -109,6 +111,33 @@ class IngressRuntime:
     #: stays silent by construction, which is what a deployment without the
     #: bot token gets. Best-effort: a failure here is logged, never surfaced.
     reply: Optional[Callable[[str, str], Awaitable[Any]]] = None
+    #: Answer a tap (`answerCallbackQuery`) — `(callback_query_id, text,
+    #: show_alert) -> bool` — and strip the tapped card's keyboard —
+    #: `(chat_ref, message_ref) -> bool`. Both best effort, after the commit
+    #: (phase 1 of the 2026-09-09 tap plan, step 10). None = silent.
+    answer_callback: Optional[Callable[[str, str, bool], Awaitable[bool]]] = None
+    strip_keyboard: Optional[Callable[[str, str], Awaitable[bool]]] = None
+
+
+@dataclass
+class TapMetrics:
+    """Counters `/health` reports: taps by outcome, answers and strips that
+    did not land (phase 1 step 12)."""
+
+    taps: dict[str, int] = field(default_factory=dict)
+    answer_failed: int = 0
+    strip_failed: int = 0
+
+    def count(self, outcome: str) -> None:
+        self.taps[outcome] = self.taps.get(outcome, 0) + 1
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "taps_total": sum(self.taps.values()),
+            "taps": dict(sorted(self.taps.items())),
+            "answer_failed": self.answer_failed,
+            "strip_failed": self.strip_failed,
+        }
 
 
 @router.post("/telegram")
@@ -193,14 +222,71 @@ async def telegram_webhook(request: Request) -> dict[str, str]:
     # AFTER the commit and outside the connection: the link is durable before
     # any provider is spoken to, so a Telegram hiccup can neither roll it back
     # nor make Telegram redeliver (the 200 below stands regardless).
-    await _acknowledge(runtime, payload, result)
+    await _acknowledge(
+        runtime,
+        payload,
+        result,
+        metrics=getattr(request.app.state, "tap_metrics", None),
+    )
     return {"status": "admitted"}
 
 
-async def _acknowledge(runtime: IngressRuntime, payload: dict, result: Any) -> None:
-    """Answer a HANDLED `/start` in the chat that tapped it. Refusals carry no
-    reply by construction (`StartResult` enforces it), so a prober still learns
-    nothing; a dispatch that returned nothing at all is left silent."""
+async def _answer_tap(
+    runtime: IngressRuntime, payload: dict, result: Any, metrics: Optional[TapMetrics]
+) -> None:
+    """After the commit: the tap's answer (its toast or alert) and, for a tap
+    that executed, the immediate strip of the tapped card's keyboard — both
+    unpaced and best effort; the paced supersede rows write the outcome line
+    in every binding regardless (F4 (a)). One answer per query."""
+    started = time.monotonic()
+    if metrics is not None:
+        metrics.count(result.outcome)
+    answered = stripped = None
+    if runtime.answer_callback is not None and result.callback_query_id:
+        try:
+            answered = await runtime.answer_callback(
+                result.callback_query_id, result.answer_text, result.show_alert
+            )
+        except Exception:  # noqa: BLE001 — best effort, and the delivery is committed
+            answered = False
+        if answered is False and metrics is not None:
+            metrics.answer_failed += 1
+    if (
+        result.outcome == "executed"
+        and runtime.strip_keyboard is not None
+        and result.chat_ref
+        and result.message_ref
+    ):
+        try:
+            stripped = await runtime.strip_keyboard(result.chat_ref, result.message_ref)
+        except Exception:  # noqa: BLE001 — best effort
+            stripped = False
+        if stripped is False and metrics is not None:
+            metrics.strip_failed += 1
+    logger.info(
+        "tap answered update_id=%s outcome=%s answered=%s stripped=%s answer_ms=%d",
+        payload.get("update_id"),
+        result.outcome,
+        answered,
+        stripped,
+        int((time.monotonic() - started) * 1000),
+    )
+
+
+async def _acknowledge(
+    runtime: IngressRuntime,
+    payload: dict,
+    result: Any,
+    *,
+    metrics: Optional[TapMetrics] = None,
+) -> None:
+    """Answer a HANDLED `/start` in the chat that tapped it, or a tap's
+    callback query. Refusals of a `/start` carry no reply by construction
+    (`StartResult` enforces it), so a prober still learns nothing; a dispatch
+    that returned nothing at all is left silent."""
+    if getattr(result, "callback_query_id", None) is not None:
+        await _answer_tap(runtime, payload, result, metrics)
+        return
     if runtime.reply is None:
         return
     if not getattr(result, "handled", False) or not getattr(result, "reply", None):
