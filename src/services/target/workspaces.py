@@ -448,6 +448,9 @@ async def list_media(
     Media surfaced only through intents until this read existed (#1044)."""
     params: dict[str, Any] = {"ws": str(workspace_id), "lim": int(limit)}
     where = "workspace_id = :ws"
+    # No default: the web asks for `available` (the library shows what is
+    # connected; a removed folder's rows are `removed` since 2026-09-09), and
+    # an operator may ask for any state.
     if state is not None:
         where += " AND state = :state"
         params["state"] = state
@@ -499,7 +502,10 @@ async def stats(executor, *, workspace_id: str) -> dict[str, Any]:
         "SELECT state AS k, count(*) AS n FROM media_items WHERE workspace_id = :ws GROUP BY 1"
     )
     media_by_category = await by(
-        "SELECT category AS k, count(*) AS n FROM media_items WHERE workspace_id = :ws GROUP BY 1"
+        # Available only: a removed folder's retired rows are out of the
+        # library, and the card must agree with the pool it sits beside.
+        "SELECT category AS k, count(*) AS n FROM media_items"
+        " WHERE workspace_id = :ws AND state = 'available' GROUP BY 1"
     )
     posted_by_category = await by(
         "SELECT m.category AS k, count(*) AS n"

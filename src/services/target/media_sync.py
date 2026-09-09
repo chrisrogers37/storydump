@@ -50,6 +50,7 @@ from typing import Optional, Any
 from sqlalchemy import text
 
 from src.services.target.drive_adapter import checkpoint_incomplete
+from src.services.target.workspaces import CONNECTED_FLAG_SQL
 
 from src.exceptions.base import StorydumpError
 
@@ -160,6 +161,52 @@ async def rearm_after_connect(
             ),
             {"s": str(source_id), "ws": str(workspace_id)},
         )
+        # Its media comes back with it (owner ruling 2026-09-09): the rows
+        # Remove retired are available again before the walk even starts.
+        await session.execute(
+            text(
+                "UPDATE media_items SET state = 'available'"
+                " WHERE workspace_id = :ws AND source_id = :s AND state = 'removed'"
+            ),
+            {"s": str(source_id), "ws": str(workspace_id)},
+        )
+    return int(result.rowcount or 0)
+
+
+async def retire_media_of_removed_folders(session, *, workspace_id: str) -> int:
+    """Retire what is still ``available`` under a REMOVED folder of the workspace.
+
+    Reconciliation, not a lifecycle step. Until 2026-09-09 Remove paused the
+    source and left its media ``available``, so a folder removed before that
+    rule still owns live rows — and adoption (`_run_sync`'s upsert) takes
+    only a RETIRED row, so a connected subfolder listing the same bytes would
+    sync to nothing. A walk that is MINTED starts by calling this, whichever
+    way it was started (a pick, Sync Now, the schedule, a reconnect); a sync
+    that joins a walk already in flight does not, that walk reconciled when
+    it began. A no-op once the invariant holds. "Removed" is the product's
+    own definition (`workspaces.CONNECTED_FLAG_SQL` — the marker, not the
+    state), so a connected folder's rows, and a disconnected-but-not-removed
+    folder's, are never touched. A migration cannot carry it: the tenancy
+    lane refuses ``UPDATE`` there by design. Returns the rows retired.
+
+    The removed sources are read FOR UPDATE: a re-pick of one of them
+    (`rearm_after_connect`) updates that same row, so the two serialise on
+    it and this statement sees the folder as it is when it runs, not as it
+    was a snapshot ago — retiring a folder someone has just connected, whose
+    own walk could then never bring the rows back (both review lenses).
+    """
+    result = await session.execute(
+        text(
+            "WITH removed AS ("
+            "  SELECT s.id FROM media_sources s"
+            "   WHERE s.workspace_id = :ws AND " + CONNECTED_FLAG_SQL + "   FOR UPDATE)"
+            " UPDATE media_items m SET state = 'removed'"
+            "   FROM removed"
+            "  WHERE m.workspace_id = :ws AND m.source_id = removed.id"
+            "    AND m.state = 'available'"
+        ),
+        {"ws": str(workspace_id)},
+    )
     return int(result.rowcount or 0)
 
 
@@ -308,6 +355,7 @@ async def _run_sync(deps, job, *, reason) -> str:
             "sync %s: source %s is paused — nothing to do", job["id"], source_id
         )
         return "paused"
+    minted = False
     # The STORED checkpoint is the cursor, always: the walk (owner ruling
     # 2026-09-08 — every folder under the connected one, lazily) carries
     # `current` and `queue` beside `page_token`, and the chunk that chains
@@ -368,7 +416,27 @@ async def _run_sync(deps, job, *, reason) -> str:
                 source_id,
             )
         checkpoint = {"v": 2, "walk": uuid.uuid4().hex}
+        minted = True
     walk = checkpoint["walk"]
+    if minted:
+        # A MINTED walk starts by reconciling: whatever a folder removed
+        # before the 2026-09-09 rule still owns is retired, so this walk can
+        # adopt it. Own transaction, before the door; a no-op once the
+        # invariant holds.
+        async with factory() as s:
+            retired = await retire_media_of_removed_folders(
+                s, workspace_id=workspace_id
+            )
+            await s.commit()
+        if retired:
+            logger.warning(
+                "sync %s: retired %d row(s) still available under a removed"
+                " folder of workspace %s before walk %s",
+                job["id"],
+                retired,
+                workspace_id,
+                walk,
+            )
 
     # Phase 2 — the provider door, outside any transaction.
     try:
@@ -438,7 +506,7 @@ async def _run_sync(deps, job, *, reason) -> str:
         return "source-error"
 
     # Phase 3 — checkpoint CAS + upsert + chain-or-rearm, one transaction.
-    kept = skipped_kind = 0
+    kept = skipped_kind = refreshed = 0
     async with factory() as s:
         # The cursor advances by compare-and-swap against what THIS carrier
         # read. A re-pick that nulled it, a persistent failure that reset it,
@@ -451,6 +519,11 @@ async def _run_sync(deps, job, *, reason) -> str:
                 text(
                     "UPDATE media_sources SET sync_checkpoint = CAST(:cp AS jsonb)"
                     " WHERE id = :s AND workspace_id = :ws"
+                    # Removed (or disconnected) since Phase 1: the person chose
+                    # that, and this carrier's page must not land — least of
+                    # all onto rows the removal just retired (review of the
+                    # media-follows-the-folder PR).
+                    "   AND state <> 'paused'"
                     "   AND COALESCE(sync_checkpoint, CAST('{}' AS jsonb))"
                     "       = CAST(:old AS jsonb)"
                     " RETURNING id"
@@ -484,22 +557,38 @@ async def _run_sync(deps, job, *, reason) -> str:
                     " provider_file_ref, category, folder_path)"
                     " VALUES (:ws, :src, :hash, :name, :kind, :mime, :ref,"
                     "  :category, :folder_path)"
-                    # A file that MOVED between folders changes its label and
-                    # path on the next walk; nothing else about a known row is
-                    # touched (the dedup is per workspace by content hash,
-                    # `uq_media_dedup`).
+                    # The row is the ITEM (owner ruling 2026-09-09): the dedup
+                    # is per workspace by content hash (`uq_media_dedup`), and
+                    # posting history and locks hang off the row, so it is
+                    # never re-created. A file that MOVED within its folder
+                    # changes its label and path; a RETIRED row (its folder
+                    # removed) is ADOPTED by whichever connected folder lists
+                    # the same bytes — new owner, reference, label and path,
+                    # available again. Two connected folders sharing bytes keep
+                    # the first owner: a different file with identical bytes
+                    # must not flap a live row.
                     " ON CONFLICT ON CONSTRAINT uq_media_dedup DO UPDATE"
-                    "   SET category = EXCLUDED.category,"
-                    "       folder_path = EXCLUDED.folder_path"
-                    # Only the SAME file moving is followed: a different file
-                    # with identical bytes in another folder (or another source)
-                    # shares the row by content hash and must not flap it. The
-                    # two conditions are parenthesised so the same-file guard
-                    # binds both columns.
-                    " WHERE (media_items.category IS DISTINCT FROM EXCLUDED.category"
-                    "     OR media_items.folder_path IS DISTINCT FROM EXCLUDED.folder_path)"
-                    "   AND media_items.source_id = EXCLUDED.source_id"
-                    "   AND media_items.provider_file_ref = EXCLUDED.provider_file_ref"
+                    "   SET source_id = EXCLUDED.source_id,"
+                    "       provider_file_ref = EXCLUDED.provider_file_ref,"
+                    "       file_name = EXCLUDED.file_name,"
+                    "       mime_type = COALESCE(EXCLUDED.mime_type, media_items.mime_type),"
+                    "       category = EXCLUDED.category,"
+                    "       folder_path = EXCLUDED.folder_path,"
+                    # Only a retired row comes back through adoption; an
+                    # `unsupported` row moving within its folder stays as it is.
+                    "       state = CASE WHEN media_items.state = 'removed'"
+                    "                    THEN 'available' ELSE media_items.state END"
+                    # A retired row is adopted by whichever CONNECTED folder
+                    # lists its bytes — including its own, should it find one
+                    # retired under itself (a re-pick's revive lost a race).
+                    # A removed folder's carrier never lands its page (the
+                    # cursor CAS above fails once the source is paused), so
+                    # no guard on the source is needed here.
+                    " WHERE media_items.state = 'removed'"
+                    "    OR (media_items.source_id = EXCLUDED.source_id"
+                    "        AND media_items.provider_file_ref = EXCLUDED.provider_file_ref"
+                    "        AND (media_items.category IS DISTINCT FROM EXCLUDED.category"
+                    "             OR media_items.folder_path IS DISTINCT FROM EXCLUDED.folder_path))"
                     " RETURNING (xmax = 0) AS inserted"
                 ),
                 {
@@ -521,7 +610,9 @@ async def _run_sync(deps, job, *, reason) -> str:
                     "ref": item["ref"],
                 },
             )
-            kept += sum(1 for (inserted,) in result.all() if inserted)
+            outcomes = [inserted for (inserted,) in result.all()]
+            kept += sum(1 for inserted in outcomes if inserted)
+            refreshed += sum(1 for inserted in outcomes if not inserted)
         if checkpoint_incomplete(new_checkpoint):
             # More pages: chain the next chunk and do NOT re-arm — the chain
             # is the carrier. The serialized key orders it after this job.
@@ -558,13 +649,14 @@ async def _run_sync(deps, job, *, reason) -> str:
             )
         await s.commit()
     logger.info(
-        "sync %s: source %s reason=%s walk=%s kept=%d skipped_kind=%d chained=%s"
-        " folders_seen=%s truncated=%s",
+        "sync %s: source %s reason=%s walk=%s kept=%d refreshed=%d skipped_kind=%d"
+        " chained=%s folders_seen=%s truncated=%s",
         job["id"],
         source_id,
         reason,
         walk,
         kept,
+        refreshed,
         skipped_kind,
         checkpoint_incomplete(new_checkpoint),
         (new_checkpoint or {}).get("seen", 0),

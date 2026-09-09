@@ -674,7 +674,17 @@ name as a label. A ratio of 0 is Off (synced, never posted); a connected folder 
 automatic (`category_mix.weights`: it posts in proportion to its files, the automatic folders together
 never more than the smallest explicit weight on the final split). Connected folders are disjoint:
 `POST /workspaces/{ws}/sources` refuses a pick inside, or containing, a connected folder
-(`source_nested`, read through the grant's `folder_ancestors`). Connected folders are meant to be **disjoint**: a folder inside a connected
+(`source_nested`, read through the grant's `folder_ancestors`).
+
+**Amendment (owner ruling 2026-09-09 — media follows the connected folder):** the `media_items` row is
+the ITEM — posting history and locks hang off it — and is never deleted. Removing a folder RETIRES its
+rows (`state = 'removed'`: out of the library, never drawn); picking the folder again revives them with
+the source; a connected folder that lists the same bytes ADOPTS a retired row through the sync's upsert
+(new `source_id`, `provider_file_ref`, label and path, `available` again) — the same item, revived with
+its new folder. Two connected folders that share bytes keep the first owner (`uq_media_dedup` is per
+workspace by content hash). Analytics read an item's CURRENT folder: a post made while the file lived
+under one folder is counted under the folder it lives in now, by design — the item, not the path, is what
+was posted. Connected folders are meant to be **disjoint**: a folder inside a connected
 folder is already synced by its parent, and the next increment refuses such a pick (`source_nested`);
 until then two overlapping sources share rows by content hash, attributed to whichever listed first.
 

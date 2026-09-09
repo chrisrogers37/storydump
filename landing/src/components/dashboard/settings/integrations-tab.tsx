@@ -669,9 +669,12 @@ export function IntegrationsTab({
               </ul>
             )}
             <p className="text-xs text-muted-foreground">
-              Removing a folder stops syncing it; what was already synced stays.
-              Disconnecting Google Drive pauses every folder and revokes access
-              here, and asks Google to revoke it on their side.
+              Removing a folder stops syncing it and takes its media out of the
+              library; its posting history stays, and the media comes back if
+              you connect the folder again — or if another connected folder
+              holds the same files. Disconnecting Google Drive pauses every
+              folder and revokes access here, and asks Google to revoke it on
+              their side.
             </p>
           </div>
         </CardContent>
