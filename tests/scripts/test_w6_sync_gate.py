@@ -1643,3 +1643,32 @@ class TestMediaFollowsTheConnectedFolder:
         assert root_only["state"] == "removed" and root_only["source_id"] == str(
             chain["src"]
         ), "what no connected folder lists stays retired under the removed one"
+
+    @pytest.mark.asyncio
+    async def test_a_connected_folders_walk_revives_its_own_row_found_retired(
+        self, lane_db, sync_conn
+    ):
+        """A row retired under a CONNECTED folder is an anomaly (a reconcile
+        racing a re-pick); the folder's own walk heals it, even when the file
+        is otherwise unchanged (adversarial review)."""
+        chain = seed_workspace_chain(sync_conn, "w6-selfheal")
+        first = _media_rows(sync_conn, chain["ws"])[0]
+        with sync_conn.cursor() as cur:
+            cur.execute("SET app.actor_kind = 'migration'")
+            cur.execute(
+                "UPDATE media_items SET state = 'removed' WHERE content_hash = %s",
+                (first["hash"],),
+            )
+        sync_conn.commit()
+        _arm_source(sync_conn, chain["src"])
+        _tick(sync_conn)
+        unchanged = _item(first["ref"], h=first["hash"])
+        unchanged["category"], unchanged["folder_path"] = (
+            first["category"],
+            first["path"],
+        )
+        wl, claimed = await _run_once_w6(lane_db, ScriptedDrive([([unchanged], None)]))
+        assert claimed is True
+        rows = _media_rows(sync_conn, chain["ws"])
+        assert len(rows) == 1 and rows[0]["state"] == "available"
+        assert rows[0]["source_id"] == str(chain["src"])

@@ -400,8 +400,10 @@ class TestAReconnectRearmsEveryFolder:
 class TestAWalkRetiresWhatARemovedFolderStillOwns:
     """A folder removed before 2026-09-09 kept its media `available`; the
     walk that follows retires it first so it can be adopted (review of the
-    media-follows-the-folder PR). Tenant-scoped; only paused AND removed
-    sources; only available rows."""
+    media-follows-the-folder PR). Tenant-scoped; removed sources only (the
+    product's marker, not the state); only available rows; the sources read
+    FOR UPDATE so a re-pick in flight serialises rather than being retired
+    from a stale snapshot."""
 
     async def test_the_statement_is_scoped_to_removed_folders_of_the_workspace(
         self,
@@ -412,14 +414,13 @@ class TestAWalkRetiresWhatARemovedFolderStillOwns:
             == 4554
         )
         ((sql, params),) = ex.calls
-        assert sql.lstrip().startswith("UPDATE media_items m SET state = 'removed'")
-        assert (
-            "m.workspace_id = :ws" in sql and "s.workspace_id = m.workspace_id" in sql
-        )
-        assert "m.state = 'available'" in sql and "s.state = 'paused'" in sql
+        assert "UPDATE media_items m SET state = 'removed'" in sql
+        assert "s.workspace_id = :ws" in sql and "m.workspace_id = :ws" in sql
+        assert "m.state = 'available'" in sql and "FOR UPDATE" in sql
         assert "(s.config->>'removed')::boolean" in sql, (
             "a disconnected-but-not-removed folder's rows are not touched"
         )
+        assert "s.state" not in sql, "the marker is the definition, not the state"
         assert params == {"ws": WS}
 
 

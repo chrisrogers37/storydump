@@ -180,21 +180,30 @@ async def retire_media_of_removed_folders(session, *, workspace_id: str) -> int:
     source and left its media ``available``, so a folder removed before that
     rule still owns live rows — and adoption (`_run_sync`'s upsert) takes
     only a RETIRED row, so a connected subfolder listing the same bytes would
-    sync to nothing. Every walk starts by calling this, whichever way it was
-    started (a pick, Sync Now, the schedule, a reconnect), so the walk that
-    follows can adopt. A no-op once the invariant holds; touches only rows
-    whose source is ``paused`` AND marked removed, so a connected folder's
-    rows — and a disconnected-but-not-removed folder's — are never touched.
-    A migration cannot carry it: the tenancy lane refuses ``UPDATE`` there
-    by design. Returns the rows retired.
+    sync to nothing. A walk that is MINTED starts by calling this, whichever
+    way it was started (a pick, Sync Now, the schedule, a reconnect); a sync
+    that joins a walk already in flight does not, that walk reconciled when
+    it began. A no-op once the invariant holds. "Removed" is the product's
+    own definition (`workspaces.CONNECTED_FLAG_SQL` — the marker, not the
+    state), so a connected folder's rows, and a disconnected-but-not-removed
+    folder's, are never touched. A migration cannot carry it: the tenancy
+    lane refuses ``UPDATE`` there by design. Returns the rows retired.
+
+    The removed sources are read FOR UPDATE: a re-pick of one of them
+    (`rearm_after_connect`) updates that same row, so the two serialise on
+    it and this statement sees the folder as it is when it runs, not as it
+    was a snapshot ago — retiring a folder someone has just connected, whose
+    own walk could then never bring the rows back (both review lenses).
     """
     result = await session.execute(
         text(
-            "UPDATE media_items m SET state = 'removed'"
-            "  FROM media_sources s"
-            " WHERE m.workspace_id = :ws AND s.workspace_id = m.workspace_id"
-            "   AND s.id = m.source_id AND m.state = 'available'"
-            "   AND s.state = 'paused' AND " + CONNECTED_FLAG_SQL
+            "WITH removed AS ("
+            "  SELECT s.id FROM media_sources s"
+            "   WHERE s.workspace_id = :ws AND " + CONNECTED_FLAG_SQL + "   FOR UPDATE)"
+            " UPDATE media_items m SET state = 'removed'"
+            "   FROM removed"
+            "  WHERE m.workspace_id = :ws AND m.source_id = removed.id"
+            "    AND m.state = 'available'"
         ),
         {"ws": str(workspace_id)},
     )
@@ -410,9 +419,10 @@ async def _run_sync(deps, job, *, reason) -> str:
         minted = True
     walk = checkpoint["walk"]
     if minted:
-        # A walk STARTS by reconciling: whatever a folder removed before the
-        # 2026-09-09 rule still owns is retired, so this walk can adopt it.
-        # Own transaction, before the door; a no-op once the invariant holds.
+        # A MINTED walk starts by reconciling: whatever a folder removed
+        # before the 2026-09-09 rule still owns is retired, so this walk can
+        # adopt it. Own transaction, before the door; a no-op once the
+        # invariant holds.
         async with factory() as s:
             retired = await retire_media_of_removed_folders(
                 s, workspace_id=workspace_id
@@ -568,11 +578,13 @@ async def _run_sync(deps, job, *, reason) -> str:
                     # `unsupported` row moving within its folder stays as it is.
                     "       state = CASE WHEN media_items.state = 'removed'"
                     "                    THEN 'available' ELSE media_items.state END"
-                    # Adoption is by ANOTHER connected folder: a source never
-                    # adopts its own retired rows (a re-pick revives them, and
-                    # the removed source's in-flight carrier is fenced above).
-                    " WHERE (media_items.state = 'removed'"
-                    "        AND media_items.source_id <> EXCLUDED.source_id)"
+                    # A retired row is adopted by whichever CONNECTED folder
+                    # lists its bytes — including its own, should it find one
+                    # retired under itself (a re-pick's revive lost a race).
+                    # A removed folder's carrier never lands its page (the
+                    # cursor CAS above fails once the source is paused), so
+                    # no guard on the source is needed here.
+                    " WHERE media_items.state = 'removed'"
                     "    OR (media_items.source_id = EXCLUDED.source_id"
                     "        AND media_items.provider_file_ref = EXCLUDED.provider_file_ref"
                     "        AND (media_items.category IS DISTINCT FROM EXCLUDED.category"

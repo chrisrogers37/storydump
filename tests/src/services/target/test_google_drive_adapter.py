@@ -1003,11 +1003,11 @@ class TestTheWalkGoesToAnyDepth:
 
         return _adapter(handler), calls
 
-    async def _walk(self, adapter, checkpoint=None, limit=30):
+    async def _walk(self, adapter, checkpoint=None, limit=30, config=CONFIG):
         seen, cursors = [], []
         for _ in range(limit):
             items, checkpoint = await adapter.list_changes(
-                CONFIG, checkpoint, source_id=SRC, workspace_id=WS
+                config, checkpoint, source_id=SRC, workspace_id=WS
             )
             cursors.append(checkpoint)
             seen.extend(
@@ -1016,6 +1016,24 @@ class TestTheWalkGoesToAnyDepth:
             if not checkpoint_incomplete(checkpoint):
                 return seen, cursors
         raise AssertionError("the walk did not complete")
+
+    @pytest.mark.asyncio
+    async def test_files_directly_in_the_connected_folder_carry_its_own_name(self):
+        """The connected folder's picked name labels its root files; a
+        subfolder's files are labelled by the subfolder as before; a folder
+        picked without a name labels its root files with nothing."""
+        adapter, calls = self._tree(
+            tree={self.ROOT: [("OLD", "old")]},
+            files={self.ROOT: [_file("r1")], "OLD": [_file("o1")]},
+        )
+        seen, _ = await self._walk(adapter, config={**CONFIG, "folder_name": "memes"})
+        assert {(ref, cat) for ref, cat, _ in seen} == {("r1", "memes"), ("o1", "old")}
+        adapter, calls = self._tree(
+            tree={self.ROOT: [("OLD", "old")]},
+            files={self.ROOT: [_file("r1")], "OLD": [_file("o1")]},
+        )
+        seen, _ = await self._walk(adapter, config={**CONFIG, "folder_name": "  "})
+        assert {(ref, cat) for ref, cat, _ in seen} == {("r1", None), ("o1", "old")}
 
     @pytest.mark.asyncio
     async def test_files_at_any_depth_carry_their_top_level_folder_and_their_path(self):
