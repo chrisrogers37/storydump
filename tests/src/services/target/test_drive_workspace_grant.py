@@ -388,9 +388,13 @@ class TestAReconnectRearmsEveryFolder:
             await media_sync.rearm_after_connect(ex, workspace_id=WS, source_id=SRC)
             == 1
         )
-        ((sql, params),) = ex.calls
+        (sql, params), (media_sql, media_params) = ex.calls
         assert "id = :s" in sql and params == {"s": SRC, "ws": WS}
         assert "config = config - 'removed'" in sql, "a pick clears the removal marker"
+        # Its media comes back with it (owner ruling 2026-09-09).
+        assert "UPDATE media_items SET state = 'available'" in media_sql
+        assert "state = 'removed'" in media_sql and "workspace_id = :ws" in media_sql
+        assert media_params == {"s": SRC, "ws": WS}
 
 
 class TestTheWorkspaceStatusProjection:
@@ -429,11 +433,19 @@ class TestRemovingAFolderPausesIt:
             await provisioning.pause_media_source(ex, workspace_id=WS, source_id=SRC)
             is True
         )
-        ((sql, params),) = ex.calls
+        (sql, params), (media_sql, media_params) = ex.calls
         assert sql.lstrip().upper().startswith("UPDATE media_sources".upper())
         assert "state = 'paused'" in sql and "DELETE" not in sql.upper()
         assert '"removed": true' in sql, "a removal is marked, so a reconnect skips it"
         assert "workspace_id = :ws" in sql and params == {"s": SRC, "ws": WS}
+        # The folder's media retires with it — an UPDATE too, never a DELETE
+        # (owner ruling 2026-09-09: the row is the item, history hangs off it).
+        assert media_sql.lstrip().upper().startswith("UPDATE media_items".upper())
+        assert "state = 'removed'" in media_sql and "DELETE" not in media_sql.upper()
+        assert "workspace_id = :ws" in media_sql and media_params == {
+            "s": SRC,
+            "ws": WS,
+        }
 
     async def test_a_source_that_is_not_here_is_false(self):
         assert (

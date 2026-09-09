@@ -106,7 +106,11 @@ describe("deriveSettings keeps the unsourced fields unsourced", () => {
     // Sourced-but-unset is still not a default. `posts_per_day: null` means
     // the workspace has no schedule set, which the screen must show as absent
     // rather than as some number.
-    const v = deriveSettings({ ...CONFIG, posts_per_day: null, caption_style: null }, [], STATS);
+    const v = deriveSettings(
+      { ...CONFIG, posts_per_day: null, caption_style: null },
+      [],
+      STATS,
+    );
     expect(v.posts_per_day).toBeNull();
     expect(v.caption_style).toBeNull();
   });
@@ -124,20 +128,31 @@ describe("deriveSettings keeps the unsourced fields unsourced", () => {
   });
 
   it("a folder without a grant is NOT connected — and is still reported as a source", () => {
-    const ungranted = deriveSettings(CONFIG, [DRIVE], STATS, { status: "none", connected_at: null });
+    const ungranted = deriveSettings(CONFIG, [DRIVE], STATS, {
+      status: "none",
+      connected_at: null,
+    });
     expect(ungranted.gdrive_connected).toBe(false);
     expect(ungranted.media_source_state).toBe("active");
   });
 
   it("an erroring folder under a live grant is still connected", () => {
-    const erroring = deriveSettings(CONFIG, [{ ...DRIVE, state: "error" }], STATS, GRANT);
+    const erroring = deriveSettings(
+      CONFIG,
+      [{ ...DRIVE, state: "error" }],
+      STATS,
+      GRANT,
+    );
     expect(erroring.gdrive_connected).toBe(true);
     expect(erroring.media_source_state).toBe("error");
   });
 
   it("expired and revoked are not connected — they are reconnect-needed", () => {
     for (const status of ["expired", "revoked"] as const) {
-      const v = deriveSettings(CONFIG, [DRIVE], STATS, { status, connected_at: null });
+      const v = deriveSettings(CONFIG, [DRIVE], STATS, {
+        status,
+        connected_at: null,
+      });
       expect(v.gdrive_connected, status).toBe(false);
     }
   });
@@ -148,7 +163,7 @@ describe("deriveSettings keeps the unsourced fields unsourced", () => {
     expect(none.media_source_state).toBeNull();
   });
 
-  it("counts media across every state, not just the available ones", () => {
-    expect(deriveSettings(CONFIG, [], STATS).media_count).toBe(15);
+  it("counts the available media only — a removed folder's rows are out of the library", () => {
+    expect(deriveSettings(CONFIG, [], STATS).media_count).toBe(12);
   });
 });

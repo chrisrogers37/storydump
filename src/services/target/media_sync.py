@@ -160,6 +160,15 @@ async def rearm_after_connect(
             ),
             {"s": str(source_id), "ws": str(workspace_id)},
         )
+        # Its media comes back with it (owner ruling 2026-09-09): the rows
+        # Remove retired are available again before the walk even starts.
+        await session.execute(
+            text(
+                "UPDATE media_items SET state = 'available'"
+                " WHERE workspace_id = :ws AND source_id = :s AND state = 'removed'"
+            ),
+            {"s": str(source_id), "ws": str(workspace_id)},
+        )
     return int(result.rowcount or 0)
 
 
@@ -484,22 +493,29 @@ async def _run_sync(deps, job, *, reason) -> str:
                     " provider_file_ref, category, folder_path)"
                     " VALUES (:ws, :src, :hash, :name, :kind, :mime, :ref,"
                     "  :category, :folder_path)"
-                    # A file that MOVED between folders changes its label and
-                    # path on the next walk; nothing else about a known row is
-                    # touched (the dedup is per workspace by content hash,
-                    # `uq_media_dedup`).
+                    # The row is the ITEM (owner ruling 2026-09-09): the dedup
+                    # is per workspace by content hash (`uq_media_dedup`), and
+                    # posting history and locks hang off the row, so it is
+                    # never re-created. A file that MOVED within its folder
+                    # changes its label and path; a RETIRED row (its folder
+                    # removed) is ADOPTED by whichever connected folder lists
+                    # the same bytes — new owner, reference, label and path,
+                    # available again. Two connected folders sharing bytes keep
+                    # the first owner: a different file with identical bytes
+                    # must not flap a live row.
                     " ON CONFLICT ON CONSTRAINT uq_media_dedup DO UPDATE"
-                    "   SET category = EXCLUDED.category,"
-                    "       folder_path = EXCLUDED.folder_path"
-                    # Only the SAME file moving is followed: a different file
-                    # with identical bytes in another folder (or another source)
-                    # shares the row by content hash and must not flap it. The
-                    # two conditions are parenthesised so the same-file guard
-                    # binds both columns.
-                    " WHERE (media_items.category IS DISTINCT FROM EXCLUDED.category"
-                    "     OR media_items.folder_path IS DISTINCT FROM EXCLUDED.folder_path)"
-                    "   AND media_items.source_id = EXCLUDED.source_id"
-                    "   AND media_items.provider_file_ref = EXCLUDED.provider_file_ref"
+                    "   SET source_id = EXCLUDED.source_id,"
+                    "       provider_file_ref = EXCLUDED.provider_file_ref,"
+                    "       file_name = EXCLUDED.file_name,"
+                    "       mime_type = COALESCE(EXCLUDED.mime_type, media_items.mime_type),"
+                    "       category = EXCLUDED.category,"
+                    "       folder_path = EXCLUDED.folder_path,"
+                    "       state = 'available'"
+                    " WHERE media_items.state = 'removed'"
+                    "    OR (media_items.source_id = EXCLUDED.source_id"
+                    "        AND media_items.provider_file_ref = EXCLUDED.provider_file_ref"
+                    "        AND (media_items.category IS DISTINCT FROM EXCLUDED.category"
+                    "             OR media_items.folder_path IS DISTINCT FROM EXCLUDED.folder_path))"
                     " RETURNING (xmax = 0) AS inserted"
                 ),
                 {

@@ -20,7 +20,7 @@ from pathlib import Path
 
 import psycopg2
 import pytest
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from src.services.target.commands import CommandRefused
 from src.services.target.work_loop import WorkerConfig
@@ -1422,3 +1422,137 @@ class TestAChunkCarriesOneWalk:
             "no rows from the dropped carrier"
         )
         assert _jobs(sync_conn, "first_ingest_chunk") == [], "no chunk chained"
+
+
+def _media_rows(conn, ws):
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT content_hash, source_id, state, category, folder_path, provider_file_ref"
+            "  FROM media_items WHERE workspace_id = %s ORDER BY content_hash",
+            (ws,),
+        )
+        return [
+            {
+                "hash": r[0],
+                "source_id": str(r[1]),
+                "state": r[2],
+                "category": r[3],
+                "path": r[4],
+                "ref": r[5],
+            }
+            for r in cur.fetchall()
+        ]
+
+
+def _second_source(conn, ws, name):
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO media_sources (workspace_id, provider, config)"
+            " VALUES (%s, 'gdrive', %s) RETURNING id",
+            (
+                ws,
+                json.dumps(
+                    {"v": 1, "folder_ref": uuid.uuid4().hex[:12], "folder_name": name}
+                ),
+            ),
+        )
+        sid = str(cur.fetchone()[0])
+    conn.commit()
+    return sid
+
+
+async def _in_session(lane_db, fn):
+    engine = create_async_engine(_async_url(lane_db))
+    try:
+        maker = async_sessionmaker(engine, expire_on_commit=False)
+        async with maker() as session:
+            async with session.begin():
+                return await fn(session)
+    finally:
+        await engine.dispose()
+
+
+class TestMediaFollowsTheConnectedFolder:
+    """Owner ruling 2026-09-09: the media row is the ENTITY (posting history
+    and locks hang off it), never deleted. Removing a folder retires its media
+    (`state = 'removed'`: out of the library, never drawn); picking the folder
+    again revives it; and a connected folder that lists the same bytes ADOPTS
+    the row — the same item, revived, with its new folder, label and path.
+    Two connected folders that share bytes keep the first owner, as before."""
+
+    @pytest.mark.asyncio
+    async def test_removing_a_folder_retires_its_media_and_a_re_pick_revives_it(
+        self, lane_db, sync_conn
+    ):
+        from src.services.target import media_sync as ms, provisioning
+
+        chain = seed_workspace_chain(sync_conn, "w6-retire")
+        assert _media_rows(sync_conn, chain["ws"])[0]["state"] == "available"
+
+        async def remove(session):
+            return await provisioning.pause_media_source(
+                session, workspace_id=chain["ws"], source_id=chain["src"]
+            )
+
+        assert await _in_session(lane_db, remove) is True
+        assert {r["state"] for r in _media_rows(sync_conn, chain["ws"])} == {"removed"}
+
+        async def repick(session):
+            return await ms.rearm_after_connect(
+                session, workspace_id=chain["ws"], source_id=chain["src"]
+            )
+
+        assert await _in_session(lane_db, repick) == 1
+        assert {r["state"] for r in _media_rows(sync_conn, chain["ws"])} == {
+            "available"
+        }
+
+    @pytest.mark.asyncio
+    async def test_a_connected_folder_that_lists_the_same_bytes_adopts_a_retired_row(
+        self, lane_db, sync_conn
+    ):
+        from src.services.target import provisioning
+
+        chain = seed_workspace_chain(sync_conn, "w6-adopt")
+        parent_rows = _media_rows(sync_conn, chain["ws"])
+        assert len(parent_rows) == 1 and parent_rows[0]["source_id"] == str(
+            chain["src"]
+        )
+
+        async def remove(session):
+            return await provisioning.pause_media_source(
+                session, workspace_id=chain["ws"], source_id=chain["src"]
+            )
+
+        await _in_session(lane_db, remove)
+        child = _second_source(sync_conn, chain["ws"], "memes")
+        _arm_source(sync_conn, child)
+        _tick(sync_conn)
+        same_bytes = _item("memes-copy", h=parent_rows[0]["hash"])
+        same_bytes["category"], same_bytes["folder_path"] = "memes", "memes/2026"
+        wl, claimed = await _run_once_w6(lane_db, ScriptedDrive([([same_bytes], None)]))
+        assert claimed is True
+        rows = _media_rows(sync_conn, chain["ws"])
+        assert len(rows) == 1, "the same item, not a second row"
+        assert rows[0]["source_id"] == child and rows[0]["state"] == "available"
+        assert rows[0]["category"] == "memes" and rows[0]["path"] == "memes/2026"
+        assert rows[0]["ref"] == "memes-copy", (
+            "the new folder's reference, so its walk follows the file"
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_same_bytes_in_two_connected_folders_stay_with_the_first(
+        self, lane_db, sync_conn
+    ):
+        chain = seed_workspace_chain(sync_conn, "w6-twoowners")
+        first = _media_rows(sync_conn, chain["ws"])[0]
+        other = _second_source(sync_conn, chain["ws"], "merch")
+        _arm_source(sync_conn, other)
+        _tick(sync_conn)
+        dup = _item("dup", h=first["hash"])
+        dup["category"], dup["folder_path"] = "merch", "merch"
+        wl, claimed = await _run_once_w6(lane_db, ScriptedDrive([([dup], None)]))
+        assert claimed is True
+        rows = _media_rows(sync_conn, chain["ws"])
+        assert len(rows) == 1 and rows[0]["source_id"] == str(chain["src"])
+        assert rows[0]["ref"] == first["ref"], "a connected owner keeps its file"
