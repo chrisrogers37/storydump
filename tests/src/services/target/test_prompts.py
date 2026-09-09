@@ -299,3 +299,14 @@ class TestTheOutcomeLine:
     )
     def test_every_state_after_awaiting_has_a_word(self, state):
         assert prompts.OUTCOME_WORDS[state]
+
+    def test_a_zone_postgres_accepts_but_the_iana_database_does_not_degrades_to_utc(
+        self,
+    ):
+        from datetime import datetime, timezone
+
+        at = datetime(2026, 9, 9, 18, 14, tzinfo=timezone.utc)
+        assert prompts.stamp(at, "PST") == "2026-09-09 18:14 UTC"
+        assert prompts.outcome_line("skipped", by=None, at=at, tz="UTC+5").endswith(
+            " UTC"
+        )

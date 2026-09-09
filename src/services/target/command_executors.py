@@ -193,12 +193,17 @@ async def _settle(
     state = found["state"] or intent["state"]
     at = found["at"] or _utcnow()
     line = prompts.outcome_line(state, by=found["by"], at=at, tz=_tz(intent))
-    await _supersede_everywhere(
-        session,
-        workspace_id=command.workspace_id,
-        intent_id=str(intent["id"]),
-        outcome_text=line,
-    )
+    if state in intent_ledger.TERMINAL_STATES:
+        # A stale card heals on first touch — with its FINAL line. A card in a
+        # transit state (`approved`, `publishing`, `review_required`) keeps
+        # its buttons and answers; the settled-card sweep writes the terminal
+        # line when the intent ends (review of #1271).
+        await _supersede_everywhere(
+            session,
+            workspace_id=command.workspace_id,
+            intent_id=str(intent["id"]),
+            outcome_text=line,
+        )
     return CommandResult(
         "answered",
         {

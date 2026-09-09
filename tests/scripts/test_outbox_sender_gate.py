@@ -1262,7 +1262,9 @@ class TestTheSenderCommitsBeforeItSpeaks:
         async def slow_transport(row):
             in_flight.set()
             await release.wait()
-            return "tg-late"
+            from src.channels.telegram_transport import SendReceipt
+
+            return SendReceipt("tg-late", sent_as="media")
 
         engine, factory = self._factory(outbox_db)
         poller = OutboxPoller(
@@ -1304,11 +1306,51 @@ class TestTheSenderCommitsBeforeItSpeaks:
         assert _state(outbox_db, outbox_id)[0] == "superseded"
         rows = _owner_exec(
             outbox_db,
-            "SELECT payload->>'supersedes_ref' FROM channel_outbox"
-            " WHERE binding_id = %s AND kind = 'prompt_supersede'",
+            "SELECT payload->>'supersedes_ref', payload->>'sent_as',"
+            "       payload->>'outcome_text' FROM channel_outbox"
+            " WHERE binding_id = %s AND kind = 'prompt_supersede'"
+            "   AND payload->>'supersedes_ref' = 'tg-late'",
             (binding,),
             fetch=True,
         )
-        assert ("tg-late",) in rows, (
-            "the sender must queue the edit for the ref only it received"
+        assert rows == [("tg-late", "media", "⏭️ Skipped by Ada · now")], (
+            "the sender must queue the edit for the ref only it received, with"
+            " how the card went out and the line the supersede carried"
         )
+
+    @pytest.mark.asyncio
+    async def test_an_idle_poller_spends_no_pacing_budget(self, outbox_db):
+        """Empty ticks debit nothing: a silent chat keeps its whole window for
+        the card that arrives (structural review of #1271)."""
+        from src.services.target.outbox import OutboxPoller
+
+        binding = _new_binding(outbox_db)
+        now = _now()
+
+        async def never(row):  # pragma: no cover — nothing to send
+            raise AssertionError("nothing is pending")
+
+        engine, factory = self._factory(outbox_db)
+        poller = OutboxPoller(
+            _tenant_session_factory(outbox_db, factory),
+            binding_id=binding,
+            transport=never,
+            clock=lambda: now,
+            interval_seconds=0.05,
+            chat_limit=CHAT_LIMIT,
+            chat_window_seconds=CHAT_WINDOW_S,
+            global_limit=GLOBAL_LIMIT,
+            global_window_seconds=GLOBAL_WINDOW_S,
+        )
+        try:
+            for _ in range(20):
+                assert await poller.tick() is None
+        finally:
+            await engine.dispose()
+        spent = _owner_exec(
+            outbox_db,
+            "SELECT count(*) FROM rate_counters WHERE scope = 'tg_chat' AND key = %s",
+            (binding,),
+            fetch=True,
+        )[0][0]
+        assert spent == 0 and poller.consecutive_failures == 0

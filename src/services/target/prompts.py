@@ -37,16 +37,19 @@ seeded in `055`; nothing drives it.
 
 from __future__ import annotations
 
+import logging
 import re
 
 from datetime import datetime
 from typing import Optional
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import text
 
 from src.services.target import intent_ledger, outbox
 from src.services.target.callback_tokens import ACTIONS, token as _token
+
+logger = logging.getLogger(__name__)
 
 INSTAGRAM_DEEPLINK_URL = "https://www.instagram.com/"
 
@@ -76,8 +79,15 @@ OUTCOME_WORDS = {
 
 def stamp(at: datetime, tz: str) -> str:
     """`%Y-%m-%d %H:%M <tz>` in the WORKSPACE's timezone — the slot line and
-    the outcome line share this one spelling."""
-    return f"{at.astimezone(ZoneInfo(tz)).strftime('%Y-%m-%d %H:%M')} {tz}"
+    the outcome line share this one spelling. A zone Postgres accepted
+    (`fn_safe_tz`: `PST`, `UTC+5`) that the IANA database does not know
+    degrades to UTC, as the door does — one workspace's zone must never fail
+    a tap or a sweep (adversarial review of #1271)."""
+    try:
+        zone = ZoneInfo(tz)
+    except (ZoneInfoNotFoundError, ValueError):
+        zone, tz = ZoneInfo("UTC"), "UTC"
+    return f"{at.astimezone(zone).strftime('%Y-%m-%d %H:%M')} {tz}"
 
 
 def outcome_line(state: str, *, by: Optional[str], at: datetime, tz: str) -> str:
@@ -238,15 +248,22 @@ async def sweep_settled_cards(session, *, limit: int = 50) -> int:
         (
             await session.execute(
                 text(
-                    "SELECT DISTINCT o.intent_id, o.workspace_id, i.state,"
-                    "       i.entered_state_at, w.tz"
+                    # Active bindings only: a revoked group's cards cannot be
+                    # edited (the bot is gone) and would otherwise be
+                    # re-selected every beat, starving the sweep's LIMIT.
+                    "SELECT o.intent_id, o.workspace_id, o.binding_id, i.state,"
+                    "       i.entered_state_at, w.tz, min(o.created_at) AS since"
                     "  FROM channel_outbox o"
+                    "  JOIN channel_bindings b ON b.id = o.binding_id AND b.state = 'active'"
                     "  JOIN post_intents i ON i.id = o.intent_id"
                     "  JOIN workspaces w ON w.id = i.workspace_id"
                     " WHERE o.kind = 'approval_prompt'"
                     "   AND o.state IN ('pending', 'sending', 'sent', 'ambiguous')"
                     "   AND i.state IN ('posted','skipped','rejected','expired',"
                     "                   'failed','cancelled')"
+                    " GROUP BY o.intent_id, o.workspace_id, o.binding_id, i.state,"
+                    "          i.entered_state_at, w.tz"
+                    " ORDER BY since"
                     " LIMIT :lim"
                 ),
                 {"lim": int(limit)},
@@ -255,32 +272,46 @@ async def sweep_settled_cards(session, *, limit: int = 50) -> int:
         .mappings()
         .all()
     )
+    healed = 0
     for row in rows:
-        settled = await intent_ledger.settlement(
-            session,
-            workspace_id=str(row["workspace_id"]),
-            intent_id=str(row["intent_id"]),
-        )
-        by = None
-        if settled.get("by_user_id"):
-            from src.services.target import identity  # noqa: PLC0415 — cycle
+        # One row's fault (a zone, a lost binding) must not fail the reaper's
+        # transaction for every workspace: a savepoint per row, and on.
+        try:
+            async with session.begin_nested():
+                settled = await intent_ledger.settlement(
+                    session,
+                    workspace_id=str(row["workspace_id"]),
+                    intent_id=str(row["intent_id"]),
+                )
+                by = None
+                if settled.get("by_user_id"):
+                    from src.services.target import identity  # noqa: PLC0415 — cycle
 
-            by = await identity.display_name_for(session, user_id=settled["by_user_id"])
-        line = outcome_line(
-            str(row["state"]),
-            by=by,
-            at=settled.get("at") or row["entered_state_at"],
-            tz=str(row["tz"] or "UTC"),
-        )
-        for binding_id in await push_bindings(session, str(row["workspace_id"])):
-            await outbox.supersede_all(
-                session,
-                workspace_id=str(row["workspace_id"]),
-                binding_id=binding_id,
-                intent_id=str(row["intent_id"]),
-                outcome_text=line,
+                    by = await identity.display_name_for(
+                        session, user_id=settled["by_user_id"]
+                    )
+                line = outcome_line(
+                    str(row["state"]),
+                    by=by,
+                    at=settled.get("at") or row["entered_state_at"],
+                    tz=str(row["tz"] or "UTC"),
+                )
+                await outbox.supersede_all(
+                    session,
+                    workspace_id=str(row["workspace_id"]),
+                    binding_id=str(row["binding_id"]),
+                    intent_id=str(row["intent_id"]),
+                    outcome_text=line,
+                )
+        except Exception:  # noqa: BLE001 — isolated, logged, the sweep goes on
+            logger.exception(
+                "settled-card sweep: intent %s binding %s skipped",
+                row["intent_id"],
+                row["binding_id"],
             )
-    return len(rows)
+            continue
+        healed += 1
+    return healed
 
 
 async def sweep_due_prompts(session, *, limit: int = 50) -> dict:

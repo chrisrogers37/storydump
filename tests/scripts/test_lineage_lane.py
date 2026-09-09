@@ -350,6 +350,9 @@ class TestTheBoundaryIsDerivedAndLoud:
             # 071: category_post_case_mix.source_id — the mix keyed on the connected
             # folder (07 §17, owner ruling 2026-09-08: sources are the groups).
             "071_case_mix_by_source.sql",
+            # 072: ix_outbox_intent — the outbox rows of one intent, for the tap's
+            # supersede (07 §18, phase 1 of the 2026-09-09 tap plan).
+            "072_outbox_intent_index.sql",
         ], (
             f"the target lineage is {above}. If you are landing the next F.2"
             " increment, add it here — deliberately, and at the end: arm (b)"

@@ -149,6 +149,9 @@ class SendReceipt(str):
 
 _NOT_MODIFIED = "message is not modified"
 _EMPTY_KEYBOARD = {"inline_keyboard": []}
+#: The tap's answer and the immediate strip are worthless late: one attempt,
+#: two seconds, and the route moves on (phase 1 step 4 — the plan's 2 s).
+_FAST = EgressPolicy(timeout_class="fast", total_budget_s=2.0, max_attempts=1)
 
 
 def _message_id(ref: str):
@@ -251,7 +254,7 @@ class TelegramTransport:
         raise TelegramSendError(f"{method}: {code} {description}")
 
     async def answer_callback(
-        self, callback_query_id: str, text: str, *, show_alert: bool = False
+        self, callback_query_id: str, text: str, show_alert: bool = False
     ) -> bool:
         """`answerCallbackQuery` — the tap's toast (or alert). Best effort by
         contract: it is the client's spinner, worthless late and harmless lost,
@@ -264,6 +267,7 @@ class TelegramTransport:
                     "text": text,
                     "show_alert": bool(show_alert),
                 },
+                policy=_FAST,
             )
         except Exception as exc:  # noqa: BLE001 — best effort, by contract
             logger.warning(
@@ -305,9 +309,28 @@ class TelegramTransport:
         )
 
     async def strip_keyboard(self, chat_id: str, message_ref: str) -> bool:
-        """The tapped card loses its buttons at once (unpaced, best effort):
-        the ref is the callback's own message, so the known-ref rule holds."""
-        return await self.edit_reply_markup(chat_id, message_ref, _EMPTY_KEYBOARD)
+        """The tapped card loses its buttons at once (unpaced, best effort,
+        on the fast budget): the ref is the callback's own message, so the
+        known-ref rule holds."""
+        try:
+            await self._call(
+                "editMessageReplyMarkup",
+                {
+                    "chat_id": chat_id,
+                    "message_id": _message_id(message_ref),
+                    "reply_markup": _EMPTY_KEYBOARD,
+                },
+                policy=_FAST,
+            )
+        except TelegramRefused as exc:
+            if _NOT_MODIFIED in str(exc):
+                return True
+            logger.warning("strip_keyboard failed: %s", self._redact(str(exc)))
+            return False
+        except Exception as exc:  # noqa: BLE001 — best effort, by contract
+            logger.warning("strip_keyboard failed: %s", self._redact(str(exc)))
+            return False
+        return True
 
     async def edit_caption(self, chat_id: str, message_ref: str, caption: str) -> bool:
         return await self._edit_quietly(

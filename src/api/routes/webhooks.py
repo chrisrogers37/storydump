@@ -208,6 +208,7 @@ async def telegram_webhook(request: Request) -> dict[str, str]:
         except DeliveryReplayed:
             # Acknowledged WITHOUT re-execution — the two obligations L.8 names.
             logger.info("telegram webhook: replay of update_id=%s", update_id)
+            await _toast_replayed_tap(runtime, payload)
             return {"status": "replayed"}
         except AdmissionConflict:
             # Never swallowed as a replay: same key, different content.
@@ -231,6 +232,26 @@ async def telegram_webhook(request: Request) -> dict[str, str]:
     return {"status": "admitted"}
 
 
+async def _toast_replayed_tap(runtime: IngressRuntime, payload: dict) -> None:
+    """A redelivered tap (Telegram retried while the first delivery's answer
+    was on its way) is a fresh query whose spinner is still turning: say so,
+    best effort, without touching the database."""
+    cq = payload.get("callback_query")
+    if (
+        not isinstance(cq, dict)
+        or cq.get("id") is None
+        or runtime.answer_callback is None
+    ):
+        return
+    try:
+        await runtime.answer_callback(str(cq["id"]), "Got it — already handled.", False)
+    except Exception:  # noqa: BLE001 — best effort
+        logger.warning(
+            "telegram webhook: replayed tap not answered (update_id=%s)",
+            payload.get("update_id"),
+        )
+
+
 async def _answer_tap(
     runtime: IngressRuntime, payload: dict, result: Any, metrics: Optional[TapMetrics]
 ) -> None:
@@ -252,7 +273,7 @@ async def _answer_tap(
         if answered is False and metrics is not None:
             metrics.answer_failed += 1
     if (
-        result.outcome == "executed"
+        result.outcome in ("executed", "answered")
         and runtime.strip_keyboard is not None
         and result.chat_ref
         and result.message_ref
@@ -284,7 +305,7 @@ async def _acknowledge(
     callback query. Refusals of a `/start` carry no reply by construction
     (`StartResult` enforces it), so a prober still learns nothing; a dispatch
     that returned nothing at all is left silent."""
-    if getattr(result, "callback_query_id", None) is not None:
+    if hasattr(result, "answer_text"):  # a TapResult — counted even unanswerable
         await _answer_tap(runtime, payload, result, metrics)
         return
     if runtime.reply is None:

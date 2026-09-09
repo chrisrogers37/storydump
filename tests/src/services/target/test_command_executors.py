@@ -140,6 +140,14 @@ class TestAnAlreadyDecidedCardAnswers:
         (ws, intent, outcome) = world["supersedes"][0]
         assert (ws, intent) == ("ws", "i1") and "Posted" in outcome
 
+    async def test_a_card_in_transit_answers_without_touching_its_buttons(self, world):
+        """`approved`/`publishing`/`review_required` are not final: the card
+        keeps its buttons (a tap answers) and the settled-card sweep writes the
+        terminal line when the intent ends."""
+        world["row"]["state"] = "publishing"
+        result = await command_executors.skip(_Session(), _cmd("skip"))
+        assert result.outcome == "answered" and world["supersedes"] == []
+
     async def test_the_operator_edge_is_not_reachable_from_a_members_tap(self, world):
         """`review_required → approved` is seeded as the operator's edge; a
         member's `approve` must answer, not take it."""

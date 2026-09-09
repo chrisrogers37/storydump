@@ -36,14 +36,17 @@ Fact 1 removes concurrent senders; fact 2 fences the one case fact 1 cannot see
 — a partitioned predecessor whose lease has expired but whose process is still
 running. Its `sending → sent` finds the row no longer `sending` and refuses.
 
-**And the write is bound to the job's own fence.** `deliver` marks the row
-inside the CALLER's transaction and never commits; the caller commits it
-together with `finalize_job`, whose token CAS raises `JobFenced` for a stale
-owner (`02` §5's "the domain transaction and job finalization commit
-together"). So a stale sender's outbox write rolls back with its failed
-finalization. That co-location is a service discipline rather than a database
-one, which is exactly the shape #883 warns about — so the gate proves it by
-running a stale sender against a live one, not by asserting it here.
+**And the production sender commits per checkpoint (2026-09-09, the tap
+plan's phase 1).** `OutboxPoller.tick` runs pace-and-claim in one committed
+transaction, speaks to the provider with none open, and settles in another —
+`02:1254`'s rule that a transaction never spans a provider call, and what keeps
+the fleet-wide `tg_global` rate row and the claimed row unlocked across an
+upload (#1260). The guarantee against a stale or dead sender is therefore NOT
+a co-located commit: it is `recover_stranded` (a `sending` row seen by the
+lease holder belongs to a predecessor → `ambiguous`, per-kind policy) plus the
+`_leave_sending` CAS. `deliver` remains the single-transaction composition of
+the same two halves for callers that hold their own transaction — the gate
+pins its never-commits contract by running a stale sender against a live one.
 
 **No migration.** Adding a send token to the outbox would be a second lease
 token for one delivery, and `02` §6 gives the sender job execution state and
@@ -432,13 +435,18 @@ async def supersede_all(
     live = (
         await session.execute(
             text(
-                "UPDATE channel_outbox SET state = 'superseded'"
+                # The superseded row itself keeps the line it was superseded
+                # with: a sender whose in-flight row this takes reads it back
+                # to edit the card only it holds the ref of.
+                "UPDATE channel_outbox SET state = 'superseded',"
+                "   payload = CASE WHEN CAST(:o AS text) IS NULL THEN payload"
+                "             ELSE payload || jsonb_build_object('outcome_text', CAST(:o AS text)) END"
                 " WHERE workspace_id = :ws AND binding_id = :b AND intent_id = :i"
                 "   AND kind IN ('approval_prompt', 'invitation')"
                 "   AND state IN ('pending', 'sending', 'sent', 'ambiguous')"
                 " RETURNING external_message_ref, payload"
             ),
-            {"ws": workspace_id, "b": binding_id, "i": intent_id},
+            {"ws": workspace_id, "b": binding_id, "i": intent_id, "o": outcome_text},
         )
     ).fetchall()
 
@@ -496,17 +504,16 @@ async def deliver(
     takes the outbox write with it (`02` §5). A `deliver` that committed on its
     own would put the send-state authority outside the fence that protects it.
 
-    Order is recover → pace → claim → send. Recovery first is load-bearing: a
+    Order is recover → claim → pace → send. Recovery first is load-bearing: a
     predecessor's stranded row is older work than anything pending, and
     resolving it may put a row back in the queue this same call then takes.
 
-    **Pacing before the claim is a preference, not a guard, and saying so is
-    the point.** Correctness there comes from the transaction — a paced call
-    raises before committing, so the caller's rollback un-claims anything it
-    took. Measured: moving the claim above the pacing check leaves the whole
-    gate green. What the order buys is a cheaper and clearer deferral (no
-    write, no attempts bump) rather than a different outcome, and a docstring
-    that called it a guard would be dressing a preference as a mechanism.
+    **The claim precedes the pacing (2026-09-09) so an EMPTY queue debits
+    nothing** — an idle poller ticking every 2 s would otherwise spend a
+    chat's whole window on silence. Correctness of the paced case comes from
+    the transaction: a paced call raises before committing, so the caller's
+    rollback un-claims the row it took (the gate proves a paced row stays
+    pending). The order is a preference for the idle case, never the guard.
 
     *transport* is injected and channel-neutral: it takes the payload and
     returns an external ref, or raises to signal a lost response. The floor is
@@ -550,6 +557,16 @@ async def pace_and_claim(
     for outbox_id in stranded:
         await resolve_ambiguous(session, outbox_id=outbox_id)
 
+    # Claim FIRST, then pace: nothing pending means nothing debited, so an
+    # idle poller never spends the chat's (or the fleet's) window on empty
+    # ticks — at the 2 s cadence that would burn a 20/min chat budget in 40 s
+    # of silence and defer the card that then arrives (review of #1271). A
+    # paced claim raises, and the caller's rollback un-claims the row — the
+    # order was always a preference, never the guard (see `deliver`).
+    row = await claim_next(session, binding_id=binding_id)
+    if row is None:
+        return None
+
     for scope, key, limit, window in (
         ("tg_chat", binding_id, chat_limit, chat_window_seconds),
         ("tg_global", "", global_limit, global_window_seconds),
@@ -567,7 +584,7 @@ async def pace_and_claim(
                 " stays pending and the next poll takes it"
             )
 
-    return await claim_next(session, binding_id=binding_id)
+    return row
 
 
 async def settle(session, row: dict, *, receipt=None, error=None) -> dict:
@@ -601,17 +618,36 @@ async def settle(session, row: dict, *, receipt=None, error=None) -> dict:
     return {**row, "state": "sent", "external_message_ref": str(receipt)}
 
 
-async def _edit_sent_card(session, row: dict, ref: str, *, force: bool) -> bool:
+async def _edit_sent_card(session, row: dict, receipt, *, force: bool) -> bool:
     """R6 after a send: re-read the intent an `approval_prompt` card is for;
     if it has moved past `awaiting_approval` since the claim (a tap, the web
     queue, the reaper), the card just sent must not keep live buttons — queue
-    the supersede for the ref we just received. *force* is the fenced case
-    (the row was superseded in flight), where the edit is owed regardless.
-    Returns whether an edit was queued."""
+    the supersede for the ref we just received. *force* is the fenced case:
+    the row left `sending` under us. Only a row that was SUPERSEDED (a tap or
+    a cancellation retired the card in flight) is owed the edit, with the line
+    that supersede carried; a row a successor moved to `ambiguous`
+    (`recover_stranded`, a partition) is the successor's to resend and is left
+    alone. *receipt* is the `SendReceipt` (its `sent_as` decides caption vs
+    text). Returns whether an edit was queued."""
     if row.get("kind") != "approval_prompt" or not row.get("intent_id"):
         return False
     from src.services.target import identity, intent_ledger, prompts  # noqa: PLC0415 — cycle
 
+    ref = str(receipt)
+    carried = None
+    if force:
+        current = (
+            await session.execute(
+                text(
+                    "SELECT state, payload->>'outcome_text' FROM channel_outbox"
+                    " WHERE id = :i AND workspace_id = :ws"
+                ),
+                {"i": row["id"], "ws": str(row["workspace_id"])},
+            )
+        ).first()
+        if current is None or current[0] != "superseded":
+            return False
+        carried = current[1]
     found = await intent_ledger.settlement(
         session, workspace_id=str(row["workspace_id"]), intent_id=str(row["intent_id"])
     )
@@ -627,8 +663,12 @@ async def _edit_sent_card(session, row: dict, ref: str, *, force: bool) -> bool:
         )
     ).first()
     tz = str(tz_row[0]) if tz_row and tz_row[0] else "UTC"
-    outcome = None
-    if state not in ("scheduled", "prompt_pending", "awaiting_approval"):
+    outcome = carried
+    if outcome is None and state not in (
+        "scheduled",
+        "prompt_pending",
+        "awaiting_approval",
+    ):
         by = (
             await identity.display_name_for(session, user_id=found["by_user_id"])
             if found.get("by_user_id")
@@ -642,7 +682,7 @@ async def _edit_sent_card(session, row: dict, ref: str, *, force: bool) -> bool:
     payload = row.get("payload") or {}
     if isinstance(payload, str):
         payload = json.loads(payload)
-    sent_as = getattr(ref, "sent_as", None) or payload.get("sent_as")
+    sent_as = getattr(receipt, "sent_as", None) or payload.get("sent_as")
     await enqueue(
         session,
         workspace_id=str(row["workspace_id"]),
@@ -758,13 +798,15 @@ class OutboxPoller:
                     result = {
                         **row,
                         "state": "superseded",
-                        "external_message_ref": receipt,
+                        "external_message_ref": None
+                        if receipt is None
+                        else str(receipt),
                     }
                     if receipt is not None:
-                        await _edit_sent_card(session, row, str(receipt), force=True)
+                        await _edit_sent_card(session, row, receipt, force=True)
                 else:
                     if result["state"] == "sent":
-                        await _edit_sent_card(session, row, str(receipt), force=False)
+                        await _edit_sent_card(session, row, receipt, force=False)
                 await session.commit()
         except Exception as exc:  # noqa: BLE001 — the counter IS the report
             self.consecutive_failures += 1

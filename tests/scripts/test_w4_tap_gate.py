@@ -434,3 +434,53 @@ class TestCardsEndInEveryTerminalState:
         assert len(lines) == 2 and all(
             "⌛ Expired — slot passed" in line for line in lines
         )
+
+    def test_a_revoked_bindings_cards_do_not_starve_the_sweep(self, world):
+        """A revoked group's cards cannot be edited and are not selected; the
+        second beat finds nothing left to heal (structural review of #1271)."""
+        from sqlalchemy.ext.asyncio import async_sessionmaker
+
+        from src.services.target import prompts, unit_of_work
+
+        i = _intent(world, "revoked-1", state="awaiting_approval")
+        ((revoked,),) = _write(
+            world,
+            "INSERT INTO channel_bindings (workspace_id, channel, external_ref, state)"
+            " VALUES (%s, 'telegram_group', '-1003', 'revoked') RETURNING id",
+            (world["ws"],),
+            fetch=True,
+        )
+        _write(
+            world,
+            "INSERT INTO channel_outbox (workspace_id, binding_id, kind, intent_id,"
+            " payload, state, external_message_ref)"
+            ' VALUES (%s, %s, \'approval_prompt\', %s, \'{"v": 2, "text": "old"}\','
+            " 'sent', '30001')",
+            (world["ws"], revoked, i["id"]),
+        )
+        _write(
+            world, "UPDATE post_intents SET state = 'expired' WHERE id = %s", (i["id"],)
+        )
+
+        async def sweep():
+            engine = create_async_engine(
+                asyncpg_url(world["ingress"]), poolclass=NullPool
+            )
+            try:
+                maker = async_sessionmaker(engine, expire_on_commit=False)
+                async with maker() as session:
+                    await unit_of_work.apply_gucs(
+                        session, tenant_id=world["ws"], actor_kind="system"
+                    )
+                    healed = await prompts.sweep_settled_cards(session, limit=50)
+                    await session.commit()
+                    return healed
+            finally:
+                await engine.dispose()
+
+        first = asyncio.run(sweep())
+        assert first >= 2  # the two active groups' cards of this intent
+        states = _card_states(world, i["id"])
+        assert states["30001"] == "sent", "the revoked group's card is left alone"
+        assert all(v == "superseded" for r, v in states.items() if r != "30001")
+        assert asyncio.run(sweep()) == 0, "nothing left to heal — no starvation"

@@ -32,7 +32,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 
 from src.exceptions.tenancy import TenantResolutionError
 from src.services.target import (
@@ -329,6 +330,12 @@ class TelegramDispatcher:
                 actor_user_id=str(user_id),
                 channel="telegram",
             )
+            # A tap waits on another tap's row lock for at most this long;
+            # past it the database refuses, the route answers 5xx and Telegram
+            # redelivers — read-then-decide makes the retry safe, and no
+            # convoy can hold the ingress pool hostage (review of #1271).
+            if hasattr(conn, "execute"):
+                await conn.execute(text("SET LOCAL lock_timeout = '2s'"))
             command = Command(
                 kind=ACTION_TO_COMMAND[tap.action],
                 workspace_id=tenant.workspace_id,
@@ -337,14 +344,24 @@ class TelegramDispatcher:
                 args={"intent_id": tap.intent_id},
             )
             try:
-                result = await commands.execute(conn, command)
+                # A savepoint: a refusal the database raised mid-executor
+                # (the guard's last line; `mark_posted`'s debit CTE) must not
+                # leave the admission's transaction aborted — the route's
+                # COMMIT would silently become a ROLLBACK and the delivery
+                # would be lost with a 200 (structural review of #1271).
+                begin_nested = getattr(conn, "begin_nested", None)
+                if callable(begin_nested):
+                    async with begin_nested():
+                        result = await commands.execute(conn, command)
+                else:
+                    result = await commands.execute(conn, command)
             except TenantResolutionError as exc:
                 return done(exc.reason)
             except CommandRefused as exc:
                 return done(exc.reason)
             outcome = "answered" if result.outcome == "answered" else "executed"
             return done(outcome, result=result)
-        except DBAPIError:
+        except SQLAlchemyError:
             raise  # the route's business: a database fault is not a tap outcome
         except Exception:  # noqa: BLE001 — a poisoned update must be a NAMED outcome
             logger.exception(
