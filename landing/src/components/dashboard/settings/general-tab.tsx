@@ -236,6 +236,12 @@ export function GeneralTab({
   const [tz, setTz] = useState(settings.tz ?? "UTC");
   const [savingSchedule, setSavingSchedule] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // A successful save says so. The card re-reads the workspace after a write
+  // (`router.refresh()`), which leaves the boxes showing exactly what was
+  // typed — indistinguishable from a save that never happened. The mix card
+  // already confirms; the owner could not tell whether the schedule had
+  // caught (2026-09-09).
+  const [notice, setNotice] = useState<string | null>(null);
 
   /**
    * The switch positions, which move optimistically and are put back if the
@@ -272,6 +278,7 @@ export function GeneralTab({
    */
   async function saveName() {
     setError(null);
+    setNotice(null);
     setSavingName(true);
     const result = await submitRenameWorkspace(workspaceId, name);
     setSavingName(false);
@@ -280,6 +287,7 @@ export function GeneralTab({
       setError(settingsRefusalCopy(result.error, result.status));
       return;
     }
+    setNotice("Workspace name saved.");
     // Re-read: the name is rendered in the header and the workspace switcher
     // too, and leaving those showing the old one would be the same half-written
     // screen the schedule save avoids.
@@ -288,6 +296,7 @@ export function GeneralTab({
 
   async function saveSchedule() {
     setError(null);
+    setNotice(null);
     setSavingSchedule(true);
     const result = await submitSettingsChange(workspaceId, {
       posts_per_day: postsPerDay,
@@ -301,6 +310,13 @@ export function GeneralTab({
       setError(settingsRefusalCopy(result.error, result.status));
       return;
     }
+    // The clock advances an account's slot cursor from the slot it already
+    // holds (`fn_next_slot`, under the settings in force at that moment), so a
+    // post already on the clock keeps its time and the new schedule runs on
+    // from there.
+    setNotice(
+      "Schedule saved. A post already on the clock keeps its time; the new hours and cadence take over after it.",
+    );
     // Re-read rather than keep the submitted values on screen. This card is
     // not the only thing rendered from `settings`, and a write that updated
     // only the boxes it was typed into would leave the rest of the tab showing
@@ -316,6 +332,7 @@ export function GeneralTab({
    */
   async function toggle(key: ToggleKey, settingsKey: string, next: boolean) {
     setError(null);
+    setNotice(null);
     setTogglingKey(key);
     const previous = toggleState[key];
     setToggleState((prev) => ({ ...prev, [key]: next }));
@@ -338,6 +355,11 @@ export function GeneralTab({
       {error && (
         <div className="mb-4 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
           {error}
+        </div>
+      )}
+      {notice && (
+        <div className="mb-4 rounded-md border border-green-200 bg-green-50 p-3 text-sm text-green-800">
+          {notice}
         </div>
       )}
 
