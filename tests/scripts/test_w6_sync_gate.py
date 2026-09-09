@@ -1599,41 +1599,47 @@ class TestMediaFollowsTheConnectedFolder:
         assert src["state"] == "paused" and src["sync_checkpoint"] is None
 
     @pytest.mark.asyncio
-    async def test_a_remove_made_before_this_rule_is_reconciled_at_the_next_re_arm(
+    async def test_a_remove_made_before_this_rule_is_reconciled_by_the_next_walk(
         self, lane_db, sync_conn
     ):
         """Production on 2026-09-09: the parent was removed BEFORE Remove
         retired media, so its rows are still `available`; a connected
-        subfolder listing the same bytes would sync to nothing. Any re-arm in
-        the workspace (here Sync Now on the subfolder) retires them first, and
-        the walk that follows adopts them."""
-        from src.services.target import media_sync as ms
-
+        subfolder listing the same bytes would sync to nothing. The next walk
+        in the workspace (here the subfolder's, however it was started —
+        Sync Now, the schedule, a pick) retires them first and adopts what it
+        lists; what it does not list stays retired."""
         chain = seed_workspace_chain(sync_conn, "w6-predeploy")
         first = _media_rows(sync_conn, chain["ws"])[0]
-        # The old Remove: the source is marked, its media is not.
+        # The old Remove: the source is marked, its media is not — plus a
+        # second file only the parent's root ever held.
         with sync_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO media_items (workspace_id, source_id, content_hash,"
+                " file_name, media_kind, provider_file_ref)"
+                " VALUES (%s, %s, 'hash-root-only', 'root.jpg', 'image', 'ref-root')",
+                (chain["ws"], chain["src"]),
+            )
             cur.execute(
                 "UPDATE media_sources SET state = 'paused',"
                 " config = config || '{\"removed\": true}'::jsonb WHERE id = %s",
                 (chain["src"],),
             )
         sync_conn.commit()
-        assert _media_rows(sync_conn, chain["ws"])[0]["state"] == "available"
+        assert {r["state"] for r in _media_rows(sync_conn, chain["ws"])} == {
+            "available"
+        }
         child = _second_source(sync_conn, chain["ws"], "memes")
-
-        async def sync_now(session):
-            return await ms.rearm_after_connect(
-                session, workspace_id=chain["ws"], source_id=child
-            )
-
-        assert await _in_session(lane_db, sync_now) == 1
-        assert {r["state"] for r in _media_rows(sync_conn, chain["ws"])} == {"removed"}
+        _arm_source(sync_conn, child)
         _tick(sync_conn)
         same_file = _item("memes-ref", h=first["hash"])
         same_file["category"], same_file["folder_path"] = "memes", "memes"
         wl, claimed = await _run_once_w6(lane_db, ScriptedDrive([([same_file], None)]))
         assert claimed is True
-        rows = _media_rows(sync_conn, chain["ws"])
-        assert len(rows) == 1 and rows[0]["source_id"] == child
-        assert rows[0]["state"] == "available" and rows[0]["category"] == "memes"
+        rows = {r["hash"]: r for r in _media_rows(sync_conn, chain["ws"])}
+        assert len(rows) == 2
+        adopted, root_only = rows[first["hash"]], rows["hash-root-only"]
+        assert adopted["source_id"] == child and adopted["state"] == "available"
+        assert adopted["category"] == "memes" and adopted["ref"] == "memes-ref"
+        assert root_only["state"] == "removed" and root_only["source_id"] == str(
+            chain["src"]
+        ), "what no connected folder lists stays retired under the removed one"

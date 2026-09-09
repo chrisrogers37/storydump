@@ -133,26 +133,6 @@ async def rearm_after_connect(
     Returns the number of rows moved; 0 means nothing matched, which the
     caller may treat as it likes.
     """
-    # Reconciliation first (review of the media-follows-the-folder PR): a
-    # folder removed BEFORE Remove retired media — every deploy up to
-    # 2026-09-09 — still owns `available` rows, and adoption looks only at
-    # retired ones, so a connected subfolder listing the same bytes would
-    # sync to nothing. Every re-arm (a pick, a re-pick, Sync Now, a
-    # reconnect) retires what is still available under a removed folder of
-    # this workspace, so the walk that follows can adopt it. A no-op once the
-    # invariant holds; runs before the picked source clears its own marker so
-    # a re-pick's revive below still wins. No migration can do this: the
-    # tenancy lane refuses `UPDATE` in a migration by design.
-    await session.execute(
-        text(
-            "UPDATE media_items m SET state = 'removed'"
-            "  FROM media_sources s"
-            " WHERE m.workspace_id = :ws AND s.workspace_id = m.workspace_id"
-            "   AND s.id = m.source_id AND m.state = 'available'"
-            "   AND s.state = 'paused' AND " + CONNECTED_FLAG_SQL
-        ),
-        {"ws": str(workspace_id)},
-    )
     if source_id is None:
         # A folder the admin REMOVED stays removed: `pause_media_source` marks
         # it (`config.removed`), and a reconnect revives only what a dead
@@ -190,6 +170,34 @@ async def rearm_after_connect(
             ),
             {"s": str(source_id), "ws": str(workspace_id)},
         )
+    return int(result.rowcount or 0)
+
+
+async def retire_media_of_removed_folders(session, *, workspace_id: str) -> int:
+    """Retire what is still ``available`` under a REMOVED folder of the workspace.
+
+    Reconciliation, not a lifecycle step. Until 2026-09-09 Remove paused the
+    source and left its media ``available``, so a folder removed before that
+    rule still owns live rows — and adoption (`_run_sync`'s upsert) takes
+    only a RETIRED row, so a connected subfolder listing the same bytes would
+    sync to nothing. Every walk starts by calling this, whichever way it was
+    started (a pick, Sync Now, the schedule, a reconnect), so the walk that
+    follows can adopt. A no-op once the invariant holds; touches only rows
+    whose source is ``paused`` AND marked removed, so a connected folder's
+    rows — and a disconnected-but-not-removed folder's — are never touched.
+    A migration cannot carry it: the tenancy lane refuses ``UPDATE`` there
+    by design. Returns the rows retired.
+    """
+    result = await session.execute(
+        text(
+            "UPDATE media_items m SET state = 'removed'"
+            "  FROM media_sources s"
+            " WHERE m.workspace_id = :ws AND s.workspace_id = m.workspace_id"
+            "   AND s.id = m.source_id AND m.state = 'available'"
+            "   AND s.state = 'paused' AND " + CONNECTED_FLAG_SQL
+        ),
+        {"ws": str(workspace_id)},
+    )
     return int(result.rowcount or 0)
 
 
@@ -338,6 +346,7 @@ async def _run_sync(deps, job, *, reason) -> str:
             "sync %s: source %s is paused — nothing to do", job["id"], source_id
         )
         return "paused"
+    minted = False
     # The STORED checkpoint is the cursor, always: the walk (owner ruling
     # 2026-09-08 — every folder under the connected one, lazily) carries
     # `current` and `queue` beside `page_token`, and the chunk that chains
@@ -398,7 +407,26 @@ async def _run_sync(deps, job, *, reason) -> str:
                 source_id,
             )
         checkpoint = {"v": 2, "walk": uuid.uuid4().hex}
+        minted = True
     walk = checkpoint["walk"]
+    if minted:
+        # A walk STARTS by reconciling: whatever a folder removed before the
+        # 2026-09-09 rule still owns is retired, so this walk can adopt it.
+        # Own transaction, before the door; a no-op once the invariant holds.
+        async with factory() as s:
+            retired = await retire_media_of_removed_folders(
+                s, workspace_id=workspace_id
+            )
+            await s.commit()
+        if retired:
+            logger.warning(
+                "sync %s: retired %d row(s) still available under a removed"
+                " folder of workspace %s before walk %s",
+                job["id"],
+                retired,
+                workspace_id,
+                walk,
+            )
 
     # Phase 2 — the provider door, outside any transaction.
     try:

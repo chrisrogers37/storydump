@@ -374,19 +374,7 @@ class TestAReconnectRearmsEveryFolder:
     ):
         ex = _Exec(rowcount=3)
         assert await media_sync.rearm_after_connect(ex, workspace_id=WS) == 3
-        (reconcile_sql, reconcile_params), (sql, params) = ex.calls
-        # Every re-arm first retires what is still available under a REMOVED
-        # folder of the workspace (a Remove made before Remove retired media).
-        assert reconcile_sql.lstrip().startswith(
-            "UPDATE media_items m SET state = 'removed'"
-        )
-        assert (
-            "m.state = 'available'" in reconcile_sql
-            and "s.state = 'paused'" in reconcile_sql
-        )
-        assert "m.workspace_id = :ws" in reconcile_sql and reconcile_params == {
-            "ws": WS
-        }
+        ((sql, params),) = ex.calls
         assert "SET state = 'active', alerted_at = NULL, next_sync_at = now()" in sql
         assert "provider = 'gdrive'" in sql and "workspace_id = :ws" in sql
         assert "id = :s" not in sql and params == {"ws": WS}
@@ -400,16 +388,39 @@ class TestAReconnectRearmsEveryFolder:
             await media_sync.rearm_after_connect(ex, workspace_id=WS, source_id=SRC)
             == 1
         )
-        (reconcile_sql, _), (sql, params), (media_sql, media_params) = ex.calls
-        assert reconcile_sql.lstrip().startswith(
-            "UPDATE media_items m SET state = 'removed'"
-        )
+        (sql, params), (media_sql, media_params) = ex.calls
         assert "id = :s" in sql and params == {"s": SRC, "ws": WS}
         assert "config = config - 'removed'" in sql, "a pick clears the removal marker"
         # Its media comes back with it (owner ruling 2026-09-09).
         assert "UPDATE media_items SET state = 'available'" in media_sql
         assert "state = 'removed'" in media_sql and "workspace_id = :ws" in media_sql
         assert media_params == {"s": SRC, "ws": WS}
+
+
+class TestAWalkRetiresWhatARemovedFolderStillOwns:
+    """A folder removed before 2026-09-09 kept its media `available`; the
+    walk that follows retires it first so it can be adopted (review of the
+    media-follows-the-folder PR). Tenant-scoped; only paused AND removed
+    sources; only available rows."""
+
+    async def test_the_statement_is_scoped_to_removed_folders_of_the_workspace(
+        self,
+    ):
+        ex = _Exec(rowcount=4554)
+        assert (
+            await media_sync.retire_media_of_removed_folders(ex, workspace_id=WS)
+            == 4554
+        )
+        ((sql, params),) = ex.calls
+        assert sql.lstrip().startswith("UPDATE media_items m SET state = 'removed'")
+        assert (
+            "m.workspace_id = :ws" in sql and "s.workspace_id = m.workspace_id" in sql
+        )
+        assert "m.state = 'available'" in sql and "s.state = 'paused'" in sql
+        assert "(s.config->>'removed')::boolean" in sql, (
+            "a disconnected-but-not-removed folder's rows are not touched"
+        )
+        assert params == {"ws": WS}
 
 
 class TestTheWorkspaceStatusProjection:
