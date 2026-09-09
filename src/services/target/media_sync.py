@@ -50,6 +50,7 @@ from typing import Optional, Any
 from sqlalchemy import text
 
 from src.services.target.drive_adapter import checkpoint_incomplete
+from src.services.target.workspaces import CONNECTED_FLAG_SQL
 
 from src.exceptions.base import StorydumpError
 
@@ -132,6 +133,26 @@ async def rearm_after_connect(
     Returns the number of rows moved; 0 means nothing matched, which the
     caller may treat as it likes.
     """
+    # Reconciliation first (review of the media-follows-the-folder PR): a
+    # folder removed BEFORE Remove retired media — every deploy up to
+    # 2026-09-09 — still owns `available` rows, and adoption looks only at
+    # retired ones, so a connected subfolder listing the same bytes would
+    # sync to nothing. Every re-arm (a pick, a re-pick, Sync Now, a
+    # reconnect) retires what is still available under a removed folder of
+    # this workspace, so the walk that follows can adopt it. A no-op once the
+    # invariant holds; runs before the picked source clears its own marker so
+    # a re-pick's revive below still wins. No migration can do this: the
+    # tenancy lane refuses `UPDATE` in a migration by design.
+    await session.execute(
+        text(
+            "UPDATE media_items m SET state = 'removed'"
+            "  FROM media_sources s"
+            " WHERE m.workspace_id = :ws AND s.workspace_id = m.workspace_id"
+            "   AND s.id = m.source_id AND m.state = 'available'"
+            "   AND s.state = 'paused' AND " + CONNECTED_FLAG_SQL
+        ),
+        {"ws": str(workspace_id)},
+    )
     if source_id is None:
         # A folder the admin REMOVED stays removed: `pause_media_source` marks
         # it (`config.removed`), and a reconnect revives only what a dead
@@ -447,7 +468,7 @@ async def _run_sync(deps, job, *, reason) -> str:
         return "source-error"
 
     # Phase 3 — checkpoint CAS + upsert + chain-or-rearm, one transaction.
-    kept = skipped_kind = 0
+    kept = skipped_kind = refreshed = 0
     async with factory() as s:
         # The cursor advances by compare-and-swap against what THIS carrier
         # read. A re-pick that nulled it, a persistent failure that reset it,
@@ -460,6 +481,11 @@ async def _run_sync(deps, job, *, reason) -> str:
                 text(
                     "UPDATE media_sources SET sync_checkpoint = CAST(:cp AS jsonb)"
                     " WHERE id = :s AND workspace_id = :ws"
+                    # Removed (or disconnected) since Phase 1: the person chose
+                    # that, and this carrier's page must not land — least of
+                    # all onto rows the removal just retired (review of the
+                    # media-follows-the-folder PR).
+                    "   AND state <> 'paused'"
                     "   AND COALESCE(sync_checkpoint, CAST('{}' AS jsonb))"
                     "       = CAST(:old AS jsonb)"
                     " RETURNING id"
@@ -510,8 +536,15 @@ async def _run_sync(deps, job, *, reason) -> str:
                     "       mime_type = COALESCE(EXCLUDED.mime_type, media_items.mime_type),"
                     "       category = EXCLUDED.category,"
                     "       folder_path = EXCLUDED.folder_path,"
-                    "       state = 'available'"
-                    " WHERE media_items.state = 'removed'"
+                    # Only a retired row comes back through adoption; an
+                    # `unsupported` row moving within its folder stays as it is.
+                    "       state = CASE WHEN media_items.state = 'removed'"
+                    "                    THEN 'available' ELSE media_items.state END"
+                    # Adoption is by ANOTHER connected folder: a source never
+                    # adopts its own retired rows (a re-pick revives them, and
+                    # the removed source's in-flight carrier is fenced above).
+                    " WHERE (media_items.state = 'removed'"
+                    "        AND media_items.source_id <> EXCLUDED.source_id)"
                     "    OR (media_items.source_id = EXCLUDED.source_id"
                     "        AND media_items.provider_file_ref = EXCLUDED.provider_file_ref"
                     "        AND (media_items.category IS DISTINCT FROM EXCLUDED.category"
@@ -537,7 +570,9 @@ async def _run_sync(deps, job, *, reason) -> str:
                     "ref": item["ref"],
                 },
             )
-            kept += sum(1 for (inserted,) in result.all() if inserted)
+            outcomes = [inserted for (inserted,) in result.all()]
+            kept += sum(1 for inserted in outcomes if inserted)
+            refreshed += sum(1 for inserted in outcomes if not inserted)
         if checkpoint_incomplete(new_checkpoint):
             # More pages: chain the next chunk and do NOT re-arm — the chain
             # is the carrier. The serialized key orders it after this job.
@@ -574,13 +609,14 @@ async def _run_sync(deps, job, *, reason) -> str:
             )
         await s.commit()
     logger.info(
-        "sync %s: source %s reason=%s walk=%s kept=%d skipped_kind=%d chained=%s"
-        " folders_seen=%s truncated=%s",
+        "sync %s: source %s reason=%s walk=%s kept=%d refreshed=%d skipped_kind=%d"
+        " chained=%s folders_seen=%s truncated=%s",
         job["id"],
         source_id,
         reason,
         walk,
         kept,
+        refreshed,
         skipped_kind,
         checkpoint_incomplete(new_checkpoint),
         (new_checkpoint or {}).get("seen", 0),

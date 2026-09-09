@@ -1556,3 +1556,84 @@ class TestMediaFollowsTheConnectedFolder:
         rows = _media_rows(sync_conn, chain["ws"])
         assert len(rows) == 1 and rows[0]["source_id"] == str(chain["src"])
         assert rows[0]["ref"] == first["ref"], "a connected owner keeps its file"
+
+    @pytest.mark.asyncio
+    async def test_a_remove_landing_mid_walk_keeps_the_rows_retired(
+        self, lane_db, sync_conn
+    ):
+        """The removed folder's own in-flight chunk must not land its page: the
+        cursor CAS is fenced on `state <> 'paused'`, and a source never adopts
+        its own retired rows (review of the media-follows-the-folder PR)."""
+        chain = seed_workspace_chain(sync_conn, "w6-remove-midwalk")
+        _arm_source(sync_conn, chain["src"])
+        _tick(sync_conn)
+        first = _media_rows(sync_conn, chain["ws"])[0]
+
+        def remove_between_phases():
+            with sync_conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE media_sources SET state = 'paused',"
+                    " config = config || '{\"removed\": true}'::jsonb WHERE id = %s",
+                    (chain["src"],),
+                )
+                cur.execute(
+                    "UPDATE media_items SET state = 'removed'"
+                    " WHERE workspace_id = %s AND source_id = %s AND state = 'available'",
+                    (chain["ws"], chain["src"]),
+                )
+            sync_conn.commit()
+
+        same_file = _item(first["ref"], h=first["hash"])
+        same_file["category"], same_file["folder_path"] = "memes", "memes"
+        drive = ScriptedDrive(
+            [([same_file, _item("brand-new")], None)], on_call=remove_between_phases
+        )
+        wl, claimed = await _run_once_w6(lane_db, drive)
+        assert claimed is True and len(drive.calls) == 1
+        rows = _media_rows(sync_conn, chain["ws"])
+        assert {r["state"] for r in rows} == {"removed"}, (
+            "the retired rows stay retired"
+        )
+        assert "brand-new" not in [r["ref"] for r in rows], "the page did not land"
+        src = _source_row(sync_conn, chain["src"])
+        assert src["state"] == "paused" and src["sync_checkpoint"] is None
+
+    @pytest.mark.asyncio
+    async def test_a_remove_made_before_this_rule_is_reconciled_at_the_next_re_arm(
+        self, lane_db, sync_conn
+    ):
+        """Production on 2026-09-09: the parent was removed BEFORE Remove
+        retired media, so its rows are still `available`; a connected
+        subfolder listing the same bytes would sync to nothing. Any re-arm in
+        the workspace (here Sync Now on the subfolder) retires them first, and
+        the walk that follows adopts them."""
+        from src.services.target import media_sync as ms
+
+        chain = seed_workspace_chain(sync_conn, "w6-predeploy")
+        first = _media_rows(sync_conn, chain["ws"])[0]
+        # The old Remove: the source is marked, its media is not.
+        with sync_conn.cursor() as cur:
+            cur.execute(
+                "UPDATE media_sources SET state = 'paused',"
+                " config = config || '{\"removed\": true}'::jsonb WHERE id = %s",
+                (chain["src"],),
+            )
+        sync_conn.commit()
+        assert _media_rows(sync_conn, chain["ws"])[0]["state"] == "available"
+        child = _second_source(sync_conn, chain["ws"], "memes")
+
+        async def sync_now(session):
+            return await ms.rearm_after_connect(
+                session, workspace_id=chain["ws"], source_id=child
+            )
+
+        assert await _in_session(lane_db, sync_now) == 1
+        assert {r["state"] for r in _media_rows(sync_conn, chain["ws"])} == {"removed"}
+        _tick(sync_conn)
+        same_file = _item("memes-ref", h=first["hash"])
+        same_file["category"], same_file["folder_path"] = "memes", "memes"
+        wl, claimed = await _run_once_w6(lane_db, ScriptedDrive([([same_file], None)]))
+        assert claimed is True
+        rows = _media_rows(sync_conn, chain["ws"])
+        assert len(rows) == 1 and rows[0]["source_id"] == child
+        assert rows[0]["state"] == "available" and rows[0]["category"] == "memes"

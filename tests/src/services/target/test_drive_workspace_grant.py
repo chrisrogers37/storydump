@@ -374,7 +374,19 @@ class TestAReconnectRearmsEveryFolder:
     ):
         ex = _Exec(rowcount=3)
         assert await media_sync.rearm_after_connect(ex, workspace_id=WS) == 3
-        ((sql, params),) = ex.calls
+        (reconcile_sql, reconcile_params), (sql, params) = ex.calls
+        # Every re-arm first retires what is still available under a REMOVED
+        # folder of the workspace (a Remove made before Remove retired media).
+        assert reconcile_sql.lstrip().startswith(
+            "UPDATE media_items m SET state = 'removed'"
+        )
+        assert (
+            "m.state = 'available'" in reconcile_sql
+            and "s.state = 'paused'" in reconcile_sql
+        )
+        assert "m.workspace_id = :ws" in reconcile_sql and reconcile_params == {
+            "ws": WS
+        }
         assert "SET state = 'active', alerted_at = NULL, next_sync_at = now()" in sql
         assert "provider = 'gdrive'" in sql and "workspace_id = :ws" in sql
         assert "id = :s" not in sql and params == {"ws": WS}
@@ -388,7 +400,10 @@ class TestAReconnectRearmsEveryFolder:
             await media_sync.rearm_after_connect(ex, workspace_id=WS, source_id=SRC)
             == 1
         )
-        (sql, params), (media_sql, media_params) = ex.calls
+        (reconcile_sql, _), (sql, params), (media_sql, media_params) = ex.calls
+        assert reconcile_sql.lstrip().startswith(
+            "UPDATE media_items m SET state = 'removed'"
+        )
         assert "id = :s" in sql and params == {"s": SRC, "ws": WS}
         assert "config = config - 'removed'" in sql, "a pick clears the removal marker"
         # Its media comes back with it (owner ruling 2026-09-09).
