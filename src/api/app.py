@@ -65,7 +65,7 @@ from src.services.target.commands import CommandNotBuilt, CommandRefused
 from src.services.target.invitations import InvitationRefused
 from src.services.target.category_mix import MixInvalid
 from src.services.target.provisioning import ProvisioningRefused
-from src.services.target import scheduling_health
+from src.services.target import posting_health, scheduling_health
 from src.services.target.unit_of_work import (
     connection_role,
     create_engine,
@@ -529,6 +529,73 @@ def create_app(
             # predating this change reads the payload exactly as before.
             lag = await scheduling_health.scheduling_lag(conn)
             return {**lag, "worker": await scheduling_health.worker_freshness(conn)}
+
+    @app.get("/health/posting")
+    async def posting_health_check():
+        """Did a post actually LAND? (#1268) — a THIRD health surface.
+
+        `/health/scheduling` above reads the clock and the worker. Both stayed
+        true through a sixteen-day silence in which nothing posted: 1936
+        consecutive `healthy` readings, every field of them correct. An intent
+        awaiting approval is not overdue, it is waiting correctly, so the
+        machinery gauge reads healthy because the machinery IS healthy.
+
+        A SEPARATE URL — and the rule is stated here rather than re-argued,
+        because the issue this closes names the next axes (stranded approvals,
+        an empty media pool, an undelivered outbox) and each will ask again.
+
+        **An axis JOINS an existing payload when it can share that poller's
+        single verdict. It gets its OWN surface when it would have to be RANKED
+        against an existing one.**
+
+        Ranking is what masks. `scheduling_monitor.classify` returns
+        `WORKER_DOWN` "FIRST, and above every cursor reading" — correct there,
+        and it means a stalled cursor is unreportable while the worker is down.
+        That is a fair trade for two axes that share a cause. It is not one
+        here: "nothing posted" and "the clock stopped" are the pair that was
+        *observed to disagree for sixteen days*, so whichever lost the ranking
+        would be the one silenced, and this axis exists precisely because the
+        other read healthy.
+
+        The tempting discriminator — "it needs its own verdict, thresholds and
+        state file" — does NOT hold, and is recorded as rejected so it is not
+        reached for again: the worker axis has its own verdict states and two
+        thresholds of its own, and was folded in anyway.
+
+        NOTHING IS RAISED HERE, for the two reasons `/health/scheduling` gives
+        verbatim: an alert whose sending is performed by the system it monitors
+        cannot fire when that system is down, and the app's own notification
+        routing has no writer, so an alert delivered there would vanish.
+
+        Unauthenticated, so it answers in AGGREGATES ONLY — counts and ages,
+        never a workspace, an account, a handle or a permalink.
+
+        503 when the engine is absent: "posting is fine" and "I could not look"
+        must never collapse, which is the whole subject of the issue this
+        closes.
+        """
+        engine = app.state.engine
+        if engine is None:
+            raise HTTPException(
+                status_code=503, detail="target database not configured"
+            )
+        # A DIRECT CONNECTION, not a unit of work, for the reason the route
+        # above records: `UnitOfWork.__init__` refuses a blank tenant at
+        # construction, and this aggregate is estate-wide and has no tenant.
+        # Its cross-tenant reach rests on the owner bypassing RLS (#751), the
+        # same footing and the same door to build when that is closed.
+        async with engine.connect() as conn:
+            posting = await posting_health.posting_freshness(conn)
+            attempts = await posting_health.publish_attempts(conn)
+            # `accounts_active` is CONTEXT for the alert text and never a gate:
+            # a poller excused from speaking by a zero here would excuse an
+            # empty tier forever, which is the first half of the outage this
+            # endpoint exists for. The age beside it is the opposite — an
+            # anchor that can only make the poller speak sooner.
+            dests = await posting_health.destinations(conn)
+            # Every key spelled in the service that computes it, so a rename
+            # cannot leave the route publishing a name nothing produces.
+            return {**posting, **attempts, **dests}
 
     return app
 
