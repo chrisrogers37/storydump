@@ -71,20 +71,26 @@ STORY_WIDTH = 1080
 STORY_HEIGHT = 1920
 #: The blur behind the picture: the legacy tier's value, kept.
 STORY_BLUR = 2000
+#: What Meta accepts for a story, by kind — the derivation's delivered format.
+STORY_FORMATS = {"image": "jpg", "video": "mp4"}
 
 
 def story_transformation(transit_asset_ref: str, *, media_kind: str) -> list[dict]:
-    """How Meta sees the asset: scaled to the story's width and padded to
+    """How Meta sees the asset: scaled to fit the story's frame and padded to
     9:16 over a blurred, filled copy of itself.
 
     An image uses the legacy chain — an UNDERLAY of the same asset filled to
     the frame and blurred, the picture scaled to the width and padded over
-    it (blurred bars only above and below). The asset is `authenticated`, so
-    the layer names it as such and the whole signed URL authorises the layer
-    (Cloudinary: an authenticated layer needs the signed URL, no separate
-    signature). A video takes Cloudinary's own blurred-background padding,
-    which exists for videos.
+    it: blurred bars above and below for a landscape or square picture,
+    left and right for one taller than 9:16 (`c_pad` never crops). The asset
+    is `authenticated`, so the layer names it as such and the whole signed
+    URL authorises the layer (Cloudinary: an authenticated layer needs the
+    signed URL, no separate signature). A video takes Cloudinary's own
+    blurred-background padding — NEW behaviour, not parity: the legacy tier
+    framed images only and sent videos raw.
     """
+    if media_kind not in STORY_FORMATS:
+        raise ValueError(f"unknown media_kind {media_kind!r}")
     if media_kind == "video":
         return [
             {"crop": "limit", "width": STORY_WIDTH, "height": STORY_HEIGHT},
@@ -273,6 +279,11 @@ class TransitStore:
             transformation=story_transformation(
                 transit_asset_ref, media_kind=media_kind
             ),
+            # Meta's story spec: a JPEG image, an MP4/MOV video. The source
+            # may be anything Drive holds (HEIC from a phone, WEBP, WEBM);
+            # the derivation is delivered in the format Meta accepts, and
+            # the signature covers the format too.
+            format=STORY_FORMATS[media_kind],
             sign_url=True,
             type="authenticated",
             resource_type=self._resource_type(media_kind),

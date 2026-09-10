@@ -670,3 +670,37 @@ class TestTheStoryFrame:
         ) in url
         assert "/s--" in url, "signed"
         assert "/image/authenticated/" in url
+
+    def test_the_real_sdk_renders_the_video_chain_as_mp4(self):
+        import cloudinary.utils
+
+        from src.services.target.transit import story_transformation
+
+        ref = f"ws/{WS}/clip1"
+        url, _ = cloudinary.utils.cloudinary_url(
+            ref,
+            transformation=story_transformation(ref, media_kind="video"),
+            format="mp4",
+            sign_url=True,
+            type="authenticated",
+            resource_type="video",
+            secure=True,
+            cloud_name="c",
+            api_key="k",
+            api_secret="s",
+        )
+        assert "/c_limit,h_1920,w_1080/b_blurred:2000:15,c_pad,h_1920,w_1080/" in url
+        assert url.endswith(".mp4") and "/video/authenticated/" in url
+
+    def test_delivery_is_in_the_format_meta_accepts(self):
+        sdk = RecordingSdk()
+        store = _store(sdk)
+        store.delivery_url(f"ws/{WS}/asset1", media_kind="image")
+        store.delivery_url(f"ws/{WS}/clip1", media_kind="video")
+        assert [c["format"] for c in sdk.url_calls] == ["jpg", "mp4"]
+
+    def test_an_unknown_kind_is_refused_before_any_url(self):
+        from src.services.target.transit import story_transformation
+
+        with pytest.raises(ValueError, match="media_kind"):
+            story_transformation("ws/x/y", media_kind="gif")
