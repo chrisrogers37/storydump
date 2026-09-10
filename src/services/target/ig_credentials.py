@@ -47,8 +47,13 @@ _SELECT = (
     "   AND c.ig_account_id = a.id"
     "   AND c.provider = :provider"
     " WHERE a.provider_account_ref = :ref"
-    "   AND a.state <> 'disabled'"
+    # A `moved` row is the tombstone an account leaves behind when it is
+    # re-connected elsewhere (PA-1); its credential is dead by construction.
+    "   AND a.state NOT IN ('disabled', 'moved')"
 )
+#: Active first, freshest first — on BOTH paths, so a workspace holding an
+#: older row for the same ref never wins by table order.
+_ORDER = " ORDER BY (c.state = :usable) DESC, c.expires_at DESC NULLS LAST LIMIT 1"
 
 
 class IgCredentialDead(StorydumpError):
@@ -61,20 +66,15 @@ async def token_for_account(
     """The active Instagram token for the account ``provider_account_ref``
     posts as — in *workspace_id* when given — or :class:`IgCredentialDead`."""
     ref = str(provider_account_ref)
-    params: dict = {"ref": ref, "provider": PROVIDER}
+    params: dict = {"ref": ref, "provider": PROVIDER, "usable": USABLE_STATE}
     if workspace_id is not None:
-        sql = _SELECT + " AND a.workspace_id = :ws LIMIT 1"
+        sql = _SELECT + " AND a.workspace_id = :ws" + _ORDER
         params["ws"] = str(workspace_id)
         uow = unit_of_work(engine, str(workspace_id), actor_kind="system")
         async with uow.begin() as session:
             row = (await session.execute(text(sql), params)).mappings().first()
     else:
-        sql = (
-            _SELECT
-            + " ORDER BY (c.state = :usable) DESC, c.expires_at DESC NULLS LAST"
-            + " LIMIT 1"
-        )
-        params["usable"] = USABLE_STATE
+        sql = _SELECT + _ORDER
         maker = async_sessionmaker(engine, expire_on_commit=False)
         async with maker() as session:
             row = (await session.execute(text(sql), params)).mappings().first()

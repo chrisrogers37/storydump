@@ -88,7 +88,10 @@ class TestTheRead:
         assert "a.workspace_id = :ws" in sql and params["ws"] == WS
         assert "provider_account_ref = :ref" in sql and params["ref"] == REF
         assert "c.provider = :provider" in sql and params["provider"] == "ig_login"
-        assert "a.state <> 'disabled'" in sql
+        assert "a.state NOT IN ('disabled', 'moved')" in sql, "tombstones are skipped"
+        assert "ORDER BY (c.state = :usable) DESC" in sql, (
+            "active first on this path too"
+        )
         assert "updated_at" not in sql, "oauth_credentials carries no such column"
 
     async def test_without_a_workspace_the_read_prefers_an_active_row(self, engine):

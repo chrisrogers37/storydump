@@ -151,6 +151,9 @@ class _Ctx:
         self.job = job
         self.intent = intent
         self.ops = ops
+        #: The typed error a readiness poll met when it answers "unauthorized",
+        #: so the caller can record it on the intent.
+        self.poll_error: Optional[BaseException] = None
 
     @property
     def intent_id(self) -> str:
@@ -756,6 +759,15 @@ async def _ladder(
             return await _retry_or_poison(
                 uow, ctx, backoff_seconds, now_fn, step_back_to="transit_uploaded"
             )
+        if verdict == "unauthorized":
+            return await _retry_or_poison(
+                uow,
+                ctx,
+                backoff_seconds,
+                now_fn,
+                error=_error_of(ctx.poll_error),
+                poison_now=True,
+            )
         if verdict == "pending":
             return await _retry_or_poison(uow, ctx, backoff_seconds, now_fn)
         async with _leased_tx(uow, ctx.job) as session:
@@ -784,6 +796,15 @@ async def _ladder(
         if verdict == "dead":
             return await _retry_or_poison(
                 uow, ctx, backoff_seconds, now_fn, step_back_to="transit_uploaded"
+            )
+        if verdict == "unauthorized":
+            return await _retry_or_poison(
+                uow,
+                ctx,
+                backoff_seconds,
+                now_fn,
+                error=_error_of(ctx.poll_error),
+                poison_now=True,
             )
         if verdict == "pending":
             return await _retry_or_poison(uow, ctx, backoff_seconds, now_fn)
@@ -903,7 +924,12 @@ async def _await_ready(ctx: _Ctx, meta, sleep) -> str:
             )
         except (MetaError, MetaLostResponse) as exc:
             # A poll has no effect to lose: a typed failure here is one more
-            # "not ready yet" rung on the attempts ladder, bounded at a human.
+            # "not ready yet" rung on the attempts ladder, bounded at a human —
+            # except a dead credential, which no rung can mend: it goes to the
+            # human at once, as it does at the effects.
+            if _dead_credential(exc):
+                ctx.poll_error = exc
+                return "unauthorized"
             logger.warning(
                 "publish_pipeline intent %s: readiness poll failed (%s) — pending",
                 ctx.intent_id,

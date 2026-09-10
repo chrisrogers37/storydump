@@ -682,6 +682,74 @@ class TestTheFetchRung:
         assert reason[0] == str(OAUTH_ERROR_CODE) and "connect Instagram" in reason[1]
 
 
+class TestTheReadinessPoll:
+    """A typed failure during the poll is one more pending rung — except a
+    dead credential, which goes to a human at once, as at the effects."""
+
+    def test_a_dead_credential_during_the_poll_lands_on_a_human_at_once(self, pipe_db):
+        from src.services.target.meta_adapter import (
+            OAUTH_ERROR_CODE,
+            MetaRetryableError,
+        )
+
+        class _NoTokenAtPoll(StubMetaAdapter):
+            async def container_status(self, container_id, **kw):
+                raise MetaRetryableError(
+                    code=OAUTH_ERROR_CODE, message="ig_login credential is 'revoked'"
+                )
+
+        intent, ref = _new_intent(
+            pipe_db,
+            state="publishing",
+            publish_step="container_created",
+            transit_ref=f"ws/{pipe_db['ws']}/pre-{uuid.uuid4()}",
+        )
+        _exec(
+            pipe_db,
+            "UPDATE post_intents SET ig_container_id = %s WHERE id = %s",
+            (f"pre-ctr-{uuid.uuid4()}", intent),
+        )
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=1, max_attempts=5)
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, _NoTokenAtPoll())))
+        assert outcome == POISONED
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "review_required"
+        reason = _exec(
+            pipe_db,
+            "SELECT last_error->'error'->>'code', last_error->'error'->>'message'"
+            " FROM post_intents WHERE id = %s",
+            (intent,),
+            fetch=True,
+        )[0]
+        assert reason[0] == str(OAUTH_ERROR_CODE) and "revoked" in reason[1]
+
+    def test_a_lost_answer_during_the_poll_is_one_more_pending_rung(self, pipe_db):
+        from src.services.target.meta_adapter import MetaLostResponse
+
+        class _Flaky(StubMetaAdapter):
+            async def container_status(self, container_id, **kw):
+                raise MetaLostResponse("GET ctr: ReadTimeout")
+
+        intent, ref = _new_intent(
+            pipe_db,
+            state="publishing",
+            publish_step="container_created",
+            transit_ref=f"ws/{pipe_db['ws']}/pre-{uuid.uuid4()}",
+        )
+        _exec(
+            pipe_db,
+            "UPDATE post_intents SET ig_container_id = %s WHERE id = %s",
+            (f"pre-ctr-{uuid.uuid4()}", intent),
+        )
+        job = _leased_job(pipe_db, intent, ref=ref)
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, _Flaky())))
+        assert outcome == RETRY_SCHEDULED
+        row = _intent_row(pipe_db, intent)
+        assert (
+            row["state"] == "publishing" and row["publish_step"] == "container_created"
+        )
+
+
 class TestColdEntryAtEveryCheckpoint:
     """The gate's resume clause, strongest form: an intent LEFT at each
     checkpoint by a death (its transaction committed, the process gone)
