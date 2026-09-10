@@ -329,6 +329,56 @@ def _engine_from_env(env: Mapping[str, str]) -> Optional[AsyncEngine]:
     return create_engine(url)
 
 
+async def _register_webhook(app: FastAPI, env: Mapping[str, str]) -> None:
+    """Register the bot's webhook on this API at startup — idempotent, on
+    every deploy — and cache the report for `/health`. Never raises.
+
+    The API holds the token and the secret already; a human step that must
+    follow every deploy is a step that will be missed (the tap's first blocker
+    was exactly that: a registration asking for `message` updates only).
+    Skipped, with the reason in the report, when the token or the secret is
+    absent, or when `TARGET_TELEGRAM_WEBHOOK_AUTOREGISTER` switches it off.
+    """
+    from src.channels import telegram_webhook_registration as reg
+
+    token = env.get("TARGET_TELEGRAM_BOT_TOKEN")
+    secret = env.get("TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN")
+    if not reg.autoregister_enabled(env.get(reg.AUTOREGISTER_VAR)):
+        app.state.webhook = {"ok": False, "skipped": "autoregister off"}
+        return
+    if not token or not secret:
+        app.state.webhook = {
+            "ok": False,
+            "skipped": "bot token or webhook secret not set",
+        }
+        return
+    try:
+        max_connections = reg.max_connections_from(env.get(reg.MAX_CONNECTIONS_VAR))
+    except reg.BadMaxConnections as exc:
+        app.state.webhook = {"ok": False, "error": str(exc)}
+        logger.error("telegram webhook not registered: %s", exc)
+        return
+    transport = _telegram_transport(env)
+    try:
+        app.state.webhook = await reg.register(
+            transport,
+            url=env.get(reg.URL_VAR) or reg.DEFAULT_WEBHOOK_URL,
+            secret=secret,
+            expected_bot=env.get("TARGET_TELEGRAM_BOT_USERNAME"),
+            max_connections=max_connections,
+        )
+    except Exception as exc:  # noqa: BLE001 — diagnostic; never fails startup
+        app.state.webhook = {"ok": False, "error": type(exc).__name__}
+        logger.warning(
+            "telegram webhook not registered at startup: %s", type(exc).__name__
+        )
+    finally:
+        try:
+            await transport.aclose()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 async def _sample_db_role(app: FastAPI) -> None:
     """Fill `app.state.db_role` once, from the catalog; never raise.
 
@@ -380,15 +430,22 @@ def create_app(
 
     @asynccontextmanager
     async def _lifespan(app_: FastAPI):
-        # The role sample runs as a background task so startup never waits on
-        # the database (see `app.state.db_role` below); a sample still pending
-        # at shutdown is cancelled rather than left to die with the loop.
-        task = asyncio.create_task(_sample_db_role(app_))
+        # The role sample and the webhook registration run as background
+        # tasks so startup never waits on the database or on Telegram (see
+        # `app.state.db_role` / `app.state.webhook` below); a task still
+        # pending at shutdown is cancelled rather than left to die with the loop.
+        tasks = [
+            asyncio.create_task(_sample_db_role(app_)),
+            asyncio.create_task(
+                _register_webhook(app_, os.environ if env is None else env)
+            ),
+        ]
         try:
             yield
         finally:
-            if not task.done():
-                task.cancel()
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
 
     app = FastAPI(
         title="Storydump API",
@@ -409,6 +466,10 @@ def create_app(
     # makes every tenant policy inert, and this field is how the switch to the
     # runtime login is verified after a deploy.
     app.state.db_role = None
+    # The webhook registration report (`_register_webhook`): None until the
+    # startup task has run; then `ok`, what Telegram holds, or why it was
+    # skipped — never the token or the secret.
+    app.state.webhook = None
 
     # The W4 ingress seam: the `/start` door (#1183) and the group join path
     # (#1242, on #854's resolver door `fn_resolve_binding` — `07` §14).
@@ -476,6 +537,8 @@ def create_app(
             "db_role": app.state.db_role,
             # The tap counters (phase 1 of the 2026-09-09 plan, step 12).
             "taps": app.state.tap_metrics.snapshot(),
+            # The webhook this API registered on the bot at startup.
+            "webhook": app.state.webhook,
         }
 
     @app.get("/health/scheduling")

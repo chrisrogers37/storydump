@@ -524,3 +524,112 @@ class TestHealthReportsTheDatabaseRole:
             resp = client.get("/health")
         assert resp.status_code == 200
         assert resp.json()["db_role"] is None
+
+
+class TestTheApiRegistersItsOwnWebhook:
+    """Phase 1 of the 2026-09-09 tap plan, deploy step made automatic: with
+    the bot token and the webhook secret set, startup registers the door on
+    the bot and `/health` reports what Telegram holds — never a secret."""
+
+    def _app_with_bot(self, monkeypatch, env_extra=None):
+        import json as _json
+
+        import httpx
+
+        from src.api import app as app_module
+        from src.channels.telegram_transport import TelegramTransport
+
+        calls = []
+
+        def bot(request):
+            name = str(request.url).rsplit("/", 1)[-1]
+            body = _json.loads(request.content) if request.content else {}
+            calls.append((name, body))
+            if name == "getMe":
+                return httpx.Response(
+                    200,
+                    json={
+                        "ok": True,
+                        "result": {"id": 1, "username": "storydump_app_bot"},
+                    },
+                )
+            if name == "setWebhook":
+                return httpx.Response(200, json={"ok": True, "result": True})
+            if name == "getWebhookInfo":
+                return httpx.Response(
+                    200,
+                    json={
+                        "ok": True,
+                        "result": {
+                            "url": "https://api.storydump.app/webhooks/telegram",
+                            "allowed_updates": ["message", "callback_query"],
+                            "pending_update_count": 0,
+                            "max_connections": 10,
+                        },
+                    },
+                )
+            return httpx.Response(
+                404, json={"ok": False, "error_code": 404, "description": "nope"}
+            )
+
+        def transport(env):
+            token = env.get("TARGET_TELEGRAM_BOT_TOKEN")
+            if not token:
+                return None
+            return TelegramTransport(
+                token, client=httpx.AsyncClient(transport=httpx.MockTransport(bot))
+            )
+
+        monkeypatch.setattr(app_module, "_telegram_transport", transport)
+        env = {
+            "TARGET_TELEGRAM_BOT_TOKEN": "8675309:AAtest",
+            "TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN": "0123456789abcdef0123456789abcdef",
+            "TARGET_TELEGRAM_BOT_USERNAME": "storydump_app_bot",
+            **(env_extra or {}),
+        }
+        return create_app(env=env), calls
+
+    def _wait_for_webhook(self, client, timeout=3.0):
+        import time as _time
+
+        deadline = _time.monotonic() + timeout
+        while _time.monotonic() < deadline:
+            body = client.get("/health").json()
+            if body.get("webhook") is not None:
+                return body["webhook"]
+            _time.sleep(0.05)
+        raise AssertionError("the webhook registration never reported")
+
+    def test_startup_registers_taps_and_the_cap_and_health_reports_it(
+        self, monkeypatch
+    ):
+        from fastapi.testclient import TestClient
+
+        app, calls = self._app_with_bot(monkeypatch)
+        with TestClient(app) as client:
+            report = self._wait_for_webhook(client)
+        assert [c[0] for c in calls] == ["getMe", "setWebhook", "getWebhookInfo"]
+        assert calls[1][1]["allowed_updates"] == ["message", "callback_query"]
+        assert calls[1][1]["max_connections"] == 10
+        assert calls[1][1]["secret_token"] == "0123456789abcdef0123456789abcdef"
+        assert calls[1][1]["drop_pending_updates"] is False
+        assert report["ok"] is True and report["bot"] == "storydump_app_bot"
+        assert report["allowed_updates"] == ["message", "callback_query"]
+        assert "0123456789abcdef" not in str(report) and "AAtest" not in str(report)
+
+    def test_without_a_token_it_is_skipped_and_says_so(self):
+        from fastapi.testclient import TestClient
+
+        with TestClient(create_app(env={})) as client:
+            report = self._wait_for_webhook(client)
+        assert report["ok"] is False and "not set" in report["skipped"]
+
+    def test_the_switch_turns_it_off(self, monkeypatch):
+        from fastapi.testclient import TestClient
+
+        app, calls = self._app_with_bot(
+            monkeypatch, {"TARGET_TELEGRAM_WEBHOOK_AUTOREGISTER": "0"}
+        )
+        with TestClient(app) as client:
+            report = self._wait_for_webhook(client)
+        assert calls == [] and report["skipped"] == "autoregister off"
