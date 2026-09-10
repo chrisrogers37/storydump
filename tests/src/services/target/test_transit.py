@@ -606,16 +606,21 @@ class TestTheStoryFrame:
         from src.services.target.transit import story_transformation
 
         chain = story_transformation(f"ws/{WS}/asset1", media_kind="image")
-        assert chain[0] == {"underlay": f"authenticated:ws:{WS}:asset1"}
-        assert chain[1] == {
+        # The picture is fitted into the frame BEFORE the underlay is laid:
+        # a layer's canvas is the base's size, and a phone photo wider than
+        # 1080 would otherwise hide the underlay (white bars — the legacy
+        # defect).
+        assert chain[0] == {"crop": "limit", "width": 1080, "height": 1920}
+        assert chain[1] == {"underlay": f"authenticated:ws:{WS}:asset1"}
+        assert chain[2] == {
             "crop": "fill",
             "width": 1080,
             "height": 1920,
             "effect": "blur:2000",
         }
-        assert chain[2] == {"flags": "layer_apply"}
-        assert chain[3] == {"crop": "limit", "width": 1080}
-        assert chain[4] == {
+        assert chain[3] == {"flags": "layer_apply"}
+        assert chain[4] == {"crop": "limit", "width": 1080}
+        assert chain[5] == {
             "crop": "pad",
             "width": 1080,
             "height": 1920,
@@ -640,7 +645,7 @@ class TestTheStoryFrame:
         sdk = RecordingSdk()
         _store(sdk).delivery_url(f"ws/{WS}/asset1", media_kind="image")
         call = sdk.url_calls[0]
-        assert call["transformation"][0] == {
+        assert call["transformation"][1] == {
             "underlay": f"authenticated:ws:{WS}:asset1"
         }
         assert call["sign_url"] is True and call["type"] == "authenticated"
@@ -665,8 +670,9 @@ class TestTheStoryFrame:
             api_secret="s",
         )
         assert (
-            f"/u_authenticated:ws:{WS}:asset1/c_fill,e_blur:2000,h_1920,w_1080"
-            "/fl_layer_apply/c_limit,w_1080/c_pad,g_center,h_1920,w_1080/"
+            f"/c_limit,h_1920,w_1080/u_authenticated:ws:{WS}:asset1"
+            "/c_fill,e_blur:2000,h_1920,w_1080/fl_layer_apply/c_limit,w_1080"
+            "/c_pad,g_center,h_1920,w_1080/"
         ) in url
         assert "/s--" in url, "signed"
         assert "/image/authenticated/" in url

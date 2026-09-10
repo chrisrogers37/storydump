@@ -78,7 +78,15 @@ def _transit_from_env(env):
 #: story image, 100 MB for a story video pulled by URL). Distinct from the
 #: Telegram card's caps (`MEDIA_CARD_MAX_BYTES`): a file too large for a
 #: Telegram preview may still be a fine story.
-PUBLISH_MAX_BYTES = {"image": 8 * 1024 * 1024, "video": 100 * 1024 * 1024}
+#: The video cap is Cloudinary's, not Meta's: a story video is framed on the
+#: fly at its delivery URL (`transit.story_transformation`), and Cloudinary
+#: transforms a video synchronously only up to 40 MB on the free plan (100 MB
+#: on paid); above that the URL answers 400 and Meta's fetch can never
+#: succeed. A file over the cap is refused by name at the fetch rung
+#: (`DriveMediaTooLarge` → failed + refund, the reason on the intent) rather
+#: than burning five attempts. Raising it means eager, asynchronous framing
+#: at upload — a follow-up.
+PUBLISH_MAX_BYTES = {"image": 8 * 1024 * 1024, "video": 40 * 1000 * 1000}
 
 
 def _publish_media_fetch(drive):
