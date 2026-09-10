@@ -674,3 +674,47 @@ class TestTheApiRegistersItsOwnWebhook:
         assert registered == [] and report["skipped"].startswith(
             "autoregister switched off"
         )
+
+
+class TestHealthReportsThePoolArithmetic:
+    """Phase 2 step 4: `/health` names the pool's numbers and how many
+    processes serve the ingress, so the `05` inequality can be read off it."""
+
+    def test_without_an_engine_the_pool_is_none_and_workers_default_to_one(self):
+        from fastapi.testclient import TestClient
+
+        body = TestClient(create_app(env={})).get("/health").json()
+        assert body["pool"] is None and body["ingress_workers"] == 1
+
+    def test_web_concurrency_names_the_process_count(self):
+        from fastapi.testclient import TestClient
+
+        body = (
+            TestClient(create_app(env={"WEB_CONCURRENCY": "2"})).get("/health").json()
+        )
+        assert body["ingress_workers"] == 2
+
+    def test_with_an_engine_the_pool_snapshot_is_reported(self, monkeypatch):
+        from fastapi.testclient import TestClient
+
+        from src.api import app as app_module
+        from src.services.target import unit_of_work as uow
+
+        engine = uow.create_engine(
+            "postgresql+asyncpg://u:p@localhost:1/db",
+            pool_timeout=uow.INGRESS_POOL_TIMEOUT_SEAM,
+        )
+        monkeypatch.setattr(app_module, "_engine_from_env", lambda env: engine)
+        try:
+            body = TestClient(create_app(env={})).get("/health").json()
+            assert body["pool"] == {
+                "size": 10,
+                "overflow": 0,
+                "timeout_s": 1.0,
+                "checked_out": 0,
+                "checked_out_peak": 0,
+            }
+        finally:
+            import asyncio
+
+            asyncio.run(engine.dispose())

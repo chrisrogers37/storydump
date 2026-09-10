@@ -40,6 +40,23 @@ def window_start(now: datetime, window_seconds: int) -> datetime:
     return epoch + timedelta(seconds=int(elapsed // window_seconds) * window_seconds)
 
 
+async def count(session, *, scope: str, key: str, window_start: datetime) -> int:
+    """The window's committed count, or 0 — a READ for a check that must not
+    spend (an admission check before the flip, `02` §6 / F12). The debit that
+    follows still goes through :func:`increment`, whose `WHERE rc.count <
+    :limit` is the backstop when two callers race this read."""
+    row = (
+        await session.execute(
+            text(
+                "SELECT count FROM rate_counters"
+                " WHERE scope = :scope AND key = :key AND window_start = :window_start"
+            ),
+            {"scope": scope, "key": key, "window_start": window_start},
+        )
+    ).first()
+    return int(row[0]) if row is not None else 0
+
+
 async def increment(
     session,
     *,

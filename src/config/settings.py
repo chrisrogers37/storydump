@@ -217,6 +217,12 @@ class Settings(BaseSettings):
     # `t.me/<bot>?start=link-…` deep link (`07` §2 `link`). Absent means the
     # link route refuses 503 rather than minting a link to nowhere.
     TARGET_TELEGRAM_BOT_USERNAME: Optional[str] = None
+    # S.2 applied to taps (F12, locked 2026-09-09): commands a workspace may
+    # EXECUTE from Telegram taps per minute, checked before the flip and
+    # debited only for a flip that ran — a repeat tap that is merely answered
+    # with its state spends nothing. 120 = two members each clearing a backlog
+    # at a tap a second (`05`'s revision rule). The web route keeps S.2's 30.
+    TARGET_TAP_ADMISSION_PER_MINUTE: int = 120
 
     # Number of Telegram updates processed concurrently (PTB
     # Application.concurrent_updates). Each concurrent callback runs in its own

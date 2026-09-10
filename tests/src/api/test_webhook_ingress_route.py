@@ -175,7 +175,7 @@ def test_an_unwired_route_NEVER_REACHES_ADMIT(client, armed, monkeypatch):
 def test_a_wired_route_admits_and_dispatches(client, armed, spy):
     r = _post(client, {"update_id": 7, "message": {"text": "hi"}})
     assert r.status_code == 200
-    assert r.json() == {"status": "admitted"}
+    assert r.json()["status"] == "admitted"
     assert len(spy["admit"]) == 1
     assert len(spy["dispatch"]) == 1
 
@@ -290,7 +290,7 @@ def test_a_handled_start_is_acknowledged_in_the_chat_after_commit(
         reply="Your Telegram account is now linked to Storydump.",
     )
     resp = _post(client, START_UPDATE)
-    assert resp.status_code == 200 and resp.json() == {"status": "admitted"}
+    assert resp.status_code == 200 and resp.json()["status"] == "admitted"
     assert replying["replies"] == [
         ("555", "Your Telegram account is now linked to Storydump.", 1)
     ], "sent to the tapping chat, once, and only after the delivery committed"
@@ -318,7 +318,7 @@ def test_a_failed_acknowledgement_does_not_fail_the_delivery(
         reply=exploding_reply,
     )
     resp = _post(client, START_UPDATE)
-    assert resp.status_code == 200 and resp.json() == {"status": "admitted"}
+    assert resp.status_code == 200 and resp.json()["status"] == "admitted"
     assert replying["conn"].commits == 1, "the link stays committed"
 
 
@@ -418,7 +418,7 @@ def test_a_tap_is_answered_and_stripped_through_the_real_transport(
             },
         },
     )
-    assert response.status_code == 200 and response.json() == {"status": "admitted"}
+    assert response.status_code == 200 and response.json()["status"] == "admitted"
     assert conn.commits == 1, "the answer follows the commit"
     assert [c[0] for c in calls] == ["answerCallbackQuery", "editMessageReplyMarkup"]
     assert calls[0][1] == {
@@ -489,3 +489,139 @@ def test_a_replayed_tap_is_toasted_after_the_connection_is_released(
     assert seen["released_at_call"] is True, "the toast must not hold the pool slot"
     assert seen["json"]["callback_query_id"] == "q-again"
     assert conn.commits == 0
+
+
+# --- the boundary (phase 2 of the 2026-09-09 tap plan, step 2) ---------------
+
+
+def _tap_update(update_id=41, *, with_message=True):
+    cq = {
+        "id": "q-41",
+        "from": {"id": 7, "first_name": "Ada"},
+        "data": "v1:skip:5f1b2c3d-0000-4000-8000-000000000001",
+    }
+    if with_message:
+        cq["message"] = {"message_id": 555, "chat": {"id": -100, "type": "supergroup"}}
+    return {"update_id": update_id, "callback_query": cq}
+
+
+class _SaturatedConnect:
+    """`engine.connect()` whose checkout times out: the pool is full."""
+
+    async def __aenter__(self):
+        from sqlalchemy.exc import TimeoutError as PoolTimeout
+
+        raise PoolTimeout("QueuePool limit of size 10 overflow 0 reached")
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+@pytest.fixture
+def saturated(monkeypatch):
+    """A wired runtime whose pool is saturated; records what the route answers."""
+    seen = {"admit": [], "answers": [], "dispatch": []}
+
+    async def fake_admit(conn, **kw):
+        seen["admit"].append(kw)
+
+    async def fake_dispatch(conn, payload):
+        seen["dispatch"].append(payload)
+
+    async def answer(qid, text, alert):
+        seen["answers"].append((qid, text, alert))
+        return True
+
+    monkeypatch.setattr(webhooks, "admit", fake_admit)
+    app.state.tap_metrics = webhooks.TapMetrics()
+    app.state.ingress = webhooks.IngressRuntime(
+        connect=lambda: _SaturatedConnect(),
+        dispatch=fake_dispatch,
+        answer_callback=answer,
+    )
+    return seen
+
+
+class TestTheSaturationBoundary:
+    def test_a_tap_is_answered_busy_and_not_admitted(self, client, armed, saturated):
+        r = _post(client, _tap_update())
+        assert r.status_code == 200
+        assert r.json() == {"status": "refused", "outcome": "busy"}
+        assert saturated["admit"] == [] and saturated["dispatch"] == []
+        assert saturated["answers"] == [("q-41", webhooks.BUSY_TEXT, False)]
+        assert app.state.tap_metrics.snapshot()["taps"] == {"busy": 1}
+
+    def test_a_message_is_refused_503_before_admission(self, client, armed, saturated):
+        r = _post(
+            client, {"update_id": 42, "message": {"text": "/start", "chat": {"id": 1}}}
+        )
+        assert r.status_code == 503
+        assert saturated["admit"] == [] and saturated["answers"] == []
+
+    def test_an_unanswerable_busy_tap_still_consumes_the_delivery(
+        self, client, armed, saturated, monkeypatch
+    ):
+        async def broken(qid, text, alert):
+            raise RuntimeError("telegram down")
+
+        app.state.ingress = webhooks.IngressRuntime(
+            connect=lambda: _SaturatedConnect(),
+            dispatch=app.state.ingress.dispatch,
+            answer_callback=broken,
+        )
+        r = _post(client, _tap_update())
+        assert r.status_code == 200 and r.json()["outcome"] == "busy"
+        assert app.state.tap_metrics.snapshot()["answer_failed"] == 1
+
+
+class TestADatabaseFaultIsA503WithNothingConsumed:
+    def test_a_fault_at_admit_is_503_and_never_committed(
+        self, client, armed, spy, monkeypatch
+    ):
+        from sqlalchemy.exc import OperationalError
+
+        async def failing_admit(conn, **kw):
+            raise OperationalError("INSERT", {}, Exception("connection lost"))
+
+        monkeypatch.setattr(webhooks, "admit", failing_admit)
+        r = _post(client, _tap_update())
+        assert r.status_code == 503
+        assert spy["conn"].commits == 0 and spy["conn"].released is True
+        assert spy["dispatch"] == []
+
+    def test_a_fault_at_commit_is_503(self, client, armed, spy, monkeypatch):
+        from sqlalchemy.exc import OperationalError
+
+        async def failing_commit():
+            raise OperationalError("COMMIT", {}, Exception("connection lost"))
+
+        spy["conn"].commit = failing_commit
+        r = _post(client, _tap_update())
+        assert r.status_code == 503 and spy["conn"].released is True
+
+
+def test_an_admitted_tap_names_its_outcome_in_the_body(client, armed, monkeypatch):
+    seen = FakeConn()
+
+    async def fake_admit(conn, **kw):
+        return {"admitted": True}
+
+    async def dispatch(conn, payload):
+        from src.services.target.telegram_dispatch import TapResult
+
+        return TapResult(
+            outcome="answered",
+            handled=True,
+            callback_query_id="q-41",
+            chat_ref="-100",
+            message_ref="555",
+            answer_text="Already skipped.",
+            show_alert=False,
+        )
+
+    monkeypatch.setattr(webhooks, "admit", fake_admit)
+    app.state.tap_metrics = webhooks.TapMetrics()
+    app.state.ingress = webhooks.IngressRuntime(connect=lambda: seen, dispatch=dispatch)
+    r = _post(client, _tap_update())
+    assert r.status_code == 200
+    assert r.json() == {"status": "admitted", "outcome": "answered"}

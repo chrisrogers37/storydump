@@ -11,7 +11,9 @@ import uuid
 
 import pytest
 
+from src.config.settings import settings
 from src.services.target import (
+    rate_counters,
     commands,
     identity,
     telegram_dispatch,
@@ -305,10 +307,27 @@ def seams(monkeypatch):
             raise state["raise"]
         return state["result"]
 
+    # S.2 for taps (phase 2): the window's count before the flip and the debit
+    # inside it, scripted — `count` answers `state["window_count"]`, and
+    # `increment` answers None when `state["exhausted"]`.
+    state["window_count"] = 0
+    state["exhausted"] = False
+    log["debits"] = []
+
+    async def count(executor, *, scope, key, window_start):
+        log.setdefault("counts", []).append((scope, key))
+        return state["window_count"]
+
+    async def increment(executor, *, scope, key, window_start, limit):
+        log["debits"].append((scope, key, limit))
+        return None if state["exhausted"] else state["window_count"] + 1
+
     monkeypatch.setattr(tenant_resolution, "resolve_chat", resolve_chat)
     monkeypatch.setattr(identity, "user_for_identity", user_for_identity)
     monkeypatch.setattr(unit_of_work, "apply_gucs", apply_gucs)
     monkeypatch.setattr(commands, "execute", execute)
+    monkeypatch.setattr(rate_counters, "count", count)
+    monkeypatch.setattr(rate_counters, "increment", increment)
     state["log"] = log
     return state
 
@@ -464,3 +483,68 @@ class TestEveryReasonHasAnAnswer:
     def test_an_unknown_reason_falls_back_to_the_web(self):
         text, alert = telegram_dispatch.answer_for("something_new")
         assert "web" in text.lower() and alert is True
+
+
+class TestTapAdmission:
+    """S.2 for taps (phase 2 step 3, F12): the window is READ before the flip
+    and DEBITED only for a flip that ran, inside the flip's savepoint."""
+
+    @pytest.mark.asyncio
+    async def test_at_the_limit_the_tap_is_told_and_nothing_runs(
+        self, seams, monkeypatch
+    ):
+        monkeypatch.setattr(settings, "TARGET_TAP_ADMISSION_PER_MINUTE", 120)
+        seams["window_count"] = 120
+        r = await telegram_dispatch.TelegramDispatcher()(None, tap("skip"))
+        assert r.outcome == "too_many" and r.show_alert is True
+        assert "Too many" in r.answer_text
+        assert seams["log"]["executed"] == [] and seams["log"]["debits"] == []
+        assert seams["log"]["counts"] == [("ws_admission", "ws")]
+
+    @pytest.mark.asyncio
+    async def test_an_executed_flip_debits_the_workspace_once(self, seams, monkeypatch):
+        monkeypatch.setattr(settings, "TARGET_TAP_ADMISSION_PER_MINUTE", 120)
+        seams["window_count"] = 119
+        r = await telegram_dispatch.TelegramDispatcher()(None, tap("skip"))
+        assert r.outcome == "executed"
+        assert seams["log"]["debits"] == [("ws_admission", "ws", 120)]
+
+    @pytest.mark.asyncio
+    async def test_an_enqueued_post_debits_too(self, seams):
+        seams["result"] = CommandResult(
+            "enqueued",
+            {"intent_id": INTENT, "state": "approved", "job": "publish_pipeline"},
+        )
+        r = await telegram_dispatch.TelegramDispatcher()(None, tap("post"))
+        assert r.outcome == "executed" and len(seams["log"]["debits"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_an_answered_repeat_spends_nothing(self, seams):
+        seams["result"] = CommandResult(
+            "answered",
+            {
+                "intent_id": INTENT,
+                "state": "skipped",
+                "settled_by": "Ada",
+                "settled_at": "2026-09-10T12:00:00+00:00",
+                "outcome_text": "⏭️ Skipped by Ada",
+            },
+        )
+        r = await telegram_dispatch.TelegramDispatcher()(None, tap("skip"))
+        assert r.outcome == "answered" and seams["log"]["debits"] == []
+
+    @pytest.mark.asyncio
+    async def test_a_refusal_spends_nothing(self, seams):
+        seams["raise"] = CommandRefused("manual_mode", "by hand")
+        r = await telegram_dispatch.TelegramDispatcher()(None, tap("post"))
+        assert r.outcome == "manual_mode" and seams["log"]["debits"] == []
+
+    @pytest.mark.asyncio
+    async def test_two_taps_racing_the_read_end_in_a_named_answer(self, seams):
+        """The read said "room"; the debit's own guard said "full": the flip
+        rolls back with the savepoint and the tap is told — never a 503."""
+        seams["window_count"] = 119
+        seams["exhausted"] = True
+        r = await telegram_dispatch.TelegramDispatcher()(None, tap("skip"))
+        assert r.outcome == "too_many" and r.handled is True
+        assert len(seams["log"]["executed"]) == 1, "the flip ran, then rolled back"

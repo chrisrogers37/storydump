@@ -492,3 +492,57 @@ class TestCardsEndInEveryTerminalState:
         assert states["30001"] == "sent", "the revoked group's card is left alone"
         assert all(v == "superseded" for r, v in states.items() if r != "30001")
         assert asyncio.run(sweep()) == 0, "nothing left to heal — no starvation"
+
+
+class TestTapAdmissionOnTheLedger:
+    """S.2 for taps (phase 2 step 3, F12 = 120/min/workspace): the window is
+    read before the flip and debited only for a flip that ran — on the real
+    `rate_counters` row, with the real window truncation."""
+
+    def _window(self):
+        from datetime import datetime, timezone
+
+        from src.services.target import rate_counters
+
+        return rate_counters.window_start(datetime.now(timezone.utc), 60)
+
+    def _count(self, world):
+        row = _one(
+            world,
+            "SELECT count FROM rate_counters WHERE scope = 'ws_admission'"
+            " AND key = %s AND window_start = %s",
+            (world["ws"], self._window()),
+        )
+        return None if row is None else row[0]
+
+    def test_an_executed_tap_debits_the_workspace_and_a_repeat_does_not(self, world):
+        i = _intent(world, "adm-1")
+        before = self._count(world) or 0
+        assert tap(world, "skip", i["id"]).outcome == "executed"
+        assert self._count(world) == before + 1, "one flip, one unit"
+        assert tap(world, "skip", i["id"]).outcome == "answered"
+        assert self._count(world) == before + 1, "an answered repeat spends nothing"
+
+    def test_at_the_limit_the_tap_is_told_and_the_card_keeps_its_state(self, world):
+        from src.config.settings import settings
+
+        i = _intent(world, "adm-2")
+        limit = int(settings.TARGET_TAP_ADMISSION_PER_MINUTE)
+        _write(
+            world,
+            "INSERT INTO rate_counters (scope, key, window_start, count)"
+            " VALUES ('ws_admission', %s, %s, %s)"
+            " ON CONFLICT (scope, key, window_start) DO UPDATE SET count = EXCLUDED.count",
+            (world["ws"], self._window(), limit),
+        )
+        try:
+            r = tap(world, "skip", i["id"])
+            assert r.outcome == "too_many" and r.show_alert is True
+            assert _state(world, i["id"]) == "awaiting_approval", "nothing flipped"
+            assert self._count(world) == limit, "a refused tap spends nothing"
+        finally:
+            _write(
+                world,
+                "DELETE FROM rate_counters WHERE scope = 'ws_admission' AND key = %s",
+                (world["ws"],),
+            )

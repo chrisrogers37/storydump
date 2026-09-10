@@ -71,6 +71,8 @@ from src.services.target.unit_of_work import (
     connection_role,
     create_engine,
     engine_url_from_env,
+    INGRESS_POOL_TIMEOUT_SEAM,
+    PoolWatch,
 )
 from src.services.target.telegram_dispatch import TelegramDispatcher
 from src.services.target.webhook_ingress import AdmissionConflict, DeliveryReplayed
@@ -328,7 +330,20 @@ def _engine_from_env(env: Mapping[str, str]) -> Optional[AsyncEngine]:
             "data route answers 503 until it is configured"
         )
         return None
-    return create_engine(url)
+    # The API's pool waits `INGRESS_POOL_TIMEOUT_SEAM`, not the worker's 3 s:
+    # the wait is the tap's user-visible latency (phase 2 step 2).
+    return create_engine(url, pool_timeout=INGRESS_POOL_TIMEOUT_SEAM)
+
+
+def _ingress_workers(env: Mapping[str, str]) -> int:
+    """How many uvicorn processes serve this API — the Procfile's `--workers`
+    is not visible from inside a process, so the deployment states it in
+    `WEB_CONCURRENCY` (uvicorn's own variable); absent = one (F5 baseline)."""
+    raw = (env.get("WEB_CONCURRENCY") or "").strip()
+    try:
+        return max(1, int(raw)) if raw else 1
+    except ValueError:
+        return 1
 
 
 async def _register_webhook(app: FastAPI, env: Mapping[str, str]) -> None:
@@ -546,6 +561,22 @@ def create_app(
     # route's honest 503 into a 500 mid-delivery.
     bot = _telegram_transport(os.environ if env is None else env)
     app.state.tap_metrics = webhooks.TapMetrics()
+    app.state.ingress_workers = _ingress_workers(os.environ if env is None else env)
+    app.state.pool_watch = (
+        PoolWatch(app.state.engine) if app.state.engine is not None else None
+    )
+    if app.state.pool_watch is not None:
+        snap = app.state.pool_watch.snapshot()
+        logger.info(
+            "ingress pool: size=%d overflow=%d timeout_s=%.1f workers=%d"
+            " → Σ ingress connections = %d (the `05` inequality: 3×10 workers"
+            " + 2×10 ingress = 50)",
+            snap["size"],
+            snap["overflow"],
+            snap["timeout_s"],
+            app.state.ingress_workers,
+            (snap["size"] + snap["overflow"]) * app.state.ingress_workers,
+        )
     app.state.ingress = (
         webhooks.IngressRuntime(
             connect=app.state.engine.connect,
@@ -597,6 +628,14 @@ def create_app(
             "uptime_seconds": int(time.time() - _START_TIME),
             "target_database": app.state.engine is not None,
             "db_role": app.state.db_role,
+            # The pool arithmetic and its high-water mark (phase 2 step 4):
+            # with `ingress_workers` this is the Σ the `05` inequality reads.
+            "pool": (
+                app.state.pool_watch.snapshot()
+                if getattr(app.state, "pool_watch", None) is not None
+                else None
+            ),
+            "ingress_workers": app.state.ingress_workers,
             # The tap counters (phase 1 of the 2026-09-09 plan, step 12).
             "taps": app.state.tap_metrics.snapshot(),
             # The webhook this API registered on the bot at startup — a
