@@ -609,7 +609,9 @@ class TestTheApiRegistersItsOwnWebhook:
         app, calls = self._app_with_bot(monkeypatch)
         with TestClient(app) as client:
             report = self._wait_for_webhook(client)
-        assert [c[0] for c in calls] == ["getMe", "setWebhook", "getWebhookInfo"]
+        # The live sampler adds `getWebhookInfo` calls of its own; the
+        # registration's sequence is the prefix.
+        assert [c[0] for c in calls][:3] == ["getMe", "setWebhook", "getWebhookInfo"]
         assert calls[1][1]["allowed_updates"] == ["message", "callback_query"]
         assert calls[1][1]["max_connections"] == 10
         assert calls[1][1]["secret_token"] == "0123456789abcdef0123456789abcdef"
@@ -617,6 +619,24 @@ class TestTheApiRegistersItsOwnWebhook:
         assert report["ok"] is True and report["bot"] == "storydump_app_bot"
         assert report["allowed_updates"] == ["message", "callback_query"]
         assert "0123456789abcdef" not in str(report) and "AAtest" not in str(report)
+
+    def test_the_live_webhook_sample_lands_on_health(self, monkeypatch):
+        from fastapi.testclient import TestClient
+
+        app, calls = self._app_with_bot(monkeypatch)
+        with TestClient(app) as client:
+            import time as _time
+
+            deadline = _time.monotonic() + 3.0
+            live = None
+            while _time.monotonic() < deadline:
+                live = client.get("/health").json().get("webhook_live")
+                if live is not None:
+                    break
+                _time.sleep(0.05)
+        assert live is not None and live["pending_update_count"] == 0
+        assert live["allowed_updates"] == ["message", "callback_query"]
+        assert "AAtest" not in str(live)
 
     def test_without_a_token_it_is_skipped_and_says_so(self):
         from fastapi.testclient import TestClient
@@ -637,7 +657,10 @@ class TestTheApiRegistersItsOwnWebhook:
         )
         with TestClient(app) as client:
             report = self._wait_for_webhook(client)
-        assert calls == [] and "not the production environment" in report["skipped"]
+        registered = [c for c in calls if c[0] != "getWebhookInfo"]
+        assert (
+            registered == [] and "not the production environment" in report["skipped"]
+        )
 
     def test_the_switch_turns_it_off(self, monkeypatch):
         from fastapi.testclient import TestClient
@@ -647,4 +670,7 @@ class TestTheApiRegistersItsOwnWebhook:
         )
         with TestClient(app) as client:
             report = self._wait_for_webhook(client)
-        assert calls == [] and report["skipped"].startswith("autoregister switched off")
+        registered = [c for c in calls if c[0] != "getWebhookInfo"]
+        assert registered == [] and report["skipped"].startswith(
+            "autoregister switched off"
+        )
