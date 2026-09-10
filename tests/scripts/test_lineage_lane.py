@@ -353,6 +353,9 @@ class TestTheBoundaryIsDerivedAndLoud:
             # 072: ix_outbox_intent — the outbox rows of one intent, for the tap's
             # supersede (07 §18, phase 1 of the 2026-09-09 tap plan).
             "072_outbox_intent_index.sql",
+            # 073: dry-run posts carry their own published_via (07 §19, Dry Run
+            # Mode, owner ruling 2026-09-10).
+            "073_dry_run_published_via.sql",
         ], (
             f"the target lineage is {above}. If you are landing the next F.2"
             " increment, add it here — deliberately, and at the end: arm (b)"

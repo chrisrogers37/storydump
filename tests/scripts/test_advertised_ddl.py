@@ -279,8 +279,9 @@ class TestAgainstTheRealDocs:
         # `media_items.folder_path` for the full-depth walk (070, ruling
         # 2026-09-08) makes it 28; §17's mix keyed on the connected folder (071,
         # ruling 2026-09-08) makes it 29; §18's `ix_outbox_intent` for the tap's
-        # supersede (072, phase 1 of the 2026-09-09 plan) makes it 30.
-        assert classes.count("normative") == 30
+        # supersede (072, phase 1 of the 2026-09-09 plan) makes it 30; §19's
+        # dry-run `published_via` (073, owner ruling 2026-09-10) makes it 31.
+        assert classes.count("normative") == 31
         assert classes.count("illustrative") == 4
 
     def test_real_stream_expands_the_fifteen_policies(self):

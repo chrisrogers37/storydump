@@ -242,6 +242,13 @@
       "label": "§18 ix_outbox_intent — the outbox rows of one intent (072, the tap, phase 1 of the 2026-09-09 plan)",
       "doc": "07-security-model.md",
       "ordinal": 16
+    },
+    {
+      "sha256": "a26993afdd5cc4c301f1b6a021c82f5052603e8ab35ce8f7c5a21b8ed31ec626",
+      "class": "normative",
+      "label": "§19 dry-run posts carry their own published_via (073, Dry Run Mode, owner ruling 2026-09-10)",
+      "doc": "07-security-model.md",
+      "ordinal": 17
     }
   ],
   "policy_expansion": {

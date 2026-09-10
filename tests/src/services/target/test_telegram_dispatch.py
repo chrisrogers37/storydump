@@ -540,3 +540,25 @@ class TestTapAdmission:
         assert "Too many" in r.answer_text
         assert len(seams["log"]["executed"]) == 1, "the flip ran, then rolled back"
         assert seams["log"]["debits"] == [("ws_admission", "ws", 120)]
+
+
+class TestThePostAnswerSaysWhatHappensNext:
+    def test_a_dry_run_and_a_paused_workspace_are_named(self):
+        from src.services.target.telegram_dispatch import _executed_text
+
+        dry = CommandResult("enqueued", {"dry_run": True, "paused": False})
+        paused = CommandResult("enqueued", {"dry_run": False, "paused": True})
+        live = CommandResult("enqueued", {"dry_run": False, "paused": False})
+        assert "dry run" in _executed_text("post", dry)
+        assert "paused" in _executed_text("post", paused)
+        assert "posting shortly" in _executed_text("post", live)
+
+
+def test_a_repeat_tap_on_a_dry_run_row_hears_dry_run_not_posted():
+    from src.services.target.telegram_dispatch import _answered_text
+
+    r = CommandResult(
+        "answered",
+        {"state": "posted", "published_via": "dry_run", "settled_by": None},
+    )
+    assert "Dry run" in _answered_text(r) and "Posted" not in _answered_text(r)

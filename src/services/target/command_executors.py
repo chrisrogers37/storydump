@@ -102,8 +102,9 @@ async def _intent_row(session, command: Command) -> dict[str, Any]:
     row = await readers.row(
         session,
         "SELECT i.id, i.workspace_id, i.state, i.media_item_id, i.ig_account_id,"
-        "       i.provider_account_ref, i.cancel_requested,"
+        "       i.provider_account_ref, i.cancel_requested, i.published_via,"
         "       w.api_publishing_enabled, w.repost_ttl_days, w.skip_ttl_days,"
+        "       w.dry_run_mode, w.is_paused,"
         "       COALESCE(a.posts_per_day, w.posts_per_day) AS eff_ppd,"
         "       COALESCE(a.tz, w.tz) AS eff_tz, a.handle"
         "  FROM post_intents i"
@@ -148,6 +149,7 @@ async def _settlement(session, *, workspace_id: str, intent_id: str) -> dict[str
     )
     return {
         "state": found["state"],
+        "published_via": found.get("published_via"),
         "by": await _actor_name(session, found.get("by_user_id")),
         "at": found.get("at"),
     }
@@ -192,7 +194,13 @@ async def _settle(
     )
     state = found["state"] or intent["state"]
     at = found["at"] or _utcnow()
-    line = prompts.outcome_line(state, by=found["by"], at=at, tz=_tz(intent))
+    line = prompts.outcome_line(
+        state,
+        by=found["by"],
+        at=at,
+        tz=_tz(intent),
+        published_via=found.get("published_via") or intent.get("published_via"),
+    )
     if state in intent_ledger.TERMINAL_STATES:
         # A stale card heals on first touch — with its FINAL line. A card in a
         # transit state (`approved`, `publishing`, `review_required`) is not
@@ -213,6 +221,7 @@ async def _settle(
             "settled_by": found["by"],
             "settled_at": prompts.stamp(at, _tz(intent)),
             "outcome_text": line,
+            "published_via": found.get("published_via") or intent.get("published_via"),
         },
     )
 
@@ -278,7 +287,9 @@ async def approve(session, command: Command) -> CommandResult:
             "manual_mode",
             "this workspace publishes manually; use mark_posted after posting by hand",
         )
-    if not await has_active_ig_credential(
+    # A dry run posts nowhere, so it needs no token: the owner can rehearse
+    # the whole flow before Instagram is connected.
+    if not intent.get("dry_run_mode") and not await has_active_ig_credential(
         session,
         workspace_id=command.workspace_id,
         ig_account_id=str(intent["ig_account_id"]),
@@ -297,7 +308,13 @@ async def approve(session, command: Command) -> CommandResult:
         kind="publish_pipeline",
         workspace_id=command.workspace_id,
         serialization_key=f"ig:{intent['provider_account_ref']}",
-        payload={"v": 1, "intent_id": str(intent["id"])},
+        # The dry-run decision travels WITH the job: what the tapper was told
+        # is what the run does, whatever the flag says by the time it runs.
+        payload={
+            "v": 1,
+            "intent_id": str(intent["id"]),
+            "dry_run": bool(intent.get("dry_run_mode")),
+        },
     )
     await _record_outcome(session, intent, command, "approved")
     return CommandResult(
@@ -306,6 +323,10 @@ async def approve(session, command: Command) -> CommandResult:
             "intent_id": str(intent["id"]),
             "state": "approved",
             "job": "publish_pipeline",
+            # What the tap's answer says next: a dry run posts nowhere; a
+            # paused workspace holds the job until it is resumed.
+            "dry_run": bool(intent.get("dry_run_mode")),
+            "paused": bool(intent.get("is_paused")),
         },
     )
 

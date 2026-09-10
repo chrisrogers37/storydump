@@ -33,9 +33,15 @@ import { isLiveToggle, scheduleSavedNotice, TOGGLES } from "./general-tab";
  * on this tab is currently inert, and that is the finding rather than a
  * mistake in this list.
  */
-// `enable_instagram_api` went live with #1220 step 3 — the publish leg is
-// built, so the switch now changes what the worker does with an approval.
-const LIVE_TOGGLES: readonly string[] = ["enable_instagram_api"];
+// All three remaining switches are live (owner, 2026-09-10): pausing through
+// its two commands, dry run and the Instagram API through `settings_change`,
+// each with a consumer on the other side (the clock/prompt sweep/publish leg,
+// the pipeline's dry-run branch, the publish leg).
+const LIVE_TOGGLES: readonly string[] = [
+  "is_paused",
+  "dry_run_mode",
+  "enable_instagram_api",
+];
 
 // `isLiveToggle` is IMPORTED, not restated. An earlier version of this file
 // copied the predicate, and a mutant that reverted the component's rule to
@@ -55,32 +61,38 @@ describe("a live switch requires a consumer, not just a column", () => {
     }
   });
 
-  it("the three #1155 toggles keep their real settingsKey", () => {
-    // Saying `null` would claim the port has no such setting — false, and it
-    // would send the next person to add a command that already exists. The
-    // reason two of them are inert is the missing CONSUMER, not a missing
-    // command; the third gained its consumer with #1220 step 3 and is live.
-    for (const key of [
-      "dry_run_mode",
-      "enable_instagram_api",
-      "enable_ai_captions",
+  it("pausing is two commands, not a settings key", () => {
+    const row = TOGGLES.find((t) => t.key === "is_paused")!;
+    expect(row.settingsKey).toBeNull();
+    expect(row.command).toEqual({
+      on: "pause_workspace",
+      off: "resume_workspace",
+    });
+  });
+
+  it("the settings-backed switches keep their real settingsKey", () => {
+    for (const [key, settingsKey] of [
+      ["dry_run_mode", "dry_run_mode"],
+      ["enable_instagram_api", "api_publishing_enabled"],
     ]) {
       const row = TOGGLES.find((t) => t.key === key);
-      expect(row, key).toBeDefined();
-      expect(row!.settingsKey, key).not.toBeNull();
-      if (key === "enable_instagram_api") {
-        expect(isLive(row!), key).toBe(true);
-      } else {
-        expect(row!.inertReason, key).toBeTruthy();
-      }
+      expect(row?.settingsKey, key).toBe(settingsKey);
+    }
+  });
+
+  it("the four rows with no source on this tier are gone", () => {
+    const keys = TOGGLES.map((t) => t.key as string);
+    for (const gone of [
+      "enable_ai_captions",
+      "show_verbose_notifications",
+      "send_lifecycle_notifications",
+      "media_sync_enabled",
+    ]) {
+      expect(keys, gone).not.toContain(gone);
     }
   });
 
   it("no inert reason names a cause the code did not establish", () => {
-    // #1140's rule, applied here: these sentences say what is not built. None
-    // may claim WHY in a way nothing checked, and none may be vague enough to
-    // hide the defect rather than state it — softening the confirmation was
-    // the wrong repair this fix exists to avoid.
     for (const t of TOGGLES) {
       if (!t.inertReason) continue;
       expect(t.inertReason.length, t.key).toBeGreaterThan(12);

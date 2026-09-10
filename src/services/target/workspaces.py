@@ -62,7 +62,6 @@ SETTINGS_COLUMNS: dict[str, type] = {
     "repost_ttl_days": int,
     "skip_ttl_days": int,
     "caption_style": str,
-    "enable_ai_captions": bool,
     "api_publishing_enabled": bool,
 }
 
@@ -511,7 +510,8 @@ async def stats(executor, *, workspace_id: str) -> dict[str, Any]:
         "SELECT m.category AS k, count(*) AS n"
         "  FROM post_intents i"
         "  JOIN media_items m ON m.workspace_id = i.workspace_id AND m.id = i.media_item_id"
-        " WHERE i.workspace_id = :ws AND i.state = 'posted' GROUP BY 1"
+        " WHERE i.workspace_id = :ws AND i.state = 'posted'"
+        "   AND i.published_via <> 'dry_run' GROUP BY 1"
     )
     counts = await readers.row(
         executor,

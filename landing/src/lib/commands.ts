@@ -91,8 +91,7 @@ function intentCommand(): CommandSpec {
  * DIFFERENT content is refused rather than silently applied (`056`:219-222).
  */
 type BodyResult =
-  | { ok: true; body: Record<string, unknown> }
-  | { ok: false; error: string };
+  { ok: true; body: Record<string, unknown> } | { ok: false; error: string };
 
 function submissionCommand(
   parseBody: (raw: Record<string, unknown>) => BodyResult,
@@ -129,7 +128,10 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
   // Entity-less. Capable, deliberately unwired until P3/P4.
   settings_change: submissionCommand((raw) => {
     // Shape only. The port owns which keys and types are legal.
-    if (!isPlainObject(raw.settings) || Object.keys(raw.settings).length === 0) {
+    if (
+      !isPlainObject(raw.settings) ||
+      Object.keys(raw.settings).length === 0
+    ) {
       return { ok: false, error: "invalid_settings" };
     }
     return { ok: true, body: { settings: raw.settings } };
@@ -186,6 +188,11 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
    * pre-judge.
    */
   restore_workspace: submissionCommand(() => ({ ok: true, body: {} })),
+  // Pause Posting on Settings › General (owner, 2026-09-10): one command per
+  // direction; the port's admin floor and the flag's readers (the clock, the
+  // prompt sweep, the publish leg) are all on the other side.
+  pause_workspace: submissionCommand(() => ({ ok: true, body: {} })),
+  resume_workspace: submissionCommand(() => ({ ok: true, body: {} })),
 
   /**
    * Disconnect a Drive source. Same shape as `sync_now` and for the same
@@ -256,7 +263,10 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
     if (!isUuidLike(raw.ig_account_id)) {
       return { ok: false, error: "invalid_ig_account_id" };
     }
-    if (!isPlainObject(raw.settings) || Object.keys(raw.settings).length === 0) {
+    if (
+      !isPlainObject(raw.settings) ||
+      Object.keys(raw.settings).length === 0
+    ) {
       return { ok: false, error: "invalid_settings" };
     }
     return {

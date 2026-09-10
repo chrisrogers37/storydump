@@ -813,16 +813,6 @@ export function IntegrationsTab({
         <CardContent className="space-y-4">
           <div className="space-y-0.5">
             <p className="font-medium">{settings.media_count} media files</p>
-            {/* `media_sync_enabled` has no source. Rendering the old
-                `? "enabled" : "disabled"` here stated a fact about the
-                workspace drawn from a missing column. */}
-            <p className="text-sm text-muted-foreground">
-              {settings.media_sync_enabled === null
-                ? "Auto-sync state is not available from this API yet."
-                : settings.media_sync_enabled
-                  ? "Auto-sync enabled"
-                  : "Auto-sync disabled"}
-            </p>
           </div>
         </CardContent>
       </Card>

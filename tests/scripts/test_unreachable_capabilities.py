@@ -172,11 +172,19 @@ class TestTheParserIgnoresProseAndStrings:
 class TestPositiveControls:
     """A checker that finds nothing must be distinguishable from a clean repo."""
 
-    def test_it_still_finds_the_seventh_instance(self):
+    def test_it_still_finds_a_known_instance(self):
+        # #1167's instance 7 (`pause_workspace` / `resume_workspace`) was FIXED
+        # on 2026-09-10 (#1282: Pause Posting rides the two commands from the
+        # web), so the positive control moved to instances the web still does
+        # not offer. When one of these is wired, move it again — never delete.
         names = {f.name for f in uc.probe_commands().findings}
-        assert {"pause_workspace", "resume_workspace"} <= names, (
-            "#1167's instance 7 is no longer detected — either it was fixed"
-            " (update this test) or the probe stopped working (fix the probe)."
+        assert {"cancel", "invite_member"} & names, (
+            "no known unreachable command is detected any more — either every"
+            " instance was fixed (retire this control) or the probe stopped"
+            " working (fix the probe)."
+        )
+        assert not {"pause_workspace", "resume_workspace"} & names, (
+            "pausing is offered by the web since #1282; the probe must not list it"
         )
 
     def test_it_still_finds_the_sixth_instance(self):

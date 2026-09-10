@@ -139,7 +139,7 @@ from sqlalchemy import text
 #: Excluded from every posting signal — see the module docstring. Nothing
 #: produces these today (the transform was cancelled, FC-7 §6); the filter
 #: guards what the schema still permits, not a migration that is coming.
-_REAL_POST = "state = 'posted' AND published_via <> 'legacy_backfill'"
+_REAL_POST = "state = 'posted' AND published_via NOT IN ('legacy_backfill', 'dry_run')"
 
 
 async def posting_freshness(executor) -> dict[str, Any]:

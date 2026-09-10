@@ -142,7 +142,8 @@ class PostIntent(TargetBase):
             "approval_mode IN ('auto','manual')", name="ck_intent_approval"
         ),
         CheckConstraint(
-            "published_via IN ('api','manual','legacy_backfill')", name="ck_intent_via"
+            "published_via IN ('api','manual','legacy_backfill','dry_run')",
+            name="ck_intent_via",
         ),
         CheckConstraint(
             "publish_step IN ('none','transit_uploaded','container_created',"
@@ -169,6 +170,8 @@ class PostIntent(TargetBase):
             "state <> 'posted'"
             " OR published_via = 'legacy_backfill'"
             " OR (published_via = 'manual' AND cap_consumed_on IS NOT NULL)"
+            " OR (published_via = 'dry_run' AND publish_step = 'effect_confirmed'"
+            " AND cap_consumed_on IS NOT NULL)"
             " OR (published_via = 'api' AND ig_container_id IS NOT NULL"
             " AND publish_step = 'effect_confirmed' AND cap_consumed_on IS NOT NULL)",
             name="ck_posted_complete",

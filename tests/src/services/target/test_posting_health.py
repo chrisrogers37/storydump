@@ -175,7 +175,9 @@ class TestTheBackfillExclusion:
 
     async def test_both_posting_aggregates_exclude_backfilled_rows(self):
         sql = await self._statement()
-        predicate = "state = 'posted' AND published_via <> 'legacy_backfill'"
+        predicate = (
+            "state = 'posted' AND published_via NOT IN ('legacy_backfill', 'dry_run')"
+        )
         # Once for `posted_ever`, once for `last_post_age_seconds`. A single
         # occurrence means one of the two is reading the unfiltered population.
         assert sql.count(predicate) == 2
