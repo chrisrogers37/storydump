@@ -36,6 +36,10 @@ from .seed import Card, Workspace
 #: How the harness redelivers a non-2xx: seconds after each failed attempt.
 #: Telegram's schedule is undocumented; this one is stated in the report.
 REDELIVERY_SCHEDULE_S = (0.5, 1.0, 2.0, 4.0)
+#: Telegram stops accepting an answer to a callback query about this long
+#: after the tap (`00_EPIC.md` F1 context: the spinner dies at ~30 s). An
+#: answer that arrives later than this after the OFFER is counted `late`.
+QUERY_EXPIRY_S = 30.0
 
 
 @dataclass
@@ -67,6 +71,10 @@ class Tap:
 @dataclass
 class Delivery:
     tap: Tap
+    #: When the tap was OFFERED (the user's tap; Telegram's queue starts here).
+    offered_at: float = 0.0
+    #: When the first delivery attempt started (after the harness's queue —
+    #: Telegram's `pending_update_count` — let it through).
     first_attempt_at: float = 0.0
     attempts: list[tuple[float, int, float]] = field(
         default_factory=list
@@ -125,15 +133,21 @@ class Client:
             async def one(i: int, tap: Tap) -> Delivery:
                 if gap:
                     await asyncio.sleep(i * gap)
-                d = Delivery(tap=tap)
+                d = Delivery(tap=tap, offered_at=time.monotonic())
                 self._queued += 1
                 self.queued_peak = max(self.queued_peak, self._queued)
-                async with sem:
-                    self._queued -= 1
-                    d.first_attempt_at = time.monotonic()
-                    for attempt, delay in enumerate((0.0,) + REDELIVERY_SCHEDULE_S):
-                        if delay:
-                            await asyncio.sleep(delay)
+                first = True
+                for delay in (0.0,) + REDELIVERY_SCHEDULE_S:
+                    if delay:
+                        # The back-off waits OUTSIDE the delivery slots: a
+                        # redelivery in flight must not hold one of Telegram's
+                        # connections while it sleeps.
+                        await asyncio.sleep(delay)
+                    async with sem:
+                        if first:
+                            self._queued -= 1
+                            d.first_attempt_at = time.monotonic()
+                            first = False
                         t0 = time.monotonic()
                         try:
                             r = await http.post(
@@ -148,12 +162,12 @@ class Client:
                         except httpx.HTTPError:
                             status, body = 599, {}
                         d.attempts.append((t0, status, time.monotonic() - t0))
-                        if 200 <= status < 300:
-                            d.status_final = status
-                            d.outcome = body.get("outcome") or body.get("status")
-                            break
-                    else:
-                        d.status_final = d.attempts[-1][1]
+                    if 200 <= status < 300:
+                        d.status_final = status
+                        d.outcome = body.get("outcome") or body.get("status")
+                        break
+                else:
+                    d.status_final = d.attempts[-1][1]
                 return d
 
             return await asyncio.gather(*(one(i, t) for i, t in enumerate(taps)))
@@ -180,15 +194,35 @@ class Scenario:
     health_after: dict
     flips: int
     audit_rows: int
-    statements: Optional[int] = None
+    #: The harness's own queue peak for THIS scenario (Telegram's
+    #: `pending_update_count` analogue).
+    pending_peak: int = 0
+    #: Database work per scenario from `pg_stat_database` deltas: commits and
+    #: rows written — the "transaction is tiny" premise, measured.
+    xact_commit: Optional[int] = None
+    rows_written: Optional[int] = None
     notes: list[str] = field(default_factory=list)
 
     def numbers(self) -> dict:
-        answers = self.fake.answers()
-        strips = self.fake.edits(("editMessageReplyMarkup",))
-        outcomes = self.fake.edits(("editMessageCaption", "editMessageText"))
-        answer_lat, route_lat, strip_lat, outcome_lat = [], [], [], []
-        five_xx = busy = refused_503 = redeliveries = unanswered = 0
+        """Everything is windowed at `settled_until`: an edit or answer that
+        arrived after the scenario's settle belongs to no scenario's number."""
+        cutoff = self.settled_until
+        answers = {k: v for k, v in self.fake.answers().items() if v <= cutoff}
+        strips = {
+            k: v
+            for k, v in self.fake.edits(("editMessageReplyMarkup",)).items()
+            if v <= cutoff
+        }
+        outcomes = {
+            k: v
+            for k, v in self.fake.edits(
+                ("editMessageCaption", "editMessageText")
+            ).items()
+            if v <= cutoff
+        }
+        answer_lat, wait_lat, queue_lat, route_lat = [], [], [], []
+        strip_lat, outcome_lat = [], []
+        five_xx = busy = refused_503 = redeliveries = unanswered = late = 0
         by_outcome: dict[str, int] = {}
         for d in self.deliveries:
             redeliveries += d.redeliveries
@@ -204,36 +238,55 @@ class Scenario:
                 by_outcome[d.outcome] = by_outcome.get(d.outcome, 0) + 1
             if d.outcome == "busy":
                 busy += 1
+            queue_lat.append(d.first_attempt_at - d.offered_at)
             at = answers.get(d.tap.callback_query_id)
             if at is None:
                 unanswered += 1
             else:
                 answer_lat.append(at - d.first_attempt_at)
-            key = (d.tap.chat, d.tap.message_id)
-            if key in strips:
-                strip_lat.append(strips[key] - d.first_attempt_at)
-            if key in outcomes:
-                outcome_lat.append(outcomes[key] - d.first_attempt_at)
+                wait_lat.append(at - d.offered_at)
+                if at - d.offered_at > QUERY_EXPIRY_S:
+                    late += 1
+            if d.outcome == "executed":
+                # Edits belong to the tap that FLIPPED the card; a repeat tap
+                # on the same card has no edit of its own.
+                key = (d.tap.chat, d.tap.message_id)
+                if key in strips:
+                    strip_lat.append(strips[key] - d.first_attempt_at)
+                if key in outcomes:
+                    outcome_lat.append(outcomes[key] - d.first_attempt_at)
+        n = len(self.deliveries)
         return {
-            "taps": len(self.deliveries),
+            "taps": n,
             "five_xx": five_xx,
             "refused_503": refused_503,
             "busy": busy,
             "redeliveries": redeliveries,
             "unanswered": unanswered,
+            "answer_late": late,
             "by_outcome": dict(sorted(by_outcome.items())),
+            # DELIVERY-SIDE: from the first attempt (the plan's SLO number).
             "answer_p50_s": pct(answer_lat, 50),
             "answer_p95_s": pct(answer_lat, 95),
             "answer_max_s": max(answer_lat) if answer_lat else None,
+            # USER-SIDE: from the tap itself, the harness queue included —
+            # what bounds the spinner when a burst exceeds max_connections.
+            "queue_wait_p95_s": pct(queue_lat, 95),
+            "wait_p95_s": pct(wait_lat, 95),
+            "wait_max_s": max(wait_lat) if wait_lat else None,
             "route_p95_s": pct(route_lat, 95),
             "strip_p95_s": pct(strip_lat, 95),
             "outcome_p95_s": pct(outcome_lat, 95),
             "outcome_landed": len(outcome_lat),
             "flips": self.flips,
             "audit_rows": self.audit_rows,
-            "pending_peak": self.fake.pending_update_count,
+            "pending_peak": self.pending_peak,
             "pool_peak": (self.health_after.get("pool") or {}).get("checked_out_peak"),
-            "statements": self.statements,
+            "xact_commit": self.xact_commit,
+            "xact_per_tap": (
+                round(self.xact_commit / n, 2) if self.xact_commit and n else None
+            ),
+            "rows_written": self.rows_written,
         }
 
 
@@ -252,11 +305,17 @@ def render_report(
         f"delivers at most `max_connections` = {DEFAULT_MAX_CONNECTIONS} taps at once and",
         f"redelivers a non-2xx after {', '.join(f'{s:g}' for s in REDELIVERY_SCHEDULE_S)} s.",
         "",
-        "**Which latency is which.** `answer` = tap → `answerCallbackQuery` at the fake,",
-        "end to end from the FIRST delivery attempt, redelivery included — the SLO (p95 < 2 s).",
-        "`route` = the 200's round trip. `strip` / `outcome` = the card's keyboard gone /",
-        "its outcome line landed, from the first attempt (reported, not judged; `one_slow_chat`",
-        "judges `outcome` against the sender's cadence).",
+        "**Which latency is which.** `answer` = tap → `answerCallbackQuery` at the fake, from",
+        "the FIRST DELIVERY ATTEMPT, redelivery included — the plan's SLO number (p95 < 2 s), a",
+        "DELIVERY-SIDE figure. `wait` = the same answer measured from the TAP ITSELF, the",
+        "harness's queue included — the user's spinner when a burst exceeds `max_connections`;",
+        f"`answer_late` counts answers later than {QUERY_EXPIRY_S:g} s after the tap, which Telegram",
+        "no longer accepts. `queue_wait` = how long the tap sat before its first attempt.",
+        "`route` = the 200's round trip. `strip` / `outcome` = the card's keyboard gone / its",
+        "outcome line landed, for the tap that flipped the card, within the scenario's settle",
+        "window (reported, not judged; the sender's throughput is phase 3's). `xact_per_tap` =",
+        "database commits per tap from `pg_stat_database`. Loopback numbers swing several-fold",
+        "run to run; the injected-RTT run is the one to read.",
         "",
         "## Run",
         "",

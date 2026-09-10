@@ -1,4 +1,4 @@
-# Load harness report — 2026-09-10 22:05 UTC
+# Load harness report — 2026-09-10 22:13 UTC
 
 Phase 2 of the 2026-09-09 tap plan, step 6 (`02_api-under-load.md`). The client
 delivers at most `max_connections` = 10 taps at once and
@@ -20,7 +20,7 @@ run to run; the injected-RTT run is the one to read.
 
 - RTT: loopback + 10 ms injected per direction on the database socket (≈ twice that per round trip)
 - Database: 15.19 (Debian 15.19-1.pgdg13+2); `synchronous_commit` = off; `max_connections` = 100
-- API: pool {"size": 10, "overflow": 0, "timeout_s": 1.0, "checked_out": 0, "checked_out_peak": 10}; ingress_workers = 1
+- API: pool {"size": 10, "overflow": 0, "timeout_s": 1.0, "checked_out": 0, "checked_out_peak": 10}; ingress_workers = 2
 
 ## Scenarios
 
@@ -34,27 +34,27 @@ run to run; the injected-RTT run is the one to read.
 | busy | 0 |
 | redeliveries | 0 |
 | unanswered | 0 |
-| answer_late | 496 |
+| answer_late | 490 |
 | by_outcome | executed: 1000 |
-| answer_p50_s | 0.580 |
-| answer_p95_s | 0.667 |
-| answer_max_s | 1.717 |
-| queue_wait_p95_s | 55.413 |
-| wait_p95_s | 56.000 |
-| wait_max_s | 58.779 |
-| route_p95_s | 0.675 |
-| strip_p95_s | 0.670 |
-| outcome_p95_s | 44.973 |
+| answer_p50_s | 0.569 |
+| answer_p95_s | 0.619 |
+| answer_max_s | 1.672 |
+| queue_wait_p95_s | 54.418 |
+| wait_p95_s | 54.983 |
+| wait_max_s | 57.753 |
+| route_p95_s | 0.623 |
+| strip_p95_s | 0.620 |
+| outcome_p95_s | 44.773 |
 | outcome_landed | 19 |
 | flips | 1000 |
 | audit_rows | 1000 |
 | pending_peak | 990 |
-| pool_peak | 10 |
-| xact_commit | 1253 |
-| xact_per_tap | 1.250 |
-| rows_written | 9581 |
+| pool_peak | 4 |
+| xact_commit | 1244 |
+| xact_per_tap | 1.240 |
+| rows_written | 9552 |
 
-> fake calls during the scenario: 2059
+> fake calls during the scenario: 2058
 
 > delivered at max_connections = 10
 
@@ -70,27 +70,27 @@ run to run; the injected-RTT run is the one to read.
 | unanswered | 0 |
 | answer_late | 0 |
 | by_outcome | answered: 49, executed: 1 |
-| answer_p50_s | 1.697 |
-| answer_p95_s | 2.027 |
-| answer_max_s | 2.401 |
-| queue_wait_p95_s | 7.096 |
-| wait_p95_s | 8.794 |
-| wait_max_s | 9.187 |
-| route_p95_s | 2.030 |
-| strip_p95_s | 0.675 |
+| answer_p50_s | 1.712 |
+| answer_p95_s | 2.022 |
+| answer_max_s | 2.375 |
+| queue_wait_p95_s | 7.112 |
+| wait_p95_s | 8.823 |
+| wait_max_s | 9.163 |
+| route_p95_s | 2.024 |
+| strip_p95_s | 0.566 |
 | outcome_p95_s | None |
 | outcome_landed | 0 |
 | flips | 1 |
 | audit_rows | 1 |
 | pending_peak | 40 |
-| pool_peak | 10 |
-| xact_commit | 110 |
-| xact_per_tap | 2.200 |
-| rows_written | 97 |
+| pool_peak | 5 |
+| xact_commit | 134 |
+| xact_per_tap | 2.680 |
+| rows_written | 215 |
 
 > exactly one flip; the other 49 answered with the card's state
 
-> fake calls during the scenario: 116
+> fake calls during the scenario: 118
 
 > delivered at max_connections = 10
 
@@ -106,25 +106,25 @@ run to run; the injected-RTT run is the one to read.
 | unanswered | 0 |
 | answer_late | 0 |
 | by_outcome | executed: 200 |
-| answer_p50_s | 0.583 |
-| answer_p95_s | 0.618 |
-| answer_max_s | 1.003 |
-| queue_wait_p95_s | 10.958 |
-| wait_p95_s | 11.559 |
-| wait_max_s | 12.130 |
-| route_p95_s | 0.622 |
-| strip_p95_s | 0.621 |
+| answer_p50_s | 0.570 |
+| answer_p95_s | 0.672 |
+| answer_max_s | 1.341 |
+| queue_wait_p95_s | 10.983 |
+| wait_p95_s | 11.553 |
+| wait_max_s | 12.164 |
+| route_p95_s | 0.674 |
+| strip_p95_s | 0.673 |
 | outcome_p95_s | None |
 | outcome_landed | 0 |
 | flips | 200 |
 | audit_rows | 200 |
 | pending_peak | 190 |
-| pool_peak | 10 |
-| xact_commit | 281 |
-| xact_per_tap | 1.410 |
-| rows_written | 1928 |
+| pool_peak | 9 |
+| xact_commit | 271 |
+| xact_per_tap | 1.350 |
+| rows_written | 1864 |
 
-> fake calls during the scenario: 421
+> fake calls during the scenario: 420
 
 > delivered at max_connections = 10
 
@@ -141,30 +141,30 @@ run to run; the injected-RTT run is the one to read.
 | answer_late | 0 |
 | by_outcome | executed: 200 |
 | answer_p50_s | 0.592 |
-| answer_p95_s | 0.623 |
-| answer_max_s | 1.095 |
-| queue_wait_p95_s | 19.223 |
-| wait_p95_s | 19.806 |
-| wait_max_s | 20.402 |
-| route_p95_s | 4.598 |
-| strip_p95_s | 2.595 |
+| answer_p95_s | 0.637 |
+| answer_max_s | 1.098 |
+| queue_wait_p95_s | 19.143 |
+| wait_p95_s | 19.747 |
+| wait_max_s | 20.370 |
+| route_p95_s | 4.603 |
+| strip_p95_s | 2.594 |
 | outcome_p95_s | None |
 | outcome_landed | 0 |
 | flips | 200 |
 | audit_rows | 200 |
 | pending_peak | 190 |
-| pool_peak | 10 |
-| xact_commit | 293 |
-| xact_per_tap | 1.470 |
-| rows_written | 1888 |
+| pool_peak | 9 |
+| xact_commit | 309 |
+| xact_per_tap | 1.540 |
+| rows_written | 1980 |
 
 > edit-landed criterion for the OTHER chats rides phase 3a's sender hold (`03_worker-throughput.md`); reported here, judged there
 
-> fake calls during the scenario: 426
+> fake calls during the scenario: 428
 
 > delivered at max_connections = 10
 
-> other chats: answer p95 = 0.616 s over 180 taps
+> other chats: answer p95 = 0.620 s over 180 taps
 
 ### `taps_1000_at_twenty_connections` — 50 workspaces × 20 cards, one tap each; 1,000 taps offered within 1 s; delivered at TWENTY connections against a pool of ten
 
@@ -176,29 +176,29 @@ run to run; the injected-RTT run is the one to read.
 | busy | 1 |
 | redeliveries | 0 |
 | unanswered | 0 |
-| answer_late | 490 |
+| answer_late | 403 |
 | by_outcome | busy: 1, executed: 999 |
-| answer_p50_s | 1.186 |
-| answer_p95_s | 1.240 |
-| answer_max_s | 1.600 |
-| queue_wait_p95_s | 54.594 |
-| wait_p95_s | 55.837 |
-| wait_max_s | 58.743 |
-| route_p95_s | 1.245 |
-| strip_p95_s | 1.243 |
+| answer_p50_s | 1.073 |
+| answer_p95_s | 1.176 |
+| answer_max_s | 1.544 |
+| queue_wait_p95_s | 46.483 |
+| wait_p95_s | 47.510 |
+| wait_max_s | 50.043 |
+| route_p95_s | 1.187 |
+| strip_p95_s | 1.186 |
 | outcome_p95_s | None |
 | outcome_landed | 0 |
 | flips | 999 |
 | audit_rows | 999 |
-| pending_peak | 972 |
-| pool_peak | 10 |
-| xact_commit | 1202 |
-| xact_per_tap | 1.200 |
-| rows_written | 9341 |
+| pending_peak | 971 |
+| pool_peak | 6 |
+| xact_commit | 1182 |
+| xact_per_tap | 1.180 |
+| rows_written | 9331 |
 
 > the boundary's own scenario: the only run where the pool can saturate
 
-> fake calls during the scenario: 2060
+> fake calls during the scenario: 2053
 
 > delivered at max_connections = 20
 

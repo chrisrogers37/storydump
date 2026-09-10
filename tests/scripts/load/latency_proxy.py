@@ -41,7 +41,11 @@ class LatencyProxy:
                 pass
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-        up_reader, up_writer = await asyncio.open_connection(*self.upstream)
+        try:
+            up_reader, up_writer = await asyncio.open_connection(*self.upstream)
+        except OSError:
+            writer.close()
+            return
         await asyncio.gather(
             self._pipe(reader, up_writer), self._pipe(up_reader, writer)
         )

@@ -94,6 +94,14 @@ def stage(admin_conn, owner_actor):
                 first_chat=-300_000_000,
                 first_tapper=3_000_000,
             ),
+            "burst": seed_world(
+                dsn,
+                workspaces=50,
+                cards_per_workspace=20,
+                tag="burst",
+                first_chat=-500_000_000,
+                first_tapper=5_000_000,
+            ),
             "slow": seed_world(
                 dsn,
                 workspaces=10,
@@ -176,7 +184,7 @@ def report(stage):
     workers = os.environ.get("LOAD_HARNESS_WORKERS")
     if workers and workers != "1":
         suffix += f"-workers{workers}"
-    path = REPORTS / f"{dt.date.today().isoformat()}{suffix}.md"
+    path = REPORTS / f"{dt.datetime.now(dt.timezone.utc).date().isoformat()}{suffix}.md"
     path.write_text(
         h.render_report(
             run_at=run_at,
@@ -196,10 +204,27 @@ def report(stage):
     print(f"\nload harness report: {path}")
 
 
-def _run_scenario(stage, *, name, spread, taps, offer_within_s=0.0, notes=()):
-    client = h.Client(stage["api"].base, SECRET)
+def _db_counters(dsn) -> tuple[int, int]:
+    (commits, written) = _sql(
+        dsn,
+        "SELECT xact_commit, tup_inserted + tup_updated + tup_deleted"
+        " FROM pg_stat_database WHERE datname = current_database()",
+        fetch=True,
+    )[0]
+    return int(commits), int(written)
+
+
+def _run_scenario(
+    stage, *, name, spread, taps, offer_within_s=0.0, notes=(), max_connections=None
+):
+    client = h.Client(
+        stage["api"].base,
+        SECRET,
+        **({"max_connections": max_connections} if max_connections else {}),
+    )
     fake: FakeTelegram = stage["fake"]
     before = len(fake.snapshot())
+    db_before = _db_counters(stage["dsn"])
     deliveries = asyncio.run(client.deliver(taps, offer_within_s=offer_within_s))
     fake.pending_update_count = client.queued_peak
     # Let the sender land the outcome lines (paced: 18/min/chat, 2 s cadence).
@@ -219,6 +244,7 @@ def _run_scenario(stage, *, name, spread, taps, offer_within_s=0.0, notes=()):
         (list(intents),),
         fetch=True,
     )[0]
+    db_after = _db_counters(stage["dsn"])
     scenario = h.Scenario(
         name=name,
         spread=spread,
@@ -228,8 +254,14 @@ def _run_scenario(stage, *, name, spread, taps, offer_within_s=0.0, notes=()):
         health_after=stage["api"].health(),
         flips=int(flips),
         audit_rows=int(audit),
+        pending_peak=client.queued_peak,
+        xact_commit=db_after[0] - db_before[0],
+        rows_written=db_after[1] - db_before[1],
         notes=list(notes)
-        + [f"fake calls during the scenario: {len(fake.snapshot()) - before}"],
+        + [
+            f"fake calls during the scenario: {len(fake.snapshot()) - before}",
+            f"delivered at max_connections = {client.max_connections}",
+        ],
     )
     stage["scenarios"].append(scenario)
     return scenario, scenario.numbers()
@@ -317,3 +349,28 @@ def test_one_slow_chat(stage):
     base = stage.get("many_cards_answer_p95")
     if base is not None:
         assert p95 <= base + 0.2, (p95, base)
+
+
+def test_taps_1000_at_twenty_connections_reach_the_boundary(stage):
+    """The busy boundary, EXERCISED: Telegram's registered `max_connections`
+    (10) equals the pool's size, so at 10 the pool can never saturate and
+    `busy` is 0 by construction. Delivering at 20 — what F5 (a) would
+    register with `--workers 2` — lets checkouts exceed the pool and shows
+    the boundary answering rather than failing: busy answers, never a 5xx on
+    a tap; a busy tap is re-offered once (its buttons remain) so the flips
+    still land."""
+    world = stage["worlds"]["burst"]
+    taps = [h.tap_for(ws, card) for ws, card in world.cards()]
+    scenario, n = _run_scenario(
+        stage,
+        name="taps_1000_at_twenty_connections",
+        spread="50 workspaces × 20 cards, one tap each; 1,000 taps offered within 1 s;"
+        " delivered at TWENTY connections against a pool of ten",
+        taps=taps,
+        offer_within_s=1.0,
+        max_connections=20,
+        notes=["the boundary's own scenario: the only run where the pool can saturate"],
+    )
+    assert n["five_xx"] == 0, n
+    assert n["flips"] + n["busy"] >= 1000, n
+    stage["boundary_busy"] = n["busy"]

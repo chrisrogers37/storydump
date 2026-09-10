@@ -52,11 +52,15 @@ Gate: `tests/scripts/test_l8_webhook_admission.py` gains `TestManyDistinctDelive
 
 ## Verification Checklist
 
-Built 2026-09-10 in two PRs (steps 2–4; steps 5–6). The report:
-`tests/scripts/load/reports/2026-09-10.md` (loopback) and `…-rtt10ms.md`
-(≈ 20 ms database RTT through the harness's latency proxy). Every criterion
-below met at today's one process; F1 and F5 locked with the numbers in `00_EPIC.md`.
-The `one_slow_chat` edit-landed criterion is reported and judged with 3a.
+Built 2026-09-10 in two PRs (steps 2–4; steps 5–6). The reports:
+`tests/scripts/load/reports/2026-09-10.md` (loopback), `…-rtt10ms.md` (≈ 20 ms database RTT
+through the harness's latency proxy — the deciding run) and `…-rtt10ms-workers2.md` (F5 (a),
+measured). Every delivery-side criterion below is met at one process; F1 and F5 are locked with the
+numbers in `00_EPIC.md`. Two criteria are NOT ticked, on the numbers: the user-side wait for a
+1,000-simultaneous burst at production-like RTT (56 s, half the queries past Telegram's expiry —
+throughput-bound, #1286), and `one_slow_chat`'s edit-landed criterion (the sender lands ≈ 0.5
+supersede rows/s fleet-wide — one lane, claim-one-await-one; phase 3a/3b's number). The busy
+boundary was exercised at twenty connections against the pool of ten: 1 busy answer, 0 5xx.
 
 - [x] `pytest tests/scripts/test_l8_webhook_admission.py -q` green.
 - [x] `RUN_LOAD_HARNESS=1 pytest tests/scripts/load -q -m load` produces a report; `taps_1000_across_50_workspaces`: 5xx = 0, end-to-end answer p95 < 2 s, pre-admission refusals within the ratified bound, `pending_update_count` peak reported; `double_tap_one_card`: exactly one flip, zero 5xx, p95 < 2 s; `taps_across_many_cards`: 200 flips over 10 workspaces; `one_slow_chat`: other chats' answer p95 < 2 s and within 200 ms of the same run's `taps_across_many_cards` p95, and other chats' edit-landed p95 within one poller cadence (2 s) plus pacing of that run's.

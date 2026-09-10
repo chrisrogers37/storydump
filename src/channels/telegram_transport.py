@@ -42,7 +42,7 @@ from typing import Awaitable, Callable, Optional
 import httpx
 
 from src.services.target import egress
-from src.services.target.egress import DEFAULT_ALLOWED_HOSTS, EgressPolicy
+from src.services.target.egress import EgressPolicy
 from src.services.target.outbox import DestinationGone
 
 logger = logging.getLogger("channels.telegram")
@@ -149,9 +149,6 @@ class SendReceipt(str):
 
 _NOT_MODIFIED = "message is not modified"
 _EMPTY_KEYBOARD = {"inline_keyboard": []}
-#: The tap's answer and the immediate strip are worthless late: one attempt,
-#: two seconds, and the route moves on (phase 1 step 4 — the plan's 2 s).
-_FAST = EgressPolicy(timeout_class="fast", total_budget_s=2.0, max_attempts=1)
 
 
 def _message_id(ref: str):
@@ -584,7 +581,8 @@ class TelegramTransport:
 #: A loopback Telegram for the load harness (`tests/scripts/load`): the API
 #: and the worker are real subprocesses, Telegram is a fake on this machine.
 API_BASE_VAR = "TARGET_TELEGRAM_API_BASE"
-_LOOPBACK = ("127.0.0.1", "localhost", "::1")
+#: Loopback ADDRESSES only — `localhost` is a name /etc/hosts may point elsewhere.
+_LOOPBACK = ("127.0.0.1", "::1")
 
 
 class ApiBaseRefused(ValueError):
@@ -607,8 +605,9 @@ def transport_from_env(token: str, env, **kwargs) -> "TelegramTransport":
     host = httpx.URL(base).host
     if host not in _LOOPBACK:
         raise ApiBaseRefused(f"{API_BASE_VAR} must name a loopback host, not {host!r}")
+    # The fake is the ONLY host this transport may speak to: a transport
+    # pointed at a loopback fake has no business with the real providers.
     policy = EgressPolicy(
-        allowed_hosts=frozenset(DEFAULT_ALLOWED_HOSTS | {host}),
-        enforce_private_address_block=False,
+        allowed_hosts=frozenset({host}), enforce_private_address_block=False
     )
     return TelegramTransport(token, api_base=base.rstrip("/"), policy=policy, **kwargs)

@@ -844,18 +844,24 @@ class TestTransportFromEnv:
             "1:t", {"TARGET_TELEGRAM_API_BASE": "http://127.0.0.1:8123/"}
         )
         assert t._api_base == "http://127.0.0.1:8123"
-        assert "127.0.0.1" in t._policy.allowed_hosts
+        assert t._policy.allowed_hosts == frozenset({"127.0.0.1"}), "the fake alone"
         assert t._policy.enforce_private_address_block is False
         assert "127.0.0.1" in t._fast.allowed_hosts, "the answer and the strip too"
-        assert "api.telegram.org" in t._policy.allowed_hosts
 
-    def test_a_non_loopback_base_is_refused(self):
+    @pytest.mark.parametrize(
+        "base",
+        [
+            "http://10.0.0.5:80",
+            "http://localhost:8123",  # a name, not an address: /etc/hosts decides
+            "http://127.0.0.1@evil.example/",
+            "http://localhost.evil.example/",
+        ],
+    )
+    def test_anything_but_a_loopback_address_is_refused(self, base):
         from src.channels.telegram_transport import ApiBaseRefused, transport_from_env
 
         with pytest.raises(ApiBaseRefused, match="loopback"):
-            transport_from_env(
-                "1:t", {"TARGET_TELEGRAM_API_BASE": "http://10.0.0.5:80"}
-            )
+            transport_from_env("1:t", {"TARGET_TELEGRAM_API_BASE": base})
 
     def test_production_refuses_the_override_outright(self):
         from src.channels.telegram_transport import ApiBaseRefused, transport_from_env
