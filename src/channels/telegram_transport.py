@@ -278,19 +278,23 @@ class TelegramTransport:
             return False
         return True
 
-    async def _edit(self, method: str, payload: dict) -> None:
+    async def _edit(
+        self, method: str, payload: dict, *, policy: Optional[EgressPolicy] = None
+    ) -> None:
         """One editMessage* call. Telegram's "message is not modified" is a
         400 that means the edit already stands — success here (#682)."""
         try:
-            await self._call(method, payload)
+            await self._call(method, payload, policy=policy)
         except TelegramRefused as exc:
             if _NOT_MODIFIED in str(exc):
                 return
             raise
 
-    async def _edit_quietly(self, method: str, payload: dict) -> bool:
+    async def _edit_quietly(
+        self, method: str, payload: dict, *, policy: Optional[EgressPolicy] = None
+    ) -> bool:
         try:
-            await self._edit(method, payload)
+            await self._edit(method, payload, policy=policy)
         except TelegramSendError as exc:
             logger.warning("%s failed: %s", method, self._redact(str(exc)))
             return False
@@ -312,25 +316,15 @@ class TelegramTransport:
         """The tapped card loses its buttons at once (unpaced, best effort,
         on the fast budget): the ref is the callback's own message, so the
         known-ref rule holds."""
-        try:
-            await self._call(
-                "editMessageReplyMarkup",
-                {
-                    "chat_id": chat_id,
-                    "message_id": _message_id(message_ref),
-                    "reply_markup": _EMPTY_KEYBOARD,
-                },
-                policy=_FAST,
-            )
-        except TelegramRefused as exc:
-            if _NOT_MODIFIED in str(exc):
-                return True
-            logger.warning("strip_keyboard failed: %s", self._redact(str(exc)))
-            return False
-        except Exception as exc:  # noqa: BLE001 — best effort, by contract
-            logger.warning("strip_keyboard failed: %s", self._redact(str(exc)))
-            return False
-        return True
+        return await self._edit_quietly(
+            "editMessageReplyMarkup",
+            {
+                "chat_id": chat_id,
+                "message_id": _message_id(message_ref),
+                "reply_markup": _EMPTY_KEYBOARD,
+            },
+            policy=_FAST,
+        )
 
     async def edit_caption(self, chat_id: str, message_ref: str, caption: str) -> bool:
         return await self._edit_quietly(
