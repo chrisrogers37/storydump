@@ -357,7 +357,7 @@ class TestDisableAccountIsInThePort:
         assert info.value.reason == expected
 
     async def test_the_executor_reports_what_moved(self, monkeypatch):
-        from src.services.target import command_executors, provisioning
+        from src.services.target import command_executors, provisioning, readers
 
         async def disable_destination(session, *, workspace_id, ig_account_id):
             return {
@@ -366,7 +366,11 @@ class TestDisableAccountIsInThePort:
                 "intents_flagged": 0,
             }
 
+        async def no_live_cards(executor, sql, **params):
+            return []  # the flagged intents whose cards would lose their buttons
+
         monkeypatch.setattr(provisioning, "disable_destination", disable_destination)
+        monkeypatch.setattr(readers, "rows", no_live_cards)
         command = port.Command(
             kind="disable_account",
             workspace_id="ws",
@@ -419,7 +423,7 @@ class TestACancellingCardOffersNoLever:
         )
         with pytest.raises(port.CommandRefused) as info:
             await getattr(command_executors, kind)(object(), command)
-        assert info.value.reason == "illegal_transition"
+        assert info.value.reason == "cancelling"
 
 
 class TestRemoveMember:

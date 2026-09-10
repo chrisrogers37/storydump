@@ -165,6 +165,13 @@ class ChannelOutbox(TargetBase):
             "created_at",
             postgresql_where=text("state = 'pending'"),
         ),
+        # 072: the tap's supersede-everywhere and the settled-card sweep select
+        # by intent (07 §18).
+        Index(
+            "ix_outbox_intent",
+            "intent_id",
+            postgresql_where=text("intent_id IS NOT NULL"),
+        ),
         Index(
             "ix_outbox_retire",
             "updated_at",

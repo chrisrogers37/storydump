@@ -54,15 +54,27 @@ SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token"
 TOKEN_VAR = "TARGET_TELEGRAM_BOT_TOKEN"
 SECRET_VAR = "TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN"
 BOT_VAR = "TARGET_TELEGRAM_BOT_USERNAME"
-#: The update kinds the target ingress serves today: `/start` taps and group
-#: messages both ride `message`; chat-inbound commands (#854) are not dispatched,
-#: so nothing else is asked for.
-ALLOWED_UPDATES = ["message"]
+#: The update kinds the target ingress serves: `/start` taps and group messages
+#: ride `message`; a button tap on an approval card is a `callback_query`
+#: (phase 1 of the 2026-09-09 tap plan). Telegram delivers ONLY what is asked
+#: for here — with `message` alone every tap was dropped before it reached the
+#: route, silently. Typed chat commands (#854) are still not dispatched.
+ALLOWED_UPDATES = ["message", "callback_query"]
+#: `setWebhook`'s `max_connections`: how many simultaneous deliveries Telegram
+#: opens against the route — its true concurrency ceiling (default 40, at most
+#: 100). Set deliberately to the ingress's connection budget: one process ×
+#: `POOL_SIZE_SEAM` (10) today; 20 if the API runs two workers (F5).
+MAX_CONNECTIONS_VAR = "TARGET_TELEGRAM_WEBHOOK_MAX_CONNECTIONS"
+DEFAULT_MAX_CONNECTIONS = 10
 TIMEOUT_S = 20
 
 
 class MissingVariable(Exception):
     """A required deployment variable is not exported in this shell."""
+
+
+class BadVariable(Exception):
+    """A deployment variable is set to a value the tool refuses."""
 
 
 class BotApiError(Exception):
@@ -235,11 +247,28 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 1 if failed else 0
 
 
+def _max_connections() -> int:
+    """The connection cap, from the environment, within Telegram's 1..100."""
+    raw = os.environ.get(MAX_CONNECTIONS_VAR, "").strip()
+    if not raw:
+        return DEFAULT_MAX_CONNECTIONS
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if not 1 <= value <= 100:
+        raise BadVariable(
+            f"{MAX_CONNECTIONS_VAR} must be an integer from 1 to 100 (got {raw!r})"
+        )
+    return value
+
+
 def cmd_register(args: argparse.Namespace) -> int:
     token = _env(TOKEN_VAR)
     secret = _env(SECRET_VAR)
     expected_bot = _env(BOT_VAR).lstrip("@")
     url = _require_https(args.url)
+    max_connections = _max_connections()
     if not _bot_matches(_bot_username(token), expected_bot):
         return 1
     body = _call(
@@ -249,6 +278,7 @@ def cmd_register(args: argparse.Namespace) -> int:
             "url": url,
             "secret_token": secret,
             "allowed_updates": json.dumps(ALLOWED_UPDATES),
+            "max_connections": str(max_connections),
             "drop_pending_updates": "true" if args.drop_pending else "false",
         },
     )
@@ -311,6 +341,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(
             f"{exc} is not set — export it in this shell (never paste it into a chat)"
         )
+        return 2
+    except BadVariable as exc:
+        print(str(exc))
         return 2
     except BotApiError as exc:
         print(str(exc))

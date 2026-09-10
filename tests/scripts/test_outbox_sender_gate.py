@@ -1117,7 +1117,7 @@ class TestThePollerReplacesTheRedisWakeUp:
 
         binding = _new_binding(outbox_db)
         _enqueue(outbox_db, kind="notification", binding=binding)
-        _enqueue(outbox_db, kind="notification", binding=binding)
+        second_id = _enqueue(outbox_db, kind="notification", binding=binding)
 
         async def transport(row):
             return "tg-ok"
@@ -1144,7 +1144,217 @@ class TestThePollerReplacesTheRedisWakeUp:
         assert first is not None and first["state"] == "sent"
         assert second is None
         assert poller.deferred == 1 and poller.sent == 1
+        # The paced tick's claim was rolled back with its session: the row is
+        # still `pending`, un-attempted, for the next window — never stranded
+        # `sending` for `recover_stranded` to write off (review of #1271).
+        assert _state(outbox_db, second_id) == ("pending", 0, None)
         assert poller.consecutive_failures == 0, (
             "a paced tick moved the failure counter — a chat at its budget"
             " would read as a dying sender"
         )
+
+
+class TestTheSenderCommitsBeforeItSpeaks:
+    """Phase 1 of the 2026-09-09 tap plan, step 8 / F8 (a): the poller's tick
+    is transaction-per-checkpoint. The claim (and the pacing debits) are
+    COMMITTED before the provider call, so while a send is in flight the
+    `tg_global` rate row is free and the claimed row is a committed `sending`
+    a tap's supersede can take; after the send the sender edits a card it sent
+    for an intent that moved meanwhile (R6)."""
+
+    def _factory(self, outbox_db):
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+        engine = create_async_engine(
+            outbox_db["worker"].replace("postgresql://", "postgresql+asyncpg://", 1),
+            pool_size=3,
+            max_overflow=0,
+        )
+        return engine, async_sessionmaker(engine, expire_on_commit=False)
+
+    @pytest.mark.asyncio
+    async def test_while_a_send_is_in_flight_the_claim_is_committed_and_the_rate_row_is_free(
+        self, outbox_db
+    ):
+        import asyncio
+
+        from src.services.target.outbox import OutboxPoller
+        from src.services.target.rate_counters import increment, window_start
+
+        binding = _new_binding(outbox_db)
+        outbox_id = _enqueue(outbox_db, kind="notification", binding=binding)
+        now = _now()
+        in_flight = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_transport(row):
+            in_flight.set()
+            await release.wait()
+            return "tg-slow"
+
+        engine, factory = self._factory(outbox_db)
+        poller = OutboxPoller(
+            _tenant_session_factory(outbox_db, factory),
+            binding_id=binding,
+            transport=slow_transport,
+            clock=lambda: now,
+            interval_seconds=0.05,
+            chat_limit=CHAT_LIMIT,
+            chat_window_seconds=CHAT_WINDOW_S,
+            global_limit=GLOBAL_LIMIT,
+            global_window_seconds=GLOBAL_WINDOW_S,
+        )
+        try:
+            tick = asyncio.create_task(poller.tick())
+            await asyncio.wait_for(in_flight.wait(), 10)
+            # The claim is COMMITTED: another connection sees `sending`.
+            assert _state(outbox_db, outbox_id)[0] == "sending"
+            # The `tg_global` row is FREE: a debit from another transaction
+            # returns at once (a row lock held across the send would block it
+            # for the whole upload — #1260).
+            async with factory() as other:
+                await other.execute(
+                    __import__("sqlalchemy").text("SET LOCAL statement_timeout = '2s'")
+                )
+                allowed = await increment(
+                    other,
+                    scope="tg_global",
+                    key="",
+                    window_start=window_start(now, GLOBAL_WINDOW_S),
+                    limit=GLOBAL_LIMIT,
+                )
+                await other.commit()
+            assert allowed is not None
+            release.set()
+            result = await asyncio.wait_for(tick, 10)
+        finally:
+            release.set()
+            await engine.dispose()
+        assert result["state"] == "sent"
+        assert _state(outbox_db, outbox_id) == ("sent", 1, "tg-slow")
+
+    @pytest.mark.asyncio
+    async def test_a_card_superseded_in_flight_is_edited_by_the_sender_itself(
+        self, outbox_db
+    ):
+        """A tap retires the card between claim and send: the supersede takes
+        the committed `sending` row, `mark_sent` is fenced, and the sender —
+        the only one who knows the ref — queues the edit for it."""
+        import asyncio
+
+        from src.services.target.outbox import OutboxPoller, supersede_all
+
+        binding = _new_binding(outbox_db)
+        (intent,) = _owner_exec(
+            outbox_db,
+            "SELECT id FROM post_intents WHERE workspace_id = %s LIMIT 1",
+            (outbox_db["ws"],),
+            fetch=True,
+        )[0]
+        outbox_id = _owner_exec(
+            outbox_db,
+            "INSERT INTO channel_outbox (workspace_id, binding_id, kind, intent_id, payload)"
+            " VALUES (%s, %s, 'approval_prompt', %s,"
+            '  \'{"v": 2, "text": "card"}\') RETURNING id',
+            (outbox_db["ws"], binding, intent),
+            fetch=True,
+        )[0][0]
+        now = _now()
+        in_flight = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_transport(row):
+            in_flight.set()
+            await release.wait()
+            from src.channels.telegram_transport import SendReceipt
+
+            return SendReceipt("tg-late", sent_as="media")
+
+        engine, factory = self._factory(outbox_db)
+        poller = OutboxPoller(
+            _tenant_session_factory(outbox_db, factory),
+            binding_id=binding,
+            transport=slow_transport,
+            clock=lambda: now,
+            interval_seconds=0.05,
+            chat_limit=CHAT_LIMIT,
+            chat_window_seconds=CHAT_WINDOW_S,
+            global_limit=GLOBAL_LIMIT,
+            global_window_seconds=GLOBAL_WINDOW_S,
+        )
+        try:
+            tick = asyncio.create_task(poller.tick())
+            await asyncio.wait_for(in_flight.wait(), 10)
+            async with factory() as other:
+                await other.execute(
+                    __import__("sqlalchemy").text(
+                        "SELECT set_config('app.tenant_id', :v, false)"
+                    ),
+                    {"v": outbox_db["ws"]},
+                )
+                n = await supersede_all(
+                    other,
+                    workspace_id=outbox_db["ws"],
+                    binding_id=binding,
+                    intent_id=str(intent),
+                    outcome_text="⏭️ Skipped by Ada · now",
+                )
+                await other.commit()
+            assert n == 1, "the committed `sending` row is what the supersede takes"
+            release.set()
+            result = await asyncio.wait_for(tick, 10)
+        finally:
+            release.set()
+            await engine.dispose()
+        assert result["state"] == "superseded"
+        assert _state(outbox_db, outbox_id)[0] == "superseded"
+        rows = _owner_exec(
+            outbox_db,
+            "SELECT payload->>'supersedes_ref', payload->>'sent_as',"
+            "       payload->>'outcome_text' FROM channel_outbox"
+            " WHERE binding_id = %s AND kind = 'prompt_supersede'"
+            "   AND payload->>'supersedes_ref' = 'tg-late'",
+            (binding,),
+            fetch=True,
+        )
+        assert rows == [("tg-late", "media", "⏭️ Skipped by Ada · now")], (
+            "the sender must queue the edit for the ref only it received, with"
+            " how the card went out and the line the supersede carried"
+        )
+
+    @pytest.mark.asyncio
+    async def test_an_idle_poller_spends_no_pacing_budget(self, outbox_db):
+        """Empty ticks debit nothing: a silent chat keeps its whole window for
+        the card that arrives (structural review of #1271)."""
+        from src.services.target.outbox import OutboxPoller
+
+        binding = _new_binding(outbox_db)
+        now = _now()
+
+        async def never(row):  # pragma: no cover — nothing to send
+            raise AssertionError("nothing is pending")
+
+        engine, factory = self._factory(outbox_db)
+        poller = OutboxPoller(
+            _tenant_session_factory(outbox_db, factory),
+            binding_id=binding,
+            transport=never,
+            clock=lambda: now,
+            interval_seconds=0.05,
+            chat_limit=CHAT_LIMIT,
+            chat_window_seconds=CHAT_WINDOW_S,
+            global_limit=GLOBAL_LIMIT,
+            global_window_seconds=GLOBAL_WINDOW_S,
+        )
+        try:
+            for _ in range(20):
+                assert await poller.tick() is None
+        finally:
+            await engine.dispose()
+        spent = _owner_exec(
+            outbox_db,
+            "SELECT count(*) FROM rate_counters WHERE scope = 'tg_chat' AND key = %s",
+            (binding,),
+            fetch=True,
+        )[0][0]
+        assert spent == 0 and poller.consecutive_failures == 0

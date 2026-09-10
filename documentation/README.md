@@ -47,7 +47,7 @@ documentation/
 - **[2026-08-17-m1-transform-spec/](planning/2026-08-17-m1-transform-spec/README.md)** — M.1 legacy → target transform — ABANDONED by owner ruling 2026-09-02 (legacy data not migrated; spec retained as the record)
 - **[2026-08-17-m2-rehearsal-spec/](planning/2026-08-17-m2-rehearsal-spec/README.md)** — M.2 window rehearsal — NOT EXECUTED
 - **[2026-08-17-m3-parity-bar-mapping/](planning/2026-08-17-m3-parity-bar-mapping/README.md)** — M.3 Telegram parity bar — DEFERRED (#854)
-- **[2026-09-09-telegram-interaction-at-throughput/](planning/2026-09-09-telegram-interaction-at-throughput/00_EPIC.md)** — the Telegram tap (W4) built for throughput: the tap, the API under load, worker throughput, tenant fairness (flagged) — RATIFIED 2026-09-09 (forks F1–F12 locked), phase 1 in build
+- **[2026-09-09-telegram-interaction-at-throughput/](planning/2026-09-09-telegram-interaction-at-throughput/00_EPIC.md)** — the Telegram tap (W4) built for throughput: the tap, the API under load, worker throughput, tenant fairness (flagged) — RATIFIED 2026-09-09 (forks F1–F12 locked); phase 1 the tap BUILT (#1271); next #1220 step 3, then phases 2, 3a, 3b
 
 ### Archive
 **[archive/README.md](archive/README.md)** — index of completed, superseded and abandoned plans, moved out of `planning/` on 2026-09-02: the two 2026-07-29 design packages the consolidated plan adjudicated, the 2026-07 full-system review, the 2026-05/06 Instagram investigations, the pre-refactor product phases (Shopify, Printify, LLM, order email, dashboard) and roadmap, and the completed credential-refactor, session-isolation, web-app-migration and Meta-launch plans.

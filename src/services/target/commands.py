@@ -167,6 +167,7 @@ REASONS: tuple[str, ...] = (
     "illegal_transition",
     "not_found",
     "manual_mode",
+    "cancelling",
 )
 
 

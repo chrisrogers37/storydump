@@ -180,7 +180,7 @@ Ratifier: owner. Status: **locked** (owner, 2026-09-09 — "go with the plan; if
 
 | Phase | Doc | Size | Depends on | Parallel with |
 |---|---|---|---|---|
-| 1 The tap | `01_the-tap.md` | L | webhook re-registration (deploy step); F2–F4, F8, F10 | 3a |
+| 1 The tap ✅ #1271 | `01_the-tap.md` | L | webhook re-registration (deploy step); F2–F4, F8, F10 | 3a |
 | 3a Worker hygiene | `03_worker-throughput.md` §3a | S | — | 1; #1220 step 3 |
 | 2 The API under load | `02_api-under-load.md` | M | 1 (the harness taps real cards); 3a (`one_slow_chat`'s edit-landed criterion needs the 15 s hold and the durable 429 hold); F11 | — |
 | 3b Worker concurrency | `03_worker-throughput.md` §3b | M | 3a; 1 (the sender's checkpointing) | 2 |

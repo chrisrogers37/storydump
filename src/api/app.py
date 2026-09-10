@@ -177,6 +177,7 @@ _COMMAND_STATUS = {
     "not_found": 404,
     "illegal_transition": 409,
     "manual_mode": 409,
+    "cancelling": 409,
 }
 
 #: `ProvisioningRefused.reason` → status (#1041).
@@ -351,16 +352,23 @@ def _cors_origins() -> list[str]:
     return [settings.web_app_origin] if settings.web_app_origin else []
 
 
-def _telegram_reply(env: Mapping[str, str]):
-    """The `/start` door's acknowledgement sender, or None without the bot
-    token — the same variable and the same transport the worker sends with,
-    so the API never holds a second credential for the one bot."""
+def _telegram_transport(env: Mapping[str, str]):
+    """The one bot transport the API speaks with — the `/start` door's
+    acknowledgement, a tap's answer and the tapped card's strip — or None
+    without the bot token (the same variable the worker sends with, so the API
+    never holds a second credential for the one bot)."""
     token = env.get("TARGET_TELEGRAM_BOT_TOKEN")
     if not token:
         return None
     from src.channels.telegram_transport import TelegramTransport
 
-    return TelegramTransport(token).send_text
+    return TelegramTransport(token)
+
+
+def _telegram_reply(env: Mapping[str, str]):
+    """The `/start` door's acknowledgement sender, or None without the token."""
+    transport = _telegram_transport(env)
+    return None if transport is None else transport.send_text
 
 
 def create_app(
@@ -413,11 +421,15 @@ def create_app(
     # Wired only when an engine exists: without one there is nothing to
     # `connect` to, and a runtime whose `connect` fails would convert the
     # route's honest 503 into a 500 mid-delivery.
+    bot = _telegram_transport(os.environ if env is None else env)
+    app.state.tap_metrics = webhooks.TapMetrics()
     app.state.ingress = (
         webhooks.IngressRuntime(
             connect=app.state.engine.connect,
             dispatch=TelegramDispatcher(),
-            reply=_telegram_reply(os.environ if env is None else env),
+            reply=None if bot is None else bot.send_text,
+            answer_callback=None if bot is None else bot.answer_callback,
+            strip_keyboard=None if bot is None else bot.strip_keyboard,
         )
         if app.state.engine is not None
         else None
@@ -462,6 +474,8 @@ def create_app(
             "uptime_seconds": int(time.time() - _START_TIME),
             "target_database": app.state.engine is not None,
             "db_role": app.state.db_role,
+            # The tap counters (phase 1 of the 2026-09-09 plan, step 12).
+            "taps": app.state.tap_metrics.snapshot(),
         }
 
     @app.get("/health/scheduling")

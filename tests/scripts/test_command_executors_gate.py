@@ -209,14 +209,28 @@ class TestSkip:
             (str(world["a"]["ws"]), first["media"]),
         ) == (1, second["id"])
 
-    def test_a_terminal_intent_is_refused_by_the_ledger_and_untouched(self, world):
+    def test_a_terminal_intent_answers_with_its_state_and_is_untouched(self, world):
+        """Read-then-decide (F2 (a), 2026-09-09): a decided card ANSWERS —
+        never an error — and nothing is written to it."""
         i = _intent(world, world["a"], "skip-3")
         run(world, "skip", intent_id=i["id"])
-        assert refused(world, "skip", intent_id=i["id"]) == "illegal_transition"
-        assert refused(world, "reject", intent_id=i["id"]) == "illegal_transition"
+        again = run(world, "skip", intent_id=i["id"])
+        assert again.outcome == "answered" and again.data["state"] == "skipped"
+        other = run(world, "reject", intent_id=i["id"])
+        assert other.outcome == "answered" and other.data["state"] == "skipped"
         assert _one(
             world, "SELECT state FROM post_intents WHERE id = %s", (i["id"],)
         ) == ("skipped",)
+
+    def test_review_required_is_answered_not_flipped_by_a_member(self, world):
+        """`review_required → approved` is the operator's edge (055): a
+        member's approve answers with the state and takes nothing."""
+        i = _intent(world, world["a"], "review-1", state="review_required")
+        out = run(world, "approve", intent_id=i["id"])
+        assert out.outcome == "answered" and out.data["state"] == "review_required"
+        assert _one(
+            world, "SELECT state FROM post_intents WHERE id = %s", (i["id"],)
+        ) == ("review_required",)
 
 
 class TestReject:
@@ -323,25 +337,19 @@ class TestMarkPosted:
         # cap_at_write is still the first debit's 1, not today's 5.
         assert self._count(world) == (2, 1)
 
-    def test_a_refused_mark_posted_rolls_its_debit_back(self, world):
+    def test_a_repeated_mark_posted_answers_and_debits_nothing(self, world):
         posted = _intent(world, world["a"], "posted-3")
         run(world, "mark_posted", intent_id=posted["id"])
         before = self._count(world)
-        with pytest.raises(CommandRefused) as err:
-            run(world, "mark_posted", intent_id=posted["id"])
-        assert err.value.reason == "illegal_transition"
-        assert "'posted'" in str(err.value)
-        assert self._count(world) == before, (
-            "the refused command's debit leaked past the rollback"
-        )
+        again = run(world, "mark_posted", intent_id=posted["id"])
+        assert again.outcome == "answered" and again.data["state"] == "posted"
+        assert self._count(world) == before, "an answered command must not debit"
 
     def test_only_an_awaiting_intent_can_be_marked(self, world):
         scheduled = _intent(world, world["a"], "posted-4", state="scheduled")
         before = self._count(world)
-        assert (
-            refused(world, "mark_posted", intent_id=scheduled["id"])
-            == "illegal_transition"
-        )
+        out = run(world, "mark_posted", intent_id=scheduled["id"])
+        assert out.outcome == "answered" and out.data["state"] == "scheduled"
         assert self._count(world) == before
 
 

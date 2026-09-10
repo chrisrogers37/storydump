@@ -259,3 +259,54 @@ class TestTheCardCarriesTheMedia:
             api_publishing_enabled=False,
         )
         assert len(payload["caption"]) <= 1024
+
+
+class TestTheOutcomeLine:
+    """One formatter for the outcome line and the slot line (phase 1 step 5):
+    `%Y-%m-%d %H:%M` in the workspace tz, the state's word, the tapper."""
+
+    def test_the_line_names_the_state_the_person_and_the_time_in_workspace_tz(self):
+        from datetime import datetime, timezone
+
+        at = datetime(2026, 9, 9, 18, 14, tzinfo=timezone.utc)
+        line = prompts.outcome_line(
+            "approved", by="Chris", at=at, tz="America/New_York"
+        )
+        assert line == "✅ Approved by Chris · 2026-09-09 14:14 America/New_York"
+
+    def test_without_a_person_the_line_still_says_what_happened(self):
+        from datetime import datetime, timezone
+
+        at = datetime(2026, 9, 9, 18, 14, tzinfo=timezone.utc)
+        assert prompts.outcome_line("expired", by=None, at=at, tz="UTC") == (
+            "⌛ Expired — slot passed · 2026-09-09 18:14 UTC"
+        )
+
+    @pytest.mark.parametrize(
+        "state",
+        [
+            "approved",
+            "publishing",
+            "publishing_ambiguous",
+            "posted",
+            "skipped",
+            "rejected",
+            "expired",
+            "cancelled",
+            "failed",
+            "review_required",
+        ],
+    )
+    def test_every_state_after_awaiting_has_a_word(self, state):
+        assert prompts.OUTCOME_WORDS[state]
+
+    def test_a_zone_postgres_accepts_but_the_iana_database_does_not_degrades_to_utc(
+        self,
+    ):
+        from datetime import datetime, timezone
+
+        at = datetime(2026, 9, 9, 18, 14, tzinfo=timezone.utc)
+        assert prompts.stamp(at, "PST") == "2026-09-09 18:14 UTC"
+        assert prompts.outcome_line("skipped", by=None, at=at, tz="UTC+5").endswith(
+            " UTC"
+        )
