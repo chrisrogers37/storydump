@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import os
 
-import pytest
-
 
 def pytest_collection_modifyitems(config, items):
     if os.environ.get("RUN_LOAD_HARNESS") == "1":
