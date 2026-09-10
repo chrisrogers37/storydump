@@ -18,6 +18,7 @@ import { Separator } from "@/components/ui/separator";
 import {
   settingsRefusalCopy,
   submitRenameWorkspace,
+  submitCommand,
   submitSettingsChange,
 } from "@/lib/command-client";
 import type { SettingsView } from "@/lib/dashboard-payloads";
@@ -42,18 +43,15 @@ import { RepostCadenceCard } from "./repost-cadence-card";
  *
  * ── Not every toggle on this screen is a `settings_change` ──────────────
  *
- * Three of the seven are (`dry_run_mode`, `enable_ai_captions`, and the one
- * this tier calls `enable_instagram_api`, which the workspace row calls
- * `api_publishing_enabled`). Three others have no source on the target tier at
- * all and already render `Unavailable` rather than a switch.
- *
- * The seventh, `is_paused`, is the one to be careful with: it READS fine, so
- * it draws a real switch showing a real value, but it is not in the port's
- * settings allowlist — pausing is `pause_workspace` / `resume_workspace`, two
- * separate commands this tier does not yet offer. Wiring it to
- * `settings_change` would send a key the port refuses BY NAME. So it carries
- * no key, stays inert, and says why. It is not a `settings_change` control and
- * is out of scope for the change that wired the other three.
+ * Two of the three are (`dry_run_mode`, and the one this tier calls
+ * `enable_instagram_api`, which the workspace row calls
+ * `api_publishing_enabled`). `is_paused` is not in the port's settings
+ * allowlist — pausing is `pause_workspace` / `resume_workspace`, one command
+ * per direction — so its row carries `command` instead of a key and the
+ * switch submits whichever direction it moves in. The four rows that had no
+ * source on this tier (AI captions — a story takes none — and the three
+ * legacy notification/sync switches) were removed on the owner's ruling of
+ * 2026-09-10 rather than shown as permanently "not available".
  */
 
 const HOUR_OPTIONS = Array.from({ length: 24 }, (_, i) => ({
@@ -61,14 +59,7 @@ const HOUR_OPTIONS = Array.from({ length: 24 }, (_, i) => ({
   label: i === 0 ? "12 AM" : i < 12 ? `${i} AM` : i === 12 ? "12 PM" : `${i - 12} PM`,
 }));
 
-type ToggleKey =
-  | "is_paused"
-  | "dry_run_mode"
-  | "enable_instagram_api"
-  | "enable_ai_captions"
-  | "show_verbose_notifications"
-  | "send_lifecycle_notifications"
-  | "media_sync_enabled";
+type ToggleKey = "is_paused" | "dry_run_mode" | "enable_instagram_api";
 
 /**
  * `settingsKey` is the column name the PORT accepts, or null when this toggle
@@ -87,7 +78,7 @@ type ToggleKey =
  *
  * So `inertReason` now answers "why does this switch not move", which has
  * THREE causes, not two, and the string says which:
- *   1. no command at all (`settingsKey: null`) — `is_paused`
+ *   1. no command at all (`settingsKey: null` and no `command`) — none today
  *   2. no column to read (`settings[key] === null`) — renders `Unavailable`
  *   3. **the write lands and nothing consumes it** — the #1155 case
  *
@@ -123,39 +114,50 @@ export function scheduleSavedNotice(workspaceState: string): string {
   );
 }
 
-export function isLiveToggle(row: { settingsKey: string | null; inertReason?: string }): boolean {
-  return row.settingsKey !== null && !row.inertReason;
+export function isLiveToggle(row: {
+  settingsKey: string | null;
+  command?: { on: string; off: string };
+  inertReason?: string;
+}): boolean {
+  return (row.settingsKey !== null || row.command !== undefined) && !row.inertReason;
 }
 
-export const TOGGLES: {
+type ToggleRow = {
   key: ToggleKey;
   label: string;
   description: string;
+  /** The `settings_change` key this switch writes — null for a command-backed one. */
   settingsKey: string | null;
   /**
-   * Why this switch does not move. Required when `settingsKey` is null, and
-   * also set when the port accepts the write but nothing acts on the value.
+   * A switch that is not a `settings_change` at all: two commands, one per
+   * direction (`is_paused` → `pause_workspace` / `resume_workspace`).
+   */
+  command?: { on: string; off: string };
+  /**
+   * Why this switch does not move. Required when it has neither a key nor a
+   * command, and also set when the port accepts the write but nothing acts on
+   * the value.
    */
   inertReason?: string;
-}[] = [
+};
+
+export const TOGGLES: ToggleRow[] = [
   {
     key: "is_paused",
     label: "Pause Posting",
-    description: "Temporarily stop all scheduled posts",
-    // Not in the port's settings allowlist: pausing is its own command pair.
+    description:
+      "Hold everything: no new posts are scheduled and approved posts wait until you resume",
+    // Not a `settings_change`: pausing is two commands, one per direction,
+    // and the clock, the prompt sweep and the publish leg all read the flag.
     settingsKey: null,
-    inertReason: "Pausing is not wired up yet",
+    command: { on: "pause_workspace", off: "resume_workspace" },
   },
   {
     key: "dry_run_mode",
     label: "Dry Run Mode",
-    description: "Simulate posting without publishing",
+    description:
+      "Rehearse: approved posts complete as if published and are marked dry run; nothing reaches Instagram",
     settingsKey: "dry_run_mode",
-    // The port stores it; nothing in `src/services/target/` reads it. Its only
-    // readers are legacy-tier, against `chat_settings` — a different table for
-    // a different cohort. And the thing it would modify does not exist: there
-    // is no publish path to simulate, so this cannot become true before one.
-    inertReason: "Nothing publishes yet, so there is nothing to simulate",
   },
   {
     key: "enable_instagram_api",
@@ -164,42 +166,6 @@ export const TOGGLES: {
     // Renamed once at the read seam (`dashboard-payloads.ts`); the port's name
     // is what goes on the wire.
     settingsKey: "api_publishing_enabled",
-    // Live since #1220 step 3: `approve` mints a `publish_pipeline` job the
-    // worker runs for real (Drive → Cloudinary transit → Instagram Graph), and
-    // the card gains "🚀 Post now" beside the manual buttons.
-  },
-  {
-    key: "enable_ai_captions",
-    label: "AI Captions",
-    description: "Auto-generate captions with Claude",
-    settingsKey: "enable_ai_captions",
-    // Same shape as `dry_run_mode`: stored, never read in the target tier.
-    // Nothing there generates a caption at all — `meta_adapter` accepts one as
-    // a publish argument, which is the consumer of a caption, not a producer.
-    inertReason: "Caption generation is not built yet",
-  },
-  // The three below have no source on the target tier, so they never draw a
-  // switch at all — `settings[key]` is null and renders `Unavailable`.
-  {
-    key: "show_verbose_notifications",
-    label: "Verbose Notifications",
-    description: "Show detailed Telegram notifications",
-    settingsKey: null,
-    inertReason: "No source on this API yet",
-  },
-  {
-    key: "send_lifecycle_notifications",
-    label: "Lifecycle Notifications",
-    description: "Receive startup/shutdown messages from the worker",
-    settingsKey: null,
-    inertReason: "No source on this API yet",
-  },
-  {
-    key: "media_sync_enabled",
-    label: "Media Sync",
-    description: "Auto-sync media from connected sources",
-    settingsKey: null,
-    inertReason: "No source on this API yet",
   },
 ];
 
@@ -359,14 +325,19 @@ export function GeneralTab({
    * not expressible as a `settings_change` and is a worse contract anyway: two
    * clicks racing would flip twice from a state neither of them read.
    */
-  async function toggle(key: ToggleKey, settingsKey: string, next: boolean) {
+  async function toggle(row: ToggleRow, next: boolean) {
+    const key = row.key;
     setError(null);
     setNotice(null);
     setTogglingKey(key);
     const previous = toggleState[key];
     setToggleState((prev) => ({ ...prev, [key]: next }));
 
-    const result = await submitSettingsChange(workspaceId, { [settingsKey]: next });
+    // A command-backed row submits whichever direction it moves in; the
+    // others are one `settings_change` carrying the value they move TO.
+    const result = row.command
+      ? await submitCommand(workspaceId, next ? row.command.on : row.command.off)
+      : await submitSettingsChange(workspaceId, { [row.settingsKey!]: next });
     setTogglingKey(null);
 
     if (!result.ok) {
@@ -628,9 +599,7 @@ export function GeneralTab({
                         disabled={!editable || !wired || togglingKey !== null}
                         aria-label={row.label}
                         onCheckedChange={
-                          wired
-                            ? (next) => toggle(row.key, row.settingsKey!, next)
-                            : undefined
+                          wired ? (next) => toggle(row, next) : undefined
                         }
                       />
                     </div>

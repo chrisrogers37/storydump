@@ -104,6 +104,7 @@ async def _intent_row(session, command: Command) -> dict[str, Any]:
         "SELECT i.id, i.workspace_id, i.state, i.media_item_id, i.ig_account_id,"
         "       i.provider_account_ref, i.cancel_requested,"
         "       w.api_publishing_enabled, w.repost_ttl_days, w.skip_ttl_days,"
+        "       w.dry_run_mode, w.is_paused,"
         "       COALESCE(a.posts_per_day, w.posts_per_day) AS eff_ppd,"
         "       COALESCE(a.tz, w.tz) AS eff_tz, a.handle"
         "  FROM post_intents i"
@@ -278,7 +279,9 @@ async def approve(session, command: Command) -> CommandResult:
             "manual_mode",
             "this workspace publishes manually; use mark_posted after posting by hand",
         )
-    if not await has_active_ig_credential(
+    # A dry run posts nowhere, so it needs no token: the owner can rehearse
+    # the whole flow before Instagram is connected.
+    if not intent.get("dry_run_mode") and not await has_active_ig_credential(
         session,
         workspace_id=command.workspace_id,
         ig_account_id=str(intent["ig_account_id"]),
@@ -306,6 +309,10 @@ async def approve(session, command: Command) -> CommandResult:
             "intent_id": str(intent["id"]),
             "state": "approved",
             "job": "publish_pipeline",
+            # What the tap's answer says next: a dry run posts nowhere; a
+            # paused workspace holds the job until it is resumed.
+            "dry_run": bool(intent.get("dry_run_mode")),
+            "paused": bool(intent.get("is_paused")),
         },
     )
 

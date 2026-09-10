@@ -310,3 +310,17 @@ class TestTheOutcomeLine:
         assert prompts.outcome_line("skipped", by=None, at=at, tz="UTC+5").endswith(
             " UTC"
         )
+
+
+def test_the_dry_run_outcome_word_names_what_did_not_happen():
+    from datetime import datetime, timezone
+
+    from src.services.target import prompts
+
+    line = prompts.outcome_line(
+        "dry_run",
+        by=None,
+        at=datetime(2026, 9, 10, 12, 0, tzinfo=timezone.utc),
+        tz="UTC",
+    )
+    assert line.startswith("🧪 Dry run — not published")

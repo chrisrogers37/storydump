@@ -151,6 +151,10 @@ ANSWERS: dict[str, tuple[str, bool]] = {
 def _executed_text(action: Optional[str], result: CommandResult) -> str:
     data = result.data or {}
     if action == "post":
+        if data.get("dry_run"):
+            return "✅ Approved — dry run, nothing will be published"
+        if data.get("paused"):
+            return "✅ Approved — posting is paused; it posts when you resume"
         if PUBLISH_LEG_LIVE:
             return "✅ Approved — posting shortly"
         return "✅ Approved — publishing isn't live yet; it will post when it is"

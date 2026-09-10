@@ -68,6 +68,7 @@ OUTCOME_WORDS = {
     "publishing_ambiguous": "🚀 Posting… (confirming)",
     "review_required": "👀 Needs review",
     "posted": "✅ Posted",
+    "dry_run": "🧪 Dry run — not published",
     "skipped": "⏭️ Skipped",
     "rejected": "🚫 Rejected",
     "expired": "⌛ Expired — slot passed",
