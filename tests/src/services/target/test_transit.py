@@ -595,3 +595,118 @@ class TestUploadFailuresAreTyped:
         with pytest.raises(TransitError, match="OSError: connection reset") as info:
             await store.upload(b"bytes", workspace_id=WS, media_kind="image")
         assert isinstance(info.value.__cause__, OSError)
+
+
+class TestTheStoryFrame:
+    """The delivery URL frames the asset for a story (owner, 2026-09-10 —
+    the first real post went up unscaled): 1080 × 1920 over a blurred copy
+    of itself, as the legacy `get_story_optimized_url` chain did."""
+
+    def test_an_image_is_padded_over_a_blurred_underlay_of_itself(self):
+        from src.services.target.transit import story_transformation
+
+        chain = story_transformation(f"ws/{WS}/asset1", media_kind="image")
+        # The picture is fitted into the frame BEFORE the underlay is laid:
+        # a layer's canvas is the base's size, and a phone photo wider than
+        # 1080 would otherwise hide the underlay (white bars — the legacy
+        # defect).
+        assert chain[0] == {"crop": "limit", "width": 1080, "height": 1920}
+        assert chain[1] == {"underlay": f"authenticated:ws:{WS}:asset1"}
+        assert chain[2] == {
+            "crop": "fill",
+            "width": 1080,
+            "height": 1920,
+            "effect": "blur:2000",
+        }
+        assert chain[3] == {"flags": "layer_apply"}
+        assert chain[4] == {"crop": "limit", "width": 1080}
+        assert chain[5] == {
+            "crop": "pad",
+            "width": 1080,
+            "height": 1920,
+            "gravity": "center",
+        }
+
+    def test_a_video_is_padded_with_cloudinarys_blurred_background(self):
+        from src.services.target.transit import story_transformation
+
+        chain = story_transformation(f"ws/{WS}/clip1", media_kind="video")
+        assert chain == [
+            {"crop": "limit", "width": 1080, "height": 1920},
+            {
+                "crop": "pad",
+                "width": 1080,
+                "height": 1920,
+                "background": "blurred:2000:15",
+            },
+        ]
+
+    def test_delivery_url_carries_the_frame(self):
+        sdk = RecordingSdk()
+        _store(sdk).delivery_url(f"ws/{WS}/asset1", media_kind="image")
+        call = sdk.url_calls[0]
+        assert call["transformation"][1] == {
+            "underlay": f"authenticated:ws:{WS}:asset1"
+        }
+        assert call["sign_url"] is True and call["type"] == "authenticated"
+
+    def test_the_real_sdk_renders_the_legacy_chain_and_signs_it(self):
+        """The SDK's own URL builder, no network: the chain reads as the
+        legacy transformation did, and the signature covers it."""
+        import cloudinary.utils
+
+        from src.services.target.transit import story_transformation
+
+        ref = f"ws/{WS}/asset1"
+        url, _ = cloudinary.utils.cloudinary_url(
+            ref,
+            transformation=story_transformation(ref, media_kind="image"),
+            sign_url=True,
+            type="authenticated",
+            resource_type="image",
+            secure=True,
+            cloud_name="c",
+            api_key="k",
+            api_secret="s",
+        )
+        assert (
+            f"/c_limit,h_1920,w_1080/u_authenticated:ws:{WS}:asset1"
+            "/c_fill,e_blur:2000,h_1920,w_1080/fl_layer_apply/c_limit,w_1080"
+            "/c_pad,g_center,h_1920,w_1080/"
+        ) in url
+        assert "/s--" in url, "signed"
+        assert "/image/authenticated/" in url
+
+    def test_the_real_sdk_renders_the_video_chain_as_mp4(self):
+        import cloudinary.utils
+
+        from src.services.target.transit import story_transformation
+
+        ref = f"ws/{WS}/clip1"
+        url, _ = cloudinary.utils.cloudinary_url(
+            ref,
+            transformation=story_transformation(ref, media_kind="video"),
+            format="mp4",
+            sign_url=True,
+            type="authenticated",
+            resource_type="video",
+            secure=True,
+            cloud_name="c",
+            api_key="k",
+            api_secret="s",
+        )
+        assert "/c_limit,h_1920,w_1080/b_blurred:2000:15,c_pad,h_1920,w_1080/" in url
+        assert url.endswith(".mp4") and "/video/authenticated/" in url
+
+    def test_delivery_is_in_the_format_meta_accepts(self):
+        sdk = RecordingSdk()
+        store = _store(sdk)
+        store.delivery_url(f"ws/{WS}/asset1", media_kind="image")
+        store.delivery_url(f"ws/{WS}/clip1", media_kind="video")
+        assert [c["format"] for c in sdk.url_calls] == ["jpg", "mp4"]
+
+    def test_an_unknown_kind_is_refused_before_any_url(self):
+        from src.services.target.transit import story_transformation
+
+        with pytest.raises(ValueError, match="media_kind"):
+            story_transformation("ws/x/y", media_kind="gif")

@@ -614,3 +614,10 @@ def _scripted_session_factory(row):
             return _Result()
 
     return _Session
+
+
+def test_the_story_video_cap_is_cloudinarys_synchronous_limit():
+    from src.worker import PUBLISH_MAX_BYTES
+
+    assert PUBLISH_MAX_BYTES["video"] == 40 * 1000 * 1000
+    assert PUBLISH_MAX_BYTES["image"] == 8 * 1024 * 1024
