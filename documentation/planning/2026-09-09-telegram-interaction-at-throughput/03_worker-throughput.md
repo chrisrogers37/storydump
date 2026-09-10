@@ -65,11 +65,11 @@ Gate (`tests/scripts/test_jobs_lease_gate.py`, `test_outbox_sender_gate.py`, `te
 
 ## Verification Checklist
 
-- [ ] 3a: `pytest tests/scripts/test_jobs_lease_gate.py tests/scripts/test_outbox_sender_gate.py tests/scripts/test_w1_worker_gate.py -q` green; the status line shows `ready=`, `oldest_age=`, `tg_global_paced=` and `ws_oldest_wait=` per lane; a 429 in the gate writes a hold and reschedules, never sleeps.
+- [x] 3a: `pytest tests/scripts/test_jobs_lease_gate.py tests/scripts/test_outbox_sender_gate.py tests/scripts/test_w1_worker_gate.py -q` green (2026-09-10, the 3a PR); the status line shows `ready=`, `oldest_age=`, `tg_global_paced=` and `ws_oldest_wait=` per lane (`backpressure.render`); a 429 in the gate writes a hold and reschedules, never sleeps (`TestAFloodLimitWritesADurableHold`, `TestASenderPacedByTheProvider`).
 - [ ] 3b: worker startup log prints `lanes: interactive×4 bulk×2 pool=10` (or the configured numbers) and the ceiling assert `K_interactive + K_bulk + 3 ≤ POOL_SIZE_SEAM` holds; the gate's measured `checked_out_peak` is recorded in the PR and `peak + 3 ≤ 10` with zero `TimeoutError`.
 - [ ] 3b: a seeded 120 s send on one binding does not delay a send on another binding (gate); `one_slow_chat` re-run and its edit-landed bound met.
 - [ ] The leased index migration applied with its postcondition.
-- [ ] `05:31`, `05:33`, `05:38` marked built; #716 answered with a citing comment.
+- [ ] `05:31`, `05:33`, `05:38` marked built; #716 answered with a citing comment. (`05:33` and `05:38` marked built by the 3a PR; `05:31` is 3b's.)
 
 ## What NOT To Do
 

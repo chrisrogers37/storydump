@@ -292,6 +292,11 @@ class TestAJobThatReachedNobodyIsNotASuccess:
 
         class _Jobs:
             JobFenced = work_loop.jobs.JobFenced
+            # Phase 3a: the loop reads the sentinel and the budget helpers
+            # from the module it was handed; the double mirrors them.
+            SELF_FINALIZED = work_loop.jobs.SELF_FINALIZED
+            budget_exhausted = staticmethod(work_loop.jobs.budget_exhausted)
+            backoff_seconds = staticmethod(work_loop.jobs.backoff_seconds)
 
             @staticmethod
             async def finalize_job(session, job_id, token, terminal_state):
@@ -306,6 +311,7 @@ class TestAJobThatReachedNobodyIsNotASuccess:
         loop._config = WorkerConfig()
         loop.processed = loop.parked = loop.failures = 0
         loop.fenced = loop.undeliverable = loop.consecutive_errors = 0
+        loop.exhausted = 0
 
         from contextlib import asynccontextmanager
 
@@ -931,3 +937,225 @@ class TestWeightedCategorySelection:
             "FROM post_locks l" in counts_sql
             and "l.ig_account_id = :acct" in counts_sql
         )
+
+
+class TestTheBudgetCeiling:
+    """F6 (a), phase 3a step 3: a failing job is rescheduled with the lane's
+    backoff until its budget — attempts or deadline — is spent; then it ends
+    `failed`, and a tenant kind the sweeps do not re-mint tells the workspace
+    in its own words."""
+
+    def _loop(self, monkeypatch, *, executor, bindings=("b-1",)):
+        from datetime import datetime, timezone
+
+        from src.services.target import outbox, prompts
+        from src.services.target.work_loop import WorkLoop, WorkerConfig
+
+        calls = {"finalized": [], "rescheduled": [], "notices": []}
+
+        class _Jobs:
+            JobFenced = work_loop.jobs.JobFenced
+            SELF_FINALIZED = work_loop.jobs.SELF_FINALIZED
+            budget_exhausted = staticmethod(work_loop.jobs.budget_exhausted)
+            backoff_seconds = staticmethod(work_loop.jobs.backoff_seconds)
+
+            @staticmethod
+            async def finalize_job(session, job_id, token, terminal_state):
+                calls["finalized"].append(terminal_state)
+
+            @staticmethod
+            async def reschedule_job(
+                session, job_id, token, *, run_at, restore_attempt
+            ):
+                calls["rescheduled"].append((run_at, restore_attempt))
+
+        async def push_bindings(session, workspace_id):
+            return list(bindings)
+
+        async def fanout_notification(
+            session, *, workspace_id, bindings, text, intent_id=None
+        ):
+            calls["notices"].append((workspace_id, tuple(bindings), text))
+            return len(bindings)
+
+        monkeypatch.setattr(work_loop, "jobs", _Jobs)
+        monkeypatch.setattr(prompts, "push_bindings", push_bindings)
+        monkeypatch.setattr(outbox, "fanout_notification", fanout_notification)
+        monkeypatch.setattr(
+            work_loop, "_utcnow", lambda: datetime(2030, 1, 1, tzinfo=timezone.utc)
+        )
+
+        loop = WorkLoop.__new__(WorkLoop)
+        loop._registry = {"sync_media_source": executor, "deliver_outbox": executor}
+        loop._config = WorkerConfig()
+        loop.processed = loop.parked = loop.failures = 0
+        loop.fenced = loop.undeliverable = loop.consecutive_errors = loop.exhausted = 0
+
+        from contextlib import asynccontextmanager
+
+        @asynccontextmanager
+        async def _ctx(job):
+            yield _FakeSession()
+
+        loop._session_for = _ctx
+        return loop, calls
+
+    @staticmethod
+    def _job(**over):
+        from datetime import datetime, timedelta, timezone
+
+        base = {
+            "id": "j-1",
+            "kind": "sync_media_source",
+            "workspace_id": "ws-1",
+            "lane": "bulk",
+            "attempts": 1,
+            "max_attempts": 5,
+            "deadline_at": datetime(2030, 1, 1, tzinfo=timezone.utc)
+            + timedelta(hours=1),
+            "lease_token": "tok",
+            "payload": {"v": 1},
+        }
+        base.update(over)
+        return base
+
+    async def test_under_budget_the_job_backs_off_on_the_lane_s_ladder(
+        self, monkeypatch
+    ):
+        from datetime import datetime, timezone
+
+        async def executor(session, job):
+            raise RuntimeError("boom")
+
+        loop, calls = self._loop(monkeypatch, executor=executor)
+        await loop._run_job(self._job(attempts=2))
+
+        assert loop.failures == 1 and loop.exhausted == 0
+        assert calls["finalized"] == [] and calls["notices"] == []
+        ((run_at, restored),) = calls["rescheduled"]
+        assert restored is False, "a retryable failure keeps its consumed attempt"
+        eta = (run_at - datetime(2030, 1, 1, tzinfo=timezone.utc)).total_seconds()
+        assert 240 <= eta <= 360, f"bulk rung 2 is 300 s ± 20 %, got {eta}"
+
+    async def test_at_the_attempt_ceiling_the_job_fails_and_the_workspace_hears(
+        self, monkeypatch
+    ):
+        async def executor(session, job):
+            raise RuntimeError("boom")
+
+        loop, calls = self._loop(monkeypatch, executor=executor)
+        await loop._run_job(self._job(attempts=5, max_attempts=5))
+
+        assert calls["finalized"] == ["failed"] and calls["rescheduled"] == []
+        assert loop.exhausted == 1 and loop.failures == 1
+        ((ws, bindings, text),) = calls["notices"]
+        assert ws == "ws-1" and bindings == ("b-1",)
+        assert text == work_loop.FAILURE_NOTICES["sync_media_source"]
+        assert "boom" not in text, "the machine detail stays in the log"
+
+    async def test_a_passed_deadline_fails_the_job_whatever_the_attempts(
+        self, monkeypatch
+    ):
+        from datetime import datetime, timedelta, timezone
+
+        async def executor(session, job):
+            raise RuntimeError("boom")
+
+        loop, calls = self._loop(monkeypatch, executor=executor)
+        await loop._run_job(
+            self._job(
+                attempts=1,
+                deadline_at=datetime(2030, 1, 1, tzinfo=timezone.utc)
+                - timedelta(seconds=1),
+            )
+        )
+        assert calls["finalized"] == ["failed"] and len(calls["notices"]) == 1
+
+    async def test_a_re_minted_kind_fails_quietly(self, monkeypatch):
+        async def executor(session, job):
+            raise RuntimeError("boom")
+
+        loop, calls = self._loop(monkeypatch, executor=executor)
+        await loop._run_job(
+            self._job(kind="deliver_outbox", attempts=3, max_attempts=3)
+        )
+
+        assert calls["finalized"] == ["failed"]
+        assert calls["notices"] == [], (
+            "the sweep re-mints a sender; 'will not retry' would be a lie"
+        )
+
+    async def test_a_workspace_with_no_binding_gets_the_log_line_only(
+        self, monkeypatch
+    ):
+        async def executor(session, job):
+            raise RuntimeError("boom")
+
+        loop, calls = self._loop(monkeypatch, executor=executor, bindings=())
+        await loop._run_job(self._job(attempts=5))
+        assert calls["finalized"] == ["failed"]
+        assert calls["notices"] == [
+            ("ws-1", (), work_loop.FAILURE_NOTICES["sync_media_source"])
+        ]
+
+    async def test_a_kind_without_its_own_sentence_gets_the_default(self, monkeypatch):
+        async def executor(session, job):
+            raise RuntimeError("boom")
+
+        loop, calls = self._loop(monkeypatch, executor=executor)
+        loop._registry["some_tenant_kind"] = executor
+        await loop._run_job(self._job(kind="some_tenant_kind", attempts=5))
+        assert calls["notices"][0][2] == work_loop._DEFAULT_NOTICE
+
+
+class TestAnExecutorThatFinalizesItself:
+    """`jobs.SELF_FINALIZED` (phase 3a): the publish pipeline and a paced
+    sender settle their own job; a second finalize by the loop was fenced and
+    counted as an error on every such run."""
+
+    async def test_the_loop_does_not_finalize_a_self_finalized_job(self, monkeypatch):
+        from src.services.target.work_loop import WorkLoop, WorkerConfig
+
+        finalized = []
+
+        class _Jobs:
+            JobFenced = work_loop.jobs.JobFenced
+            SELF_FINALIZED = work_loop.jobs.SELF_FINALIZED
+            budget_exhausted = staticmethod(work_loop.jobs.budget_exhausted)
+            backoff_seconds = staticmethod(work_loop.jobs.backoff_seconds)
+
+            @staticmethod
+            async def finalize_job(session, job_id, token, terminal_state):
+                finalized.append(terminal_state)
+
+        async def executor(session, job):
+            return work_loop.jobs.SELF_FINALIZED
+
+        monkeypatch.setattr(work_loop, "jobs", _Jobs)
+        loop = WorkLoop.__new__(WorkLoop)
+        loop._registry = {"publish_pipeline": executor}
+        loop._config = WorkerConfig()
+        loop.processed = loop.parked = loop.failures = 0
+        loop.fenced = loop.undeliverable = loop.consecutive_errors = loop.exhausted = 0
+
+        from contextlib import asynccontextmanager
+
+        @asynccontextmanager
+        async def _ctx(job):
+            yield _FakeSession()
+
+        loop._session_for = _ctx
+        await loop._run_job(
+            {"id": "j", "kind": "publish_pipeline", "lease_token": "t", "payload": {}}
+        )
+        assert finalized == [] and loop.processed == 1 and loop.fenced == 0
+
+
+class TestPerLaneWorkspaceCaps:
+    def test_the_caps_are_05_s_numbers_per_lane(self):
+        from src.services.target.work_loop import WorkerConfig
+
+        cfg = WorkerConfig()
+        assert cfg.ws_lane_cap_for("interactive") == 5
+        assert cfg.ws_lane_cap_for("bulk") == 3
+        assert cfg.sender_hold_seconds == 15.0

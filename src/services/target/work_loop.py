@@ -66,11 +66,17 @@ class WorkerConfig:
     """
 
     lease_seconds: float = 90.0  # 05: 60–120 band
-    ws_lane_cap: int = 2  # per-workspace per-lane concurrency
+    # `05:33` row 3 — per-workspace, per-lane: a workspace can never own a
+    # lane. Interactive 5 (half one replica's interactive pool), bulk 3
+    # (one publish + one sync + one misc). Raised from 2/2 in phase 3a.
+    ws_lane_cap_interactive: int = 5
+    ws_lane_cap_bulk: int = 3
     claim_idle_seconds: float = 1.0  # sleep when a lane has nothing runnable
     retry_backoff_seconds: float = 60.0  # R8 retryable-failure backoff
     park_seconds: float = 900.0  # executor-less kinds retry this often
-    sender_hold_seconds: float = 45.0  # < lease_seconds: poller hold per claim
+    # < lease_seconds: the poller's hold per claim. 45 → 15 in phase 3a so a
+    # busy binding yields its lane sooner; the sweep re-mints while rows remain.
+    sender_hold_seconds: float = 15.0
     sender_sweep_seconds: float = 3.0  # cadence of the sender-job mint sweep
     prompt_sweep_seconds: float = 5.0  # cadence of the prompt sweep (W3)
     lane_max_consecutive_errors: int = 10  # claim errors before the lane dies loudly
@@ -93,6 +99,14 @@ class WorkerConfig:
     # the parked-intent notice (06 section 5). None = the notice still fires,
     # without a link: being told late beats not being told.
     web_app_origin: Optional[str] = None
+
+    def ws_lane_cap_for(self, lane: str) -> int:
+        return (
+            self.ws_lane_cap_interactive
+            if lane == "interactive"
+            else self.ws_lane_cap_bulk
+        )
+
     clock_interval_seconds: float = 15.0
     clock_max_inserts: int = 500
     refresh_cadence_seconds: int = 7 * 24 * 3600
@@ -318,6 +332,9 @@ def build_registry(deps: WorkerDeps) -> dict:
             media_fetch=deps.media_fetch,
         )
         logger.info("publish_pipeline %s -> %s", job["id"], outcome)
+        # The pipeline finalizes or reschedules its own job in its own
+        # transactions; the loop must not finalize again.
+        return jobs.SELF_FINALIZED
 
     async def deliver_outbox(session, job):
         # The bounded sender hold: while THIS lease serializes the binding's
@@ -378,6 +395,24 @@ def build_registry(deps: WorkerDeps) -> dict:
                     f", moved to {moved}" if moved else "",
                 )
                 break
+            if result is not None and result.get("state") == "paced":
+                # A 429: the hold is on the pacing rows for every replica; this
+                # sender yields its lane now and comes back when Telegram said
+                # to — its own reschedule, no attempt spent (phase 3a step 2).
+                wait = float(result.get("retry_after_s") or cfg.poller_interval_seconds)
+                await jobs.reschedule_job(
+                    session,
+                    job["id"],
+                    job["lease_token"],
+                    run_at=_utcnow() + timedelta(seconds=wait),
+                    restore_attempt=True,
+                )
+                logger.info(
+                    "deliver_outbox %s: paced by the provider — back in %.0fs",
+                    job["id"],
+                    wait,
+                )
+                return jobs.SELF_FINALIZED
             if (
                 result is None
                 and (
@@ -532,6 +567,57 @@ def build_registry(deps: WorkerDeps) -> dict:
     return registry
 
 
+#: Kinds a sweep re-mints on its own: their `failed` is a log line, never a
+#: tenant notice ("will not retry" would be a lie). `publish_pipeline` keeps
+#: its own ceiling and its own notices.
+_REMINTED_KINDS = frozenset({"deliver_outbox", "publish_pipeline", "plan_slot"})
+
+#: The user-language sentence for a tenant kind whose budget is spent — the
+#: thing, not the kind (`05:38`; phase 3a step 3).
+FAILURE_NOTICES: dict[str, str] = {
+    "sync_media_source": (
+        "The sync of your Drive folder failed and won't retry until the next"
+        " scheduled sync; open Settings on the web to check the folder."
+    ),
+    "first_ingest_chunk": (
+        "Reading your Drive folder failed part-way and won't retry until the"
+        " next scheduled sync; open Settings on the web to check the folder."
+    ),
+    "refresh_credential": (
+        "Renewing a connection to Instagram or Google Drive failed and won't"
+        " retry on its own; open Settings › Integrations on the web to reconnect."
+    ),
+    "reauth_prompt": (
+        "We could not tell you about a connection that needs attention; open"
+        " Settings › Integrations on the web."
+    ),
+}
+_DEFAULT_NOTICE = (
+    "A background task for this workspace failed and won't retry on its own;"
+    " open Settings on the web."
+)
+
+
+async def _notify_exhausted(session, job) -> None:
+    """One `notification` outbox row per push binding when a tenant kind the
+    sweeps do not re-mint has spent its budget. Nothing for system kinds and
+    the re-minted kinds; a workspace with no binding gets nothing here (the
+    log carries it)."""
+    kind = str(job.get("kind"))
+    workspace_id = job.get("workspace_id")
+    if workspace_id is None or kind in _REMINTED_KINDS:
+        return
+    from src.services.target import prompts  # noqa: PLC0415 — cycle
+
+    bindings = await prompts.push_bindings(session, str(workspace_id))
+    await outbox.fanout_notification(
+        session,
+        workspace_id=str(workspace_id),
+        bindings=bindings,
+        text=FAILURE_NOTICES.get(kind, _DEFAULT_NOTICE),
+    )
+
+
 class WorkLoop:
     """One lane's claim → dispatch → finalize cycle.
 
@@ -562,6 +648,8 @@ class WorkLoop:
         self.parked = 0
         self.failures = 0
         self.fenced = 0
+        #: Jobs that spent their `05:38` budget and ended `failed` (phase 3a).
+        self.exhausted = 0
         #: Jobs that ran cleanly and reached NOBODY. Its own counter rather
         #: than a share of `processed`, because the whole point is that the two
         #: are not the same outcome.
@@ -584,7 +672,7 @@ class WorkLoop:
                 lane=self.lane,
                 worker=self._worker_name,
                 lease_seconds=self._config.lease_seconds,
-                ws_lane_cap=self._config.ws_lane_cap,
+                ws_lane_cap=self._config.ws_lane_cap_for(self.lane),
             )
         except Exception as exc:  # noqa: BLE001 — survive transient, die loud on persistent
             self.consecutive_errors += 1
@@ -637,14 +725,18 @@ class WorkLoop:
                 # producer that reached nobody report a clean run. Every other
                 # executor returns None and is unaffected.
                 undeliverable = outcome == outbox.UNDELIVERABLE
-                await jobs.finalize_job(
-                    session,
-                    job["id"],
-                    job["lease_token"],
-                    terminal_state=(
-                        "review_required" if undeliverable else "succeeded"
-                    ),
-                )
+                # An executor that finalized or rescheduled its OWN job says
+                # so with `jobs.SELF_FINALIZED` — a second finalize here would
+                # only be fenced and counted as an error (phase 3a).
+                if outcome is not jobs.SELF_FINALIZED:
+                    await jobs.finalize_job(
+                        session,
+                        job["id"],
+                        job["lease_token"],
+                        terminal_state=(
+                            "review_required" if undeliverable else "succeeded"
+                        ),
+                    )
             if undeliverable:
                 logger.warning(
                     "job %s (%s) reached no delivery surface — parked"
@@ -662,19 +754,51 @@ class WorkLoop:
             )
             self.fenced += 1
         except Exception:
-            logger.exception(
-                "job %s (%s) failed; rescheduling with backoff", job["id"], kind
-            )
             self.failures += 1
             self.consecutive_errors += 1
+            now = _utcnow()
+            if jobs.budget_exhausted(job, now=now):
+                # F6 (a): the `05:38` budget is spent — attempts or the
+                # deadline. The job ends `failed`, and a tenant kind the
+                # sweeps do not re-mint tells the workspace in its own words
+                # (the machine detail stays in the log).
+                logger.exception(
+                    "job %s (%s) failed and its budget is spent (attempts=%s/%s,"
+                    " deadline=%s) — ending failed",
+                    job["id"],
+                    kind,
+                    job.get("attempts"),
+                    job.get("max_attempts"),
+                    job.get("deadline_at"),
+                )
+                try:
+                    async with self._session_for(job) as session:
+                        await _notify_exhausted(session, job)
+                        await jobs.finalize_job(
+                            session, job["id"], job["lease_token"], "failed"
+                        )
+                except jobs.JobFenced:
+                    self.fenced += 1
+                self.exhausted += 1
+                return
+            backoff = jobs.backoff_seconds(
+                str(job.get("lane") or "bulk"), int(job.get("attempts") or 1)
+            )
+            logger.exception(
+                "job %s (%s) failed; rescheduling in %.0fs (attempt %s/%s)",
+                job["id"],
+                kind,
+                backoff,
+                job.get("attempts"),
+                job.get("max_attempts"),
+            )
             try:
                 async with self._session_for(job) as session:
                     await jobs.reschedule_job(
                         session,
                         job["id"],
                         job["lease_token"],
-                        run_at=_utcnow()
-                        + timedelta(seconds=self._config.retry_backoff_seconds),
+                        run_at=now + timedelta(seconds=backoff),
                         restore_attempt=False,
                     )
             except jobs.JobFenced:
@@ -722,9 +846,9 @@ async def ensure_sender_jobs(session) -> int:
     result = await session.execute(
         text(
             "INSERT INTO jobs (kind, workspace_id, lane, serialization_key,"
-            " run_at, max_attempts, payload)"
+            " run_at, max_attempts, deadline_at, payload)"
             " SELECT 'deliver_outbox', b.workspace_id, 'interactive',"
-            "        'tg:' || b.id, now(), 3,"
+            "        'tg:' || b.id, now(), 3, now() + interval '10 minutes',"
             "        jsonb_build_object('v', 1, 'binding_id', b.id)"
             "   FROM channel_bindings b"
             "  WHERE b.state = 'active' AND b.channel LIKE 'telegram%'"
@@ -733,6 +857,8 @@ async def ensure_sender_jobs(session) -> int:
             "    AND NOT EXISTS (SELECT 1 FROM jobs j"
             "                     WHERE j.serialization_key = 'tg:' || b.id"
             "                       AND j.state IN ('ready', 'leased'))"
+            # H5: a sweep is bounded; the next one takes the rest.
+            "  LIMIT 200"
         )
     )
     return result.rowcount

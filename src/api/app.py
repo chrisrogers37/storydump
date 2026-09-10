@@ -67,7 +67,8 @@ from src.services.target.commands import CommandNotBuilt, CommandRefused
 from src.services.target.invitations import InvitationRefused
 from src.services.target.category_mix import MixInvalid
 from src.services.target.provisioning import ProvisioningRefused
-from src.services.target import posting_health, scheduling_health
+from src.services.target import backpressure, posting_health, scheduling_health
+from src.services.target.work_loop import WorkerConfig
 from src.services.target.unit_of_work import (
     connection_role,
     create_engine,
@@ -722,7 +723,16 @@ def create_app(
             # reach. The cursor keys keep their names and meanings, so a poller
             # predating this change reads the payload exactly as before.
             lag = await scheduling_health.scheduling_lag(conn)
-            return {**lag, "worker": await scheduling_health.worker_freshness(conn)}
+            worker = await scheduling_health.worker_freshness(conn)
+            # The backpressure signal (phase 3a step 6): the same numbers the
+            # worker's status line prints, for the poller that watches this.
+            pressure = await backpressure.snapshot(
+                conn,
+                now=datetime.now(timezone.utc),
+                global_limit=WorkerConfig().global_limit,
+                global_window_seconds=WorkerConfig().global_window_seconds,
+            )
+            return {**lag, "worker": worker, "backpressure": pressure}
 
     @app.get("/health/posting")
     async def posting_health_check():

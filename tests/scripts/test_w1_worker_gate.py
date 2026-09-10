@@ -401,3 +401,321 @@ class TestJsonbTimestampWidths:
                 )
                 assert cur.fetchone()[0] == 1, f"width {width!r} did not mint"
         _assert_no_stranded_lease(sync_conn)
+
+
+def _binding(conn, workspace_id) -> str:
+    with conn.cursor() as cur:
+        cur.execute("SET app.actor_kind = 'migration'")
+        cur.execute(
+            "INSERT INTO channel_bindings (workspace_id, channel, external_ref)"
+            " VALUES (%s, 'telegram_group', %s) RETURNING id",
+            (workspace_id, f"tg-{uuid.uuid4().hex[:10]}"),
+        )
+        binding_id = cur.fetchone()[0]
+    conn.commit()
+    return str(binding_id)
+
+
+def _notices(conn, workspace_id) -> list[str]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT payload->>'text' FROM channel_outbox"
+            " WHERE workspace_id = %s AND kind = 'notification' AND state = 'pending'",
+            (workspace_id,),
+        )
+        return [r[0] for r in cur.fetchall()]
+
+
+def _set(conn, job_id, sql_fragment):
+    with conn.cursor() as cur:
+        cur.execute("SET app.actor_kind = 'migration'")
+        cur.execute(f"UPDATE jobs SET {sql_fragment} WHERE id = %s", (str(job_id),))
+    conn.commit()
+
+
+class TestTheBudgetCeilingOnTheRealMachinery:
+    """F6 (a), phase 3a: `05:38`'s budget, enforced by the loop on real rows.
+    Until now `reschedule_job` never read `max_attempts` and `deadline_at`
+    was never written — a failing job retried every 60 s forever."""
+
+    async def test_the_last_attempt_ends_failed_and_the_workspace_hears(
+        self, lane_db, sync_conn
+    ):
+        chain = seed_workspace_chain(sync_conn, "w1ceil")
+        _binding(sync_conn, chain["ws"])
+        job_id = _insert_job(
+            sync_conn, kind="sync_media_source", workspace_id=chain["ws"]
+        )
+        _set(sync_conn, job_id, "max_attempts = 1")
+
+        async def failing(session, job):
+            raise RuntimeError("the adapter is down")
+
+        wl, claimed = await _run_once(
+            lane_db, registry_override={"sync_media_source": failing}
+        )
+
+        assert claimed is True and wl.failures == 1 and wl.exhausted == 1
+        row = _job_row(sync_conn, job_id)
+        assert row["state"] == "failed", row
+        notices = _notices(sync_conn, chain["ws"])
+        assert len(notices) == 1 and "won't retry" in notices[0], notices
+        assert "adapter is down" not in notices[0]
+        _assert_no_stranded_lease(sync_conn)
+
+    async def test_a_passed_deadline_ends_the_job_on_its_first_failure(
+        self, lane_db, sync_conn
+    ):
+        chain = seed_workspace_chain(sync_conn, "w1dead")
+        job_id = _insert_job(
+            sync_conn, kind="sync_media_source", workspace_id=chain["ws"]
+        )
+        _set(sync_conn, job_id, "deadline_at = now() - interval '1 minute'")
+
+        async def failing(session, job):
+            raise RuntimeError("still down")
+
+        wl, _ = await _run_once(
+            lane_db, registry_override={"sync_media_source": failing}
+        )
+
+        assert wl.exhausted == 1
+        row = _job_row(sync_conn, job_id)
+        assert row["state"] == "failed" and row["attempts"] == 1
+        _assert_no_stranded_lease(sync_conn)
+
+    async def test_under_budget_the_backoff_is_the_lane_s_rung_with_jitter(
+        self, lane_db, sync_conn
+    ):
+        chain = seed_workspace_chain(sync_conn, "w1rung")
+        job_id = _insert_job(
+            sync_conn, kind="sync_media_source", workspace_id=chain["ws"]
+        )
+
+        async def failing(session, job):
+            raise RuntimeError("down")
+
+        wl, _ = await _run_once(
+            lane_db, registry_override={"sync_media_source": failing}
+        )
+
+        assert wl.exhausted == 0
+        row = _job_row(sync_conn, job_id)
+        assert row["state"] == "ready" and row["attempts"] == 1
+        eta = (row["run_at"] - datetime.now(timezone.utc)).total_seconds()
+        assert 40 < eta <= 75, f"bulk rung 1 is 60 s ± 20 %, got {eta}"
+        assert _notices(sync_conn, chain["ws"]) == []
+
+    async def test_a_re_minted_kind_fails_without_a_notice(self, lane_db, sync_conn):
+        chain = seed_workspace_chain(sync_conn, "w1quiet")
+        _binding(sync_conn, chain["ws"])
+        job_id = _insert_job(sync_conn, kind="plan_slot", workspace_id=chain["ws"])
+        _set(sync_conn, job_id, "max_attempts = 1")
+
+        async def failing(session, job):
+            raise RuntimeError("down")
+
+        wl, _ = await _run_once(lane_db, registry_override={"plan_slot": failing})
+
+        assert wl.exhausted == 1 and _job_row(sync_conn, job_id)["state"] == "failed"
+        assert _notices(sync_conn, chain["ws"]) == []
+
+    async def test_enqueue_writes_the_lane_s_deadline_and_ceiling(
+        self, lane_db, sync_conn
+    ):
+        from sqlalchemy import text as _t
+        from sqlalchemy.ext.asyncio import async_sessionmaker
+
+        from src.services.target import jobs
+
+        chain = seed_workspace_chain(sync_conn, "w1mint")
+        engine = create_async_engine(_async_url(lane_db))
+        try:
+            factory = async_sessionmaker(engine, expire_on_commit=False)
+            async with factory() as session:
+                await session.execute(_t("SET app.actor_kind = 'migration'"))
+                job_id = await jobs.enqueue(
+                    session,
+                    kind="sync_media_source",
+                    workspace_id=chain["ws"],
+                    serialization_key=f"sync:{uuid.uuid4()}",
+                    payload={"v": 1},
+                    lane="bulk",
+                )
+                interactive_id = await jobs.enqueue(
+                    session,
+                    kind="reauth_prompt",
+                    workspace_id=chain["ws"],
+                    serialization_key=f"reauth:{uuid.uuid4()}",
+                    payload={"v": 1},
+                    lane="interactive",
+                )
+                await session.commit()
+        finally:
+            await engine.dispose()
+
+        with sync_conn.cursor() as cur:
+            cur.execute(
+                "SELECT max_attempts, EXTRACT(EPOCH FROM deadline_at - run_at)"
+                " FROM jobs WHERE id = %s",
+                (str(job_id),),
+            )
+            bulk = cur.fetchone()
+            cur.execute(
+                "SELECT max_attempts, EXTRACT(EPOCH FROM deadline_at - run_at)"
+                " FROM jobs WHERE id = %s",
+                (str(interactive_id),),
+            )
+            interactive = cur.fetchone()
+        assert (bulk[0], int(bulk[1])) == (5, 6 * 3600)
+        assert (interactive[0], int(interactive[1])) == (3, 600)
+
+
+class TestTheBackpressureSignalOnRealRows:
+    """Phase 3a step 6: the four statements behind the status line and
+    `/health/scheduling`, run against seeded rows — the unit test only
+    proves the shape."""
+
+    async def test_depth_age_pending_hold_and_oldest_wait_read_true(
+        self, lane_db, sync_conn
+    ):
+        from sqlalchemy import text as _t
+
+        from src.services.target import backpressure, outbox
+
+        chain = seed_workspace_chain(sync_conn, "w1press")
+        binding = _binding(sync_conn, chain["ws"])
+        old = _insert_job(sync_conn, kind="sync_media_source", workspace_id=chain["ws"])
+        _set(sync_conn, old, "run_at = now() - interval '90 seconds'")
+        _insert_job(sync_conn, kind="plan_slot", workspace_id=chain["ws"])
+        future = _insert_job(sync_conn, kind="plan_slot", workspace_id=chain["ws"])
+        _set(sync_conn, future, "run_at = now() + interval '1 hour'")  # not runnable
+        with sync_conn.cursor() as cur:
+            cur.execute("SET app.actor_kind = 'migration'")
+            cur.execute(
+                "INSERT INTO channel_outbox (workspace_id, binding_id, kind, payload)"
+                ' VALUES (%s, %s, \'notification\', \'{"v": 1, "text": "hi"}\')',
+                (chain["ws"], binding),
+            )
+        sync_conn.commit()
+
+        now = datetime.now(timezone.utc)
+        engine = create_async_engine(_async_url(lane_db))
+        try:
+            async with engine.connect() as conn:
+                await conn.execute(_t("SET app.actor_kind = 'migration'"))
+                held = await outbox.write_pacing_hold(
+                    conn,
+                    scope="tg_global",
+                    key="",
+                    now=now,
+                    seconds=5,
+                    limit=30,
+                    window_seconds=1,
+                )
+                await conn.commit()
+                snap = await backpressure.snapshot(
+                    conn, now=now, global_limit=30, global_window_seconds=1
+                )
+        finally:
+            await engine.dispose()
+
+        assert held == 6, "now through now + 5 s is six 1 s windows"
+        bulk = snap["lanes"]["bulk"]
+        assert bulk["ready"] >= 2, snap
+        assert bulk["oldest_age_s"] >= 89.0, snap
+        assert snap["outbox_pending"] >= 1
+        assert snap["tg_global"]["hold_active"] is True
+        assert snap["tg_global"]["paced_windows_last_minute"] >= 6
+        oldest = snap["ws_oldest_wait"]
+        assert oldest is not None and oldest["wait_s"] >= 89.0
+        assert oldest["workspace_id"] == str(chain["ws"])
+
+
+class TestASenderPacedByTheProvider:
+    """Phase 3a step 2, on the real executor: a 429 from the transport writes
+    the durable hold, returns the row to `pending`, and the sender job
+    reschedules ITSELF at `now + retry_after` with its attempt restored —
+    no failure counted, no second finalize, no in-task sleep."""
+
+    async def test_the_sender_job_comes_back_when_telegram_said(
+        self, lane_db, sync_conn
+    ):
+        from src.services.target.outbox import ChannelPaced
+        from src.services.target.work_loop import WorkerDeps, build_registry
+
+        chain = seed_workspace_chain(sync_conn, "w1paced")
+        binding = _binding(sync_conn, chain["ws"])
+        with sync_conn.cursor() as cur:
+            cur.execute("SET app.actor_kind = 'migration'")
+            cur.execute(
+                "INSERT INTO channel_outbox (workspace_id, binding_id, kind, payload)"
+                ' VALUES (%s, %s, \'notification\', \'{"v": 1, "text": "hi"}\')'
+                " RETURNING id",
+                (chain["ws"], binding),
+            )
+            row_id = cur.fetchone()[0]
+        sync_conn.commit()
+        job_id = _insert_job(
+            sync_conn,
+            kind="deliver_outbox",
+            workspace_id=chain["ws"],
+            serialization_key=f"tg:{binding}",
+            payload='{"v": 1, "binding_id": "%s"}' % binding,
+        )
+        reached: list = []
+
+        class _Flooding:
+            def for_chat(self, external_ref):
+                async def send(row):
+                    reached.append(row["id"])
+                    raise ChannelPaced("429", retry_after_s=9, scope="chat")
+
+                return send
+
+        engine = create_async_engine(_async_url(lane_db))
+        try:
+            cfg = WorkerConfig(poller_interval_seconds=0.05, sender_hold_seconds=5.0)
+            registry = build_registry(
+                WorkerDeps(engine=engine, transport=_Flooding(), config=cfg)
+            )
+            app = compose(engine=engine, config=cfg, env={})
+            wl = next(wl_ for wl_ in app.loops if wl_.lane == "bulk")
+            wl._registry = {
+                **app.registry,
+                "deliver_outbox": registry["deliver_outbox"],
+            }
+            conn = await engine.connect()
+            try:
+                wl.bind_claim_conn(conn)
+                started = datetime.now(timezone.utc)
+                claimed = await wl.run_once()
+            finally:
+                await conn.close()
+        finally:
+            await engine.dispose()
+
+        assert claimed is True
+        assert reached == [str(row_id)], reached
+        assert (wl.failures, wl.fenced, wl.exhausted) == (0, 0, 0)
+        row = _job_row(sync_conn, job_id)
+        assert row["state"] == "ready", row
+        assert row["attempts"] == 0, "a provider's limit costs the job no attempt"
+        eta = (row["run_at"] - started).total_seconds()
+        assert 8.5 <= eta <= 10.5, f"back at now + retry_after (9 s), got {eta}"
+        with sync_conn.cursor() as cur:
+            cur.execute("SELECT state FROM channel_outbox WHERE id = %s", (row_id,))
+            assert cur.fetchone()[0] == "pending"
+            cur.execute(
+                "SELECT count(*) FROM rate_counters WHERE scope = 'tg_global'"
+                " AND key = '' AND count >= %s AND window_start >= %s",
+                (cfg.global_limit, started - timedelta(seconds=1)),
+            )
+            assert cur.fetchone()[0] >= 9, "the hold spans every window of retry_after"
+            cur.execute(
+                "SELECT count(*) FROM rate_counters WHERE scope = 'tg_chat'"
+                " AND key = %s AND count >= %s",
+                (binding, cfg.chat_limit),
+            )
+            assert cur.fetchone()[0] >= 1, "a chat-scoped 429 holds the chat's row too"
+        _assert_no_stranded_lease(sync_conn)

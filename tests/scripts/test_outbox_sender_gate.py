@@ -617,27 +617,39 @@ class TestTheLostAckPolicyIsBoundedPerKind:
 
     @pytest.mark.asyncio
     async def test_an_approval_prompt_resends_rather_than_failing(self, outbox_db):
-        """Two live cards are tolerable; a silently dropped prompt is not."""
-        from src.services.target.outbox import resolve_ambiguous
+        """Two live cards are tolerable; a silently dropped prompt is not.
+        The resend is bounded at MAX_PROMPT_RESENDS (phase 3a step 3 — a
+        card that keeps losing its answer is not resent forever), and that
+        bound is the prompt's own, not the notification's retry-once."""
+        from src.services.target.outbox import MAX_PROMPT_RESENDS, resolve_ambiguous
 
-        outbox_id = _enqueue(outbox_db, kind="approval_prompt")
+        within = _enqueue(outbox_db, kind="approval_prompt")
+        past = _enqueue(outbox_db, kind="approval_prompt")
         _owner_exec(
             outbox_db,
-            "UPDATE channel_outbox SET state = 'ambiguous', attempts = 5 WHERE id = %s",
-            (outbox_id,),
+            "UPDATE channel_outbox SET state = 'ambiguous', attempts = %s WHERE id = %s",
+            (MAX_PROMPT_RESENDS, within),
+        )
+        _owner_exec(
+            outbox_db,
+            "UPDATE channel_outbox SET state = 'ambiguous', attempts = %s WHERE id = %s",
+            (MAX_PROMPT_RESENDS + 2, past),
         )
         engine = self._engine(outbox_db)
         try:
             async with engine.connect() as conn:
                 await self._tenant(conn, outbox_db)
-                got = await resolve_ambiguous(conn, outbox_id=outbox_id)
+                got_within = await resolve_ambiguous(conn, outbox_id=within)
+                got_past = await resolve_ambiguous(conn, outbox_id=past)
                 await conn.commit()
         finally:
             await engine.dispose()
-        assert got == "pending", (
-            "a prompt must resend at ANY attempt count — the retry-once bound"
+        assert got_within == "pending", (
+            "a prompt within its bound must resend — the retry-once bound"
             " is the notification rule and must not leak onto prompts"
         )
+        assert MAX_PROMPT_RESENDS > 1, "the prompt's bound is wider than a notification's"
+        assert got_past == "failed", "past its bound a prompt is not resent forever"
 
     @pytest.mark.asyncio
     async def test_supersede_all_targets_every_known_ref_and_converges(self, outbox_db):
@@ -1358,3 +1370,153 @@ class TestTheSenderCommitsBeforeItSpeaks:
             fetch=True,
         )[0][0]
         assert spent == 0 and poller.consecutive_failures == 0
+
+
+class TestAFloodLimitWritesADurableHold:
+    """Phase 3a step 2: a 429 returns the row to `pending` and spends the
+    pacing rows for Telegram's `retry_after` in ONE statement, so every
+    replica's sender defers until it passes — no in-task sleep (#1035),
+    no ambiguous row, no attempt lost to the provider's own limit."""
+
+    def _engine(self, outbox_db):
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        return create_async_engine(
+            outbox_db["worker"].replace("postgresql://", "postgresql+asyncpg://", 1),
+            pool_size=2,
+            max_overflow=0,
+        )
+
+    async def _tenant(self, conn, outbox_db):
+        from sqlalchemy import text as _t
+
+        await conn.execute(
+            _t("SELECT set_config('app.tenant_id', :v, false)"),
+            {"v": outbox_db["ws"]},
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_hold_is_on_the_rows_and_the_next_send_defers(self, outbox_db):
+        from src.services.target.outbox import ChannelPaced, OutboxPaced, deliver
+
+        binding = _new_binding(outbox_db)
+        row_id = _enqueue(outbox_db, kind="notification", binding=binding)
+        reached: list = []
+
+        async def flooded(row):
+            reached.append(row["id"])
+            raise ChannelPaced("429", retry_after_s=3, scope="chat")
+
+        now = _now()
+        engine = self._engine(outbox_db)
+        try:
+            async with engine.connect() as conn:
+                await self._tenant(conn, outbox_db)
+                result = await deliver(
+                    conn,
+                    binding_id=binding,
+                    transport=flooded,
+                    now=now,
+                    chat_limit=CHAT_LIMIT,
+                    chat_window_seconds=CHAT_WINDOW_S,
+                    global_limit=GLOBAL_LIMIT,
+                    global_window_seconds=GLOBAL_WINDOW_S,
+                )
+                await conn.commit()
+            assert result is not None and result["state"] == "paced"
+            assert result["retry_after_s"] == 3.0
+            assert result["held_windows"]["global"] >= 1
+            assert result["held_windows"]["chat"] >= 1
+
+            # A second sender — any replica — in the same instant is deferred
+            # by the rows, before it reaches the provider.
+            async with engine.connect() as conn:
+                await self._tenant(conn, outbox_db)
+                with pytest.raises(OutboxPaced):
+                    await deliver(
+                        conn,
+                        binding_id=binding,
+                        transport=flooded,
+                        now=now,
+                        chat_limit=CHAT_LIMIT,
+                        chat_window_seconds=CHAT_WINDOW_S,
+                        global_limit=GLOBAL_LIMIT,
+                        global_window_seconds=GLOBAL_WINDOW_S,
+                    )
+                await conn.rollback()
+
+            # ...and after the hold has passed, the row goes out.
+            async def sends(row):
+                reached.append(row["id"])
+                return "tg-after-hold"
+
+            async with engine.connect() as conn:
+                await self._tenant(conn, outbox_db)
+                later = await deliver(
+                    conn,
+                    binding_id=binding,
+                    transport=sends,
+                    now=now + timedelta(seconds=CHAT_WINDOW_S + 5),
+                    chat_limit=CHAT_LIMIT,
+                    chat_window_seconds=CHAT_WINDOW_S,
+                    global_limit=GLOBAL_LIMIT,
+                    global_window_seconds=GLOBAL_WINDOW_S,
+                )
+                await conn.commit()
+        finally:
+            await engine.dispose()
+
+        assert reached == [str(row_id), str(row_id)], reached
+        assert later is not None and later["state"] == "sent"
+        assert _state(outbox_db, row_id)[0] == "sent"
+        held = _owner_exec(
+            outbox_db,
+            "SELECT count(*) FROM rate_counters"
+            " WHERE scope = 'tg_global' AND key = '' AND count >= %s"
+            "   AND window_start >= %s AND window_start <= %s",
+            (GLOBAL_LIMIT, now, now + timedelta(seconds=3)),
+            fetch=True,
+        )[0][0]
+        assert held == 3 // GLOBAL_WINDOW_S + 1, (
+            f"the global row must be spent for every window of the hold, got {held}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_poller_counts_a_flood_as_deferred_and_remembers_the_wait(
+        self, outbox_db
+    ):
+        from sqlalchemy.ext.asyncio import async_sessionmaker
+
+        from src.services.target.outbox import ChannelPaced, OutboxPoller
+
+        binding = _new_binding(outbox_db)
+        row_id = _enqueue(outbox_db, kind="notification", binding=binding)
+
+        async def flooded(row):
+            raise ChannelPaced("429", retry_after_s=9, scope="global")
+
+        engine = self._engine(outbox_db)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        poller = OutboxPoller(
+            _tenant_session_factory(outbox_db, factory),
+            binding_id=binding,
+            transport=flooded,
+            clock=_now,
+            interval_seconds=0.05,
+            chat_limit=CHAT_LIMIT,
+            chat_window_seconds=CHAT_WINDOW_S,
+            global_limit=GLOBAL_LIMIT,
+            global_window_seconds=GLOBAL_WINDOW_S,
+        )
+        try:
+            result = await poller.tick()
+        finally:
+            await engine.dispose()
+
+        assert result is not None and result["state"] == "paced"
+        assert poller.deferred == 1 and poller.held_for_s == 9.0
+        assert poller.consecutive_failures == 0 and poller.sent == 0
+        state, attempts, ref = _state(outbox_db, row_id)
+        assert (state, ref) == ("pending", None), (
+            "a 429 leaves the row pending for the next window — never ambiguous"
+        )

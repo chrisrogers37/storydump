@@ -23,6 +23,7 @@ own; this process only chooses the recurring singletons it can actually run.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from typing import Optional
 import logging
 
@@ -45,6 +46,7 @@ from src.services.target import (
     scheduler,
     unit_of_work,
 )
+from src.services.target import backpressure as _backpressure
 from src.services.target import health as health_endpoint
 from src.services.target import prompts as prompts_mod
 from src.services.target.work_loop import (
@@ -384,11 +386,16 @@ def status_line(
     sweeper=None,
     prompt_sweeper=None,
     bot_username=None,
+    backpressure=None,
 ) -> str:
-    """One human-readable line from the observables — the soak's visibility."""
+    """One human-readable line from the observables — the soak's visibility.
+    *backpressure* is `backpressure.snapshot`'s dict (phase 3a step 6): the
+    queue's depth and age per lane, the outbox backlog, the `tg_global`
+    pacing state and the workspace waiting longest."""
     lanes = " ".join(
         f"{wl.lane}[processed={wl.processed} parked={wl.parked}"
-        f" failures={wl.failures} fenced={wl.fenced}]"
+        f" failures={wl.failures} exhausted={getattr(wl, 'exhausted', 0)}"
+        f" fenced={wl.fenced}]"
         for wl in loops
     )
     clock_part = (
@@ -415,6 +422,8 @@ def status_line(
             f" prompted={prompt_sweeper.prompted}"
             f" advanced={prompt_sweeper.advanced}]"
         )
+    if backpressure is not None:
+        line += " " + _backpressure.render(backpressure)
     return line
 
 
@@ -516,6 +525,23 @@ async def supervise(stop: asyncio.Event, tasks) -> asyncio.Task | None:
     return dead[0] if dead else None
 
 
+async def _backpressure_snapshot(app: WorkerApp):
+    """One short read for the status line; a failure is a None, never a
+    reporter that stops reporting."""
+    cfg = app.config
+    try:
+        async with app.engine.connect() as conn:
+            return await _backpressure.snapshot(
+                conn,
+                now=datetime.now(timezone.utc),
+                global_limit=cfg.global_limit,
+                global_window_seconds=cfg.global_window_seconds,
+            )
+    except Exception as exc:  # noqa: BLE001 — the line still prints
+        logger.warning("status: backpressure snapshot failed: %r", exc)
+        return None
+
+
 async def _status_reporter(app: WorkerApp, stop: asyncio.Event, every: float) -> None:
     while not stop.is_set():
         if not await jobs.wait_or_stop(stop, every):
@@ -529,6 +555,7 @@ async def _status_reporter(app: WorkerApp, stop: asyncio.Event, every: float) ->
                     sweeper=app.sweeper,
                     prompt_sweeper=app.prompt_sweeper,
                     bot_username=app.bot_username,
+                    backpressure=await _backpressure_snapshot(app),
                 ),
             )
 

@@ -23,6 +23,7 @@ import pytest
 from src.channels.telegram_transport import (
     MediaTransient,
     MediaUnavailable,
+    TelegramPaced,
     TelegramRefused,
     TelegramAuthDead,
     TelegramSendError,
@@ -874,3 +875,60 @@ class TestTransportFromEnv:
                     "RAILWAY_ENVIRONMENT_NAME": "production",
                 },
             )
+
+
+class TestAFloodLimitIsPacedNotFailed:
+    """Phase 3a step 2: a 429 is neither a lost response (the message did
+    not go) nor a fault of the row. It is `TelegramPaced` — the outbox's
+    `ChannelPaced` — carrying Telegram's `retry_after` so the sender can
+    write a durable hold and come back when told."""
+
+    async def test_429_raises_the_paced_error_with_telegram_s_retry_after(self):
+        from src.services.target.outbox import ChannelPaced
+
+        t = _transport(
+            lambda r: httpx.Response(
+                429,
+                json={
+                    "ok": False,
+                    "error_code": 429,
+                    "description": "Too Many Requests: retry after 7",
+                    "parameters": {"retry_after": 7},
+                },
+            )
+        )
+        with pytest.raises(TelegramPaced) as info:
+            await t.send_text("555", "hi")
+        assert isinstance(info.value, ChannelPaced)
+        assert isinstance(info.value, TelegramSendError), (
+            "a caller that catches the plain send error must still see it"
+        )
+        assert info.value.retry_after_s == 7.0
+        assert info.value.scope == "chat", "a chat-addressed call names the chat"
+        assert TOKEN not in str(info.value)
+
+    async def test_a_429_without_retry_after_still_paces_for_a_default(self):
+        t = _transport(
+            lambda r: httpx.Response(
+                429, json={"ok": False, "error_code": 429, "description": "flood"}
+            )
+        )
+        with pytest.raises(TelegramPaced) as info:
+            await t.send_text("555", "hi")
+        assert info.value.retry_after_s == 5.0
+
+    async def test_a_429_on_a_call_without_a_chat_is_global(self):
+        t = _transport(
+            lambda r: httpx.Response(
+                429,
+                json={
+                    "ok": False,
+                    "error_code": 429,
+                    "description": "flood",
+                    "parameters": {"retry_after": 2},
+                },
+            )
+        )
+        with pytest.raises(TelegramPaced) as info:
+            await t.probe()
+        assert info.value.scope == "global"
