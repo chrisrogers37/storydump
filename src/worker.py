@@ -74,6 +74,109 @@ def _transit_from_env(env):
     return None
 
 
+#: What a story may weigh on the way to Meta (Meta's own limits: 8 MB for a
+#: story image, 100 MB for a story video pulled by URL). Distinct from the
+#: Telegram card's caps (`MEDIA_CARD_MAX_BYTES`): a file too large for a
+#: Telegram preview may still be a fine story.
+PUBLISH_MAX_BYTES = {"image": 8 * 1024 * 1024, "video": 100 * 1024 * 1024}
+
+
+def _publish_media_fetch(drive):
+    """`publish_pipeline`'s ``media_fetch``: the intent row → the file's bytes,
+    read from Drive under the workspace's grant (#1220 step 3). The row
+    carries `source_id`, `workspace_id`, `provider_file_ref` and `media_kind`
+    since the pipeline's `_load` gained them."""
+
+    async def fetch(intent: dict) -> bytes:
+        kind = str(intent.get("media_kind") or "image")
+        content, _name, _mime = await drive.fetch_bytes(
+            source_id=str(intent["source_id"]),
+            workspace_id=str(intent["workspace_id"]),
+            file_ref=str(intent["provider_file_ref"]),
+            max_bytes=PUBLISH_MAX_BYTES.get(kind, PUBLISH_MAX_BYTES["image"]),
+        )
+        return content
+
+    return fetch
+
+
+def _meta_from_env(engine, env):
+    """The real Instagram Graph adapter, always constructible: it needs no
+    secret of its own — each call reads the account's token from
+    `oauth_credentials` through `ig_credentials.token_for_account`.
+    `META_GRAPH_VERSION` overrides the Graph version."""
+    from src.services.target import ig_credentials
+    from src.services.target.instagram_graph import (
+        DEFAULT_GRAPH_VERSION,
+        InstagramGraphAdapter,
+    )
+
+    async def token_for_account(ref: str, *, workspace_id=None) -> str:
+        return await ig_credentials.token_for_account(
+            engine, ref, workspace_id=workspace_id
+        )
+
+    return InstagramGraphAdapter(
+        token_for_account=token_for_account,
+        version=env.get("META_GRAPH_VERSION") or DEFAULT_GRAPH_VERSION,
+    )
+
+
+def _poll_from(engine, meta, *, session_factory=None):
+    """`reconcile_ambiguous`'s ladder half (`06` §5): the container's status
+    for an ambiguous intent, asked of Meta (#1220 step 3).
+
+    Returns the `status_code` the reconciler classifies (PUBLISHED → posted,
+    ERROR/EXPIRED → failed, anything else inconclusive), or None — inconclusive
+    under every mode — when the intent has no container or Meta's answer is a
+    typed error: the ladder records the sighting and, spent, parks the intent
+    for a human. A typed error is logged by type and returned as None rather
+    than raised so one account's dead token cannot abort the whole sweep.
+    Reads as the owner role (BYPASSRLS, #751) like `ig_credentials`."""
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.services.target.meta_adapter import MetaError, MetaLostResponse
+
+    maker = session_factory or async_sessionmaker(engine, expire_on_commit=False)
+
+    async def poll(*, intent_id) -> Optional[str]:
+        async with maker() as session:
+            row = (
+                (
+                    await session.execute(
+                        text(
+                            "SELECT i.ig_container_id, a.provider_account_ref,"
+                            "       i.workspace_id"
+                            "  FROM post_intents i"
+                            "  JOIN ig_accounts a ON a.id = i.ig_account_id"
+                            " WHERE i.id = :id"
+                        ),
+                        {"id": str(intent_id)},
+                    )
+                )
+                .mappings()
+                .first()
+            )
+        if row is None or not row["ig_container_id"]:
+            return None
+        try:
+            return await meta.container_status(
+                str(row["ig_container_id"]),
+                provider_account_ref=row["provider_account_ref"],
+                workspace_id=str(row["workspace_id"]),
+            )
+        except (MetaError, MetaLostResponse) as exc:
+            logger.warning(
+                "reconcile poll for intent %s: %s — recorded as inconclusive",
+                intent_id,
+                type(exc).__name__,
+            )
+            return None
+
+    return poll
+
+
 def make_session_for(engine):
     """Per-job transaction contexts with the GUC invariant applied once.
 
@@ -132,16 +235,22 @@ def compose(
     credential is probed by run(), not here. *refresh* defaults to the real
     IG refresh door — always constructible (no config), egress-floored; tests
     inject a scripted one."""
+    # The publish leg (#1220 step 3): the Graph adapter is always built (it
+    # reads each account's token at call time); the media fetch exists only
+    # with a Drive adapter; the registry parks the kind naming whichever of
+    # the three (fetch, meta, transit) is missing. The same adapter answers the
+    # ambiguous-publish reconciler's poll.
+    meta = _meta_from_env(engine, env)
     deps = WorkerDeps(
-        meta=None,
+        meta=meta,
         transit=_transit_from_env(env),
-        media_fetch=None,
+        media_fetch=None if drive is None else _publish_media_fetch(drive),
         # None until a provider is wired, and that is the honest state rather
         # than a stub: `07` §1's owner ack on adding Resend is OPEN, so the
         # kind parks with a reason naming what is missing (#1092).
         email=email_sender.sender_from_env(env),
         transport=transport,
-        poll=None,
+        poll=_poll_from(engine, meta),
         refresh=refresh if refresh is not None else credential_lifecycle.ig_refresh,
         drive=drive,
         engine=engine,
@@ -618,12 +727,10 @@ def main() -> None:
     # and THE JOB SUCCEEDS. So the failure mode is a visible source in `error`,
     # not a poisoned lane.
     #
-    # `media_fetch` is deliberately NOT derived from this. Its parking predicate
-    # is media_fetch-only while the ladder also calls `transit.upload` and
-    # `meta.create_container` (astrid, #982), so wiring it here would unpark
-    # `publish_pipeline` straight into `meta=None` -> AttributeError -> poison.
-    # That wire belongs with milestone 2, gated on media_fetch AND meta AND
-    # transit.
+    # `media_fetch` IS derived from this since #1220 step 3 (`compose`), and
+    # the registry gates `publish_pipeline` on media_fetch AND meta AND transit
+    # — the triple astrid named on #982 — so a missing Cloudinary trio parks
+    # the kind by name rather than crashing the ladder.
     if not settings.GOOGLE_CLIENT_ID or not settings.GOOGLE_CLIENT_SECRET:
         # Said at startup, once, where an operator looks: without the client
         # the hourly refresh (P5, #1247) cannot run here, and every folder's

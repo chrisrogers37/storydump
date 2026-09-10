@@ -23,6 +23,12 @@ difference decides what would reopen each.** Neither is "the estate is empty":
   `review_required` producer — parks on `poll=None` (W5a). Absent code, and a
   constant in the composition root.
 
+**Superseded in part on 2026-09-10 (#1276, the publish leg):** production now
+composes `media_fetch`, `meta`, `transit` AND `poll`, so both producers are
+live and `review_required` is reachable. The structural test below pins the
+new reality (parked under the DEFAULT seam set only; live under the production
+composition); D6 is reopened on #1124.
+
 Both tests below assert the structural gate. The `approve` gate is asserted too,
 because it is the first door and its removal is worth noticing, but it is
 labelled as the weak one so nobody reads it as the whole argument.
@@ -109,56 +115,48 @@ def test_nothing_writes_provider_quarantine_so_there_is_nothing_to_clear():
     )
 
 
-def test_the_review_producers_cannot_park_under_the_production_seam_set():
-    """The STRUCTURAL half, and the one that does not move when a setting does.
+def test_the_review_producers_park_only_under_the_default_seam_set():
+    """The STRUCTURAL half — RE-POINTED AGAIN, this time because the fact it
+    pinned stopped holding on purpose (#1276, the publish leg, 2026-09-10).
 
-    Both `review_required` producers sit behind worker seams that production
-    composes as None. Asserted behaviourally against the real registry rather
-    than by grep, and paired with the composition-root constant that makes the
-    default the deployed reality.
+    Until #1276 both `review_required` producers sat behind worker seams that
+    production composed as None: `publish_pipeline` parked on
+    `media_fetch=None` (W5b unbuilt) and `reconcile_ambiguous`'s ladder half
+    skipped on `poll=None` (W5a). That was the load-bearing fact behind #1090
+    D6's "not yet" — no intent could reach `review_required`, so the
+    unbuilt operator floor (`resolve_review`, #1124) had nothing to act on.
 
-    **RE-POINTED, not relaxed (#1132).** This asserted that BOTH kinds are
-    `Parked`. #1132 gave `reconcile_ambiguous` an executor under every seam set,
-    deliberately: its sweep returns two row kinds and only one of them needs a
-    provider poll, so parking the whole kind parked a half that depends on
-    nothing the deployment lacks — and production runs `poll=None`, which is why
-    `06` §5's customer notification could never fire.
+    #1276 is exactly the work this test existed to notice: production now
+    composes the Drive-backed fetch, the Instagram Graph adapter, the transit
+    store AND the reconciler's poll, so BOTH producers are live where Drive
+    and `CLOUDINARY_*` are configured. D6 is therefore reopened — recorded on
+    #1124 and the follow-up it names — and the interim is honest rather than
+    hidden: `post_intents.last_error` says why an intent parked, and the
+    `06` §5 customer notice still fires.
 
-    So the tripwire fired correctly and its stated conclusion did not follow.
-    `Parked` was a PROXY for the property; the property is *no intent can reach
-    `review_required`*, and that still holds — measured, not argued:
+    What still holds, and is pinned here so it cannot drift silently:
 
-    * `_park_review_required` has exactly one caller, `reconcile_intent`;
-    * `reconcile_intent` has exactly one production caller, the `ladder_due`
-      branch of `reconcile_ambiguous`, which is SKIPPED when `deps.poll is
-      None`;
-    * and a `ladder_due` row requires a `publishing_ambiguous` intent, which
-      only the publish pipeline mints — and that still parks on
-      `media_fetch=None`.
-
-    The assertion below therefore tests the parking PATH rather than the kind's
-    registration, which is strictly stronger for this producer: the old form
-    could not tell "the kind cannot run" from "the kind runs but cannot park",
-    and those have different remedies. It fires the moment anyone wires
-    `deps.poll` — a smaller and likelier change than before, which is worth
-    knowing and is recorded on #1124.
-
-    `publish_pipeline` keeps the `Parked` assertion unchanged: for it the kind
-    and the path are still the same thing.
+    * under the DEFAULT seam set (no Drive adapter, no transit store) the
+      pipeline kind is `Parked` and the ladder half is skipped — a bare
+      composition still cannot park anything;
+    * under the PRODUCTION composition (a Drive adapter + `CLOUDINARY_*`)
+      both producers are live — asserted so that a later "tidy-up" that
+      re-parks one of them by accident is noticed as loudly as the un-park
+      was.
     """
     from src.services.target.work_loop import Parked, WorkerDeps, build_registry
+    from src.worker import WorkerConfig, compose
 
     registry = build_registry(WorkerDeps())
 
     assert isinstance(registry["publish_pipeline"], Parked), (
-        "publish_pipeline now has an executor under the default seam set — an"
-        " intent can reach `review_required`, so `resolve_review` has parked"
-        " items to resolve. Reopen #1090 D6 (#1124)."
+        "publish_pipeline has an executor under the DEFAULT seam set — a bare"
+        " composition could now park an intent into `review_required`"
     )
 
-    # The parking path, driven. A ladder-due row is the only input that can
-    # reach `_park_review_required`; under the production seam set the branch
-    # that would consume it is skipped, so nothing parks.
+    # The parking path, driven under the default seam set: a ladder-due row is
+    # the only input that can reach `_park_review_required`, and the branch
+    # that would consume it is skipped without a poll.
     from src.services.target import reconciler as _rec
 
     reached: list[str] = []
@@ -183,18 +181,26 @@ def test_the_review_producers_cannot_park_under_the_production_seam_set():
         _rec.sweep_due, _rec.reconcile_intent = original
 
     assert not reached, (
-        "reconcile_ambiguous reached `reconcile_intent` under the default seam"
-        " set, so an intent can now be parked into `review_required` and"
-        " `resolve_review` has items to resolve. Reopen #1090 D6 (#1124)."
+        "reconcile_ambiguous reached `reconcile_intent` under the DEFAULT seam"
+        " set — the ladder half no longer waits for a poll"
     )
 
-    worker = (SERVICES.parent / "worker.py").read_text()
-    for seam in ("media_fetch=None", "poll=None"):
-        assert seam in worker, (
-            f"the composition root no longer passes {seam} — the seam that made"
-            " the parking above the DEPLOYED reality rather than a default is"
-            " gone. Reopen #1090 D6 (#1124)."
-        )
+    # The production composition: both producers live. This is the fact that
+    # reopened D6; it is pinned so it cannot quietly flip back.
+    env = {
+        "CLOUDINARY_CLOUD_NAME": "c",
+        "CLOUDINARY_API_KEY": "k",
+        "CLOUDINARY_API_SECRET": "s",
+    }
+    app = compose(engine=object(), config=WorkerConfig(), env=env, drive=object())
+    assert not isinstance(app.registry["publish_pipeline"], Parked), (
+        "publish_pipeline parks under the production composition — the publish"
+        " leg (#1276) regressed; see #1220 step 3"
+    )
+    assert callable(app.deps.poll), (
+        "production composes poll=None again — the reconciler's ladder half is"
+        " dead and a lost publish response parks for a human every time (#1276)"
+    )
 
 
 def test_the_publish_pipeline_has_exactly_one_producer_and_it_is_manual_mode_gated():

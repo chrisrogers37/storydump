@@ -464,3 +464,153 @@ class TestPromptSweeperConsumesTheSweep:
 
         assert (sweeper.sweeps, sweeper.prompted, sweeper.advanced) == (1, 2, 1)
         assert "prompt sweep failed" not in caplog.text
+
+
+class TestThePublishLegIsWired:
+    """#1220 step 3: with a Drive adapter and the Cloudinary trio the
+    publish_pipeline kind is LIVE; without Drive it parks naming media_fetch;
+    the Graph adapter is always built and the fetch reads the intent row."""
+
+    def test_drive_and_cloudinary_bring_publish_pipeline_live(self):
+        from src.services.target.work_loop import Parked
+
+        env = {
+            "CLOUDINARY_CLOUD_NAME": "c",
+            "CLOUDINARY_API_KEY": "k",
+            "CLOUDINARY_API_SECRET": "s",
+        }
+        app = compose(engine=object(), config=WorkerConfig(), env=env, drive=object())
+        assert not isinstance(app.registry["publish_pipeline"], Parked)
+        assert app.deps.meta is not None and app.deps.media_fetch is not None
+
+    def test_without_drive_it_parks_naming_the_fetch(self):
+        from src.services.target.work_loop import Parked
+
+        env = {
+            "CLOUDINARY_CLOUD_NAME": "c",
+            "CLOUDINARY_API_KEY": "k",
+            "CLOUDINARY_API_SECRET": "s",
+        }
+        app = compose(engine=object(), config=WorkerConfig(), env=env)
+        entry = app.registry["publish_pipeline"]
+        assert isinstance(entry, Parked) and entry.reason.startswith(
+            "media_fetch is not wired"
+        )
+
+    async def test_the_publish_fetch_reads_the_intent_row_under_the_story_cap(self):
+        from src.worker import PUBLISH_MAX_BYTES, _publish_media_fetch
+
+        seen = {}
+
+        class _Drive:
+            async def fetch_bytes(self, **kw):
+                seen.update(kw)
+                return b"jpeg-bytes", "f.jpg", "image/jpeg"
+
+        fetch = _publish_media_fetch(_Drive())
+        intent = {
+            "source_id": "src-1",
+            "workspace_id": "ws-1",
+            "provider_file_ref": "ref-1",
+            "media_kind": "video",
+        }
+        assert await fetch(intent) == b"jpeg-bytes"
+        assert seen == {
+            "source_id": "src-1",
+            "workspace_id": "ws-1",
+            "file_ref": "ref-1",
+            "max_bytes": PUBLISH_MAX_BYTES["video"],
+        }
+
+
+class TestTheReconcilerPollIsWired:
+    """#1220 step 3: production no longer runs `poll=None` — the ambiguous
+    ladder asks Meta for the container's status through the Graph adapter."""
+
+    def test_compose_supplies_the_poll_seam(self):
+        app = compose(engine=object(), config=WorkerConfig(), env={})
+        assert callable(app.deps.poll)
+
+    async def test_the_poll_returns_the_containers_status_for_the_intent(self):
+        from src.worker import _poll_from
+
+        class _Meta:
+            def __init__(self):
+                self.calls = []
+
+            async def container_status(
+                self, container_id, *, provider_account_ref=None, workspace_id=None
+            ):
+                self.calls.append((container_id, provider_account_ref, workspace_id))
+                return "PUBLISHED"
+
+        meta = _Meta()
+        poll = _poll_from(
+            object(),
+            meta,
+            session_factory=_scripted_session_factory(
+                {
+                    "ig_container_id": "ctr-7",
+                    "provider_account_ref": "1784",
+                    "workspace_id": "ws-1",
+                }
+            ),
+        )
+        assert await poll(intent_id="i-1") == "PUBLISHED"
+        assert meta.calls == [("ctr-7", "1784", "ws-1")]
+
+    async def test_no_container_or_a_typed_error_is_inconclusive_not_a_crash(self):
+        from src.services.target.meta_adapter import MetaRetryableError
+        from src.worker import _poll_from
+
+        class _Dead:
+            async def container_status(
+                self, container_id, *, provider_account_ref=None, workspace_id=None
+            ):
+                raise MetaRetryableError(code=190, message="dead token")
+
+        none = _poll_from(
+            object(),
+            _Dead(),
+            session_factory=_scripted_session_factory(
+                {
+                    "ig_container_id": None,
+                    "provider_account_ref": "1784",
+                    "workspace_id": "ws-1",
+                }
+            ),
+        )
+        assert await none(intent_id="i-1") is None
+        dead = _poll_from(
+            object(),
+            _Dead(),
+            session_factory=_scripted_session_factory(
+                {
+                    "ig_container_id": "ctr-7",
+                    "provider_account_ref": "1784",
+                    "workspace_id": "ws-1",
+                }
+            ),
+        )
+        assert await dead(intent_id="i-1") is None
+
+
+def _scripted_session_factory(row):
+    class _Result:
+        def mappings(self):
+            return self
+
+        def first(self):
+            return row
+
+    class _Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def execute(self, statement, params=None):
+            return _Result()
+
+    return _Session

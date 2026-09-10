@@ -164,16 +164,9 @@ export const TOGGLES: {
     // Renamed once at the read seam (`dashboard-payloads.ts`); the port's name
     // is what goes on the wire.
     settingsKey: "api_publishing_enabled",
-    // The ONLY one of the three with a real consumer, and it is inert for the
-    // opposite reason: turning it on does too much, not nothing. `approve`
-    // stops refusing `manual_mode` and mints a `publish_pipeline` job that
-    // PARKS — production composes `media_fetch=None` (W5b unbuilt) — while
-    // `prompts.render_card` swaps the card to `_ACTIONS_API`, which is a
-    // SUPERSET of `_ACTIONS_MANUAL`: it ADDS a "Post now" button and takes
-    // none away (`intents.ts:100`: "keeps the manual buttons beside Approve").
-    // So enabling it removes no capability — it grows a NEW dead control,
-    // which is this file's own defect appearing one screen over.
-    inertReason: "Direct posting is not built yet",
+    // Live since #1220 step 3: `approve` mints a `publish_pipeline` job the
+    // worker runs for real (Drive → Cloudinary transit → Instagram Graph), and
+    // the card gains "🚀 Post now" beside the manual buttons.
   },
   {
     key: "enable_ai_captions",

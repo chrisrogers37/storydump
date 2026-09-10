@@ -57,6 +57,14 @@ def world(admin_conn, owner_actor):
                     "UPDATE workspaces SET api_publishing_enabled = true WHERE id = %s",
                     (chain["ws"],),
                 )
+                # `approve` refuses a `post` tap without a usable Instagram
+                # token (#1276): the API workspace here is connected.
+                cur.execute(
+                    "INSERT INTO oauth_credentials (workspace_id, ig_account_id,"
+                    " provider, encrypted_payload, state)"
+                    " VALUES (%s, %s, 'ig_login', 'ciphertext', 'active')",
+                    (chain["ws"], chain["iga"]),
+                )
                 cur.execute(
                     "INSERT INTO user_identities"
                     " (user_id, provider, external_id, display_name, verified_at)"

@@ -217,6 +217,24 @@ async def _settle(
     )
 
 
+async def has_active_ig_credential(
+    session, *, workspace_id: str, ig_account_id: str
+) -> bool:
+    """Whether the account has a usable Instagram Login token in this
+    workspace — the precondition for minting a `publish_pipeline` job."""
+    row = (
+        await session.execute(
+            text(
+                "SELECT 1 FROM oauth_credentials"
+                " WHERE workspace_id = :ws AND ig_account_id = :acct"
+                "   AND provider = 'ig_login' AND state = 'active' LIMIT 1"
+            ),
+            {"ws": str(workspace_id), "acct": str(ig_account_id)},
+        )
+    ).first()
+    return row is not None
+
+
 async def _record_outcome(
     session, intent: dict[str, Any], command: Command, state: str
 ) -> str:
@@ -259,6 +277,19 @@ async def approve(session, command: Command) -> CommandResult:
         raise CommandRefused(
             "manual_mode",
             "this workspace publishes manually; use mark_posted after posting by hand",
+        )
+    if not await has_active_ig_credential(
+        session,
+        workspace_id=command.workspace_id,
+        ig_account_id=str(intent["ig_account_id"]),
+    ):
+        # Said at the tap, not an hour later: without a token the publish leg
+        # cannot post, and a job minted anyway would only burn its ladder and
+        # land on a human (#1276 review).
+        raise CommandRefused(
+            "not_connected",
+            "Instagram is not connected for this account — connect it in"
+            " Settings › Integrations, or post by hand and use mark_posted",
         )
     await _flip(session, str(intent["id"]), "approved")
     await jobs.enqueue(

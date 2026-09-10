@@ -578,3 +578,20 @@ class TestClosedSetsTrackTheSchema:
 
         allowed = set(re.findall(r"'([a-z_]+)'", str(ck.sqltext)))
         assert allowed == set(_RESOURCE_TYPES)
+
+
+class TestUploadFailuresAreTyped:
+    """#1276 review: the SDK raises its own family; the pipeline routes on
+    typed failures only, so an untyped one would crash the job into the
+    loop's unbounded reschedule. One type, the cause chained."""
+
+    async def test_an_sdk_failure_becomes_a_transit_error_with_the_cause(self):
+        from src.services.target.transit import TransitError
+
+        def exploding_upload(content, **kw):
+            raise OSError("connection reset by peer")
+
+        store = _store(RecordingSdk(), upload_fn=exploding_upload)
+        with pytest.raises(TransitError, match="OSError: connection reset") as info:
+            await store.upload(b"bytes", workspace_id=WS, media_kind="image")
+        assert isinstance(info.value.__cause__, OSError)
