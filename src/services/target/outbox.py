@@ -730,7 +730,11 @@ async def _edit_sent_card(session, row: dict, receipt, *, force: bool) -> bool:
         from datetime import datetime, timezone  # noqa: PLC0415
 
         outcome = prompts.outcome_line(
-            state, by=by, at=found["at"] or datetime.now(timezone.utc), tz=tz
+            state,
+            by=by,
+            at=found["at"] or datetime.now(timezone.utc),
+            tz=tz,
+            published_via=found.get("published_via"),
         )
     payload = row.get("payload") or {}
     if isinstance(payload, str):

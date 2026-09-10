@@ -155,7 +155,7 @@ export const TOGGLES: ToggleRow[] = [
     key: "dry_run_mode",
     label: "Dry Run Mode",
     description:
-      "Rehearse: approved posts complete as if published and are marked dry run; nothing reaches Instagram",
+      "Rehearse: posts approved from now on complete as if published and are marked dry run; nothing reaches Instagram",
     settingsKey: "dry_run_mode",
   },
   {

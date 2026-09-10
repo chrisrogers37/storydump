@@ -493,7 +493,6 @@ export type SetupState = {
   enable_instagram_api?: boolean;
   show_verbose_notifications?: boolean;
   media_sync_enabled?: boolean;
-  enable_ai_captions?: boolean;
   repost_ttl_days?: number | null;
   skip_ttl_days?: number | null;
   caption_style?: string | null;

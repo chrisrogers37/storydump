@@ -287,7 +287,7 @@ async def run_publish_pipeline(
             )
         if ctx.intent.get("is_paused") and not ctx.intent["cancel_requested"]:
             return await _defer_paused(uow, ctx, now_fn)
-    elif state == "publishing" and ctx.dry_run and not ctx.ops:
+    elif state == "publishing" and ctx.dry_run:
         raise ValueError(
             f"intent {ctx.intent_id}: a dry-run job at step"
             f" {ctx.intent['publish_step']!r} — a dry run never climbs the ladder"
@@ -995,8 +995,11 @@ async def _await_ready(ctx: _Ctx, meta, sleep) -> str:
 
 
 async def _defer_paused(uow, ctx: _Ctx, now_fn) -> str:
-    """The workspace is paused: reschedule without spending an attempt; the
-    intent stays `approved` and nothing is debited. Resume is a fresh run."""
+    """The workspace is paused: reschedule without spending an attempt. From
+    the `approved` branch nothing is debited; from the post-flip hold (step
+    `none`, no permits) the row is already `publishing` with its debit — it
+    waits with it, and a `publishing` TTL is a follow-up. Resume is a fresh
+    run."""
     async with _leased_tx(uow, ctx.job) as session:
         await reschedule_job(
             session,
