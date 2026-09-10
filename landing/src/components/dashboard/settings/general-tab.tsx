@@ -69,12 +69,11 @@ type ToggleKey = "is_paused" | "dry_run_mode" | "enable_instagram_api";
  *
  * **A switch is live only when the port accepts the write AND something reads
  * the value.** `settingsKey` alone answers the first half, and for three
- * toggles it was answering as though it settled both (#1155). `dry_run_mode`
- * and `enable_ai_captions` have NO reader anywhere in `src/services/target/` —
- * their only consumers are legacy-tier, against a different table — so the
- * switch saved, returned no error, and nothing happened. That is worse than a
- * dead control: a save that confirms and does nothing manufactures a belief,
- * and the person has no error and no reason to check.
+ * toggles it once answered as though it settled both (#1155): a save that
+ * confirms and does nothing manufactures a belief. Since 2026-09-10 every
+ * switch on this screen has its reader — the publish leg reads `dry_run_mode`
+ * and `api_publishing_enabled`, the clock, the prompt sweep and the publish
+ * leg read `is_paused` — and the rows that had none are gone.
  *
  * So `inertReason` now answers "why does this switch not move", which has
  * THREE causes, not two, and the string says which:

@@ -102,9 +102,25 @@ def stamp(at: datetime, tz: str) -> str:
     return f"{at.astimezone(zone).strftime('%Y-%m-%d %H:%M')} {tz}"
 
 
-def outcome_line(state: str, *, by: Optional[str], at: datetime, tz: str) -> str:
+def outcome_word(state: str, published_via: Optional[str] = None) -> str:
+    """The state's word — and a `posted` row that was a DRY RUN says so,
+    everywhere a state becomes a word (the tap's answer, the settled-card
+    sweep, the outcome line), so a rehearsal never reads as a post."""
+    if state == "posted" and published_via == "dry_run":
+        return OUTCOME_WORDS["dry_run"]
+    return OUTCOME_WORDS.get(state, state)
+
+
+def outcome_line(
+    state: str,
+    *,
+    by: Optional[str],
+    at: datetime,
+    tz: str,
+    published_via: Optional[str] = None,
+) -> str:
     """What a settled card says under its header: the state's word, who, when."""
-    word = OUTCOME_WORDS.get(state, state)
+    word = outcome_word(state, published_via)
     who = f" by {by}" if by else ""
     return f"{word}{who} · {stamp(at, tz)}"
 
@@ -307,6 +323,7 @@ async def sweep_settled_cards(session, *, limit: int = 50) -> int:
                     by=by,
                     at=settled.get("at") or row["entered_state_at"],
                     tz=str(row["tz"] or "UTC"),
+                    published_via=settled.get("published_via"),
                 )
                 await outbox.supersede_all(
                     session,

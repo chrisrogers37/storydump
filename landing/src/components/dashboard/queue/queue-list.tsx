@@ -58,7 +58,10 @@ const STATE_TONE: Partial<Record<IntentState, string>> = {
   review_required: "bg-red-100 text-red-900",
 };
 
-const COMMAND_VARIANT: Record<QueueCommand, "default" | "outline" | "destructive"> = {
+const COMMAND_VARIANT: Record<
+  QueueCommand,
+  "default" | "outline" | "destructive"
+> = {
   approve: "default",
   mark_posted: "default",
   skip: "outline",
@@ -104,13 +107,17 @@ export function QueueList({
         setNotice({ intentId: intent.id, text: refusalCopy(body?.error) });
         // A refusal about the ROW (already moved on, no longer here) means the
         // list is stale; a refusal about the request or the session does not.
-        if (response.status === 409 || response.status === 404) router.refresh();
+        if (response.status === 409 || response.status === 404)
+          router.refresh();
         return;
       }
 
       router.refresh();
     } catch {
-      setNotice({ intentId: intent.id, text: refusalCopy("target_router_unreachable") });
+      setNotice({
+        intentId: intent.id,
+        text: refusalCopy("target_router_unreachable"),
+      });
     } finally {
       setPending(null);
     }
@@ -130,29 +137,49 @@ export function QueueList({
     <div className="space-y-3">
       <ul className="divide-y rounded-lg border bg-card">
         {intents.map((intent) => {
-          const actions = actionsFor(intent.state, apiPublishingEnabled, intent.cancel_requested);
+          const actions = actionsFor(
+            intent.state,
+            apiPublishingEnabled,
+            intent.cancel_requested,
+          );
           const MediaGlyph = intent.media_kind === "video" ? Video : ImageIcon;
 
           return (
             <li key={intent.id} className="p-4">
               <div className="flex flex-wrap items-center gap-4">
                 <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-muted">
-                  <MediaGlyph className="h-5 w-5 text-muted-foreground" aria-hidden />
+                  <MediaGlyph
+                    className="h-5 w-5 text-muted-foreground"
+                    aria-hidden
+                  />
                 </div>
 
                 <div className="min-w-0 flex-1">
                   <p className="truncate font-medium">{intent.file_name}</p>
                   <p className="text-sm text-muted-foreground">
-                    {accountLabel(intent)} · {formatSlot(intent.schedule_slot_at, tz)}
+                    {accountLabel(intent)} ·{" "}
+                    {formatSlot(intent.schedule_slot_at, tz)}
                     {intent.category ? ` · ${intent.category}` : ""}
                   </p>
                 </div>
 
-                <Badge variant="secondary" className={STATE_TONE[intent.state]}>
-                  {STATE_LABELS[intent.state] ?? intent.state}
+                <Badge
+                  variant="secondary"
+                  className={
+                    intent.published_via === "dry_run"
+                      ? "bg-purple-100 text-purple-900"
+                      : STATE_TONE[intent.state]
+                  }
+                >
+                  {intent.published_via === "dry_run"
+                    ? "dry run"
+                    : (STATE_LABELS[intent.state] ?? intent.state)}
                 </Badge>
                 {intent.cancel_requested && (
-                  <Badge variant="secondary" className="bg-amber-100 text-amber-900">
+                  <Badge
+                    variant="secondary"
+                    className="bg-amber-100 text-amber-900"
+                  >
                     Cancelling
                   </Badge>
                 )}
@@ -160,7 +187,10 @@ export function QueueList({
                 {actions.length > 0 && (
                   <div className="flex flex-wrap items-center gap-2">
                     {pending === intent.id && (
-                      <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" aria-hidden />
+                      <Loader2
+                        className="h-4 w-4 animate-spin text-muted-foreground"
+                        aria-hidden
+                      />
                     )}
                     {actions.map((command) =>
                       command === "reject" ? (
@@ -178,8 +208,9 @@ export function QueueList({
                             <DialogHeader>
                               <DialogTitle>Reject this post?</DialogTitle>
                               <DialogDescription>
-                                {intent.file_name} will never be offered again for{" "}
-                                {accountLabel(intent)}. Skip instead if it should come back later.
+                                {intent.file_name} will never be offered again
+                                for {accountLabel(intent)}. Skip instead if it
+                                should come back later.
                               </DialogDescription>
                             </DialogHeader>
                             <DialogFooter>
@@ -225,7 +256,8 @@ export function QueueList({
 
       {truncatedAt !== null && (
         <p className="text-xs text-muted-foreground">
-          Showing the first {truncatedAt} posts. More are waiting beyond this page.
+          Showing the first {truncatedAt} posts. More are waiting beyond this
+          page.
         </p>
       )}
     </div>

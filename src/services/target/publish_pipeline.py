@@ -161,6 +161,8 @@ class _Ctx:
         #: The typed error a readiness poll met when it answers "unauthorized",
         #: so the caller can record it on the intent.
         self.poll_error: Optional[BaseException] = None
+        #: The job payload's dry-run snapshot (see `_load`).
+        self.dry_run: bool = False
 
     @property
     def intent_id(self) -> str:
@@ -251,16 +253,17 @@ async def run_publish_pipeline(
         raise ValueError(f"intent {ctx.intent_id} in unexpected state {state!r}")
 
     if state == "approved":
-        if ctx.intent.get("is_paused"):
+        if ctx.intent.get("is_paused") and not ctx.intent["cancel_requested"]:
             # Pause Posting holds an approved intent here, before the cap is
-            # spent: the job waits and re-checks; the card keeps its line.
+            # spent: the job waits and re-checks; the card keeps its line. A
+            # cancel asked for meanwhile is honoured by `_admit`, not held.
             return await _defer_paused(uow, ctx, now_fn)
         outcome = await _admit(uow, ctx, meta, precheck, backoff_seconds, now_fn)
         if outcome is not None:
             return outcome
         # Flip committed — the ladder proceeds as a publishing intent (the
         # SQL predicates enforce state DB-side; nothing re-reads the snapshot).
-        if ctx.intent.get("dry_run_mode"):
+        if ctx.dry_run:
             # Dry Run: everything a post does to the workspace — the cap
             # debit above, the rotation, the card — and no provider call.
             return await _confirm_dry_run(
@@ -269,6 +272,26 @@ async def run_publish_pipeline(
                 repost_ttl_days_default=repost_ttl_days_default,
                 now_fn=now_fn,
             )
+
+    if state == "publishing" and ctx.intent["publish_step"] == "none" and not ctx.ops:
+        # Flipped, nothing else done yet — the point a crash between the flip
+        # and the dry-run confirm (or a pause landing mid-hold) re-enters.
+        # A dry-run job must confirm as a dry run HERE, never fall into the
+        # real ladder below; a paused workspace holds here too.
+        if ctx.dry_run:
+            return await _confirm_dry_run(
+                uow,
+                ctx,
+                repost_ttl_days_default=repost_ttl_days_default,
+                now_fn=now_fn,
+            )
+        if ctx.intent.get("is_paused") and not ctx.intent["cancel_requested"]:
+            return await _defer_paused(uow, ctx, now_fn)
+    elif state == "publishing" and ctx.dry_run and not ctx.ops:
+        raise ValueError(
+            f"intent {ctx.intent_id}: a dry-run job at step"
+            f" {ctx.intent['publish_step']!r} — a dry run never climbs the ladder"
+        )
 
     # -- resume protocol: unresolved permits FIRST (`02` §6 step 2) -------------
     pending_publish = ctx.unresolved("publish")
@@ -318,7 +341,7 @@ async def _load(uow, job: dict) -> Optional[_Ctx]:
                         "       i.media_item_id, i.ig_account_id, i.ig_container_id,"
                         "       i.transit_asset_ref,"
                         "       a.provider_account_ref, i.workspace_id,"
-                        "       w.is_paused, w.dry_run_mode,"
+                        "       w.is_paused,"
                         "       m.source_id, m.mime_type,"
                         "       COALESCE(a.posts_per_day, w.posts_per_day) AS eff_ppd,"
                         "       COALESCE(a.tz, w.tz) AS eff_tz,"
@@ -354,7 +377,12 @@ async def _load(uow, job: dict) -> Optional[_Ctx]:
             .mappings()
             .all()
         )
-    return _Ctx(job, dict(row), [dict(o) for o in ops])
+    ctx = _Ctx(job, dict(row), [dict(o) for o in ops])
+    # The dry-run decision is the JOB's, snapshotted by `approve` when the
+    # tapper was told "dry run" — never the workspace's live flag, which may
+    # have moved since (a rehearsal that posts for real, or the reverse).
+    ctx.dry_run = bool(payload.get("dry_run"))
+    return ctx
 
 
 def _local_date(ctx: _Ctx, now_fn) -> date:

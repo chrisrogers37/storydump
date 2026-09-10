@@ -552,3 +552,13 @@ class TestThePostAnswerSaysWhatHappensNext:
         assert "dry run" in _executed_text("post", dry)
         assert "paused" in _executed_text("post", paused)
         assert "posting shortly" in _executed_text("post", live)
+
+
+def test_a_repeat_tap_on_a_dry_run_row_hears_dry_run_not_posted():
+    from src.services.target.telegram_dispatch import _answered_text
+
+    r = CommandResult(
+        "answered",
+        {"state": "posted", "published_via": "dry_run", "settled_by": None},
+    )
+    assert "Dry run" in _answered_text(r) and "Posted" not in _answered_text(r)

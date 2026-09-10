@@ -1,6 +1,6 @@
 -- 073: dry-run posts carry their own published_via (07 §19; Dry Run Mode, owner ruling 2026-09-10).
 -- Identical to the 07 §19 block; the advertised-DDL manifest pins the two together.
--- runner:postcondition SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_intent_via' AND pg_get_constraintdef(oid) LIKE '%dry_run%')
+-- runner:postcondition SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_intent_via' AND pg_get_constraintdef(oid) LIKE '%dry_run%') AND EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_posted_complete' AND pg_get_constraintdef(oid) LIKE '%dry_run%')
 
 -- Dry Run Mode (Settings › General, owner ruling 2026-09-10): an approved post completes as if
 -- published — the cap debit, the rotation, the card's line — and nothing reaches Instagram. The

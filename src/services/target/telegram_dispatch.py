@@ -154,7 +154,7 @@ def _executed_text(action: Optional[str], result: CommandResult) -> str:
         if data.get("dry_run"):
             return "✅ Approved — dry run, nothing will be published"
         if data.get("paused"):
-            return "✅ Approved — posting is paused; it posts when you resume"
+            return "✅ Approved — posting is paused; it posts when you resume (within 3 days)"
         if PUBLISH_LEG_LIVE:
             return "✅ Approved — posting shortly"
         return "✅ Approved — publishing isn't live yet; it will post when it is"
@@ -171,7 +171,9 @@ def _executed_text(action: Optional[str], result: CommandResult) -> str:
 def _answered_text(result: CommandResult) -> str:
     data = result.data or {}
     state = data.get("state")
-    word = prompts.OUTCOME_WORDS.get(state, state or "decided")
+    word = (
+        prompts.outcome_word(state, data.get("published_via")) if state else "decided"
+    )
     who = f" by {data['settled_by']}" if data.get("settled_by") else ""
     when = f" · {data['settled_at']}" if data.get("settled_at") else ""
     return f"Already: {word}{who}{when}"

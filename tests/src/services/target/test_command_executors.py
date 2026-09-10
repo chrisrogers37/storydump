@@ -208,7 +208,9 @@ class TestDryRunAndPauseAtApprove:
         world["row"]["dry_run_mode"] = True
         out = await command_executors.approve(_Session(), _cmd("approve"))
         assert out.outcome == "enqueued" and out.data["dry_run"] is True
-        assert world["jobs"], "the pipeline job is minted; it completes as a dry run"
+        assert world["jobs"][0]["payload"]["dry_run"] is True, (
+            "the decision travels with the job, not the live flag"
+        )
 
     @pytest.mark.asyncio
     async def test_a_paused_workspace_still_approves_and_says_it_waits(self, world):

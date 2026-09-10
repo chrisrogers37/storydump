@@ -142,7 +142,8 @@ async def settlement(session, *, workspace_id: str, intent_id: str) -> dict:
         (
             await session.execute(
                 text(
-                    "SELECT i.state, i.entered_state_at, a.actor_user_id, a.created_at"
+                    "SELECT i.state, i.published_via, i.entered_state_at,"
+                    "       a.actor_user_id, a.created_at"
                     "  FROM post_intents i"
                     "  LEFT JOIN LATERAL ("
                     "    SELECT actor_user_id, created_at FROM audit_events e"
@@ -158,9 +159,10 @@ async def settlement(session, *, workspace_id: str, intent_id: str) -> dict:
         .first()
     )
     if row is None:
-        return {"state": None, "by_user_id": None, "at": None}
+        return {"state": None, "published_via": None, "by_user_id": None, "at": None}
     return {
         "state": row["state"],
+        "published_via": row["published_via"],
         "by_user_id": None
         if row["actor_user_id"] is None
         else str(row["actor_user_id"]),

@@ -324,3 +324,11 @@ def test_the_dry_run_outcome_word_names_what_did_not_happen():
         tz="UTC",
     )
     assert line.startswith("🧪 Dry run — not published")
+
+
+def test_a_posted_dry_run_row_words_as_a_dry_run_everywhere():
+    from src.services.target import prompts
+
+    assert prompts.outcome_word("posted", "dry_run").startswith("🧪 Dry run")
+    assert prompts.outcome_word("posted", "api") == "✅ Posted"
+    assert prompts.outcome_word("skipped", "dry_run") == "⏭️ Skipped"
