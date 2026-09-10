@@ -409,3 +409,49 @@ class TestConnectionRole:
 
     async def test_an_empty_answer_is_none(self):
         assert await connection_role(_Conn(row=None)) is None
+
+
+class TestTheIngressPoolSeam:
+    """Phase 2 step 2: the API's pool waits 1 s, the worker's 3 s, and a
+    caller may pick only one of the two seams."""
+
+    def test_the_two_seams_and_nothing_else(self):
+        from src.services.target import unit_of_work as uow
+
+        url = "postgresql+asyncpg://u:p@localhost:1/db"
+        api = uow.create_engine(url, pool_timeout=uow.INGRESS_POOL_TIMEOUT_SEAM)
+        worker = uow.create_engine(url)
+        try:
+            assert api.sync_engine.pool._timeout == 1.0
+            assert worker.sync_engine.pool._timeout == 3.0
+            assert uow.INGRESS_POOL_TIMEOUT_SEAM < uow.POOL_TIMEOUT_SEAM
+            with pytest.raises(ValueError, match="pool_timeout"):
+                uow.create_engine(url, pool_timeout=7.0)
+        finally:
+            api.sync_engine.dispose()
+            worker.sync_engine.dispose()
+
+    def test_the_pool_watch_reports_the_arithmetic_and_starts_at_zero(self):
+        from src.services.target import unit_of_work as uow
+
+        engine = uow.create_engine(
+            "postgresql+asyncpg://u:p@localhost:1/db",
+            pool_timeout=uow.INGRESS_POOL_TIMEOUT_SEAM,
+        )
+        try:
+            snap = uow.PoolWatch(engine).snapshot()
+            assert snap == {
+                "size": 10,
+                "overflow": 0,
+                "timeout_s": 1.0,
+                "checked_out": 0,
+                "checked_out_peak": 0,
+            }
+        finally:
+            engine.sync_engine.dispose()
+
+    def test_the_pool_watch_tolerates_a_composition_fake(self):
+        from src.services.target import unit_of_work as uow
+
+        snap = uow.PoolWatch(object()).snapshot()
+        assert snap["size"] == 10 and snap["checked_out_peak"] == 0

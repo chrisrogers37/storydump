@@ -108,6 +108,14 @@ POOL_SIZE_SEAM = 10
 #: DB-active demand at ~2.5 against a pool of 10 — a wait of any length is
 #: already the tail, so failing fast there defers work rather than losing it.
 POOL_TIMEOUT_SEAM = 3.0
+#: The INGRESS pool's wait — the API's saturation policy (phase 2 of the
+#: 2026-09-09 tap plan, F1 (a)+(d)). A tap that cannot get a connection within
+#: this budget is answered "Busy — tap again" and not admitted, so the
+#: tapper's spinner never outlives the budget and Telegram never redelivers a
+#: storm; a message update is refused 503 before admission instead. Below the
+#: worker's 3 s because the wait IS the user-visible latency here: `01` H2
+#: wants the tap answered within 2 s end to end, redelivery included.
+INGRESS_POOL_TIMEOUT_SEAM = 1.0
 
 #: Carried across from the legacy sync engine (`src/config/database.py`), which
 #: sets it explicitly to 300 alongside pre-ping. `pool_pre_ping` catches a dead
@@ -177,16 +185,76 @@ def engine_url_from_env(env) -> Optional[str]:
     return asyncpg_url(url)
 
 
-def create_engine(url: Optional[str] = None) -> AsyncEngine:
-    """The async engine, with `max_overflow` pinned to the `05` seam."""
+def create_engine(
+    url: Optional[str] = None, *, pool_timeout: float = POOL_TIMEOUT_SEAM
+) -> AsyncEngine:
+    """The async engine, with `max_overflow` pinned to the `05` seam. The
+    worker takes the default wait; the API passes `INGRESS_POOL_TIMEOUT_SEAM`
+    (the only knob a caller may turn, and only to one of the two seams)."""
+    if pool_timeout not in (POOL_TIMEOUT_SEAM, INGRESS_POOL_TIMEOUT_SEAM):
+        raise ValueError(
+            "pool_timeout must be POOL_TIMEOUT_SEAM or INGRESS_POOL_TIMEOUT_SEAM"
+        )
     return create_async_engine(
         url or async_database_url(),
         pool_size=POOL_SIZE_SEAM,
         max_overflow=MAX_OVERFLOW_SEAM,
-        pool_timeout=POOL_TIMEOUT_SEAM,
+        pool_timeout=pool_timeout,
         pool_recycle=POOL_RECYCLE_SEAM,
         pool_pre_ping=True,
     )
+
+
+class PoolWatch:
+    """The pool's arithmetic and its high-water mark, for `/health` and the
+    startup log (phase 2 step 4): `size`, `overflow`, `timeout_s`,
+    `checked_out` now and `checked_out_peak` since attach. The peak is kept by
+    the pool's own checkout event, so it costs nothing on the request path
+    and misses no burst between two health probes."""
+
+    def __init__(self, engine: AsyncEngine):
+        self._engine = engine
+        self.checked_out_peak = 0
+        # A composition-root fake has no pool; the watch then reports the
+        # seams and never a peak, rather than refusing to exist. The pool is
+        # read through the engine each time (a dispose recreates it; the
+        # listener rides `_dispatch` across the recreate).
+        pool = self._current_pool()
+        if pool is None:
+            return
+
+        def _on_checkout(dbapi_conn, record, proxy):  # noqa: ARG001 — event shape
+            # A listener that raises breaks EVERY checkout; the watch is
+            # telemetry and must never be the reason a request has no
+            # connection.
+            try:
+                now = self._current_pool().checkedout()
+            except Exception:  # noqa: BLE001 — telemetry only
+                return
+            if now > self.checked_out_peak:
+                self.checked_out_peak = now
+
+        from sqlalchemy import event
+
+        event.listen(pool, "checkout", _on_checkout)
+
+    def _current_pool(self):
+        pool = getattr(getattr(self._engine, "sync_engine", None), "pool", None)
+        return pool if pool is not None and hasattr(pool, "checkedout") else None
+
+    def snapshot(self) -> dict:
+        pool = self._current_pool()
+        return {
+            "size": pool.size() if pool is not None else POOL_SIZE_SEAM,
+            "overflow": MAX_OVERFLOW_SEAM,
+            "timeout_s": float(
+                getattr(pool, "_timeout", POOL_TIMEOUT_SEAM)
+                if pool is not None
+                else POOL_TIMEOUT_SEAM
+            ),
+            "checked_out": pool.checkedout() if pool is not None else 0,
+            "checked_out_peak": self.checked_out_peak,
+        }
 
 
 class UnitOfWork:
