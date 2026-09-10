@@ -42,7 +42,7 @@ from typing import Awaitable, Callable, Optional
 import httpx
 
 from src.services.target import egress
-from src.services.target.egress import EgressPolicy
+from src.services.target.egress import DEFAULT_ALLOWED_HOSTS, EgressPolicy
 from src.services.target.outbox import DestinationGone
 
 logger = logging.getLogger("channels.telegram")
@@ -180,6 +180,12 @@ class TelegramTransport:
         self._token = token
         self._client = client or httpx.AsyncClient()
         self._policy = policy or EgressPolicy()
+        # The answer and the strip ride a 2 s single-attempt budget (phase 1
+        # step 10) — derived from THIS policy so a transport pointed at a
+        # loopback fake (the load harness) keeps its allowlist on those too.
+        self._fast = _replace(
+            self._policy, timeout_class="fast", total_budget_s=2.0, max_attempts=1
+        )
         self._api_base = api_base
         # `media_fetch(media) -> (bytes, filename, mime)`: how a card's media
         # block becomes bytes to upload (the worker wires the Drive adapter).
@@ -298,7 +304,7 @@ class TelegramTransport:
                     "text": text,
                     "show_alert": bool(show_alert),
                 },
-                policy=_FAST,
+                policy=self._fast,
             )
         except Exception as exc:  # noqa: BLE001 — best effort, by contract
             # A query Telegram already considers answered (a redelivery, a
@@ -362,7 +368,7 @@ class TelegramTransport:
                 "message_id": _message_id(message_ref),
                 "reply_markup": _EMPTY_KEYBOARD,
             },
-            policy=_FAST,
+            policy=self._fast,
         )
 
     async def edit_caption(self, chat_id: str, message_ref: str, caption: str) -> bool:
@@ -573,3 +579,36 @@ class TelegramTransport:
 
     async def aclose(self) -> None:
         await self._client.aclose()
+
+
+#: A loopback Telegram for the load harness (`tests/scripts/load`): the API
+#: and the worker are real subprocesses, Telegram is a fake on this machine.
+API_BASE_VAR = "TARGET_TELEGRAM_API_BASE"
+_LOOPBACK = ("127.0.0.1", "localhost", "::1")
+
+
+class ApiBaseRefused(ValueError):
+    """`TARGET_TELEGRAM_API_BASE` names a host this process may not speak to."""
+
+
+def transport_from_env(token: str, env, **kwargs) -> "TelegramTransport":
+    """The bot transport a process speaks with. Without `TARGET_TELEGRAM_API_BASE`
+    it is the real Telegram under the default floor. With it — ONLY a loopback
+    host, and NEVER in Railway's production environment — the transport points
+    at that base and its floor admits the host (the private-address block is
+    lifted for it; every other guard stays), so the load harness can stand a
+    fake Telegram beside the real processes. The same door serves the API and
+    the worker so the two cannot disagree about which Telegram they speak to."""
+    base = (env.get(API_BASE_VAR) or "").strip()
+    if not base:
+        return TelegramTransport(token, **kwargs)
+    if (env.get("RAILWAY_ENVIRONMENT_NAME") or "").strip().lower() == "production":
+        raise ApiBaseRefused(f"{API_BASE_VAR} is not honoured in production")
+    host = httpx.URL(base).host
+    if host not in _LOOPBACK:
+        raise ApiBaseRefused(f"{API_BASE_VAR} must name a loopback host, not {host!r}")
+    policy = EgressPolicy(
+        allowed_hosts=frozenset(DEFAULT_ALLOWED_HOSTS | {host}),
+        enforce_private_address_block=False,
+    )
+    return TelegramTransport(token, api_base=base.rstrip("/"), policy=policy, **kwargs)
