@@ -33,7 +33,9 @@ import { isLiveToggle, scheduleSavedNotice, TOGGLES } from "./general-tab";
  * on this tab is currently inert, and that is the finding rather than a
  * mistake in this list.
  */
-const LIVE_TOGGLES: readonly string[] = [];
+// `enable_instagram_api` went live with #1220 step 3 — the publish leg is
+// built, so the switch now changes what the worker does with an approval.
+const LIVE_TOGGLES: readonly string[] = ["enable_instagram_api"];
 
 // `isLiveToggle` is IMPORTED, not restated. An earlier version of this file
 // copied the predicate, and a mutant that reverted the component's rule to
@@ -56,7 +58,8 @@ describe("a live switch requires a consumer, not just a column", () => {
   it("the three #1155 toggles keep their real settingsKey", () => {
     // Saying `null` would claim the port has no such setting — false, and it
     // would send the next person to add a command that already exists. The
-    // reason they are inert is the missing CONSUMER, not a missing command.
+    // reason two of them are inert is the missing CONSUMER, not a missing
+    // command; the third gained its consumer with #1220 step 3 and is live.
     for (const key of [
       "dry_run_mode",
       "enable_instagram_api",
@@ -65,7 +68,11 @@ describe("a live switch requires a consumer, not just a column", () => {
       const row = TOGGLES.find((t) => t.key === key);
       expect(row, key).toBeDefined();
       expect(row!.settingsKey, key).not.toBeNull();
-      expect(row!.inertReason, key).toBeTruthy();
+      if (key === "enable_instagram_api") {
+        expect(isLive(row!), key).toBe(true);
+      } else {
+        expect(row!.inertReason, key).toBeTruthy();
+      }
     }
   });
 

@@ -59,7 +59,7 @@ logger = logging.getLogger(__name__)
 #: Flipped by #1220 step 3 when the worker's publish leg is live. Until then
 #: the `post` answer says what is true (F11): approval is recorded, publishing
 #: is not yet automatic.
-PUBLISH_LEG_LIVE = False
+PUBLISH_LEG_LIVE = True
 
 #: A button's action → the command it runs (phase 1 step 11).
 ACTION_TO_COMMAND = {
@@ -117,6 +117,11 @@ ANSWERS: dict[str, tuple[str, bool]] = {
     # command refusals (`commands.REASONS`)
     "manual_mode": (
         "This workspace posts by hand — post it on Instagram, then tap ✅ Posted myself.",
+        True,
+    ),
+    "not_connected": (
+        "Instagram isn't connected for this account yet — connect it in Settings ›"
+        " Integrations, or post by hand and tap ✅ Posted myself.",
         True,
     ),
     "not_found": ("That post is gone.", True),

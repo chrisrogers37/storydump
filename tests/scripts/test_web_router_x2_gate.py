@@ -78,6 +78,15 @@ def _seed_intent(dsn: str, workspace_id: str, tag: str) -> str:
                 "UPDATE ig_accounts SET handle = %s WHERE id = %s",
                 (f"@{tag}_acct", str(chain["iga"])),
             )
+            # `approve` refuses a post without a usable Instagram token
+            # (`not_connected`, #1276); the API workspace this gate flips to
+            # api_publishing is connected, as the real one is.
+            cur.execute(
+                "INSERT INTO oauth_credentials (workspace_id, ig_account_id,"
+                " provider, encrypted_payload, state)"
+                " VALUES (%s, %s, 'ig_login', 'ciphertext', 'active')",
+                (workspace_id, str(chain["iga"])),
+            )
         conn.commit()
         return str(chain["intent"])
     finally:

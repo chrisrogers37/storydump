@@ -94,7 +94,13 @@ def world(monkeypatch):
     async def _actor_name(session, user_id):
         return "Chris"
 
+    async def has_active_ig_credential(session, *, workspace_id, ig_account_id):
+        return log.get("connected", True)
+
     monkeypatch.setattr(command_executors, "_intent_row", _intent_row)
+    monkeypatch.setattr(
+        command_executors, "has_active_ig_credential", has_active_ig_credential
+    )
     monkeypatch.setattr(intent_ledger, "transition", transition)
     monkeypatch.setattr(jobs, "enqueue", enqueue)
     monkeypatch.setattr(command_executors, "_settlement", _settlement)
@@ -184,3 +190,9 @@ class TestAnAwaitingCardFlipsOnceAndSupersedesEverywhere:
         with pytest.raises(commands.CommandRefused) as info:
             await command_executors.approve(_Session(), _cmd("approve"))
         assert info.value.reason == "manual_mode" and world["flips"] == []
+
+    async def test_a_disconnected_account_refuses_post_before_any_write(self, world):
+        world["connected"] = False
+        with pytest.raises(commands.CommandRefused) as info:
+            await command_executors.approve(_Session(), _cmd("approve"))
+        assert info.value.reason == "not_connected" and world["flips"] == []

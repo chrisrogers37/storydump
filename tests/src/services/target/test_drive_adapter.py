@@ -290,6 +290,9 @@ class TestTheSeamParksLoudly:
             return {k for k, e in registry.items() if not isinstance(e, Parked)}
 
         gated = live(wired) - live(unwired)
+        # `publish_pipeline` is NOT in this set even though its media fetch
+        # reads Drive: the fetch is derived from the adapter in `worker.compose`
+        # (#1220 step 3), one level above the registry this pins.
         assert gated == {"sync_media_source", "first_ingest_chunk"}, (
             f"wiring the drive seam moved kinds it does not gate — got {sorted(gated)}"
         )
