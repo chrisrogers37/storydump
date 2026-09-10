@@ -647,4 +647,4 @@ class TestTheApiRegistersItsOwnWebhook:
         )
         with TestClient(app) as client:
             report = self._wait_for_webhook(client)
-        assert calls == [] and report["skipped"].startswith("autoregister off")
+        assert calls == [] and report["skipped"].startswith("autoregister switched off")

@@ -132,7 +132,9 @@ async def register(
         # prose (Telegram's, or httpx's, which may embed the URL) goes to the
         # log with the token AND the secret struck out.
         report["error"] = type(exc).__name__
-        prose = transport.redact(str(exc)).replace(secret, "<SECRET>")
+        prose = transport.redact(str(exc))
+        if secret:
+            prose = prose.replace(secret, "<SECRET>")
         logger.warning(
             "telegram webhook not registered: %s: %s", type(exc).__name__, prose
         )
