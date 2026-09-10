@@ -182,6 +182,11 @@ async def telegram_webhook(request: Request) -> dict[str, str]:
         logger.warning("telegram webhook: no integer update_id")
         raise HTTPException(status_code=400, detail="missing update_id")
 
+    logger.info(
+        "telegram webhook: delivery update_id=%s kinds=%s",
+        update_id,
+        sorted(k for k in payload if k != "update_id"),
+    )
     runtime: Optional[IngressRuntime] = getattr(request.app.state, "ingress", None)
     if runtime is None:
         # THE SEAM. Refused before admission, on purpose. 503 rather than 200

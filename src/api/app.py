@@ -39,6 +39,7 @@ at nothing and on a misconfigured one would point at a legacy-shaped database
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import os
 from contextlib import asynccontextmanager
 import time
@@ -395,6 +396,43 @@ async def _register_webhook(app: FastAPI, env: Mapping[str, str]) -> None:
                 pass
 
 
+async def _sample_webhook_live(app: FastAPI, env: Mapping[str, str]) -> None:
+    """Every minute: what Telegram holds for the bot's webhook RIGHT NOW —
+    `getWebhookInfo`'s backlog and last delivery error — cached on
+    `app.state.webhook_live` for `/health`. Read-only, so it runs wherever a
+    token exists; a failure is a report, never a raise. This is the signal
+    that tells "Telegram is not delivering" from "our route is failing": the
+    former shows as a growing backlog with no error, the latter as
+    `last_error_message` naming our response code."""
+    if not env.get("TARGET_TELEGRAM_BOT_TOKEN"):
+        return
+    transport = _telegram_transport(env)
+    try:
+        while True:
+            try:
+                info = await transport.webhook_info()
+                app.state.webhook_live = {
+                    "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    "url": info.get("url"),
+                    "pending_update_count": info.get("pending_update_count"),
+                    "last_error_date": info.get("last_error_date"),
+                    "last_error_message": info.get("last_error_message"),
+                    "max_connections": info.get("max_connections"),
+                    "allowed_updates": info.get("allowed_updates"),
+                }
+            except Exception as exc:  # noqa: BLE001 — a report, never a failed loop
+                app.state.webhook_live = {
+                    "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    "error": type(exc).__name__,
+                }
+            await asyncio.sleep(60)
+    finally:
+        try:
+            await transport.aclose()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 async def _sample_db_role(app: FastAPI) -> None:
     """Fill `app.state.db_role` once, from the catalog; never raise.
 
@@ -455,6 +493,9 @@ def create_app(
             asyncio.create_task(
                 _register_webhook(app_, os.environ if env is None else env)
             ),
+            asyncio.create_task(
+                _sample_webhook_live(app_, os.environ if env is None else env)
+            ),
         ]
         try:
             yield
@@ -486,6 +527,10 @@ def create_app(
     # startup task has run; then `ok`, what Telegram holds, or why it was
     # skipped — never the token or the secret.
     app.state.webhook = None
+    # What Telegram holds for the webhook now (`_sample_webhook_live`, every
+    # minute): the backlog and the last delivery error — the signal that tells
+    # "Telegram is not delivering" from "our route is failing".
+    app.state.webhook_live = None
 
     # The W4 ingress seam: the `/start` door (#1183) and the group join path
     # (#1242, on #854's resolver door `fn_resolve_binding` — `07` §14).
@@ -556,6 +601,7 @@ def create_app(
             # The webhook this API registered on the bot at startup — a
             # snapshot from this process's start (`sampled: startup`).
             "webhook": app.state.webhook,
+            "webhook_live": app.state.webhook_live,
         }
 
     @app.get("/health/scheduling")
