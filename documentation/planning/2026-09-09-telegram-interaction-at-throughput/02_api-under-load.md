@@ -52,11 +52,33 @@ Gate: `tests/scripts/test_l8_webhook_admission.py` gains `TestManyDistinctDelive
 
 ## Verification Checklist
 
-- [ ] `pytest tests/scripts/test_l8_webhook_admission.py -q` green.
-- [ ] `RUN_LOAD_HARNESS=1 pytest tests/scripts/load -q -m load` produces a report; `taps_1000_across_50_workspaces`: 5xx = 0, end-to-end answer p95 < 2 s, pre-admission refusals within the ratified bound, `pending_update_count` peak reported; `double_tap_one_card`: exactly one flip, zero 5xx, p95 < 2 s; `taps_across_many_cards`: 200 flips over 10 workspaces; `one_slow_chat`: other chats' answer p95 < 2 s and within 200 ms of the same run's `taps_across_many_cards` p95, and other chats' edit-landed p95 within one poller cadence (2 s) plus pacing of that run's.
-- [ ] The report names the container settings, the RTT of the run, and which latency each number is.
-- [ ] `/health` reports the pool arithmetic, `max_connections`, `pending_update_count` and the tap counters; the startup log prints the arithmetic; the Procfile matches the F5 ruling.
-- [ ] F1, F5 and F12 locked in `00_EPIC.md` with the report cited.
+Built 2026-09-10 in two PRs (steps 2–4; steps 5–6). The reports:
+`tests/scripts/load/reports/2026-09-10.md` (loopback), `…-rtt10ms.md` (≈ 20 ms database RTT
+through the harness's latency proxy — the deciding run) and `…-rtt10ms-workers2.md` (F5 (a),
+measured). Read against the deciding run:
+
+- MET: `taps_1000_across_50_workspaces` 5xx 0, delivery-side answer p95 0.667 s, pre-admission
+  refusals 0, `pending_peak` 990 reported; `taps_across_many_cards` 200 flips; `one_slow_chat` other
+  chats' answer p95 0.684 s, within 200 ms of the run's `taps_across_many_cards` (0.618 s); the busy
+  boundary exercised at twenty connections against the pool of ten (1 busy, 0 5xx).
+- MISSED, on the numbers: `double_tap_one_card` answer p95 **2.027 s** against the 2 s bound (2.022 s
+  with two workers; 0.086 s on loopback) — the row-lock convoy of 50 taps in 100 ms on ONE card, each
+  waiting for the previous flip's commit at ≈ 24 round trips × 20 ms. The harness's own assertion
+  fails on it in the deciding run, deliberately: the plan's Test Plan says this criterion is what
+  would re-serve F2 toward (d). **Owner to ratify:** keep F2 (a) with the bound read as "≈ 2 s at
+  20 ms RTT, shrinking with #1286" (the lean — a 1.4 % miss on a synthetic burst, and every tap was
+  still answered by name), or re-serve F2 as (d). The assertion is loosened only by that ruling.
+- NOT MET and not claimed: the user-side wait for a 1,000-simultaneous burst (56 s, half past
+  Telegram's expiry — throughput-bound, #1286); `one_slow_chat`'s edit-landed criterion (the sender
+  lands ≈ 0.5 supersede rows/s fleet-wide — one lane, claim-one-await-one; phase 3a/3b's number).
+
+- [x] `pytest tests/scripts/test_l8_webhook_admission.py -q` green.
+- [x] `RUN_LOAD_HARNESS=1 pytest tests/scripts/load -q -m load` produces a report; `taps_1000_across_50_workspaces`: 5xx = 0, end-to-end answer p95 < 2 s, pre-admission refusals within the ratified bound, `pending_update_count` peak reported; `taps_across_many_cards`: 200 flips over 10 workspaces; `one_slow_chat`: other chats' answer p95 < 2 s and within 200 ms of the same run's `taps_across_many_cards` p95.
+- [ ] `double_tap_one_card`: exactly one flip, zero 5xx — met; **p95 < 2 s — missed by 27 ms at the deciding RTT (owner ruling pending, above).**
+- [ ] `one_slow_chat`: other chats' edit-landed p95 within one poller cadence (2 s) plus pacing — not met (the sender's throughput; phase 3a/3b).
+- [x] The report names the container settings, the RTT of the run, and which latency each number is.
+- [x] `/health` reports the pool arithmetic, `max_connections`, `pending_update_count` and the tap counters; the startup log prints the arithmetic; the Procfile matches the F5 ruling.
+- [x] F1, F5 and F12 locked in `00_EPIC.md` with the report cited (F2's exception awaits the owner).
 
 ## What NOT To Do
 
