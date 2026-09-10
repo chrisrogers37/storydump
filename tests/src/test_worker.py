@@ -521,3 +521,84 @@ class TestThePublishLegIsWired:
             "file_ref": "ref-1",
             "max_bytes": PUBLISH_MAX_BYTES["video"],
         }
+
+
+class TestTheReconcilerPollIsWired:
+    """#1220 step 3: production no longer runs `poll=None` — the ambiguous
+    ladder asks Meta for the container's status through the Graph adapter."""
+
+    def test_compose_supplies_the_poll_seam(self):
+        app = compose(engine=object(), config=WorkerConfig(), env={})
+        assert callable(app.deps.poll)
+
+    async def test_the_poll_returns_the_containers_status_for_the_intent(self):
+        from src.worker import _poll_from
+
+        class _Meta:
+            def __init__(self):
+                self.calls = []
+
+            async def container_status(
+                self, container_id, *, provider_account_ref=None
+            ):
+                self.calls.append((container_id, provider_account_ref))
+                return "PUBLISHED"
+
+        meta = _Meta()
+        poll = _poll_from(
+            object(),
+            meta,
+            session_factory=_scripted_session_factory(
+                {"ig_container_id": "ctr-7", "provider_account_ref": "1784"}
+            ),
+        )
+        assert await poll(intent_id="i-1") == "PUBLISHED"
+        assert meta.calls == [("ctr-7", "1784")]
+
+    async def test_no_container_or_a_typed_error_is_inconclusive_not_a_crash(self):
+        from src.services.target.meta_adapter import MetaRetryableError
+        from src.worker import _poll_from
+
+        class _Dead:
+            async def container_status(
+                self, container_id, *, provider_account_ref=None
+            ):
+                raise MetaRetryableError(code=190, message="dead token")
+
+        none = _poll_from(
+            object(),
+            _Dead(),
+            session_factory=_scripted_session_factory(
+                {"ig_container_id": None, "provider_account_ref": "1784"}
+            ),
+        )
+        assert await none(intent_id="i-1") is None
+        dead = _poll_from(
+            object(),
+            _Dead(),
+            session_factory=_scripted_session_factory(
+                {"ig_container_id": "ctr-7", "provider_account_ref": "1784"}
+            ),
+        )
+        assert await dead(intent_id="i-1") is None
+
+
+def _scripted_session_factory(row):
+    class _Result:
+        def mappings(self):
+            return self
+
+        def first(self):
+            return row
+
+    class _Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def execute(self, statement, params=None):
+            return _Result()
+
+    return _Session

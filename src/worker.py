@@ -120,6 +120,57 @@ def _meta_from_env(engine, env):
     )
 
 
+def _poll_from(engine, meta, *, session_factory=None):
+    """`reconcile_ambiguous`'s ladder half (`06` §5): the container's status
+    for an ambiguous intent, asked of Meta (#1220 step 3).
+
+    Returns the `status_code` the reconciler classifies (PUBLISHED → posted,
+    ERROR/EXPIRED → failed, anything else inconclusive), or None — inconclusive
+    under every mode — when the intent has no container or Meta's answer is a
+    typed error: the ladder records the sighting and, spent, parks the intent
+    for a human. A typed error is logged by type and returned as None rather
+    than raised so one account's dead token cannot abort the whole sweep.
+    Reads as the owner role (BYPASSRLS, #751) like `ig_credentials`."""
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.services.target.meta_adapter import MetaError, MetaLostResponse
+
+    maker = session_factory or async_sessionmaker(engine, expire_on_commit=False)
+
+    async def poll(*, intent_id) -> Optional[str]:
+        async with maker() as session:
+            row = (
+                (
+                    await session.execute(
+                        text(
+                            "SELECT ig_container_id, provider_account_ref"
+                            "  FROM post_intents WHERE id = :id"
+                        ),
+                        {"id": str(intent_id)},
+                    )
+                )
+                .mappings()
+                .first()
+            )
+        if row is None or not row["ig_container_id"]:
+            return None
+        try:
+            return await meta.container_status(
+                str(row["ig_container_id"]),
+                provider_account_ref=row["provider_account_ref"],
+            )
+        except (MetaError, MetaLostResponse) as exc:
+            logger.warning(
+                "reconcile poll for intent %s: %s — recorded as inconclusive",
+                intent_id,
+                type(exc).__name__,
+            )
+            return None
+
+    return poll
+
+
 def make_session_for(engine):
     """Per-job transaction contexts with the GUC invariant applied once.
 
@@ -178,12 +229,14 @@ def compose(
     credential is probed by run(), not here. *refresh* defaults to the real
     IG refresh door — always constructible (no config), egress-floored; tests
     inject a scripted one."""
+    # The publish leg (#1220 step 3): the Graph adapter is always built (it
+    # reads each account's token at call time); the media fetch exists only
+    # with a Drive adapter; the registry parks the kind naming whichever of
+    # the three (fetch, meta, transit) is missing. The same adapter answers the
+    # ambiguous-publish reconciler's poll.
+    meta = _meta_from_env(engine, env)
     deps = WorkerDeps(
-        # The publish leg (#1220 step 3): the Graph adapter is always built (it
-        # reads each account's token at call time); the media fetch exists only
-        # with a Drive adapter; the registry parks the kind naming whichever of
-        # the three (fetch, meta, transit) is missing.
-        meta=_meta_from_env(engine, env),
+        meta=meta,
         transit=_transit_from_env(env),
         media_fetch=None if drive is None else _publish_media_fetch(drive),
         # None until a provider is wired, and that is the honest state rather
@@ -191,7 +244,7 @@ def compose(
         # kind parks with a reason naming what is missing (#1092).
         email=email_sender.sender_from_env(env),
         transport=transport,
-        poll=None,
+        poll=_poll_from(engine, meta),
         refresh=refresh if refresh is not None else credential_lifecycle.ig_refresh,
         drive=drive,
         engine=engine,

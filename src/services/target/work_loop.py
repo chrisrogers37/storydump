@@ -434,9 +434,10 @@ def build_registry(deps: WorkerDeps) -> dict:
         run_pipeline
         if _missing is None
         else Parked(
-            f"{_missing} is not wired: the publish leg needs media_fetch (a Drive"
-            " adapter), meta (the Instagram Graph adapter) and transit"
-            " (CLOUDINARY_*) — build-path W5b / #1220 step 3"
+            f"{_missing} is not wired: the publish leg needs media_fetch (composed"
+            " from the media-source adapter in worker.compose), meta (the"
+            " Instagram Graph adapter) and transit (CLOUDINARY_*) — build-path"
+            " W5b / #1220 step 3"
         )
     )
     registry["deliver_outbox"] = (
