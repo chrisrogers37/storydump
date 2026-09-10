@@ -88,7 +88,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 
-from src.services.target import provider_ops, publish_cap
+from src.services.target import outbox, prompts, provider_ops, publish_cap
 from src.services.target.jobs import assert_lease, finalize_job, reschedule_job
 from src.services.target.meta_adapter import (
     MetaCapDeferral,
@@ -285,7 +285,8 @@ async def _load(uow, job: dict) -> Optional[_Ctx]:
                         "SELECT i.id, i.state, i.publish_step, i.cancel_requested,"
                         "       i.media_item_id, i.ig_account_id, i.ig_container_id,"
                         "       i.transit_asset_ref,"
-                        "       i.provider_account_ref,"
+                        "       i.provider_account_ref, i.workspace_id,"
+                        "       m.source_id, m.mime_type,"
                         "       COALESCE(a.posts_per_day, w.posts_per_day) AS eff_ppd,"
                         "       COALESCE(a.tz, w.tz) AS eff_tz,"
                         "       a.next_slot_at, w.repost_ttl_days,"
@@ -803,7 +804,10 @@ async def _ladder(
 async def _await_ready(ctx: _Ctx, meta, sleep) -> str:
     """One bounded readiness segment: 'ready' | 'dead' | 'pending'."""
     for attempt in range(POLL_BUDGET):
-        status = await meta.container_status(ctx.intent["ig_container_id"])
+        status = await meta.container_status(
+            ctx.intent["ig_container_id"],
+            provider_account_ref=ctx.intent["provider_account_ref"],
+        )
         if status in _READY_STATUSES:
             return "ready"
         if status in _DEAD_STATUSES:
@@ -912,6 +916,25 @@ async def _confirm(
             text("UPDATE ig_accounts SET last_posted_at = now() WHERE id = :acct"),
             {"acct": str(ctx.intent["ig_account_id"])},
         )
+        # The card said "Approved — posting shortly"; now it says posted. Every
+        # live card of the intent, in every push binding, loses its buttons and
+        # gains the terminal line — in THIS transaction, so a rolled-back
+        # confirm takes the edit with it (the phase-1 follow-up `01_the-tap.md`
+        # named: the leg writes the terminal line).
+        line = prompts.outcome_line(
+            "posted",
+            by=None,
+            at=datetime.now(timezone.utc),
+            tz=str(ctx.intent.get("eff_tz") or "UTC"),
+        )
+        for binding_id in await prompts.push_bindings(session, ctx.workspace_id):
+            await outbox.supersede_all(
+                session,
+                workspace_id=ctx.workspace_id,
+                binding_id=binding_id,
+                intent_id=ctx.intent_id,
+                outcome_text=line,
+            )
         await finalize_job(session, ctx.job["id"], ctx.job["lease_token"], "succeeded")
     try:
         await transit.destroy(

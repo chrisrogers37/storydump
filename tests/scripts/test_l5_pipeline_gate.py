@@ -463,6 +463,23 @@ class TestTheHappyPath:
         (best-effort inline destroy after commit)."""
         intent, ref = _new_intent(pipe_db)
         job = _leased_job(pipe_db, intent, ref=ref)
+        # A live approval card for the intent, as the tap left it: "Approved —
+        # posting shortly". The leg must finish that sentence (#1220 step 3).
+        binding = _exec(
+            pipe_db,
+            "INSERT INTO channel_bindings (workspace_id, channel, external_ref)"
+            " VALUES (%s, 'telegram_group', %s) RETURNING id",
+            (pipe_db["ws"], f"-100{intent[:8]}"),
+            fetch=True,
+        )[0][0]
+        _exec(
+            pipe_db,
+            "INSERT INTO channel_outbox (workspace_id, binding_id, kind, intent_id,"
+            " payload, state, external_message_ref)"
+            " VALUES (%s, %s, 'approval_prompt', %s,"
+            ' \'{"v": 2, "text": "📸 f.jpg", "sent_as": "text"}\', \'sent\', \'77001\')',
+            (pipe_db["ws"], binding, intent),
+        )
         meta = StubMetaAdapter(ready_after_polls=1)
         transit = FakeTransit()
         outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, meta, transit)))
@@ -471,6 +488,16 @@ class TestTheHappyPath:
         row = _intent_row(pipe_db, intent)
         assert row["state"] == "posted"
         assert row["publish_step"] == "effect_confirmed"
+        card = _exec(
+            pipe_db,
+            "SELECT state, payload->>'outcome_text' FROM channel_outbox"
+            " WHERE intent_id = %s AND kind = 'approval_prompt'",
+            (intent,),
+            fetch=True,
+        )[0]
+        assert card[0] == "superseded" and card[1].startswith("✅ Posted"), (
+            f"the card did not gain the terminal line — got {card!r}"
+        )
         assert row["ig_media_id"] and row["ig_media_id"].startswith("media-")
         assert row["ig_container_id"] == meta.publish_calls[0]["container_id"], (
             "R1: the container the publish call used is the persisted one"

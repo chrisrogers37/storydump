@@ -179,7 +179,11 @@ class StubMetaAdapter:
         self._status_polls[container_id] = 0
         return container_id
 
-    async def container_status(self, container_id: str) -> str:
+    async def container_status(
+        self, container_id: str, *, provider_account_ref: Optional[str] = None
+    ) -> str:
+        # The real adapter needs the account to find its token (a resumed run
+        # has no memory of the create); the stub keeps counting by container.
         self.status_calls.append(container_id)
         if self._status_script:
             return self._status_script.pop(0)

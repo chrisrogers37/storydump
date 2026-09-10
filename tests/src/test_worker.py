@@ -464,3 +464,60 @@ class TestPromptSweeperConsumesTheSweep:
 
         assert (sweeper.sweeps, sweeper.prompted, sweeper.advanced) == (1, 2, 1)
         assert "prompt sweep failed" not in caplog.text
+
+
+class TestThePublishLegIsWired:
+    """#1220 step 3: with a Drive adapter and the Cloudinary trio the
+    publish_pipeline kind is LIVE; without Drive it parks naming media_fetch;
+    the Graph adapter is always built and the fetch reads the intent row."""
+
+    def test_drive_and_cloudinary_bring_publish_pipeline_live(self):
+        from src.services.target.work_loop import Parked
+
+        env = {
+            "CLOUDINARY_CLOUD_NAME": "c",
+            "CLOUDINARY_API_KEY": "k",
+            "CLOUDINARY_API_SECRET": "s",
+        }
+        app = compose(engine=object(), config=WorkerConfig(), env=env, drive=object())
+        assert not isinstance(app.registry["publish_pipeline"], Parked)
+        assert app.deps.meta is not None and app.deps.media_fetch is not None
+
+    def test_without_drive_it_parks_naming_the_fetch(self):
+        from src.services.target.work_loop import Parked
+
+        env = {
+            "CLOUDINARY_CLOUD_NAME": "c",
+            "CLOUDINARY_API_KEY": "k",
+            "CLOUDINARY_API_SECRET": "s",
+        }
+        app = compose(engine=object(), config=WorkerConfig(), env=env)
+        entry = app.registry["publish_pipeline"]
+        assert isinstance(entry, Parked) and entry.reason.startswith(
+            "media_fetch is not wired"
+        )
+
+    async def test_the_publish_fetch_reads_the_intent_row_under_the_story_cap(self):
+        from src.worker import PUBLISH_MAX_BYTES, _publish_media_fetch
+
+        seen = {}
+
+        class _Drive:
+            async def fetch_bytes(self, **kw):
+                seen.update(kw)
+                return b"jpeg-bytes", "f.jpg", "image/jpeg"
+
+        fetch = _publish_media_fetch(_Drive())
+        intent = {
+            "source_id": "src-1",
+            "workspace_id": "ws-1",
+            "provider_file_ref": "ref-1",
+            "media_kind": "video",
+        }
+        assert await fetch(intent) == b"jpeg-bytes"
+        assert seen == {
+            "source_id": "src-1",
+            "workspace_id": "ws-1",
+            "file_ref": "ref-1",
+            "max_bytes": PUBLISH_MAX_BYTES["video"],
+        }

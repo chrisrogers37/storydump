@@ -415,12 +415,28 @@ def build_registry(deps: WorkerDeps) -> dict:
         if deps.transit is not None
         else Parked("no transit store configured (CLOUDINARY_* absent)")
     )
+    # The ladder calls all three — fetch, transit.upload, meta.create_container
+    # — so it is live only when all three are wired, and parks naming the
+    # first one missing (#1220 step 3; the seam astrid named on #982).
+    _missing = next(
+        (
+            name
+            for name, dep in (
+                ("media_fetch", deps.media_fetch),
+                ("meta", deps.meta),
+                ("transit", deps.transit),
+            )
+            if dep is None
+        ),
+        None,
+    )
     registry["publish_pipeline"] = (
         run_pipeline
-        if deps.media_fetch is not None
+        if _missing is None
         else Parked(
-            "media_fetch has no production implementation (build-path W5b);"
-            " wiring a test fake into production is not composition"
+            f"{_missing} is not wired: the publish leg needs media_fetch (a Drive"
+            " adapter), meta (the Instagram Graph adapter) and transit"
+            " (CLOUDINARY_*) — build-path W5b / #1220 step 3"
         )
     )
     registry["deliver_outbox"] = (

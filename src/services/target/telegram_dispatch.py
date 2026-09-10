@@ -59,7 +59,7 @@ logger = logging.getLogger(__name__)
 #: Flipped by #1220 step 3 when the worker's publish leg is live. Until then
 #: the `post` answer says what is true (F11): approval is recorded, publishing
 #: is not yet automatic.
-PUBLISH_LEG_LIVE = False
+PUBLISH_LEG_LIVE = True
 
 #: A button's action → the command it runs (phase 1 step 11).
 ACTION_TO_COMMAND = {

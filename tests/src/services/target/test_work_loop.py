@@ -151,6 +151,16 @@ class TestSeamAbsenceParksTheDependentKind:
         assert isinstance(registry["publish_pipeline"], Parked)
         assert "media_fetch" in registry["publish_pipeline"].reason
 
+    def test_no_meta_or_no_transit_parks_publish_pipeline_by_name(self):
+        """The ladder calls fetch, transit and meta; each absence parks the
+        kind naming itself (#1220 step 3)."""
+        registry = build_registry(full_deps(meta=None))
+        assert isinstance(registry["publish_pipeline"], Parked)
+        assert registry["publish_pipeline"].reason.startswith("meta is not wired")
+        registry = build_registry(full_deps(transit=None))
+        assert isinstance(registry["publish_pipeline"], Parked)
+        assert registry["publish_pipeline"].reason.startswith("transit is not wired")
+
     def test_no_poll_does_NOT_park_the_reconciler(self):
         """Re-pointed, not deleted (#1090 D4). The property this class pins —
         a missing seam parks its DEPENDENT kind — is unchanged and still has
