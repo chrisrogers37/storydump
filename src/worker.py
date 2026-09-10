@@ -744,13 +744,13 @@ def main() -> None:
         token_provider=drive_credentials.provider_from_engine(engine),
     )
     if token:
-        from src.channels.telegram_transport import TelegramTransport
+        from src.channels.telegram_transport import transport_from_env
 
         # The approval card is the photo (owner, 2026-09-08): the transport
         # fetches a card's media through the same Drive read leg. This is NOT
-        # the publish pipeline's `media_fetch` seam (above) — that one stays
-        # unwired until milestone 2, for the reason given there.
-        transport = TelegramTransport(token, media_fetch=_card_media_fetch(drive))
+        # the publish pipeline's `media_fetch` seam (`_publish_media_fetch`,
+        # composed above), which reads the file for Meta at its own cap.
+        transport = transport_from_env(token, env, media_fetch=_card_media_fetch(drive))
     app = compose(
         engine=engine, config=config, env=env, transport=transport, drive=drive
     )

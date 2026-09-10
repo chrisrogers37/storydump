@@ -480,9 +480,9 @@ def _telegram_transport(env: Mapping[str, str]):
     token = env.get("TARGET_TELEGRAM_BOT_TOKEN")
     if not token:
         return None
-    from src.channels.telegram_transport import TelegramTransport
+    from src.channels.telegram_transport import transport_from_env
 
-    return TelegramTransport(token)
+    return transport_from_env(token, env)
 
 
 def _telegram_reply(env: Mapping[str, str]):

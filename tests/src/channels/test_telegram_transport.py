@@ -822,3 +822,49 @@ class TestASendReceiptSaysHowTheCardWent:
         t = TelegramTransport(TOKEN, client=_client(handler), media_fetch=_fetch_ok)
         ref = await t.for_chat("7")(MEDIA_ROW)
         assert ref == "77" and ref.sent_as == "media"
+
+
+class TestTransportFromEnv:
+    """`TARGET_TELEGRAM_API_BASE` (the load harness's fake Telegram): loopback
+    only, never in production, and the floor admits the host on the fast
+    calls too — derived from the transport's own policy."""
+
+    def test_without_the_variable_it_is_the_real_telegram_under_the_default_floor(self):
+        from src.channels.telegram_transport import _API_BASE, transport_from_env
+
+        t = transport_from_env("1:t", {})
+        assert t._api_base == _API_BASE
+        assert t._policy.enforce_private_address_block is True
+        assert t._fast.timeout_class == "fast" and t._fast.max_attempts == 1
+
+    def test_a_loopback_base_is_admitted_on_every_call_class(self):
+        from src.channels.telegram_transport import transport_from_env
+
+        t = transport_from_env(
+            "1:t", {"TARGET_TELEGRAM_API_BASE": "http://127.0.0.1:8123/"}
+        )
+        assert t._api_base == "http://127.0.0.1:8123"
+        assert "127.0.0.1" in t._policy.allowed_hosts
+        assert t._policy.enforce_private_address_block is False
+        assert "127.0.0.1" in t._fast.allowed_hosts, "the answer and the strip too"
+        assert "api.telegram.org" in t._policy.allowed_hosts
+
+    def test_a_non_loopback_base_is_refused(self):
+        from src.channels.telegram_transport import ApiBaseRefused, transport_from_env
+
+        with pytest.raises(ApiBaseRefused, match="loopback"):
+            transport_from_env(
+                "1:t", {"TARGET_TELEGRAM_API_BASE": "http://10.0.0.5:80"}
+            )
+
+    def test_production_refuses_the_override_outright(self):
+        from src.channels.telegram_transport import ApiBaseRefused, transport_from_env
+
+        with pytest.raises(ApiBaseRefused, match="production"):
+            transport_from_env(
+                "1:t",
+                {
+                    "TARGET_TELEGRAM_API_BASE": "http://127.0.0.1:8123",
+                    "RAILWAY_ENVIRONMENT_NAME": "production",
+                },
+            )
