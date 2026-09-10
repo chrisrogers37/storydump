@@ -119,6 +119,11 @@ ANSWERS: dict[str, tuple[str, bool]] = {
         "This workspace posts by hand — post it on Instagram, then tap ✅ Posted myself.",
         True,
     ),
+    "not_connected": (
+        "Instagram isn't connected for this account yet — connect it in Settings ›"
+        " Integrations, or post by hand and tap ✅ Posted myself.",
+        True,
+    ),
     "not_found": ("That post is gone.", True),
     "cancelling": ("This card is being cancelled.", False),
     "illegal_transition": ("That card can't take this action any more.", False),

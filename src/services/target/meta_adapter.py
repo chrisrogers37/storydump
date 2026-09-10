@@ -56,6 +56,10 @@ CAP_ERROR_CODE = 9
 
 #: Definitive-permanent codes: 9004 = the uploaded file cannot be parsed.
 TERMINAL_CODES = frozenset({9004})
+#: Meta's OAuth error code. The real adapter reports a dead or absent token as
+#: a retryable error with this code, and the pipeline hands it straight to a
+#: human (`review_required`): a retry cannot mint a credential.
+OAUTH_ERROR_CODE = 190
 
 
 class MetaLostResponse(StorydumpError):
@@ -165,6 +169,7 @@ class StubMetaAdapter:
         media_url: str,
         media_kind: str,
         caption: Optional[str] = None,
+        workspace_id: Optional[str] = None,
     ) -> str:
         self.create_calls.append(
             {
@@ -180,7 +185,11 @@ class StubMetaAdapter:
         return container_id
 
     async def container_status(
-        self, container_id: str, *, provider_account_ref: Optional[str] = None
+        self,
+        container_id: str,
+        *,
+        provider_account_ref: Optional[str] = None,
+        workspace_id: Optional[str] = None,
     ) -> str:
         # The real adapter needs the account to find its token (a resumed run
         # has no memory of the create); the stub keeps counting by container.
@@ -191,7 +200,13 @@ class StubMetaAdapter:
         self._status_polls[container_id] = polls + 1
         return "FINISHED" if polls >= self._ready_after_polls else "IN_PROGRESS"
 
-    async def publish(self, provider_account_ref: str, container_id: str) -> str:
+    async def publish(
+        self,
+        provider_account_ref: str,
+        container_id: str,
+        *,
+        workspace_id: Optional[str] = None,
+    ) -> str:
         self.publish_calls.append(
             {"ref": provider_account_ref, "container_id": container_id}
         )

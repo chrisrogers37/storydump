@@ -1,5 +1,6 @@
 """The real Meta adapter (#1220 step 3): what it sends, how it maps answers
-to the typed taxonomy the pipeline routes on, and that the token never leaks."""
+to the typed taxonomy the pipeline routes on, that an effect is attempted
+ONCE, and that the token never leaks."""
 
 from __future__ import annotations
 
@@ -22,10 +23,13 @@ from src.services.target.meta_adapter import (
 
 TOKEN = "IGQVJsecretTOKENvalue"
 REF = "17841400000000001"
+WS = "ws-1"
 
 
-def _adapter(handler, *, token=TOKEN):
-    async def token_for_account(ref):
+def _adapter(handler, *, token=TOKEN, resolver=None, seen_reads=None):
+    async def token_for_account(ref, *, workspace_id=None):
+        if seen_reads is not None:
+            seen_reads.append((ref, workspace_id))
         if token is None:
             raise IgCredentialDead(
                 f"no ig_login credential for Instagram account {ref}"
@@ -38,7 +42,7 @@ def _adapter(handler, *, token=TOKEN):
         client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
         # The floor pins the host to a resolved address; a static answer keeps
         # DNS out of the test and the request's Host header names the host.
-        resolver=lambda host: ["93.184.216.34"],
+        resolver=resolver or (lambda host: ["93.184.216.34"]),
     )
 
 
@@ -47,7 +51,7 @@ def _form(request) -> dict:
 
 
 class TestWhatItSends:
-    async def test_an_image_story_container_pulls_the_image_url_with_the_token_in_the_body(
+    async def test_an_image_story_container_pulls_the_image_url_with_a_bearer_token(
         self,
     ):
         seen = {}
@@ -56,6 +60,7 @@ class TestWhatItSends:
             seen["url"] = str(request.url)
             seen["host"] = request.headers["host"]
             seen["path"] = request.url.path
+            seen["auth"] = request.headers.get("authorization")
             seen["form"] = _form(request)
             return httpx.Response(200, json={"id": "ctr-1"})
 
@@ -68,10 +73,10 @@ class TestWhatItSends:
         )
         assert seen["host"] == "graph.instagram.com"
         assert seen["path"] == f"/v21.0/{REF}/media"
+        assert seen["auth"] == f"Bearer {TOKEN}"
         assert seen["form"] == {
             "media_type": "STORIES",
             "image_url": "https://cdn/x.jpg",
-            "access_token": TOKEN,
         }
         assert TOKEN not in seen["url"]
 
@@ -96,8 +101,10 @@ class TestWhatItSends:
         def handler(request):
             path = request.url.path
             calls.append((request.method, path))
+            assert request.headers["authorization"] == f"Bearer {TOKEN}"
+            assert "access_token" not in str(request.url)
             if path.endswith("/media_publish"):
-                assert _form(request) == {"creation_id": "ctr-1", "access_token": TOKEN}
+                assert _form(request) == {"creation_id": "ctr-1"}
                 return httpx.Response(200, json={"id": "media-9"})
             if path.endswith("/content_publishing_limit"):
                 return httpx.Response(
@@ -105,7 +112,6 @@ class TestWhatItSends:
                     json={"data": [{"quota_usage": 3, "config": {"quota_total": 100}}]},
                 )
             assert request.url.params["fields"] == "status_code,status"
-            assert request.url.params["access_token"] == TOKEN
             return httpx.Response(200, json={"id": "ctr-1", "status_code": "FINISHED"})
 
         a = _adapter(handler)
@@ -117,6 +123,65 @@ class TestWhatItSends:
             ("POST", f"/v21.0/{REF}/media_publish"),
             ("GET", f"/v21.0/{REF}/content_publishing_limit"),
         ]
+
+    async def test_the_workspace_reaches_the_token_reader(self):
+        reads = []
+
+        def handler(request):
+            return httpx.Response(200, json={"id": "x", "status_code": "FINISHED"})
+
+        a = _adapter(handler, seen_reads=reads)
+        await a.create_container(
+            REF, media_url="u", media_kind="image", workspace_id=WS
+        )
+        await a.container_status("ctr-1", provider_account_ref=REF, workspace_id=WS)
+        await a.publish(REF, "ctr-1", workspace_id=WS)
+        assert reads == [(REF, WS)] * 3
+
+
+class TestOneAttemptPerEffect:
+    """The floor's default retries a transport fault; an effect must not be
+    POSTed twice (#1276 review: a ReadTimeout after Meta accepted the publish
+    re-sent the same creation_id)."""
+
+    async def test_a_transport_fault_on_publish_is_lost_after_exactly_one_request(self):
+        requests = []
+
+        def handler(request):
+            requests.append(request.method)
+            raise httpx.ReadTimeout("slow")
+
+        with pytest.raises(MetaLostResponse):
+            await _adapter(handler).publish(REF, "ctr-1")
+        assert requests == ["POST"]
+
+    async def test_a_transport_fault_on_create_is_lost_after_exactly_one_request(self):
+        requests = []
+
+        def handler(request):
+            requests.append(request.method)
+            raise httpx.ConnectError("boom")
+
+        with pytest.raises(MetaLostResponse):
+            await _adapter(handler).create_container(
+                REF, media_url="u", media_kind="image"
+            )
+        assert requests == ["POST"]
+
+    async def test_a_read_may_retry_once(self):
+        requests = []
+
+        def handler(request):
+            requests.append(request.method)
+            if len(requests) == 1:
+                raise httpx.ReadTimeout("slow")
+            return httpx.Response(200, json={"status_code": "IN_PROGRESS"})
+
+        assert (
+            await _adapter(handler).container_status("ctr-1", provider_account_ref=REF)
+            == "IN_PROGRESS"
+        )
+        assert requests == ["GET", "GET"]
 
 
 class TestTheTaxonomy:
@@ -156,6 +221,19 @@ class TestTheTaxonomy:
             await _adapter(handler).publish(REF, "ctr-1")
         assert TOKEN not in str(info.value)
 
+    async def test_a_refused_egress_is_retryable_not_lost(self):
+        """The floor refusing to call (a private address here) means nothing
+        left the process: the effect did not happen, so the ladder may retry.
+        A park would hand a DNS blip to a human a day later."""
+
+        def handler(request):  # pragma: no cover — the floor never calls it
+            raise AssertionError("refused calls do not reach the transport")
+
+        a = _adapter(handler, resolver=lambda host: ["10.0.0.7"])
+        with pytest.raises(MetaRetryableError) as info:
+            await a.publish(REF, "ctr-1")
+        assert info.value.code == 0 and "refused" in str(info.value)
+
     async def test_a_5xx_and_a_non_json_answer_are_lost_responses(self):
         def five(request):
             return httpx.Response(503, json={"error": {"message": "down", "code": 2}})
@@ -188,3 +266,14 @@ class TestTheTaxonomy:
         assert (
             info.value.code == OAUTH_ERROR_CODE and "connect" in str(info.value).lower()
         )
+
+    async def test_usage_tolerates_an_object_shaped_data_field(self):
+        def handler(request):
+            return httpx.Response(
+                200, json={"data": {"quota_usage": "7", "config": {"quota_total": 25}}}
+            )
+
+        assert await _adapter(handler).usage(REF) == {
+            "quota_usage": 7,
+            "quota_total": 25,
+        }

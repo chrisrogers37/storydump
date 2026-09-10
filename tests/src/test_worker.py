@@ -539,9 +539,9 @@ class TestTheReconcilerPollIsWired:
                 self.calls = []
 
             async def container_status(
-                self, container_id, *, provider_account_ref=None
+                self, container_id, *, provider_account_ref=None, workspace_id=None
             ):
-                self.calls.append((container_id, provider_account_ref))
+                self.calls.append((container_id, provider_account_ref, workspace_id))
                 return "PUBLISHED"
 
         meta = _Meta()
@@ -549,11 +549,15 @@ class TestTheReconcilerPollIsWired:
             object(),
             meta,
             session_factory=_scripted_session_factory(
-                {"ig_container_id": "ctr-7", "provider_account_ref": "1784"}
+                {
+                    "ig_container_id": "ctr-7",
+                    "provider_account_ref": "1784",
+                    "workspace_id": "ws-1",
+                }
             ),
         )
         assert await poll(intent_id="i-1") == "PUBLISHED"
-        assert meta.calls == [("ctr-7", "1784")]
+        assert meta.calls == [("ctr-7", "1784", "ws-1")]
 
     async def test_no_container_or_a_typed_error_is_inconclusive_not_a_crash(self):
         from src.services.target.meta_adapter import MetaRetryableError
@@ -561,7 +565,7 @@ class TestTheReconcilerPollIsWired:
 
         class _Dead:
             async def container_status(
-                self, container_id, *, provider_account_ref=None
+                self, container_id, *, provider_account_ref=None, workspace_id=None
             ):
                 raise MetaRetryableError(code=190, message="dead token")
 
@@ -569,7 +573,11 @@ class TestTheReconcilerPollIsWired:
             object(),
             _Dead(),
             session_factory=_scripted_session_factory(
-                {"ig_container_id": None, "provider_account_ref": "1784"}
+                {
+                    "ig_container_id": None,
+                    "provider_account_ref": "1784",
+                    "workspace_id": "ws-1",
+                }
             ),
         )
         assert await none(intent_id="i-1") is None
@@ -577,7 +585,11 @@ class TestTheReconcilerPollIsWired:
             object(),
             _Dead(),
             session_factory=_scripted_session_factory(
-                {"ig_container_id": "ctr-7", "provider_account_ref": "1784"}
+                {
+                    "ig_container_id": "ctr-7",
+                    "provider_account_ref": "1784",
+                    "workspace_id": "ws-1",
+                }
             ),
         )
         assert await dead(intent_id="i-1") is None

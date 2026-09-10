@@ -138,7 +138,32 @@ async def sweep_due(conn, *, limit: int, notify_after_seconds: int) -> list[dict
         ),
         {"lim": limit, "rungs": rungs, "notify": notify_after_seconds},
     )
-    return [dict(r) for r in result.mappings().all()]
+    rows = [dict(r) for r in result.mappings().all()]
+    # The door returns WHICH rows are due; the ladder also needs HOW FAR each
+    # has climbed, which `_record_evidence` keeps on the row. Without it every
+    # step counted as the first, the ladder never exhausted, and an intent
+    # whose poll stays inconclusive never reached `review_required` (#1276
+    # review) — silently holding its account's next publish.
+    due = [r for r in rows if r["reason"] == "ladder_due"]
+    if due:
+        counted = await conn.execute(
+            text(
+                "SELECT id, COALESCE((last_error->'evidence'->>'checks')::int, 0)"
+                "       AS checks"
+                "  FROM post_intents WHERE id = ANY(CAST(:ids AS uuid[]))"
+            ),
+            {"ids": [_uuid(r["intent_id"]) for r in due]},
+        )
+        checks = {str(r["id"]): int(r["checks"]) for r in counted.mappings().all()}
+        for r in due:
+            r["checks"] = checks.get(str(r["intent_id"]), 0)
+    return rows
+
+
+def _uuid(value):
+    import uuid
+
+    return value if isinstance(value, uuid.UUID) else uuid.UUID(str(value))
 
 
 async def _record_no_surface(

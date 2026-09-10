@@ -178,6 +178,7 @@ _COMMAND_STATUS = {
     "not_found": 404,
     "illegal_transition": 409,
     "manual_mode": 409,
+    "not_connected": 409,
     "cancelling": 409,
 }
 

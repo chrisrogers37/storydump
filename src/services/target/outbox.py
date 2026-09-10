@@ -464,6 +464,59 @@ async def supersede_all(
     return len(live)
 
 
+async def restate_cards(
+    session,
+    *,
+    workspace_id: str,
+    binding_id: str,
+    intent_id: str,
+    outcome_text: str,
+) -> int:
+    """Write a NEW outcome line onto every card of *intent_id* that still has
+    a message to edit, and queue the edit — whether or not the card is already
+    superseded.
+
+    `supersede_all` is the tap's door: it takes a LIVE card's buttons away and
+    says what happened. By the time the publish leg confirms a post, the tap
+    has already done that (the card reads "✅ Approved by …"), so the card is
+    `superseded` and `supersede_all` would find nothing (#1276 review). This
+    door addresses the ref instead of the state: an `approval_prompt` row with
+    an `external_message_ref` in any settled state gets the line and a
+    `prompt_supersede` row per ref; the poller edits the message under the
+    same fenced path (a second strip of an already-stripped keyboard is
+    Telegram's "message is not modified", which the transport treats as done).
+    Returns the number of refs queued.
+    """
+    rows = (
+        await session.execute(
+            text(
+                "UPDATE channel_outbox"
+                "   SET payload = payload || jsonb_build_object('outcome_text', CAST(:o AS text))"
+                " WHERE workspace_id = :ws AND binding_id = :b AND intent_id = :i"
+                "   AND kind = 'approval_prompt'"
+                "   AND state IN ('sent', 'superseded', 'ambiguous')"
+                "   AND external_message_ref IS NOT NULL"
+                " RETURNING external_message_ref, payload"
+            ),
+            {"ws": workspace_id, "b": binding_id, "i": intent_id, "o": outcome_text},
+        )
+    ).fetchall()
+    seen: set[str] = set()
+    for ref, payload in rows:
+        if str(ref) in seen:
+            continue
+        seen.add(str(ref))
+        await enqueue(
+            session,
+            workspace_id=workspace_id,
+            binding_id=binding_id,
+            kind="prompt_supersede",
+            payload=_supersede_payload(str(ref), payload, outcome_text),
+            intent_id=intent_id,
+        )
+    return len(seen)
+
+
 async def recover_stranded(session, *, binding_id: str) -> list:
     """Resolve rows a dead predecessor left `sending`. Returns their ids.
 

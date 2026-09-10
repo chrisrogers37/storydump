@@ -463,8 +463,10 @@ class TestTheHappyPath:
         (best-effort inline destroy after commit)."""
         intent, ref = _new_intent(pipe_db)
         job = _leased_job(pipe_db, intent, ref=ref)
-        # A live approval card for the intent, as the tap left it: "Approved —
-        # posting shortly". The leg must finish that sentence (#1220 step 3).
+        # The approval card exactly as the TAP leaves it (#1276 review): the
+        # card row is already `superseded` with "✅ Approved by Ada" and the
+        # tap's own edit row has been sent. The leg must finish that sentence
+        # on a card whose buttons are already gone (#1220 step 3).
         binding = _exec(
             pipe_db,
             "INSERT INTO channel_bindings (workspace_id, channel, external_ref)"
@@ -477,8 +479,14 @@ class TestTheHappyPath:
             "INSERT INTO channel_outbox (workspace_id, binding_id, kind, intent_id,"
             " payload, state, external_message_ref)"
             " VALUES (%s, %s, 'approval_prompt', %s,"
-            ' \'{"v": 2, "text": "📸 f.jpg", "sent_as": "text"}\', \'sent\', \'77001\')',
-            (pipe_db["ws"], binding, intent),
+            ' \'{"v": 2, "text": "📸 f.jpg", "sent_as": "text",'
+            ' "outcome_text": "✅ Approved by Ada · 12:00 UTC"}\','
+            " 'superseded', '77001'),"
+            " (%s, %s, 'prompt_supersede', %s,"
+            ' \'{"v": 1, "external_message_ref": "77001", "sent_as": "text",'
+            ' "outcome_text": "✅ Approved by Ada · 12:00 UTC"}\','
+            " 'sent', '77001')",
+            (pipe_db["ws"], binding, intent, pipe_db["ws"], binding, intent),
         )
         meta = StubMetaAdapter(ready_after_polls=1)
         transit = FakeTransit()
@@ -498,6 +506,18 @@ class TestTheHappyPath:
         assert card[0] == "superseded" and card[1].startswith("✅ Posted"), (
             f"the card did not gain the terminal line — got {card!r}"
         )
+        edits = _exec(
+            pipe_db,
+            "SELECT state, payload->>'outcome_text', payload->>'supersedes_ref'"
+            " FROM channel_outbox WHERE intent_id = %s AND kind = 'prompt_supersede'"
+            " ORDER BY created_at",
+            (intent,),
+            fetch=True,
+        )
+        assert edits[-1][0] == "pending" and edits[-1][1].startswith("✅ Posted"), (
+            f"no edit was queued for the posted line — got {edits!r}"
+        )
+        assert edits[-1][2] == "77001", "the edit addresses the card's message"
         assert row["ig_media_id"] and row["ig_media_id"].startswith("media-")
         assert row["ig_container_id"] == meta.publish_calls[0]["container_id"], (
             "R1: the container the publish call used is the persisted one"
@@ -567,6 +587,99 @@ class TestTheHappyPath:
         assert outcome == POSTED
         assert _intent_row(pipe_db, intent)["state"] == "posted"
         assert len(transit.destroy_calls) == 1, "the destroy was attempted"
+
+
+class TestTheFetchRung:
+    """The fetch and the upload are provider calls too (#1276 review): a file
+    that is gone or too large fails the intent with its refund; anything else
+    rides the ladder; a dead credential skips the ladder and lands on a human.
+    None of them may reach the loop's blanket reschedule, which would hold the
+    account's `uq_publish_exclusive` forever."""
+
+    def test_a_gone_or_oversized_file_fails_and_refunds_with_the_reason(self, pipe_db):
+        from src.services.target.drive_adapter import DriveMediaTooLarge
+
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref)
+
+        async def too_large(intent_row):
+            raise DriveMediaTooLarge(
+                "drive file f is 9000000 bytes; the cap is 8388608"
+            )
+
+        outcome = _run(
+            run_publish_pipeline(
+                job, **_deps(pipe_db, StubMetaAdapter(), media_fetch=too_large)
+            )
+        )
+        assert outcome == FAILED
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "failed" and row["cap_refunded_at"] is not None
+        assert _bucket(pipe_db, _today_utc()) == 0, "the refund returned the slot"
+        assert _job_row(pipe_db, job["id"])["state"] == "failed"
+        reason = _exec(
+            pipe_db,
+            "SELECT last_error->'error'->>'type', last_error->'error'->>'message'"
+            " FROM post_intents WHERE id = %s",
+            (intent,),
+            fetch=True,
+        )[0]
+        assert reason[0] == "DriveMediaTooLarge" and "cap is 8388608" in reason[1]
+
+    def test_any_other_fetch_failure_rides_the_ladder_with_the_reason(self, pipe_db):
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref)
+
+        from src.services.target.drive_adapter import DriveRetryableError
+
+        async def flaky(intent_row):
+            raise DriveRetryableError("drive answered 503")
+
+        outcome = _run(
+            run_publish_pipeline(
+                job, **_deps(pipe_db, StubMetaAdapter(), media_fetch=flaky)
+            )
+        )
+        assert outcome == RETRY_SCHEDULED
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "publishing" and row["publish_step"] == "none"
+        assert _job_row(pipe_db, job["id"])["state"] != "failed"
+        reason = _exec(
+            pipe_db,
+            "SELECT last_error->'error'->>'type' FROM post_intents WHERE id = %s",
+            (intent,),
+            fetch=True,
+        )[0][0]
+        assert reason == "DriveRetryableError"
+
+    def test_a_dead_credential_skips_the_ladder_and_lands_on_a_human(self, pipe_db):
+        from src.services.target.meta_adapter import (
+            OAUTH_ERROR_CODE,
+            MetaRetryableError,
+        )
+
+        class _NoToken(StubMetaAdapter):
+            async def create_container(self, provider_account_ref, **kw):
+                raise MetaRetryableError(
+                    code=OAUTH_ERROR_CODE,
+                    message="no ig_login credential — connect Instagram",
+                )
+
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=1, max_attempts=5)
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, _NoToken())))
+        assert outcome == POISONED, "one attempt, not five: a retry mints no token"
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "review_required"
+        assert _job_row(pipe_db, job["id"])["state"] == "review_required"
+        reason = _exec(
+            pipe_db,
+            "SELECT last_error->'error'->>'code', last_error->'error'->>'message'"
+            " FROM post_intents WHERE id = %s",
+            (intent,),
+            fetch=True,
+        )[0]
+        assert reason[0] == str(OAUTH_ERROR_CODE) and "connect Instagram" in reason[1]
 
 
 class TestColdEntryAtEveryCheckpoint:
@@ -1083,7 +1196,16 @@ class TestThePrecheck:
         assert _intent_row(pipe_db, intent)["state"] == "approved"
         assert _bucket(pipe_db, _today_utc()) in (None, 0), "no debit before the flip"
         assert transit.upload_calls == [] and meta.create_calls == []
-        assert meta.usage_calls == [ref]
+        # The adapter is addressed by the ACCOUNT's live identity, not the
+        # intent's snapshot of it (a pre-connect intent carries the manual
+        # placeholder; the connect rewrites only the account, #1276 review).
+        account_ref = _exec(
+            pipe_db,
+            "SELECT provider_account_ref FROM ig_accounts WHERE id = %s",
+            (pipe_db["iga"],),
+            fetch=True,
+        )[0][0]
+        assert meta.usage_calls == [account_ref]
         after = _job_row(pipe_db, job["id"])
         assert after["state"] == "ready" and after["attempts"] == 0
         audits = _exec(

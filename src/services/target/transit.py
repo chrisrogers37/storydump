@@ -64,6 +64,12 @@ from src.exceptions.base import StorydumpError
 from src.services.target.egress import TIMEOUT_CLASSES
 from src.utils.datetime_utils import ensure_utc
 
+
+class TransitError(StorydumpError):
+    """The transit store's upload failed; the cause is chained. Retryable by
+    the pipeline's ladder, bounded at a human."""
+
+
 #: media_items.media_kind (`ck_media_kind`) → Cloudinary resource_type.
 _RESOURCE_TYPES = {"image": "image", "video": "video"}
 
@@ -184,16 +190,25 @@ class TransitStore:
         """
         folder = self._workspace_folder(workspace_id)
         resource_type = self._resource_type(media_kind)
-        result = await asyncio.to_thread(
-            self._upload_fn,
-            content,
-            folder=folder,
-            type="authenticated",
-            resource_type=resource_type,
-            overwrite=False,
-            timeout=self._sdk_timeout_s,
-            **self._credentials,
-        )
+        try:
+            result = await asyncio.to_thread(
+                self._upload_fn,
+                content,
+                folder=folder,
+                type="authenticated",
+                resource_type=resource_type,
+                overwrite=False,
+                timeout=self._sdk_timeout_s,
+                **self._credentials,
+            )
+        except Exception as exc:  # noqa: BLE001 — the SDK's zoo becomes one type
+            # The SDK raises its own family (and plain OSErrors on the wire);
+            # the pipeline routes on TYPED failures only, so an untyped one
+            # here would crash the job into the loop's unbounded reschedule
+            # (#1276 review). One type, the cause preserved.
+            raise TransitError(
+                f"transit upload failed: {type(exc).__name__}: {exc}"
+            ) from exc
         return result["public_id"]
 
     # -- FC-3.2 (D38): delivery ------------------------------------------------

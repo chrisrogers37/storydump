@@ -86,14 +86,23 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 from zoneinfo import ZoneInfo
 
+import httpx
 from sqlalchemy import text
 
+from src.exceptions.base import StorydumpError
 from src.services.target import outbox, prompts, provider_ops, publish_cap
+from src.services.target.drive_adapter import (
+    DriveError,
+    DriveLostResponse,
+    DriveTerminalError,
+)
 from src.services.target.jobs import assert_lease, finalize_job, reschedule_job
 from src.services.target.meta_adapter import (
+    OAUTH_ERROR_CODE,
     MetaCapDeferral,
     MetaError,
     MetaLostResponse,
+    MetaRetryableError,
     MetaTerminalError,
 )
 from src.services.target.publish_cap import FlipOutcome, IntentNotApproved
@@ -285,7 +294,7 @@ async def _load(uow, job: dict) -> Optional[_Ctx]:
                         "SELECT i.id, i.state, i.publish_step, i.cancel_requested,"
                         "       i.media_item_id, i.ig_account_id, i.ig_container_id,"
                         "       i.transit_asset_ref,"
-                        "       i.provider_account_ref, i.workspace_id,"
+                        "       a.provider_account_ref, i.workspace_id,"
                         "       m.source_id, m.mime_type,"
                         "       COALESCE(a.posts_per_day, w.posts_per_day) AS eff_ppd,"
                         "       COALESCE(a.tz, w.tz) AS eff_tz,"
@@ -504,6 +513,8 @@ async def _retry_or_poison(
     resolve_op_id=None,
     resolve_response: Optional[dict] = None,
     step_back_to: Optional[str] = None,
+    error: Optional[dict] = None,
+    poison_now: bool = False,
 ) -> str:
     """R8's retryable-failure edge: reschedule on the `05` ladder while the
     attempts budget holds; G5 poison (`publishing → review_required`, debit
@@ -511,8 +522,20 @@ async def _retry_or_poison(
     failure on the permit in the same transaction; *step_back_to* rewinds the
     ladder (the dead-container case)."""
     attempts = int(ctx.job["attempts"])
-    exhausted = attempts >= int(ctx.job["max_attempts"])
+    # *poison_now*: the failure cannot be retried into success (a dead
+    # credential) — skip the ladder, hand the intent to a human at once.
+    exhausted = poison_now or attempts >= int(ctx.job["max_attempts"])
     async with _leased_tx(uow, ctx.job) as session:
+        if error is not None:
+            # The reason, on the row, for whichever surface reads it next —
+            # the operator's review queue or the customer notice. Written
+            # before the flip; `review_required` is not terminal-frozen.
+            await session.execute(
+                text(
+                    "UPDATE post_intents SET last_error = CAST(:e AS jsonb) WHERE id = :intent"
+                ),
+                {"e": json.dumps(error), "intent": ctx.intent_id},
+            )
         if resolve_op_id is not None:
             await provider_ops.resolve_permit(
                 session,
@@ -606,12 +629,38 @@ async def _ladder(
     step = ctx.intent["publish_step"]
 
     if step == "none":
-        media = await media_fetch(dict(ctx.intent))
-        ref = await transit.upload(
-            media,
-            workspace_id=ctx.workspace_id,
-            media_kind=ctx.intent["media_kind"],
-        )
+        # The fetch and the upload are provider calls too (Drive, Cloudinary),
+        # and a typed failure out of this rung would otherwise reach the
+        # loop's blanket reschedule — every minute, forever, the intent stuck
+        # in `publishing` with its cap debit and `uq_publish_exclusive` held,
+        # so every later intent on the account is deferred (#1276 review). A
+        # file that is gone or too large is terminal: fail + refund. Every
+        # other TYPED failure (Drive's, the transit store's, the floor's, the
+        # transport's) rides the ladder and, exhausted, lands on a human. An
+        # untyped exception still propagates: a crash must look like a crash.
+        try:
+            media = await media_fetch(dict(ctx.intent))
+            ref = await transit.upload(
+                media,
+                workspace_id=ctx.workspace_id,
+                media_kind=ctx.intent["media_kind"],
+            )
+        except DriveTerminalError as exc:
+            logger.warning(
+                "publish_pipeline intent %s: media unavailable (%s) — failing",
+                ctx.intent_id,
+                type(exc).__name__,
+            )
+            return await _fail_terminal(uow, ctx, op_id=None, exc=exc)
+        except (DriveError, DriveLostResponse, StorydumpError, httpx.HTTPError) as exc:
+            logger.warning(
+                "publish_pipeline intent %s: fetch/upload failed (%s) — retrying",
+                ctx.intent_id,
+                type(exc).__name__,
+            )
+            return await _retry_or_poison(
+                uow, ctx, backoff_seconds, now_fn, error=_error_of(exc)
+            )
         async with _leased_tx(uow, ctx.job) as session:
             advanced = (
                 await session.execute(
@@ -641,10 +690,18 @@ async def _ladder(
                 ctx.intent["provider_account_ref"],
                 media_url=media_url,
                 media_kind=ctx.intent["media_kind"],
+                workspace_id=ctx.workspace_id,
             )
         except MetaTerminalError as exc:
             return await _fail_terminal(uow, ctx, op_id=permit["id"], exc=exc)
         except MetaError as exc:
+            logger.warning(
+                "publish_pipeline intent %s: %s code=%s — %s",
+                ctx.intent_id,
+                type(exc).__name__,
+                exc.code,
+                "handing to a human" if _dead_credential(exc) else "retrying",
+            )
             return await _retry_or_poison(
                 uow,
                 ctx,
@@ -652,6 +709,8 @@ async def _ladder(
                 now_fn,
                 resolve_op_id=permit["id"],
                 resolve_response={"v": 1, "error": exc.code},
+                error=_error_of(exc),
+                poison_now=_dead_credential(exc),
             )
         except MetaLostResponse:
             # Lost response on a RECOVERABLE effect (`02` §6): resolve it the
@@ -735,7 +794,9 @@ async def _ladder(
         permit = await _permit(engine, ctx, op_kind="publish", generation=generation)
         try:
             media_id = await meta.publish(
-                ctx.intent["provider_account_ref"], ctx.intent["ig_container_id"]
+                ctx.intent["provider_account_ref"],
+                ctx.intent["ig_container_id"],
+                workspace_id=ctx.workspace_id,
             )
         except MetaCapDeferral as exc:
             # Error 9 (`02` §8): a cap, not a fault. Definitive non-effect →
@@ -770,6 +831,13 @@ async def _ladder(
         except MetaTerminalError as exc:
             return await _fail_terminal(uow, ctx, op_id=permit["id"], exc=exc)
         except MetaError as exc:
+            logger.warning(
+                "publish_pipeline intent %s: %s code=%s — %s",
+                ctx.intent_id,
+                type(exc).__name__,
+                exc.code,
+                "handing to a human" if _dead_credential(exc) else "retrying",
+            )
             return await _retry_or_poison(
                 uow,
                 ctx,
@@ -777,6 +845,8 @@ async def _ladder(
                 now_fn,
                 resolve_op_id=permit["id"],
                 resolve_response={"v": 1, "error": exc.code},
+                error=_error_of(exc),
+                poison_now=_dead_credential(exc),
             )
         except MetaLostResponse:
             # Lost response on the IRREVERSIBLE effect: R8. The call may have
@@ -791,6 +861,7 @@ async def _ladder(
             media_id=media_id,
             transit=transit,
             repost_ttl_days_default=repost_ttl_days_default,
+            now_fn=now_fn,
         )
 
     if step == "effect_confirmed":
@@ -801,13 +872,44 @@ async def _ladder(
     raise ValueError(f"intent {ctx.intent_id}: unknown publish_step {step!r}")
 
 
+def _dead_credential(exc: BaseException) -> bool:
+    """A missing or dead Instagram token: no retry mints one, so the ladder
+    is skipped and the intent goes to a human with the reason on it."""
+    return isinstance(exc, MetaRetryableError) and exc.code == OAUTH_ERROR_CODE
+
+
+def _error_of(exc: BaseException) -> dict:
+    """What `post_intents.last_error` records for a retry or a poison: the
+    type, the provider code when there is one, and the (already redacted)
+    message — so the operator surface can say WHY, not just that."""
+    return {
+        "v": 1,
+        "error": {
+            "type": type(exc).__name__,
+            "code": getattr(exc, "code", None),
+            "message": str(exc)[:500],
+        },
+    }
+
+
 async def _await_ready(ctx: _Ctx, meta, sleep) -> str:
     """One bounded readiness segment: 'ready' | 'dead' | 'pending'."""
     for attempt in range(POLL_BUDGET):
-        status = await meta.container_status(
-            ctx.intent["ig_container_id"],
-            provider_account_ref=ctx.intent["provider_account_ref"],
-        )
+        try:
+            status = await meta.container_status(
+                ctx.intent["ig_container_id"],
+                provider_account_ref=ctx.intent["provider_account_ref"],
+                workspace_id=ctx.workspace_id,
+            )
+        except (MetaError, MetaLostResponse) as exc:
+            # A poll has no effect to lose: a typed failure here is one more
+            # "not ready yet" rung on the attempts ladder, bounded at a human.
+            logger.warning(
+                "publish_pipeline intent %s: readiness poll failed (%s) — pending",
+                ctx.intent_id,
+                type(exc).__name__,
+            )
+            return "pending"
         if status in _READY_STATUSES:
             return "ready"
         if status in _DEAD_STATUSES:
@@ -817,17 +919,25 @@ async def _await_ready(ctx: _Ctx, meta, sleep) -> str:
     return "pending"
 
 
-async def _fail_terminal(uow, ctx: _Ctx, *, op_id, exc: MetaError) -> str:
-    """`publishing → failed` on a definitive permanent provider error: permit
-    failed + state flip + cap refund + job failed, ONE transaction (`02` §4:
-    the refund rides the terminal flip's transaction)."""
+async def _fail_terminal(
+    uow, ctx: _Ctx, *, op_id: Optional[str], exc: BaseException
+) -> str:
+    """`publishing → failed` on a definitive permanent failure: permit failed
+    (when a permit exists — the fetch rung has none) + state flip with the
+    reason + cap refund + job failed, ONE transaction (`02` §4: the refund
+    rides the terminal flip's transaction)."""
     async with _leased_tx(uow, ctx.job) as session:
-        await provider_ops.resolve_permit(
-            session,
-            op_id=op_id,
-            outcome="failed",
-            response_ref={"v": 1, "error": exc.code, "terminal": True},
-        )
+        if op_id is not None:
+            await provider_ops.resolve_permit(
+                session,
+                op_id=op_id,
+                outcome="failed",
+                response_ref={
+                    "v": 1,
+                    "error": getattr(exc, "code", type(exc).__name__),
+                    "terminal": True,
+                },
+            )
         # Refund BEFORE the flip: the terminal-freeze trigger makes the row
         # immutable the moment state='failed' lands in this transaction, so a
         # refund stamped after it is refused. Same-tx per `02` §4; the ORDER
@@ -841,10 +951,13 @@ async def _fail_terminal(uow, ctx: _Ctx, *, op_id, exc: MetaError) -> str:
         moved = (
             await session.execute(
                 text(
-                    "UPDATE post_intents SET state = 'failed'"
+                    # The reason rides the flip's own statement: the terminal
+                    # freeze makes the row immutable once `failed` lands.
+                    "UPDATE post_intents SET state = 'failed',"
+                    " last_error = CAST(:e AS jsonb)"
                     " WHERE id = :intent AND state = 'publishing' RETURNING id"
                 ),
-                {"intent": ctx.intent_id},
+                {"intent": ctx.intent_id, "e": json.dumps(_error_of(exc))},
             )
         ).fetchone()
         if moved is None:
@@ -861,6 +974,7 @@ async def _confirm(
     media_id: str,
     transit,
     repost_ttl_days_default: int,
+    now_fn=None,
 ) -> str:
     """The terminal domain transaction (`02` §4 publishing→posted row):
     permit outcome + posted flip (one statement, so `ck_posted_complete`
@@ -916,19 +1030,20 @@ async def _confirm(
             text("UPDATE ig_accounts SET last_posted_at = now() WHERE id = :acct"),
             {"acct": str(ctx.intent["ig_account_id"])},
         )
-        # The card said "Approved — posting shortly"; now it says posted. Every
-        # live card of the intent, in every push binding, loses its buttons and
-        # gains the terminal line — in THIS transaction, so a rolled-back
-        # confirm takes the edit with it (the phase-1 follow-up `01_the-tap.md`
-        # named: the leg writes the terminal line).
+        # The card said "✅ Approved by … — posting shortly"; now it says
+        # posted. The tap already superseded the card (its buttons are gone),
+        # so this is a RESTATE, not a supersede: every card of the intent that
+        # still has a message to edit, in every push binding, gains the
+        # terminal line — in THIS transaction, so a rolled-back confirm takes
+        # the edit with it (the phase-1 follow-up `01_the-tap.md` named).
         line = prompts.outcome_line(
             "posted",
             by=None,
-            at=datetime.now(timezone.utc),
+            at=(now_fn() if now_fn is not None else datetime.now(timezone.utc)),
             tz=str(ctx.intent.get("eff_tz") or "UTC"),
         )
         for binding_id in await prompts.push_bindings(session, ctx.workspace_id):
-            await outbox.supersede_all(
+            await outbox.restate_cards(
                 session,
                 workspace_id=ctx.workspace_id,
                 binding_id=binding_id,

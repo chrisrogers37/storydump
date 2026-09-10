@@ -111,8 +111,10 @@ def _meta_from_env(engine, env):
         InstagramGraphAdapter,
     )
 
-    async def token_for_account(ref: str) -> str:
-        return await ig_credentials.token_for_account(engine, ref)
+    async def token_for_account(ref: str, *, workspace_id=None) -> str:
+        return await ig_credentials.token_for_account(
+            engine, ref, workspace_id=workspace_id
+        )
 
     return InstagramGraphAdapter(
         token_for_account=token_for_account,
@@ -144,8 +146,11 @@ def _poll_from(engine, meta, *, session_factory=None):
                 (
                     await session.execute(
                         text(
-                            "SELECT ig_container_id, provider_account_ref"
-                            "  FROM post_intents WHERE id = :id"
+                            "SELECT i.ig_container_id, a.provider_account_ref,"
+                            "       i.workspace_id"
+                            "  FROM post_intents i"
+                            "  JOIN ig_accounts a ON a.id = i.ig_account_id"
+                            " WHERE i.id = :id"
                         ),
                         {"id": str(intent_id)},
                     )
@@ -159,6 +164,7 @@ def _poll_from(engine, meta, *, session_factory=None):
             return await meta.container_status(
                 str(row["ig_container_id"]),
                 provider_account_ref=row["provider_account_ref"],
+                workspace_id=str(row["workspace_id"]),
             )
         except (MetaError, MetaLostResponse) as exc:
             logger.warning(
