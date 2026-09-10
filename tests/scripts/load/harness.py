@@ -248,8 +248,9 @@ class Scenario:
                 if at - d.offered_at > QUERY_EXPIRY_S:
                     late += 1
             if d.outcome == "executed":
-                # Edits belong to the tap that FLIPPED the card; a repeat tap
-                # on the same card has no edit of its own.
+                # Edits are keyed to the tap that FLIPPED the card (the route
+                # strips on a repeat too, but the card's first edit is the
+                # flipping tap's, and the timing question is that tap's).
                 key = (d.tap.chat, d.tap.message_id)
                 if key in strips:
                     strip_lat.append(strips[key] - d.first_attempt_at)
@@ -281,7 +282,11 @@ class Scenario:
             "flips": self.flips,
             "audit_rows": self.audit_rows,
             "pending_peak": self.pending_peak,
-            "pool_peak": (self.health_after.get("pool") or {}).get("checked_out_peak"),
+            # CUMULATIVE since the API process started (one worker's, under
+            # --workers 2), not this scenario's — the pool's own high-water mark.
+            "pool_peak_cumulative": (self.health_after.get("pool") or {}).get(
+                "checked_out_peak"
+            ),
             "xact_commit": self.xact_commit,
             "xact_per_tap": (
                 round(self.xact_commit / n, 2) if self.xact_commit and n else None

@@ -64,6 +64,8 @@ class LatencyProxy:
                 self._loop.run_until_complete(self._serve())
             except asyncio.CancelledError:
                 pass
+            finally:
+                self._loop.close()
 
         self._thread = threading.Thread(target=run, daemon=True)
         self._thread.start()

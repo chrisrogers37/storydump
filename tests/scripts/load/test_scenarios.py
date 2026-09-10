@@ -226,6 +226,10 @@ def _run_scenario(
     before = len(fake.snapshot())
     db_before = _db_counters(stage["dsn"])
     deliveries = asyncio.run(client.deliver(taps, offer_within_s=offer_within_s))
+    # The database delta is the DELIVERIES' — sampled before the settle, so
+    # the sender's backlog (its own commits) stays out of "per tap".
+    time.sleep(1.0)  # pg_stat_database flushes stats within ~500 ms
+    db_after = _db_counters(stage["dsn"])
     fake.pending_update_count = client.queued_peak
     # Let the sender land the outcome lines (paced: 18/min/chat, 2 s cadence).
     time.sleep(SETTLE_S)
@@ -244,7 +248,6 @@ def _run_scenario(
         (list(intents),),
         fetch=True,
     )[0]
-    db_after = _db_counters(stage["dsn"])
     scenario = h.Scenario(
         name=name,
         spread=spread,
@@ -357,8 +360,8 @@ def test_taps_1000_at_twenty_connections_reach_the_boundary(stage):
     `busy` is 0 by construction. Delivering at 20 — what F5 (a) would
     register with `--workers 2` — lets checkouts exceed the pool and shows
     the boundary answering rather than failing: busy answers, never a 5xx on
-    a tap; a busy tap is re-offered once (its buttons remain) so the flips
-    still land."""
+    a tap. A busy tap is consumed with 200 and NOT re-offered here (Telegram
+    would not either — the person taps again), so flips + busy == taps."""
     world = stage["worlds"]["burst"]
     taps = [h.tap_for(ws, card) for ws, card in world.cards()]
     scenario, n = _run_scenario(
@@ -372,5 +375,5 @@ def test_taps_1000_at_twenty_connections_reach_the_boundary(stage):
         notes=["the boundary's own scenario: the only run where the pool can saturate"],
     )
     assert n["five_xx"] == 0, n
-    assert n["flips"] + n["busy"] >= 1000, n
+    assert n["flips"] + n["busy"] == 1000, n
     stage["boundary_busy"] = n["busy"]
