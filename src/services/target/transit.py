@@ -65,6 +65,68 @@ from src.services.target.egress import TIMEOUT_CLASSES
 from src.utils.datetime_utils import ensure_utc
 
 
+#: The Instagram story frame (owner, 2026-09-10 — parity with the legacy
+#: `cloud_storage.get_story_optimized_url`): 1080 × 1920, 9:16.
+STORY_WIDTH = 1080
+STORY_HEIGHT = 1920
+#: The blur behind the picture: the legacy tier's value, kept.
+STORY_BLUR = 2000
+#: What Meta accepts for a story, by kind — the derivation's delivered format.
+STORY_FORMATS = {"image": "jpg", "video": "mp4"}
+
+
+def story_transformation(transit_asset_ref: str, *, media_kind: str) -> list[dict]:
+    """How Meta sees the asset: scaled to fit the story's frame and padded to
+    9:16 over a blurred, filled copy of itself.
+
+    An image uses the legacy chain — an UNDERLAY of the same asset filled to
+    the frame and blurred, the picture scaled to the width and padded over
+    it: blurred bars above and below for a landscape or square picture,
+    left and right for one taller than 9:16 (`c_pad` never crops). The asset
+    is `authenticated`, so the layer names it as such and the whole signed
+    URL authorises the layer (Cloudinary: an authenticated layer needs the
+    signed URL, no separate signature). A video takes Cloudinary's own
+    blurred-background padding — NEW behaviour, not parity: the legacy tier
+    framed images only and sent videos raw.
+    """
+    if media_kind not in STORY_FORMATS:
+        raise ValueError(f"unknown media_kind {media_kind!r}")
+    if media_kind == "video":
+        return [
+            {"crop": "limit", "width": STORY_WIDTH, "height": STORY_HEIGHT},
+            {
+                "crop": "pad",
+                "width": STORY_WIDTH,
+                "height": STORY_HEIGHT,
+                "background": f"blurred:{STORY_BLUR}:15",
+            },
+        ]
+    underlay = "authenticated:" + transit_asset_ref.replace("/", ":")
+    return [
+        # FIRST fit the picture into the frame. A layer's canvas is the base's
+        # size, so a 4032 × 3024 phone photo behind a 1080 × 1920 underlay
+        # would hide the underlay entirely and the pad below would fall back
+        # to white bars — the legacy chain had exactly that defect (review of
+        # #1283, verified on Cloudinary's demo cloud).
+        {"crop": "limit", "width": STORY_WIDTH, "height": STORY_HEIGHT},
+        {"underlay": underlay},
+        {
+            "crop": "fill",
+            "width": STORY_WIDTH,
+            "height": STORY_HEIGHT,
+            "effect": f"blur:{STORY_BLUR}",
+        },
+        {"flags": "layer_apply"},
+        {"crop": "limit", "width": STORY_WIDTH},
+        {
+            "crop": "pad",
+            "width": STORY_WIDTH,
+            "height": STORY_HEIGHT,
+            "gravity": "center",
+        },
+    ]
+
+
 class TransitError(StorydumpError):
     """The transit store's upload failed; the cause is chained. Retryable by
     the pipeline's ladder, bounded at a human."""
@@ -214,9 +276,20 @@ class TransitStore:
     # -- FC-3.2 (D38): delivery ------------------------------------------------
 
     def delivery_url(self, transit_asset_ref: str, *, media_kind: str) -> str:
-        """The signed, non-expiring delivery URL Meta pulls the asset from."""
+        """The signed, non-expiring delivery URL Meta pulls the asset from —
+        framed for a story (:func:`story_transformation`): the signature
+        covers the transformation, so the framed derivation is the only one
+        an authenticated asset serves."""
         url, _options = self._url_fn(
             transit_asset_ref,
+            transformation=story_transformation(
+                transit_asset_ref, media_kind=media_kind
+            ),
+            # Meta's story spec: a JPEG image, an MP4/MOV video. The source
+            # may be anything Drive holds (HEIC from a phone, WEBP, WEBM);
+            # the derivation is delivered in the format Meta accepts, and
+            # the signature covers the format too.
+            format=STORY_FORMATS[media_kind],
             sign_url=True,
             type="authenticated",
             resource_type=self._resource_type(media_kind),

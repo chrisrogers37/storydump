@@ -757,7 +757,20 @@ async def _ladder(
             # create (and a fresh generation) from the still-valid transit
             # asset — step back, retry on the ladder.
             return await _retry_or_poison(
-                uow, ctx, backoff_seconds, now_fn, step_back_to="transit_uploaded"
+                uow,
+                ctx,
+                backoff_seconds,
+                now_fn,
+                step_back_to="transit_uploaded",
+                error={
+                    "v": 1,
+                    "error": {
+                        "type": "ContainerDead",
+                        "code": None,
+                        "message": "Meta reported the container ERROR or EXPIRED —"
+                        " the media at the delivery URL could not be processed",
+                    },
+                },
             )
         if verdict == "unauthorized":
             return await _retry_or_poison(
@@ -795,7 +808,20 @@ async def _ladder(
         verdict = await _await_ready(ctx, meta, sleep)
         if verdict == "dead":
             return await _retry_or_poison(
-                uow, ctx, backoff_seconds, now_fn, step_back_to="transit_uploaded"
+                uow,
+                ctx,
+                backoff_seconds,
+                now_fn,
+                step_back_to="transit_uploaded",
+                error={
+                    "v": 1,
+                    "error": {
+                        "type": "ContainerDead",
+                        "code": None,
+                        "message": "Meta reported the container ERROR or EXPIRED —"
+                        " the media at the delivery URL could not be processed",
+                    },
+                },
             )
         if verdict == "unauthorized":
             return await _retry_or_poison(
