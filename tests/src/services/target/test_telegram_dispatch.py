@@ -486,28 +486,16 @@ class TestEveryReasonHasAnAnswer:
 
 
 class TestTapAdmission:
-    """S.2 for taps (phase 2 step 3, F12): the window is READ before the flip
-    and DEBITED only for a flip that ran, inside the flip's savepoint."""
-
-    @pytest.mark.asyncio
-    async def test_at_the_limit_the_tap_is_told_and_nothing_runs(
-        self, seams, monkeypatch
-    ):
-        monkeypatch.setattr(settings, "TARGET_TAP_ADMISSION_PER_MINUTE", 120)
-        seams["window_count"] = 120
-        r = await telegram_dispatch.TelegramDispatcher()(None, tap("skip"))
-        assert r.outcome == "too_many" and r.show_alert is True
-        assert "Too many" in r.answer_text
-        assert seams["log"]["executed"] == [] and seams["log"]["debits"] == []
-        assert seams["log"]["counts"] == [("ws_admission", "ws")]
+    """S.2 for taps (phase 2 step 3, F12): DEBITED only for a flip that ran,
+    inside the flip's savepoint; the increment's own guard is the check."""
 
     @pytest.mark.asyncio
     async def test_an_executed_flip_debits_the_workspace_once(self, seams, monkeypatch):
         monkeypatch.setattr(settings, "TARGET_TAP_ADMISSION_PER_MINUTE", 120)
-        seams["window_count"] = 119
         r = await telegram_dispatch.TelegramDispatcher()(None, tap("skip"))
         assert r.outcome == "executed"
         assert seams["log"]["debits"] == [("ws_admission", "ws", 120)]
+        assert "counts" not in seams["log"], "no read before the flip (R6)"
 
     @pytest.mark.asyncio
     async def test_an_enqueued_post_debits_too(self, seams):
@@ -519,7 +507,10 @@ class TestTapAdmission:
         assert r.outcome == "executed" and len(seams["log"]["debits"]) == 1
 
     @pytest.mark.asyncio
-    async def test_an_answered_repeat_spends_nothing(self, seams):
+    async def test_an_answered_repeat_spends_nothing_even_at_the_cap(self, seams):
+        """R6 at the cap: `_settle` answers before any write, so a repeat on a
+        settled card is never told 'too many'."""
+        seams["exhausted"] = True
         seams["result"] = CommandResult(
             "answered",
             {
@@ -540,11 +531,12 @@ class TestTapAdmission:
         assert r.outcome == "manual_mode" and seams["log"]["debits"] == []
 
     @pytest.mark.asyncio
-    async def test_two_taps_racing_the_read_end_in_a_named_answer(self, seams):
-        """The read said "room"; the debit's own guard said "full": the flip
-        rolls back with the savepoint and the tap is told — never a 503."""
-        seams["window_count"] = 119
+    async def test_at_the_limit_the_flip_rolls_back_and_the_tap_is_told(self, seams):
+        """The debit's guard said "full": the flip rolls back with the
+        savepoint and the tap is told — an alert, never a 503."""
         seams["exhausted"] = True
         r = await telegram_dispatch.TelegramDispatcher()(None, tap("skip"))
-        assert r.outcome == "too_many" and r.handled is True
+        assert r.outcome == "too_many" and r.show_alert is True and r.handled is True
+        assert "Too many" in r.answer_text
         assert len(seams["log"]["executed"]) == 1, "the flip ran, then rolled back"
+        assert seams["log"]["debits"] == [("ws_admission", "ws", 120)]

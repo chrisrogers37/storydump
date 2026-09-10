@@ -74,7 +74,6 @@ from fastapi import APIRouter, HTTPException, Request
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.exc import TimeoutError as PoolTimeout
 
-from src.services.target import callback_tokens
 
 from src.config.settings import settings
 from src.services.target.webhook_ingress import (
@@ -208,37 +207,40 @@ async def telegram_webhook(request: Request) -> dict[str, str]:
     replayed = False
     result: Any = None
     metrics = getattr(request.app.state, "tap_metrics", None)
+    # THE BOUNDARY (phase 2 step 2, F1 (a)+(d)): the pool's own wait is met at
+    # the CHECKOUT and nowhere else, so "not admitted" is structural — no
+    # transaction exists yet when it fires. A tap is answered by name without
+    # a database so its spinner never outlives the budget, and its buttons
+    # remain for a fresh tap; a message has no spinner, so it is refused and
+    # Telegram redelivers.
+    connection = runtime.connect()
     try:
-        async with runtime.connect() as conn:
-            try:
-                await admit(
-                    conn,
-                    channel="telegram",
-                    external_ref=str(update_id),
-                    payload=payload,
-                    principal=TELEGRAM_PRINCIPAL,
-                )
-            except DeliveryReplayed:
-                # Acknowledged WITHOUT re-execution — the two obligations L.8 names.
-                logger.info("telegram webhook: replay of update_id=%s", update_id)
-                replayed = True
-            except AdmissionConflict:
-                # Never swallowed as a replay: same key, different content.
-                logger.warning(
-                    "telegram webhook: admission conflict on update_id=%s", update_id
-                )
-                raise HTTPException(status_code=409, detail="admission conflict")
-
-            if not replayed:
-                result = await runtime.dispatch(conn, payload)
-                await conn.commit()
+        conn = await connection.__aenter__()
     except PoolTimeout:
-        # THE BOUNDARY (phase 2 step 2, F1 (a)+(d)): the pool's own wait ran
-        # out BEFORE admission — nothing was written, nothing is consumed. A
-        # tap is answered by name without a database so its spinner never
-        # outlives the budget, and its buttons remain for a fresh tap; a
-        # message has no spinner, so it is refused and Telegram redelivers.
         return await _refuse_saturated(runtime, payload, metrics)
+    try:
+        try:
+            await admit(
+                conn,
+                channel="telegram",
+                external_ref=str(update_id),
+                payload=payload,
+                principal=TELEGRAM_PRINCIPAL,
+            )
+        except DeliveryReplayed:
+            # Acknowledged WITHOUT re-execution — the two obligations L.8 names.
+            logger.info("telegram webhook: replay of update_id=%s", update_id)
+            replayed = True
+        except AdmissionConflict:
+            # Never swallowed as a replay: same key, different content.
+            logger.warning(
+                "telegram webhook: admission conflict on update_id=%s", update_id
+            )
+            raise HTTPException(status_code=409, detail="admission conflict")
+
+        if not replayed:
+            result = await runtime.dispatch(conn, payload)
+            await conn.commit()
     except SQLAlchemyError as exc:
         # A database fault around admit()/dispatch/commit: the admission row
         # rolls back with the connection (L.8 `TestAnAbortedWinnerDoesNotPoisonTheKey`),
@@ -250,6 +252,8 @@ async def telegram_webhook(request: Request) -> dict[str, str]:
             type(exc).__name__,
         )
         raise HTTPException(status_code=503, detail="database unavailable")
+    finally:
+        await connection.__aexit__(None, None, None)
 
     if replayed:
         # OUTSIDE the connection: no pool slot is held across a provider call.
@@ -275,11 +279,13 @@ BUSY_TEXT = "Busy — tap again."
 async def _refuse_saturated(
     runtime: IngressRuntime, payload: dict, metrics: Optional[TapMetrics]
 ) -> dict[str, str]:
-    """The pool wait ran out before admission. A `callback_query` whose token
-    parses is answered "Busy — tap again" (best effort, no database) and the
+    """The pool wait ran out before admission. EVERY `callback_query` with an
+    id is answered "Busy — tap again" (best effort, no database) and the
     delivery is consumed with 200 `refused/busy` — the tap is re-derivable
-    because its buttons remain. Anything else is refused 503 before admission
-    so the provider redelivers (a message has no spinner to protect)."""
+    because its buttons remain; a stale or malformed token is still a real
+    spinner, and busy is the one thing true of it here (unsaturated it would
+    hear `older_card`). Anything else is refused 503 before admission so the
+    provider redelivers (a message has no spinner to protect)."""
     cq = payload.get("callback_query")
     if isinstance(cq, dict) and cq.get("id") is not None:
         if metrics is not None:
@@ -289,14 +295,15 @@ async def _refuse_saturated(
             " not admitted",
             payload.get("update_id"),
         )
-        if runtime.answer_callback is not None and callback_tokens.parse(
-            cq.get("data")
-        ):
+        if runtime.answer_callback is not None:
+            # The transport answers False rather than raising; both are an
+            # answer that did not land, and the F1 bound is read from here.
             try:
-                await runtime.answer_callback(str(cq["id"]), BUSY_TEXT, False)
+                landed = await runtime.answer_callback(str(cq["id"]), BUSY_TEXT, False)
             except Exception:  # noqa: BLE001 — best effort, no database
-                if metrics is not None:
-                    metrics.answer_failed += 1
+                landed = False
+            if landed is False and metrics is not None:
+                metrics.answer_failed += 1
         return {"status": "refused", "outcome": "busy"}
     logger.warning(
         "telegram webhook PARKED: pool saturated, delivery NOT admitted"

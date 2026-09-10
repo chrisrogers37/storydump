@@ -428,10 +428,8 @@ class TestTheIngressPoolSeam:
             with pytest.raises(ValueError, match="pool_timeout"):
                 uow.create_engine(url, pool_timeout=7.0)
         finally:
-            import asyncio
-
-            asyncio.run(api.dispose())
-            asyncio.run(worker.dispose())
+            api.sync_engine.dispose()
+            worker.sync_engine.dispose()
 
     def test_the_pool_watch_reports_the_arithmetic_and_starts_at_zero(self):
         from src.services.target import unit_of_work as uow
@@ -450,9 +448,7 @@ class TestTheIngressPoolSeam:
                 "checked_out_peak": 0,
             }
         finally:
-            import asyncio
-
-            asyncio.run(engine.dispose())
+            engine.sync_engine.dispose()
 
     def test_the_pool_watch_tolerates_a_composition_fake(self):
         from src.services.target import unit_of_work as uow

@@ -362,27 +362,18 @@ class TelegramDispatcher:
                 channel="telegram",
                 args={"intent_id": tap.intent_id},
             )
-            # S.2 for taps (F12): the workspace's window is READ before the
-            # flip — at the limit the tapper is told, nothing is spent, the
-            # delivery is consumed (a repeat tap is a fresh update). The
-            # DEBIT lands inside the savepoint below, only for a flip that
-            # ran; if two taps raced this read the increment's own guard
-            # refuses, the savepoint rolls the flip back and the tap is
-            # answered by name — never a 503.
+            # S.2 for taps (F12): the workspace's window is DEBITED inside the
+            # savepoint below, only for a flip that ran — the increment's own
+            # `WHERE count < limit` is the check, atomic under the row lock,
+            # so at the limit the flip rolls back with the savepoint and the
+            # tapper is told; nothing is spent, the delivery is consumed (a
+            # repeat is a fresh update). No read runs before the flip: a
+            # repeat tap on a settled card is answered with its state even at
+            # the cap (R6), because `_settle` answers before any write.
             limit = int(settings.TARGET_TAP_ADMISSION_PER_MINUTE)
             window = rate_counters.window_start(
                 datetime.now(timezone.utc), ADMISSION_WINDOW_SECONDS
             )
-            if (
-                await rate_counters.count(
-                    conn,
-                    scope=ADMISSION_SCOPE,
-                    key=tenant.workspace_id,
-                    window_start=window,
-                )
-                >= limit
-            ):
-                return done("too_many")
             try:
                 # A savepoint: a refusal the database raised mid-executor
                 # (the guard's last line; `mark_posted`'s debit CTE) must not

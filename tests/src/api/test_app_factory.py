@@ -715,6 +715,4 @@ class TestHealthReportsThePoolArithmetic:
                 "checked_out_peak": 0,
             }
         finally:
-            import asyncio
-
-            asyncio.run(engine.dispose())
+            engine.sync_engine.dispose()

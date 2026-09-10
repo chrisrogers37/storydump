@@ -543,6 +543,28 @@ def saturated(monkeypatch):
 
 
 class TestTheSaturationBoundary:
+    def test_a_stale_token_is_still_answered_busy(self, client, armed, saturated):
+        """A malformed or older-card token is a real spinner; unsaturated it
+        would hear `older_card`, saturated it hears busy — never nothing."""
+        update = _tap_update()
+        update["callback_query"]["data"] = "v0:garbage"
+        r = _post(client, update)
+        assert r.status_code == 200 and r.json()["outcome"] == "busy"
+        assert saturated["answers"] == [("q-41", webhooks.BUSY_TEXT, False)]
+
+    def test_an_answer_that_did_not_land_is_counted(self, client, armed, saturated):
+        async def not_landed(qid, text, alert):
+            return False
+
+        app.state.ingress = webhooks.IngressRuntime(
+            connect=lambda: _SaturatedConnect(),
+            dispatch=app.state.ingress.dispatch,
+            answer_callback=not_landed,
+        )
+        r = _post(client, _tap_update())
+        assert r.status_code == 200 and r.json()["outcome"] == "busy"
+        assert app.state.tap_metrics.snapshot()["answer_failed"] == 1
+
     def test_a_tap_is_answered_busy_and_not_admitted(self, client, armed, saturated):
         r = _post(client, _tap_update())
         assert r.status_code == 200

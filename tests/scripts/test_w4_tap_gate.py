@@ -504,6 +504,13 @@ class TestTapAdmissionOnTheLedger:
 
         from src.services.target import rate_counters
 
+        # The dispatcher truncates its own clock to the minute; a test that
+        # straddles the boundary would read one window and debit the next.
+        # Wait it out once rather than pin a clock seam for a 0.5 % flake.
+        import time as _time
+
+        if 60 - _time.time() % 60 < 3:
+            _time.sleep(3.5)
         return rate_counters.window_start(datetime.now(timezone.utc), 60)
 
     def _count(self, world):
@@ -537,9 +544,21 @@ class TestTapAdmissionOnTheLedger:
         )
         try:
             r = tap(world, "skip", i["id"])
+            # The flip RAN and rolled back with the savepoint on real Postgres:
+            # the row keeps its state, the counter its count, and the delivery
+            # is consumed (the update_id is admitted) so a redelivery is a toast.
             assert r.outcome == "too_many" and r.show_alert is True
             assert _state(world, i["id"]) == "awaiting_approval", "nothing flipped"
             assert self._count(world) == limit, "a refused tap spends nothing"
+            assert (
+                _one(
+                    world,
+                    "SELECT count(*) FROM channel_outbox WHERE intent_id = %s"
+                    " AND kind = 'prompt_supersede'",
+                    (i["id"],),
+                )[0]
+                == 0
+            ), "the flip's supersede rows rolled back too"
         finally:
             _write(
                 world,

@@ -216,15 +216,21 @@ class PoolWatch:
         self._engine = engine
         self.checked_out_peak = 0
         # A composition-root fake has no pool; the watch then reports the
-        # seams and never a peak, rather than refusing to exist.
-        pool = getattr(getattr(engine, "sync_engine", None), "pool", None)
-        self._pool = pool
-        if pool is None or not hasattr(pool, "checkedout"):
-            self._pool = None
+        # seams and never a peak, rather than refusing to exist. The pool is
+        # read through the engine each time (a dispose recreates it; the
+        # listener rides `_dispatch` across the recreate).
+        pool = self._current_pool()
+        if pool is None:
             return
 
         def _on_checkout(dbapi_conn, record, proxy):  # noqa: ARG001 — event shape
-            now = pool.checkedout()
+            # A listener that raises breaks EVERY checkout; the watch is
+            # telemetry and must never be the reason a request has no
+            # connection.
+            try:
+                now = self._current_pool().checkedout()
+            except Exception:  # noqa: BLE001 — telemetry only
+                return
             if now > self.checked_out_peak:
                 self.checked_out_peak = now
 
@@ -232,8 +238,12 @@ class PoolWatch:
 
         event.listen(pool, "checkout", _on_checkout)
 
+    def _current_pool(self):
+        pool = getattr(getattr(self._engine, "sync_engine", None), "pool", None)
+        return pool if pool is not None and hasattr(pool, "checkedout") else None
+
     def snapshot(self) -> dict:
-        pool = self._pool
+        pool = self._current_pool()
         return {
             "size": pool.size() if pool is not None else POOL_SIZE_SEAM,
             "overflow": MAX_OVERFLOW_SEAM,

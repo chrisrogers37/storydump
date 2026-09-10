@@ -45,6 +45,7 @@ from contextlib import asynccontextmanager
 import time
 from typing import Mapping, Optional
 
+from sqlalchemy.exc import TimeoutError as PoolTimeout
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -248,6 +249,19 @@ def _unmapped(request: Request, exc: Exception) -> JSONResponse:
 
 def _register_handlers(app: FastAPI) -> None:
     """Service refusals → HTTP, once. No route speaks a status for these."""
+
+    @app.exception_handler(PoolTimeout)
+    async def _pool_saturated(request: Request, exc: PoolTimeout):
+        # The ingress pool's 1 s wait (phase 2 step 2) is met by every route,
+        # not only the webhook: a web request that cannot get a connection is
+        # told to retry rather than shown a 500 (the webhook route maps the
+        # same wait itself, before admission, and never reaches this).
+        logger.warning("pool saturated on %s %s", request.method, request.url.path)
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "busy — try again", "reason": "pool_saturated"},
+            headers={"Retry-After": "1"},
+        )
 
     @app.exception_handler(TenantResolutionError)
     async def _tenant(request: Request, exc: TenantResolutionError):
