@@ -65,9 +65,9 @@ measured). Read against the deciding run:
   with two workers; 0.086 s on loopback) — the row-lock convoy of 50 taps in 100 ms on ONE card, each
   waiting for the previous flip's commit at ≈ 24 round trips × 20 ms. The harness's own assertion
   fails on it in the deciding run, deliberately: the plan's Test Plan says this criterion is what
-  would re-serve F2 toward (d). **Owner to ratify:** keep F2 (a) with the bound read as "≈ 2 s at
-  20 ms RTT, shrinking with #1286" (the lean — a 1.4 % miss on a synthetic burst, and every tap was
-  still answered by name), or re-serve F2 as (d). The assertion is loosened only by that ruling.
+  would re-serve F2 toward (d). **Ratified (owner, 2026-09-10 — "as long as these are filed for fixing, I'm ok with moving
+  on"):** F2 (a) stands; the bound reads "≈ 2 s at 20 ms RTT, shrinking with #1286". The harness
+  assertion for `double_tap_one_card` is loosened to 2.1 s with that reading.
 - NOT MET and not claimed: the user-side wait for a 1,000-simultaneous burst (56 s, half past
   Telegram's expiry — throughput-bound, #1286); `one_slow_chat`'s edit-landed criterion (the sender
   lands ≈ 0.5 supersede rows/s fleet-wide — one lane, claim-one-await-one; phase 3a/3b's number).
