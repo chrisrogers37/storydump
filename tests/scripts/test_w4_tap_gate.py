@@ -565,3 +565,29 @@ class TestTapAdmissionOnTheLedger:
                 "DELETE FROM rate_counters WHERE scope = 'ws_admission' AND key = %s",
                 (world["ws"],),
             )
+
+
+class TestDryRunLeavesTheTapOnTheJob:
+    def test_a_post_tap_under_dry_run_snapshots_the_decision_onto_the_job(self, world):
+        _write(
+            world,
+            "UPDATE workspaces SET dry_run_mode = true WHERE id = %s",
+            (world["ws"],),
+        )
+        try:
+            i = _intent(world, "dry-1")
+            r = tap(world, "post", i["id"])
+            assert r.outcome == "executed" and "dry run" in r.answer_text
+            payload = _one(
+                world,
+                "SELECT payload FROM jobs WHERE kind = 'publish_pipeline'"
+                " AND payload->>'intent_id' = %s",
+                (i["id"],),
+            )[0]
+            assert payload["dry_run"] is True, payload
+        finally:
+            _write(
+                world,
+                "UPDATE workspaces SET dry_run_mode = false WHERE id = %s",
+                (world["ws"],),
+            )

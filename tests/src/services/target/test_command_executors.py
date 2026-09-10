@@ -196,3 +196,24 @@ class TestAnAwaitingCardFlipsOnceAndSupersedesEverywhere:
         with pytest.raises(commands.CommandRefused) as info:
             await command_executors.approve(_Session(), _cmd("approve"))
         assert info.value.reason == "not_connected" and world["flips"] == []
+
+
+class TestDryRunAndPauseAtApprove:
+    """Settings › General (owner, 2026-09-10): a dry run needs no Instagram
+    token, and the tap's answer says what happens next."""
+
+    @pytest.mark.asyncio
+    async def test_a_dry_run_approve_needs_no_credential_and_says_so(self, world):
+        world["connected"] = False
+        world["row"]["dry_run_mode"] = True
+        out = await command_executors.approve(_Session(), _cmd("approve"))
+        assert out.outcome == "enqueued" and out.data["dry_run"] is True
+        assert world["jobs"][0]["payload"]["dry_run"] is True, (
+            "the decision travels with the job, not the live flag"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_paused_workspace_still_approves_and_says_it_waits(self, world):
+        world["row"]["is_paused"] = True
+        out = await command_executors.approve(_Session(), _cmd("approve"))
+        assert out.outcome == "enqueued" and out.data["paused"] is True

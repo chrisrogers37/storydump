@@ -299,7 +299,7 @@ def probe_commands() -> ProbeResult:
     """Commands with a real executor that the generic envelope does not send.
 
     This is #1167's instance 1 (`rename_workspace`) and instance 7
-    (`pause_workspace` / `resume_workspace`).
+    (`pause_workspace` / `resume_workspace` — wired on 2026-09-10 by #1282; the positive control moved to `cancel`).
     """
     port = port_commands()
     envelope = envelope_commands()

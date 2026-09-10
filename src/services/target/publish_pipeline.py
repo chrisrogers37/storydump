@@ -137,6 +137,13 @@ RETRY_SCHEDULED = "retry_scheduled"
 POISONED = "poisoned"
 FAILED = "failed"
 CANCELLED = "cancelled"
+#: The workspace is paused (Settings › General): the job waits, the intent
+#: stays `approved`, no cap is spent. Re-checked every `PAUSE_RECHECK_SECONDS`.
+DEFERRED_PAUSED = "deferred_paused"
+#: Dry run (Settings › General): the intent completes as if published —
+#: the cap, the rotation, the card's line — and nothing reaches Instagram.
+POSTED_DRY_RUN = "posted_dry_run"
+PAUSE_RECHECK_SECONDS = 300
 
 
 def _utcnow() -> datetime:
@@ -154,6 +161,8 @@ class _Ctx:
         #: The typed error a readiness poll met when it answers "unauthorized",
         #: so the caller can record it on the intent.
         self.poll_error: Optional[BaseException] = None
+        #: The job payload's dry-run snapshot (see `_load`).
+        self.dry_run: bool = False
 
     @property
     def intent_id(self) -> str:
@@ -244,11 +253,45 @@ async def run_publish_pipeline(
         raise ValueError(f"intent {ctx.intent_id} in unexpected state {state!r}")
 
     if state == "approved":
+        if ctx.intent.get("is_paused") and not ctx.intent["cancel_requested"]:
+            # Pause Posting holds an approved intent here, before the cap is
+            # spent: the job waits and re-checks; the card keeps its line. A
+            # cancel asked for meanwhile is honoured by `_admit`, not held.
+            return await _defer_paused(uow, ctx, now_fn)
         outcome = await _admit(uow, ctx, meta, precheck, backoff_seconds, now_fn)
         if outcome is not None:
             return outcome
         # Flip committed — the ladder proceeds as a publishing intent (the
         # SQL predicates enforce state DB-side; nothing re-reads the snapshot).
+        if ctx.dry_run:
+            # Dry Run: everything a post does to the workspace — the cap
+            # debit above, the rotation, the card — and no provider call.
+            return await _confirm_dry_run(
+                uow,
+                ctx,
+                repost_ttl_days_default=repost_ttl_days_default,
+                now_fn=now_fn,
+            )
+
+    if state == "publishing" and ctx.intent["publish_step"] == "none" and not ctx.ops:
+        # Flipped, nothing else done yet — the point a crash between the flip
+        # and the dry-run confirm (or a pause landing mid-hold) re-enters.
+        # A dry-run job must confirm as a dry run HERE, never fall into the
+        # real ladder below; a paused workspace holds here too.
+        if ctx.dry_run:
+            return await _confirm_dry_run(
+                uow,
+                ctx,
+                repost_ttl_days_default=repost_ttl_days_default,
+                now_fn=now_fn,
+            )
+        if ctx.intent.get("is_paused") and not ctx.intent["cancel_requested"]:
+            return await _defer_paused(uow, ctx, now_fn)
+    elif state == "publishing" and ctx.dry_run:
+        raise ValueError(
+            f"intent {ctx.intent_id}: a dry-run job at step"
+            f" {ctx.intent['publish_step']!r} — a dry run never climbs the ladder"
+        )
 
     # -- resume protocol: unresolved permits FIRST (`02` §6 step 2) -------------
     pending_publish = ctx.unresolved("publish")
@@ -298,6 +341,7 @@ async def _load(uow, job: dict) -> Optional[_Ctx]:
                         "       i.media_item_id, i.ig_account_id, i.ig_container_id,"
                         "       i.transit_asset_ref,"
                         "       a.provider_account_ref, i.workspace_id,"
+                        "       w.is_paused,"
                         "       m.source_id, m.mime_type,"
                         "       COALESCE(a.posts_per_day, w.posts_per_day) AS eff_ppd,"
                         "       COALESCE(a.tz, w.tz) AS eff_tz,"
@@ -333,7 +377,12 @@ async def _load(uow, job: dict) -> Optional[_Ctx]:
             .mappings()
             .all()
         )
-    return _Ctx(job, dict(row), [dict(o) for o in ops])
+    ctx = _Ctx(job, dict(row), [dict(o) for o in ops])
+    # The dry-run decision is the JOB's, snapshotted by `approve` when the
+    # tapper was told "dry run" — never the workspace's live flag, which may
+    # have moved since (a rehearsal that posts for real, or the reverse).
+    ctx.dry_run = bool(payload.get("dry_run"))
+    return ctx
 
 
 def _local_date(ctx: _Ctx, now_fn) -> date:
@@ -969,6 +1018,98 @@ async def _await_ready(ctx: _Ctx, meta, sleep) -> str:
         if attempt + 1 < POLL_BUDGET:
             await sleep(POLL_INTERVAL_S)
     return "pending"
+
+
+async def _defer_paused(uow, ctx: _Ctx, now_fn) -> str:
+    """The workspace is paused: reschedule without spending an attempt. From
+    the `approved` branch nothing is debited; from the post-flip hold (step
+    `none`, no permits) the row is already `publishing` with its debit — it
+    waits with it, and a `publishing` TTL is a follow-up. Resume is a fresh
+    run."""
+    async with _leased_tx(uow, ctx.job) as session:
+        await reschedule_job(
+            session,
+            ctx.job["id"],
+            ctx.job["lease_token"],
+            run_at=now_fn() + timedelta(seconds=PAUSE_RECHECK_SECONDS),
+            restore_attempt=True,
+        )
+    logger.info(
+        "publish_pipeline intent %s: workspace paused — held %ss",
+        ctx.intent_id,
+        PAUSE_RECHECK_SECONDS,
+    )
+    return DEFERRED_PAUSED
+
+
+async def _confirm_dry_run(
+    uow, ctx: _Ctx, *, repost_ttl_days_default: int, now_fn
+) -> str:
+    """The dry-run terminal transaction: the `posted` row with
+    `published_via = 'dry_run'` (no container, no media id from Meta), the
+    same rotation effects a real post has (`times_posted`, the recent lock,
+    `last_posted_at`), the card restated with the dry-run line, the job
+    finalized — one transaction, nothing spoken to any provider."""
+    async with uow.begin() as session:
+        moved = (
+            await session.execute(
+                text(
+                    "UPDATE post_intents SET state = 'posted',"
+                    " publish_step = 'effect_confirmed',"
+                    " published_via = 'dry_run', ig_media_id = 'dry-run'"
+                    " WHERE id = :intent AND state = 'publishing' RETURNING id"
+                ),
+                {"intent": ctx.intent_id},
+            )
+        ).fetchone()
+        if moved is None:
+            raise ValueError(f"intent {ctx.intent_id} left 'publishing' during dry run")
+        await session.execute(
+            text(
+                "UPDATE media_items SET times_posted = times_posted + 1,"
+                " last_posted_at = now() WHERE id = :media"
+            ),
+            {"media": str(ctx.intent["media_item_id"])},
+        )
+        await session.execute(
+            text(
+                "INSERT INTO post_locks (workspace_id, media_item_id, kind,"
+                " ig_account_id, expires_at)"
+                " VALUES (:ws, :media, 'recent', :acct,"
+                "         now() + make_interval(days => :ttl_days))"
+                " ON CONFLICT (workspace_id, media_item_id, kind, ig_account_id)"
+                "   WHERE ig_account_id IS NOT NULL"
+                " DO UPDATE SET expires_at = EXCLUDED.expires_at"
+            ),
+            {
+                "ws": ctx.workspace_id,
+                "media": str(ctx.intent["media_item_id"]),
+                "acct": str(ctx.intent["ig_account_id"]),
+                "ttl_days": int(
+                    ctx.intent["repost_ttl_days"] or repost_ttl_days_default
+                ),
+            },
+        )
+        await session.execute(
+            text("UPDATE ig_accounts SET last_posted_at = now() WHERE id = :acct"),
+            {"acct": str(ctx.intent["ig_account_id"])},
+        )
+        line = prompts.outcome_line(
+            "dry_run",
+            by=None,
+            at=now_fn(),
+            tz=str(ctx.intent.get("eff_tz") or "UTC"),
+        )
+        for binding_id in await prompts.push_bindings(session, ctx.workspace_id):
+            await outbox.restate_cards(
+                session,
+                workspace_id=ctx.workspace_id,
+                binding_id=binding_id,
+                intent_id=ctx.intent_id,
+                outcome_text=line,
+            )
+        await finalize_job(session, ctx.job["id"], ctx.job["lease_token"], "succeeded")
+    return POSTED_DRY_RUN
 
 
 async def _fail_terminal(

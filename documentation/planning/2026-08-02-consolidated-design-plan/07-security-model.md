@@ -1040,3 +1040,30 @@ One partial index; no policy, grant or door changes.
 -- scan of the outbox on the tap's own transaction. Partial: notifications and acks carry no intent.
 CREATE INDEX ix_outbox_intent ON channel_outbox (intent_id) WHERE intent_id IS NOT NULL;
 ```
+
+### §19. Dry-run posts carry their own `published_via` (073, owner ruling 2026-09-10)
+
+**Why:** Dry Run Mode on Settings › General was stored (`workspaces.dry_run_mode`) and read by
+nothing. With the publish leg live (#1276) it has a meaning: an approved post runs the workspace's
+side of a publish — the cap debit, the rotation lock, `times_posted`, the card's outcome line — and
+never calls Meta. `ck_intent_via` admitted only `api`, `manual` and `legacy_backfill`, and
+`ck_posted_complete` demanded Meta's container for an `api` row, so a dry-run row could not be
+`posted` without lying in its own column. Two constraints re-stated; no policy, grant or door changes.
+
+```sql
+-- Dry Run Mode (Settings › General, owner ruling 2026-09-10): an approved post completes as if
+-- published — the cap debit, the rotation, the card's line — and nothing reaches Instagram. The
+-- row says so in its own column: `published_via = 'dry_run'`, no container, no media id from Meta.
+-- The two checks that pin what a posted row must carry gain the branch; nothing else moves.
+ALTER TABLE post_intents DROP CONSTRAINT ck_intent_via;
+ALTER TABLE post_intents ADD CONSTRAINT ck_intent_via
+  CHECK (published_via IN ('api','manual','legacy_backfill','dry_run'));
+ALTER TABLE post_intents DROP CONSTRAINT ck_posted_complete;
+ALTER TABLE post_intents ADD CONSTRAINT ck_posted_complete CHECK (
+  state <> 'posted'
+  OR published_via = 'legacy_backfill'
+  OR (published_via = 'manual' AND cap_consumed_on IS NOT NULL)
+  OR (published_via = 'dry_run' AND publish_step = 'effect_confirmed' AND cap_consumed_on IS NOT NULL)
+  OR (published_via = 'api' AND ig_container_id IS NOT NULL
+      AND publish_step = 'effect_confirmed' AND cap_consumed_on IS NOT NULL));
+```

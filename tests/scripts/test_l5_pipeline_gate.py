@@ -182,7 +182,7 @@ def _new_intent(
     return str(rows[0][0]), ref
 
 
-def _leased_job(pipe_db, intent_id, *, ref, attempts=1, max_attempts=5):
+def _leased_job(pipe_db, intent_id, *, ref, attempts=1, max_attempts=5, dry_run=False):
     """A claimed `publish_pipeline` job row, exactly as fn_claim_job hands one
     to the composition root (leased, token minted, attempts incremented)."""
     token = str(uuid.uuid4())
@@ -197,7 +197,7 @@ def _leased_job(pipe_db, intent_id, *, ref, attempts=1, max_attempts=5):
         (
             str(pipe_db["ws"]),
             f"ig:{ref}",
-            f'{{"v": 1, "intent_id": "{intent_id}"}}',
+            f'{{"v": 1, "intent_id": "{intent_id}", "dry_run": {"true" if dry_run else "false"}}}',
             max_attempts,
             attempts,
             token,
@@ -748,6 +748,150 @@ class TestTheReadinessPoll:
         assert (
             row["state"] == "publishing" and row["publish_step"] == "container_created"
         )
+
+
+class TestPauseAndDryRun:
+    """Settings › General, live 2026-09-10 (owner): Pause Posting holds an
+    approved intent before the cap is spent; Dry Run completes it as if
+    published — the debit, the rotation, the card — with no provider call."""
+
+    def _flag(self, pipe_db, column, value):
+        _exec(
+            pipe_db,
+            f"UPDATE workspaces SET {column} = %s WHERE id = %s",
+            (value, pipe_db["ws"]),
+        )
+
+    def test_a_paused_workspace_holds_the_job_and_spends_nothing(self, pipe_db):
+        from src.services.target.publish_pipeline import DEFERRED_PAUSED
+
+        self._flag(pipe_db, "is_paused", True)
+        try:
+            intent, ref = _new_intent(pipe_db)
+            job = _leased_job(pipe_db, intent, ref=ref)
+            meta = StubMetaAdapter()
+            outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, meta)))
+            assert outcome == DEFERRED_PAUSED
+            row = _intent_row(pipe_db, intent)
+            assert row["state"] == "approved", "held, not flipped"
+            assert _bucket(pipe_db, _today_utc()) in (None, 0), "no debit while paused"
+            assert meta.create_calls == [] and meta.publish_calls == []
+            after = _job_row(pipe_db, job["id"])
+            assert after["state"] != "failed"
+            assert after["attempts"] == job["attempts"] - 1, "the hold burns no attempt"
+        finally:
+            self._flag(pipe_db, "is_paused", False)
+
+    def test_a_cancel_asked_for_while_paused_is_honoured_not_held(self, pipe_db):
+        from src.services.target.publish_pipeline import CANCELLED
+
+        self._flag(pipe_db, "is_paused", True)
+        try:
+            intent, ref = _new_intent(pipe_db, cancel_requested=True)
+            job = _leased_job(pipe_db, intent, ref=ref)
+            outcome = _run(
+                run_publish_pipeline(job, **_deps(pipe_db, StubMetaAdapter()))
+            )
+            assert outcome == CANCELLED
+            assert _intent_row(pipe_db, intent)["state"] == "cancelled"
+        finally:
+            self._flag(pipe_db, "is_paused", False)
+
+    def test_a_dry_run_completes_as_posted_without_a_provider(self, pipe_db):
+        """The decision is the JOB's snapshot, taken at approve — the
+        workspace flag is OFF here and the run is still a dry run."""
+        from src.services.target.publish_pipeline import POSTED_DRY_RUN
+
+        self._flag(pipe_db, "dry_run_mode", False)
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref, dry_run=True)
+        binding = _exec(
+            pipe_db,
+            "INSERT INTO channel_bindings (workspace_id, channel, external_ref)"
+            " VALUES (%s, 'telegram_group', %s) RETURNING id",
+            (pipe_db["ws"], f"-100{intent[:8]}"),
+            fetch=True,
+        )[0][0]
+        _exec(
+            pipe_db,
+            "INSERT INTO channel_outbox (workspace_id, binding_id, kind, intent_id,"
+            " payload, state, external_message_ref)"
+            " VALUES (%s, %s, 'approval_prompt', %s,"
+            ' \'{"v": 2, "text": "📸 f.jpg", "sent_as": "text"}\', \'superseded\', \'77002\')',
+            (pipe_db["ws"], binding, intent),
+        )
+        meta = StubMetaAdapter()
+        transit = FakeTransit()
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, meta, transit)))
+        assert outcome == POSTED_DRY_RUN
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "posted" and row["publish_step"] == "effect_confirmed"
+        via = _exec(
+            pipe_db,
+            "SELECT published_via, ig_media_id, ig_container_id FROM post_intents"
+            " WHERE id = %s",
+            (intent,),
+            fetch=True,
+        )[0]
+        assert via == ("dry_run", "dry-run", None)
+        assert meta.create_calls == [] and meta.publish_calls == [], "no provider call"
+        assert transit.upload_calls == [], "no transit upload either"
+        assert _bucket(pipe_db, _today_utc()) == 1, "the cap is spent, as a post would"
+        lock = _exec(
+            pipe_db,
+            "SELECT count(*) FROM post_locks l JOIN post_intents i"
+            " ON i.media_item_id = l.media_item_id WHERE i.id = %s AND l.kind = 'recent'",
+            (intent,),
+            fetch=True,
+        )[0][0]
+        assert lock == 1, "the rotation moves on"
+        edits = _exec(
+            pipe_db,
+            "SELECT payload->>'outcome_text' FROM channel_outbox"
+            " WHERE intent_id = %s AND kind = 'prompt_supersede' ORDER BY created_at",
+            (intent,),
+            fetch=True,
+        )
+        assert edits and edits[-1][0].startswith("🧪 Dry run"), edits
+        assert _job_row(pipe_db, job["id"])["state"] == "succeeded"
+
+    def test_a_dry_run_reclaimed_after_the_flip_never_climbs_the_ladder(self, pipe_db):
+        """The crash between the flip and the confirm (review of the toggles
+        PR): the re-claimed job finds `publishing` at step `none` with no
+        permits — and confirms as a dry run, never fetching or calling Meta."""
+        from src.services.target.publish_pipeline import POSTED_DRY_RUN
+
+        intent, ref = _new_intent(pipe_db, state="publishing", publish_step="none")
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=2, dry_run=True)
+        meta = StubMetaAdapter()
+        transit = FakeTransit()
+
+        async def never(intent_row):
+            raise AssertionError("a dry run must not fetch media")
+
+        outcome = _run(
+            run_publish_pipeline(
+                job, **_deps(pipe_db, meta, transit, media_fetch=never)
+            )
+        )
+        assert outcome == POSTED_DRY_RUN
+        assert _intent_row(pipe_db, intent)["state"] == "posted"
+        assert meta.create_calls == [] and transit.upload_calls == []
+
+    def test_a_pause_that_lands_after_the_flip_holds_at_step_none(self, pipe_db):
+        from src.services.target.publish_pipeline import DEFERRED_PAUSED
+
+        self._flag(pipe_db, "is_paused", True)
+        try:
+            intent, ref = _new_intent(pipe_db, state="publishing", publish_step="none")
+            job = _leased_job(pipe_db, intent, ref=ref)
+            meta = StubMetaAdapter()
+            outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, meta)))
+            assert outcome == DEFERRED_PAUSED
+            assert _intent_row(pipe_db, intent)["state"] == "publishing"
+            assert meta.create_calls == []
+        finally:
+            self._flag(pipe_db, "is_paused", False)
 
 
 class TestColdEntryAtEveryCheckpoint:

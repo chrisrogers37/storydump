@@ -59,6 +59,8 @@ describe("every offered command can produce an idempotency key", () => {
     rename_workspace: { submission_id: UUID, name: "Northside Coffee" },
     offboard_workspace: { submission_id: UUID, confirm: true },
     restore_workspace: { submission_id: UUID },
+    pause_workspace: { submission_id: UUID },
+    resume_workspace: { submission_id: UUID },
     disconnect_account: { submission_id: UUID },
     disable_account: { submission_id: UUID, ig_account_id: UUID2 },
     remove_member: { submission_id: UUID, user_id: UUID2 },
