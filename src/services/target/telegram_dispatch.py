@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -36,7 +37,9 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
 from src.exceptions.tenancy import TenantResolutionError
+from src.config.settings import settings
 from src.services.target import (
+    rate_counters,
     callback_tokens,
     channel_bind,
     commands,
@@ -60,6 +63,16 @@ logger = logging.getLogger(__name__)
 #: the `post` answer says what is true (F11): approval is recorded, publishing
 #: is not yet automatic.
 PUBLISH_LEG_LIVE = True
+
+#: `rate_counters` scope for S.2 (`02` §6, `056` `ck_rate_scope`); the window
+#: is the minute `05:51` names.
+ADMISSION_SCOPE = "ws_admission"
+ADMISSION_WINDOW_SECONDS = 60
+
+
+class _AdmissionExhausted(Exception):
+    """The window filled between the read and the debit (two taps raced)."""
+
 
 #: A button's action → the command it runs (phase 1 step 11).
 ACTION_TO_COMMAND = {
@@ -124,6 +137,7 @@ ANSWERS: dict[str, tuple[str, bool]] = {
         " Integrations, or post by hand and tap ✅ Posted myself.",
         True,
     ),
+    "too_many": ("Too many actions at once — try again in a minute.", True),
     "not_found": ("That post is gone.", True),
     "cancelling": ("This card is being cancelled.", False),
     "illegal_transition": ("That card can't take this action any more.", False),
@@ -348,6 +362,18 @@ class TelegramDispatcher:
                 channel="telegram",
                 args={"intent_id": tap.intent_id},
             )
+            # S.2 for taps (F12): the workspace's window is DEBITED inside the
+            # savepoint below, only for a flip that ran — the increment's own
+            # `WHERE count < limit` is the check, atomic under the row lock,
+            # so at the limit the flip rolls back with the savepoint and the
+            # tapper is told; nothing is spent, the delivery is consumed (a
+            # repeat is a fresh update). No read runs before the flip: a
+            # repeat tap on a settled card is answered with its state even at
+            # the cap (R6), because `_settle` answers before any write.
+            limit = int(settings.TARGET_TAP_ADMISSION_PER_MINUTE)
+            window = rate_counters.window_start(
+                datetime.now(timezone.utc), ADMISSION_WINDOW_SECONDS
+            )
             try:
                 # A savepoint: a refusal the database raised mid-executor
                 # (the guard's last line; `mark_posted`'s debit CTE) must not
@@ -358,12 +384,18 @@ class TelegramDispatcher:
                 if callable(begin_nested):
                     async with begin_nested():
                         result = await commands.execute(conn, command)
+                        await self._debit(
+                            conn, tenant.workspace_id, window, limit, result
+                        )
                 else:
                     result = await commands.execute(conn, command)
+                    await self._debit(conn, tenant.workspace_id, window, limit, result)
             except TenantResolutionError as exc:
                 return done(exc.reason)
             except CommandRefused as exc:
                 return done(exc.reason)
+            except _AdmissionExhausted:
+                return done("too_many")
             outcome = "answered" if result.outcome == "answered" else "executed"
             return done(outcome, result=result)
         except SQLAlchemyError:
@@ -374,6 +406,25 @@ class TelegramDispatcher:
                 payload.get("update_id"),
             )
             return done("tap_failed")
+
+    @staticmethod
+    async def _debit(conn, workspace_id: str, window, limit: int, result) -> None:
+        """Spend one unit of the workspace's tap admission for a flip that
+        RAN (`executed`, or `enqueued` — a `post` that minted its job). An
+        `answered` no-op and a refusal spend nothing (F12). Raises
+        :class:`_AdmissionExhausted` when the window is full — inside the
+        caller's savepoint, so the flip rolls back with it."""
+        if getattr(result, "outcome", None) not in ("executed", "enqueued"):
+            return
+        n = await rate_counters.increment(
+            conn,
+            scope=ADMISSION_SCOPE,
+            key=workspace_id,
+            window_start=window,
+            limit=limit,
+        )
+        if n is None:
+            raise _AdmissionExhausted()
 
     async def _observe_all(self, conn, people) -> StartResult:
         """Every person the message showed the bot; the result is the first

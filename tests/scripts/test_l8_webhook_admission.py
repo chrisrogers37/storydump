@@ -468,3 +468,69 @@ class TestTheSecretToken:
 
     def test_an_absent_presented_token_is_refused(self):
         assert ingress.verify_secret_token(None, "s3cret") is False
+
+
+class TestManyDistinctDeliveriesAtOnce:
+    """Phase 2's admission gate: 200 DISTINCT updates admitted concurrently on
+    an ingress-shaped pool (10, overflow 0, the 1 s ingress wait) — 200
+    admissions, zero errors, the pool's high-water mark within its size, and
+    the run provably concurrent (#672: the property, never wall-clock)."""
+
+    def test_200_distinct_updates_admit_with_zero_errors_within_the_pool(
+        self, admit_db
+    ):
+        from src.services.target import unit_of_work as uow
+
+        engine = uow.create_engine(
+            admit_db["owner"].replace("postgresql://", "postgresql+asyncpg://", 1),
+            pool_timeout=uow.INGRESS_POOL_TIMEOUT_SEAM,
+        )
+        watch = uow.PoolWatch(engine)
+        refs = [_ref() for _ in range(200)]
+
+        async def go():
+            gate = asyncio.Event()
+            in_flight = {"now": 0, "peak": 0}
+
+            async def one(ref):
+                await gate.wait()
+                async with engine.connect() as conn:
+                    await conn.execute(
+                        __import__("sqlalchemy").text("SET app.actor_kind = 'system'")
+                    )
+                    in_flight["now"] += 1
+                    in_flight["peak"] = max(in_flight["peak"], in_flight["now"])
+                    try:
+                        await ingress.admit(
+                            conn,
+                            channel="telegram",
+                            external_ref=ref,
+                            payload={"update_id": ref},
+                            principal="telegram-bot",
+                        )
+                        await conn.commit()
+                    finally:
+                        in_flight["now"] -= 1
+
+            tasks = [asyncio.create_task(one(r)) for r in refs]
+            gate.set()  # every task exists before any may start: a burst, not a drip
+            outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+            await engine.dispose()
+            return outcomes, in_flight["peak"]
+
+        outcomes, in_flight_peak = _run(go())
+        errors = [o for o in outcomes if isinstance(o, BaseException)]
+        assert errors == [], f"{len(errors)} of 200 admissions failed: {errors[:3]!r}"
+        (admitted,) = _exec(
+            admit_db,
+            "SELECT count(*) FROM command_dedup WHERE channel = 'telegram'"
+            " AND external_ref = ANY(%s)",
+            (refs,),
+            fetch=True,
+        )[0]
+        assert admitted == 200
+        assert 2 <= in_flight_peak, "the run was not concurrent"
+        assert watch.checked_out_peak <= uow.POOL_SIZE_SEAM, (
+            f"the pool lent more than its size: {watch.checked_out_peak}"
+        )
+        assert watch.checked_out_peak >= 2, "the pool never served two at once"

@@ -48,7 +48,7 @@ Derived:
 | Outbox sender poll | 2 s | replaces Redis wake-up (C3); invisible in pg at ≪1 msg/s |
 | Telegram pacing | 20 msgs/min/group, 30/s global | Telegram published budgets, carried into durable `rate_counters` rows (`02` §6 — scopes `tg_chat`/`tg_global`) |
 | Jobs-ready poll (workers) | 1 s interactive / 2 s bulk | the pg-polling cost the annex trigger watches |
-| Admission (pg fixed-window, S.2) | 30 commands/min/workspace; **no global ceiling** | per-workspace abuse guard, fail-closed; durable home: `rate_counters` scope `ws_admission` (`02` §6). The pass-1 50/s global cap is struck (review A §4.1): no app-wide platform budget exists to protect; global protection = pool bounds + backpressure visibility |
+| Admission (pg fixed-window, S.2) | 30 commands/min/workspace on the web route (not yet built there); **120/min/workspace for Telegram taps** (F12, built 2026-09-10 — read before the flip, debited only for a flip that ran); **no global ceiling** | per-workspace abuse guard, fail-closed; durable home: `rate_counters` scope `ws_admission` (`02` §6). The pass-1 50/s global cap is struck (review A §4.1): no app-wide platform budget exists to protect; global protection = pool bounds + backpressure visibility |
 | DB connections | 50 total (3×10 workers + 2×10 ingress) | inequality above; re-verify both sides at S.3 |
 | Media transfers per worker | 4 | EP:80's initial cap, kept |
 | Temp storage | 3 × 4 × 100 MB = 1.2 GB headroom per env | SE:236-237 inequality with declared inputs |
