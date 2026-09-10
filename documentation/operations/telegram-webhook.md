@@ -59,7 +59,12 @@ python -m scripts.telegram_webhook register --drop-pending   # first arming of a
    ingress wired; a 3xx is reported and never followed. With the secret not
    exported the door is `NOT CHECKED`, and that counts as a failure.
 
-`register` calls `setWebhook` with the door URL, the secret, the served update kinds — `message` and, since the 2026-09-09 tap (W4), `callback_query`: Telegram delivers ONLY what is asked for, so a registration without it drops every button tap silently — and `max_connections` from `TARGET_TELEGRAM_WEBHOOK_MAX_CONNECTIONS` (default 10, the ingress's connection budget; 1..100). **Re-run `register` after a deploy that changes the served kinds** (the W4 deploy is one); `verify` prints `allowed_updates` so the omission is visible. It also sends
+**Since 2026-09-09 the API registers the webhook itself at startup** (`src/api/app.py`
+`_register_webhook`, idempotent on every deploy; `/health` reports the result under `webhook` as a startup
+snapshot; on by default only in Railway's `production` environment — `RAILWAY_ENVIRONMENT_NAME` —
+so a laptop or a preview holding the token never re-points production's webhook;
+`TARGET_TELEGRAM_WEBHOOK_AUTOREGISTER=1` forces it on, `0` off). This tool remains for `verify`,
+`deregister` and a manual `register`. `register` calls `setWebhook` with the door URL, the secret, the served update kinds — `message` and, since the 2026-09-09 tap (W4), `callback_query`: Telegram delivers ONLY what is asked for, so a registration without it drops every button tap silently — and `max_connections` from `TARGET_TELEGRAM_WEBHOOK_MAX_CONNECTIONS` (default 10, the ingress's connection budget; 1..100). **Re-run `register` after a deploy that changes the served kinds** (the W4 deploy is one); `verify` prints `allowed_updates` so the omission is visible. It also sends
 (the ingress serves `/start` taps and group messages; chat-inbound commands are
 still #854), then runs
 `status`. `--drop-pending` discards updates Telegram queued before now: use

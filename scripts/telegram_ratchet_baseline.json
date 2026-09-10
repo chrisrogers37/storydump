@@ -117,6 +117,7 @@
   "provider_account_ref_log_sites": [],
   "telegram_modules": [
     "src/channels/telegram_transport.py",
+    "src/channels/telegram_webhook_registration.py",
     "src/exceptions/telegram.py",
     "src/services/core/telegram_accounts.py",
     "src/services/core/telegram_autopost.py",
