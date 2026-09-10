@@ -55,7 +55,8 @@ caught here: `commands.execute` maps it once, for every executor.
 
 from __future__ import annotations
 
-from typing import Any
+from datetime import datetime, timezone
+from typing import Any, Optional
 
 from sqlalchemy import text
 
@@ -63,10 +64,13 @@ from src.config.defaults import DEFAULT_REPOST_TTL_DAYS, DEFAULT_SKIP_TTL_DAYS
 from src.config.settings import settings
 from src.services.target import (
     google_drive_oauth,
+    identity,
     intent_ledger,
     invitations,
     jobs,
     offboarding,
+    outbox,
+    prompts,
     provisioning,
     readers,
     workspaces,
@@ -89,20 +93,24 @@ def _arg(command: Command, name: str) -> str:
 
 
 async def _intent_row(session, command: Command) -> dict[str, Any]:
-    """The intent plus the workspace/account facts the effect lists need.
-    Workspace-bound in the WHERE, not only by RLS."""
+    """The intent plus the workspace/account facts the effect lists need,
+    read `FOR UPDATE` (F2 (a), phase 1 of the 2026-09-09 tap plan): the lock
+    is what makes the read the DECISION — two taps racing on one card queue
+    here, and the second reads the first's committed state and answers with
+    it. Workspace-bound in the WHERE, not only by RLS."""
     intent_id = _arg(command, "intent_id")
     row = await readers.row(
         session,
-        "SELECT i.id, i.state, i.media_item_id, i.ig_account_id,"
+        "SELECT i.id, i.workspace_id, i.state, i.media_item_id, i.ig_account_id,"
         "       i.provider_account_ref, i.cancel_requested,"
         "       w.api_publishing_enabled, w.repost_ttl_days, w.skip_ttl_days,"
         "       COALESCE(a.posts_per_day, w.posts_per_day) AS eff_ppd,"
-        "       COALESCE(a.tz, w.tz) AS eff_tz"
+        "       COALESCE(a.tz, w.tz) AS eff_tz, a.handle"
         "  FROM post_intents i"
         "  JOIN workspaces w ON w.id = i.workspace_id"
         "  JOIN ig_accounts a ON a.id = i.ig_account_id"
-        " WHERE i.id = :id AND i.workspace_id = :ws",
+        " WHERE i.id = :id AND i.workspace_id = :ws"
+        " FOR UPDATE OF i",
         id=intent_id,
         ws=command.workspace_id,
     )
@@ -115,11 +123,117 @@ def _refuse_if_cancelling(intent: dict[str, Any]) -> None:
     """A card whose cancellation is requested offers no lever. The flag is
     set by `cancel` and by `disable_account` (a removed destination's cards);
     the worker terminalizes at its next checkpoint (`02` §4), and until it
-    does, acting on the card would post for a destination someone removed."""
+    does, acting on the card would post for a destination someone removed.
+    Refused by its own name so a tap can say so."""
     if intent.get("cancel_requested"):
-        raise CommandRefused(
-            "illegal_transition", f"intent {intent['id']} is being cancelled"
+        raise CommandRefused("cancelling", f"intent {intent['id']} is being cancelled")
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+async def _actor_name(session, user_id: Optional[str]) -> Optional[str]:
+    """The name a shared chat may see for the actor (F3): never an email."""
+    if not user_id:
+        return None
+    return await identity.display_name_for(session, user_id=str(user_id))
+
+
+async def _settlement(session, *, workspace_id: str, intent_id: str) -> dict[str, Any]:
+    """The card's state, who last moved it and when — for a tap that arrives
+    after the decision (R6)."""
+    found = await intent_ledger.settlement(
+        session, workspace_id=workspace_id, intent_id=intent_id
+    )
+    return {
+        "state": found["state"],
+        "by": await _actor_name(session, found.get("by_user_id")),
+        "at": found.get("at"),
+    }
+
+
+async def _supersede_everywhere(
+    session, *, workspace_id: str, intent_id: str, outcome_text: str
+) -> int:
+    """Every live card for the intent, in EVERY binding of the workspace,
+    loses its buttons and gains the outcome line — in the caller's transaction,
+    so a rolled-back flip takes its edits with it (phase 1 step 7)."""
+    n = 0
+    for binding_id in await prompts.push_bindings(session, workspace_id):
+        n += await outbox.supersede_all(
+            session,
+            workspace_id=workspace_id,
+            binding_id=binding_id,
+            intent_id=intent_id,
+            outcome_text=outcome_text,
         )
+    return n
+
+
+def _tz(intent: dict[str, Any]) -> str:
+    return str(intent.get("eff_tz") or "UTC")
+
+
+async def _settle(
+    session, intent: dict[str, Any], command: Command
+) -> Optional[CommandResult]:
+    """Read, then decide (F2 (a)). A row in ANY state other than
+    `awaiting_approval` — a repeat of the same tap, a finished card, the
+    operator-only `review_required` edge, a card not yet prompted — answers
+    with its current state and writes nothing to the intent. The card is
+    superseded again with that state, so a stale card (a lost supersede)
+    heals on first touch. Returns None when the row is awaiting approval and
+    the caller may flip it."""
+    if intent["state"] == "awaiting_approval":
+        return None
+    found = await _settlement(
+        session, workspace_id=command.workspace_id, intent_id=str(intent["id"])
+    )
+    state = found["state"] or intent["state"]
+    at = found["at"] or _utcnow()
+    line = prompts.outcome_line(state, by=found["by"], at=at, tz=_tz(intent))
+    if state in intent_ledger.TERMINAL_STATES:
+        # A stale card heals on first touch — with its FINAL line. A card in a
+        # transit state (`approved`, `publishing`, `review_required`) is not
+        # superseded here (the route strips the tapped copy's buttons; other
+        # copies keep theirs and answer); the settled-card sweep writes the
+        # terminal line on every copy when the intent ends (review of #1271).
+        await _supersede_everywhere(
+            session,
+            workspace_id=command.workspace_id,
+            intent_id=str(intent["id"]),
+            outcome_text=line,
+        )
+    return CommandResult(
+        "answered",
+        {
+            "intent_id": str(intent["id"]),
+            "state": state,
+            "settled_by": found["by"],
+            "settled_at": prompts.stamp(at, _tz(intent)),
+            "outcome_text": line,
+        },
+    )
+
+
+async def _record_outcome(
+    session, intent: dict[str, Any], command: Command, state: str
+) -> str:
+    """After a flip: the outcome line, written onto every card of the intent."""
+    line = prompts.outcome_line(
+        state,
+        by=await _actor_name(session, command.actor_user_id),
+        at=_utcnow(),
+        tz=_tz(intent),
+    )
+    await _supersede_everywhere(
+        session,
+        workspace_id=command.workspace_id,
+        intent_id=str(intent["id"]),
+        outcome_text=line,
+    )
+    return line
 
 
 async def _flip(session, intent_id: str, to_state: str) -> None:
@@ -138,6 +252,9 @@ def _result(intent: dict[str, Any], state: str, **extra: Any) -> CommandResult:
 async def approve(session, command: Command) -> CommandResult:
     intent = await _intent_row(session, command)
     _refuse_if_cancelling(intent)
+    settled = await _settle(session, intent, command)
+    if settled is not None:
+        return settled
     if not intent["api_publishing_enabled"]:
         raise CommandRefused(
             "manual_mode",
@@ -151,6 +268,7 @@ async def approve(session, command: Command) -> CommandResult:
         serialization_key=f"ig:{intent['provider_account_ref']}",
         payload={"v": 1, "intent_id": str(intent["id"])},
     )
+    await _record_outcome(session, intent, command, "approved")
     return CommandResult(
         "enqueued",
         {
@@ -164,6 +282,9 @@ async def approve(session, command: Command) -> CommandResult:
 async def skip(session, command: Command) -> CommandResult:
     intent = await _intent_row(session, command)
     _refuse_if_cancelling(intent)
+    settled = await _settle(session, intent, command)
+    if settled is not None:
+        return settled
     await _flip(session, str(intent["id"]), "skipped")
     ttl_days = int(intent["skip_ttl_days"] or DEFAULT_SKIP_TTL_DAYS)
     await session.execute(
@@ -184,12 +305,16 @@ async def skip(session, command: Command) -> CommandResult:
             "u": command.actor_user_id,
         },
     )
+    await _record_outcome(session, intent, command, "skipped")
     return _result(intent, "skipped", lock="skip", lock_days=ttl_days)
 
 
 async def reject(session, command: Command) -> CommandResult:
     intent = await _intent_row(session, command)
     _refuse_if_cancelling(intent)
+    settled = await _settle(session, intent, command)
+    if settled is not None:
+        return settled
     await _flip(session, str(intent["id"]), "rejected")
     await session.execute(
         text(
@@ -208,6 +333,7 @@ async def reject(session, command: Command) -> CommandResult:
             "u": command.actor_user_id,
         },
     )
+    await _record_outcome(session, intent, command, "rejected")
     return _result(intent, "rejected", lock="reject")
 
 
@@ -219,6 +345,9 @@ async def mark_posted(session, command: Command) -> CommandResult:
     day's first debit exactly as the API path's does."""
     intent = await _intent_row(session, command)
     _refuse_if_cancelling(intent)
+    settled = await _settle(session, intent, command)
+    if settled is not None:
+        return settled
     row = (
         await session.execute(
             text(
@@ -285,6 +414,7 @@ async def mark_posted(session, command: Command) -> CommandResult:
         text("UPDATE ig_accounts SET last_posted_at = now() WHERE id = :acct"),
         {"acct": str(intent["ig_account_id"])},
     )
+    await _record_outcome(session, intent, command, "posted")
     return _result(intent, "posted", published_via="manual")
 
 
@@ -299,6 +429,9 @@ async def cancel(session, command: Command) -> CommandResult:
         text("UPDATE post_intents SET cancel_requested = true WHERE id = :id"),
         {"id": str(intent["id"])},
     )
+    # The card loses its buttons now: a cancelling card offers no lever, and
+    # the worker's terminalization (#1235) is a later checkpoint.
+    await _record_outcome(session, intent, command, "cancelled")
     return _result(intent, intent["state"], cancel_requested=True)
 
 
@@ -432,6 +565,31 @@ async def disable_account(session, command: Command) -> CommandResult:
                 "illegal_transition", f"destination {account_id} is already disabled"
             ) from exc
         raise CommandRefused("not_found", f"destination {account_id}") from exc
+    # Its live cards lose their buttons (phase 1 step 7): the flagged intents
+    # are the ones the worker will terminalize.
+    live = await readers.rows(
+        session,
+        "SELECT i.id, COALESCE(a.tz, w.tz) AS eff_tz FROM post_intents i"
+        "  JOIN workspaces w ON w.id = i.workspace_id"
+        "  JOIN ig_accounts a ON a.id = i.ig_account_id"
+        " WHERE i.workspace_id = :ws AND i.ig_account_id = :acct"
+        "   AND i.cancel_requested AND i.state NOT IN"
+        "   ('posted','skipped','rejected','expired','failed','cancelled')",
+        ws=command.workspace_id,
+        acct=account_id,
+    )
+    for row in live:
+        await _supersede_everywhere(
+            session,
+            workspace_id=command.workspace_id,
+            intent_id=str(row["id"]),
+            outcome_text=prompts.outcome_line(
+                "account_disabled",
+                by=None,
+                at=_utcnow(),
+                tz=str(row["eff_tz"] or "UTC"),
+            ),
+        )
     return CommandResult(
         "executed", {"ig_account_id": account_id, "state": "disabled", **effects}
     )

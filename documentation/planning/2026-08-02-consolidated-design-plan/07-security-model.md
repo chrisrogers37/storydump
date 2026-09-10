@@ -1024,3 +1024,19 @@ DROP INDEX uq_case_mix_current;
 CREATE UNIQUE INDEX uq_case_mix_current_by_source ON category_post_case_mix (workspace_id, source_id)
   WHERE effective_to IS NULL AND source_id IS NOT NULL;
 ```
+
+### §18. The outbox index on the intent (072, the tap — phase 1 of the 2026-09-09 plan)
+
+**Why:** a tap supersedes every live card for its intent in every binding, inside the flip's
+transaction (`02` §5 amendment), and the settled-card sweep finds live cards of ended intents
+(`02` §6 amendment). Both select `channel_outbox` by `intent_id`, which no index covered — a
+sequential scan of the outbox on the tap's own transaction, growing with every card ever sent.
+One partial index; no policy, grant or door changes.
+
+```sql
+-- The outbox rows of one intent, for the tap's supersede-everywhere (phase 1 of the 2026-09-09 tap
+-- plan): every flip retires the intent's cards in every binding with `WHERE … intent_id = :i`, and
+-- the settled-card sweep joins live cards to their intents. Without this index each was a sequential
+-- scan of the outbox on the tap's own transaction. Partial: notifications and acks carry no intent.
+CREATE INDEX ix_outbox_intent ON channel_outbox (intent_id) WHERE intent_id IS NOT NULL;
+```

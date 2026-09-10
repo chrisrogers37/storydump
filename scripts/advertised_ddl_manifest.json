@@ -235,6 +235,13 @@
       "label": "§17 category_post_case_mix.source_id — the mix keyed on the connected folder (071, owner ruling 2026-09-08)",
       "doc": "07-security-model.md",
       "ordinal": 15
+    },
+    {
+      "sha256": "b24800cb097e7adc8b11616c2481d0045e5036c1abaa8a29a9db2f1888f53064",
+      "class": "normative",
+      "label": "§18 ix_outbox_intent — the outbox rows of one intent (072, the tap, phase 1 of the 2026-09-09 plan)",
+      "doc": "07-security-model.md",
+      "ordinal": 16
     }
   ],
   "policy_expansion": {

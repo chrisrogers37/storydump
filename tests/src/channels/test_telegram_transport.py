@@ -563,3 +563,262 @@ class TestMediaCardsStayHonest:
         assert (
             fetched == [] and calls == ["sendMessage"] and t.media_fetch_failures == 1
         )
+
+
+# ---------------------------------------------------------------------------
+# The tap (phase 1 of the 2026-09-09 plan): answering a tap and editing a card.
+# ---------------------------------------------------------------------------
+
+
+def _ok(result=True):
+    return httpx.Response(200, json={"ok": True, "result": result})
+
+
+class TestAnsweringATap:
+    async def test_answer_callback_posts_the_query_id_text_and_alert_flag(self):
+        seen = {}
+
+        def handler(request):
+            seen["url"] = str(request.url)
+            seen["json"] = json.loads(request.content)
+            return _ok()
+
+        t = _transport(handler)
+        assert await t.answer_callback("q1", "Skipped", show_alert=True) is True
+        assert seen["url"].endswith("/answerCallbackQuery")
+        assert seen["json"] == {
+            "callback_query_id": "q1",
+            "text": "Skipped",
+            "show_alert": True,
+        }
+
+    async def test_a_failed_answer_is_false_never_a_raise(self):
+        def handler(request):
+            return httpx.Response(
+                400,
+                json={
+                    "ok": False,
+                    "error_code": 400,
+                    "description": "Bad Request: query is too old",
+                },
+            )
+
+        t = _transport(handler)
+        assert await t.answer_callback("q1", "x") is False
+
+    async def test_a_transport_failure_is_false_too(self):
+        def handler(request):
+            raise httpx.ConnectError("down")
+
+        t = _transport(handler)
+        assert await t.answer_callback("q1", "x") is False
+
+
+class TestEditingACard:
+    async def test_strip_keyboard_is_an_empty_reply_markup_edit(self):
+        seen = {}
+
+        def handler(request):
+            seen["url"] = str(request.url)
+            seen["json"] = json.loads(request.content)
+            return _ok()
+
+        t = _transport(handler)
+        assert await t.strip_keyboard("-100", "555") is True
+        assert seen["url"].endswith("/editMessageReplyMarkup")
+        assert seen["json"] == {
+            "chat_id": "-100",
+            "message_id": 555,
+            "reply_markup": {"inline_keyboard": []},
+        }
+
+    async def test_caption_and_text_edits_name_their_methods(self):
+        calls = []
+
+        def handler(request):
+            calls.append(
+                (str(request.url).rsplit("/", 1)[-1], json.loads(request.content))
+            )
+            return _ok()
+
+        t = _transport(handler)
+        assert await t.edit_caption("-100", "555", "📸 @brand\n✅ Approved") is True
+        assert await t.edit_text("-100", "556", "📸 f.jpg\n⏭️ Skipped") is True
+        assert [c[0] for c in calls] == ["editMessageCaption", "editMessageText"]
+        assert calls[0][1] == {
+            "chat_id": "-100",
+            "message_id": 555,
+            "caption": "📸 @brand\n✅ Approved",
+        }
+        assert calls[1][1]["text"] == "📸 f.jpg\n⏭️ Skipped"
+
+    async def test_not_modified_is_success(self):
+        def handler(request):
+            return httpx.Response(
+                400,
+                json={
+                    "ok": False,
+                    "error_code": 400,
+                    "description": "Bad Request: message is not modified",
+                },
+            )
+
+        t = _transport(handler)
+        assert await t.strip_keyboard("-100", "555") is True
+
+    async def test_any_other_400_on_an_edit_is_false(self):
+        def handler(request):
+            return httpx.Response(
+                400,
+                json={
+                    "ok": False,
+                    "error_code": 400,
+                    "description": "Bad Request: message to edit not found",
+                },
+            )
+
+        t = _transport(handler)
+        assert await t.edit_text("-100", "555", "x") is False
+
+
+class TestTheSupersedeRowEditsTheCard:
+    """`prompt_supersede` rows strip the keyboard FIRST (the call that must
+    land) and then, when the row carries an outcome, write the original header
+    plus the outcome line — a caption for a media card, text otherwise."""
+
+    async def test_strip_then_caption_for_a_media_card(self):
+        calls = []
+
+        def handler(request):
+            calls.append(
+                (str(request.url).rsplit("/", 1)[-1], json.loads(request.content))
+            )
+            return _ok()
+
+        t = _transport(handler)
+        row = {
+            "id": "ob-9",
+            "kind": "prompt_supersede",
+            "intent_id": "i1",
+            "payload": {
+                "v": 1,
+                "supersedes_ref": "555",
+                "outcome_text": "✅ Approved by Chris · 2026-09-09 14:14 UTC",
+                "header": "📸 @brand\nSlot: 2026-09-09 14:00 UTC",
+                "sent_as": "media",
+            },
+        }
+        ref = await t.for_chat("-100")(row)
+        assert ref == "555"
+        assert [c[0] for c in calls] == ["editMessageReplyMarkup", "editMessageCaption"]
+        assert (
+            calls[1][1]["caption"]
+            == "📸 @brand\nSlot: 2026-09-09 14:00 UTC\n✅ Approved by Chris · 2026-09-09 14:14 UTC"
+        )
+
+    async def test_strip_then_text_for_a_text_card(self):
+        calls = []
+
+        def handler(request):
+            calls.append(str(request.url).rsplit("/", 1)[-1])
+            return _ok()
+
+        t = _transport(handler)
+        row = {
+            "id": "ob-9",
+            "kind": "prompt_supersede",
+            "intent_id": "i1",
+            "payload": {
+                "v": 1,
+                "supersedes_ref": "555",
+                "outcome_text": "⏭️ Skipped",
+                "header": "📸 f.jpg",
+                "sent_as": "text",
+            },
+        }
+        assert await t.for_chat("-100")(row) == "555"
+        assert calls == ["editMessageReplyMarkup", "editMessageText"]
+
+    async def test_without_an_outcome_it_only_strips(self):
+        calls = []
+
+        def handler(request):
+            calls.append(str(request.url).rsplit("/", 1)[-1])
+            return _ok()
+
+        t = _transport(handler)
+        row = {
+            "id": "ob-9",
+            "kind": "prompt_supersede",
+            "intent_id": "i1",
+            "payload": {"v": 1, "supersedes_ref": "555"},
+        }
+        assert await t.for_chat("-100")(row) == "555"
+        assert calls == ["editMessageReplyMarkup"]
+
+    async def test_a_failed_outcome_edit_does_not_fail_the_row(self):
+        def handler(request):
+            name = str(request.url).rsplit("/", 1)[-1]
+            if name == "editMessageCaption":
+                return httpx.Response(
+                    400,
+                    json={
+                        "ok": False,
+                        "error_code": 400,
+                        "description": "Bad Request: there is no caption",
+                    },
+                )
+            return _ok()
+
+        t = _transport(handler)
+        row = {
+            "id": "ob-9",
+            "kind": "prompt_supersede",
+            "intent_id": "i1",
+            "payload": {
+                "v": 1,
+                "supersedes_ref": "555",
+                "outcome_text": "x",
+                "header": "h",
+                "sent_as": "media",
+            },
+        }
+        assert await t.for_chat("-100")(row) == "555"
+
+    async def test_a_failed_strip_fails_the_row(self):
+        def handler(request):
+            return httpx.Response(
+                400,
+                json={
+                    "ok": False,
+                    "error_code": 400,
+                    "description": "Bad Request: message to edit not found",
+                },
+            )
+
+        t = _transport(handler)
+        row = {
+            "id": "ob-9",
+            "kind": "prompt_supersede",
+            "intent_id": "i1",
+            "payload": {"v": 1, "supersedes_ref": "555"},
+        }
+        with pytest.raises(TelegramRefused):
+            await t.for_chat("-100")(row)
+
+
+class TestASendReceiptSaysHowTheCardWent:
+    async def test_a_text_send_reports_text(self):
+        def handler(request):
+            return _ok({"message_id": 99})
+
+        ref = await _transport(handler).for_chat("7")(ROW)
+        assert ref == "99" and ref.sent_as == "text"
+
+    async def test_a_media_send_reports_media(self):
+        def handler(request):
+            return _ok({"message_id": 77})
+
+        t = TelegramTransport(TOKEN, client=_client(handler), media_fetch=_fetch_ok)
+        ref = await t.for_chat("7")(MEDIA_ROW)
+        assert ref == "77" and ref.sent_as == "media"

@@ -132,6 +132,42 @@ async def transition(session, intent_id: str, to_state: str) -> None:
         raise
 
 
+async def settlement(session, *, workspace_id: str, intent_id: str) -> dict:
+    """What a card in any state past `awaiting_approval` says about itself:
+    the state, who last moved it and when — the newest `audit_events` row for
+    the intent (`ix_audit_entity`, bound on `workspace_id`), or the row's own
+    `entered_state_at` when no audit row exists (a clock or reaper move records
+    `actor_user_id` NULL). Phase 1 of the 2026-09-09 tap plan, step 6."""
+    row = (
+        (
+            await session.execute(
+                text(
+                    "SELECT i.state, i.entered_state_at, a.actor_user_id, a.created_at"
+                    "  FROM post_intents i"
+                    "  LEFT JOIN LATERAL ("
+                    "    SELECT actor_user_id, created_at FROM audit_events e"
+                    "     WHERE e.workspace_id = i.workspace_id"
+                    "       AND e.entity_kind = 'post_intent' AND e.entity_id = i.id"
+                    "     ORDER BY e.id DESC LIMIT 1) a ON true"
+                    " WHERE i.id = :i AND i.workspace_id = :ws"
+                ),
+                {"i": str(intent_id), "ws": str(workspace_id)},
+            )
+        )
+        .mappings()
+        .first()
+    )
+    if row is None:
+        return {"state": None, "by_user_id": None, "at": None}
+    return {
+        "state": row["state"],
+        "by_user_id": None
+        if row["actor_user_id"] is None
+        else str(row["actor_user_id"]),
+        "at": row["created_at"] or row["entered_state_at"],
+    }
+
+
 async def current_state(session, intent_id: str) -> Optional[str]:
     """The intent's state, or None if it does not exist."""
     row = (

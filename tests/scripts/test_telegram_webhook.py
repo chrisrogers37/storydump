@@ -77,6 +77,44 @@ def _run(capsys, *argv):
     return code, out.out + out.err
 
 
+class TestTapsAreAskedFor:
+    """Phase 1 of the 2026-09-09 tap plan: Telegram delivers only the update
+    kinds the registration asks for. Without `callback_query` here every tap
+    is dropped before it reaches the route — the plan's first blocker."""
+
+    def test_the_registration_asks_for_taps(self):
+        assert "callback_query" in tool.ALLOWED_UPDATES
+        assert "message" in tool.ALLOWED_UPDATES
+
+    def test_register_sends_the_allowed_updates_and_a_connection_cap(
+        self, env, http, capsys
+    ):
+        code, out = _run(capsys, "register")
+        assert code == 0
+        body = [c for c in http.calls if c["url"].endswith("setWebhook")][0]["data"]
+        assert json.loads(body["allowed_updates"]) == tool.ALLOWED_UPDATES
+        assert body["max_connections"] == str(tool.DEFAULT_MAX_CONNECTIONS)
+
+    def test_the_connection_cap_comes_from_the_environment(
+        self, env, http, capsys, monkeypatch
+    ):
+        monkeypatch.setenv(tool.MAX_CONNECTIONS_VAR, "20")
+        code, _ = _run(capsys, "register")
+        assert code == 0
+        body = [c for c in http.calls if c["url"].endswith("setWebhook")][0]["data"]
+        assert body["max_connections"] == "20"
+
+    @pytest.mark.parametrize("bad", ["0", "101", "many"])
+    def test_a_cap_outside_telegrams_range_is_refused_before_any_call(
+        self, env, http, capsys, monkeypatch, bad
+    ):
+        monkeypatch.setenv(tool.MAX_CONNECTIONS_VAR, bad)
+        code, out = _run(capsys, "register")
+        assert code == 2
+        assert tool.MAX_CONNECTIONS_VAR in out
+        assert not [c for c in http.calls if c["url"].endswith("setWebhook")]
+
+
 class TestSecretsNeverPrint:
     @pytest.mark.parametrize("argv", [("status",), ("register",), ("deregister",)])
     def test_no_output_line_carries_the_token_or_the_secret(
@@ -254,7 +292,7 @@ class TestStatus:
 
 
 class TestRegister:
-    def test_sets_the_webhook_with_the_secret_and_messages_only_keeping_the_backlog(
+    def test_sets_the_webhook_with_the_secret_and_the_served_updates_keeping_the_backlog(
         self, env, http, capsys
     ):
         code, _ = _run(capsys, "register")
@@ -263,7 +301,7 @@ class TestRegister:
         assert call["method"] == "POST"
         assert call["data"]["url"] == URL
         assert call["data"]["secret_token"] == SECRET
-        assert json.loads(call["data"]["allowed_updates"]) == ["message"]
+        assert json.loads(call["data"]["allowed_updates"]) == tool.ALLOWED_UPDATES
         assert call["data"]["drop_pending_updates"] == "false"
 
     def test_dropping_the_backlog_is_opt_in(self, env, http, capsys):

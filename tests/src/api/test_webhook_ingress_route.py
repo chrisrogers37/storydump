@@ -21,15 +21,17 @@ URL = "/webhooks/telegram"
 
 
 class FakeConn:
-    """Minimal async connection: records commits, nothing else."""
+    """Minimal async connection: records commits and when it was released."""
 
     def __init__(self) -> None:
         self.commits = 0
+        self.released = False
 
     async def __aenter__(self):
         return self
 
     async def __aexit__(self, *exc):
+        self.released = True
         return False
 
     async def commit(self):
@@ -349,3 +351,141 @@ class TestTheAcknowledgementIsWiredFromTheBotToken:
     def test_without_the_token_the_door_is_silent(self):
         built = self._app({})
         assert built.state.ingress is not None and built.state.ingress.reply is None
+
+
+# --- the tap is answered through the REAL transport --------------------------
+
+
+def test_a_tap_is_answered_and_stripped_through_the_real_transport(
+    client, armed, monkeypatch
+):
+    """The route's answer runs the transport's own `answer_callback` and
+    `strip_keyboard` — wired exactly as `app.py` wires them, over a scripted
+    Bot API — so a signature drift between the two (positional vs keyword
+    `show_alert`) fails HERE, not silently in production behind the
+    best-effort `except` (structural review of #1271)."""
+    import json as _json
+
+    import httpx
+
+    from src.channels.telegram_transport import TelegramTransport
+    from src.services.target.telegram_dispatch import TapResult
+
+    calls = []
+
+    def bot(request):
+        calls.append(
+            (str(request.url).rsplit("/", 1)[-1], _json.loads(request.content))
+        )
+        return httpx.Response(200, json={"ok": True, "result": True})
+
+    transport = TelegramTransport(
+        "8675309:AAtest", client=httpx.AsyncClient(transport=httpx.MockTransport(bot))
+    )
+
+    async def fake_admit(conn, **kw):
+        return {"admitted": True}
+
+    async def fake_dispatch(conn, payload):
+        return TapResult(
+            outcome="executed",
+            handled=True,
+            callback_query_id="q1",
+            chat_ref="-100",
+            message_ref="555",
+            answer_text="⏭️ Skipped for 7 days",
+            show_alert=True,
+        )
+
+    monkeypatch.setattr(webhooks, "admit", fake_admit)
+    conn = FakeConn()
+    app.state.ingress = webhooks.IngressRuntime(
+        connect=lambda: conn,
+        dispatch=fake_dispatch,
+        reply=transport.send_text,
+        answer_callback=transport.answer_callback,
+        strip_keyboard=transport.strip_keyboard,
+    )
+    before = app.state.tap_metrics.snapshot()["taps_total"]
+    response = _post(
+        client,
+        {
+            "update_id": 77,
+            "callback_query": {
+                "id": "q1",
+                "data": "v1:skip:x",
+                "message": {"message_id": 555, "chat": {"id": -100}},
+            },
+        },
+    )
+    assert response.status_code == 200 and response.json() == {"status": "admitted"}
+    assert conn.commits == 1, "the answer follows the commit"
+    assert [c[0] for c in calls] == ["answerCallbackQuery", "editMessageReplyMarkup"]
+    assert calls[0][1] == {
+        "callback_query_id": "q1",
+        "text": "⏭️ Skipped for 7 days",
+        "show_alert": True,
+    }
+    assert calls[1][1] == {
+        "chat_id": "-100",
+        "message_id": 555,
+        "reply_markup": {"inline_keyboard": []},
+    }
+    after = app.state.tap_metrics.snapshot()
+    assert after["taps_total"] == before + 1 and after["answer_failed"] == 0
+
+
+def test_a_replayed_tap_is_toasted_after_the_connection_is_released(
+    client, armed, monkeypatch
+):
+    """Telegram redelivered a tap the route already handled: the redelivered
+    query still has a spinner, so it gets a toast — sent AFTER the pool
+    connection is released, never across a provider call (the discipline the
+    sender's split exists for)."""
+    import json as _json
+
+    import httpx
+
+    from src.channels.telegram_transport import TelegramTransport
+
+    conn = FakeConn()
+    seen = {}
+
+    def bot(request):
+        seen["released_at_call"] = conn.released
+        seen["json"] = _json.loads(request.content)
+        return httpx.Response(200, json={"ok": True, "result": True})
+
+    transport = TelegramTransport(
+        "8675309:AAtest", client=httpx.AsyncClient(transport=httpx.MockTransport(bot))
+    )
+
+    async def replayed_admit(conn_, **kw):
+        raise DeliveryReplayed("update 77 was admitted before")
+
+    async def never_dispatch(
+        conn_, payload
+    ):  # pragma: no cover — a replay is not dispatched
+        raise AssertionError("a replayed delivery must not be dispatched")
+
+    monkeypatch.setattr(webhooks, "admit", replayed_admit)
+    app.state.ingress = webhooks.IngressRuntime(
+        connect=lambda: conn,
+        dispatch=never_dispatch,
+        answer_callback=transport.answer_callback,
+    )
+    response = _post(
+        client,
+        {
+            "update_id": 77,
+            "callback_query": {
+                "id": "q-again",
+                "data": "v1:skip:x",
+                "message": {"message_id": 555, "chat": {"id": -100}},
+            },
+        },
+    )
+    assert response.status_code == 200 and response.json() == {"status": "replayed"}
+    assert seen["released_at_call"] is True, "the toast must not hold the pool slot"
+    assert seen["json"]["callback_query_id"] == "q-again"
+    assert conn.commits == 0
