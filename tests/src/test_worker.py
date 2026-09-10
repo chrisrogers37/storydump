@@ -216,6 +216,60 @@ class TestTransportComposition:
         # the loops share the same dict object, so the park reaches them
         assert app.loops[0]._registry is app.registry
 
+    async def test_a_token_for_the_wrong_bot_parks_the_channel_loudly(self, caplog):
+        """The 2026-09-10 crosswire: the worker sent cards as @storydumpapp_bot
+        while the API's webhook listened on @storydump_app_bot — every tap went
+        where nothing listened. With the configured bot known, a mismatched
+        token parks the sender and says why."""
+        from src.services.target.work_loop import Parked
+        from src.worker import apply_transport_probe
+
+        class _Other:
+            def for_chat(self, ref):  # pragma: no cover - never bound
+                raise AssertionError
+
+            async def probe(self):
+                return "storydumpapp_bot"
+
+        app = compose(
+            engine=object(),
+            config=WorkerConfig(),
+            env={"TARGET_TELEGRAM_BOT_USERNAME": "@storydump_app_bot"},
+            transport=_Other(),
+        )
+        with caplog.at_level("ERROR"):
+            await apply_transport_probe(app)
+        entry = app.registry["deliver_outbox"]
+        assert isinstance(entry, Parked)
+        assert "WRONG BOT" in entry.reason and "storydumpapp_bot" in entry.reason
+        assert "storydump_app_bot" in entry.reason
+        assert any("configured bot" in r.message for r in caplog.records)
+        assert app.bot_username == "storydumpapp_bot"
+
+    async def test_the_configured_bot_keeps_the_channel(self):
+        from src.services.target.work_loop import Parked
+        from src.worker import apply_transport_probe
+
+        class _Right:
+            def for_chat(self, ref):
+                async def send(row):
+                    return "1"
+
+                return send
+
+            async def probe(self):
+                return "Storydump_App_Bot"
+
+        app = compose(
+            engine=object(),
+            config=WorkerConfig(),
+            env={"TARGET_TELEGRAM_BOT_USERNAME": "storydump_app_bot"},
+            transport=_Right(),
+        )
+        await apply_transport_probe(app)
+        assert not isinstance(app.registry["deliver_outbox"], Parked)
+        assert app.bot_username == "Storydump_App_Bot"
+
     async def test_a_live_probe_logs_the_bot_identity_and_keeps_the_channel(self):
         from src.services.target.work_loop import Parked
         from src.worker import apply_transport_probe

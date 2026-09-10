@@ -35,6 +35,7 @@ from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from src.channels.telegram_webhook_registration import bot_matches
 from src.services.target import (
     credential_lifecycle,
     drive_credentials,
@@ -115,6 +116,12 @@ class WorkerApp:
     clock: object = None  # set by run() so a supervisor can read its observables
     sweeper: object = None  # set by run(); carries sweeps/mints observables
     prompt_sweeper: object = None  # set by run(); sweeps/prompted/advanced
+    #: The bot this worker is CONFIGURED to speak as (`TARGET_TELEGRAM_BOT_USERNAME`,
+    #: the API's webhook bot) and the bot its token actually is (from the
+    #: startup probe). A mismatch means every card's buttons belong to a bot
+    #: nobody listens on — the 2026-09-10 crosswire — so it parks the sender.
+    expected_bot: object = None
+    bot_username: object = None
 
 
 def compose(
@@ -183,6 +190,8 @@ def compose(
         registry=registry,
         loops=loops,
         recurring=recurring,
+        expected_bot=(env.get("TARGET_TELEGRAM_BOT_USERNAME") or "").lstrip("@")
+        or None,
         heartbeat=heartbeat,
         heartbeat_lease_seconds=config.lease_seconds,
         heartbeat_interval_seconds=config.heartbeat_interval_seconds,
@@ -196,6 +205,12 @@ DEAD_CREDENTIAL_REASON = (
     "credential rejected by Telegram at startup (getMe 401/403) — DEAD TOKEN;"
     " the channel is down until it is replaced, and every park of this job is"
     " this reminder"
+)
+
+
+WRONG_BOT_REASON = (
+    "WRONG BOT: the token is @{actual}, the configured bot is @{expected} — cards"
+    " from it carry buttons nobody listens on; fix TARGET_TELEGRAM_BOT_TOKEN"
 )
 
 
@@ -223,11 +238,35 @@ async def apply_transport_probe(app: WorkerApp) -> None:
         )
         app.registry["deliver_outbox"] = Parked(DEAD_CREDENTIAL_REASON)
         return
+    app.bot_username = username
+    if app.expected_bot and not bot_matches(username, app.expected_bot):
+        # The 2026-09-10 crosswire: the worker sent cards as the old bot while
+        # the API's webhook listened on the new one, so every tap went where
+        # nothing listened. A card from the wrong bot is a dead card — refuse
+        # to send any, loudly, rather than mint buttons that cannot answer.
+        logger.error(
+            "Telegram token belongs to @%s but the configured bot is @%s —"
+            " parking the deliver_outbox channel; set the worker's"
+            " TARGET_TELEGRAM_BOT_TOKEN to the API's bot",
+            username,
+            app.expected_bot,
+        )
+        app.registry["deliver_outbox"] = Parked(
+            WRONG_BOT_REASON.format(actual=username, expected=app.expected_bot)
+        )
+        return
     logger.info("telegram channel live as @%s", username)
 
 
 def status_line(
-    *, loops, clock, heartbeat, transport=None, sweeper=None, prompt_sweeper=None
+    *,
+    loops,
+    clock,
+    heartbeat,
+    transport=None,
+    sweeper=None,
+    prompt_sweeper=None,
+    bot_username=None,
 ) -> str:
     """One human-readable line from the observables — the soak's visibility."""
     lanes = " ".join(
@@ -248,7 +287,7 @@ def status_line(
     line = f"{lanes} {clock_part} {hb_part}"
     if transport is not None:
         line += (
-            f" transport[auth_failures={transport.auth_failures},"
+            f" transport[bot=@{bot_username or '?'} auth_failures={transport.auth_failures},"
             f" media_fetch_failures={getattr(transport, 'media_fetch_failures', 0)}]"
         )
     if sweeper is not None:
@@ -372,6 +411,7 @@ async def _status_reporter(app: WorkerApp, stop: asyncio.Event, every: float) ->
                     transport=app.deps.transport,
                     sweeper=app.sweeper,
                     prompt_sweeper=app.prompt_sweeper,
+                    bot_username=app.bot_username,
                 ),
             )
 
