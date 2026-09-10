@@ -41,7 +41,7 @@ A tap on `🚀 Post now`, `✅ Posted myself`, `⏭️ Skip` or `🚫 Reject` re
 
 ### Dependencies
 
-- **Webhook re-registration** (a deploy step of this phase, first): `ALLOWED_UPDATES` gains `callback_query` and `register` sends `max_connections` in the same `setWebhook` call; re-run per `documentation/operations/telegram-webhook.md`. Until it runs, Telegram delivers no taps and no test in this phase can be confirmed live.
+- **Webhook registration is automatic since the fold** (`src/api/app.py` `_register_webhook` at startup, reported on `/health`); the text below describes the manual step it replaced. **Webhook re-registration** (a deploy step of this phase, first): `ALLOWED_UPDATES` gains `callback_query` and `register` sends `max_connections` in the same `setWebhook` call; re-run per `documentation/operations/telegram-webhook.md`. Until it runs, Telegram delivers no taps and no test in this phase can be confirmed live.
 - Forks F2, F3, F4, F8 and F10 ratified (parser token set, executors, card edit, sender, keyboard layout). F11 decides what the `post` answer says until #1220 step 3 lands.
 - Migration: none — `ck_outbox_kind` already has `prompt_supersede` (`scripts/migrations/056_machinery_tables.sql:144-145`); `sent_as` and the header ride the JSONB payload.
 

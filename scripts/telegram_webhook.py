@@ -49,23 +49,24 @@ import urllib.request
 from typing import Any, Optional
 
 BOT_API = "https://api.telegram.org"
-DEFAULT_WEBHOOK_URL = "https://api.storydump.app/webhooks/telegram"
+
 SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token"
 TOKEN_VAR = "TARGET_TELEGRAM_BOT_TOKEN"
 SECRET_VAR = "TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN"
 BOT_VAR = "TARGET_TELEGRAM_BOT_USERNAME"
-#: The update kinds the target ingress serves: `/start` taps and group messages
-#: ride `message`; a button tap on an approval card is a `callback_query`
-#: (phase 1 of the 2026-09-09 tap plan). Telegram delivers ONLY what is asked
-#: for here — with `message` alone every tap was dropped before it reached the
-#: route, silently. Typed chat commands (#854) are still not dispatched.
-ALLOWED_UPDATES = ["message", "callback_query"]
-#: `setWebhook`'s `max_connections`: how many simultaneous deliveries Telegram
-#: opens against the route — its true concurrency ceiling (default 40, at most
-#: 100). Set deliberately to the ingress's connection budget: one process ×
-#: `POOL_SIZE_SEAM` (10) today; 20 if the API runs two workers (F5).
-MAX_CONNECTIONS_VAR = "TARGET_TELEGRAM_WEBHOOK_MAX_CONNECTIONS"
-DEFAULT_MAX_CONNECTIONS = 10
+#: The served update kinds and the connection cap live in ONE place, shared
+#: with the API's startup self-registration (`src/api/app.py`), so the two
+#: cannot disagree. Telegram delivers ONLY what is asked for — with `message`
+#: alone every tap was dropped before it reached the route, silently.
+from src.channels.telegram_webhook_registration import (  # noqa: E402
+    ALLOWED_UPDATES,
+    DEFAULT_MAX_CONNECTIONS,  # noqa: F401 — the tool's documented default, pinned by its tests
+    DEFAULT_WEBHOOK_URL,
+    MAX_CONNECTIONS_VAR,
+    BadMaxConnections,
+    max_connections_from,
+)
+
 TIMEOUT_S = 20
 
 
@@ -249,18 +250,10 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 def _max_connections() -> int:
     """The connection cap, from the environment, within Telegram's 1..100."""
-    raw = os.environ.get(MAX_CONNECTIONS_VAR, "").strip()
-    if not raw:
-        return DEFAULT_MAX_CONNECTIONS
     try:
-        value = int(raw)
-    except ValueError:
-        value = 0
-    if not 1 <= value <= 100:
-        raise BadVariable(
-            f"{MAX_CONNECTIONS_VAR} must be an integer from 1 to 100 (got {raw!r})"
-        )
-    return value
+        return max_connections_from(os.environ.get(MAX_CONNECTIONS_VAR))
+    except BadMaxConnections as exc:
+        raise BadVariable(str(exc)) from None
 
 
 def cmd_register(args: argparse.Namespace) -> int:

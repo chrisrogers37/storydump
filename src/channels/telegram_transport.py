@@ -195,6 +195,37 @@ class TelegramTransport:
     def _redact(self, text: str) -> str:
         return text.replace(self._token, "<TOKEN>")
 
+    def redact(self, text: str) -> str:
+        """The token, wherever it appears in *text*, replaced — for callers
+        that must log a failure that may embed the URL."""
+        return self._redact(text)
+
+    async def set_webhook(
+        self,
+        *,
+        url: str,
+        secret_token: str,
+        allowed_updates: list[str],
+        max_connections: int,
+    ) -> bool:
+        """`setWebhook`: the door URL, the secret Telegram must echo, the update
+        kinds served and the connection cap; the pending backlog is kept."""
+        await self._call(
+            "setWebhook",
+            {
+                "url": url,
+                "secret_token": secret_token,
+                "allowed_updates": list(allowed_updates),
+                "max_connections": int(max_connections),
+                "drop_pending_updates": False,
+            },
+        )
+        return True
+
+    async def webhook_info(self) -> dict:
+        """`getWebhookInfo`: what Telegram holds for this bot."""
+        return await self._call("getWebhookInfo") or {}
+
     async def _call(
         self,
         method: str,
