@@ -77,6 +77,10 @@ OUTCOME_WORDS = {
 }
 
 
+#: Zones already warned about — one line per zone, not one per card.
+_WARNED_ZONES: set[str] = set()
+
+
 def stamp(at: datetime, tz: str) -> str:
     """`%Y-%m-%d %H:%M <tz>` in the WORKSPACE's timezone — the slot line and
     the outcome line share this one spelling. A zone Postgres accepted
@@ -86,6 +90,13 @@ def stamp(at: datetime, tz: str) -> str:
     try:
         zone = ZoneInfo(tz)
     except (ZoneInfoNotFoundError, ValueError):
+        if tz not in _WARNED_ZONES:
+            _WARNED_ZONES.add(tz)
+            logger.warning(
+                "workspace tz %r is unknown to the IANA database — card times"
+                " render in UTC until it is changed in Settings",
+                tz,
+            )
         zone, tz = ZoneInfo("UTC"), "UTC"
     return f"{at.astimezone(zone).strftime('%Y-%m-%d %H:%M')} {tz}"
 

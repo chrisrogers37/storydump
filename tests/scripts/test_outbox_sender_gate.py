@@ -1117,7 +1117,7 @@ class TestThePollerReplacesTheRedisWakeUp:
 
         binding = _new_binding(outbox_db)
         _enqueue(outbox_db, kind="notification", binding=binding)
-        _enqueue(outbox_db, kind="notification", binding=binding)
+        second_id = _enqueue(outbox_db, kind="notification", binding=binding)
 
         async def transport(row):
             return "tg-ok"
@@ -1144,6 +1144,10 @@ class TestThePollerReplacesTheRedisWakeUp:
         assert first is not None and first["state"] == "sent"
         assert second is None
         assert poller.deferred == 1 and poller.sent == 1
+        # The paced tick's claim was rolled back with its session: the row is
+        # still `pending`, un-attempted, for the next window — never stranded
+        # `sending` for `recover_stranded` to write off (review of #1271).
+        assert _state(outbox_db, second_id) == ("pending", 0, None)
         assert poller.consecutive_failures == 0, (
             "a paced tick moved the failure counter — a chat at its budget"
             " would read as a dying sender"

@@ -795,15 +795,19 @@ class OutboxPoller:
                     # the claim and the send, and its ref was unknown to the
                     # supersede. The card is out there with buttons — edit it
                     # ourselves (R6), with the intent's current outcome.
+                    # Labelled by what we read: `superseded` when the card we
+                    # sent is ours to edit, `fenced` when a successor moved the
+                    # row to `ambiguous` and the resend is its business.
+                    edited = receipt is not None and await _edit_sent_card(
+                        session, row, receipt, force=True
+                    )
                     result = {
                         **row,
-                        "state": "superseded",
+                        "state": "superseded" if edited else "fenced",
                         "external_message_ref": None
                         if receipt is None
                         else str(receipt),
                     }
-                    if receipt is not None:
-                        await _edit_sent_card(session, row, receipt, force=True)
                 else:
                     if result["state"] == "sent":
                         await _edit_sent_card(session, row, receipt, force=False)

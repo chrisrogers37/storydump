@@ -270,7 +270,15 @@ class TelegramTransport:
                 policy=_FAST,
             )
         except Exception as exc:  # noqa: BLE001 — best effort, by contract
-            logger.warning(
+            # A query Telegram already considers answered (a redelivery, a
+            # slow tap) is the expected shape, not a fault: INFO.
+            level = (
+                logger.info
+                if isinstance(exc, TelegramRefused)
+                and ("too old" in str(exc) or "QUERY_ID_INVALID" in str(exc))
+                else logger.warning
+            )
+            level(
                 "answerCallbackQuery %s not delivered: %s",
                 callback_query_id,
                 self._redact(str(exc)),
