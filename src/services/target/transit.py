@@ -103,6 +103,12 @@ def story_transformation(transit_asset_ref: str, *, media_kind: str) -> list[dic
         ]
     underlay = "authenticated:" + transit_asset_ref.replace("/", ":")
     return [
+        # FIRST fit the picture into the frame. A layer's canvas is the base's
+        # size, so a 4032 × 3024 phone photo behind a 1080 × 1920 underlay
+        # would hide the underlay entirely and the pad below would fall back
+        # to white bars — the legacy chain had exactly that defect (review of
+        # #1283, verified on Cloudinary's demo cloud).
+        {"crop": "limit", "width": STORY_WIDTH, "height": STORY_HEIGHT},
         {"underlay": underlay},
         {
             "crop": "fill",
