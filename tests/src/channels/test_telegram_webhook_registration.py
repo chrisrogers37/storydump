@@ -93,8 +93,22 @@ class TestWhatIsAskedFor:
             t, url=URL, secret=SECRET, expected_bot=None, max_connections=10
         )
         assert report["ok"] is False
-        assert report["error"].startswith("RuntimeError:")
-        assert TOKEN not in report["error"] and "<TOKEN>" in report["error"]
+        assert report["error"] == "RuntimeError"
+        assert TOKEN not in str(report)
+
+    @pytest.mark.asyncio
+    async def test_the_secret_never_reaches_the_report_either(self):
+        """`/health` is unauthenticated: the report carries the exception's
+        TYPE; the prose — which may quote the request — goes to the log with
+        the token and the secret struck out."""
+        t = _Transport(
+            fail_set=RuntimeError(f"setWebhook rejected {SECRET} for {TOKEN}")
+        )
+        report = await reg.register(
+            t, url=URL, secret=SECRET, expected_bot=None, max_connections=10
+        )
+        assert report["ok"] is False and report["error"] == "RuntimeError"
+        assert SECRET not in str(report) and TOKEN not in str(report)
 
     @pytest.mark.asyncio
     async def test_a_different_registered_url_is_not_ok(self):
@@ -113,11 +127,13 @@ class TestTheKnobs:
             with pytest.raises(reg.BadMaxConnections):
                 reg.max_connections_from(bad)
 
-    def test_autoregister_is_on_unless_switched_off(self):
-        assert reg.autoregister_enabled(None) is True
-        assert reg.autoregister_enabled("1") is True
+    def test_autoregister_is_on_in_production_only_unless_said_otherwise(self):
+        assert reg.autoregister_enabled(None, environment="production") is True
+        assert reg.autoregister_enabled(None, environment="staging") is False
+        assert reg.autoregister_enabled(None, environment=None) is False
+        assert reg.autoregister_enabled("1", environment=None) is True
         for off in ("0", "false", "no", "OFF"):
-            assert reg.autoregister_enabled(off) is False
+            assert reg.autoregister_enabled(off, environment="production") is False
 
     def test_bot_matching_ignores_the_at_sign_and_case(self):
         assert reg.bot_matches("Storydump_App_Bot", "@storydump_app_bot")

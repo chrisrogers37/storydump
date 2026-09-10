@@ -343,8 +343,13 @@ async def _register_webhook(app: FastAPI, env: Mapping[str, str]) -> None:
 
     token = env.get("TARGET_TELEGRAM_BOT_TOKEN")
     secret = env.get("TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN")
-    if not reg.autoregister_enabled(env.get(reg.AUTOREGISTER_VAR)):
-        app.state.webhook = {"ok": False, "skipped": "autoregister off"}
+    if not reg.autoregister_enabled(
+        env.get(reg.AUTOREGISTER_VAR), environment=env.get(reg.ENVIRONMENT_VAR)
+    ):
+        app.state.webhook = {
+            "ok": False,
+            "skipped": "autoregister off (not the production environment)",
+        }
         return
     if not token or not secret:
         app.state.webhook = {
@@ -352,14 +357,10 @@ async def _register_webhook(app: FastAPI, env: Mapping[str, str]) -> None:
             "skipped": "bot token or webhook secret not set",
         }
         return
+    transport = None
     try:
         max_connections = reg.max_connections_from(env.get(reg.MAX_CONNECTIONS_VAR))
-    except reg.BadMaxConnections as exc:
-        app.state.webhook = {"ok": False, "error": str(exc)}
-        logger.error("telegram webhook not registered: %s", exc)
-        return
-    transport = _telegram_transport(env)
-    try:
+        transport = _telegram_transport(env)
         app.state.webhook = await reg.register(
             transport,
             url=env.get(reg.URL_VAR) or reg.DEFAULT_WEBHOOK_URL,
@@ -367,16 +368,21 @@ async def _register_webhook(app: FastAPI, env: Mapping[str, str]) -> None:
             expected_bot=env.get("TARGET_TELEGRAM_BOT_USERNAME"),
             max_connections=max_connections,
         )
+    except reg.BadMaxConnections as exc:
+        # Names the variable and the value, never a secret.
+        app.state.webhook = {"ok": False, "error": str(exc)}
+        logger.error("telegram webhook not registered: %s", exc)
     except Exception as exc:  # noqa: BLE001 — diagnostic; never fails startup
         app.state.webhook = {"ok": False, "error": type(exc).__name__}
         logger.warning(
             "telegram webhook not registered at startup: %s", type(exc).__name__
         )
     finally:
-        try:
-            await transport.aclose()
-        except Exception:  # noqa: BLE001
-            pass
+        if transport is not None:
+            try:
+                await transport.aclose()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 async def _sample_db_role(app: FastAPI) -> None:
@@ -537,7 +543,8 @@ def create_app(
             "db_role": app.state.db_role,
             # The tap counters (phase 1 of the 2026-09-09 plan, step 12).
             "taps": app.state.tap_metrics.snapshot(),
-            # The webhook this API registered on the bot at startup.
+            # The webhook this API registered on the bot at startup — a
+            # snapshot from this process's start (`sampled: startup`).
             "webhook": app.state.webhook,
         }
 

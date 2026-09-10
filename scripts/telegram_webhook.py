@@ -49,7 +49,6 @@ import urllib.request
 from typing import Any, Optional
 
 BOT_API = "https://api.telegram.org"
-from src.channels.telegram_webhook_registration import DEFAULT_WEBHOOK_URL  # noqa: E402
 
 SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token"
 TOKEN_VAR = "TARGET_TELEGRAM_BOT_TOKEN"
@@ -62,6 +61,7 @@ BOT_VAR = "TARGET_TELEGRAM_BOT_USERNAME"
 from src.channels.telegram_webhook_registration import (  # noqa: E402
     ALLOWED_UPDATES,
     DEFAULT_MAX_CONNECTIONS,  # noqa: F401 — the tool's documented default, pinned by its tests
+    DEFAULT_WEBHOOK_URL,
     MAX_CONNECTIONS_VAR,
     BadMaxConnections,
     max_connections_from,

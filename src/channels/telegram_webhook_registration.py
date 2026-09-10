@@ -31,10 +31,13 @@ ALLOWED_UPDATES = ["message", "callback_query"]
 #: `POOL_SIZE_SEAM` (10) today; 20 if the API runs two workers (F5).
 MAX_CONNECTIONS_VAR = "TARGET_TELEGRAM_WEBHOOK_MAX_CONNECTIONS"
 DEFAULT_MAX_CONNECTIONS = 10
-#: `0`/`false`/`no` switches the API's startup registration off (an operator
-#: driving the script by hand, or a second deployment of the same bot that
-#: must NOT steal the webhook).
+#: The API's startup registration is ON in Railway's production environment
+#: and OFF anywhere else unless this says `1` — any second process holding
+#: the production token (a laptop, a tunnel, a preview) must never re-point
+#: production's webhook at itself with its own secret. `0`/`false`/`no`
+#: switches it off in production too (an operator driving the script by hand).
 AUTOREGISTER_VAR = "TARGET_TELEGRAM_WEBHOOK_AUTOREGISTER"
+ENVIRONMENT_VAR = "RAILWAY_ENVIRONMENT_NAME"
 
 
 class BadMaxConnections(ValueError):
@@ -56,8 +59,16 @@ def max_connections_from(raw: Optional[str]) -> int:
     return value
 
 
-def autoregister_enabled(raw: Optional[str]) -> bool:
-    return (raw or "1").strip().lower() not in ("0", "false", "no", "off")
+def autoregister_enabled(raw: Optional[str], *, environment: Optional[str]) -> bool:
+    """Explicit `1` → on; explicit `0`/`false`/`no`/`off` → off; unset → on only
+    in Railway's `production` environment (the one deployment that owns the
+    bot's webhook)."""
+    value = (raw or "").strip().lower()
+    if value in ("0", "false", "no", "off"):
+        return False
+    if value in ("1", "true", "yes", "on"):
+        return True
+    return (environment or "").strip().lower() == "production"
 
 
 def bot_matches(username: str, expected: Optional[str]) -> bool:
@@ -87,6 +98,7 @@ async def register(
     """
     report: dict[str, Any] = {
         "ok": False,
+        "sampled": "startup",  # a snapshot from this process's start, not live
         "url": url,
         "asked_updates": list(ALLOWED_UPDATES),
         "max_connections": max_connections,
@@ -116,8 +128,14 @@ async def register(
         if not report["ok"]:
             report["error"] = "getWebhookInfo reports a different URL"
     except Exception as exc:  # noqa: BLE001 — a report, never a failed startup
-        report["error"] = f"{type(exc).__name__}: {transport.redact(str(exc))}"
-        logger.warning("telegram webhook not registered: %s", report["error"])
+        # `/health` is unauthenticated: it gets the exception's TYPE only. The
+        # prose (Telegram's, or httpx's, which may embed the URL) goes to the
+        # log with the token AND the secret struck out.
+        report["error"] = type(exc).__name__
+        prose = transport.redact(str(exc)).replace(secret, "<SECRET>")
+        logger.warning(
+            "telegram webhook not registered: %s: %s", type(exc).__name__, prose
+        )
         return report
     logger.info(
         "telegram webhook registered on @%s → %s (updates=%s, max_connections=%s,"

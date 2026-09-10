@@ -585,6 +585,7 @@ class TestTheApiRegistersItsOwnWebhook:
             "TARGET_TELEGRAM_BOT_TOKEN": "8675309:AAtest",
             "TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN": "0123456789abcdef0123456789abcdef",
             "TARGET_TELEGRAM_BOT_USERNAME": "storydump_app_bot",
+            "RAILWAY_ENVIRONMENT_NAME": "production",
             **(env_extra or {}),
         }
         return create_app(env=env), calls
@@ -620,9 +621,23 @@ class TestTheApiRegistersItsOwnWebhook:
     def test_without_a_token_it_is_skipped_and_says_so(self):
         from fastapi.testclient import TestClient
 
-        with TestClient(create_app(env={})) as client:
+        with TestClient(
+            create_app(env={"RAILWAY_ENVIRONMENT_NAME": "production"})
+        ) as client:
             report = self._wait_for_webhook(client)
         assert report["ok"] is False and "not set" in report["skipped"]
+
+    def test_outside_production_it_is_off_by_default(self, monkeypatch):
+        """A laptop or a preview holding the production token must never
+        re-point production's webhook at itself."""
+        from fastapi.testclient import TestClient
+
+        app, calls = self._app_with_bot(
+            monkeypatch, {"RAILWAY_ENVIRONMENT_NAME": "pr-42"}
+        )
+        with TestClient(app) as client:
+            report = self._wait_for_webhook(client)
+        assert calls == [] and "not the production environment" in report["skipped"]
 
     def test_the_switch_turns_it_off(self, monkeypatch):
         from fastapi.testclient import TestClient
@@ -632,4 +647,4 @@ class TestTheApiRegistersItsOwnWebhook:
         )
         with TestClient(app) as client:
             report = self._wait_for_webhook(client)
-        assert calls == [] and report["skipped"] == "autoregister off"
+        assert calls == [] and report["skipped"].startswith("autoregister off")
