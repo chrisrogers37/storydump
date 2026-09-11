@@ -182,6 +182,11 @@ class Command:
     actor_user_id: str
     channel: str
     args: Mapping[str, Any] = field(default_factory=dict)
+    #: The actor's display name as the ADAPTER resolved it (the tap reads it
+    #: with the tapper's identity — #1286), never from `args`: the web route
+    #: passes the request body into `args` verbatim, and a name there would
+    #: be a member's own choice of what the group reads after "by".
+    actor_label: Optional[str] = None
 
 
 @dataclass(frozen=True)

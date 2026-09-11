@@ -371,9 +371,11 @@ class TelegramDispatcher:
                 workspace_id=tenant.workspace_id,
                 actor_user_id=str(user_id),
                 channel="telegram",
-                # The tapper's name rides with the command so the outcome
-                # line needs no second identity read (#1286).
-                args={"intent_id": tap.intent_id, "actor_label": actor_label},
+                args={"intent_id": tap.intent_id},
+                # The tapper's name rides with the command — on its own
+                # field, never in `args` — so the outcome line needs no
+                # second identity read (#1286).
+                actor_label=actor_label,
             )
             # S.2 for taps (F12): the workspace's window is DEBITED inside the
             # savepoint below, only for a flip that ran — the increment's own

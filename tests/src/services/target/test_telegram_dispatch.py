@@ -357,7 +357,7 @@ class TestTheTap:
             "u1",
             "telegram",
         )
-        assert cmd.args == {"intent_id": INTENT, "actor_label": "Chris"}
+        assert cmd.args == {"intent_id": INTENT}
         gucs = seams["log"]["gucs"][0]
         assert gucs["tenant_id"] == "ws" and gucs["actor_kind"] == "user"
         assert gucs["actor_user_id"] == "u1" and gucs["channel"] == "telegram"
@@ -591,7 +591,8 @@ class TestATapIsCheap:
         d = telegram_dispatch.TelegramDispatcher()
         await d(None, tap("skip"))
         (command,) = seams["log"]["executed"]
-        assert command.args["actor_label"] == "Dana"
+        assert command.actor_label == "Dana"
+        assert "actor_label" not in command.args, "never in args (the web body's)"
 
     @pytest.mark.asyncio
     async def test_a_tapper_without_a_name_still_taps(self, seams):
@@ -600,7 +601,7 @@ class TestATapIsCheap:
         r = await d(None, tap("skip"))
         assert r.outcome == "executed"
         (command,) = seams["log"]["executed"]
-        assert command.args["actor_label"] is None
+        assert command.actor_label is None
 
     @pytest.mark.asyncio
     async def test_the_command_port_is_told_the_tenant_is_bound(self, seams):

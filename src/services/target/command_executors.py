@@ -145,9 +145,10 @@ async def _actor_name(
     session, user_id: Optional[str], *, label: Optional[str] = None
 ) -> Optional[str]:
     """The name a shared chat may see for the actor (F3): never an email. A
-    tap carries the tapper's name on the command (`args.actor_label`, read
+    tap carries the tapper's name on the command (`Command.actor_label`, read
     with the identity — #1286) and passes it as *label*; anything else asks
-    the identity table."""
+    the identity table. `args` is never consulted: the web route fills it
+    from the request body."""
     if label:
         return str(label)
     if not user_id:
@@ -244,11 +245,7 @@ async def _record_outcome(
     """After a flip: the outcome line, written onto every card of the intent."""
     line = prompts.outcome_line(
         state,
-        by=await _actor_name(
-            session,
-            command.actor_user_id,
-            label=(command.args or {}).get("actor_label"),
-        ),
+        by=await _actor_name(session, command.actor_user_id, label=command.actor_label),
         at=_utcnow(),
         tz=_tz(intent),
     )

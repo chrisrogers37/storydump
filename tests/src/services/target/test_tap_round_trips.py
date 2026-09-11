@@ -111,12 +111,39 @@ class TestTheActorNameOnTheCommand:
             workspace_id="ws",
             actor_user_id="u-1",
             channel="telegram",
-            args={"intent_id": "i", "actor_label": "Dana"},
+            args={"intent_id": "i"},
+            actor_label="Dana",
         )
         line = await command_executors._record_outcome(
             object(), {"id": "i", "eff_tz": "UTC"}, command, "skipped"
         )
         assert seen["args"] == ("u-1", "Dana") and "Dana" in line
+
+    async def test_a_label_in_args_is_never_honoured(self, monkeypatch):
+        """The web route passes the request body into `args` verbatim; a name
+        there would let a member choose what the group reads after "by"."""
+        seen = {}
+
+        async def _actor_name(session, user_id, *, label=None):
+            seen["args"] = (user_id, label)
+            return "Chris"
+
+        async def supersede(session, **kw):
+            return 1
+
+        monkeypatch.setattr(command_executors, "_actor_name", _actor_name)
+        monkeypatch.setattr(command_executors, "_supersede_everywhere", supersede)
+        command = Command(
+            kind="skip",
+            workspace_id="ws",
+            actor_user_id="u-1",
+            channel="web",
+            args={"intent_id": "i", "actor_label": "The CEO"},
+        )
+        line = await command_executors._record_outcome(
+            object(), {"id": "i", "eff_tz": "UTC"}, command, "skipped"
+        )
+        assert seen["args"] == ("u-1", None) and "The CEO" not in line
 
 
 class TestTheGateTrustsABoundTenant:
