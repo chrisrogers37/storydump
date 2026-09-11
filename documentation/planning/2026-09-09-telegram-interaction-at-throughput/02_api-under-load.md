@@ -80,6 +80,11 @@ measured). Read against the deciding run:
   `taps_across_many_cards` 0.616 s; `one_slow_chat` 0.602 s; the 20-connection boundary 1.048 s,
   wait p95 45.3 s, late 375. The burst's wait is still throughput-bound (one process, ten
   connections, ≈ 13 round trips per tap) — phase 3b's and F5's territory, not the tap's.
+  **After 3b (#1291, `reports/2026-09-11-rtt10ms-post3b.md`):** `double_tap_one_card` 1.693 s;
+  the 1,000-burst answer p95 0.541 s, wait p95 41.1 s, `answer_late` 312; `taps_across_many_cards`
+  0.615 s; `one_slow_chat` 0.537 s; the 20-connection boundary 0.996 s, wait 42.3 s, late 329. The
+  tap side is unchanged by 3b, as expected — the worker's concurrency moves the sender's throughput,
+  which this harness cannot yet read (#1292).
 - NOT MET and not claimed: the user-side wait for a 1,000-simultaneous burst (56 s, half past
   Telegram's expiry — throughput-bound, #1286); `one_slow_chat`'s edit-landed criterion (the sender
   lands ≈ 0.5 supersede rows/s fleet-wide — one lane, claim-one-await-one; phase 3a/3b's number).
