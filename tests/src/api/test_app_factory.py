@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 
 from src.api.app import create_app
 from src.config.settings import settings
-from src.services.target import posting_health, scheduling_health
+from src.services.target import backpressure, posting_health, scheduling_health
 
 
 class TestEngineConfiguration:
@@ -189,6 +189,20 @@ class TestRefusalMappingsAreTotal:
         assert resp.json() == {"detail": "internal error"}
 
 
+async def _fake_snapshot(executor, **kwargs):
+    """The third seam on `/health/scheduling` (phase 3a): stubbed so a route
+    unit test never reaches SQL."""
+    return {
+        "lanes": {
+            "interactive": {"ready": 0, "oldest_age_s": 0.0},
+            "bulk": {"ready": 2, "oldest_age_s": 12.5},
+        },
+        "outbox_pending": 4,
+        "tg_global": {"paced_windows_last_minute": 0, "hold_active": False},
+        "ws_oldest_wait": None,
+    }
+
+
 class TestSchedulingHealthIsASecondSurface:
     """#1090 F1. `/health` is Railway's liveness gate and must not open a
     connection; this is the dependency-touching check #1026 asked for, and the
@@ -254,6 +268,7 @@ class TestSchedulingHealthIsASecondSurface:
 
         monkeypatch.setattr(scheduling_health, "scheduling_lag", fake_lag)
         monkeypatch.setattr(scheduling_health, "worker_freshness", fake_worker)
+        monkeypatch.setattr(backpressure, "snapshot", _fake_snapshot)
         resp = client.get("/health/scheduling")
 
         assert resp.status_code == 200, resp.text
@@ -292,14 +307,44 @@ class TestSchedulingHealthIsASecondSurface:
 
         monkeypatch.setattr(scheduling_health, "scheduling_lag", fake_lag)
         monkeypatch.setattr(scheduling_health, "worker_freshness", fake_worker)
+        monkeypatch.setattr(backpressure, "snapshot", _fake_snapshot)
         resp = client.get("/health/scheduling")
 
         assert resp.status_code == 200, resp.text
         payload = resp.json()
         # The cursor axis is unchanged — the poller's existing contract.
         assert payload["accounts_active"] == 0
+        # Phase 3a: the backpressure signal rides the same payload — a third
+        # seam, stubbed like the other two, and asserted present.
+        assert payload["backpressure"]["outbox_pending"] == 4
         assert payload["worker"]["succeeded_ever"] == 78
         assert payload["worker"]["last_success_age_seconds"] == 3600
+
+    def test_the_route_calls_the_snapshot_without_identification(
+        self, client, monkeypatch
+    ):
+        """The route is public and promises nothing identifying (`scheduling_health`,
+        `posting_health`): the snapshot must be asked WITHOUT `identify`, and the
+        payload must carry no workspace id at any depth."""
+        seen = {}
+
+        async def fake_lag(executor):
+            return {"stalled": 0, "accounts_active": 0, "max_lag_seconds": None}
+
+        async def fake_worker(executor):
+            return {"succeeded_ever": 0, "last_success_age_seconds": None}
+
+        async def fake_snapshot(executor, **kwargs):
+            seen.update(kwargs)
+            return await _fake_snapshot(executor, **kwargs)
+
+        monkeypatch.setattr(scheduling_health, "scheduling_lag", fake_lag)
+        monkeypatch.setattr(scheduling_health, "worker_freshness", fake_worker)
+        monkeypatch.setattr(backpressure, "snapshot", fake_snapshot)
+        resp = client.get("/health/scheduling")
+        assert resp.status_code == 200, resp.text
+        assert not seen.get("identify"), seen
+        assert "workspace_id" not in resp.text
 
 
 class TestPostingHealthIsATHIRDSurface:

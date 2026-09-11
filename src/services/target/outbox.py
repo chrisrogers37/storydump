@@ -94,6 +94,7 @@ the same review-blocking defect as one in a door body.
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 import logging
 from typing import Any, Optional
 
@@ -114,6 +115,34 @@ RETRY_ONCE_KINDS = frozenset({"notification", "ack"})
 #: The bound the policy states: at most one extra send of a notification.
 #: A row that has been ambiguous once has spent it.
 MAX_NOTIFICATION_RESENDS = 1
+
+
+class ChannelPaced(StorydumpError):
+    """The provider answered 429: not a lost response (the message did not
+    go) and not a fault of the row. Phase 3a step 2: the row returns to
+    `pending`, and the budget the provider named is written as a DURABLE hold
+    on the pacing rows so every replica's poller defers until it passes —
+    never an in-task sleep (#1035). `scope` is `global` or `chat`."""
+
+    def __init__(self, message: str, *, retry_after_s: float, scope: str = "global"):
+        super().__init__(message)
+        self.retry_after_s = float(retry_after_s)
+        self.scope = scope
+
+
+#: A provider's `retry_after` is honoured up to this long on the GLOBAL row
+#: (a longer one is re-learned on the next 429); the chat row takes it whole.
+MAX_GLOBAL_HOLD_SECONDS = 60
+MAX_CHAT_HOLD_SECONDS = 3600
+#: A 429 on a chat-addressed call is almost always the chat's limit (Telegram:
+#: ~20/min per group, against ~30/s bot-wide), so the fleet's global row takes
+#: only a short brake for it — in case it was the bot-wide limit after all —
+#: while the chat's row takes the whole `retry_after`.
+CHAT_SCOPED_GLOBAL_BRAKE_SECONDS = 2
+#: An `approval_prompt` (or invitation) is resent after an ambiguous send at
+#: most this many times; past it the row fails and the intent's reaper
+#: handles the rest (phase 3a step 3 — no cap was a resend forever).
+MAX_PROMPT_RESENDS = 3
 
 
 class DestinationGone(StorydumpError):
@@ -309,6 +338,12 @@ async def _leave_sending(session, outbox_id: str, to_state: str, **extra) -> Non
             "payload = payload || jsonb_build_object('sent_as', CAST(:sent_as AS text))"
         )
         params["sent_as"] = str(extra["sent_as"])
+    if extra.get("restore_attempt"):
+        # A provider's limit (429) is not the row's failure: the attempt the
+        # claim consumed is given back, so R8's ambiguity budget (one retry for
+        # a notification, MAX_PROMPT_RESENDS for a card) is spent only by sends
+        # that were actually lost.
+        sets.append("attempts = GREATEST(attempts - 1, 0)")
     result = await session.execute(
         text(
             f"UPDATE channel_outbox SET {', '.join(sets)}"
@@ -373,7 +408,9 @@ async def resolve_ambiguous(session, *, outbox_id: str) -> str:
     kind, attempts = row[0], row[1]
 
     if kind in RESEND_KINDS:
-        to_state = "pending"  # resend; the duplicate card is tolerated
+        # Resend — the duplicate card is tolerated — but not forever: a card
+        # that keeps losing its answer ends `failed` after MAX_PROMPT_RESENDS.
+        to_state = "pending" if attempts <= MAX_PROMPT_RESENDS else "failed"
     elif attempts <= MAX_NOTIFICATION_RESENDS:
         to_state = "pending"  # the ONE retry the policy allows
     else:
@@ -589,7 +626,17 @@ async def deliver(
         receipt = await transport(row)
     except Exception as exc:  # noqa: BLE001 — classified in `settle`
         error = exc
-    return await settle(session, row, receipt=receipt, error=error)
+    return await settle(
+        session,
+        row,
+        receipt=receipt,
+        error=error,
+        now=now,
+        chat_limit=chat_limit,
+        chat_window_seconds=chat_window_seconds,
+        global_limit=global_limit,
+        global_window_seconds=global_window_seconds,
+    )
 
 
 async def pace_and_claim(
@@ -640,11 +687,109 @@ async def pace_and_claim(
     return row
 
 
-async def settle(session, row: dict, *, receipt=None, error=None) -> dict:
+async def write_pacing_hold(
+    session,
+    *,
+    scope: str,
+    key: str,
+    now,
+    seconds: float,
+    limit: int,
+    window_seconds: int,
+) -> int:
+    """Spend every *window_seconds* window of *scope*/*key* from *now* through
+    `now + seconds` to *limit* in ONE statement, so `increment` on any replica
+    defers (`OutboxPaced`) until the hold passes. Idempotent and monotonic: a
+    window already spent stays spent (`GREATEST`). Returns the windows held."""
+    first = window_start(now, window_seconds)
+    last = window_start(now + timedelta(seconds=max(0.0, seconds)), window_seconds)
+    result = await session.execute(
+        text(
+            "INSERT INTO rate_counters AS rc (scope, key, window_start, count)"
+            " SELECT :scope, :key, gs, :limit"
+            "   FROM generate_series(CAST(:first AS timestamptz),"
+            "                        CAST(:last AS timestamptz),"
+            "                        make_interval(secs => :window)) AS gs"
+            " ON CONFLICT (scope, key, window_start)"
+            "   DO UPDATE SET count = GREATEST(rc.count, EXCLUDED.count)"
+        ),
+        {
+            "scope": scope,
+            "key": key,
+            "limit": limit,
+            "first": first,
+            "last": last,
+            "window": window_seconds,
+        },
+    )
+    return int(result.rowcount or 0)
+
+
+async def settle(
+    session,
+    row: dict,
+    *,
+    receipt=None,
+    error=None,
+    now=None,
+    chat_limit: Optional[int] = None,
+    chat_window_seconds: Optional[int] = None,
+    global_limit: Optional[int] = None,
+    global_window_seconds: Optional[int] = None,
+) -> dict:
     """Everything AFTER the provider answered, in the caller's transaction:
     the row's exit from `sending` by R8's taxonomy. *receipt* is the ref the
     channel returned (a `SendReceipt` also says how the card went out);
-    *error* is what the transport raised instead."""
+    *error* is what the transport raised instead. A `ChannelPaced` error
+    (429) returns the row to `pending` and — when the caller passes its
+    clock and budgets — writes the provider's `retry_after` as a durable hold
+    on the pacing rows (phase 3a step 2): the chat's row for the whole
+    `retry_after` when the 429 is chat-scoped (with a short brake on the
+    global row), the global row for up to a minute otherwise."""
+    if isinstance(error, ChannelPaced):
+        # The holds FIRST: a 429 is a fact about the provider, not about this
+        # row. If the row was superseded in flight, `_leave_sending` is fenced
+        # and the poller commits what came before it — the holds must be in
+        # that set, or the next tick calls straight back into the flood.
+        held = {"global": 0, "chat": 0}
+        if now is not None and global_limit is not None:
+            # Chat row first, then global — the same order `pace_and_claim`
+            # locks them in, so a stale sender still inside its hold cannot
+            # deadlock with this settle.
+            if error.scope == "chat" and chat_limit is not None:
+                held["chat"] = await write_pacing_hold(
+                    session,
+                    scope="tg_chat",
+                    key=str(row["binding_id"]),
+                    now=now,
+                    seconds=min(error.retry_after_s, MAX_CHAT_HOLD_SECONDS),
+                    limit=chat_limit,
+                    window_seconds=chat_window_seconds or 60,
+                )
+            global_seconds = (
+                CHAT_SCOPED_GLOBAL_BRAKE_SECONDS
+                if error.scope == "chat"
+                else MAX_GLOBAL_HOLD_SECONDS
+            )
+            held["global"] = await write_pacing_hold(
+                session,
+                scope="tg_global",
+                key="",
+                now=now,
+                seconds=min(error.retry_after_s, global_seconds),
+                limit=global_limit,
+                window_seconds=global_window_seconds or 1,
+            )
+        # The row goes back to `pending` with the attempt the claim consumed
+        # restored: the provider's limit is not this row's failure.
+        await _leave_sending(session, row["id"], "pending", restore_attempt=True)
+        return {
+            **row,
+            "state": "paced",
+            "external_message_ref": None,
+            "retry_after_s": error.retry_after_s,
+            "held_windows": held,
+        }
     if isinstance(error, DestinationGone):
         # Definitive, not ambiguous: the provider said the chat will not take
         # it. The row fails; the caller retires the binding so the sweep stops
@@ -805,6 +950,8 @@ class OutboxPoller:
         self.ticks = 0
         self.sent = 0
         self.deferred = 0
+        #: Set by a 429: how long the provider asked this sender to wait.
+        self.held_for_s = 0.0
         self.consecutive_failures = 0
         self._task = None
 
@@ -846,7 +993,14 @@ class OutboxPoller:
         try:
             async with self._session_factory() as session:
                 try:
-                    result = await settle(session, row, receipt=receipt, error=error)
+                    result = await settle(
+                        session,
+                        row,
+                        receipt=receipt,
+                        error=error,
+                        now=self._clock(),
+                        **self._budgets,
+                    )
                 except OutboxFenced:
                     # Superseded while in flight: a tap retired the card between
                     # the claim and the send, and its ref was unknown to the
@@ -880,6 +1034,11 @@ class OutboxPoller:
         self.consecutive_failures = 0
         if result["state"] == "sent":
             self.sent += 1
+        elif result["state"] == "paced":
+            # A 429: the hold is written; this binding's sender should yield
+            # its lane and come back when the provider said to.
+            self.deferred += 1
+            self.held_for_s = float(result.get("retry_after_s") or 0.0)
         return result
 
     async def start(self) -> None:

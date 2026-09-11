@@ -43,7 +43,7 @@ import httpx
 
 from src.services.target import egress
 from src.services.target.egress import EgressPolicy
-from src.services.target.outbox import DestinationGone
+from src.services.target.outbox import ChannelPaced, DestinationGone
 
 logger = logging.getLogger("channels.telegram")
 
@@ -103,6 +103,14 @@ class TelegramChatGone(DestinationGone, TelegramSendError):
     chat was deleted, or a group became a supergroup (Telegram names the
     successor id in `parameters.migrate_to_chat_id`). A chat-level fact —
     never the credential's."""
+
+
+class TelegramPaced(ChannelPaced, TelegramSendError):
+    """429 Too Many Requests with Telegram's `retry_after` (phase 3a step 2):
+    the message did not go; the outbox writes the budget as a durable hold
+    and the sender comes back when Telegram said to. Telegram does not say
+    whether the flood limit is the bot's or the chat's; the hold is written
+    on the GLOBAL row (bounded) and, for a chat-addressed call, the chat's."""
 
 
 class TelegramRefused(TelegramSendError):
@@ -285,6 +293,20 @@ class TelegramTransport:
             # never be accepted. 429 and 5xx are NOT this — the card may have
             # landed, and only the outbox's policy may decide.
             raise TelegramRefused(f"{method}: {code} {description}")
+        if code == 429:
+            retry_after = (body.get("parameters") or {}).get("retry_after")
+            try:
+                retry_after_s = max(1.0, float(retry_after))
+            except (TypeError, ValueError):
+                retry_after_s = 5.0
+            has_chat = (isinstance(payload, dict) and "chat_id" in payload) or (
+                isinstance(data, dict) and "chat_id" in data
+            )
+            raise TelegramPaced(
+                f"{method}: 429 retry_after={retry_after_s:g}s {description}",
+                retry_after_s=retry_after_s,
+                scope="chat" if has_chat else "global",
+            )
         raise TelegramSendError(f"{method}: {code} {description}")
 
     async def answer_callback(
