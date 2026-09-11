@@ -31,7 +31,6 @@ from src.config.settings import settings
 import os
 import signal
 import socket
-from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -50,6 +49,8 @@ from src.services.target import backpressure as _backpressure
 from src.services.target import health as health_endpoint
 from src.services.target import prompts as prompts_mod
 from src.services.target.work_loop import (
+    assert_concurrency_fits,
+    make_session_for,
     Parked,
     WorkerConfig,
     WorkerDeps,
@@ -187,32 +188,6 @@ def _poll_from(engine, meta, *, session_factory=None):
     return poll
 
 
-def make_session_for(engine):
-    """Per-job transaction contexts with the GUC invariant applied once.
-
-    Tenant scope comes from the claimed row (system singletons carry none and
-    get an empty tenant id — fail-closed under any tenant policy); the actor
-    is `system`, the `02` §4 worker actor.
-    """
-    maker = async_sessionmaker(engine, expire_on_commit=False)
-
-    def session_for(job: dict):
-        @asynccontextmanager
-        async def ctx():
-            async with maker() as session:
-                async with session.begin():
-                    await unit_of_work.apply_gucs(
-                        session,
-                        tenant_id=str(job.get("workspace_id") or ""),
-                        actor_kind="system",
-                    )
-                    yield session
-
-        return ctx()
-
-    return session_for
-
-
 @dataclass
 class WorkerApp:
     """The composed, not-yet-connected worker."""
@@ -235,6 +210,30 @@ class WorkerApp:
     #: nobody listens on — the 2026-09-10 crosswire — so it parks the sender.
     expected_bot: object = None
     bot_username: object = None
+
+
+#: Env names for phase 3b's K per lane (`05:31`); the defaults are the
+#: dataclass's. A non-integer or a value below 1 is refused by name.
+LANE_CONCURRENCY_ENV = {
+    "interactive": "TARGET_WORKER_INTERACTIVE_CONCURRENCY",
+    "bulk": "TARGET_WORKER_BULK_CONCURRENCY",
+}
+
+
+def lane_concurrency_from_env(env: dict) -> dict:
+    out = dict(WorkerConfig().lane_concurrency)
+    for lane, name in LANE_CONCURRENCY_ENV.items():
+        raw = (env.get(name) or "").strip()
+        if not raw:
+            continue
+        try:
+            value = int(raw)
+        except ValueError as exc:
+            raise ValueError(f"{name} must be an integer, got {raw!r}") from exc
+        if value < 1:
+            raise ValueError(f"{name} must be at least 1, got {value}")
+        out[lane] = value
+    return out
 
 
 def compose(
@@ -294,16 +293,28 @@ def compose(
     )
     session_for = make_session_for(engine)
     name = f"{socket.gethostname()}-{os.getpid()}"
+    # Phase 3b (F7 (a)): K claim-and-run tasks per lane, each claiming on a
+    # pooled checkout it returns at once — K bounds tasks, not connections.
+    # The ceiling is asserted HERE, at composition, so an oversubscribed
+    # configuration refuses to start rather than timing out on checkouts.
+    logger.info(
+        "worker %s",
+        assert_concurrency_fits(config, pool_size=unit_of_work.POOL_SIZE_SEAM),
+    )
     loops = [
         WorkLoop(
+            # A unit composition may pass an engine with no `connect`; such a
+            # loop never claims (it raises at run, as an unbound one always did).
+            connect=getattr(engine, "connect", None),
             session_for=session_for,
             lane=lane,
             registry=registry,
             heartbeat=heartbeat,
             config=config,
-            worker_name=f"{name}-{lane}",
+            worker_name=f"{name}-{lane}-{k}",
         )
         for lane in ("interactive", "bulk")
+        for k in range(config.concurrency_for(lane))
     ]
     return WorkerApp(
         registry=registry,
@@ -392,11 +403,28 @@ def status_line(
     *backpressure* is `backpressure.snapshot`'s dict (phase 3a step 6): the
     queue's depth and age per lane, the outbox backlog, the `tg_global`
     pacing state and the workspace waiting longest."""
+    # K loops per lane (phase 3b) report as ONE lane: the counters summed, the
+    # task count shown, so the line reads the same at K=1 and K=4.
+    by_lane: dict = {}
+    for wl in loops:
+        agg = by_lane.setdefault(
+            wl.lane,
+            {
+                "tasks": 0,
+                "processed": 0,
+                "parked": 0,
+                "failures": 0,
+                "exhausted": 0,
+                "fenced": 0,
+            },
+        )
+        agg["tasks"] += 1
+        for key in ("processed", "parked", "failures", "exhausted", "fenced"):
+            agg[key] += int(getattr(wl, key, 0) or 0)
     lanes = " ".join(
-        f"{wl.lane}[processed={wl.processed} parked={wl.parked}"
-        f" failures={wl.failures} exhausted={getattr(wl, 'exhausted', 0)}"
-        f" fenced={wl.fenced}]"
-        for wl in loops
+        f"{lane}[tasks={a['tasks']} processed={a['processed']} parked={a['parked']}"
+        f" failures={a['failures']} exhausted={a['exhausted']} fenced={a['fenced']}]"
+        for lane, a in by_lane.items()
     )
     clock_part = (
         f"clock[elected={clock.elected} ticks={clock.ticks}"
@@ -595,9 +623,8 @@ async def run(app: WorkerApp, *, stop: asyncio.Event | None = None) -> None:
     # F.4): the runtime posture is verified from this line after a deploy.
     role = await unit_of_work.connection_role(election_conn)
     logger.info("worker database role: %s", role if role is not None else "unknown")
-    claim_conns = [await engine.connect() for _ in app.loops]
-    for wl, conn in zip(app.loops, claim_conns):
-        wl.bind_claim_conn(conn)
+    # No pinned claim connections (phase 3b): each loop checks one out per
+    # claim through `connect` and returns it at once.
 
     clock = app.clock = scheduler.Clock(
         election_conn,
@@ -677,8 +704,6 @@ async def run(app: WorkerApp, *, stop: asyncio.Event | None = None) -> None:
         await app.heartbeat.stop()
         hb_task.cancel()
         await asyncio.gather(hb_task, return_exceptions=True)
-        for conn in claim_conns:
-            await conn.close()
         await election_conn.close()
         if app.deps.transport is not None:
             await app.deps.transport.aclose()
@@ -748,8 +773,11 @@ def main() -> None:
     # rather than duplicated as a worker env var.
     from src.config.settings import settings as _settings
 
-    config = WorkerConfig(web_app_origin=_settings.web_app_origin)
     env = dict(os.environ)
+    config = WorkerConfig(
+        web_app_origin=_settings.web_app_origin,
+        lane_concurrency=lane_concurrency_from_env(env),
+    )
     engine = unit_of_work.create_engine(unit_of_work.engine_url_from_env(env))
     transport = None
     token = env.get("TARGET_TELEGRAM_BOT_TOKEN")

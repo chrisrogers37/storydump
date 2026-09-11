@@ -7,6 +7,8 @@ work the registry parks would manufacture parked jobs on its own cadence),
 and the heartbeat/lease numbers agreeing.
 """
 
+import pytest
+
 from src.services.target.work_loop import _UNBUILT_REASON, Parked, WorkerConfig
 from src.worker import compose
 
@@ -666,3 +668,72 @@ class TestBackpressureOnTheStatusLine:
             beats, short_beats, consecutive_failures = 0, 0, 0
 
         assert "queue" not in status_line(loops=[_L], clock=None, heartbeat=_H)
+
+
+class TestKTasksPerLane:
+    """Phase 3b: K loops per lane on pooled checkouts, from the config, with
+    the ceiling asserted at composition; the env names override the K."""
+
+    def _compose(self, config):
+        from types import SimpleNamespace
+
+        from src.worker import compose
+
+        engine = SimpleNamespace(connect=lambda: None)
+        return compose(engine=engine, config=config, env={})
+
+    def test_compose_builds_k_loops_per_lane_sharing_the_registry(self):
+        from src.services.target.work_loop import WorkerConfig
+
+        app = self._compose(WorkerConfig())
+        by_lane = {}
+        for wl in app.loops:
+            by_lane.setdefault(wl.lane, []).append(wl)
+        assert {lane: len(loops) for lane, loops in by_lane.items()} == {
+            "interactive": 4,
+            "bulk": 2,
+        }
+        assert len({wl._worker_name for wl in app.loops}) == 6, "distinct names"
+        assert all(wl._registry is app.registry for wl in app.loops)
+        assert all(wl._connect is app.engine.connect for wl in app.loops)
+
+    def test_an_oversubscribed_config_refuses_at_composition(self):
+        from src.services.target.work_loop import WorkerConfig
+
+        with pytest.raises(ValueError):
+            self._compose(WorkerConfig(lane_concurrency={"interactive": 8, "bulk": 4}))
+
+    def test_lane_concurrency_from_env(self):
+        from src.worker import lane_concurrency_from_env
+
+        assert lane_concurrency_from_env({}) == {"interactive": 4, "bulk": 2}
+        assert lane_concurrency_from_env(
+            {
+                "TARGET_WORKER_INTERACTIVE_CONCURRENCY": "3",
+                "TARGET_WORKER_BULK_CONCURRENCY": " 1 ",
+            }
+        ) == {"interactive": 3, "bulk": 1}
+        with pytest.raises(ValueError):
+            lane_concurrency_from_env({"TARGET_WORKER_BULK_CONCURRENCY": "two"})
+        with pytest.raises(ValueError):
+            lane_concurrency_from_env({"TARGET_WORKER_BULK_CONCURRENCY": "0"})
+
+    def test_the_status_line_sums_k_loops_into_one_lane(self):
+        from src.worker import status_line
+
+        class _L:
+            def __init__(self, lane, processed):
+                self.lane = lane
+                self.processed, self.parked, self.failures = processed, 0, 1
+                self.fenced, self.exhausted = 0, 0
+
+        class _H:
+            beats, short_beats, consecutive_failures = 0, 0, 0
+
+        line = status_line(
+            loops=[_L("interactive", 3), _L("interactive", 4), _L("bulk", 1)],
+            clock=None,
+            heartbeat=_H,
+        )
+        assert "interactive[tasks=2 processed=7 parked=0 failures=2" in line
+        assert "bulk[tasks=1 processed=1" in line

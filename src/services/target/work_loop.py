@@ -21,10 +21,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Mapping, Optional
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -66,6 +66,13 @@ class WorkerConfig:
     """
 
     lease_seconds: float = 90.0  # 05: 60–120 band
+    # `05:31` row 1, phase 3b (F7 (a)): K concurrent claim-and-run tasks per
+    # lane in ONE process, on pooled checkouts — K bounds tasks, not
+    # connections. Start values under the ceiling `assert_concurrency_fits`
+    # enforces; raising them past it needs the measurement the gate records.
+    lane_concurrency: Mapping[str, int] = field(
+        default_factory=lambda: {"interactive": 4, "bulk": 2}
+    )
     # `05:33` row 3 — per-workspace, per-lane: a workspace can never own a
     # lane. Interactive 5 (half one replica's interactive pool), bulk 3
     # (one publish + one sync + one misc). Raised from 2/2 in phase 3a.
@@ -100,6 +107,9 @@ class WorkerConfig:
     # without a link: being told late beats not being told.
     web_app_origin: Optional[str] = None
 
+    def concurrency_for(self, lane: str) -> int:
+        return max(1, int(self.lane_concurrency.get(lane, 1)))
+
     def ws_lane_cap_for(self, lane: str) -> int:
         return (
             self.ws_lane_cap_interactive
@@ -115,6 +125,39 @@ class WorkerConfig:
     offboard_drain_timeout_seconds: int = 15 * 60  # 05: publish-drain 15 min
     offboard_drain_recheck_seconds: int = 60  # provisional: 05 states no cadence
     offboard_drain_limit: int = 500  # provisional: 05 states no bound
+
+
+#: Connections the worker holds besides its claim-and-run tasks: the clock's
+#: election, the heartbeat's beat, the status reporter's read.
+RESERVED_CONNECTIONS = 3
+
+
+def assert_concurrency_fits(config: WorkerConfig, *, pool_size: int) -> str:
+    """The phase 3b ceiling: every task DB-active at once plus the reserved
+    connections must fit the pool — `K_interactive + K_bulk + 3 ≤ pool`.
+    Returns the startup line; raises `ValueError` naming the numbers when
+    the configuration would oversubscribe the pool (a worker that starts
+    and then times out on checkouts is the failure this refuses at boot)."""
+    k_i = config.concurrency_for("interactive")
+    k_b = config.concurrency_for("bulk")
+    line = f"lanes: interactive×{k_i} bulk×{k_b} pool={pool_size}"
+    if k_i + k_b + RESERVED_CONNECTIONS > pool_size:
+        raise ValueError(
+            f"{line}: {k_i} + {k_b} + {RESERVED_CONNECTIONS} reserved exceeds the"
+            f" pool of {pool_size} — lower TARGET_WORKER_*_CONCURRENCY or raise"
+            " the pool with the measurement 03_worker-throughput.md step 10 asks for"
+        )
+    return line
+
+
+def own_transactions(fn):
+    """Mark an executor that opens its OWN transactions against the engine —
+    the publish pipeline's checkpoints, the email sender's provider call,
+    the outbox sender's hold — so the loop runs it with NO job session open
+    and finalizes in a transaction of its own afterwards (phase 3b: a task
+    waiting on a provider holds no pooled connection while it waits)."""
+    fn.owns_transactions = True
+    return fn
 
 
 @dataclass
@@ -321,9 +364,10 @@ def build_registry(deps: WorkerDeps) -> dict:
             older_than_seconds=cfg.transit_reap_older_than_seconds,
         )
 
+    @own_transactions
     async def run_pipeline(session, job):
-        # The pipeline owns its own transactions against the engine; the
-        # session here is only the finalization context the loop holds.
+        # The pipeline owns its own transactions against the engine; the loop
+        # opens no job session for it (phase 3b) and it finalizes itself.
         outcome = await publish_pipeline.run_publish_pipeline(
             dict(job),
             engine=deps.engine,
@@ -336,28 +380,42 @@ def build_registry(deps: WorkerDeps) -> dict:
         # transactions; the loop must not finalize again.
         return jobs.SELF_FINALIZED
 
+    sessions = make_session_for(deps.engine)
+
+    @own_transactions
     async def deliver_outbox(session, job):
         # The bounded sender hold: while THIS lease serializes the binding's
         # sender, run poller ticks until the queue drains or the hold elapses,
         # then return — the loop finalizes the job and the sweep re-mints one
         # when new rows arrive, so the sender cycles rather than lives forever.
+        # Own transactions (phase 3b): the binding is read in one short
+        # transaction, the hold runs with NO job session open (the poller
+        # ticks on its own), and the binding's retirement or the paced
+        # reschedule each take a short transaction of their own.
         payload = job.get("payload") or {}
         binding_id = str(
             payload.get("binding_id") or job["serialization_key"].split(":", 1)[1]
         )
-        row = (
-            (
-                await session.execute(
-                    text(
-                        "SELECT external_ref, workspace_id FROM channel_bindings"
-                        " WHERE id = :b"
-                    ),
-                    {"b": binding_id},
+
+        def short(name: str):
+            # The loop hands a marked executor no session (phase 3b); a caller
+            # that DOES pass one (the unit seam) keeps it for every write.
+            return sessions(job) if session is None else nullcontext(session)
+
+        async with short("read") as reader:
+            row = (
+                (
+                    await reader.execute(
+                        text(
+                            "SELECT external_ref, workspace_id FROM channel_bindings"
+                            " WHERE id = :b"
+                        ),
+                        {"b": binding_id},
+                    )
                 )
+                .mappings()
+                .first()
             )
-            .mappings()
-            .first()
-        )
         if row is None:
             raise RuntimeError(
                 f"deliver_outbox {job['id']}: binding {binding_id} has no row"
@@ -382,11 +440,12 @@ def build_registry(deps: WorkerDeps) -> dict:
                 # became a supergroup) or retire the binding; either way this
                 # hold ends — the sweep will not mint for a revoked binding.
                 moved = result.get("migrate_to")
-                followed = bool(moved) and await bindings.repoint(
-                    session, binding_id=binding_id, external_ref=str(moved)
-                )
-                if not followed:
-                    await bindings.revoke_by_id(session, binding_id=binding_id)
+                async with short("retire") as writer:
+                    followed = bool(moved) and await bindings.repoint(
+                        writer, binding_id=binding_id, external_ref=str(moved)
+                    )
+                    if not followed:
+                        await bindings.revoke_by_id(writer, binding_id=binding_id)
                 logger.warning(
                     "deliver_outbox %s: binding %s %s (chat gone%s)",
                     job["id"],
@@ -400,13 +459,14 @@ def build_registry(deps: WorkerDeps) -> dict:
                 # sender yields its lane now and comes back when Telegram said
                 # to — its own reschedule, no attempt spent (phase 3a step 2).
                 wait = float(result.get("retry_after_s") or cfg.poller_interval_seconds)
-                await jobs.reschedule_job(
-                    session,
-                    job["id"],
-                    job["lease_token"],
-                    run_at=_utcnow() + timedelta(seconds=wait),
-                    restore_attempt=True,
-                )
+                async with short("paced") as writer:
+                    await jobs.reschedule_job(
+                        writer,
+                        job["id"],
+                        job["lease_token"],
+                        run_at=_utcnow() + timedelta(seconds=wait),
+                        restore_attempt=True,
+                    )
                 logger.info(
                     "deliver_outbox %s: paced by the provider — back in %.0fs",
                     job["id"],
@@ -498,6 +558,7 @@ def build_registry(deps: WorkerDeps) -> dict:
         else Parked("no refresh door provided (compose wires the real one)")
     )
 
+    @own_transactions
     async def send_email(session, job):
         # Own-transactions, for `run_pipeline`'s reason above plus one of its
         # own: a provider call cannot run inside an open transaction (`02` §5).
@@ -663,6 +724,7 @@ class WorkLoop:
         self,
         *,
         claim_conn=None,
+        connect: Optional[Callable[[], Any]] = None,
         session_for: Callable[[dict], Any],
         lane: str,
         registry: dict,
@@ -671,6 +733,11 @@ class WorkLoop:
         worker_name: str,
     ):
         self._claim_conn = claim_conn
+        #: Phase 3b: a claim checks out a pooled connection, claims (the door
+        #: commits) and returns it at once — K loops bound tasks, not
+        #: connections. *connect* is `engine.connect` (an async context
+        #: manager factory); a bound `claim_conn` is the test seam.
+        self._connect = connect
         self._session_for = session_for
         self.lane = lane
         self._registry = registry
@@ -691,22 +758,29 @@ class WorkLoop:
         self._stop = asyncio.Event()
 
     def bind_claim_conn(self, conn) -> None:
-        """The run-time half of construction: compose() wires everything that
-        needs no connection; the entrypoint binds the live claim connection."""
+        """The test seam: pin one connection for this loop's claims. Production
+        (phase 3b) claims on pooled checkouts via *connect* instead."""
         self._claim_conn = conn
+
+    async def _claim(self):
+        claim = dict(
+            lane=self.lane,
+            worker=self._worker_name,
+            lease_seconds=self._config.lease_seconds,
+            ws_lane_cap=self._config.ws_lane_cap_for(self.lane),
+        )
+        if self._claim_conn is not None:
+            return await jobs.claim_job(self._claim_conn, **claim)
+        assert self._connect is not None  # run_once checked
+        async with self._connect() as conn:
+            return await jobs.claim_job(conn, **claim)
 
     async def run_once(self) -> bool:
         """Claim and run at most one job. Returns True when one was claimed."""
-        if self._claim_conn is None:
-            raise RuntimeError("WorkLoop.run before bind_claim_conn")
+        if self._claim_conn is None and self._connect is None:
+            raise RuntimeError("WorkLoop.run before bind_claim_conn or connect")
         try:
-            job = await jobs.claim_job(
-                self._claim_conn,
-                lane=self.lane,
-                worker=self._worker_name,
-                lease_seconds=self._config.lease_seconds,
-                ws_lane_cap=self._config.ws_lane_cap_for(self.lane),
-            )
+            job = await self._claim()
         except Exception as exc:  # noqa: BLE001 — survive transient, die loud on persistent
             self.consecutive_errors += 1
             logger.error(
@@ -751,25 +825,45 @@ class WorkLoop:
             self.parked += 1
             return
         try:
-            async with self._session_for(job) as session:
-                outcome = await entry(session, job)
-                # The executor's verdict decides the terminal state. It was
-                # discarded here and `succeeded` hardcoded, which is what let a
-                # producer that reached nobody report a clean run. Every other
-                # executor returns None and is unaffected.
+            if getattr(entry, "owns_transactions", False):
+                # Phase 3b: an executor that waits — on a provider, on its own
+                # checkpoints, on the sender's hold — runs with NO job session
+                # open, so no pooled connection sits idle in a transaction for
+                # the wait; its finalize takes a short transaction after.
+                outcome = await entry(None, job)
                 undeliverable = outcome == outbox.UNDELIVERABLE
-                # An executor that finalized or rescheduled its OWN job says
-                # so with `jobs.SELF_FINALIZED` — a second finalize here would
-                # only be fenced and counted as an error (phase 3a).
                 if outcome is not jobs.SELF_FINALIZED:
-                    await jobs.finalize_job(
-                        session,
-                        job["id"],
-                        job["lease_token"],
-                        terminal_state=(
-                            "review_required" if undeliverable else "succeeded"
-                        ),
-                    )
+                    async with self._session_for(job) as session:
+                        await jobs.finalize_job(
+                            session,
+                            job["id"],
+                            job["lease_token"],
+                            terminal_state=(
+                                "review_required" if undeliverable else "succeeded"
+                            ),
+                        )
+            else:
+                async with self._session_for(job) as session:
+                    outcome = await entry(session, job)
+                    # The executor's verdict decides the terminal state. It
+                    # was discarded here and `succeeded` hardcoded, which is
+                    # what let a producer that reached nobody report a clean
+                    # run. Every other executor returns None and is
+                    # unaffected.
+                    undeliverable = outcome == outbox.UNDELIVERABLE
+                    # An executor that finalized or rescheduled its OWN job
+                    # says so with `jobs.SELF_FINALIZED` — a second finalize
+                    # here would only be fenced and counted as an error
+                    # (phase 3a).
+                    if outcome is not jobs.SELF_FINALIZED:
+                        await jobs.finalize_job(
+                            session,
+                            job["id"],
+                            job["lease_token"],
+                            terminal_state=(
+                                "review_required" if undeliverable else "succeeded"
+                            ),
+                        )
             if undeliverable:
                 logger.warning(
                     "job %s (%s) reached no delivery surface — parked"
@@ -858,6 +952,33 @@ class WorkLoop:
 
     def stop(self) -> None:
         self._stop.set()
+
+
+def make_session_for(engine):
+    """Per-job transaction contexts with the GUC invariant applied once.
+
+    Tenant scope comes from the claimed row (system singletons carry none and
+    get an empty tenant id — fail-closed under any tenant policy); the actor
+    is `system`, the `02` §4 worker actor. Lives here (phase 3b) because the
+    sender executor takes its own short transactions through it.
+    """
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+
+    def session_for(job: dict):
+        @asynccontextmanager
+        async def ctx():
+            async with maker() as session:
+                async with session.begin():
+                    await unit_of_work.apply_gucs(
+                        session,
+                        tenant_id=str(job.get("workspace_id") or ""),
+                        actor_kind="system",
+                    )
+                    yield session
+
+        return ctx()
+
+    return session_for
 
 
 def poller_session_factory(engine, tenant_id: str):

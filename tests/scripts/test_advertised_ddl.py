@@ -280,8 +280,10 @@ class TestAgainstTheRealDocs:
         # 2026-09-08) makes it 28; §17's mix keyed on the connected folder (071,
         # ruling 2026-09-08) makes it 29; §18's `ix_outbox_intent` for the tap's
         # supersede (072, phase 1 of the 2026-09-09 plan) makes it 30; §19's
-        # dry-run `published_via` (073, owner ruling 2026-09-10) makes it 31.
-        assert classes.count("normative") == 31
+        # dry-run `published_via` (073, owner ruling 2026-09-10) makes it 31;
+        # §20's `ix_jobs_leased_lane_ws` for K claimers (074, tap plan phase
+        # 3b) makes it 32.
+        assert classes.count("normative") == 32
         assert classes.count("illustrative") == 4
 
     def test_real_stream_expands_the_fifteen_policies(self):
