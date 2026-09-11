@@ -1541,3 +1541,92 @@ class TestAFloodLimitWritesADurableHold:
         assert (state, ref) == ("pending", None), (
             "a 429 leaves the row pending for the next window — never ambiguous"
         )
+
+
+class TestASlowChatDoesNotDelayAnother:
+    """Phase 3b (`03` step 12's property, on the worker): two senders on the
+    interactive lane, two bindings; a transport that takes seconds for one
+    chat must not delay the other binding's send by more than a poller
+    cadence — the K tasks are what free the lane from a slow binding."""
+
+    @pytest.mark.asyncio
+    async def test_the_other_binding_sends_while_one_is_slow(self, outbox_db):
+        import asyncio
+        import time as _time
+
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        from src.services.target.work_loop import WorkerConfig as _Cfg
+        from src.worker import compose
+
+        slow_binding = _new_binding(outbox_db)
+        fast_binding = _new_binding(outbox_db)
+        refs = {
+            b: _owner_exec(
+                outbox_db,
+                "SELECT external_ref FROM channel_bindings WHERE id = %s",
+                (b,),
+                fetch=True,
+            )[0][0]
+            for b in (slow_binding, fast_binding)
+        }
+        slow_row = _enqueue(outbox_db, kind="notification", binding=slow_binding)
+        fast_row = _enqueue(outbox_db, kind="notification", binding=fast_binding)
+        _seed_sender_job(outbox_db, binding=slow_binding)
+        _seed_sender_job(outbox_db, binding=fast_binding)
+        sent_at: dict = {}
+        started = _time.monotonic()
+
+        class _Transport:
+            def for_chat(self, external_ref):
+                async def send(row):
+                    if external_ref == refs[slow_binding]:
+                        await asyncio.sleep(3.0)
+                    sent_at[str(row["id"])] = _time.monotonic() - started
+                    return f"tg-{row['id']}"
+
+                return send
+
+        from src.services.target import unit_of_work as _uow
+
+        engine = create_async_engine(
+            outbox_db["worker"].replace("postgresql://", "postgresql+asyncpg://", 1),
+            pool_size=10,
+            max_overflow=0,
+        )
+        watch = _uow.PoolWatch(engine)
+        try:
+            cfg = _Cfg(
+                lane_concurrency={"interactive": 2, "bulk": 1},
+                poller_interval_seconds=0.1,
+                sender_hold_seconds=1.0,
+                claim_idle_seconds=0.05,
+                chat_limit=CHAT_LIMIT,
+                chat_window_seconds=CHAT_WINDOW_S,
+                global_limit=GLOBAL_LIMIT,
+                global_window_seconds=GLOBAL_WINDOW_S,
+            )
+            app = compose(engine=engine, config=cfg, env={}, transport=_Transport())
+            loops = [wl for wl in app.loops if wl.lane == "interactive"]
+            assert len(loops) == 2
+            tasks = [asyncio.create_task(wl.run()) for wl in loops]
+            deadline = _time.monotonic() + 10
+            while len(sent_at) < 2 and _time.monotonic() < deadline:
+                await asyncio.sleep(0.05)
+            for wl in loops:
+                wl.stop()
+            await asyncio.gather(*tasks)
+        finally:
+            await engine.dispose()
+
+        assert set(sent_at) == {str(slow_row), str(fast_row)}, sent_at
+        assert sent_at[str(fast_row)] < 1.5, (
+            f"the fast binding waited {sent_at[str(fast_row)]:.2f}s behind the slow one"
+        )
+        assert sent_at[str(slow_row)] >= 3.0
+        assert _state(outbox_db, fast_row)[0] == "sent"
+        assert _state(outbox_db, slow_row)[0] == "sent"
+        # `03` step 10's measurement for the sender kind: two tasks in the
+        # hold, each with its short sessions and poller ticks one at a time,
+        # never more than one connection each plus a claim in flight.
+        assert watch.checked_out_peak <= 3, watch.checked_out_peak

@@ -1067,3 +1067,19 @@ ALTER TABLE post_intents ADD CONSTRAINT ck_posted_complete CHECK (
   OR (published_via = 'api' AND ig_container_id IS NOT NULL
       AND publish_step = 'effect_confirmed' AND cap_consumed_on IS NOT NULL));
 ```
+
+### §20. The leased-lane index for K claimers (074, tap plan phase 3b)
+
+**Why:** `fn_claim_job` (059) enforces `05:33`'s per-workspace cap by counting the workspace's
+`leased` rows on the lane at every claim. With one claimer per lane the count was one scan per
+job; phase 3b runs K claimers per lane (`05:31`), so the count runs K times as often and the
+`(lane, workspace_id)` pair it filters on had no index of its own. One partial index; no
+policy, grant or door changes.
+
+```sql
+-- Phase 3b of the 2026-09-09 tap plan (K claim-and-run tasks per lane): `fn_claim_job` counts
+-- a workspace's leased rows on the lane for the per-workspace cap on EVERY claim, and K claimers
+-- per lane make that K times as many counts. The partial index serves exactly that predicate;
+-- `uq_jobs_serialized_lease` (the one-key-one-runner proof) and the claim/expiry indexes stand.
+CREATE INDEX ix_jobs_leased_lane_ws ON jobs (lane, workspace_id) WHERE state = 'leased';
+```

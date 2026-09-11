@@ -306,7 +306,10 @@ def test_double_tap_one_card(stage):
     # F2's bound, as ratified 2026-09-10: "≈ 2 s at 20 ms RTT, shrinking with
     # #1286" — the row-lock convoy of fifty taps on ONE card measured 2.027 s
     # at the deciding RTT; the reading admits it, the number is still watched.
-    assert n["answer_p95_s"] is not None and n["answer_p95_s"] < 2.1, n
+    # F2 (a)'s bound, restored after #1286: the 2026-09-11 rtt10ms run reads
+    # 1.733 s (the 2026-09-10 deciding run read 2.027 s and carried the
+    # owner's exception).
+    assert n["answer_p95_s"] is not None and n["answer_p95_s"] < 2.0, n
 
 
 def test_taps_across_many_cards(stage):

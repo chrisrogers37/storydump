@@ -356,6 +356,9 @@ class TestTheBoundaryIsDerivedAndLoud:
             # 073: dry-run posts carry their own published_via (07 §19, Dry Run
             # Mode, owner ruling 2026-09-10).
             "073_dry_run_published_via.sql",
+            # 074: ix_jobs_leased_lane_ws — the per-workspace count under K
+            # claimers per lane (07 §20, tap plan phase 3b).
+            "074_jobs_leased_lane_ws_index.sql",
         ], (
             f"the target lineage is {above}. If you are landing the next F.2"
             " increment, add it here — deliberately, and at the end: arm (b)"

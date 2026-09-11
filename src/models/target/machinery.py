@@ -120,6 +120,14 @@ class Job(TargetBase):
                 "state IN ('succeeded','cancelled','failed','review_required')"
             ),
         ),
+        # 074 (07 §20, tap plan phase 3b): `fn_claim_job`'s per-workspace count
+        # of leased rows runs K times as often under K claimers per lane.
+        Index(
+            "ix_jobs_leased_lane_ws",
+            "lane",
+            "workspace_id",
+            postgresql_where=text("state = 'leased'"),
+        ),
     )
 
 
