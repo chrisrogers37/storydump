@@ -249,6 +249,13 @@
       "label": "§19 dry-run posts carry their own published_via (073, Dry Run Mode, owner ruling 2026-09-10)",
       "doc": "07-security-model.md",
       "ordinal": 17
+    },
+    {
+      "sha256": "d1f584c85834f515a5563f509dcd6eb2e693b7140f9983ea3b11d6e932be5c16",
+      "class": "normative",
+      "label": "§20 ix_jobs_leased_lane_ws for K claimers per lane (074, tap plan phase 3b)",
+      "doc": "07-security-model.md",
+      "ordinal": 18
     }
   ],
   "policy_expansion": {

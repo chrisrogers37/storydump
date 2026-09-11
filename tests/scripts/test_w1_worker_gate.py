@@ -9,6 +9,8 @@ assertion — a leased row nobody owns is the failure class the whole design
 exists to prevent.
 """
 
+import asyncio
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -312,9 +314,14 @@ class TestTheWorkerIdlesVisibly:
         assert app.prompt_sweeper is not None and app.prompt_sweeper.sweeps >= 1, (
             "the prompt sweeper must be alive too (W3)"
         )
-        bulk = next(wl_ for wl_ in app.loops if wl_.lane == "bulk")
-        assert bulk.processed >= 1, "the clock-minted plan_slot job must be run"
-        assert bulk.parked >= 1, "the executor-less kind must park, not vanish"
+        # K loops per lane (phase 3b): the lane's counters are their sum.
+        bulk = [wl_ for wl_ in app.loops if wl_.lane == "bulk"]
+        assert sum(wl_.processed for wl_ in bulk) >= 1, (
+            "the clock-minted plan_slot job must be run"
+        )
+        assert sum(wl_.parked for wl_ in bulk) >= 1, (
+            "the executor-less kind must park, not vanish"
+        )
         assert app.heartbeat.consecutive_failures == 0
 
         with sync_conn.cursor() as cur:
@@ -757,4 +764,134 @@ class TestASenderPacedByTheProvider:
                 (binding, cfg.chat_limit),
             )
             assert cur.fetchone()[0] >= 1, "a chat-scoped 429 holds the chat's row"
+        _assert_no_stranded_lease(sync_conn)
+
+
+class TestKLoopsOnOneLane:
+    """Phase 3b (F7 (a)): K claim-and-run tasks on one lane, each claiming on
+    a pooled checkout it returns at once. The unique leased index is what
+    keeps one serialization key on one runner; K makes the race real, so
+    the property is proven under it — never two runs of one key overlapping,
+    at least two runs overlapping at all (the K tasks are concurrent), and
+    the pool's measured peak recorded (`03` step 10)."""
+
+    async def test_k_tasks_claim_distinct_keys_and_never_two_of_one(
+        self, lane_db, sync_conn
+    ):
+        from src.services.target import unit_of_work
+        from src.services.target.work_loop import WorkerConfig as _Cfg
+
+        chain = seed_workspace_chain(sync_conn, "w1k")
+        keys = ["dup", "dup", "b", "c", "d", "e"]
+        job_ids = [
+            _insert_job(
+                sync_conn,
+                kind="sync_media_source",
+                workspace_id=chain["ws"],
+                serialization_key=f"k:{k}:{chain['ws']}",
+            )
+            for k in keys
+        ]
+        runs: list = []
+
+        async def slow(session, job):
+            started = time.monotonic()
+            await asyncio.sleep(0.3)
+            runs.append((job["serialization_key"], started, time.monotonic()))
+
+        engine = create_async_engine(_async_url(lane_db), pool_size=10, max_overflow=0)
+        watch = unit_of_work.PoolWatch(engine)
+        try:
+            cfg = _Cfg(
+                lane_concurrency={"interactive": 1, "bulk": 3},
+                ws_lane_cap_bulk=3,
+                claim_idle_seconds=0.05,
+            )
+            app = compose(engine=engine, config=cfg, env={})
+            bulk = [wl for wl in app.loops if wl.lane == "bulk"]
+            assert len(bulk) == 3
+            for wl in bulk:
+                wl._registry = {**app.registry, "sync_media_source": slow}
+            tasks = [asyncio.create_task(wl.run()) for wl in bulk]
+            deadline = time.monotonic() + 8
+            while len(runs) < len(keys) and time.monotonic() < deadline:
+                await asyncio.sleep(0.05)
+            for wl in bulk:
+                wl.stop()
+            await asyncio.gather(*tasks)
+        finally:
+            await engine.dispose()
+
+        assert len(runs) == len(keys), runs
+        dup = sorted((s, e) for k, s, e in runs if k.startswith("k:dup:"))
+        assert len(dup) == 2 and dup[0][1] <= dup[1][0], (
+            "two runs of one serialization key overlapped — the leased index"
+            " no longer keeps one key on one runner"
+        )
+        overlaps = sum(
+            1
+            for i, (_, s1, e1) in enumerate(runs)
+            for (_, s2, e2) in runs[i + 1 :]
+            if s1 < e2 and s2 < e1
+        )
+        assert overlaps >= 2, "K tasks never ran concurrently"
+        with sync_conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM jobs WHERE id = ANY(%s::uuid[]) AND state = 'succeeded'",
+                ([str(j) for j in job_ids],),
+            )
+            assert cur.fetchone()[0] == len(keys)
+        _assert_no_stranded_lease(sync_conn)
+        # `03` step 10's measurement: with K=3 bulk tasks and no other holder
+        # (the heartbeat is built but not started here) the pool's peak is
+        # exactly K — a claim's checkout returns before its job session opens.
+        assert watch.checked_out_peak <= 3, watch.checked_out_peak
+
+
+class TestNoLeaseExpiresDuringAWait:
+    """Phase 3b: the heartbeat extends every registered lease while a task
+    waits on a provider — a 4 s executor under a 3 s lease finishes with its
+    lease intact and finalizes unfenced."""
+
+    async def test_the_heartbeat_outlives_the_lease_during_a_slow_run(
+        self, lane_db, sync_conn
+    ):
+        from src.services.target.work_loop import WorkerConfig as _Cfg
+
+        chain = seed_workspace_chain(sync_conn, "w1beat")
+        job_id = _insert_job(
+            sync_conn, kind="sync_media_source", workspace_id=chain["ws"]
+        )
+
+        async def waits(session, job):
+            await asyncio.sleep(4.0)
+
+        engine = create_async_engine(_async_url(lane_db))
+        try:
+            cfg = _Cfg(
+                lease_seconds=3.0,
+                heartbeat_interval_seconds=0.5,
+                lane_concurrency={"interactive": 1, "bulk": 1},
+            )
+            app = compose(engine=engine, config=cfg, env={})
+            wl = next(wl_ for wl_ in app.loops if wl_.lane == "bulk")
+            wl._registry = {**app.registry, "sync_media_source": waits}
+            hb = asyncio.create_task(app.heartbeat.run())
+            try:
+                claimed = await wl.run_once()
+            finally:
+                await app.heartbeat.stop()
+                await hb
+        finally:
+            await engine.dispose()
+
+        assert claimed is True
+        assert wl.fenced == 0 and wl.processed == 1
+        assert app.heartbeat.beats >= 4, app.heartbeat.beats
+        # THE proof (structural review of #1291): `fn_extend_leases` extends
+        # only a lease with `locked_until > now()`, so a lease that expired
+        # mid-run makes a SHORT beat — none means every beat found the lease
+        # alive, i.e. it was extended before the 3 s ran out.
+        assert app.heartbeat.short_beats == 0, app.heartbeat.short_beats
+        assert _job_row(sync_conn, job_id)["state"] == "succeeded"
         _assert_no_stranded_lease(sync_conn)

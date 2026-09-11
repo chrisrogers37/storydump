@@ -1193,6 +1193,99 @@ class TestTheBudgetCeiling:
         assert calls["notices"][0][2] == work_loop._DEFAULT_NOTICE
 
 
+class TestAFailureToRecordAFailureDoesNotTakeTheLane:
+    """Adversarial review of the 3b PR: the failure path opens its own
+    checkout; a pool wait or a database fault there must leave the lease to
+    lapse, not raise out of the lane task (which would take the K−1 other
+    in-flight jobs down with it)."""
+
+    def _loop(self, monkeypatch, *, session_error):
+        from datetime import datetime, timezone
+
+        from src.services.target.work_loop import WorkLoop, WorkerConfig
+
+        class _Jobs:
+            JobFenced = work_loop.jobs.JobFenced
+            SELF_FINALIZED = work_loop.jobs.SELF_FINALIZED
+            budget_exhausted = staticmethod(work_loop.jobs.budget_exhausted)
+            backoff_seconds = staticmethod(work_loop.jobs.backoff_seconds)
+
+            @staticmethod
+            async def finalize_job(*a, **k):  # pragma: no cover
+                raise AssertionError("no session, no finalize")
+
+            @staticmethod
+            async def reschedule_job(*a, **k):  # pragma: no cover
+                raise AssertionError("no session, no reschedule")
+
+        monkeypatch.setattr(work_loop, "jobs", _Jobs)
+        monkeypatch.setattr(
+            work_loop, "_utcnow", lambda: datetime(2030, 1, 1, tzinfo=timezone.utc)
+        )
+
+        async def executor(session, job):
+            raise RuntimeError("boom")
+
+        loop = WorkLoop.__new__(WorkLoop)
+        loop._registry = {"k": executor}
+        loop._config = WorkerConfig()
+        loop.processed = loop.parked = loop.failures = 0
+        loop.fenced = loop.undeliverable = loop.consecutive_errors = loop.exhausted = 0
+        loop.claim_waits = 0
+
+        from contextlib import asynccontextmanager
+
+        opened = {"n": 0}
+
+        @asynccontextmanager
+        async def _ctx(job):
+            opened["n"] += 1
+            if (
+                opened["n"] >= 2
+            ):  # the executor's session opens; the failure path's fails
+                raise session_error
+            yield _FakeSession()
+
+        loop._session_for = _ctx
+        return loop
+
+    async def test_a_pool_wait_on_the_backoff_path_is_logged_not_raised(
+        self, monkeypatch
+    ):
+        from sqlalchemy.exc import TimeoutError as PoolTimeout
+
+        loop = self._loop(monkeypatch, session_error=PoolTimeout("pool full"))
+        await loop._run_job(
+            {
+                "id": "j",
+                "kind": "k",
+                "lane": "bulk",
+                "attempts": 1,
+                "max_attempts": 5,
+                "lease_token": "t",
+                "payload": {},
+            }
+        )
+        assert loop.failures == 1 and loop.consecutive_errors == 1
+
+    async def test_a_fault_on_the_exhausted_path_is_logged_not_raised(
+        self, monkeypatch
+    ):
+        loop = self._loop(monkeypatch, session_error=RuntimeError("db gone"))
+        await loop._run_job(
+            {
+                "id": "j",
+                "kind": "k",
+                "lane": "bulk",
+                "attempts": 5,
+                "max_attempts": 5,
+                "lease_token": "t",
+                "payload": {},
+            }
+        )
+        assert loop.failures == 1 and loop.exhausted == 0
+
+
 class TestAnExecutorThatFinalizesItself:
     """`jobs.SELF_FINALIZED` (phase 3a): the publish pipeline and a paced
     sender settle their own job; a second finalize by the loop was fenced and
@@ -1244,3 +1337,249 @@ class TestPerLaneWorkspaceCaps:
         assert cfg.ws_lane_cap_for("interactive") == 5
         assert cfg.ws_lane_cap_for("bulk") == 3
         assert cfg.sender_hold_seconds == 15.0
+
+
+class TestTheConcurrencyCeiling:
+    """Phase 3b (F7 (a), `03` step 10): K per lane is bounded at composition
+    by the pool — every task DB-active at once plus the three reserved
+    connections must fit, or the worker refuses to start."""
+
+    def test_the_start_values_fit_and_the_line_names_them(self):
+        from src.services.target.work_loop import WorkerConfig, assert_concurrency_fits
+
+        line = assert_concurrency_fits(WorkerConfig(), pool_size=10)
+        assert line == (
+            "lanes: interactive×3 bulk×2 pool=10 (tasks hold up to 7 + 3 reserved)"
+        )
+
+    def test_a_bulk_task_weighs_two_connections(self):
+        """A bulk kind's plain executor opens its own sessions UNDER the
+        loop's job transaction (a sync walk, a refresh, the reconciler's
+        poll) — the ceiling counts what a task holds, not the task."""
+        from src.services.target.work_loop import (
+            TASK_CONNECTIONS,
+            WorkerConfig,
+            task_connections,
+        )
+
+        assert TASK_CONNECTIONS == {"interactive": 1, "bulk": 2}
+        assert task_connections(WorkerConfig()) == 3 * 1 + 2 * 2
+
+    def test_past_the_ceiling_it_refuses_by_the_numbers(self):
+        from src.services.target.work_loop import WorkerConfig, assert_concurrency_fits
+
+        cfg = WorkerConfig(lane_concurrency={"interactive": 4, "bulk": 2})
+        with pytest.raises(ValueError) as info:
+            assert_concurrency_fits(cfg, pool_size=10)
+        assert "4×1 + 2×2 + 3 reserved exceeds the pool of 10" in str(info.value)
+
+    def test_exactly_at_the_ceiling_is_allowed(self):
+        from src.services.target.work_loop import WorkerConfig, assert_concurrency_fits
+
+        cfg = WorkerConfig(lane_concurrency={"interactive": 3, "bulk": 2})
+        assert assert_concurrency_fits(cfg, pool_size=10).startswith("lanes:")
+
+    def test_an_unknown_lane_runs_one_task(self):
+        from src.services.target.work_loop import WorkerConfig
+
+        assert WorkerConfig().concurrency_for("weird") == 1
+
+
+class TestClaimsOnPooledCheckouts:
+    """Phase 3b: a loop with `connect` checks a connection out per claim and
+    returns it at once; a bound claim connection (the test seam) still wins."""
+
+    def _loop(self, monkeypatch, **kw):
+        from src.services.target.work_loop import WorkLoop, WorkerConfig
+
+        claims = []
+
+        async def claim_job(conn, **claim):
+            claims.append((conn, claim))
+            return None  # nothing runnable — the claim itself is the point
+
+        monkeypatch.setattr(work_loop.jobs, "claim_job", claim_job)
+        loop = WorkLoop(
+            session_for=lambda job: None,
+            lane="bulk",
+            registry={},
+            heartbeat=None,
+            config=WorkerConfig(),
+            worker_name="w",
+            **kw,
+        )
+        return loop, claims
+
+    async def test_each_claim_checks_out_and_returns_a_connection(self, monkeypatch):
+        from contextlib import asynccontextmanager
+
+        events = []
+
+        @asynccontextmanager
+        async def connect():
+            events.append("out")
+            yield "conn-1"
+            events.append("back")
+
+        loop, claims = self._loop(monkeypatch, connect=connect)
+        assert await loop.run_once() is False
+        assert await loop.run_once() is False
+        assert events == ["out", "back", "out", "back"]
+        assert [c for c, _ in claims] == ["conn-1", "conn-1"]
+        assert claims[0][1]["lane"] == "bulk" and claims[0][1]["ws_lane_cap"] == 3
+
+    async def test_a_bound_connection_is_used_instead(self, monkeypatch):
+        from contextlib import asynccontextmanager
+
+        @asynccontextmanager
+        async def connect():  # pragma: no cover — must not be used
+            raise AssertionError("bound connection wins")
+            yield
+
+        loop, claims = self._loop(monkeypatch, connect=connect)
+        loop.bind_claim_conn("pinned")
+        await loop.run_once()
+        assert [c for c, _ in claims] == ["pinned"]
+
+    async def test_a_full_pool_is_a_counted_wait_not_an_error(self, monkeypatch):
+        from contextlib import asynccontextmanager
+
+        from sqlalchemy.exc import TimeoutError as PoolTimeout
+
+        @asynccontextmanager
+        async def connect():
+            raise PoolTimeout("QueuePool limit reached")
+            yield  # pragma: no cover
+
+        loop, _ = self._loop(monkeypatch, connect=connect)
+        assert await loop.run_once() is False
+        assert loop.claim_waits == 1 and loop.consecutive_errors == 0, (
+            "pressure must not walk the lane toward its error ceiling"
+        )
+
+    async def test_without_either_the_loop_says_so(self, monkeypatch):
+        loop, _ = self._loop(monkeypatch)
+        with pytest.raises(RuntimeError):
+            await loop.run_once()
+
+
+class TestAnExecutorThatOwnsItsTransactions:
+    """Phase 3b: an executor marked `own_transactions` runs with NO job
+    session open and is finalized in a short transaction afterwards; a
+    plain executor keeps the one-transaction shape."""
+
+    def _loop(self, monkeypatch, executor):
+        from src.services.target.work_loop import WorkLoop, WorkerConfig
+
+        calls = {"finalized": [], "opened": 0, "open_during_run": []}
+
+        class _Jobs:
+            JobFenced = work_loop.jobs.JobFenced
+            SELF_FINALIZED = work_loop.jobs.SELF_FINALIZED
+            budget_exhausted = staticmethod(work_loop.jobs.budget_exhausted)
+            backoff_seconds = staticmethod(work_loop.jobs.backoff_seconds)
+
+            @staticmethod
+            async def finalize_job(session, job_id, token, terminal_state):
+                calls["finalized"].append((session, terminal_state))
+
+        monkeypatch.setattr(work_loop, "jobs", _Jobs)
+        loop = WorkLoop.__new__(WorkLoop)
+        loop._registry = {"k": executor}
+        loop._config = WorkerConfig()
+        loop.processed = loop.parked = loop.failures = 0
+        loop.fenced = loop.undeliverable = loop.consecutive_errors = loop.exhausted = 0
+
+        from contextlib import asynccontextmanager
+
+        state = {"open": 0}
+
+        @asynccontextmanager
+        async def _ctx(job):
+            calls["opened"] += 1
+            state["open"] += 1
+            try:
+                yield _FakeSession()
+            finally:
+                state["open"] -= 1
+
+        loop._session_for = _ctx
+        calls["state"] = state
+        return loop, calls
+
+    async def test_a_marked_executor_sees_no_session_and_is_finalized_after(
+        self, monkeypatch
+    ):
+        from src.services.target.work_loop import own_transactions
+
+        seen = {}
+
+        @own_transactions
+        async def executor(session, job):
+            seen["session"] = session
+            seen["open_during"] = calls["state"]["open"]
+            return None
+
+        loop, calls = self._loop(monkeypatch, executor)
+        await loop._run_job({"id": "j", "kind": "k", "lease_token": "t", "payload": {}})
+        assert seen["session"] is None
+        assert seen["open_during"] == 0, "no job transaction is open while it waits"
+        assert calls["opened"] == 1 and calls["finalized"][0][1] == "succeeded"
+        assert loop.processed == 1
+
+    async def test_a_marked_executor_that_finalizes_itself_opens_nothing(
+        self, monkeypatch
+    ):
+        from src.services.target.work_loop import own_transactions
+
+        @own_transactions
+        async def executor(session, job):
+            return work_loop.jobs.SELF_FINALIZED
+
+        loop, calls = self._loop(monkeypatch, executor)
+        await loop._run_job({"id": "j", "kind": "k", "lease_token": "t", "payload": {}})
+        assert calls["opened"] == 0 and calls["finalized"] == []
+
+    async def test_an_undeliverable_verdict_still_parks_review_required(
+        self, monkeypatch
+    ):
+        from src.services.target import outbox
+        from src.services.target.work_loop import own_transactions
+
+        @own_transactions
+        async def executor(session, job):
+            return outbox.UNDELIVERABLE
+
+        loop, calls = self._loop(monkeypatch, executor)
+        await loop._run_job({"id": "j", "kind": "k", "lease_token": "t", "payload": {}})
+        assert calls["finalized"][0][1] == "review_required" and loop.undeliverable == 1
+
+    async def test_a_plain_executor_keeps_the_one_transaction_shape(self, monkeypatch):
+        seen = {}
+
+        async def executor(session, job):
+            seen["session"] = session
+            seen["open_during"] = calls["state"]["open"]
+
+        loop, calls = self._loop(monkeypatch, executor)
+        await loop._run_job({"id": "j", "kind": "k", "lease_token": "t", "payload": {}})
+        assert seen["session"] is not None and seen["open_during"] == 1
+        assert calls["opened"] == 1 and calls["finalized"][0][0] is seen["session"]
+
+    def test_the_three_waiting_kinds_are_marked(self):
+        from src.services.target.work_loop import WorkerDeps, build_registry
+
+        registry = build_registry(
+            WorkerDeps(
+                engine=None,
+                transport=object(),
+                email=object(),
+                meta=object(),
+                transit=object(),
+                media_fetch=lambda job: None,
+            )
+        )
+        for kind in ("deliver_outbox", "send_email", "publish_pipeline"):
+            entry = registry[kind]
+            assert not hasattr(entry, "reason"), f"{kind} must be live here"
+            assert getattr(entry, "owns_transactions", False), kind
