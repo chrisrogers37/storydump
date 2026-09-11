@@ -219,7 +219,7 @@ async def telegram_webhook(
     try:
         conn = await connection.__aenter__()
     except PoolTimeout:
-        return await _refuse_saturated(runtime, payload, metrics)
+        return _refuse_saturated(runtime, payload, metrics, background)
     try:
         try:
             await admit(
@@ -281,16 +281,35 @@ async def telegram_webhook(
 BUSY_TEXT = "Busy — tap again."
 
 
-async def _refuse_saturated(
-    runtime: IngressRuntime, payload: dict, metrics: Optional[TapMetrics]
+async def _answer_busy(
+    runtime: IngressRuntime, callback_query_id: str, metrics: Optional[TapMetrics]
+) -> None:
+    """The busy toast, behind the 200 (#1284): the transport answers False
+    rather than raising; both are an answer that did not land, and the F1
+    bound is read from `answer_failed` either way."""
+    try:
+        landed = await runtime.answer_callback(callback_query_id, BUSY_TEXT, False)
+    except Exception:  # noqa: BLE001 — best effort, no database
+        landed = False
+    if landed is False and metrics is not None:
+        metrics.answer_failed += 1
+
+
+def _refuse_saturated(
+    runtime: IngressRuntime,
+    payload: dict,
+    metrics: Optional[TapMetrics],
+    background: BackgroundTasks,
 ) -> dict[str, str]:
     """The pool wait ran out before admission. EVERY `callback_query` with an
-    id is answered "Busy — tap again" (best effort, no database) and the
-    delivery is consumed with 200 `refused/busy` — the tap is re-derivable
-    because its buttons remain; a stale or malformed token is still a real
-    spinner, and busy is the one thing true of it here (unsaturated it would
-    hear `older_card`). Anything else is refused 503 before admission so the
-    provider redelivers (a message has no spinner to protect)."""
+    id is answered "Busy — tap again" (best effort, no database, behind the
+    200 like every other answer — the saturated path is the one where a
+    request waiting on Telegram is dearest) and the delivery is consumed
+    with 200 `refused/busy` — the tap is re-derivable because its buttons
+    remain; a stale or malformed token is still a real spinner, and busy is
+    the one thing true of it here (unsaturated it would hear `older_card`).
+    Anything else is refused 503 before admission so the provider redelivers
+    (a message has no spinner to protect)."""
     cq = payload.get("callback_query")
     if isinstance(cq, dict) and cq.get("id") is not None:
         if metrics is not None:
@@ -301,14 +320,7 @@ async def _refuse_saturated(
             payload.get("update_id"),
         )
         if runtime.answer_callback is not None:
-            # The transport answers False rather than raising; both are an
-            # answer that did not land, and the F1 bound is read from here.
-            try:
-                landed = await runtime.answer_callback(str(cq["id"]), BUSY_TEXT, False)
-            except Exception:  # noqa: BLE001 — best effort, no database
-                landed = False
-            if landed is False and metrics is not None:
-                metrics.answer_failed += 1
+            background.add_task(_answer_busy, runtime, str(cq["id"]), metrics)
         return {"status": "refused", "outcome": "busy"}
     logger.warning(
         "telegram webhook PARKED: pool saturated, delivery NOT admitted"
