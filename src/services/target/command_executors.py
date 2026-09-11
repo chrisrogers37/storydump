@@ -308,6 +308,10 @@ async def approve(session, command: Command) -> CommandResult:
         kind="publish_pipeline",
         workspace_id=command.workspace_id,
         serialization_key=f"ig:{intent['provider_account_ref']}",
+        # The pipeline's ceiling is its own (`05:38`: deadline = slot end; the
+        # slot may be a day away) — the loop's deadline would end a deferred
+        # publish on its first escaped error. Attempts still bound it.
+        deadline_seconds=jobs.NO_DEADLINE,
         # The dry-run decision travels WITH the job: what the tapper was told
         # is what the run does, whatever the flag says by the time it runs.
         payload={

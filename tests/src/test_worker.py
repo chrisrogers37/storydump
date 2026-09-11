@@ -621,3 +621,48 @@ def test_the_story_video_cap_is_cloudinarys_synchronous_limit():
 
     assert PUBLISH_MAX_BYTES["video"] == 40 * 1000 * 1000
     assert PUBLISH_MAX_BYTES["image"] == 8 * 1024 * 1024
+
+
+class TestBackpressureOnTheStatusLine:
+    """Phase 3a step 6: the status line carries the queue's depth and age
+    per lane, the outbox backlog and the pacing state — `01:88`'s
+    'visible backpressure', from one read the reporter takes itself."""
+
+    def test_status_line_renders_the_snapshot_and_the_exhausted_counter(self):
+        from src.worker import status_line
+
+        class _L:
+            lane, processed, parked, failures, fenced, exhausted = "bulk", 0, 0, 2, 0, 1
+
+        class _H:
+            beats, short_beats, consecutive_failures = 0, 0, 0
+
+        snap = {
+            "lanes": {
+                "interactive": {"ready": 1, "oldest_age_s": 0.5},
+                "bulk": {"ready": 7, "oldest_age_s": 42.0},
+            },
+            "outbox_pending": 3,
+            "tg_global": {"paced_windows_last_minute": 2, "hold_active": False},
+            "ws_oldest_wait": {"workspace_id": "abcdef12-0000", "wait_s": 9.0},
+        }
+        line = status_line(loops=[_L], clock=None, heartbeat=_H, backpressure=snap)
+        for token in (
+            "exhausted=1",
+            "bulk[ready=7 oldest_age=42.0s]",
+            "outbox_pending=3",
+            "tg_global_paced=2",
+            "ws_oldest_wait=abcdef12 9.0s",
+        ):
+            assert token in line, line
+
+    def test_without_a_snapshot_the_line_is_unchanged(self):
+        from src.worker import status_line
+
+        class _L:
+            lane, processed, parked, failures, fenced = "bulk", 0, 0, 0, 0
+
+        class _H:
+            beats, short_beats, consecutive_failures = 0, 0, 0
+
+        assert "queue" not in status_line(loops=[_L], clock=None, heartbeat=_H)

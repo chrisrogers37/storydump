@@ -115,6 +115,54 @@ def _is_serialization_race(exc: BaseException) -> bool:
     )
 
 
+#: What an executor returns when it finalized (or rescheduled) its OWN job
+#: inside its transaction — the loop must not finalize again (phase 3a: the
+#: publish pipeline and a paced sender do this; before, the loop's second
+#: finalize was fenced and counted as an error on every such run).
+SELF_FINALIZED = "self-finalized"
+
+#: `05:38` row 8 — the retryable-failure budget per lane: attempts and the
+#: deadline from mint (interactive: 3 attempts, +10 min; bulk: 5 attempts,
+#: +6 h for a job with no slot). Both bound `_run_job`'s failure path (F6 (a)).
+LANE_BUDGETS: dict[str, tuple[int, int]] = {
+    "interactive": (3, 10 * 60),
+    "bulk": (5, 6 * 3600),
+}
+#: `enqueue(deadline_seconds=NO_DEADLINE)`: the job carries no deadline (`deadline_at`
+#: NULL) — for a kind whose ceiling is its own, like the publish pipeline, whose
+#: slot may be a day away (`05:38`: "deadline = slot end"). Attempts still bound it.
+NO_DEADLINE = -1
+#: The backoff ladder per lane (seconds), ± 20 % jitter applied by `backoff_seconds`.
+BACKOFF_SECONDS: dict[str, tuple[int, ...]] = {
+    "interactive": (10, 30, 60),
+    "bulk": (60, 300, 900, 3600),
+}
+
+
+def backoff_seconds(lane: str, attempts: int, *, jitter=None) -> float:
+    """Seconds until the next attempt after *attempts* have been consumed:
+    the lane's rung (the last rung repeats) with ± 20 % jitter so a burst of
+    failures does not re-arrive as a burst. *jitter* is a callable returning a
+    float in [0, 1) — `random.random` by default, injectable for tests."""
+    import random
+
+    rungs = BACKOFF_SECONDS.get(lane) or BACKOFF_SECONDS["bulk"]
+    rung = rungs[min(max(attempts, 1) - 1, len(rungs) - 1)]
+    draw = (jitter or random.random)()
+    return rung * (0.8 + 0.4 * draw)
+
+
+def budget_exhausted(job: dict, *, now) -> bool:
+    """R8's ceiling (F6 (a)): the attempts consumed reach `max_attempts`, or
+    `deadline_at` has passed. A job with no deadline is bound by attempts alone."""
+    attempts = int(job.get("attempts") or 0)
+    max_attempts = int(job.get("max_attempts") or 0)
+    if max_attempts and attempts >= max_attempts:
+        return True
+    deadline = job.get("deadline_at")
+    return bool(deadline is not None and now >= deadline)
+
+
 async def claim_job(
     conn,
     *,
@@ -253,7 +301,8 @@ async def enqueue(
     serialization_key: str,
     payload: dict,
     lane: str = "bulk",
-    max_attempts: int = 5,
+    max_attempts: Optional[int] = None,
+    deadline_seconds: Optional[int] = None,
     unless_pending: bool = False,
 ) -> Optional[str]:
     """Insert one `ready` job in the caller's transaction; returns its id.
@@ -276,13 +325,20 @@ async def enqueue(
         if unless_pending
         else ""
     )
+    # `05:38`: the lane's budget unless the caller names its own. The deadline
+    # is written at mint so `_run_job` can read it back without knowing the
+    # lane's table (a job re-minted by a sweep gets a fresh one); a negative
+    # `deadline_seconds` (`NO_DEADLINE`) writes NULL — no deadline at all.
+    lane_attempts, lane_deadline = LANE_BUDGETS.get(lane, LANE_BUDGETS["bulk"])
     row = (
         await session.execute(
             text(
                 "INSERT INTO jobs (kind, workspace_id, lane, serialization_key,"
-                " run_at, max_attempts, payload)"
+                " run_at, max_attempts, deadline_at, payload)"
                 " SELECT CAST(:kind AS text), CAST(:ws AS uuid), CAST(:lane AS text),"
                 "        CAST(:key AS text), now(), CAST(:attempts AS int),"
+                "        CASE WHEN CAST(:deadline AS int) < 0 THEN NULL"
+                "             ELSE now() + make_interval(secs => CAST(:deadline AS int)) END,"
                 f"        CAST(:p AS jsonb){guard}"
                 " RETURNING id"
             ),
@@ -291,7 +347,10 @@ async def enqueue(
                 "ws": workspace_id,
                 "lane": lane,
                 "key": serialization_key,
-                "attempts": max_attempts,
+                "attempts": lane_attempts if max_attempts is None else max_attempts,
+                "deadline": (
+                    lane_deadline if deadline_seconds is None else deadline_seconds
+                ),
                 "p": json.dumps(payload),
             },
         )

@@ -151,8 +151,8 @@ class FolderPage:
 MEDIA_CARD_MAX_BYTES = {"image": 10 * 1024 * 1024, "video": 50 * 1024 * 1024}
 #: A fetch holds about two copies of the file in memory (the capped read and
 #: the multipart body): ~100 MB per in-flight video card, one sender per
-#: binding, `ws_lane_cap=2` — bounded, and noted here so nobody raises the
-#: cap without raising the worker.
+#: binding, `ws_lane_cap_interactive=5` (phase 3a) — bounded, and noted here
+#: so nobody raises the cap without raising the worker.
 #: The media fetch runs under the upload timeout class with its own budget:
 #: a 50 MB video on a modest link needs more than the 30 s default.
 MEDIA_FETCH_BUDGET_S = 120.0
