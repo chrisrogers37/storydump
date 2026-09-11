@@ -725,7 +725,9 @@ def create_app(
             lag = await scheduling_health.scheduling_lag(conn)
             worker = await scheduling_health.worker_freshness(conn)
             # The backpressure signal (phase 3a step 6): the same numbers the
-            # worker's status line prints, for the poller that watches this.
+            # worker's status line prints, for the poller that watches this —
+            # without the waiting workspace's id (this route is public and
+            # promises nothing identifying; `identify` stays False).
             pressure = await backpressure.snapshot(
                 conn,
                 now=datetime.now(timezone.utc),

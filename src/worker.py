@@ -536,6 +536,7 @@ async def _backpressure_snapshot(app: WorkerApp):
                 now=datetime.now(timezone.utc),
                 global_limit=cfg.global_limit,
                 global_window_seconds=cfg.global_window_seconds,
+                identify=True,  # the worker's own log; never the public route
             )
     except Exception as exc:  # noqa: BLE001 — the line still prints
         logger.warning("status: backpressure snapshot failed: %r", exc)

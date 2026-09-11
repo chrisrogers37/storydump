@@ -320,6 +320,32 @@ class TestSchedulingHealthIsASecondSurface:
         assert payload["worker"]["succeeded_ever"] == 78
         assert payload["worker"]["last_success_age_seconds"] == 3600
 
+    def test_the_route_calls_the_snapshot_without_identification(
+        self, client, monkeypatch
+    ):
+        """The route is public and promises nothing identifying (`scheduling_health`,
+        `posting_health`): the snapshot must be asked WITHOUT `identify`, and the
+        payload must carry no workspace id at any depth."""
+        seen = {}
+
+        async def fake_lag(executor):
+            return {"stalled": 0, "accounts_active": 0, "max_lag_seconds": None}
+
+        async def fake_worker(executor):
+            return {"succeeded_ever": 0, "last_success_age_seconds": None}
+
+        async def fake_snapshot(executor, **kwargs):
+            seen.update(kwargs)
+            return await _fake_snapshot(executor, **kwargs)
+
+        monkeypatch.setattr(scheduling_health, "scheduling_lag", fake_lag)
+        monkeypatch.setattr(scheduling_health, "worker_freshness", fake_worker)
+        monkeypatch.setattr(backpressure, "snapshot", fake_snapshot)
+        resp = client.get("/health/scheduling")
+        assert resp.status_code == 200, resp.text
+        assert not seen.get("identify"), seen
+        assert "workspace_id" not in resp.text
+
 
 class TestPostingHealthIsATHIRDSurface:
     """#1268. `/health/scheduling` reads the clock and the worker, and both

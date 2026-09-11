@@ -364,11 +364,24 @@ class _FakeSession:
         self.rows = rows or []
         self.statements = []
 
+    def begin_nested(self):
+        # The exhausted notice rides a savepoint (phase 3a); the double
+        # offers one that does nothing.
+        from contextlib import asynccontextmanager
+
+        @asynccontextmanager
+        async def _sp():
+            yield self
+
+        return _sp()
+
     async def execute(self, stmt, params=None):
         self.statements.append((str(stmt), params))
         rows = self.rows
 
         class _R:
+            rowcount = 1  # an UPDATE's report, for the re-arm
+
             def mappings(self_inner):
                 class _M:
                     def first(self_m):
@@ -993,9 +1006,13 @@ class TestTheBudgetCeiling:
 
         from contextlib import asynccontextmanager
 
+        calls["sessions"] = []
+
         @asynccontextmanager
         async def _ctx(job):
-            yield _FakeSession()
+            session = _FakeSession()
+            calls["sessions"].append(session)
+            yield session
 
         loop._session_for = _ctx
         return loop, calls
@@ -1084,6 +1101,74 @@ class TestTheBudgetCeiling:
         assert calls["notices"] == [], (
             "the sweep re-mints a sender; 'will not retry' would be a lie"
         )
+
+    async def test_a_spent_sync_re_arms_its_source_for_tomorrow(self, monkeypatch):
+        """Leg 4 nulls `next_sync_at` at mint and only a completed sync re-arms
+        it; a sync the loop ends `failed` would leave the source never selected
+        again. The exhausted path re-arms it, so "will try again tomorrow" is
+        true — in the same savepoint as the notice."""
+
+        async def executor(session, job):
+            raise RuntimeError("drive down")
+
+        loop, calls = self._loop(monkeypatch, executor=executor)
+        await loop._run_job(
+            self._job(attempts=5, payload={"v": 1, "source_id": "src-1"})
+        )
+        assert calls["finalized"] == ["failed"] and len(calls["notices"]) == 1
+        updates = [
+            (sql, params)
+            for session in calls["sessions"]
+            for sql, params in session.statements
+            if "UPDATE media_sources" in sql
+        ]
+        assert len(updates) == 1, updates
+        sql, params = updates[0]
+        assert "next_sync_at IS NULL" in sql and "state = 'active'" in sql
+        assert params["s"] == "src-1" and params["ws"] == "ws-1"
+        assert params["secs"] == work_loop.REARM_AFTER_SECONDS
+
+    async def test_a_spent_sync_without_a_source_re_arms_nothing(self, monkeypatch):
+        async def executor(session, job):
+            raise RuntimeError("drive down")
+
+        loop, calls = self._loop(monkeypatch, executor=executor)
+        await loop._run_job(self._job(attempts=5))
+        assert not any(
+            "UPDATE media_sources" in sql
+            for session in calls["sessions"]
+            for sql, _ in session.statements
+        )
+
+    async def test_a_publish_job_the_loop_fails_tells_the_workspace(self, monkeypatch):
+        """Only `approve` mints `publish_pipeline`; an exception that ESCAPES the
+        pipeline past the ceiling would strand the intent with nobody told."""
+
+        async def executor(session, job):
+            raise RuntimeError("pool timeout")
+
+        loop, calls = self._loop(monkeypatch, executor=executor)
+        loop._registry["publish_pipeline"] = executor
+        await loop._run_job(self._job(kind="publish_pipeline", attempts=5))
+        assert calls["finalized"] == ["failed"]
+        assert calls["notices"][0][2] == work_loop.FAILURE_NOTICES["publish_pipeline"]
+
+    async def test_a_notice_that_cannot_be_written_does_not_stop_the_finalize(
+        self, monkeypatch
+    ):
+        from src.services.target import prompts
+
+        async def executor(session, job):
+            raise RuntimeError("boom")
+
+        async def broken_bindings(session, workspace_id):
+            raise RuntimeError("the bindings query failed")
+
+        loop, calls = self._loop(monkeypatch, executor=executor)
+        monkeypatch.setattr(prompts, "push_bindings", broken_bindings)
+        await loop._run_job(self._job(attempts=5))
+        assert calls["finalized"] == ["failed"] and calls["notices"] == []
+        assert loop.exhausted == 1
 
     async def test_a_workspace_with_no_binding_gets_the_log_line_only(
         self, monkeypatch

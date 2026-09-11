@@ -15,7 +15,7 @@ Read-only, one connection, four statements; never a verdict.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import text
@@ -26,8 +26,17 @@ LANES = ("interactive", "bulk")
 
 
 async def snapshot(
-    executor, *, now: datetime, global_limit: int, global_window_seconds: int
+    executor,
+    *,
+    now: datetime,
+    global_limit: int,
+    global_window_seconds: int,
+    identify: bool = False,
 ) -> dict[str, Any]:
+    """The signal. *identify* adds the waiting workspace's id to
+    `ws_oldest_wait` — for the worker's own log, never for a public surface
+    (`/health/scheduling` is unauthenticated and promises nothing identifying:
+    `scheduling_health.py`, `posting_health.py`)."""
     lanes: dict[str, dict[str, Any]] = {
         lane: {"ready": 0, "oldest_age_s": 0.0} for lane in LANES
     }
@@ -56,15 +65,17 @@ async def snapshot(
         (
             await executor.execute(
                 text(
-                    "SELECT count(*) FILTER (WHERE window_start >= :since) AS spent,"
+                    "SELECT count(*) AS spent,"
                     "       bool_or(window_start = :current) AS held"
                     "  FROM rate_counters"
                     " WHERE scope = 'tg_global' AND key = ''"
-                    "   AND window_start >= :since AND count >= :limit"
+                    "   AND window_start >= :since AND window_start <= :current"
+                    "   AND count >= :limit"
                 ),
                 {
-                    "since": window_start(now, global_window_seconds).replace(
-                        second=0, microsecond=0
+                    # A rolling minute, aligned to the window grid.
+                    "since": window_start(
+                        now - timedelta(seconds=60), global_window_seconds
                     ),
                     "current": current,
                     "limit": global_limit,
@@ -99,8 +110,8 @@ async def snapshot(
             None
             if oldest is None
             else {
-                "workspace_id": str(oldest["workspace_id"]),
                 "wait_s": round(float(oldest["wait"] or 0.0), 1),
+                **({"workspace_id": str(oldest["workspace_id"])} if identify else {}),
             }
         ),
     }
@@ -114,11 +125,12 @@ def render(snap: dict[str, Any]) -> str:
     )
     tg = snap["tg_global"]
     oldest = snap.get("ws_oldest_wait")
-    ws = (
-        "ws_oldest_wait=none"
-        if oldest is None
-        else f"ws_oldest_wait={oldest['workspace_id'][:8]} {oldest['wait_s']}s"
-    )
+    if oldest is None:
+        ws = "ws_oldest_wait=none"
+    elif oldest.get("workspace_id"):
+        ws = f"ws_oldest_wait={oldest['workspace_id'][:8]} {oldest['wait_s']}s"
+    else:
+        ws = f"ws_oldest_wait={oldest['wait_s']}s"
     return (
         f"queue {lanes} outbox_pending={snap['outbox_pending']}"
         f" tg_global_paced={tg['paced_windows_last_minute']}"

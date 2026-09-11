@@ -134,6 +134,11 @@ class ChannelPaced(StorydumpError):
 #: (a longer one is re-learned on the next 429); the chat row takes it whole.
 MAX_GLOBAL_HOLD_SECONDS = 60
 MAX_CHAT_HOLD_SECONDS = 3600
+#: A 429 on a chat-addressed call is almost always the chat's limit (Telegram:
+#: ~20/min per group, against ~30/s bot-wide), so the fleet's global row takes
+#: only a short brake for it — in case it was the bot-wide limit after all —
+#: while the chat's row takes the whole `retry_after`.
+CHAT_SCOPED_GLOBAL_BRAKE_SECONDS = 2
 #: An `approval_prompt` (or invitation) is resent after an ambiguous send at
 #: most this many times; past it the row fails and the intent's reaper
 #: handles the rest (phase 3a step 3 — no cap was a resend forever).
@@ -333,6 +338,12 @@ async def _leave_sending(session, outbox_id: str, to_state: str, **extra) -> Non
             "payload = payload || jsonb_build_object('sent_as', CAST(:sent_as AS text))"
         )
         params["sent_as"] = str(extra["sent_as"])
+    if extra.get("restore_attempt"):
+        # A provider's limit (429) is not the row's failure: the attempt the
+        # claim consumed is given back, so R8's ambiguity budget (one retry for
+        # a notification, MAX_PROMPT_RESENDS for a card) is spent only by sends
+        # that were actually lost.
+        sets.append("attempts = GREATEST(attempts - 1, 0)")
     result = await session.execute(
         text(
             f"UPDATE channel_outbox SET {', '.join(sets)}"
@@ -732,20 +743,19 @@ async def settle(
     *error* is what the transport raised instead. A `ChannelPaced` error
     (429) returns the row to `pending` and — when the caller passes its
     clock and budgets — writes the provider's `retry_after` as a durable hold
-    on the pacing rows (phase 3a step 2)."""
+    on the pacing rows (phase 3a step 2): the chat's row for the whole
+    `retry_after` when the 429 is chat-scoped (with a short brake on the
+    global row), the global row for up to a minute otherwise."""
     if isinstance(error, ChannelPaced):
-        await _leave_sending(session, row["id"], "pending")
+        # The holds FIRST: a 429 is a fact about the provider, not about this
+        # row. If the row was superseded in flight, `_leave_sending` is fenced
+        # and the poller commits what came before it — the holds must be in
+        # that set, or the next tick calls straight back into the flood.
         held = {"global": 0, "chat": 0}
         if now is not None and global_limit is not None:
-            held["global"] = await write_pacing_hold(
-                session,
-                scope="tg_global",
-                key="",
-                now=now,
-                seconds=min(error.retry_after_s, MAX_GLOBAL_HOLD_SECONDS),
-                limit=global_limit,
-                window_seconds=global_window_seconds or 1,
-            )
+            # Chat row first, then global — the same order `pace_and_claim`
+            # locks them in, so a stale sender still inside its hold cannot
+            # deadlock with this settle.
             if error.scope == "chat" and chat_limit is not None:
                 held["chat"] = await write_pacing_hold(
                     session,
@@ -756,6 +766,23 @@ async def settle(
                     limit=chat_limit,
                     window_seconds=chat_window_seconds or 60,
                 )
+            global_seconds = (
+                CHAT_SCOPED_GLOBAL_BRAKE_SECONDS
+                if error.scope == "chat"
+                else MAX_GLOBAL_HOLD_SECONDS
+            )
+            held["global"] = await write_pacing_hold(
+                session,
+                scope="tg_global",
+                key="",
+                now=now,
+                seconds=min(error.retry_after_s, global_seconds),
+                limit=global_limit,
+                window_seconds=global_window_seconds or 1,
+            )
+        # The row goes back to `pending` with the attempt the claim consumed
+        # restored: the provider's limit is not this row's failure.
+        await _leave_sending(session, row["id"], "pending", restore_attempt=True)
         return {
             **row,
             "state": "paced",

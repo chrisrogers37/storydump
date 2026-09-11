@@ -505,17 +505,11 @@ def build_registry(deps: WorkerDeps) -> dict:
             job, sender=deps.email, engine=deps.engine
         )
         if sent is None:
-            # The executor rescheduled the job itself, so the loop's finalize
-            # below will not match a leased row and will log a fence warning
-            # ("another owner won") that is not true here. Said plainly on the
-            # line above it, because that warning is what an operator reads to
-            # answer "is the reaper racing my workers". The accounting itself
-            # is the loop's to fix and is filed.
-            logger.info(
-                "send_email %s deferred; the fence warning that follows is the"
-                " deferral, not a lost lease",
-                job["id"],
-            )
+            # The executor rescheduled the job itself (over the daily budget);
+            # the loop must not finalize it again (phase 3a: the sentinel
+            # replaces the fence warning this path used to log).
+            logger.info("send_email %s deferred by its own budget", job["id"])
+            return jobs.SELF_FINALIZED
 
     registry["send_email"] = (
         send_email
@@ -568,20 +562,24 @@ def build_registry(deps: WorkerDeps) -> dict:
 
 
 #: Kinds a sweep re-mints on its own: their `failed` is a log line, never a
-#: tenant notice ("will not retry" would be a lie). `publish_pipeline` keeps
-#: its own ceiling and its own notices.
-_REMINTED_KINDS = frozenset({"deliver_outbox", "publish_pipeline", "plan_slot"})
+#: tenant notice ("will not retry" would be a lie). `publish_pipeline` is NOT
+#: here: only `approve` mints it, and its own ceiling covers the errors it
+#: types — an exception that ESCAPES it is exactly the case the workspace must
+#: hear about, or the intent strands in `publishing` with nobody told.
+_REMINTED_KINDS = frozenset({"deliver_outbox", "plan_slot"})
 
 #: The user-language sentence for a tenant kind whose budget is spent — the
 #: thing, not the kind (`05:38`; phase 3a step 3).
 FAILURE_NOTICES: dict[str, str] = {
     "sync_media_source": (
-        "The sync of your Drive folder failed and won't retry until the next"
-        " scheduled sync; open Settings on the web to check the folder."
+        "The sync of your Drive folder failed and will try again tomorrow;"
+        " open Settings › Integrations on the web to check the folder, or pick"
+        " it again to sync now."
     ),
     "first_ingest_chunk": (
-        "Reading your Drive folder failed part-way and won't retry until the"
-        " next scheduled sync; open Settings on the web to check the folder."
+        "Reading your Drive folder failed part-way and will try again tomorrow;"
+        " open Settings › Integrations on the web to check the folder, or pick"
+        " it again to sync now."
     ),
     "refresh_credential": (
         "Renewing a connection to Instagram or Google Drive failed and won't"
@@ -591,7 +589,40 @@ FAILURE_NOTICES: dict[str, str] = {
         "We could not tell you about a connection that needs attention; open"
         " Settings › Integrations on the web."
     ),
+    "publish_pipeline": (
+        "Posting a story to Instagram hit an unexpected error and stopped;"
+        " open the Queue on the web."
+    ),
 }
+
+#: Kinds whose exhausted job leaves a Drive source with `next_sync_at` NULL
+#: (leg 4 nulls it at mint; only a completed sync re-arms it). Without the
+#: re-arm below the source would never be selected again — "will try again
+#: tomorrow" has to be made true, not just said.
+_SYNC_KINDS = frozenset({"sync_media_source", "first_ingest_chunk"})
+REARM_AFTER_SECONDS = 24 * 3600
+
+
+async def _rearm_source(session, job) -> int:
+    """Re-arm the source a spent sync job carried (`payload.source_id`) for
+    tomorrow's baseline, if it is still active and still disarmed. Returns
+    rows re-armed (0 when the payload names no source or it moved on)."""
+    source_id = (job.get("payload") or {}).get("source_id")
+    workspace_id = job.get("workspace_id")
+    if not source_id or workspace_id is None:
+        return 0
+    result = await session.execute(
+        text(
+            "UPDATE media_sources"
+            "   SET next_sync_at = now() + make_interval(secs => :secs)"
+            " WHERE id = CAST(:s AS uuid) AND workspace_id = CAST(:ws AS uuid)"
+            "   AND state = 'active' AND next_sync_at IS NULL"
+        ),
+        {"s": str(source_id), "ws": str(workspace_id), "secs": REARM_AFTER_SECONDS},
+    )
+    return int(result.rowcount or 0)
+
+
 _DEFAULT_NOTICE = (
     "A background task for this workspace failed and won't retry on its own;"
     " open Settings on the web."
@@ -607,6 +638,8 @@ async def _notify_exhausted(session, job) -> None:
     workspace_id = job.get("workspace_id")
     if workspace_id is None or kind in _REMINTED_KINDS:
         return
+    if kind in _SYNC_KINDS:
+        await _rearm_source(session, job)
     from src.services.target import prompts  # noqa: PLC0415 — cycle
 
     bindings = await prompts.push_bindings(session, str(workspace_id))
@@ -773,13 +806,26 @@ class WorkLoop:
                 )
                 try:
                     async with self._session_for(job) as session:
-                        await _notify_exhausted(session, job)
+                        # The notice rides a savepoint: a failure writing it
+                        # must not take the finalize down with it (the log
+                        # already carries the failure; the notice is a
+                        # courtesy, the terminal state is the record).
+                        try:
+                            async with session.begin_nested():
+                                await _notify_exhausted(session, job)
+                        except Exception:  # noqa: BLE001 — logged, finalize proceeds
+                            logger.exception(
+                                "job %s (%s): the exhausted notice could not be"
+                                " written; finalizing failed without it",
+                                job["id"],
+                                kind,
+                            )
                         await jobs.finalize_job(
                             session, job["id"], job["lease_token"], "failed"
                         )
+                    self.exhausted += 1
                 except jobs.JobFenced:
                     self.fenced += 1
-                self.exhausted += 1
                 return
             backoff = jobs.backoff_seconds(
                 str(job.get("lane") or "bulk"), int(job.get("attempts") or 1)

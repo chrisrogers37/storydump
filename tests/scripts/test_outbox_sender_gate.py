@@ -1399,7 +1399,12 @@ class TestAFloodLimitWritesADurableHold:
 
     @pytest.mark.asyncio
     async def test_the_hold_is_on_the_rows_and_the_next_send_defers(self, outbox_db):
-        from src.services.target.outbox import ChannelPaced, OutboxPaced, deliver
+        from src.services.target.outbox import (
+            CHAT_SCOPED_GLOBAL_BRAKE_SECONDS,
+            ChannelPaced,
+            OutboxPaced,
+            deliver,
+        )
 
         binding = _new_binding(outbox_db)
         row_id = _enqueue(outbox_db, kind="notification", binding=binding)
@@ -1429,6 +1434,9 @@ class TestAFloodLimitWritesADurableHold:
             assert result["retry_after_s"] == 3.0
             assert result["held_windows"]["global"] >= 1
             assert result["held_windows"]["chat"] >= 1
+            assert _state(outbox_db, row_id) == ("pending", 0, None), (
+                "back to pending with the claim's attempt restored"
+            )
 
             # A second sender — any replica — in the same instant is deferred
             # by the rows, before it reaches the provider.
@@ -1479,9 +1487,20 @@ class TestAFloodLimitWritesADurableHold:
             (GLOBAL_LIMIT, now, now + timedelta(seconds=3)),
             fetch=True,
         )[0][0]
-        assert held == 3 // GLOBAL_WINDOW_S + 1, (
-            f"the global row must be spent for every window of the hold, got {held}"
+        # Chat-scoped: the fleet's row takes the 2 s brake (three inclusive 1 s
+        # windows), the chat's row the whole retry_after — the deferral above
+        # came from the chat row.
+        assert held == CHAT_SCOPED_GLOBAL_BRAKE_SECONDS // GLOBAL_WINDOW_S + 1, (
+            f"the global brake must be spent for every window, got {held}"
         )
+        chat_held = _owner_exec(
+            outbox_db,
+            "SELECT count(*) FROM rate_counters"
+            " WHERE scope = 'tg_chat' AND key = %s AND count >= %s",
+            (binding, CHAT_LIMIT),
+            fetch=True,
+        )[0][0]
+        assert chat_held >= 1
 
     @pytest.mark.asyncio
     async def test_the_poller_counts_a_flood_as_deferred_and_remembers_the_wait(

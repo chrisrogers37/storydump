@@ -68,25 +68,51 @@ class TestSettleOnAFloodLimit:
         )
         assert result["state"] == "paced" and result["retry_after_s"] == 7.0
         assert result["external_message_ref"] is None
-        assert floor["left"] == [("row-1", "pending", {})]
+        assert floor["left"] == [("row-1", "pending", {"restore_attempt": True})]
         assert floor["ambiguous"] == [], "a 429 is not a lost response"
         scopes = {(h["scope"], h["key"]) for h in floor["holds"]}
         assert scopes == {("tg_global", ""), ("tg_chat", "b-1")}
         by_scope = {h["scope"]: h for h in floor["holds"]}
+        # A chat-scoped 429 is the chat's limit: the chat row takes the whole
+        # retry_after, the fleet's global row only a short brake.
         assert (
-            by_scope["tg_global"]["seconds"] == 7
-            and by_scope["tg_global"]["limit"] == 30
+            by_scope["tg_global"]["seconds"] == outbox.CHAT_SCOPED_GLOBAL_BRAKE_SECONDS
         )
+        assert by_scope["tg_global"]["limit"] == 30
         assert (
             by_scope["tg_chat"]["seconds"] == 7 and by_scope["tg_chat"]["limit"] == 20
         )
         assert by_scope["tg_chat"]["window_seconds"] == 60
 
+    async def test_the_holds_survive_a_row_superseded_in_flight(
+        self, floor, monkeypatch
+    ):
+        """`_leave_sending` is fenced when a tap retired the card between the
+        claim and the 429 — the poller commits what came before. The holds
+        must be in that set, or the next tick calls straight into the flood."""
+
+        async def fenced(session, outbox_id, to_state, **extra):
+            raise outbox.OutboxFenced("superseded in flight")
+
+        monkeypatch.setattr(outbox, "_leave_sending", fenced)
+        with pytest.raises(outbox.OutboxFenced):
+            await outbox.settle(
+                object(),
+                ROW,
+                error=outbox.ChannelPaced("429", retry_after_s=7, scope="chat"),
+                now=NOW,
+                chat_limit=20,
+                chat_window_seconds=60,
+                global_limit=30,
+                global_window_seconds=1,
+            )
+        assert {h["scope"] for h in floor["holds"]} == {"tg_global", "tg_chat"}
+
     async def test_a_global_flood_writes_only_the_global_hold(self, floor):
         await outbox.settle(
             object(),
             ROW,
-            error=outbox.ChannelPaced("429", retry_after_s=2, scope="global"),
+            error=outbox.ChannelPaced("429", retry_after_s=20, scope="global"),
             now=NOW,
             chat_limit=20,
             chat_window_seconds=60,
@@ -94,6 +120,9 @@ class TestSettleOnAFloodLimit:
             global_window_seconds=1,
         )
         assert [h["scope"] for h in floor["holds"]] == ["tg_global"]
+        assert floor["holds"][0]["seconds"] == 20, (
+            "a bot-wide 429 holds the fleet whole"
+        )
 
     async def test_the_global_hold_is_bounded_the_chat_hold_takes_it_whole(self, floor):
         long = outbox.MAX_GLOBAL_HOLD_SECONDS * 10
@@ -108,17 +137,31 @@ class TestSettleOnAFloodLimit:
             global_window_seconds=1,
         )
         by_scope = {h["scope"]: h for h in floor["holds"]}
-        assert by_scope["tg_global"]["seconds"] == outbox.MAX_GLOBAL_HOLD_SECONDS, (
-            "one 429 must not spend the fleet's global row for ten minutes"
+        assert (
+            by_scope["tg_global"]["seconds"] == outbox.CHAT_SCOPED_GLOBAL_BRAKE_SECONDS
         )
         assert by_scope["tg_chat"]["seconds"] == long
+        floor["holds"].clear()
+        await outbox.settle(
+            object(),
+            ROW,
+            error=outbox.ChannelPaced("429", retry_after_s=long, scope="global"),
+            now=NOW,
+            chat_limit=20,
+            chat_window_seconds=60,
+            global_limit=30,
+            global_window_seconds=1,
+        )
+        assert floor["holds"][0]["seconds"] == outbox.MAX_GLOBAL_HOLD_SECONDS, (
+            "one 429 must not spend the fleet's global row for ten minutes"
+        )
 
     async def test_without_a_clock_the_row_still_returns_to_pending(self, floor):
         result = await outbox.settle(
             object(), ROW, error=outbox.ChannelPaced("429", retry_after_s=3)
         )
         assert result["state"] == "paced"
-        assert floor["left"] == [("row-1", "pending", {})]
+        assert floor["left"] == [("row-1", "pending", {"restore_attempt": True})]
         assert floor["holds"] == [], "no budget was named, so nothing is held"
 
 
@@ -138,8 +181,35 @@ class TestDeliverOnAFloodLimit:
             global_window_seconds=1,
         )
         assert result["state"] == "paced" and result["retry_after_s"] == 4.0
-        assert floor["left"] == [("row-1", "pending", {})]
+        assert floor["left"] == [("row-1", "pending", {"restore_attempt": True})]
         assert len(floor["holds"]) == 2
+
+
+class TestTheRowKeepsItsAttemptOnAFlood:
+    async def test_leave_sending_restores_the_claimed_attempt(self):
+        """R8's ambiguity budget is spent by LOST sends only; a 429 gives the
+        claim's attempt back — asserted on the statement itself."""
+        from src.services.target import outbox as real
+
+        class _S:
+            def __init__(self):
+                self.sql = None
+
+            async def execute(self, stmt, params=None):
+                self.sql = " ".join(str(stmt).split())
+
+                class _R:
+                    rowcount = 1
+
+                return _R()
+
+        s = _S()
+        await real._leave_sending(s, "row-1", "pending", restore_attempt=True)
+        assert "attempts = GREATEST(attempts - 1, 0)" in s.sql
+        assert "state = 'sending'" in s.sql, "still the one CAS"
+        s2 = _S()
+        await real._leave_sending(s2, "row-1", "failed")
+        assert "GREATEST" not in s2.sql
 
 
 class TestThePromptResendIsCapped:

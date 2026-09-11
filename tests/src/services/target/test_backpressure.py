@@ -3,7 +3,7 @@ status line and served on `/health/scheduling`."""
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from src.services.target import backpressure
 
@@ -83,14 +83,36 @@ class TestSnapshot:
             "paced_windows_last_minute": 4,
             "hold_active": True,
         }
-        assert snap["ws_oldest_wait"] == {
-            "workspace_id": "ws-aaaaaaaa-1",
-            "wait_s": 61.4,
-        }
-        paced_params = next(p for s, p in ex.statements if "rate_counters" in s)
+        assert snap["ws_oldest_wait"] == {"wait_s": 61.4}, (
+            "the waiting workspace is not named unless the caller asks (the"
+            " public health route never does)"
+        )
+        paced_sql, paced_params = next(
+            (s, p) for s, p in ex.statements if "rate_counters" in s
+        )
+        assert "window_start <= :current" in paced_sql, (
+            "a hold's FUTURE windows are not windows spent in the last minute"
+        )
         assert paced_params["limit"] == 30
         assert paced_params["current"] == NOW.replace(microsecond=0)
-        assert paced_params["since"] == NOW.replace(second=0, microsecond=0)
+        assert paced_params["since"] == (NOW - timedelta(seconds=60)).replace(
+            microsecond=0
+        ), "a rolling minute, not the top of the wall-clock minute"
+
+    async def test_identify_names_the_waiting_workspace_for_the_worker_s_log(self):
+        ex = _Executor(
+            lanes=[],
+            pending=0,
+            paced=None,
+            oldest={"workspace_id": "ws-aaaaaaaa-1", "wait": 61.44},
+        )
+        snap = await backpressure.snapshot(
+            ex, now=NOW, global_limit=30, global_window_seconds=1, identify=True
+        )
+        assert snap["ws_oldest_wait"] == {
+            "wait_s": 61.4,
+            "workspace_id": "ws-aaaaaaaa-1",
+        }
 
     async def test_an_empty_queue_renders_zeros_not_gaps(self):
         ex = _Executor(lanes=[], pending=0, paced=None, oldest=None)
@@ -131,6 +153,17 @@ class TestRender:
             "ws_oldest_wait=0f3a9c2e 61.4s",
         ):
             assert token in line, line
+
+    def test_an_unnamed_wait_renders_its_seconds_alone(self):
+        line = backpressure.render(
+            {
+                "lanes": {"bulk": {"ready": 1, "oldest_age_s": 3.0}},
+                "outbox_pending": 0,
+                "tg_global": {"paced_windows_last_minute": 0, "hold_active": False},
+                "ws_oldest_wait": {"wait_s": 3.0},
+            }
+        )
+        assert "ws_oldest_wait=3.0s" in line
 
     def test_no_waiting_workspace_says_so(self):
         line = backpressure.render(

@@ -128,6 +128,10 @@ LANE_BUDGETS: dict[str, tuple[int, int]] = {
     "interactive": (3, 10 * 60),
     "bulk": (5, 6 * 3600),
 }
+#: `enqueue(deadline_seconds=NO_DEADLINE)`: the job carries no deadline (`deadline_at`
+#: NULL) — for a kind whose ceiling is its own, like the publish pipeline, whose
+#: slot may be a day away (`05:38`: "deadline = slot end"). Attempts still bound it.
+NO_DEADLINE = -1
 #: The backoff ladder per lane (seconds), ± 20 % jitter applied by `backoff_seconds`.
 BACKOFF_SECONDS: dict[str, tuple[int, ...]] = {
     "interactive": (10, 30, 60),
@@ -323,7 +327,8 @@ async def enqueue(
     )
     # `05:38`: the lane's budget unless the caller names its own. The deadline
     # is written at mint so `_run_job` can read it back without knowing the
-    # lane's table (a job re-minted by a sweep gets a fresh one).
+    # lane's table (a job re-minted by a sweep gets a fresh one); a negative
+    # `deadline_seconds` (`NO_DEADLINE`) writes NULL — no deadline at all.
     lane_attempts, lane_deadline = LANE_BUDGETS.get(lane, LANE_BUDGETS["bulk"])
     row = (
         await session.execute(
@@ -332,7 +337,8 @@ async def enqueue(
                 " run_at, max_attempts, deadline_at, payload)"
                 " SELECT CAST(:kind AS text), CAST(:ws AS uuid), CAST(:lane AS text),"
                 "        CAST(:key AS text), now(), CAST(:attempts AS int),"
-                "        now() + make_interval(secs => CAST(:deadline AS int)),"
+                "        CASE WHEN CAST(:deadline AS int) < 0 THEN NULL"
+                "             ELSE now() + make_interval(secs => CAST(:deadline AS int)) END,"
                 f"        CAST(:p AS jsonb){guard}"
                 " RETURNING id"
             ),

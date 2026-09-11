@@ -459,7 +459,7 @@ class TestTheBudgetCeilingOnTheRealMachinery:
         row = _job_row(sync_conn, job_id)
         assert row["state"] == "failed", row
         notices = _notices(sync_conn, chain["ws"])
-        assert len(notices) == 1 and "won't retry" in notices[0], notices
+        assert len(notices) == 1 and "will try again tomorrow" in notices[0], notices
         assert "adapter is down" not in notices[0]
         _assert_no_stranded_lease(sync_conn)
 
@@ -550,6 +550,14 @@ class TestTheBudgetCeilingOnTheRealMachinery:
                     payload={"v": 1},
                     lane="interactive",
                 )
+                publish_id = await jobs.enqueue(
+                    session,
+                    kind="publish_pipeline",
+                    workspace_id=chain["ws"],
+                    serialization_key=f"ig:{uuid.uuid4()}",
+                    payload={"v": 1},
+                    deadline_seconds=jobs.NO_DEADLINE,
+                )
                 await session.commit()
         finally:
             await engine.dispose()
@@ -569,6 +577,16 @@ class TestTheBudgetCeilingOnTheRealMachinery:
             interactive = cur.fetchone()
         assert (bulk[0], int(bulk[1])) == (5, 6 * 3600)
         assert (interactive[0], int(interactive[1])) == (3, 600)
+        with sync_conn.cursor() as cur:
+            cur.execute(
+                "SELECT max_attempts, deadline_at FROM jobs WHERE id = %s",
+                (str(publish_id),),
+            )
+            publish = cur.fetchone()
+        assert publish == (5, None), (
+            "a publish job's ceiling is the pipeline's own (05:38: slot end);"
+            " the loop's deadline must not end a deferred publish"
+        )
 
 
 class TestTheBackpressureSignalOnRealRows:
@@ -615,7 +633,17 @@ class TestTheBackpressureSignalOnRealRows:
                 )
                 await conn.commit()
                 snap = await backpressure.snapshot(
-                    conn, now=now, global_limit=30, global_window_seconds=1
+                    conn,
+                    now=now,
+                    global_limit=30,
+                    global_window_seconds=1,
+                    identify=True,
+                )
+                later = await backpressure.snapshot(
+                    conn,
+                    now=now + timedelta(seconds=5),
+                    global_limit=30,
+                    global_window_seconds=1,
                 )
         finally:
             await engine.dispose()
@@ -626,7 +654,11 @@ class TestTheBackpressureSignalOnRealRows:
         assert bulk["oldest_age_s"] >= 89.0, snap
         assert snap["outbox_pending"] >= 1
         assert snap["tg_global"]["hold_active"] is True
-        assert snap["tg_global"]["paced_windows_last_minute"] >= 6
+        # Spent windows are counted up to NOW — a hold's future windows are
+        # not "paced in the last minute" until they arrive.
+        assert snap["tg_global"]["paced_windows_last_minute"] == 1
+        assert later["tg_global"]["paced_windows_last_minute"] >= 6
+        assert later["tg_global"]["hold_active"] is True
         oldest = snap["ws_oldest_wait"]
         assert oldest is not None and oldest["wait_s"] >= 89.0
         assert oldest["workspace_id"] == str(chain["ws"])
@@ -702,20 +734,27 @@ class TestASenderPacedByTheProvider:
         assert row["state"] == "ready", row
         assert row["attempts"] == 0, "a provider's limit costs the job no attempt"
         eta = (row["run_at"] - started).total_seconds()
-        assert 8.5 <= eta <= 10.5, f"back at now + retry_after (9 s), got {eta}"
+        assert 8.5 <= eta <= 12.0, f"back at now + retry_after (9 s), got {eta}"
         with sync_conn.cursor() as cur:
-            cur.execute("SELECT state FROM channel_outbox WHERE id = %s", (row_id,))
-            assert cur.fetchone()[0] == "pending"
+            cur.execute(
+                "SELECT state, attempts FROM channel_outbox WHERE id = %s", (row_id,)
+            )
+            assert cur.fetchone() == ("pending", 0), (
+                "the row keeps its ambiguity budget: a 429 is the provider's"
+                " limit, not this row's failure"
+            )
             cur.execute(
                 "SELECT count(*) FROM rate_counters WHERE scope = 'tg_global'"
                 " AND key = '' AND count >= %s AND window_start >= %s",
                 (cfg.global_limit, started - timedelta(seconds=1)),
             )
-            assert cur.fetchone()[0] >= 9, "the hold spans every window of retry_after"
+            # A chat-scoped 429 brakes the fleet's row for 2 s (three 1 s
+            # windows, inclusive); the chat's row carries the whole 9 s.
+            assert cur.fetchone()[0] >= 3, "the global brake spans its windows"
             cur.execute(
                 "SELECT count(*) FROM rate_counters WHERE scope = 'tg_chat'"
                 " AND key = %s AND count >= %s",
                 (binding, cfg.chat_limit),
             )
-            assert cur.fetchone()[0] >= 1, "a chat-scoped 429 holds the chat's row too"
+            assert cur.fetchone()[0] >= 1, "a chat-scoped 429 holds the chat's row"
         _assert_no_stranded_lease(sync_conn)

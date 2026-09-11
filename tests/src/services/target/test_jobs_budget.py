@@ -56,3 +56,9 @@ class TestTheCeiling:
 
     def test_the_lane_budgets_are_the_numbers_05_names(self):
         assert jobs.LANE_BUDGETS == {"interactive": (3, 600), "bulk": (5, 6 * 3600)}
+
+    def test_no_deadline_is_a_negative_seconds_value(self):
+        assert jobs.NO_DEADLINE < 0
+        assert not jobs.budget_exhausted(
+            {"attempts": 1, "max_attempts": 5, "deadline_at": None}, now=NOW
+        )
