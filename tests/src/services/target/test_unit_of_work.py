@@ -455,3 +455,45 @@ class TestTheIngressPoolSeam:
 
         snap = uow.PoolWatch(object()).snapshot()
         assert snap["size"] == 10 and snap["checked_out_peak"] == 0
+
+
+class TestTheLockTimeoutRidesTheGucStatement:
+    """#1286: `apply_gucs(lock_timeout=)` folds `lock_timeout` into the ONE
+    `set_config` statement, transaction-local like the rest."""
+
+    @staticmethod
+    def _module():
+        from src.services.target import unit_of_work as uow_mod
+
+        return uow_mod
+
+    async def test_one_statement_carries_the_gucs_and_the_timeout(self):
+        seen = []
+
+        class _Ex:
+            async def execute(self, stmt, params=None):
+                seen.append((" ".join(str(stmt).split()), params))
+
+        await self._module().apply_gucs(
+            _Ex(),
+            tenant_id="ws-1",
+            actor_kind="user",
+            actor_user_id="u-1",
+            channel="telegram",
+            lock_timeout="2s",
+        )
+        assert len(seen) == 1
+        sql, params = seen[0]
+        assert "set_config('lock_timeout', :v4, true)" in sql
+        assert params["v4"] == "2s"
+        assert sql.count("set_config(") == 5
+
+    async def test_without_a_timeout_nothing_is_added(self):
+        seen = []
+
+        class _Ex:
+            async def execute(self, stmt, params=None):
+                seen.append(" ".join(str(stmt).split()))
+
+        await self._module().apply_gucs(_Ex(), tenant_id="ws-1", actor_kind="system")
+        assert "lock_timeout" not in seen[0]

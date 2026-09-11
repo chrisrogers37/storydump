@@ -111,7 +111,12 @@ async def resolve_chat(executor, channel: str, external_ref: str) -> ResolvedTen
 
 
 async def authorize_member(
-    executor, workspace_id: str, user_id: str, minimum_role: str = "member"
+    executor,
+    workspace_id: str,
+    user_id: str,
+    minimum_role: str = "member",
+    *,
+    tenant_bound: bool = False,
 ) -> str:
     """The one central authorization gate (`01` §1): workspace_members role
     check, in one place, never per handler.
@@ -121,11 +126,15 @@ async def authorize_member(
     visible iff the claim is the row's own workspace, so a false claim reads
     empty and refuses. Fail-closed by construction, and safe to call on a
     privileged connection too (the read is then unfiltered but the WHERE
-    still binds both keys).
+    still binds both keys). *tenant_bound*: the caller already set the claim
+    as this transaction's tenant context (the tap's dispatch does, with the
+    actor GUCs, in one statement), so setting it again would only be a round
+    trip (#1286) — the WHERE still binds both keys either way.
     """
     if minimum_role not in ROLE_ORDER:
         raise TenantResolutionError("insufficient_role", f"unknown role {minimum_role}")
-    await apply_gucs(executor, tenant_id=str(workspace_id))
+    if not tenant_bound:
+        await apply_gucs(executor, tenant_id=str(workspace_id))
     row = (
         await executor.execute(
             text(

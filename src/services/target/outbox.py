@@ -501,6 +501,52 @@ async def supersede_all(
     return len(live)
 
 
+async def supersede_everywhere(
+    session, *, workspace_id: str, intent_id: str, outcome_text: Optional[str]
+) -> int:
+    """`supersede_all` for EVERY active Telegram binding of the workspace, in
+    one statement (#1286): the bindings, the supersede of every live card and
+    the `prompt_supersede` rows are one round trip inside the tap's
+    transaction instead of one read plus two writes per binding. The payload
+    is `_supersede_payload`'s, built in SQL. Returns the cards superseded."""
+    row = (
+        await session.execute(
+            text(
+                "WITH b AS ("
+                "  SELECT id FROM channel_bindings"
+                "   WHERE workspace_id = :ws AND state = 'active'"
+                "     AND channel LIKE 'telegram%'"
+                "), sup AS ("
+                "  UPDATE channel_outbox o SET state = 'superseded',"
+                "     payload = CASE WHEN CAST(:o AS text) IS NULL THEN o.payload"
+                "               ELSE o.payload || jsonb_build_object('outcome_text', CAST(:o AS text)) END"
+                "   WHERE o.workspace_id = :ws AND o.intent_id = :i"
+                "     AND o.binding_id IN (SELECT id FROM b)"
+                "     AND o.kind IN ('approval_prompt', 'invitation')"
+                "     AND o.state IN ('pending', 'sending', 'sent', 'ambiguous')"
+                "   RETURNING o.binding_id, o.external_message_ref, o.payload"
+                "), ins AS ("
+                "  INSERT INTO channel_outbox (workspace_id, binding_id, kind, intent_id, payload)"
+                "  SELECT :ws, s.binding_id, 'prompt_supersede', :i,"
+                "         jsonb_strip_nulls(jsonb_build_object("
+                "           'v', 1,"
+                "           'supersedes_ref', s.external_message_ref,"
+                "           'outcome_text', NULLIF(CAST(:o AS text), ''),"
+                "           'header', COALESCE(NULLIF(s.payload->>'caption', ''),"
+                "                              NULLIF(s.payload->>'text', '')),"
+                "           'sent_as', NULLIF(s.payload->>'sent_as', '')))"
+                "    FROM sup s WHERE s.external_message_ref IS NOT NULL"
+                "  RETURNING id"
+                ")"
+                " SELECT (SELECT count(*) FROM sup) AS superseded,"
+                "        (SELECT count(*) FROM ins) AS queued"
+            ),
+            {"ws": workspace_id, "i": intent_id, "o": outcome_text},
+        )
+    ).first()
+    return int(row[0] or 0) if row is not None else 0
+
+
 async def restate_cards(
     session,
     *,

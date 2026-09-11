@@ -647,3 +647,173 @@ def test_an_admitted_tap_names_its_outcome_in_the_body(client, armed, monkeypatc
     r = _post(client, _tap_update())
     assert r.status_code == 200
     assert r.json() == {"status": "admitted", "outcome": "answered"}
+
+
+# --- the answer rides behind the 200 (#1284) -------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_answer_and_strip_run_after_the_response_has_gone_out(
+    armed, monkeypatch
+):
+    """#1284: the tap's answer and strip are Telegram round trips of their
+    own; run inside the request they held this delivery's slot on the ingress
+    worker until Telegram replied. They are now background tasks — the 200's
+    body is sent BEFORE the transport is spoken to. Proven at the ASGI level:
+    the order of `http.response.body` against the answer call."""
+    import json as _json
+
+    from src.services.target.telegram_dispatch import TapResult
+
+    order: list = []
+
+    async def fake_admit(conn, **kw):
+        return {"admitted": True}
+
+    async def fake_dispatch(conn, payload):
+        return TapResult(
+            outcome="executed",
+            handled=True,
+            callback_query_id="q1",
+            chat_ref="-100",
+            message_ref="555",
+            answer_text="⏭️ Skipped for 7 days",
+            show_alert=True,
+        )
+
+    async def answer(callback_query_id, text, show_alert):
+        order.append("answered")
+        return True
+
+    async def strip(chat_ref, message_ref):
+        order.append("stripped")
+        return True
+
+    monkeypatch.setattr(webhooks, "admit", fake_admit)
+    app.state.ingress = webhooks.IngressRuntime(
+        connect=lambda: FakeConn(),
+        dispatch=fake_dispatch,
+        answer_callback=answer,
+        strip_keyboard=strip,
+    )
+    body = _json.dumps(
+        {
+            "update_id": 91,
+            "callback_query": {
+                "id": "q1",
+                "data": "v1:skip:x",
+                "message": {"message_id": 555, "chat": {"id": -100}},
+            },
+        }
+    ).encode()
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": URL,
+        "raw_path": URL.encode(),
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"host", b"testserver"),
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(body)).encode()),
+            (SECRET_HEADER.lower().encode(), SECRET.encode()),
+        ],
+        "client": ("127.0.0.1", 1234),
+        "server": ("testserver", 80),
+    }
+    sent_body = {"given": False}
+
+    async def receive():
+        if not sent_body["given"]:
+            sent_body["given"] = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        return {"type": "http.disconnect"}
+
+    messages: list = []
+
+    async def send(message):
+        messages.append(message["type"])
+        if message["type"] == "http.response.body" and not message.get("more_body"):
+            order.append("body-sent")
+
+    await app(scope, receive, send)
+
+    assert "http.response.start" in messages
+    assert order == ["body-sent", "answered", "stripped"], order
+
+
+@pytest.mark.asyncio
+async def test_the_busy_answer_runs_after_the_refusal_has_gone_out(armed, monkeypatch):
+    """The saturated path is where a request waiting on Telegram is dearest:
+    its busy toast is a background task too (#1284, adversarial review of
+    #1290)."""
+    import json as _json
+
+    from sqlalchemy.exc import TimeoutError as PoolTimeout
+
+    order: list = []
+
+    class _Saturated:
+        async def __aenter__(self):
+            raise PoolTimeout("pool saturated")
+
+        async def __aexit__(self, *exc):
+            return False
+
+    async def answer(callback_query_id, text, show_alert):
+        order.append(("answered", text))
+        return True
+
+    app.state.ingress = webhooks.IngressRuntime(
+        connect=lambda: _Saturated(), dispatch=None, answer_callback=answer
+    )
+    body = _json.dumps(
+        {
+            "update_id": 92,
+            "callback_query": {
+                "id": "q2",
+                "data": "v1:skip:x",
+                "message": {"message_id": 556, "chat": {"id": -100}},
+            },
+        }
+    ).encode()
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": URL,
+        "raw_path": URL.encode(),
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"host", b"testserver"),
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(body)).encode()),
+            (SECRET_HEADER.lower().encode(), SECRET.encode()),
+        ],
+        "client": ("127.0.0.1", 1234),
+        "server": ("testserver", 80),
+    }
+    given = {"body": False}
+
+    async def receive():
+        if not given["body"]:
+            given["body"] = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        if message["type"] == "http.response.body" and not message.get("more_body"):
+            order.append(("body-sent", None))
+
+    before = app.state.tap_metrics.snapshot()["taps_total"]
+    await app(scope, receive, send)
+
+    assert order == [("body-sent", None), ("answered", webhooks.BUSY_TEXT)], order
+    assert app.state.tap_metrics.snapshot()["taps_total"] == before + 1

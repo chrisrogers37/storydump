@@ -155,6 +155,29 @@ async def user_for_identity(
     return None if row is None else str(row[0])
 
 
+async def tapper_for_identity(
+    executor, *, provider: str, external_id: str
+) -> Optional[tuple[str, Optional[str]]]:
+    """`user_for_identity` plus the identity's own display name, in ONE read —
+    for a tap, whose outcome line names the tapper (#1286: the name was a
+    second query, inside the flip). The Telegram identity's name is the one a
+    group already sees, which is exactly `display_name_for`'s first choice;
+    an empty name here means "ask the long way" (`_actor_name`)."""
+    row = (
+        await executor.execute(
+            text(
+                "SELECT user_id, display_name FROM user_identities"
+                " WHERE provider = :p AND external_id = :sub"
+            ),
+            {"p": provider, "sub": external_id},
+        )
+    ).first()
+    if row is None:
+        return None
+    name = row[1]
+    return str(row[0]), (str(name) if name else None)
+
+
 async def identity_for_user(executor, *, user_id: str, provider: str) -> Optional[str]:
     """The external id *user_id* holds for *provider*, or None — "has this
     person linked Telegram?" asked before a flow that needs it."""
