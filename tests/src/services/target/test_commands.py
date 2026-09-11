@@ -160,7 +160,7 @@ def gate(monkeypatch):
 
     log = Log()
 
-    async def authorize_member(session, ws, user, minimum_role="member"):
+    async def authorize_member(session, ws, user, minimum_role="member", **kw):
         log.append((ws, user, minimum_role))
         if log.refuse is not None:
             raise log.refuse

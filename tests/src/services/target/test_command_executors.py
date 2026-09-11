@@ -69,7 +69,8 @@ def world(monkeypatch):
     log = {"flips": [], "jobs": [], "supersedes": [], "row": dict(ROW)}
 
     async def _intent_row(session, command):
-        return dict(log["row"])
+        # The publish precondition rides the row (#1286): a usable token.
+        return {**log["row"], "has_ig_credential": log.get("connected", True)}
 
     async def transition(session, intent_id, to_state):
         log["flips"].append((intent_id, to_state))
@@ -91,16 +92,10 @@ def world(monkeypatch):
         log["supersedes"].append((workspace_id, intent_id, outcome_text))
         return 1
 
-    async def _actor_name(session, user_id):
+    async def _actor_name(session, user_id, **kw):
         return "Chris"
 
-    async def has_active_ig_credential(session, *, workspace_id, ig_account_id):
-        return log.get("connected", True)
-
     monkeypatch.setattr(command_executors, "_intent_row", _intent_row)
-    monkeypatch.setattr(
-        command_executors, "has_active_ig_credential", has_active_ig_credential
-    )
     monkeypatch.setattr(intent_ledger, "transition", transition)
     monkeypatch.setattr(jobs, "enqueue", enqueue)
     monkeypatch.setattr(command_executors, "_settlement", _settlement)

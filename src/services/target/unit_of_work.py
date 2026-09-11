@@ -326,6 +326,7 @@ async def apply_gucs(
     actor_kind: Optional[str] = None,
     actor_user_id: Optional[str] = None,
     channel: Optional[str] = None,
+    lock_timeout: Optional[str] = None,
 ) -> None:
     """`SET LOCAL` the tenancy/actor GUCs — the ONE spelling of the security
     invariant, shared by the UoW and by raw-connection transactions (the §6
@@ -350,12 +351,16 @@ async def apply_gucs(
     so no provider call can happen inside it — named here because this is
     where the next reader will look.
     """
+    # `lock_timeout` rides the same statement (#1286): a tap bounds its wait on
+    # another tap's row lock, and a second round trip for `SET LOCAL` was the
+    # price of spelling it separately.
     pairs = [("app.tenant_id", tenant_id)] + [
         (name, value)
         for name, value in (
             ("app.actor_kind", actor_kind),
             ("app.actor_user_id", actor_user_id),
             ("app.channel", channel),
+            ("lock_timeout", lock_timeout),
         )
         if value is not None
     ]

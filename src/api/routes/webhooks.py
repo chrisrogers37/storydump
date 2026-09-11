@@ -70,7 +70,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.exc import TimeoutError as PoolTimeout
 
@@ -150,7 +150,9 @@ class TapMetrics:
 # validated against measured delivery rates (the route is still dormant). If
 # the M.2 rehearsal shows a ceiling is wanted, it is a durable `rate_counters`
 # scope, sized from those counts -- not a process-local bucket re-added here.
-async def telegram_webhook(request: Request) -> dict[str, str]:
+async def telegram_webhook(
+    request: Request, background: BackgroundTasks
+) -> dict[str, str]:
     """Admit one Telegram delivery, exactly once, and dispatch it.
 
     Refusals are ordered cheapest-first, and the last of them is the seam: a
@@ -217,7 +219,7 @@ async def telegram_webhook(request: Request) -> dict[str, str]:
     try:
         conn = await connection.__aenter__()
     except PoolTimeout:
-        return await _refuse_saturated(runtime, payload, metrics)
+        return _refuse_saturated(runtime, payload, metrics, background)
     try:
         try:
             await admit(
@@ -256,14 +258,17 @@ async def telegram_webhook(request: Request) -> dict[str, str]:
         await connection.__aexit__(None, None, None)
 
     if replayed:
-        # OUTSIDE the connection: no pool slot is held across a provider call.
-        await _toast_replayed_tap(runtime, payload)
+        # OUTSIDE the connection and AFTER the 200: no pool slot and no
+        # delivery slot is held across a provider call.
+        background.add_task(_toast_replayed_tap, runtime, payload)
         return {"status": "replayed"}
 
-    # AFTER the commit and outside the connection: the link is durable before
-    # any provider is spoken to, so a Telegram hiccup can neither roll it back
-    # nor make Telegram redeliver (the 200 below stands regardless).
-    await _acknowledge(runtime, payload, result, metrics=metrics)
+    # AFTER the commit, outside the connection, and after the 200 has gone
+    # out (#1284): the link is durable before any provider is spoken to, so a
+    # Telegram hiccup can neither roll it back nor make Telegram redeliver —
+    # and the request no longer waits on Telegram's reply to the answer
+    # before it returns (the task still runs to completion on this worker).
+    background.add_task(_acknowledge, runtime, payload, result, metrics=metrics)
     outcome = getattr(result, "outcome", None)
     return (
         {"status": "admitted", "outcome": str(outcome)}
@@ -276,16 +281,35 @@ async def telegram_webhook(request: Request) -> dict[str, str]:
 BUSY_TEXT = "Busy — tap again."
 
 
-async def _refuse_saturated(
-    runtime: IngressRuntime, payload: dict, metrics: Optional[TapMetrics]
+async def _answer_busy(
+    runtime: IngressRuntime, callback_query_id: str, metrics: Optional[TapMetrics]
+) -> None:
+    """The busy toast, behind the 200 (#1284): the transport answers False
+    rather than raising; both are an answer that did not land, and the F1
+    bound is read from `answer_failed` either way."""
+    try:
+        landed = await runtime.answer_callback(callback_query_id, BUSY_TEXT, False)
+    except Exception:  # noqa: BLE001 — best effort, no database
+        landed = False
+    if landed is False and metrics is not None:
+        metrics.answer_failed += 1
+
+
+def _refuse_saturated(
+    runtime: IngressRuntime,
+    payload: dict,
+    metrics: Optional[TapMetrics],
+    background: BackgroundTasks,
 ) -> dict[str, str]:
     """The pool wait ran out before admission. EVERY `callback_query` with an
-    id is answered "Busy — tap again" (best effort, no database) and the
-    delivery is consumed with 200 `refused/busy` — the tap is re-derivable
-    because its buttons remain; a stale or malformed token is still a real
-    spinner, and busy is the one thing true of it here (unsaturated it would
-    hear `older_card`). Anything else is refused 503 before admission so the
-    provider redelivers (a message has no spinner to protect)."""
+    id is answered "Busy — tap again" (best effort, no database, behind the
+    200 like every other answer — the saturated path is the one where a
+    request waiting on Telegram is dearest) and the delivery is consumed
+    with 200 `refused/busy` — the tap is re-derivable because its buttons
+    remain; a stale or malformed token is still a real spinner, and busy is
+    the one thing true of it here (unsaturated it would hear `older_card`).
+    Anything else is refused 503 before admission so the provider redelivers
+    (a message has no spinner to protect)."""
     cq = payload.get("callback_query")
     if isinstance(cq, dict) and cq.get("id") is not None:
         if metrics is not None:
@@ -296,14 +320,7 @@ async def _refuse_saturated(
             payload.get("update_id"),
         )
         if runtime.answer_callback is not None:
-            # The transport answers False rather than raising; both are an
-            # answer that did not land, and the F1 bound is read from here.
-            try:
-                landed = await runtime.answer_callback(str(cq["id"]), BUSY_TEXT, False)
-            except Exception:  # noqa: BLE001 — best effort, no database
-                landed = False
-            if landed is False and metrics is not None:
-                metrics.answer_failed += 1
+            background.add_task(_answer_busy, runtime, str(cq["id"]), metrics)
         return {"status": "refused", "outcome": "busy"}
     logger.warning(
         "telegram webhook PARKED: pool saturated, delivery NOT admitted"
