@@ -98,7 +98,7 @@ Ratifier: owner. Status: **locked** (owner, 2026-09-09 — "go with the plan; if
 Context: one `WorkLoop` per lane, one pinned claim connection each (`worker.py:413-415`), one job at a time per lane. The first draft pinned K claim connections and asserted `K_interactive + K_bulk + 2 ≤ POOL_SIZE_SEAM` — `8 + 4 + 2 = 14 > 10` at its own defaults — and pinned slots would have starved the job sessions, poller ticks and heartbeat checkouts that share the pool (Evidence), expiring leases and making the reaper re-ready running work. `05:41` rules a pool slot a task, not a connection; `jobs.claim_job` commits its own claim (`jobs.py:118-151`). The legacy twin is #713/#573 (`concurrent_updates(8)` as "the dominant multiplier on peak concurrent DB connections", `src/config/settings.py:222`). `05:31`'s 10:50 is the ceiling shape; 8:4 inverted it.
 Options: (a) **K tasks per lane in one process, no pinned connections.** Each task claims through `jobs.claim_job` on a pooled checkout returned at once, runs the job with its session released across holds and provider waits (transaction-per-checkpoint, `02:1254`), and holds at most one connection, only inside a transaction. K is sized from the *measured* peak connections per running job: the 3b gate seeds K jobs of the most database-active kind (`deliver_outbox` under a slow fake) and asserts pool peak + election + clock + heartbeat ≤ `POOL_SIZE_SEAM` with zero `TimeoutError`; start at K = 4 interactive / 2 bulk (fits even if every task were DB-active at once: 4 + 2 + 3 ≤ 10) and raise on the measurement toward `05:31`'s 10/50. Σ = 50 stands. (b) More replicas, one job per lane each. (c) Both.
 Lean: (a) — H6 says any replica runs any workspace's job, so replicas remain the scale-out lever, but a replica that runs two jobs wastes the pool it already holds.
-Ratifier: owner. Status: **locked** (owner, 2026-09-09 — "go with the plan; if the behaviour or experience is suboptimal we address it then"): (a) — K tasks per lane with no pinned connections, K from the 3b measurement starting at 4 interactive / 2 bulk, Σ = 50 kept.
+Ratifier: owner. Status: **locked** (owner, 2026-09-09 — "go with the plan; if the behaviour or experience is suboptimal we address it then"): (a) — K tasks per lane with no pinned connections, K from the 3b measurement starting at 4 interactive / 2 bulk, Σ = 50 kept. **Built (#1291, 2026-09-11) at 3 interactive / 2 bulk:** the review's count showed a bulk task's plain kinds open their own sessions under the loop's job transaction (two connections at peak), so the ceiling weighs a bulk task at two — 3×1 + 2×2 + 3 reserved = 10; the sender, the pipeline and the email kind run with no job transaction open; a claim's pool wait is counted, never an error.
 
 ### Fork F8 — The global rate row (#1260)
 
@@ -181,9 +181,9 @@ Ratifier: owner. Status: **locked** (owner, 2026-09-09 — "go with the plan; if
 | Phase | Doc | Size | Depends on | Parallel with |
 |---|---|---|---|---|
 | 1 The tap ✅ #1271 | `01_the-tap.md` | L | webhook re-registration (deploy step); F2–F4, F8, F10 | 3a |
-| 3a Worker hygiene | `03_worker-throughput.md` §3a | S | — | 1; #1220 step 3 |
-| 2 The API under load | `02_api-under-load.md` | M | 1 (the harness taps real cards); 3a (`one_slow_chat`'s edit-landed criterion needs the 15 s hold and the durable 429 hold); F11 | — |
-| 3b Worker concurrency | `03_worker-throughput.md` §3b | M | 3a; 1 (the sender's checkpointing) | 2 |
+| 3a Worker hygiene ✅ #1288 | `03_worker-throughput.md` §3a | S | — | 1; #1220 step 3 |
+| 2 The API under load ✅ #1280 #1287 (+ #1290 the tap's round trips) | `02_api-under-load.md` | M | 1 (the harness taps real cards); 3a (`one_slow_chat`'s edit-landed criterion needs the 15 s hold and the durable 429 hold); F11 | — |
+| 3b Worker concurrency ✅ #1291 | `03_worker-throughput.md` §3b | M | 3a; 1 (the sender's checkpointing) | 2 |
 | 4 Tenant fairness | `04_tenant-fairness.md` | S/M, evidence-gated | 2 (the harness; this phase adds its scenario); 3a (the status-line trigger); 3b (the leased index) | — |
 
 Critical path per F11: (a) 1 → #1220 step 3 → 2 → 3a → 3b, or (b) 1 → 3a → 2 → 3b. Phase 4 waits for evidence from either the harness or the status line.
