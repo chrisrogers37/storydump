@@ -690,10 +690,10 @@ class TestKTasksPerLane:
         for wl in app.loops:
             by_lane.setdefault(wl.lane, []).append(wl)
         assert {lane: len(loops) for lane, loops in by_lane.items()} == {
-            "interactive": 4,
+            "interactive": 3,
             "bulk": 2,
         }
-        assert len({wl._worker_name for wl in app.loops}) == 6, "distinct names"
+        assert len({wl._worker_name for wl in app.loops}) == 5, "distinct names"
         assert all(wl._registry is app.registry for wl in app.loops)
         assert all(wl._connect is app.engine.connect for wl in app.loops)
 
@@ -701,12 +701,12 @@ class TestKTasksPerLane:
         from src.services.target.work_loop import WorkerConfig
 
         with pytest.raises(ValueError):
-            self._compose(WorkerConfig(lane_concurrency={"interactive": 8, "bulk": 4}))
+            self._compose(WorkerConfig(lane_concurrency={"interactive": 4, "bulk": 2}))
 
     def test_lane_concurrency_from_env(self):
         from src.worker import lane_concurrency_from_env
 
-        assert lane_concurrency_from_env({}) == {"interactive": 4, "bulk": 2}
+        assert lane_concurrency_from_env({}) == {"interactive": 3, "bulk": 2}
         assert lane_concurrency_from_env(
             {
                 "TARGET_WORKER_INTERACTIVE_CONCURRENCY": "3",
@@ -737,3 +737,4 @@ class TestKTasksPerLane:
         )
         assert "interactive[tasks=2 processed=7 parked=0 failures=2" in line
         assert "bulk[tasks=1 processed=1" in line
+        assert "waits=0" in line

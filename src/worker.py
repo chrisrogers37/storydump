@@ -416,14 +416,17 @@ def status_line(
                 "failures": 0,
                 "exhausted": 0,
                 "fenced": 0,
+                "waits": 0,
             },
         )
         agg["tasks"] += 1
         for key in ("processed", "parked", "failures", "exhausted", "fenced"):
             agg[key] += int(getattr(wl, key, 0) or 0)
+        agg["waits"] += int(getattr(wl, "claim_waits", 0) or 0)
     lanes = " ".join(
         f"{lane}[tasks={a['tasks']} processed={a['processed']} parked={a['parked']}"
-        f" failures={a['failures']} exhausted={a['exhausted']} fenced={a['fenced']}]"
+        f" failures={a['failures']} exhausted={a['exhausted']} fenced={a['fenced']}"
+        f" waits={a['waits']}]"
         for lane, a in by_lane.items()
     )
     clock_part = (
@@ -638,7 +641,8 @@ async def run(app: WorkerApp, *, stop: asyncio.Event | None = None) -> None:
     hb_task = asyncio.create_task(app.heartbeat.run(), name="lease-heartbeat")
     await clock.start()
     loop_tasks = [
-        asyncio.create_task(wl.run(), name=f"lane-{wl.lane}") for wl in app.loops
+        asyncio.create_task(wl.run(), name=f"lane-{wl._worker_name}")
+        for wl in app.loops
     ]
     logger.info(
         "worker up: lanes=%s live_kinds=%s recurring=%s",

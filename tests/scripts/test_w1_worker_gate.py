@@ -843,8 +843,9 @@ class TestKLoopsOnOneLane:
             assert cur.fetchone()[0] == len(keys)
         _assert_no_stranded_lease(sync_conn)
         # `03` step 10's measurement: with K=3 bulk tasks and no other holder
-        # the pool's peak stays within K + the heartbeat's beat.
-        assert watch.checked_out_peak <= 3 + 1, watch.checked_out_peak
+        # (the heartbeat is built but not started here) the pool's peak is
+        # exactly K — a claim's checkout returns before its job session opens.
+        assert watch.checked_out_peak <= 3, watch.checked_out_peak
 
 
 class TestNoLeaseExpiresDuringAWait:
@@ -885,7 +886,12 @@ class TestNoLeaseExpiresDuringAWait:
             await engine.dispose()
 
         assert claimed is True
-        assert wl.fenced == 0 and wl.processed == 1, "the lease was extended"
+        assert wl.fenced == 0 and wl.processed == 1
         assert app.heartbeat.beats >= 4, app.heartbeat.beats
+        # THE proof (structural review of #1291): `fn_extend_leases` extends
+        # only a lease with `locked_until > now()`, so a lease that expired
+        # mid-run makes a SHORT beat — none means every beat found the lease
+        # alive, i.e. it was extended before the 3 s ran out.
+        assert app.heartbeat.short_beats == 0, app.heartbeat.short_beats
         assert _job_row(sync_conn, job_id)["state"] == "succeeded"
         _assert_no_stranded_lease(sync_conn)

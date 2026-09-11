@@ -482,10 +482,15 @@ class LeaseHeartbeat:
             await conn.close()
         self.beats += 1
         self.consecutive_failures = 0
-        if extended < len(tokens):
+        # A lease that its task finished (and unregistered) while the beat
+        # was in flight is not a lost lease: measure against what is STILL
+        # registered, or K tasks finishing jobs would read as fencing noise
+        # (adversarial review of the 3b PR).
+        still = [t for t in tokens if t in self._tokens]
+        if extended < len(still):
             self.short_beats += 1
             if self._on_short_count is not None:
-                self._on_short_count(len(tokens), extended)
+                self._on_short_count(len(still), extended)
         return extended
 
     async def run(self) -> None:

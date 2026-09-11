@@ -27,6 +27,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping, Optional
 
 from sqlalchemy import text
+from sqlalchemy.exc import TimeoutError as PoolTimeout
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from src.services.target import credential_lifecycle, email_sender, media_sync
@@ -71,7 +72,7 @@ class WorkerConfig:
     # connections. Start values under the ceiling `assert_concurrency_fits`
     # enforces; raising them past it needs the measurement the gate records.
     lane_concurrency: Mapping[str, int] = field(
-        default_factory=lambda: {"interactive": 4, "bulk": 2}
+        default_factory=lambda: {"interactive": 3, "bulk": 2}
     )
     # `05:33` row 3 — per-workspace, per-lane: a workspace can never own a
     # lane. Interactive 5 (half one replica's interactive pool), bulk 3
@@ -127,25 +128,56 @@ class WorkerConfig:
     offboard_drain_limit: int = 500  # provisional: 05 states no bound
 
 
-#: Connections the worker holds besides its claim-and-run tasks: the clock's
-#: election, the heartbeat's beat, the status reporter's read.
+#: Connections the worker holds besides its claim-and-run tasks, counted as
+#: the STEADY holders: the clock's pinned election connection, plus two
+#: periodic holders that may coincide (a clock tick's session and a
+#: heartbeat beat). The other periodic readers — the status reporter (60 s),
+#: the sender sweeper (3 s), the prompt sweeper (5 s) — and a kind that opens
+#: a second session inside its job (`reconcile_ambiguous`'s poll) are
+#: transient waiters: they hold a connection for milliseconds, and when the
+#: pool is momentarily full they wait `pool_timeout`, which is not a fault
+#: (`run_once` counts a claim's pool wait apart from errors). So the ceiling
+#: bounds what is held at once in steady state, not every possible overlap.
 RESERVED_CONNECTIONS = 3
+#: What one task holds at its peak, per lane. An interactive task's kinds run
+#: their own transactions (the sender) or one short job transaction: one
+#: connection. A bulk task's plain kinds — a sync walk, a credential refresh,
+#: the ambiguous reconciler's poll — open sessions of their own UNDER the
+#: loop's job transaction, so a bulk task holds two at its peak (adversarial
+#: review of the 3b PR). The ceiling weighs them so, rather than pretending.
+TASK_CONNECTIONS = {"interactive": 1, "bulk": 2}
+
+
+def task_connections(config: WorkerConfig) -> int:
+    return sum(
+        config.concurrency_for(lane) * TASK_CONNECTIONS[lane]
+        for lane in ("interactive", "bulk")
+    )
 
 
 def assert_concurrency_fits(config: WorkerConfig, *, pool_size: int) -> str:
-    """The phase 3b ceiling: every task DB-active at once plus the reserved
-    connections must fit the pool — `K_interactive + K_bulk + 3 ≤ pool`.
+    """The phase 3b ceiling: every task DB-active at once (weighed by what a
+    task holds at its peak, `TASK_CONNECTIONS`) plus the reserved steady
+    holders must fit the pool — `K_interactive × 1 + K_bulk × 2 + 3 ≤ pool`.
     Returns the startup line; raises `ValueError` naming the numbers when
     the configuration would oversubscribe the pool (a worker that starts
-    and then times out on checkouts is the failure this refuses at boot)."""
+    and then times out on every checkout is the failure this refuses at
+    boot). A momentary overlap of the transient readers past the pool is a
+    bounded wait, counted, never a failure."""
     k_i = config.concurrency_for("interactive")
     k_b = config.concurrency_for("bulk")
-    line = f"lanes: interactive×{k_i} bulk×{k_b} pool={pool_size}"
-    if k_i + k_b + RESERVED_CONNECTIONS > pool_size:
+    held = task_connections(config)
+    line = (
+        f"lanes: interactive×{k_i} bulk×{k_b} pool={pool_size}"
+        f" (tasks hold up to {held} + {RESERVED_CONNECTIONS} reserved)"
+    )
+    if held + RESERVED_CONNECTIONS > pool_size:
         raise ValueError(
-            f"{line}: {k_i} + {k_b} + {RESERVED_CONNECTIONS} reserved exceeds the"
-            f" pool of {pool_size} — lower TARGET_WORKER_*_CONCURRENCY or raise"
-            " the pool with the measurement 03_worker-throughput.md step 10 asks for"
+            f"{line}: {k_i}×{TASK_CONNECTIONS['interactive']} +"
+            f" {k_b}×{TASK_CONNECTIONS['bulk']} + {RESERVED_CONNECTIONS} reserved"
+            f" exceeds the pool of {pool_size} — lower TARGET_WORKER_*_CONCURRENCY"
+            " or raise the pool with the measurement 03_worker-throughput.md"
+            " step 10 asks for"
         )
     return line
 
@@ -397,12 +429,12 @@ def build_registry(deps: WorkerDeps) -> dict:
             payload.get("binding_id") or job["serialization_key"].split(":", 1)[1]
         )
 
-        def short(name: str):
+        def short():
             # The loop hands a marked executor no session (phase 3b); a caller
             # that DOES pass one (the unit seam) keeps it for every write.
             return sessions(job) if session is None else nullcontext(session)
 
-        async with short("read") as reader:
+        async with short() as reader:
             row = (
                 (
                     await reader.execute(
@@ -440,7 +472,7 @@ def build_registry(deps: WorkerDeps) -> dict:
                 # became a supergroup) or retire the binding; either way this
                 # hold ends — the sweep will not mint for a revoked binding.
                 moved = result.get("migrate_to")
-                async with short("retire") as writer:
+                async with short() as writer:
                     followed = bool(moved) and await bindings.repoint(
                         writer, binding_id=binding_id, external_ref=str(moved)
                     )
@@ -459,7 +491,7 @@ def build_registry(deps: WorkerDeps) -> dict:
                 # sender yields its lane now and comes back when Telegram said
                 # to — its own reschedule, no attempt spent (phase 3a step 2).
                 wait = float(result.get("retry_after_s") or cfg.poller_interval_seconds)
-                async with short("paced") as writer:
+                async with short() as writer:
                     await jobs.reschedule_job(
                         writer,
                         job["id"],
@@ -750,6 +782,9 @@ class WorkLoop:
         self.fenced = 0
         #: Jobs that spent their `05:38` budget and ended `failed` (phase 3a).
         self.exhausted = 0
+        #: Claims that waited out a momentarily full pool (phase 3b): pressure,
+        #: reported on the status line, never an error.
+        self.claim_waits = 0
         #: Jobs that ran cleanly and reached NOBODY. Its own counter rather
         #: than a share of `processed`, because the whole point is that the two
         #: are not the same outcome.
@@ -781,6 +816,18 @@ class WorkLoop:
             raise RuntimeError("WorkLoop.run before bind_claim_conn or connect")
         try:
             job = await self._claim()
+        except PoolTimeout:
+            # The pool was momentarily full (a transient reader overlapped
+            # every task): a bounded wait, not a database fault — counted on
+            # its own so the lane's error ceiling never reads pressure as
+            # failure (phase 3b review).
+            self.claim_waits += 1
+            logger.warning(
+                "lane %s: claim waited out the pool (%d so far) — pressure, not a fault",
+                self.lane,
+                self.claim_waits,
+            )
+            return False
         except Exception as exc:  # noqa: BLE001 — survive transient, die loud on persistent
             self.consecutive_errors += 1
             logger.error(
@@ -920,6 +967,18 @@ class WorkLoop:
                     self.exhausted += 1
                 except jobs.JobFenced:
                     self.fenced += 1
+                except Exception:  # noqa: BLE001 — the lease expires; the lane lives
+                    # A pool wait or a database fault while ending the job:
+                    # the lease lapses and the reaper returns the row (the
+                    # attempt stays consumed); a failure to record a failure
+                    # must not take the lane — and its K−1 in-flight jobs —
+                    # down with it (adversarial review of the 3b PR).
+                    logger.exception(
+                        "job %s (%s): could not be finalized failed; its lease"
+                        " will lapse",
+                        job["id"],
+                        kind,
+                    )
                 return
             backoff = jobs.backoff_seconds(
                 str(job.get("lane") or "bulk"), int(job.get("attempts") or 1)
@@ -943,6 +1002,12 @@ class WorkLoop:
                     )
             except jobs.JobFenced:
                 self.fenced += 1
+            except Exception:  # noqa: BLE001 — the lease expires; the lane lives
+                logger.exception(
+                    "job %s (%s): could not be rescheduled; its lease will lapse",
+                    job["id"],
+                    kind,
+                )
 
     async def run(self) -> None:
         while not self._stop.is_set():

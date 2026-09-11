@@ -1587,11 +1587,14 @@ class TestASlowChatDoesNotDelayAnother:
 
                 return send
 
+        from src.services.target import unit_of_work as _uow
+
         engine = create_async_engine(
             outbox_db["worker"].replace("postgresql://", "postgresql+asyncpg://", 1),
             pool_size=10,
             max_overflow=0,
         )
+        watch = _uow.PoolWatch(engine)
         try:
             cfg = _Cfg(
                 lane_concurrency={"interactive": 2, "bulk": 1},
@@ -1623,3 +1626,7 @@ class TestASlowChatDoesNotDelayAnother:
         assert sent_at[str(slow_row)] >= 3.0
         assert _state(outbox_db, fast_row)[0] == "sent"
         assert _state(outbox_db, slow_row)[0] == "sent"
+        # `03` step 10's measurement for the sender kind: two tasks in the
+        # hold, each with its short sessions and poller ticks one at a time,
+        # never more than one connection each plus a claim in flight.
+        assert watch.checked_out_peak <= 3, watch.checked_out_peak
