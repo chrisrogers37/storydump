@@ -648,7 +648,9 @@ class TestTheLostAckPolicyIsBoundedPerKind:
             "a prompt within its bound must resend — the retry-once bound"
             " is the notification rule and must not leak onto prompts"
         )
-        assert MAX_PROMPT_RESENDS > 1, "the prompt's bound is wider than a notification's"
+        assert MAX_PROMPT_RESENDS > 1, (
+            "the prompt's bound is wider than a notification's"
+        )
         assert got_past == "failed", "past its bound a prompt is not resent forever"
 
     @pytest.mark.asyncio
