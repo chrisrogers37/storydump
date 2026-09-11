@@ -266,8 +266,8 @@ async def telegram_webhook(
     # AFTER the commit, outside the connection, and after the 200 has gone
     # out (#1284): the link is durable before any provider is spoken to, so a
     # Telegram hiccup can neither roll it back nor make Telegram redeliver —
-    # and the answer's own round trip to Telegram no longer holds this
-    # delivery's slot on the ingress worker while it lands.
+    # and the request no longer waits on Telegram's reply to the answer
+    # before it returns (the task still runs to completion on this worker).
     background.add_task(_acknowledge, runtime, payload, result, metrics=metrics)
     outcome = getattr(result, "outcome", None)
     return (
