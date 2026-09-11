@@ -72,8 +72,14 @@ measured). Read against the deciding run:
   timeout in one, the tapper and their name in one, no second tenant set in the gate, the token
   read with the intent, the supersede of every binding in one — pinned by the tap gate at
   `TAP_STATEMENT_BUDGET = 11` cursor statements; the route adds its dedup insert and the commit.
-  **#1284 landed** with it: the answer and strip are background tasks behind the 200. The
-  harness's `double_tap_one_card` bound is to be re-read from a fresh RTT run (not re-run here).
+  **#1284 landed** with it: the answer and strip are background tasks behind the 200.
+  **Re-read (2026-09-11, `reports/2026-09-11-rtt10ms.md`, after #1290):** `double_tap_one_card`
+  answer p95 **1.733 s** (was 2.027 s) — F2 (a)'s 2 s bound is met without the exception, and the
+  harness assertion is restored to `< 2.0`; `taps_1000_across_50_workspaces` answer p95 0.577 s
+  (was 0.667), user-side wait p95 43.1 s (was 56.0), `answer_late` 348 (was 496);
+  `taps_across_many_cards` 0.616 s; `one_slow_chat` 0.602 s; the 20-connection boundary 1.048 s,
+  wait p95 45.3 s, late 375. The burst's wait is still throughput-bound (one process, ten
+  connections, ≈ 13 round trips per tap) — phase 3b's and F5's territory, not the tap's.
 - NOT MET and not claimed: the user-side wait for a 1,000-simultaneous burst (56 s, half past
   Telegram's expiry — throughput-bound, #1286); `one_slow_chat`'s edit-landed criterion (the sender
   lands ≈ 0.5 supersede rows/s fleet-wide — one lane, claim-one-await-one; phase 3a/3b's number).
