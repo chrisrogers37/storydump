@@ -273,11 +273,17 @@ REGISTRY: dict[str, Optional[Executor]] = _build_registry()
 UNBUILT: tuple[str, ...] = tuple(k for k in VOCABULARY if REGISTRY[k] is None)
 
 
-async def execute(session, command: Command) -> CommandResult:
+async def execute(
+    session, command: Command, *, tenant_bound: bool = False
+) -> CommandResult:
     """Gate, then execute. The ONE path every adapter takes.
 
     *session* is the caller's open unit of work (tenant + actor GUCs already
     applied — `02` §0's writer-identity rule, enforced by the audit triggers).
+    *tenant_bound* says the caller applied `app.tenant_id` for THIS
+    `command.workspace_id` in this transaction already, so the gate need not
+    set it again (#1286: one round trip per tap); a caller that cannot vouch
+    for that leaves it False and the gate binds the claim itself.
 
     Order is load-bearing: unknown → refused cold (no gate, nothing to
     authorize against); then the gate; then not-built; then the executor. A
@@ -302,7 +308,11 @@ async def execute(session, command: Command) -> CommandResult:
         if not command.workspace_id:
             raise CommandRefused("workspace_required", command.kind)
         await tenant_resolution.authorize_member(
-            session, command.workspace_id, command.actor_user_id, floor
+            session,
+            command.workspace_id,
+            command.actor_user_id,
+            floor,
+            tenant_bound=tenant_bound,
         )
 
     executor = REGISTRY.get(command.kind)

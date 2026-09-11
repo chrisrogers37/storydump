@@ -70,7 +70,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.exc import TimeoutError as PoolTimeout
 
@@ -150,7 +150,9 @@ class TapMetrics:
 # validated against measured delivery rates (the route is still dormant). If
 # the M.2 rehearsal shows a ceiling is wanted, it is a durable `rate_counters`
 # scope, sized from those counts -- not a process-local bucket re-added here.
-async def telegram_webhook(request: Request) -> dict[str, str]:
+async def telegram_webhook(
+    request: Request, background: BackgroundTasks
+) -> dict[str, str]:
     """Admit one Telegram delivery, exactly once, and dispatch it.
 
     Refusals are ordered cheapest-first, and the last of them is the seam: a
@@ -256,14 +258,17 @@ async def telegram_webhook(request: Request) -> dict[str, str]:
         await connection.__aexit__(None, None, None)
 
     if replayed:
-        # OUTSIDE the connection: no pool slot is held across a provider call.
-        await _toast_replayed_tap(runtime, payload)
+        # OUTSIDE the connection and AFTER the 200: no pool slot and no
+        # delivery slot is held across a provider call.
+        background.add_task(_toast_replayed_tap, runtime, payload)
         return {"status": "replayed"}
 
-    # AFTER the commit and outside the connection: the link is durable before
-    # any provider is spoken to, so a Telegram hiccup can neither roll it back
-    # nor make Telegram redeliver (the 200 below stands regardless).
-    await _acknowledge(runtime, payload, result, metrics=metrics)
+    # AFTER the commit, outside the connection, and after the 200 has gone
+    # out (#1284): the link is durable before any provider is spoken to, so a
+    # Telegram hiccup can neither roll it back nor make Telegram redeliver —
+    # and the answer's own round trip to Telegram no longer holds this
+    # delivery's slot on the ingress worker while it lands.
+    background.add_task(_acknowledge, runtime, payload, result, metrics=metrics)
     outcome = getattr(result, "outcome", None)
     return (
         {"status": "admitted", "outcome": str(outcome)}

@@ -591,3 +591,39 @@ class TestDryRunLeavesTheTapOnTheJob:
                 "UPDATE workspaces SET dry_run_mode = false WHERE id = %s",
                 (world["ws"],),
             )
+
+
+#: #1286 — the tap's statement budget, counted at the cursor: the GUCs and
+#: lock timeout in one, the tapper and their name in one, the intent and its
+#: token in one, the flip, the job, the supersede of every binding in one,
+#: the admission debit, and the savepoint pair. The route adds its dedup
+#: insert and the commit. Was 19 before #1286.
+TAP_STATEMENT_BUDGET = 11
+
+
+class TestATapIsCheapOnRealRows:
+    def test_a_post_tap_spends_at_most_its_budget(self, world):
+        from sqlalchemy import event
+        from sqlalchemy.engine import Engine
+
+        statements: list[str] = []
+
+        def listen(conn, cursor, statement, parameters, context, executemany):
+            statements.append(" ".join(statement.split()))
+
+        event.listen(Engine, "before_cursor_execute", listen)
+        try:
+            i = _intent(world, "post-cheap")
+            r = tap(world, "post", i["id"])
+        finally:
+            event.remove(Engine, "before_cursor_execute", listen)
+
+        assert r.outcome == "executed", r
+        assert _state(world, i["id"]) == "approved"
+        assert len(statements) <= TAP_STATEMENT_BUDGET, "\n".join(statements)
+        # The shape, not just the count: each fold is present as ONE statement.
+        assert sum("set_config(" in s for s in statements) == 1
+        assert sum("FROM user_identities" in s for s in statements) == 1
+        assert sum("has_ig_credential" in s for s in statements) == 1
+        assert sum("'prompt_supersede'" in s for s in statements) == 1
+        assert not any(s.startswith("SET LOCAL") for s in statements)

@@ -106,7 +106,14 @@ async def _intent_row(session, command: Command) -> dict[str, Any]:
         "       w.api_publishing_enabled, w.repost_ttl_days, w.skip_ttl_days,"
         "       w.dry_run_mode, w.is_paused,"
         "       COALESCE(a.posts_per_day, w.posts_per_day) AS eff_ppd,"
-        "       COALESCE(a.tz, w.tz) AS eff_tz, a.handle"
+        "       COALESCE(a.tz, w.tz) AS eff_tz, a.handle,"
+        # The publish precondition, read with the row rather than after it
+        # (#1286): a usable Instagram Login token for this account.
+        "       EXISTS (SELECT 1 FROM oauth_credentials c"
+        "                WHERE c.workspace_id = i.workspace_id"
+        "                  AND c.ig_account_id = i.ig_account_id"
+        "                  AND c.provider = 'ig_login' AND c.state = 'active')"
+        "         AS has_ig_credential"
         "  FROM post_intents i"
         "  JOIN workspaces w ON w.id = i.workspace_id"
         "  JOIN ig_accounts a ON a.id = i.ig_account_id"
@@ -134,8 +141,15 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-async def _actor_name(session, user_id: Optional[str]) -> Optional[str]:
-    """The name a shared chat may see for the actor (F3): never an email."""
+async def _actor_name(
+    session, user_id: Optional[str], *, label: Optional[str] = None
+) -> Optional[str]:
+    """The name a shared chat may see for the actor (F3): never an email. A
+    tap carries the tapper's name on the command (`args.actor_label`, read
+    with the identity — #1286) and passes it as *label*; anything else asks
+    the identity table."""
+    if label:
+        return str(label)
     if not user_id:
         return None
     return await identity.display_name_for(session, user_id=str(user_id))
@@ -160,17 +174,15 @@ async def _supersede_everywhere(
 ) -> int:
     """Every live card for the intent, in EVERY binding of the workspace,
     loses its buttons and gains the outcome line — in the caller's transaction,
-    so a rolled-back flip takes its edits with it (phase 1 step 7)."""
-    n = 0
-    for binding_id in await prompts.push_bindings(session, workspace_id):
-        n += await outbox.supersede_all(
-            session,
-            workspace_id=workspace_id,
-            binding_id=binding_id,
-            intent_id=intent_id,
-            outcome_text=outcome_text,
-        )
-    return n
+    so a rolled-back flip takes its edits with it (phase 1 step 7). One
+    statement for all bindings (#1286: it was one read plus two writes per
+    binding, inside the tap's transaction)."""
+    return await outbox.supersede_everywhere(
+        session,
+        workspace_id=workspace_id,
+        intent_id=intent_id,
+        outcome_text=outcome_text,
+    )
 
 
 def _tz(intent: dict[str, Any]) -> str:
@@ -226,31 +238,17 @@ async def _settle(
     )
 
 
-async def has_active_ig_credential(
-    session, *, workspace_id: str, ig_account_id: str
-) -> bool:
-    """Whether the account has a usable Instagram Login token in this
-    workspace — the precondition for minting a `publish_pipeline` job."""
-    row = (
-        await session.execute(
-            text(
-                "SELECT 1 FROM oauth_credentials"
-                " WHERE workspace_id = :ws AND ig_account_id = :acct"
-                "   AND provider = 'ig_login' AND state = 'active' LIMIT 1"
-            ),
-            {"ws": str(workspace_id), "acct": str(ig_account_id)},
-        )
-    ).first()
-    return row is not None
-
-
 async def _record_outcome(
     session, intent: dict[str, Any], command: Command, state: str
 ) -> str:
     """After a flip: the outcome line, written onto every card of the intent."""
     line = prompts.outcome_line(
         state,
-        by=await _actor_name(session, command.actor_user_id),
+        by=await _actor_name(
+            session,
+            command.actor_user_id,
+            label=(command.args or {}).get("actor_label"),
+        ),
         at=_utcnow(),
         tz=_tz(intent),
     )
@@ -288,12 +286,9 @@ async def approve(session, command: Command) -> CommandResult:
             "this workspace publishes manually; use mark_posted after posting by hand",
         )
     # A dry run posts nowhere, so it needs no token: the owner can rehearse
-    # the whole flow before Instagram is connected.
-    if not intent.get("dry_run_mode") and not await has_active_ig_credential(
-        session,
-        workspace_id=command.workspace_id,
-        ig_account_id=str(intent["ig_account_id"]),
-    ):
+    # the whole flow before Instagram is connected. The token's presence was
+    # read with the intent (`_intent_row`, #1286).
+    if not intent.get("dry_run_mode") and not intent.get("has_ig_credential"):
         # Said at the tap, not an hour later: without a token the publish leg
         # cannot post, and a job minted anyway would only burn its ladder and
         # land on a human (#1276 review).

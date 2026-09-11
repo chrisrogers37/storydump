@@ -298,11 +298,18 @@ def seams(monkeypatch):
     async def user_for_identity(executor, *, provider, external_id):
         return state["user"]
 
+    async def tapper_for_identity(executor, *, provider, external_id):
+        # The tapper and their display name in one read (#1286).
+        if state["user"] is None:
+            return None
+        return state["user"], state.get("label", "Chris")
+
     async def apply_gucs(executor, **kw):
         log["gucs"].append(kw)
 
-    async def execute(session, command):
+    async def execute(session, command, **kw):
         log["executed"].append(command)
+        log.setdefault("execute_kw", []).append(kw)
         if state["raise"] is not None:
             raise state["raise"]
         return state["result"]
@@ -324,6 +331,7 @@ def seams(monkeypatch):
 
     monkeypatch.setattr(tenant_resolution, "resolve_chat", resolve_chat)
     monkeypatch.setattr(identity, "user_for_identity", user_for_identity)
+    monkeypatch.setattr(identity, "tapper_for_identity", tapper_for_identity)
     monkeypatch.setattr(unit_of_work, "apply_gucs", apply_gucs)
     monkeypatch.setattr(commands, "execute", execute)
     monkeypatch.setattr(rate_counters, "count", count)
@@ -349,7 +357,7 @@ class TestTheTap:
             "u1",
             "telegram",
         )
-        assert cmd.args == {"intent_id": INTENT}
+        assert cmd.args == {"intent_id": INTENT, "actor_label": "Chris"}
         gucs = seams["log"]["gucs"][0]
         assert gucs["tenant_id"] == "ws" and gucs["actor_kind"] == "user"
         assert gucs["actor_user_id"] == "u1" and gucs["channel"] == "telegram"
@@ -562,3 +570,40 @@ def test_a_repeat_tap_on_a_dry_run_row_hears_dry_run_not_posted():
         {"state": "posted", "published_via": "dry_run", "settled_by": None},
     )
     assert "Dry run" in _answered_text(r) and "Posted" not in _answered_text(r)
+
+
+class TestATapIsCheap:
+    """#1286: the tap's own statements, counted where the dispatch spends
+    them — one GUC statement carrying the lock timeout, the tapper and their
+    name in one read, and the command port told the tenant is bound."""
+
+    @pytest.mark.asyncio
+    async def test_the_lock_timeout_rides_the_one_guc_statement(self, seams):
+        d = telegram_dispatch.TelegramDispatcher()
+        await d(None, tap("skip"))
+        (gucs,) = seams["log"]["gucs"]
+        assert gucs["lock_timeout"] == telegram_dispatch.TAP_LOCK_TIMEOUT == "2s"
+        assert gucs["tenant_id"] == "ws" and gucs["actor_user_id"] == "u1"
+
+    @pytest.mark.asyncio
+    async def test_the_tapper_s_name_rides_the_command(self, seams):
+        seams["label"] = "Dana"
+        d = telegram_dispatch.TelegramDispatcher()
+        await d(None, tap("skip"))
+        (command,) = seams["log"]["executed"]
+        assert command.args["actor_label"] == "Dana"
+
+    @pytest.mark.asyncio
+    async def test_a_tapper_without_a_name_still_taps(self, seams):
+        seams["label"] = None
+        d = telegram_dispatch.TelegramDispatcher()
+        r = await d(None, tap("skip"))
+        assert r.outcome == "executed"
+        (command,) = seams["log"]["executed"]
+        assert command.args["actor_label"] is None
+
+    @pytest.mark.asyncio
+    async def test_the_command_port_is_told_the_tenant_is_bound(self, seams):
+        d = telegram_dispatch.TelegramDispatcher()
+        await d(None, tap("skip"))
+        assert seams["log"]["execute_kw"] == [{"tenant_bound": True}]

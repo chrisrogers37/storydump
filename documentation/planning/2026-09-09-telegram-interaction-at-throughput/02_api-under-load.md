@@ -67,7 +67,13 @@ measured). Read against the deciding run:
   fails on it in the deciding run, deliberately: the plan's Test Plan says this criterion is what
   would re-serve F2 toward (d). **Ratified (owner, 2026-09-10 — "as long as these are filed for fixing, I'm ok with moving
   on"):** F2 (a) stands; the bound reads "≈ 2 s at 20 ms RTT, shrinking with #1286". The harness
-  assertion for `double_tap_one_card` is loosened to 2.1 s with that reading.
+  assertion for `double_tap_one_card` is loosened to 2.1 s with that reading. **#1286 landed
+  (2026-09-11):** a post tap is 12 statements inside the dispatch (was 20) — the GUCs and lock
+  timeout in one, the tapper and their name in one, no second tenant set in the gate, the token
+  read with the intent, the supersede of every binding in one — pinned by the tap gate at
+  `TAP_STATEMENT_BUDGET = 11` cursor statements; the route adds its dedup insert and the commit.
+  **#1284 landed** with it: the answer and strip are background tasks behind the 200. The
+  harness's `double_tap_one_card` bound is to be re-read from a fresh RTT run (not re-run here).
 - NOT MET and not claimed: the user-side wait for a 1,000-simultaneous burst (56 s, half past
   Telegram's expiry — throughput-bound, #1286); `one_slow_chat`'s edit-landed criterion (the sender
   lands ≈ 0.5 supersede rows/s fleet-wide — one lane, claim-one-await-one; phase 3a/3b's number).

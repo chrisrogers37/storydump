@@ -33,7 +33,6 @@ from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
 from src.exceptions.tenancy import TenantResolutionError
@@ -52,6 +51,9 @@ from src.services.target import (
 )
 from src.services.target.commands import Command, CommandRefused, CommandResult
 from src.services.target.start_router import StartResult, StartRouter
+
+#: How long a tap waits on another tap's row lock (review of #1271).
+TAP_LOCK_TIMEOUT = "2s"
 
 logger = logging.getLogger(__name__)
 
@@ -341,34 +343,37 @@ class TelegramDispatcher:
                 return done(exc.reason)
             workspace = tenant.workspace_id
             from_id = (cq.get("from") or {}).get("id")
-            user_id = (
+            tapper = (
                 None
                 if from_id is None
-                else await identity.user_for_identity(
+                else await identity.tapper_for_identity(
                     conn, provider="telegram", external_id=str(from_id)
                 )
             )
-            if user_id is None:
+            if tapper is None:
                 return done("unlinked")
+            user_id, actor_label = tapper
+            # One statement for the tenant and actor GUCs AND the lock
+            # timeout: a tap waits on another tap's row lock for at most 2 s;
+            # past it the database refuses, the route answers 5xx and Telegram
+            # redelivers — read-then-decide makes the retry safe, and no
+            # convoy can hold the ingress pool hostage (review of #1271).
             await unit_of_work.apply_gucs(
                 conn,
                 tenant_id=tenant.workspace_id,
                 actor_kind="user",
                 actor_user_id=str(user_id),
                 channel="telegram",
+                lock_timeout=TAP_LOCK_TIMEOUT,
             )
-            # A tap waits on another tap's row lock for at most this long;
-            # past it the database refuses, the route answers 5xx and Telegram
-            # redelivers — read-then-decide makes the retry safe, and no
-            # convoy can hold the ingress pool hostage (review of #1271).
-            if hasattr(conn, "execute"):
-                await conn.execute(text("SET LOCAL lock_timeout = '2s'"))
             command = Command(
                 kind=ACTION_TO_COMMAND[tap.action],
                 workspace_id=tenant.workspace_id,
                 actor_user_id=str(user_id),
                 channel="telegram",
-                args={"intent_id": tap.intent_id},
+                # The tapper's name rides with the command so the outcome
+                # line needs no second identity read (#1286).
+                args={"intent_id": tap.intent_id, "actor_label": actor_label},
             )
             # S.2 for taps (F12): the workspace's window is DEBITED inside the
             # savepoint below, only for a flip that ran — the increment's own
@@ -389,14 +394,19 @@ class TelegramDispatcher:
                 # COMMIT would silently become a ROLLBACK and the delivery
                 # would be lost with a 200 (structural review of #1271).
                 begin_nested = getattr(conn, "begin_nested", None)
+                # `tenant_bound`: the GUC statement above already set this
+                # workspace as the transaction's tenant; the gate's own
+                # re-set would be a round trip for nothing (#1286).
                 if callable(begin_nested):
                     async with begin_nested():
-                        result = await commands.execute(conn, command)
+                        result = await commands.execute(
+                            conn, command, tenant_bound=True
+                        )
                         await self._debit(
                             conn, tenant.workspace_id, window, limit, result
                         )
                 else:
-                    result = await commands.execute(conn, command)
+                    result = await commands.execute(conn, command, tenant_bound=True)
                     await self._debit(conn, tenant.workspace_id, window, limit, result)
             except TenantResolutionError as exc:
                 return done(exc.reason)
