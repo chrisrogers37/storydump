@@ -495,3 +495,60 @@ class TestTheReviewCardIsTheTenantsToResolve:
         assert commands.ROLE_FLOOR["resolve_review"] == "member"
         assert commands.REGISTRY["resolve_review"] is command_executors.resolve_review
         assert {"nothing_to_confirm", "may_have_posted"} <= set(commands.REASONS)
+
+
+class TestRemovingAnAccountGivesUpItsParkedReviews:
+    """`disable_account` flags an account's live intents; a parked row has no
+    worker checkpoint to honour the flag at, so the removal IS its give-up:
+    the row is cancelled (debit retained), its lost publish op ends by
+    verdict, and its card loses the review buttons by ref."""
+
+    @pytest.fixture
+    def removed(self, parked, monkeypatch):
+        async def disable_destination(session, *, workspace_id, ig_account_id):
+            return {"credential_revoked": True}
+
+        async def rows(executor, sql, **params):
+            return [
+                {"id": "i1", "state": "review_required", "eff_tz": "UTC"},
+                {"id": "i2", "state": "approved", "eff_tz": "UTC"},
+            ]
+
+        monkeypatch.setattr(
+            command_executors.provisioning, "disable_destination", disable_destination
+        )
+        monkeypatch.setattr(command_executors.readers, "rows", rows)
+        return parked
+
+    async def test_a_parked_row_is_cancelled_its_op_ended_and_its_card_restated(
+        self, removed
+    ):
+        command = Command(
+            kind="disable_account",
+            workspace_id="ws",
+            actor_user_id="admin",
+            channel="web",
+            args={"ig_account_id": "a1"},
+        )
+        out = await command_executors.disable_account(_Session(), command)
+        assert out.outcome == "executed"
+        assert removed["cancels"] == ["i1"], "the parked row takes the give-up edge"
+        assert removed["verdicts"] == [
+            ("op-9", "failed", "given_up", "admin", "ambiguous")
+        ]
+        assert [r[1] for r in removed["restates"]] == ["i1"]
+        assert "Account disabled" in removed["restates"][0][2]
+        # The approved row keeps the flag path: superseded live, not restated.
+        assert [s[1] for s in removed["supersedes"]] == ["i2"]
+
+    async def test_a_row_a_member_resolved_meanwhile_keeps_their_line(self, removed):
+        removed["cancel_ok"] = False
+        command = Command(
+            kind="disable_account",
+            workspace_id="ws",
+            actor_user_id="admin",
+            channel="web",
+            args={"ig_account_id": "a1"},
+        )
+        await command_executors.disable_account(_Session(), command)
+        assert removed["verdicts"] == [] and removed["restates"] == []

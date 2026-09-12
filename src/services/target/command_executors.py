@@ -856,7 +856,10 @@ async def disable_account(session, command: Command) -> CommandResult:
             # removal is its give-up, and its card loses the review buttons
             # (by ref — the approve tap superseded it long ago).
             intent_id = str(row["id"])
-            await publish_cap.resolve_cancel(session, intent_id=intent_id)
+            if not await publish_cap.resolve_cancel(session, intent_id=intent_id):
+                # A member resolved it between the flag and this read: their
+                # line stands, and the op was ended by their verdict.
+                continue
             await _end_op_by_verdict(
                 session,
                 await _latest_publish_op(session, intent_id),
