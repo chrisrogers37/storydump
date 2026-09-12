@@ -41,6 +41,7 @@ from src.services.target.publish_pipeline import (
     CANCELLED,
     DEFERRED_CAP,
     DEFERRED_META_CAP,
+    FETCH_RETRY_SECONDS,
     FAILED,
     PARKED_AMBIGUOUS,
     POISONED,
@@ -412,8 +413,15 @@ class TestTheFlipIntegration:
         used to abort the admission transaction, so the deferral's own writes
         then failed ("current transaction is aborted") and the job burned an
         attempt on the failure ladder — five approvals in six seconds on
-        2026-09-12 cost four such crashes. The flip runs in a savepoint: the
-        sibling defers exactly like a cap denial, attempt restored, no error."""
+        2026-09-12 cost four such crashes. The flip runs in a savepoint, and
+        the sibling waits a few seconds and tries again — NOT the account's
+        next product slot, hours away, which a cap denial rightly waits for
+        (adversarial review of #1301) — attempt restored, no error."""
+        from src.services.target.publish_pipeline import (
+            BUSY_RETRY_SECONDS,
+            DEFERRED_BUSY,
+        )
+
         slot = datetime.now(timezone.utc) + timedelta(hours=2)
         _exec(
             pipe_db,
@@ -425,13 +433,17 @@ class TestTheFlipIntegration:
         job = _leased_job(pipe_db, sibling, ref=ref, attempts=1)
         meta = StubMetaAdapter()
         transit = FakeTransit()
+        before = datetime.now(timezone.utc)
         outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, meta, transit)))
-        assert outcome == DEFERRED_CAP
+        assert outcome == DEFERRED_BUSY
         assert _intent_row(pipe_db, sibling)["state"] == "approved"
         assert _intent_row(pipe_db, busy)["state"] == "publishing"
         after = _job_row(pipe_db, job["id"])
         assert after["state"] == "ready" and after["attempts"] == 0
-        assert abs((after["run_at"] - slot).total_seconds()) < 1
+        wait = (after["run_at"] - before).total_seconds()
+        assert 0 < wait <= BUSY_RETRY_SECONDS + 5, (
+            f"a busy account is retried in seconds, not at the next slot ({wait:.0f}s)"
+        )
         assert transit.upload_calls == [] and meta.create_calls == []
         audits = _exec(
             pipe_db,
@@ -440,7 +452,7 @@ class TestTheFlipIntegration:
             (sibling,),
             fetch=True,
         )
-        assert [a[0] for a in audits] == ["cap"]
+        assert [a[0] for a in audits] == ["exclusive"]
 
     def test_proceed_debits_exactly_once_on_the_way_to_posted(self, pipe_db):
         """Gate item 2, PROCEED arm: the §4 flip inside the pipeline debits
@@ -1725,6 +1737,15 @@ class TestTheFirstFetch:
                 "a fetch failure keeps the attempt the claim consumed"
             )
         assert outcomes == [RETRY_SCHEDULED, RETRY_SCHEDULED]
+        # Its own quick ladder: a fetch race resolves in seconds, and while
+        # the intent is `publishing` it holds the account — the bulk ladder's
+        # hour-long rung would block every sibling for that long.
+        wait = (
+            _job_row(pipe_db, job["id"])["run_at"] - datetime.now(timezone.utc)
+        ).total_seconds()
+        assert wait <= FETCH_RETRY_SECONDS[1] * 1.3, (
+            f"the second rung is short ({wait:.0f}s)"
+        )
         row = _intent_row(pipe_db, intent)
         assert (
             row["state"] == "publishing" and row["last_error"]["error"]["code"] == 9004

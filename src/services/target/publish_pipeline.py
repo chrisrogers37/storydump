@@ -140,6 +140,18 @@ POSTED = "posted"
 #: first container attempt it is the fetch racing the asset's first serving.
 FETCH_FAILED_CODE = 9004
 DEFERRED_CAP = "deferred_cap"
+#: Key 4 (`uq_publish_exclusive`): a sibling of the real account is publishing
+#: right now. The story waits this long and tries again — seconds, because a
+#: publish takes seconds; a cap denial waits for the next product slot
+#: instead, which is hours (adversarial review of #1301).
+DEFERRED_BUSY = "deferred_busy"
+BUSY_RETRY_SECONDS = 20
+#: Meta's "media could not be fetched" (9004) is a fetch losing a race, not the
+#: file (2026-09-11, -12): its own short ladder, because while the intent is
+#: `publishing` it holds the account (key 4) and the bulk ladder's hour-long
+#: rung would block every sibling for that hour. Five attempts park it for the
+#: workspace's review in about eight minutes.
+FETCH_RETRY_SECONDS = (30, 60, 120, 300)
 DEFERRED_META_CAP = "deferred_meta_cap"
 PARKED_AMBIGUOUS = "parked_ambiguous"
 RETRY_SCHEDULED = "retry_scheduled"
@@ -513,8 +525,15 @@ async def _admit(
                 local_date=_local_date(ctx, now_fn),
                 effective_cap=int(ctx.intent["eff_ppd"]),
             )
-            if flip is FlipOutcome.DEFERRED:
-                run_at = _next_slot(ctx, now_fn, backoff_seconds)
+            if flip is FlipOutcome.PROCEED:
+                deferred = None
+            else:
+                busy = flip is FlipOutcome.BUSY
+                run_at = (
+                    now_fn() + timedelta(seconds=BUSY_RETRY_SECONDS)
+                    if busy
+                    else _next_slot(ctx, now_fn, backoff_seconds)
+                )
                 await reschedule_job(
                     session,
                     ctx.job["id"],
@@ -523,11 +542,13 @@ async def _admit(
                     restore_attempt=True,
                 )
                 await _audit_deferral(
-                    session, ctx, reason="cap", next_run_at=run_at, state="approved"
+                    session,
+                    ctx,
+                    reason="exclusive" if busy else "cap",
+                    next_run_at=run_at,
+                    state="approved",
                 )
-                deferred = True
-            else:
-                deferred = False
+                deferred = DEFERRED_BUSY if busy else DEFERRED_CAP
     except IntentNotApproved:
         # (1,0): a race moved the intent while we held the job. The UoW
         # rolled back (debit included). Route on what it became.
@@ -552,7 +573,7 @@ async def _admit(
             else:
                 raise
         return CANCELLED
-    return DEFERRED_CAP if deferred else None
+    return deferred
 
 
 async def _park(uow, ctx: _Ctx, op_id) -> str:
@@ -831,7 +852,7 @@ async def _ladder(
                 return await _retry_or_poison(
                     uow,
                     ctx,
-                    backoff_seconds,
+                    FETCH_RETRY_SECONDS,
                     now_fn,
                     resolve_op_id=permit["id"],
                     resolve_response={"v": 1, "error": exc.code, "fetch_failed": True},

@@ -1109,8 +1109,10 @@ SELECT (SELECT count(*) FROM debit) AS debited,
 --   two-statement form could commit a debit around a zero-row flip, consuming capacity without
 --   entering publishing; the CTE coupling plus the asserted row count closes that leak (R2).
 -- unique_violation on uq_publish_exclusive ⇒ the real account already has a publishing or
---   publishing_ambiguous intent in some workspace: treated exactly as a cap denial (transaction
---   rolls back — debit included — defer, no error surfaced to the user).
+--   publishing_ambiguous intent in some workspace: the flip runs in a SAVEPOINT (2026-09-12: the
+--   refusal used to abort the whole transaction and the deferral's own writes crashed), the debit
+--   rolls back with it, and the intent waits SECONDS and tries again (`BUSY`, audit reason
+--   `exclusive`) — not the next product slot, which is a cap denial's wait; no error surfaced.
 COMMIT;  -- or ROLLBACK per the outcome above
 ```
 

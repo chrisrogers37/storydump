@@ -59,10 +59,16 @@ _PUBLISH_EXCLUSIVE = "uq_publish_exclusive"
 
 
 class FlipOutcome(enum.Enum):
-    """The §4 flip's two non-error outcomes. `(1,0)` is not here — it raises."""
+    """The §4 flip's non-error outcomes. `(1,0)` is not here — it raises.
+
+    `DEFERRED` is the cap's answer (the day is spent — wait for the next
+    slot); `BUSY` is key 4's (a sibling of the real account is publishing
+    right now — wait seconds, not a slot). The two were one value until
+    2026-09-12, and a burst of approvals waited a day for its second story."""
 
     PROCEED = "proceed"
     DEFERRED = "deferred"
+    BUSY = "busy"
 
 
 class IntentNotApproved(StorydumpError):
@@ -89,7 +95,8 @@ async def flip_to_publishing(
 ) -> FlipOutcome:
     """The `approved → publishing` flip (`02` §4), inside the caller's UoW tx.
 
-    Returns PROCEED or DEFERRED; raises :class:`IntentNotApproved` on `(1,0)`.
+    Returns PROCEED, DEFERRED (the cap) or BUSY (key 4); raises
+    :class:`IntentNotApproved` on `(1,0)`.
     Runs the one CTE and reads back `(debited, flipped)` — the row counts ARE
     the decision, because a rowcount here cannot be faked the way #883's could:
     a debited-but-not-flipped tuple is a real race, not a self-transition
@@ -136,8 +143,8 @@ async def flip_to_publishing(
     except IntegrityError as exc:
         if _is_publish_exclusive_violation(exc):
             # key 4: the real account is already publishing/ambiguous elsewhere.
-            # Defer exactly like a cap denial — the caller rolls back the debit.
-            return FlipOutcome.DEFERRED
+            # The savepoint rolled the debit back; the caller waits seconds.
+            return FlipOutcome.BUSY
         raise
 
     debited, flipped = int(row.debited), int(row.flipped)
