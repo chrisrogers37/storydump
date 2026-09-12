@@ -119,6 +119,23 @@ def world(monkeypatch):
         log["restates"].append((workspace_id, intent_id, outcome_text))
         return 1
 
+    # The latest `publish` op of the intent (None = Instagram was never asked)
+    # and the human-verdict door that terminalizes it.
+    log.update({"op": None, "verdicts": []})
+
+    async def _latest_publish_op(session, intent_id):
+        return log["op"]
+
+    async def resolve_by_human(
+        session, *, op_id, outcome, verdict, actor_user_id, from_state
+    ):
+        log["verdicts"].append((op_id, outcome, verdict, actor_user_id, from_state))
+
+    monkeypatch.setattr(command_executors, "_latest_publish_op", _latest_publish_op)
+    monkeypatch.setattr(
+        command_executors.provider_ops, "resolve_by_human", resolve_by_human
+    )
+
     monkeypatch.setattr(command_executors.publish_cap, "resolve_retry", resolve_retry)
     monkeypatch.setattr(command_executors.publish_cap, "resolve_posted", resolve_posted)
     monkeypatch.setattr(command_executors.publish_cap, "resolve_cancel", resolve_cancel)
@@ -243,15 +260,18 @@ class TestDryRunAndPauseAtApprove:
         assert out.outcome == "enqueued" and out.data["paused"] is True
 
 
-def _review(resolution: str) -> Command:
+def _review(resolution: str, **extra) -> Command:
     return Command(
         kind="resolve_review",
         workspace_id="ws",
         actor_user_id="u1",
         channel="telegram",
-        args={"intent_id": "i1", "resolution": resolution},
+        args={"intent_id": "i1", "resolution": resolution, **extra},
         actor_label="Chris",
     )
+
+
+NOT_POSTED = {"verdict": "not_posted"}
 
 
 @pytest.fixture
@@ -268,6 +288,10 @@ def parked(world):
             "is_paused": False,
         }
     )
+    # The publish call's answer was lost: the reconciler's ladder ran out and
+    # parked the intent with the op still `ambiguous` — the one origin where
+    # "it posted" may be the truth.
+    world["op"] = {"id": "op-9", "state": "ambiguous"}
     return world
 
 
@@ -279,9 +303,44 @@ class TestTheReviewCardIsTheTenantsToResolve:
     job; `posted` confirms what a publish call did; `cancel` gives up and
     keeps the debit. `failed` (a refund) stays the operator's."""
 
+    async def test_retry_on_a_lost_answer_needs_the_members_verdict(self, parked):
+        """The publish op is `ambiguous`: Instagram MAY have posted. A plain
+        retry would re-permit a second publish call — the rail's one
+        forbidden thing — so it is refused by name until the member says
+        the story is not there."""
+        with pytest.raises(commands.CommandRefused) as exc:
+            await command_executors.resolve_review(_Session(), _review("retry"))
+        assert exc.value.reason == "may_have_posted"
+        assert (
+            parked["retries"] == []
+            and parked["jobs"] == []
+            and parked["verdicts"] == []
+        )
+
+    async def test_retry_with_the_verdict_terminalizes_the_op_then_reapproves(
+        self, parked
+    ):
+        out = await command_executors.resolve_review(
+            _Session(), _review("retry", **NOT_POSTED)
+        )
+        assert out.outcome == "enqueued"
+        assert parked["verdicts"] == [
+            ("op-9", "failed", "not_posted", "u1", "ambiguous")
+        ], "the human verdict ends the ambiguous op BEFORE a new generation exists"
+        assert len(parked["retries"]) == 1 and len(parked["jobs"]) == 1
+
+    async def test_retry_after_a_definitive_failure_needs_no_verdict(self, parked):
+        parked["op"] = {"id": "op-9", "state": "failed"}
+        out = await command_executors.resolve_review(_Session(), _review("retry"))
+        assert out.outcome == "enqueued" and parked["verdicts"] == []
+        parked["op"] = None  # poisoned before any publish call
+        out = await command_executors.resolve_review(_Session(), _review("retry"))
+        assert out.outcome == "enqueued" and parked["verdicts"] == []
+
     async def test_retry_reapproves_debit_neutral_and_mints_the_publish_job(
         self, parked
     ):
+        parked["op"] = {"id": "op-9", "state": "failed"}
         out = await command_executors.resolve_review(_Session(), _review("retry"))
         assert out.outcome == "enqueued" and out.data["state"] == "approved"
         (intent_id, ws, acct, attempts) = parked["retries"][0]
@@ -305,32 +364,43 @@ class TestTheReviewCardIsTheTenantsToResolve:
 
     async def test_a_second_retry_counts_up(self, parked):
         parked["row"]["attempts_by_step"] = {"v": 1, "retries": 2}
-        await command_executors.resolve_review(_Session(), _review("retry"))
+        await command_executors.resolve_review(
+            _Session(), _review("retry", **NOT_POSTED)
+        )
         assert parked["retries"][0][3]["retries"] == 3
 
     async def test_retry_keeps_approves_preconditions(self, parked):
         parked["row"]["api_publishing_enabled"] = False
         with pytest.raises(commands.CommandRefused) as exc:
-            await command_executors.resolve_review(_Session(), _review("retry"))
+            await command_executors.resolve_review(
+                _Session(), _review("retry", **NOT_POSTED)
+            )
         assert exc.value.reason == "manual_mode"
         parked["row"]["api_publishing_enabled"] = True
         parked["connected"] = False
         with pytest.raises(commands.CommandRefused) as exc:
-            await command_executors.resolve_review(_Session(), _review("retry"))
+            await command_executors.resolve_review(
+                _Session(), _review("retry", **NOT_POSTED)
+            )
         assert exc.value.reason == "not_connected"
         assert parked["retries"] == [] and parked["jobs"] == []
+        assert parked["verdicts"] == [], "a refused retry leaves the op as it was"
 
     async def test_a_dry_run_workspace_retries_as_a_dry_run(self, parked):
         parked["connected"] = False
         parked["row"]["dry_run_mode"] = True
-        out = await command_executors.resolve_review(_Session(), _review("retry"))
+        out = await command_executors.resolve_review(
+            _Session(), _review("retry", **NOT_POSTED)
+        )
         assert out.data["dry_run"] is True
         assert parked["jobs"][0]["payload"]["dry_run"] is True
 
     async def test_a_lost_retry_race_is_an_illegal_transition(self, parked):
         parked["retry_ok"] = False
         with pytest.raises(commands.CommandRefused) as exc:
-            await command_executors.resolve_review(_Session(), _review("retry"))
+            await command_executors.resolve_review(
+                _Session(), _review("retry", **NOT_POSTED)
+            )
         assert exc.value.reason == "illegal_transition"
         assert parked["jobs"] == [] and parked["restates"] == []
 
@@ -340,26 +410,56 @@ class TestTheReviewCardIsTheTenantsToResolve:
         session = _Session()
         out = await command_executors.resolve_review(session, _review("posted"))
         assert out.outcome == "executed" and out.data["state"] == "posted"
+        assert out.data["published_via"] == "api"
         assert parked["posted"] == ["i1"]
         sql = " ".join(s for s, _ in session.statements)
         assert "times_posted = times_posted + 1" in sql
         assert "'recent'" in sql and "last_posted_at = now()" in sql
         assert "Posted" in parked["restates"][0][2]
+        assert parked["verdicts"] == [
+            ("op-9", "succeeded", "posted", "u1", "ambiguous")
+        ], "the human verdict ends the ambiguous op so it can retire"
 
     async def test_posted_needs_a_publish_call_to_confirm(self, parked):
         """Poison before the publish rung means Instagram was never asked:
         there is nothing to confirm, and the member is told which two levers
         remain."""
         parked["row"]["publish_step"] = "container_ready"
+        parked["op"] = None
         with pytest.raises(commands.CommandRefused) as exc:
             await command_executors.resolve_review(_Session(), _review("posted"))
-        assert exc.value.reason == "no_publish_call"
+        assert exc.value.reason == "nothing_to_confirm"
         assert parked["posted"] == [] and parked["restates"] == []
+
+    async def test_posted_is_refused_when_instagram_answered_no(self, parked):
+        """`publish_step` stays `publish_called` after a publish Meta
+        definitively refused (the permit resolved `failed`); the step alone
+        would let a member confirm a story that never landed."""
+        parked["op"] = {"id": "op-9", "state": "failed"}
+        with pytest.raises(commands.CommandRefused) as exc:
+            await command_executors.resolve_review(_Session(), _review("posted"))
+        assert exc.value.reason == "nothing_to_confirm"
+        assert parked["posted"] == [] and parked["verdicts"] == []
 
     async def test_cancel_gives_up_and_keeps_the_debit(self, parked):
         out = await command_executors.resolve_review(_Session(), _review("cancel"))
         assert out.outcome == "executed" and out.data["state"] == "cancelled"
         assert parked["cancels"] == ["i1"]
+        assert "Cancelled" in parked["restates"][0][2]
+        assert parked["verdicts"] == [
+            ("op-9", "failed", "given_up", "u1", "ambiguous")
+        ], "giving up ends the ambiguous op too — nothing may stay un-retirable"
+
+    async def test_the_plain_cancel_command_on_a_parked_row_is_the_give_up(
+        self, parked
+    ):
+        """`cancel` used to flag a `review_required` row and nothing ever
+        finished it (the worker terminalizes at its checkpoints; a parked row
+        has none) — the card kept its buttons under a *Cancelling* badge.
+        It now takes the give-up edge outright."""
+        out = await command_executors.cancel(_Session(), _cmd("cancel"))
+        assert out.outcome == "executed" and out.data["state"] == "cancelled"
+        assert parked["cancels"] == ["i1"] and parked["supersedes"] == []
         assert "Cancelled" in parked["restates"][0][2]
 
     async def test_cancel_is_honoured_even_when_a_cancel_was_already_asked_for(
@@ -394,4 +494,4 @@ class TestTheReviewCardIsTheTenantsToResolve:
     def test_the_floor_is_the_members_like_every_other_intent_command(self):
         assert commands.ROLE_FLOOR["resolve_review"] == "member"
         assert commands.REGISTRY["resolve_review"] is command_executors.resolve_review
-        assert "no_publish_call" in commands.REASONS
+        assert {"nothing_to_confirm", "may_have_posted"} <= set(commands.REASONS)

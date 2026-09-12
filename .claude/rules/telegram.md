@@ -41,7 +41,7 @@ The tables above describe the **legacy** bot. In the target tier a button tap on
 approval card is a `callback_query` on the webhook (`src/api/routes/webhooks.py`):
 admitted on its `update_id` (`command_dedup`), dispatched by
 `src/services/target/telegram_dispatch.py::TelegramDispatcher._tap` — parse
-(`callback_tokens.parse`, `v1:<post|posted|skip|reject|retry|itposted|giveup>:<intent-uuid>` — the last three are the review card's, all → `resolve_review`), resolve the
+(`callback_tokens.parse`, `v1:<post|posted|skip|reject|itposted|notposted|giveup>:<intent-uuid>` — the last three are the review card's, all → `resolve_review`; `notposted` carries the member's verdict), resolve the
 chat (`fn_resolve_binding`), resolve the tapper (`user_identities`), set the actor
 GUCs, `commands.execute` as the tapping member — and committed; the route then
 answers (`answerCallbackQuery`), best effort. The card's keyboard goes with the

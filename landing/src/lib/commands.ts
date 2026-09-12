@@ -141,9 +141,12 @@ function resolveReviewCommand(): CommandSpec {
       }
       const episode =
         typeof raw.episode === "string" && raw.episode.length > 0 ? raw.episode : "";
+      // The one verdict the port knows: the member looked, the story is not
+      // there. Anything else is not forwarded — the port would refuse it.
+      const verdict = raw.verdict === "not_posted" ? { verdict: "not_posted" } : {};
       return {
         ok: true,
-        body: { intent_id: intentId, resolution },
+        body: { intent_id: intentId, resolution, ...verdict },
         identity: episode
           ? `${intentId}:${resolution}:${episode}`
           : `${intentId}:${resolution}`,

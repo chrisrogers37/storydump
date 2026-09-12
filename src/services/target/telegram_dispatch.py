@@ -83,11 +83,15 @@ ACTION_TO_COMMAND = {
     "skip": "skip",
     "reject": "reject",
     # The review card (2026-09-12): one command, the resolution in `args`.
-    "retry": "resolve_review",
     "itposted": "resolve_review",
+    "notposted": "resolve_review",
     "giveup": "resolve_review",
 }
-RESOLUTION_OF = {"retry": "retry", "itposted": "posted", "giveup": "cancel"}
+RESOLUTION_OF = {"itposted": "posted", "notposted": "retry", "giveup": "cancel"}
+#: The verdict a review button's label carries: "🔁 Not there — post again"
+#: is the member saying the story is not on Instagram, which `resolve_review`
+#: requires before it re-approves an intent whose publish answer was lost.
+VERDICT_OF = {"notposted": "not_posted"}
 
 #: The outcomes a tap can end in that are not a command refusal reason or a
 #: resolver refusal reason. Every one has an entry in ANSWERS.
@@ -144,9 +148,14 @@ ANSWERS: dict[str, tuple[str, bool]] = {
         " Integrations, or post by hand and tap ✅ Posted myself.",
         True,
     ),
-    "no_publish_call": (
-        "Instagram was never asked to post this one, so there is nothing to"
-        " confirm — tap 🔁 Post again, or 🚫 Give up.",
+    "nothing_to_confirm": (
+        "Instagram didn't post this one — it was never asked, or it answered no —"
+        " so there is nothing to confirm. Tap 🔁 Not there — post again, or 🚫 Give up.",
+        True,
+    ),
+    "may_have_posted": (
+        "Instagram may have posted this one. Check your story: tap ✅ It posted"
+        " if it's there, or 🔁 Not there — post again if it isn't.",
         True,
     ),
     "too_many": ("Too many actions at once — try again in a minute.", True),
@@ -174,7 +183,7 @@ def _executed_text(action: Optional[str], result: CommandResult) -> str:
         return "✅ Approved — publishing isn't live yet; it will post when it is"
     if action == "posted" or action == "itposted":
         return "✅ Marked posted"
-    if action == "retry":
+    if action == "notposted":
         if data.get("dry_run"):
             return "🔁 Posting again — dry run, nothing will be published"
         if data.get("paused"):
@@ -214,6 +223,15 @@ def answer_for(
         return _executed_text(action, result), False
     if key == "answered" and result is not None:
         return _answered_text(result), False
+    if key == "manual_mode" and action in RESOLUTION_OF:
+        # The approval card's answer names ✅ Posted myself; the review card
+        # has no such button — its lever for a workspace that posts by hand
+        # now is to give up here and post the story itself.
+        return (
+            "This workspace posts by hand now — tap 🚫 Give up here and post"
+            " the story on Instagram yourself.",
+            True,
+        )
     return ANSWERS.get(key, FALLBACK_ANSWER)
 
 
@@ -389,6 +407,8 @@ class TelegramDispatcher:
             args: dict[str, Any] = {"intent_id": tap.intent_id}
             if tap.action in RESOLUTION_OF:
                 args["resolution"] = RESOLUTION_OF[tap.action]
+            if tap.action in VERDICT_OF:
+                args["verdict"] = VERDICT_OF[tap.action]
             command = Command(
                 kind=ACTION_TO_COMMAND[tap.action],
                 workspace_id=tenant.workspace_id,

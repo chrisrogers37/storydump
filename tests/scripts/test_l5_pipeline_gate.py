@@ -1241,8 +1241,8 @@ class TestDefinitiveFailureClassification:
             for b in row_
         ]
         assert tokens == [
-            f"v1:retry:{intent}",
             f"v1:itposted:{intent}",
+            f"v1:notposted:{intent}",
             f"v1:giveup:{intent}",
         ]
         assert "attention" in _notices(pipe_db, intent, binding)[0]

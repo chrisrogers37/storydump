@@ -179,9 +179,13 @@ REASONS: tuple[str, ...] = (
     "manual_mode",
     "cancelling",
     "not_connected",
-    # The review card's `posted` resolution on an intent Instagram was never
-    # asked to post (2026-09-12): nothing to confirm; retry or give up.
-    "no_publish_call",
+    # The review card (2026-09-12): `posted` on an intent Instagram never
+    # posted (never asked, or it answered no) has nothing to confirm; `retry`
+    # on an intent whose publish answer was LOST needs the member's verdict
+    # that the story is not there — a plain retry would re-permit a second
+    # publish call beside an unresolved one, the rail's one forbidden thing.
+    "nothing_to_confirm",
+    "may_have_posted",
 )
 
 

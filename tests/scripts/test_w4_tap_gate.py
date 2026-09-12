@@ -635,7 +635,7 @@ class TestATapIsCheapOnRealRows:
 # --- the review card is the workspace's to resolve (2026-09-12) --------------
 
 
-def _parked(world, tag: str, *, publish_step="publish_called") -> dict:
+def _parked(world, tag: str, *, publish_step="publish_called", op="ambiguous") -> dict:
     """A `review_required` intent as the pipeline leaves it: the day debited
     (a real bucket row, so a refund is observable), the container present,
     and the cards already SUPERSEDED by the approve tap — so a resolution can
@@ -647,6 +647,15 @@ def _parked(world, tag: str, *, publish_step="publish_called") -> dict:
         " ig_container_id = 'c-1' WHERE id = %s",
         (publish_step, i["id"]),
     )
+    if op is not None:
+        # The publish permit the pipeline minted, in the state the park left it.
+        _write(
+            world,
+            "INSERT INTO provider_operations (workspace_id, intent_id, provider, op_kind,"
+            " business_key, generation, state, lease_token)"
+            " VALUES (%s, %s, 'ig', 'publish', %s, 1, %s, gen_random_uuid())",
+            (world["ws"], i["id"], f"ig:publish:{i['id']}:1", op),
+        )
     _write(
         world,
         "INSERT INTO daily_post_counts (workspace_id, ig_account_id, local_date, count, cap_at_write)"
@@ -662,6 +671,19 @@ def _parked(world, tag: str, *, publish_step="publish_called") -> dict:
         (i["id"],),
     )
     return i
+
+
+def _op_state(world, intent_id):
+    row = _one(
+        world,
+        "SELECT state, response_ref FROM provider_operations"
+        " WHERE intent_id = %s AND op_kind = 'publish' ORDER BY generation DESC LIMIT 1",
+        (intent_id,),
+    )
+    if row is None:
+        return None
+    ref = row[1] if isinstance(row[1], dict) or row[1] is None else json.loads(row[1])
+    return row[0], ref
 
 
 def _day_count(world):
@@ -694,9 +716,14 @@ class TestTheReviewCardIsTheTenantsToResolve:
     ):
         i = _parked(world, "review-retry")
         assert _day_count(world) == 1
-        r = tap(world, "retry", i["id"])
+        r = tap(world, "notposted", i["id"])
         assert r.outcome == "executed", r.answer_text
         assert "again" in r.answer_text.lower()
+        # The member's verdict ended the ambiguous op: the rail never sees a
+        # second permitted publish call beside an unresolved one.
+        state, ref = _op_state(world, i["id"])
+        assert state == "failed" and ref["verdict"] == "not_posted"
+        assert ref["by"] == world["user"]
         state, step, _via, refunded, attempts = _intent_cols(world, i["id"])
         assert (state, step) == ("approved", "none")
         assert refunded is None and _day_count(world) == 0, (
@@ -731,6 +758,8 @@ class TestTheReviewCardIsTheTenantsToResolve:
         i = _parked(world, "review-posted")
         r = tap(world, "itposted", i["id"])
         assert r.outcome == "executed", r.answer_text
+        state, ref = _op_state(world, i["id"])
+        assert state == "succeeded" and ref["verdict"] == "posted"
         state, step, via, refunded, _ = _intent_cols(world, i["id"])
         assert (state, step, via) == ("posted", "effect_confirmed", "api")
         assert refunded is None and _day_count(world) == 1, "the debit stands"
@@ -753,12 +782,21 @@ class TestTheReviewCardIsTheTenantsToResolve:
     def test_itposted_without_a_publish_call_is_told_why_and_writes_nothing(
         self, world
     ):
-        i = _parked(world, "review-noposted", publish_step="container_ready")
+        i = _parked(world, "review-noposted", publish_step="container_ready", op=None)
         r = tap(world, "itposted", i["id"])
-        assert r.outcome == "no_publish_call" and r.show_alert is True
-        assert "Post again" in r.answer_text
+        assert r.outcome == "nothing_to_confirm" and r.show_alert is True
+        assert "post again" in r.answer_text.lower()
         assert _intent_cols(world, i["id"])[0] == "review_required"
         assert _audit(world, i["id"]) == [] and _supersedes(world, i["id"]) == []
+
+    def test_itposted_after_instagram_answered_no_is_refused_the_same_way(self, world):
+        """`publish_step` stays `publish_called` when the permit resolved
+        `failed`; the op's state is the discriminator, not the step."""
+        i = _parked(world, "review-refused", op="failed")
+        r = tap(world, "itposted", i["id"])
+        assert r.outcome == "nothing_to_confirm"
+        assert _intent_cols(world, i["id"])[0] == "review_required"
+        assert _op_state(world, i["id"])[0] == "failed"
 
     def test_giveup_cancels_and_keeps_the_debit(self, world):
         i = _parked(world, "review-giveup")
@@ -766,6 +804,9 @@ class TestTheReviewCardIsTheTenantsToResolve:
         assert r.outcome == "executed" and "Cancelled" in r.answer_text
         state, _, _, refunded, _ = _intent_cols(world, i["id"])
         assert state == "cancelled" and refunded is None
+        assert _op_state(world, i["id"])[0] == "failed", (
+            "the op retires with the intent"
+        )
         assert _day_count(world) == 1, (
             "`02` §4: a review may have published — no refund"
         )
@@ -779,7 +820,7 @@ class TestTheReviewCardIsTheTenantsToResolve:
 
     def test_a_review_tap_on_a_card_that_moved_on_answers(self, world):
         i = _parked(world, "review-moved")
-        assert tap(world, "retry", i["id"]).outcome == "executed"
+        assert tap(world, "notposted", i["id"]).outcome == "executed"
         r = tap(world, "giveup", i["id"])
         assert r.outcome == "answered" and "Approved" in r.answer_text
         assert _intent_cols(world, i["id"])[0] == "approved"

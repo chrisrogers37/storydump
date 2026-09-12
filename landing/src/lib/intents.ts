@@ -117,11 +117,17 @@ export const ACTION_LABELS: Record<QueueAction, string> = {
   resolve_cancel: "Give up",
 };
 
-const RESOLUTION_OF: Record<"retry" | "resolve_posted" | "resolve_cancel", string> = {
+type ReviewAction = "retry" | "resolve_posted" | "resolve_cancel";
+
+const RESOLUTION_OF: Record<ReviewAction, string> = {
   retry: "retry",
   resolve_posted: "posted",
   resolve_cancel: "cancel",
 };
+
+function isReviewAction(action: QueueAction): action is ReviewAction {
+  return action in RESOLUTION_OF;
+}
 
 export type ActionRequest = { command: QueueCommand; body: Record<string, unknown> };
 
@@ -129,23 +135,27 @@ export type ActionRequest = { command: QueueCommand; body: Record<string, unknow
  * The command and body an action posts. A review resolution carries the
  * row's `entered_state_at` as its `episode`: the idempotency key is derived
  * from it (`@/lib/commands`), so a double-click replays while a LATER review
- * of the same post — parked again after a retry — is a new command.
+ * of the same post — parked again after a retry — is a new command. Post
+ * again carries the member's verdict (`not_posted`): the Queue asks "is it
+ * on your story?" before sending, and the port needs that answer when the
+ * publish answer was lost — a plain retry could post the story twice.
  */
 export function requestFor(
   action: QueueAction,
   intent: Pick<Intent, "id" | "entered_state_at">,
 ): ActionRequest {
-  if (action in RESOLUTION_OF) {
+  if (isReviewAction(action)) {
     return {
       command: "resolve_review",
       body: {
         intent_id: intent.id,
-        resolution: RESOLUTION_OF[action as keyof typeof RESOLUTION_OF],
+        resolution: RESOLUTION_OF[action],
+        ...(action === "retry" ? { verdict: "not_posted" } : {}),
         episode: intent.entered_state_at,
       },
     };
   }
-  return { command: action as QueueCommand, body: { intent_id: intent.id } };
+  return { command: action, body: { intent_id: intent.id } };
 }
 
 export function isQueueCommand(value: unknown): value is QueueCommand {
@@ -157,21 +167,25 @@ export function isQueueCommand(value: unknown): value is QueueCommand {
 /**
  * The buttons a row gets. `awaiting_approval` has the matrix's four user
  * edges; hybrid (`api_publishing_enabled`) keeps the manual buttons beside
- * Approve (`06` §3). `review_required` has the three resolutions (Post
- * again needs the API to publish; Give up is offered even while a cancel is
- * pending, because it IS the cancel). Every other state renders read-only
- * with its badge.
+ * Approve (`06` §3). `review_required` has the three resolutions: It posted
+ * only once a publish call was made (`publish_step`, on the row — before that
+ * rung the port can only refuse it); Post again needs the API to publish;
+ * Give up is offered even while a cancel is pending, because it IS the
+ * cancel. Every other state renders read-only with its badge.
  */
 export function actionsFor(
   state: IntentState,
   apiPublishingEnabled: boolean,
   cancelRequested = false,
+  publishStep: string | null = null,
 ): QueueAction[] {
   if (state === "review_required") {
     if (cancelRequested) return ["resolve_cancel"];
-    return apiPublishingEnabled
-      ? ["retry", "resolve_posted", "resolve_cancel"]
-      : ["resolve_posted", "resolve_cancel"];
+    const actions: QueueAction[] = [];
+    if (publishStep === "publish_called") actions.push("resolve_posted");
+    if (apiPublishingEnabled) actions.push("retry");
+    actions.push("resolve_cancel");
+    return actions;
   }
   // A card whose cancellation is requested (by `cancel`, or because its
   // destination was removed) has no lever until the worker finishes it.
@@ -205,8 +219,10 @@ export function refusalCopy(reason: unknown): string {
       return "This workspace posts by hand. Post the story on Instagram, then tap Posted myself.";
     case "not_connected":
       return "Instagram is not connected for this account. Connect it in Settings › Integrations, or post by hand.";
-    case "no_publish_call":
-      return "Instagram was never asked to post this one, so there is nothing to confirm. Post again, or give up.";
+    case "nothing_to_confirm":
+      return "Instagram did not post this one — it was never asked, or it answered no — so there is nothing to confirm. Post again, or give up.";
+    case "may_have_posted":
+      return "Instagram may have posted this one. Check your story first: choose It posted if it is there.";
     case "cancelling":
       return "This post is being cancelled.";
     case "not_found":

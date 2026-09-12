@@ -41,7 +41,9 @@ import {
  * Reject asks first. It is the one action whose lock is permanent — the
  * story is never offered again — and the button sits beside Skip, whose
  * lock expires. Give up asks too: it ends a review for good, and the person
- * who can see the story on Instagram should choose It posted instead.
+ * who can see the story on Instagram should choose It posted instead. Post
+ * again asks the review's own question — is it on your story? — because the
+ * answer travels with the command as the member's verdict.
  */
 
 /** Labels that differ from the state's own name; the badge falls back to the name. */
@@ -88,6 +90,14 @@ const CONFIRM: Partial<
     body: (intent) =>
       `Storydump will stop trying to post ${intent.file_name}. If you can already see it on Instagram, choose It posted instead.`,
     verb: "Give up",
+  },
+  // The answer to the review's own question. The port needs it when the
+  // publish answer was lost: a plain retry could show the story twice.
+  retry: {
+    title: "Is it on your story?",
+    body: (intent) =>
+      `Check Instagram first. If ${intent.file_name} is already there, choose It posted — posting again would show it twice. If it is not there, post it again.`,
+    verb: "Not there — post again",
   },
 };
 
@@ -165,6 +175,7 @@ export function QueueList({
             intent.state,
             apiPublishingEnabled,
             intent.cancel_requested,
+            intent.publish_step,
           );
           const MediaGlyph = intent.media_kind === "video" ? Video : ImageIcon;
 

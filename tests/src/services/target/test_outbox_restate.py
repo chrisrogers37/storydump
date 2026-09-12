@@ -120,3 +120,63 @@ class TestRestateEverywhere:
             s, workspace_id="ws", intent_id="i", outcome_text="x", reply_markup=KEYBOARD
         )
         assert json.loads(s.sql[0][1]["kb"]) == KEYBOARD
+
+
+class TestACardLandingOnAParkedIntentKeepsTheReviewButtons:
+    """`_edit_sent_card` (R6 after a send): a card whose intent moved while it
+    was in flight is edited at once. If the intent is `review_required`, the
+    edit carries the review keyboard; for any other state it carries none."""
+
+    @pytest.fixture
+    def seams(self, monkeypatch):
+        from src.services.target import identity, intent_ledger
+
+        seen = {"state": "review_required", "queued": []}
+
+        async def settlement(session, *, workspace_id, intent_id):
+            return {"state": seen["state"], "by_user_id": None, "at": None}
+
+        async def display_name_for(session, *, user_id):
+            return None
+
+        async def enqueue(session, **kw):
+            seen["queued"].append(kw)
+            return "ob-new"
+
+        monkeypatch.setattr(intent_ledger, "settlement", settlement)
+        monkeypatch.setattr(identity, "display_name_for", display_name_for)
+        monkeypatch.setattr(outbox, "enqueue", enqueue)
+        return seen
+
+    class _Receipt(str):
+        sent_as = "text"
+
+    async def _land(self, seams):
+        session = _Session([("UTC",)])
+        row = {
+            "id": "ob-1",
+            "kind": "approval_prompt",
+            "intent_id": "i",
+            "workspace_id": "ws",
+            "binding_id": "b",
+            "payload": {"v": 2, "text": "📸 f.jpg"},
+        }
+        assert await outbox._edit_sent_card(
+            session, row, self._Receipt("777"), force=False
+        )
+        return seams["queued"][0]["payload"]
+
+    async def test_a_parked_intent_gets_the_three_buttons(self, seams):
+        payload = await self._land(seams)
+        assert "Needs review" in payload["outcome_text"]
+        tokens = [
+            b["callback_data"]
+            for r in payload["reply_markup"]["inline_keyboard"]
+            for b in r
+        ]
+        assert tokens == ["v1:itposted:i", "v1:notposted:i", "v1:giveup:i"]
+
+    async def test_any_other_state_gets_none(self, seams):
+        seams["state"] = "posted"
+        payload = await self._land(seams)
+        assert "Posted" in payload["outcome_text"] and "reply_markup" not in payload

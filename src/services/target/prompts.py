@@ -56,8 +56,10 @@ INSTAGRAM_DEEPLINK_URL = "https://www.instagram.com/"
 _ACTIONS_API = ("post", "posted", "skip", "reject")
 _ACTIONS_MANUAL = ("posted", "skip", "reject")
 #: The review card's buttons (2026-09-12): a `review_required` card is the
-#: workspace's to resolve — post again, it posted, give up.
-REVIEW_ACTIONS = ("retry", "itposted", "giveup")
+#: workspace's to resolve — it posted, not there (post again), give up. The
+#: retry button's label is the answer to the review's own question ("is it
+#: on your story?"), so a tap on it carries the member's verdict.
+REVIEW_ACTIONS = ("itposted", "notposted", "giveup")
 assert set(_ACTIONS_API) | set(REVIEW_ACTIONS) == set(ACTIONS)
 
 #: The word a card shows for each state a tap can find it in — the outcome
@@ -134,8 +136,8 @@ _LABELS = {
     "posted": "✅ Posted myself",
     "skip": "⏭️ Skip",
     "reject": "🚫 Reject",
-    "retry": "🔁 Post again",
     "itposted": "✅ It posted",
+    "notposted": "🔁 Not there — post again",
     "giveup": "🚫 Give up",
 }
 

@@ -617,7 +617,7 @@ class TestTheReviewTaps:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("action", "resolution"),
-        [("retry", "retry"), ("itposted", "posted"), ("giveup", "cancel")],
+        [("notposted", "retry"), ("itposted", "posted"), ("giveup", "cancel")],
     )
     async def test_a_review_tap_carries_its_resolution(self, seams, action, resolution):
         seams["result"] = CommandResult(
@@ -628,19 +628,39 @@ class TestTheReviewTaps:
         assert r.outcome == "executed"
         cmd = seams["log"]["executed"][0]
         assert cmd.kind == "resolve_review"
-        assert cmd.args == {"intent_id": INTENT, "resolution": resolution}
+        expected = {"intent_id": INTENT, "resolution": resolution}
+        if action == "notposted":
+            # The button's label IS the member's verdict: "not on my story".
+            expected["verdict"] = "not_posted"
+        assert cmd.args == expected
 
     def test_the_answers_name_what_happens_next(self):
         from src.services.target.telegram_dispatch import _executed_text
 
         retry = CommandResult("enqueued", {"state": "approved", "dry_run": False})
-        assert "again" in _executed_text("retry", retry).lower()
+        assert "again" in _executed_text("notposted", retry).lower()
+        dry = CommandResult("enqueued", {"state": "approved", "dry_run": True})
+        assert "dry run" in _executed_text("notposted", dry)
+        paused = CommandResult("enqueued", {"state": "approved", "paused": True})
+        assert "paused" in _executed_text("notposted", paused)
         assert (
             "posted"
             in _executed_text("itposted", CommandResult("executed", {})).lower()
         )
         assert "Cancelled" in _executed_text("giveup", CommandResult("executed", {}))
 
-    def test_a_posted_claim_without_a_publish_call_is_told_why(self):
-        text, alert = telegram_dispatch.answer_for("no_publish_call")
-        assert alert is True and "Post again" in text
+    def test_a_posted_claim_with_nothing_to_confirm_is_told_why(self):
+        text, alert = telegram_dispatch.answer_for("nothing_to_confirm")
+        assert alert is True and "post again" in text.lower()
+
+    def test_a_retry_on_a_lost_answer_is_told_to_look_first(self):
+        text, alert = telegram_dispatch.answer_for("may_have_posted")
+        assert alert is True and "It posted" in text
+
+    def test_manual_mode_on_the_review_card_names_the_review_cards_lever(self):
+        """The approval card's manual-mode answer says "tap ✅ Posted myself";
+        the review card has no such button."""
+        text, _ = telegram_dispatch.answer_for("manual_mode", action="notposted")
+        assert "Give up" in text and "Posted myself" not in text
+        text, _ = telegram_dispatch.answer_for("manual_mode", action="post")
+        assert "Posted myself" in text

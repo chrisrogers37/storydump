@@ -346,10 +346,15 @@ class TestTheReviewKeyboard:
         kb = prompts.review_keyboard(INTENT)
         rows = kb["inline_keyboard"]
         assert [[b["callback_data"] for b in row] for row in rows] == [
-            [f"v1:retry:{INTENT}", f"v1:itposted:{INTENT}"],
+            [f"v1:itposted:{INTENT}", f"v1:notposted:{INTENT}"],
             [f"v1:giveup:{INTENT}"],
         ]
-        assert [b["text"] for b in rows[0]] == ["🔁 Post again", "✅ It posted"]
+        # The retry button's label carries the member's verdict: it is the
+        # answer to "is it on your story?", which is the review's question.
+        assert [b["text"] for b in rows[0]] == [
+            "✅ It posted",
+            "🔁 Not there — post again",
+        ]
         assert rows[1][0]["text"] == "🚫 Give up"
 
     def test_every_button_parses_back_to_its_action(self):

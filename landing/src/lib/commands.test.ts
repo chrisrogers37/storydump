@@ -438,6 +438,25 @@ describe("resolve_review — the review card's three resolutions (2026-09-12)", 
     });
   });
 
+  it("forwards the one verdict the port knows, and drops any other", () => {
+    const withVerdict = parseCommand("resolve_review", {
+      intent_id: UUID,
+      resolution: "retry",
+      verdict: "not_posted",
+    });
+    expect(withVerdict.ok && withVerdict.body).toEqual({
+      intent_id: UUID,
+      resolution: "retry",
+      verdict: "not_posted",
+    });
+    const other = parseCommand("resolve_review", {
+      intent_id: UUID,
+      resolution: "retry",
+      verdict: "posted",
+    });
+    expect(other.ok && other.body).toEqual({ intent_id: UUID, resolution: "retry" });
+  });
+
   it("keys on the review episode, so a second review of the same post is a new command and a double-click is not", () => {
     const first = parseCommand("resolve_review", { intent_id: UUID, resolution: "retry", episode: "t1" });
     const again = parseCommand("resolve_review", { intent_id: UUID, resolution: "retry", episode: "t1" });

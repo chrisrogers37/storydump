@@ -44,18 +44,27 @@ describe("which actions an intent offers", () => {
   });
 
   it("offers the three resolutions on review_required — the workspace resolves its own review (2026-09-12)", () => {
-    expect(actionsFor("review_required", true)).toEqual([
-      "retry",
+    expect(actionsFor("review_required", true, false, "publish_called")).toEqual([
       "resolve_posted",
+      "retry",
       "resolve_cancel",
     ]);
     // Post again re-mints the publish job, so it needs the API to publish.
-    expect(actionsFor("review_required", false)).toEqual([
+    expect(actionsFor("review_required", false, false, "publish_called")).toEqual([
       "resolve_posted",
       "resolve_cancel",
     ]);
+    // It posted needs a publish call to confirm: before that rung the port
+    // can only refuse it, so the button is not offered (the row's step says).
+    expect(actionsFor("review_required", true, false, "container_ready")).toEqual([
+      "retry",
+      "resolve_cancel",
+    ]);
+    expect(actionsFor("review_required", true)).toEqual(["retry", "resolve_cancel"]);
     // A cancel already asked for is honoured by Give up alone.
-    expect(actionsFor("review_required", true, true)).toEqual(["resolve_cancel"]);
+    expect(actionsFor("review_required", true, true, "publish_called")).toEqual([
+      "resolve_cancel",
+    ]);
   });
 
   it("offers nothing on every other state — those rows are the ledger's read-only view", () => {
@@ -72,9 +81,17 @@ describe("which actions an intent offers", () => {
       command: "approve",
       body: { intent_id: intent.id },
     });
+    // Post again carries the member's verdict: the web asks "is it on your
+    // story?" first, and the port needs the answer when the publish answer
+    // was lost (a plain retry could post the story twice).
     expect(requestFor("retry", intent)).toEqual({
       command: "resolve_review",
-      body: { intent_id: intent.id, resolution: "retry", episode: intent.entered_state_at },
+      body: {
+        intent_id: intent.id,
+        resolution: "retry",
+        verdict: "not_posted",
+        episode: intent.entered_state_at,
+      },
     });
     expect(requestFor("resolve_posted", intent).body.resolution).toBe("posted");
     expect(requestFor("resolve_cancel", intent).body.resolution).toBe("cancel");
@@ -129,6 +146,11 @@ describe("the idempotency key", () => {
 });
 
 describe("refusal copy", () => {
+  it("names the review card's two refusals", () => {
+    expect(refusalCopy("nothing_to_confirm")).toMatch(/nothing to confirm/i);
+    expect(refusalCopy("may_have_posted")).toMatch(/It posted/);
+  });
+
   it("turns the matrix's normal 409 answers into a sentence, never a raw code", () => {
     expect(refusalCopy("illegal_transition")).toMatch(/already/i);
     expect(refusalCopy("manual_mode")).toMatch(/Posted myself/);

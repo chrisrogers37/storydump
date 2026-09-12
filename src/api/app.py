@@ -184,7 +184,8 @@ _COMMAND_STATUS = {
     "manual_mode": 409,
     "not_connected": 409,
     "cancelling": 409,
-    "no_publish_call": 409,
+    "nothing_to_confirm": 409,
+    "may_have_posted": 409,
 }
 
 #: `ProvisioningRefused.reason` → status (#1041).

@@ -7,7 +7,7 @@ buttons shipped for months with nothing consuming them — so both live in this
 one module and a test round-trips them.
 
 The token is bounded by Telegram's 64-byte `callback_data` limit: `v1:` (3)
-plus the longest action (8, `itposted`) plus `:` (1) plus a UUID (36) is 48
+plus the longest action (9, `notposted`) plus `:` (1) plus a UUID (36) is 49
 bytes.
 """
 
@@ -23,15 +23,17 @@ VERSION = 1
 #: (→ `approve`), `posted` the manual workspace's "I posted it" (→
 #: `mark_posted`), `skip` and `reject` their commands (F10: one tap is final;
 #: no confirm token). The review card's three (2026-09-12 — the workspace
-#: resolves its own `review_required` card): `retry` (post again), `itposted`
-#: (Instagram did post it) and `giveup` (cancel), all → `resolve_review`.
+#: resolves its own `review_required` card): `itposted` (Instagram did post
+#: it), `notposted` (it is not on the story — post again; the label IS the
+#: member's verdict, which the resolution needs when the publish answer was
+#: lost) and `giveup` (cancel), all → `resolve_review`.
 ACTIONS: tuple[str, ...] = (
     "post",
     "posted",
     "skip",
     "reject",
-    "retry",
     "itposted",
+    "notposted",
     "giveup",
 )
 
