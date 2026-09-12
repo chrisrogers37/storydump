@@ -334,6 +334,9 @@ def test_a_posted_dry_run_row_words_as_a_dry_run_everywhere():
     assert prompts.outcome_word("skipped", "dry_run") == "⏭️ Skipped"
 
 
+INTENT = "0b6e5f1a-2f4d-4c1e-9a3b-7d8e9f0a1b2c"
+
+
 class TestTheReviewKeyboard:
     """A `review_required` card is the workspace's to resolve (2026-09-12): it
     offers the three resolutions a member may take — post again, it posted,

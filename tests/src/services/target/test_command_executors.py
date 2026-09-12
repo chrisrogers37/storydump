@@ -99,8 +99,12 @@ def world(monkeypatch):
     # the restate-by-ref that reaches a card the tap already superseded.
     log.update({"retries": [], "posted": [], "cancels": [], "restates": []})
 
-    async def resolve_retry(session, *, intent_id, workspace_id, ig_account_id, attempts_by_step):
-        log["retries"].append((intent_id, workspace_id, ig_account_id, attempts_by_step))
+    async def resolve_retry(
+        session, *, intent_id, workspace_id, ig_account_id, attempts_by_step
+    ):
+        log["retries"].append(
+            (intent_id, workspace_id, ig_account_id, attempts_by_step)
+        )
         return log.get("retry_ok", True)
 
     async def resolve_posted(session, *, intent_id):
@@ -275,7 +279,9 @@ class TestTheReviewCardIsTheTenantsToResolve:
     job; `posted` confirms what a publish call did; `cancel` gives up and
     keeps the debit. `failed` (a refund) stays the operator's."""
 
-    async def test_retry_reapproves_debit_neutral_and_mints_the_publish_job(self, parked):
+    async def test_retry_reapproves_debit_neutral_and_mints_the_publish_job(
+        self, parked
+    ):
         out = await command_executors.resolve_review(_Session(), _review("retry"))
         assert out.outcome == "enqueued" and out.data["state"] == "approved"
         (intent_id, ws, acct, attempts) = parked["retries"][0]
@@ -292,7 +298,10 @@ class TestTheReviewCardIsTheTenantsToResolve:
         # The card the approve tap already superseded is reached BY REF.
         assert parked["supersedes"] == []
         assert len(parked["restates"]) == 1
-        assert "Approved" in parked["restates"][0][2] and "Chris" in parked["restates"][0][2]
+        assert (
+            "Approved" in parked["restates"][0][2]
+            and "Chris" in parked["restates"][0][2]
+        )
 
     async def test_a_second_retry_counts_up(self, parked):
         parked["row"]["attempts_by_step"] = {"v": 1, "retries": 2}
@@ -325,7 +334,9 @@ class TestTheReviewCardIsTheTenantsToResolve:
         assert exc.value.reason == "illegal_transition"
         assert parked["jobs"] == [] and parked["restates"] == []
 
-    async def test_posted_confirms_the_publish_call_with_every_posted_effect(self, parked):
+    async def test_posted_confirms_the_publish_call_with_every_posted_effect(
+        self, parked
+    ):
         session = _Session()
         out = await command_executors.resolve_review(session, _review("posted"))
         assert out.outcome == "executed" and out.data["state"] == "posted"
@@ -351,7 +362,9 @@ class TestTheReviewCardIsTheTenantsToResolve:
         assert parked["cancels"] == ["i1"]
         assert "Cancelled" in parked["restates"][0][2]
 
-    async def test_cancel_is_honoured_even_when_a_cancel_was_already_asked_for(self, parked):
+    async def test_cancel_is_honoured_even_when_a_cancel_was_already_asked_for(
+        self, parked
+    ):
         parked["row"]["cancel_requested"] = True
         out = await command_executors.resolve_review(_Session(), _review("cancel"))
         assert out.data["state"] == "cancelled"
@@ -359,7 +372,9 @@ class TestTheReviewCardIsTheTenantsToResolve:
             await command_executors.resolve_review(_Session(), _review("retry"))
         assert exc.value.reason == "cancelling"
 
-    @pytest.mark.parametrize("state", ["approved", "publishing", "posted", "awaiting_approval"])
+    @pytest.mark.parametrize(
+        "state", ["approved", "publishing", "posted", "awaiting_approval"]
+    )
     async def test_any_other_state_answers_and_writes_nothing(self, parked, state):
         parked["row"]["state"] = state
         out = await command_executors.resolve_review(_Session(), _review("retry"))
@@ -370,7 +385,11 @@ class TestTheReviewCardIsTheTenantsToResolve:
         with pytest.raises(commands.CommandRefused) as exc:
             await command_executors.resolve_review(_Session(), _review("failed"))
         assert exc.value.reason == "invalid_args"
-        assert parked["retries"] == [] and parked["posted"] == [] and parked["cancels"] == []
+        assert (
+            parked["retries"] == []
+            and parked["posted"] == []
+            and parked["cancels"] == []
+        )
 
     def test_the_floor_is_the_members_like_every_other_intent_command(self):
         assert commands.ROLE_FLOOR["resolve_review"] == "member"

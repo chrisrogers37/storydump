@@ -465,10 +465,18 @@ async def resolve_ambiguous(session, *, outbox_id: str) -> str:
     return to_state
 
 
-def _supersede_payload(ref: str, payload: Any, outcome_text: Optional[str]) -> dict:
+def _supersede_payload(
+    ref: str,
+    payload: Any,
+    outcome_text: Optional[str],
+    *,
+    reply_markup: Optional[dict] = None,
+) -> dict:
     """What the sender needs to edit the card it names: the ref, the outcome
     line, the original header (a media card's caption or a text card's text —
-    the edit keeps it and appends the outcome) and how the card went out."""
+    the edit keeps it and appends the outcome), how the card went out, and —
+    for a state that still offers buttons (`review_required`) — the keyboard
+    the edit leaves instead of the empty one."""
     if isinstance(payload, str):
         payload = json.loads(payload)
     payload = payload or {}
@@ -480,6 +488,8 @@ def _supersede_payload(ref: str, payload: Any, outcome_text: Optional[str]) -> d
         body["header"] = header
     if payload.get("sent_as"):
         body["sent_as"] = payload["sent_as"]
+    if reply_markup:
+        body["reply_markup"] = reply_markup
     return body
 
 
@@ -585,6 +595,66 @@ async def supersede_everywhere(
     return int(row[0] or 0) if row is not None else 0
 
 
+async def restate_everywhere(
+    session,
+    *,
+    workspace_id: str,
+    intent_id: str,
+    outcome_text: str,
+    reply_markup: Optional[dict] = None,
+) -> int:
+    """`restate_cards` for EVERY active Telegram binding of the workspace, in
+    one statement — the review resolutions' door (2026-09-12): the card a
+    `review_required` intent shows was superseded by the approve tap, so the
+    resolution's line reaches it by ref, and the shape is
+    `supersede_everywhere`'s (#1286: one round trip inside the transaction).
+    Returns the edits queued."""
+    row = (
+        await session.execute(
+            text(
+                "WITH b AS ("
+                "  SELECT id FROM channel_bindings"
+                "   WHERE workspace_id = :ws AND state = 'active'"
+                "     AND channel LIKE 'telegram%'"
+                "), upd AS ("
+                "  UPDATE channel_outbox o"
+                "     SET payload = o.payload || jsonb_build_object('outcome_text', CAST(:o AS text))"
+                "   WHERE o.workspace_id = :ws AND o.intent_id = :i"
+                "     AND o.binding_id IN (SELECT id FROM b)"
+                "     AND o.kind = 'approval_prompt'"
+                "     AND o.state IN ('sent', 'superseded', 'ambiguous')"
+                "     AND o.external_message_ref IS NOT NULL"
+                "   RETURNING o.binding_id, o.external_message_ref, o.payload"
+                "), refs AS ("
+                "  SELECT DISTINCT ON (binding_id, external_message_ref)"
+                "         binding_id, external_message_ref, payload FROM upd"
+                "), ins AS ("
+                "  INSERT INTO channel_outbox (workspace_id, binding_id, kind, intent_id, payload)"
+                "  SELECT :ws, r.binding_id, 'prompt_supersede', :i,"
+                "         jsonb_strip_nulls(jsonb_build_object("
+                "           'v', 1,"
+                "           'supersedes_ref', r.external_message_ref,"
+                "           'outcome_text', CAST(:o AS text),"
+                "           'header', COALESCE(NULLIF(r.payload->>'caption', ''),"
+                "                              NULLIF(r.payload->>'text', '')),"
+                "           'sent_as', NULLIF(r.payload->>'sent_as', ''),"
+                "           'reply_markup', CAST(:kb AS jsonb)))"
+                "    FROM refs r"
+                "  RETURNING id"
+                ")"
+                " SELECT (SELECT count(*) FROM ins) AS queued"
+            ),
+            {
+                "ws": workspace_id,
+                "i": intent_id,
+                "o": outcome_text,
+                "kb": None if reply_markup is None else json.dumps(reply_markup),
+            },
+        )
+    ).first()
+    return int(row[0] or 0) if row is not None else 0
+
+
 async def restate_cards(
     session,
     *,
@@ -592,6 +662,7 @@ async def restate_cards(
     binding_id: str,
     intent_id: str,
     outcome_text: str,
+    reply_markup: Optional[dict] = None,
 ) -> int:
     """Write a NEW outcome line onto every card of *intent_id* that still has
     a message to edit, and queue the edit — whether or not the card is already
@@ -632,7 +703,9 @@ async def restate_cards(
             workspace_id=workspace_id,
             binding_id=binding_id,
             kind="prompt_supersede",
-            payload=_supersede_payload(str(ref), payload, outcome_text),
+            payload=_supersede_payload(
+                str(ref), payload, outcome_text, reply_markup=reply_markup
+            ),
             intent_id=intent_id,
         )
     return len(seen)
@@ -1004,13 +1077,23 @@ async def _edit_sent_card(session, row: dict, receipt, *, force: bool) -> bool:
     if isinstance(payload, str):
         payload = json.loads(payload)
     sent_as = getattr(receipt, "sent_as", None) or payload.get("sent_as")
+    # A card that lands while its intent waits for the workspace's review
+    # keeps the review buttons, not none (2026-09-12).
+    markup = (
+        prompts.review_keyboard(str(row["intent_id"]))
+        if state == "review_required"
+        else None
+    )
     await enqueue(
         session,
         workspace_id=str(row["workspace_id"]),
         binding_id=str(row["binding_id"]),
         kind="prompt_supersede",
         payload=_supersede_payload(
-            ref, {**payload, **({"sent_as": sent_as} if sent_as else {})}, outcome
+            ref,
+            {**payload, **({"sent_as": sent_as} if sent_as else {})},
+            outcome,
+            reply_markup=markup,
         ),
         intent_id=str(row["intent_id"]),
     )

@@ -810,6 +810,78 @@ class TestTheSupersedeRowEditsTheCard:
         assert info.value.retry_after_s == 7.0
         assert calls == ["editMessageCaption"]
 
+    async def test_a_payload_keyboard_rides_the_edit_instead_of_the_empty_one(self):
+        """A `review_required` card keeps buttons — the three resolutions —
+        so the restate's supersede row carries its own `reply_markup`, and
+        the one edit sends THAT instead of the empty keyboard (2026-09-12)."""
+        calls = []
+
+        def handler(request):
+            calls.append(
+                (str(request.url).rsplit("/", 1)[-1], json.loads(request.content))
+            )
+            return _ok()
+
+        keyboard = {
+            "inline_keyboard": [
+                [{"text": "🔁 Post again", "callback_data": "v1:retry:x"}],
+            ]
+        }
+        t = _transport(handler)
+        row = {
+            "id": "ob-9",
+            "kind": "prompt_supersede",
+            "intent_id": "i1",
+            "payload": {
+                "v": 1,
+                "supersedes_ref": "555",
+                "outcome_text": "👀 Needs review · 12:00 UTC",
+                "header": "📸 @brand",
+                "sent_as": "media",
+                "reply_markup": keyboard,
+            },
+        }
+        assert await t.for_chat("-100")(row) == "555"
+        assert [c[0] for c in calls] == ["editMessageCaption"]
+        assert calls[0][1]["reply_markup"] == keyboard
+
+    async def test_the_fallback_strip_sets_the_payload_keyboard_too(self):
+        calls = []
+
+        def handler(request):
+            name = str(request.url).rsplit("/", 1)[-1]
+            calls.append((name, json.loads(request.content)))
+            if name == "editMessageCaption":
+                return httpx.Response(
+                    400,
+                    json={
+                        "ok": False,
+                        "error_code": 400,
+                        "description": "Bad Request: no caption",
+                    },
+                )
+            return _ok()
+
+        keyboard = {
+            "inline_keyboard": [[{"text": "x", "callback_data": "v1:giveup:x"}]]
+        }
+        t = _transport(handler)
+        row = {
+            "id": "ob-9",
+            "kind": "prompt_supersede",
+            "intent_id": "i1",
+            "payload": {
+                "v": 1,
+                "supersedes_ref": "555",
+                "outcome_text": "x",
+                "sent_as": "media",
+                "reply_markup": keyboard,
+            },
+        }
+        assert await t.for_chat("-100")(row) == "555"
+        assert [c[0] for c in calls] == ["editMessageCaption", "editMessageReplyMarkup"]
+        assert calls[1][1]["reply_markup"] == keyboard
+
     async def test_not_modified_is_success_in_one_call(self):
         calls = []
 

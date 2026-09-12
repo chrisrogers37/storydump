@@ -53,8 +53,12 @@ logger = logging.getLogger(__name__)
 
 INSTAGRAM_DEEPLINK_URL = "https://www.instagram.com/"
 
-_ACTIONS_API = ACTIONS
+_ACTIONS_API = ("post", "posted", "skip", "reject")
 _ACTIONS_MANUAL = ("posted", "skip", "reject")
+#: The review card's buttons (2026-09-12): a `review_required` card is the
+#: workspace's to resolve — post again, it posted, give up.
+REVIEW_ACTIONS = ("retry", "itposted", "giveup")
+assert set(_ACTIONS_API) | set(REVIEW_ACTIONS) == set(ACTIONS)
 
 #: The word a card shows for each state a tap can find it in — the outcome
 #: line (phase 1 of the 2026-09-09 tap plan, step 5) and the answer a repeat
@@ -130,7 +134,29 @@ _LABELS = {
     "posted": "✅ Posted myself",
     "skip": "⏭️ Skip",
     "reject": "🚫 Reject",
+    "retry": "🔁 Post again",
+    "itposted": "✅ It posted",
+    "giveup": "🚫 Give up",
 }
+
+
+def review_keyboard(intent_id: str) -> dict:
+    """The keyboard a `review_required` card carries: the member's three
+    resolutions, minted by the one token function. Rides the restate's
+    supersede row as `reply_markup`, so the edit that writes "👀 Needs
+    review" leaves these buttons instead of none."""
+    return {
+        "inline_keyboard": [
+            [
+                {"text": _LABELS[a], "callback_data": _token(a, intent_id)}
+                for a in REVIEW_ACTIONS[:2]
+            ],
+            [
+                {"text": _LABELS[a], "callback_data": _token(a, intent_id)}
+                for a in REVIEW_ACTIONS[2:]
+            ],
+        ]
+    }
 
 
 def _canonical_fraction(value: str) -> str:

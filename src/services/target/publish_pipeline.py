@@ -659,8 +659,11 @@ async def _retry_or_poison(
                 at=now_fn(),
                 notice=(
                     "A story couldn't be posted after several tries and needs"
-                    " attention. Open the Queue on the web."
+                    " attention: choose on its card, or open the Queue on the web."
                 ),
+                # The card keeps buttons: the workspace resolves its own
+                # review (2026-09-12) — post again, it posted, give up.
+                reply_markup=prompts.review_keyboard(ctx.intent_id),
             )
             if told:
                 # The latch is the reconciler's own rule (`reconciler.py`): it is
@@ -1317,7 +1320,15 @@ def _failure_notice(exc: BaseException, *, lock_media: bool) -> str:
     return "A story didn't post. Open the Queue on the web to see which."
 
 
-async def _say_outcome(session, ctx: _Ctx, *, state: str, at, notice: str) -> int:
+async def _say_outcome(
+    session,
+    ctx: _Ctx,
+    *,
+    state: str,
+    at,
+    notice: str,
+    reply_markup: Optional[dict] = None,
+) -> int:
     """Restate every card of the intent with the outcome line (the posted
     line's own path — the tap already superseded the card, so only a restate
     by ref can reach it) and write ONE notification per push binding, in the
@@ -1334,6 +1345,7 @@ async def _say_outcome(session, ctx: _Ctx, *, state: str, at, notice: str) -> in
             binding_id=binding_id,
             intent_id=ctx.intent_id,
             outcome_text=line,
+            reply_markup=reply_markup,
         )
     await outbox.fanout_notification(
         session,

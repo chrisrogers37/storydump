@@ -82,7 +82,12 @@ ACTION_TO_COMMAND = {
     "posted": "mark_posted",
     "skip": "skip",
     "reject": "reject",
+    # The review card (2026-09-12): one command, the resolution in `args`.
+    "retry": "resolve_review",
+    "itposted": "resolve_review",
+    "giveup": "resolve_review",
 }
+RESOLUTION_OF = {"retry": "retry", "itposted": "posted", "giveup": "cancel"}
 
 #: The outcomes a tap can end in that are not a command refusal reason or a
 #: resolver refusal reason. Every one has an entry in ANSWERS.
@@ -139,6 +144,11 @@ ANSWERS: dict[str, tuple[str, bool]] = {
         " Integrations, or post by hand and tap ✅ Posted myself.",
         True,
     ),
+    "no_publish_call": (
+        "Instagram was never asked to post this one, so there is nothing to"
+        " confirm — tap 🔁 Post again, or 🚫 Give up.",
+        True,
+    ),
     "too_many": ("Too many actions at once — try again in a minute.", True),
     "not_found": ("That post is gone.", True),
     "cancelling": ("This card is being cancelled.", False),
@@ -162,8 +172,16 @@ def _executed_text(action: Optional[str], result: CommandResult) -> str:
         if PUBLISH_LEG_LIVE:
             return "✅ Approved — posting shortly"
         return "✅ Approved — publishing isn't live yet; it will post when it is"
-    if action == "posted":
+    if action == "posted" or action == "itposted":
         return "✅ Marked posted"
+    if action == "retry":
+        if data.get("dry_run"):
+            return "🔁 Posting again — dry run, nothing will be published"
+        if data.get("paused"):
+            return "🔁 Posting again when you resume — posting is paused"
+        return "🔁 Posting again shortly"
+    if action == "giveup":
+        return "🚫 Cancelled"
     if action == "skip":
         days = data.get("lock_days")
         return f"⏭️ Skipped for {days} days" if days else "⏭️ Skipped"
@@ -368,12 +386,15 @@ class TelegramDispatcher:
                 channel="telegram",
                 lock_timeout=TAP_LOCK_TIMEOUT,
             )
+            args: dict[str, Any] = {"intent_id": tap.intent_id}
+            if tap.action in RESOLUTION_OF:
+                args["resolution"] = RESOLUTION_OF[tap.action]
             command = Command(
                 kind=ACTION_TO_COMMAND[tap.action],
                 workspace_id=tenant.workspace_id,
                 actor_user_id=str(user_id),
                 channel="telegram",
-                args={"intent_id": tap.intent_id},
+                args=args,
                 # The tapper's name rides with the command — on its own
                 # field, never in `args` — so the outcome line needs no
                 # second identity read (#1286).
