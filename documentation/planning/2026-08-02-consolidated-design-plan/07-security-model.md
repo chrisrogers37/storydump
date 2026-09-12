@@ -1083,3 +1083,24 @@ policy, grant or door changes.
 -- `uq_jobs_serialized_lease` (the one-key-one-runner proof) and the claim/expiry indexes stand.
 CREATE INDEX ix_jobs_leased_lane_ws ON jobs (lane, workspace_id) WHERE state = 'leased';
 ```
+
+### §21. The aged-ambiguous index for the sender's lost-answer resolution (075, #1297)
+
+**Why:** `02` §6's ambiguity policy is applied to a live sender's lost answers on a later tick
+(#1297: before it, only a dead sender's stranded rows ever reached `resolve_ambiguous`). Two new
+predicates ask for a binding's `ambiguous` rows older than the backoff — the fleet-wide sender
+sweep every 3 s (`ensure_sender_jobs`, so a quiet binding gets a sender for such a row) and the
+binding's sender on every tick (`resolve_aged_ambiguous`). Without an index the sweep was a full
+scan of an unbounded table (the re-verify measured 22k buffers on a million rows). One partial
+index; no policy, grant or door changes. The newer-edit check that retires a stale edit rides
+`ix_outbox_intent` (072) by joining on the intent — an intent-less edit (an invitation card's) has
+no such check and is resent under the cap as before.
+
+```sql
+-- #1297 (the one-edit tap): a live sender's lost answer is resolved after a backoff — the sender
+-- sweep (every 3 s, fleet-wide) asks each binding for an `ambiguous` row older than it, and the
+-- binding's sender lists its aged rows on every tick. Neither predicate had an index of its own:
+-- `ix_outbox_due` is partial on `pending`, `ix_outbox_retire` is `(updated_at)` alone, so the sweep
+-- became a full scan of an unbounded table. The partial index serves exactly both predicates.
+CREATE INDEX ix_outbox_ambiguous_age ON channel_outbox (binding_id, updated_at) WHERE state = 'ambiguous';
+```

@@ -18,6 +18,9 @@ def floor(monkeypatch):
     async def recover_stranded(session, *, binding_id):
         return []
 
+    async def resolve_aged_ambiguous(session, *, binding_id):
+        return []
+
     async def increment(session, **kw):
         return 1
 
@@ -35,6 +38,7 @@ def floor(monkeypatch):
         seen["ambiguous"].append(outbox_id)
 
     monkeypatch.setattr(outbox, "recover_stranded", recover_stranded)
+    monkeypatch.setattr(outbox, "resolve_aged_ambiguous", resolve_aged_ambiguous)
     monkeypatch.setattr(outbox, "increment", increment)
     monkeypatch.setattr(outbox, "claim_next", claim_next)
     monkeypatch.setattr(outbox, "_leave_sending", _leave_sending)

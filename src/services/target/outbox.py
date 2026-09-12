@@ -106,8 +106,12 @@ from src.services.target.rate_counters import increment, window_start
 logger = logging.getLogger(__name__)
 
 #: `02` §6 kinds whose ambiguity resolves by resend rather than retry-once.
-#: Two live cards are tolerable; a duplicate notification is not.
-RESEND_KINDS = frozenset({"approval_prompt", "invitation"})
+#: Two live cards are tolerable; a duplicate notification is not. A card EDIT
+#: (`prompt_supersede`) is idempotent — "not modified" is success — so a lost
+#: answer costs one paced call to resend; and since the route no longer strips
+#: a card (#1297), this row is the only path that removes its buttons, so it
+#: may not die after the notification's single retry.
+RESEND_KINDS = frozenset({"approval_prompt", "invitation", "prompt_supersede"})
 
 #: Kinds whose ambiguity is retried EXACTLY once, then failed.
 RETRY_ONCE_KINDS = frozenset({"notification", "ack"})
@@ -143,6 +147,22 @@ CHAT_SCOPED_GLOBAL_BRAKE_SECONDS = 2
 #: most this many times; past it the row fails and the intent's reaper
 #: handles the rest (phase 3a step 3 — no cap was a resend forever).
 MAX_PROMPT_RESENDS = 3
+
+
+class ChannelRefused(StorydumpError):
+    """The provider answered, and said no for good — a 4xx that is neither a
+    gone destination, a dead credential nor a flood limit. DEFINITIVE, like
+    :class:`DestinationGone`: the message as shaped never landed, so the row
+    fails outright instead of entering the ambiguity policy (a refused edit
+    retried to the resend cap was four paced calls for nothing; #1297)."""
+
+
+#: A live sender's lost answer (`settle` → `ambiguous`) waits this long
+#: before the binding's next claim applies the per-kind policy
+#: (`resolve_ambiguous`): long enough for the provider's answer, had it been
+#: merely slow, to have been a timeout rather than a partition. `02` §6's
+#: "retry once after backoff" — this is the backoff.
+AMBIGUOUS_RESOLVE_AFTER_SECONDS = 30
 
 
 class DestinationGone(StorydumpError):
@@ -380,7 +400,9 @@ async def mark_ambiguous(session, *, outbox_id: str) -> None:
     """`sending → ambiguous`: the send left, the response did not come back.
 
     R8's no-blind-retry rule lands here. Resolution is the per-kind policy in
-    :func:`resolve_ambiguous`, never an immediate re-send at the call site.
+    :func:`resolve_ambiguous`, never an immediate re-send at the call site:
+    the binding's sender applies it on a later tick, once the row has waited
+    `AMBIGUOUS_RESOLVE_AFTER_SECONDS` (`resolve_aged_ambiguous`).
     """
     await _leave_sending(session, outbox_id, "ambiguous")
 
@@ -395,8 +417,19 @@ async def resolve_ambiguous(session, *, outbox_id: str) -> str:
     row = (
         await session.execute(
             text(
-                "SELECT kind, attempts FROM channel_outbox"
-                " WHERE id = :i AND state = 'ambiguous'"
+                "SELECT o.kind, o.attempts,"
+                # A later edit of the SAME message (any state): resending this
+                # one would land its older line over the newer (#1297). Joined
+                # on the intent so it rides `ix_outbox_intent` (072); an
+                # intent-less edit (an invitation card's) has no such check.
+                "       EXISTS (SELECT 1 FROM channel_outbox n"
+                "                WHERE n.intent_id = o.intent_id"
+                "                  AND n.binding_id = o.binding_id"
+                "                  AND n.kind = 'prompt_supersede'"
+                "                  AND n.payload->>'supersedes_ref' = o.payload->>'supersedes_ref'"
+                "                  AND n.created_at > o.created_at) AS newer_edit"
+                "  FROM channel_outbox o"
+                " WHERE o.id = :i AND o.state = 'ambiguous'"
             ),
             {"i": outbox_id},
         )
@@ -405,11 +438,16 @@ async def resolve_ambiguous(session, *, outbox_id: str) -> str:
         raise OutboxFenced(
             f"outbox {outbox_id}: not 'ambiguous' — already resolved elsewhere"
         )
-    kind, attempts = row[0], row[1]
+    kind, attempts, newer_edit = row[0], row[1], bool(row[2])
 
-    if kind in RESEND_KINDS:
-        # Resend — the duplicate card is tolerated — but not forever: a card
-        # that keeps losing its answer ends `failed` after MAX_PROMPT_RESENDS.
+    if kind == "prompt_supersede" and newer_edit:
+        # The message has a newer line queued or landed; this edit is stale
+        # and is retired, never resent (a resend carries ITS line).
+        to_state = "superseded"
+    elif kind in RESEND_KINDS:
+        # Resend — a duplicate card is tolerated, and a card edit is
+        # idempotent — but not forever: a row that keeps losing its answer
+        # ends `failed` after MAX_PROMPT_RESENDS.
         to_state = "pending" if attempts <= MAX_PROMPT_RESENDS else "failed"
     elif attempts <= MAX_NOTIFICATION_RESENDS:
         to_state = "pending"  # the ONE retry the policy allows
@@ -600,6 +638,34 @@ async def restate_cards(
     return len(seen)
 
 
+async def resolve_aged_ambiguous(session, *, binding_id: str) -> list:
+    """Apply the per-kind policy to the binding's `ambiguous` rows that have
+    waited the backoff. Returns the ids resolved, oldest first.
+
+    `settle` marks a live sender's lost answer `ambiguous` and, until #1297,
+    nothing ever came back for it — only a DEAD sender's stranded rows went
+    through `resolve_ambiguous` (`pace_and_claim`), so the resend policy was
+    unreachable for the common case and the row sat until retention deleted
+    it. Bounded per tick; the binding's sender is single (`tg:<binding_id>`),
+    so no other writer races the rows."""
+    rows = (
+        await session.execute(
+            text(
+                "SELECT id FROM channel_outbox"
+                " WHERE binding_id = :b AND state = 'ambiguous'"
+                "   AND updated_at <= now() - make_interval(secs => :age)"
+                " ORDER BY created_at LIMIT 20"
+            ),
+            {"b": binding_id, "age": AMBIGUOUS_RESOLVE_AFTER_SECONDS},
+        )
+    ).fetchall()
+    resolved = []
+    for (outbox_id,) in rows:
+        await resolve_ambiguous(session, outbox_id=str(outbox_id))
+        resolved.append(str(outbox_id))
+    return resolved
+
+
 async def recover_stranded(session, *, binding_id: str) -> list:
     """Resolve rows a dead predecessor left `sending`. Returns their ids.
 
@@ -702,6 +768,8 @@ async def pace_and_claim(
     stranded = await recover_stranded(session, binding_id=binding_id)
     for outbox_id in stranded:
         await resolve_ambiguous(session, outbox_id=outbox_id)
+    # A live sender's own lost answers, once they have waited the backoff.
+    await resolve_aged_ambiguous(session, binding_id=binding_id)
 
     # Claim FIRST, then pace: nothing pending means nothing debited, so an
     # idle poller never spends the chat's (or the fleet's) window on empty
@@ -848,6 +916,11 @@ async def settle(
             "destination_gone": True,
             "migrate_to": error.migrate_to,
         }
+    if isinstance(error, ChannelRefused):
+        # Definitive, like a gone destination: the provider said this message
+        # as shaped will never land. Nothing to resend; the row fails.
+        await _leave_sending(session, row["id"], "failed")
+        return {**row, "state": "failed", "external_message_ref": None}
     if error is not None:
         # A lost response is the ambiguous case.
         await mark_ambiguous(session, outbox_id=row["id"])

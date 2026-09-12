@@ -282,8 +282,9 @@ class TestAgainstTheRealDocs:
         # supersede (072, phase 1 of the 2026-09-09 plan) makes it 30; §19's
         # dry-run `published_via` (073, owner ruling 2026-09-10) makes it 31;
         # §20's `ix_jobs_leased_lane_ws` for K claimers (074, tap plan phase
-        # 3b) makes it 32.
-        assert classes.count("normative") == 32
+        # 3b) makes it 32; §21's `ix_outbox_ambiguous_age` for the sender's
+        # lost-answer resolution (075, #1297) makes it 33.
+        assert classes.count("normative") == 33
         assert classes.count("illustrative") == 4
 
     def test_real_stream_expands_the_fifteen_policies(self):

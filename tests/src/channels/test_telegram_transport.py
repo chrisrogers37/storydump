@@ -615,79 +615,14 @@ class TestAnsweringATap:
         assert await t.answer_callback("q1", "x") is False
 
 
-class TestEditingACard:
-    async def test_strip_keyboard_is_an_empty_reply_markup_edit(self):
-        seen = {}
-
-        def handler(request):
-            seen["url"] = str(request.url)
-            seen["json"] = json.loads(request.content)
-            return _ok()
-
-        t = _transport(handler)
-        assert await t.strip_keyboard("-100", "555") is True
-        assert seen["url"].endswith("/editMessageReplyMarkup")
-        assert seen["json"] == {
-            "chat_id": "-100",
-            "message_id": 555,
-            "reply_markup": {"inline_keyboard": []},
-        }
-
-    async def test_caption_and_text_edits_name_their_methods(self):
-        calls = []
-
-        def handler(request):
-            calls.append(
-                (str(request.url).rsplit("/", 1)[-1], json.loads(request.content))
-            )
-            return _ok()
-
-        t = _transport(handler)
-        assert await t.edit_caption("-100", "555", "📸 @brand\n✅ Approved") is True
-        assert await t.edit_text("-100", "556", "📸 f.jpg\n⏭️ Skipped") is True
-        assert [c[0] for c in calls] == ["editMessageCaption", "editMessageText"]
-        assert calls[0][1] == {
-            "chat_id": "-100",
-            "message_id": 555,
-            "caption": "📸 @brand\n✅ Approved",
-        }
-        assert calls[1][1]["text"] == "📸 f.jpg\n⏭️ Skipped"
-
-    async def test_not_modified_is_success(self):
-        def handler(request):
-            return httpx.Response(
-                400,
-                json={
-                    "ok": False,
-                    "error_code": 400,
-                    "description": "Bad Request: message is not modified",
-                },
-            )
-
-        t = _transport(handler)
-        assert await t.strip_keyboard("-100", "555") is True
-
-    async def test_any_other_400_on_an_edit_is_false(self):
-        def handler(request):
-            return httpx.Response(
-                400,
-                json={
-                    "ok": False,
-                    "error_code": 400,
-                    "description": "Bad Request: message to edit not found",
-                },
-            )
-
-        t = _transport(handler)
-        assert await t.edit_text("-100", "555", "x") is False
-
-
 class TestTheSupersedeRowEditsTheCard:
-    """`prompt_supersede` rows strip the keyboard FIRST (the call that must
-    land) and then, when the row carries an outcome, write the original header
-    plus the outcome line — a caption for a media card, text otherwise."""
+    """`prompt_supersede` rows edit the card in ONE call: the original header
+    plus the outcome line with an empty keyboard in the same request (one
+    Telegram message per tap per binding, 2026-09-12). A row without an
+    outcome strips alone; a refused combined edit falls back to the
+    type-agnostic strip — the call that must land."""
 
-    async def test_strip_then_caption_for_a_media_card(self):
+    async def test_one_caption_edit_carries_the_line_and_removes_the_keyboard(self):
         calls = []
 
         def handler(request):
@@ -711,17 +646,21 @@ class TestTheSupersedeRowEditsTheCard:
         }
         ref = await t.for_chat("-100")(row)
         assert ref == "555"
-        assert [c[0] for c in calls] == ["editMessageReplyMarkup", "editMessageCaption"]
+        assert [c[0] for c in calls] == ["editMessageCaption"], "one call, not two"
         assert (
-            calls[1][1]["caption"]
+            calls[0][1]["caption"]
             == "📸 @brand\nSlot: 2026-09-09 14:00 UTC\n✅ Approved by Chris · 2026-09-09 14:14 UTC"
         )
+        assert calls[0][1]["reply_markup"] == {"inline_keyboard": []}
+        assert calls[0][1]["message_id"] == 555
 
-    async def test_strip_then_text_for_a_text_card(self):
+    async def test_one_text_edit_for_a_text_card(self):
         calls = []
 
         def handler(request):
-            calls.append(str(request.url).rsplit("/", 1)[-1])
+            calls.append(
+                (str(request.url).rsplit("/", 1)[-1], json.loads(request.content))
+            )
             return _ok()
 
         t = _transport(handler)
@@ -738,7 +677,9 @@ class TestTheSupersedeRowEditsTheCard:
             },
         }
         assert await t.for_chat("-100")(row) == "555"
-        assert calls == ["editMessageReplyMarkup", "editMessageText"]
+        assert [c[0] for c in calls] == ["editMessageText"]
+        assert calls[0][1]["text"] == "📸 f.jpg\n⏭️ Skipped"
+        assert calls[0][1]["reply_markup"] == {"inline_keyboard": []}
 
     async def test_without_an_outcome_it_only_strips(self):
         calls = []
@@ -757,9 +698,14 @@ class TestTheSupersedeRowEditsTheCard:
         assert await t.for_chat("-100")(row) == "555"
         assert calls == ["editMessageReplyMarkup"]
 
-    async def test_a_failed_outcome_edit_does_not_fail_the_row(self):
+    async def test_a_refused_outcome_edit_still_strips_the_keyboard(self):
+        """The caption Telegram will not take must not leave the buttons: the
+        type-agnostic strip is the fallback, and the row is sent."""
+        calls = []
+
         def handler(request):
             name = str(request.url).rsplit("/", 1)[-1]
+            calls.append(name)
             if name == "editMessageCaption":
                 return httpx.Response(
                     400,
@@ -785,6 +731,113 @@ class TestTheSupersedeRowEditsTheCard:
             },
         }
         assert await t.for_chat("-100")(row) == "555"
+        assert calls == ["editMessageCaption", "editMessageReplyMarkup"]
+
+    async def test_a_failed_outcome_edit_escapes_after_one_call(self):
+        """Only a definitive refusal takes the strip fallback. A 5xx means
+        the edit MAY have landed: it escapes to the outbox's own policy
+        (ambiguous → resent under the prompt cap → failed) — a second call here would
+        double-spend the pacing debit and could strip a card whose line
+        already landed."""
+        calls = []
+
+        def handler(request):
+            calls.append(str(request.url).rsplit("/", 1)[-1])
+            return httpx.Response(
+                502,
+                json={"ok": False, "error_code": 502, "description": "Bad Gateway"},
+            )
+
+        t = _transport(handler)
+        row = {
+            "id": "ob-9",
+            "kind": "prompt_supersede",
+            "intent_id": "i1",
+            "payload": {
+                "v": 1,
+                "supersedes_ref": "555",
+                "outcome_text": "x",
+                "header": "h",
+                "sent_as": "text",
+            },
+        }
+        with pytest.raises(TelegramSendError) as info:
+            await t.for_chat("-100")(row)
+        assert not isinstance(info.value, TelegramRefused)
+        assert calls == ["editMessageText"], "no strip after a non-refusal"
+
+    def test_a_refusal_is_the_outboxs_definitive_kind(self):
+        """`settle` fails a `ChannelRefused` row outright — a 400 is Telegram
+        saying the message as shaped will never land, not a lost answer."""
+        from src.services.target.outbox import ChannelRefused
+
+        assert issubclass(TelegramRefused, ChannelRefused)
+        assert not issubclass(TelegramPaced, ChannelRefused)
+
+    async def test_a_paced_outcome_edit_escapes_after_one_call(self):
+        """A 429 on the combined edit is the sender's pacing signal, not a
+        refusal: it escapes as `TelegramPaced` from the one call, so the
+        outbox writes its hold instead of this branch hitting Telegram again."""
+        calls = []
+
+        def handler(request):
+            calls.append(str(request.url).rsplit("/", 1)[-1])
+            return httpx.Response(
+                429,
+                json={
+                    "ok": False,
+                    "error_code": 429,
+                    "description": "Too Many Requests: retry after 7",
+                    "parameters": {"retry_after": 7},
+                },
+            )
+
+        t = _transport(handler)
+        row = {
+            "id": "ob-9",
+            "kind": "prompt_supersede",
+            "intent_id": "i1",
+            "payload": {
+                "v": 1,
+                "supersedes_ref": "555",
+                "outcome_text": "x",
+                "header": "h",
+                "sent_as": "media",
+            },
+        }
+        with pytest.raises(TelegramPaced) as info:
+            await t.for_chat("-100")(row)
+        assert info.value.retry_after_s == 7.0
+        assert calls == ["editMessageCaption"]
+
+    async def test_not_modified_is_success_in_one_call(self):
+        calls = []
+
+        def handler(request):
+            calls.append(str(request.url).rsplit("/", 1)[-1])
+            return httpx.Response(
+                400,
+                json={
+                    "ok": False,
+                    "error_code": 400,
+                    "description": "Bad Request: message is not modified",
+                },
+            )
+
+        t = _transport(handler)
+        row = {
+            "id": "ob-9",
+            "kind": "prompt_supersede",
+            "intent_id": "i1",
+            "payload": {
+                "v": 1,
+                "supersedes_ref": "555",
+                "outcome_text": "x",
+                "sent_as": "text",
+            },
+        }
+        assert await t.for_chat("-100")(row) == "555"
+        assert calls == ["editMessageText"], "an edit that already stands is done"
 
     async def test_a_failed_strip_fails_the_row(self):
         def handler(request):
@@ -803,6 +856,32 @@ class TestTheSupersedeRowEditsTheCard:
             "kind": "prompt_supersede",
             "intent_id": "i1",
             "payload": {"v": 1, "supersedes_ref": "555"},
+        }
+        with pytest.raises(TelegramRefused):
+            await t.for_chat("-100")(row)
+
+    async def test_a_refused_edit_and_a_refused_strip_fail_the_row(self):
+        def handler(request):
+            return httpx.Response(
+                400,
+                json={
+                    "ok": False,
+                    "error_code": 400,
+                    "description": "Bad Request: message to edit not found",
+                },
+            )
+
+        t = _transport(handler)
+        row = {
+            "id": "ob-9",
+            "kind": "prompt_supersede",
+            "intent_id": "i1",
+            "payload": {
+                "v": 1,
+                "supersedes_ref": "555",
+                "outcome_text": "x",
+                "sent_as": "text",
+            },
         }
         with pytest.raises(TelegramRefused):
             await t.for_chat("-100")(row)
