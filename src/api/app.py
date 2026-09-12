@@ -489,7 +489,7 @@ def _cors_origins() -> list[str]:
 
 def _telegram_transport(env: Mapping[str, str]):
     """The one bot transport the API speaks with — the `/start` door's
-    acknowledgement, a tap's answer and the tapped card's strip — or None
+    acknowledgement and a tap's answer (the card's edit is the outbox's) — or None
     without the bot token (the same variable the worker sends with, so the API
     never holds a second credential for the one bot)."""
     token = env.get("TARGET_TELEGRAM_BOT_TOKEN")
@@ -598,7 +598,6 @@ def create_app(
             dispatch=TelegramDispatcher(),
             reply=None if bot is None else bot.send_text,
             answer_callback=None if bot is None else bot.answer_callback,
-            strip_keyboard=None if bot is None else bot.strip_keyboard,
         )
         if app.state.engine is not None
         else None

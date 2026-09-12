@@ -1,1 +1,2 @@
-- [Production DB access](reference_prod_db_access.md) — prod Postgres creds live in Railway vars; the locally authed Neon account holds a different product's database
+- [Production DB access](reference_prod_db_access.md) — Railway recipe that works, plus the two invocation gotchas (cwd, local var expansion) that silently break it
+- [Production read-only discipline](feedback_prod_readonly_discipline.md) — SELECT only; never print connection strings or token columns

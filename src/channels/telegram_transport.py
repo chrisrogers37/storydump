@@ -43,7 +43,7 @@ import httpx
 
 from src.services.target import egress
 from src.services.target.egress import EgressPolicy
-from src.services.target.outbox import ChannelPaced, DestinationGone
+from src.services.target.outbox import ChannelPaced, ChannelRefused, DestinationGone
 
 logger = logging.getLogger("channels.telegram")
 
@@ -113,10 +113,11 @@ class TelegramPaced(ChannelPaced, TelegramSendError):
     on the GLOBAL row (bounded) and, for a chat-addressed call, the chat's."""
 
 
-class TelegramRefused(TelegramSendError):
+class TelegramRefused(ChannelRefused, TelegramSendError):
     """Telegram answered, and said no for good: `ok: false` with a 4xx that is
     neither a gone chat, a dead token nor 429 — a DEFINITIVE refusal, so a
-    caller may try another shape of the same message. A transport failure, a
+    caller may try another shape of the same message, and one that escapes
+    to the outbox fails the row (`ChannelRefused`). A transport failure, a
     429 or a 5xx is NOT this: the message may have landed, and only the
     outbox's ambiguity policy may decide what happens next."""
 
@@ -354,82 +355,55 @@ class TelegramTransport:
                 return
             raise
 
-    async def _edit_quietly(
-        self, method: str, payload: dict, *, policy: Optional[EgressPolicy] = None
-    ) -> bool:
-        try:
-            await self._edit(method, payload, policy=policy)
-        except TelegramSendError as exc:
-            logger.warning("%s failed: %s", method, self._redact(str(exc)))
-            return False
-        return True
-
-    async def edit_reply_markup(
-        self, chat_id: str, message_ref: str, reply_markup: dict
-    ) -> bool:
-        return await self._edit_quietly(
-            "editMessageReplyMarkup",
-            {
-                "chat_id": chat_id,
-                "message_id": _message_id(message_ref),
-                "reply_markup": reply_markup,
-            },
-        )
-
-    async def strip_keyboard(self, chat_id: str, message_ref: str) -> bool:
-        """The tapped card loses its buttons at once (unpaced, best effort,
-        on the fast budget): the ref is the callback's own message, so the
-        known-ref rule holds."""
-        return await self._edit_quietly(
-            "editMessageReplyMarkup",
-            {
-                "chat_id": chat_id,
-                "message_id": _message_id(message_ref),
-                "reply_markup": _EMPTY_KEYBOARD,
-            },
-            policy=self._fast,
-        )
-
-    async def edit_caption(self, chat_id: str, message_ref: str, caption: str) -> bool:
-        return await self._edit_quietly(
-            "editMessageCaption",
-            {
-                "chat_id": chat_id,
-                "message_id": _message_id(message_ref),
-                "caption": caption,
-            },
-        )
-
-    async def edit_text(self, chat_id: str, message_ref: str, text: str) -> bool:
-        return await self._edit_quietly(
-            "editMessageText",
-            {"chat_id": chat_id, "message_id": _message_id(message_ref), "text": text},
-        )
-
     async def _supersede(self, external_ref: str, row: dict) -> SendReceipt:
-        """A `prompt_supersede` row edits the card it names: the keyboard goes
-        FIRST — type-agnostic, the call that must land; a refusal fails the row
-        — then, when the row carries an outcome, the original header plus the
-        outcome line, as a caption for a media card and as text otherwise,
-        best effort (F4 (a))."""
+        """A `prompt_supersede` row edits the card it names in ONE call: the
+        original header plus the outcome line — a caption for a media card,
+        text otherwise — with an empty keyboard in the same request, so the
+        buttons go as the line lands (one Telegram message per tap per
+        binding; the bot's 30/s is the fleet's ceiling, 2026-09-12). A row
+        without an outcome strips the keyboard alone. If the combined edit is
+        refused (a caption Telegram will not take), the keyboard still goes
+        by the type-agnostic `editMessageReplyMarkup` — the call that must
+        land. Only a definitive refusal takes the fallback: a 429, a 5xx or a
+        transport failure escapes as it did before, and the outbox settles it
+        (paced, or ambiguous → resent under the prompt cap → failed). A
+        refusal of the fallback escapes too, and fails the row (F4 (a))."""
         payload = row.get("payload") or {}
         ref = str(payload["supersedes_ref"])
-        await self._edit(
-            "editMessageReplyMarkup",
-            {
-                "chat_id": external_ref,
-                "message_id": _message_id(ref),
-                "reply_markup": _EMPTY_KEYBOARD,
-            },
-        )
+        message_id = _message_id(ref)
         outcome = payload.get("outcome_text")
         if outcome:
             header = payload.get("header")
             body = f"{header}\n{outcome}" if header else str(outcome)
             if payload.get("sent_as") == "media":
-                await self.edit_caption(external_ref, ref, body[:1024])
+                method, field, limit = "editMessageCaption", "caption", 1024
             else:
-                await self.edit_text(external_ref, ref, body[:4096])
+                method, field, limit = "editMessageText", "text", 4096
+            try:
+                await self._edit(
+                    method,
+                    {
+                        "chat_id": external_ref,
+                        "message_id": message_id,
+                        field: body[:limit],
+                        "reply_markup": _EMPTY_KEYBOARD,
+                    },
+                )
+                return SendReceipt(ref, sent_as="edit")
+            except TelegramRefused as exc:
+                logger.warning(
+                    "%s refused for a supersede (%s); stripping the keyboard alone",
+                    method,
+                    self._redact(str(exc)),
+                )
+        await self._edit(
+            "editMessageReplyMarkup",
+            {
+                "chat_id": external_ref,
+                "message_id": message_id,
+                "reply_markup": _EMPTY_KEYBOARD,
+            },
+        )
         return SendReceipt(ref, sent_as="edit")
 
     async def probe(self) -> str:

@@ -20,6 +20,9 @@ def floor(monkeypatch):
     async def recover_stranded(session, *, binding_id):
         return []
 
+    async def resolve_aged_ambiguous(session, *, binding_id):
+        return []
+
     async def increment(session, **kw):
         return 1
 
@@ -43,6 +46,7 @@ def floor(monkeypatch):
         return 3
 
     monkeypatch.setattr(outbox, "recover_stranded", recover_stranded)
+    monkeypatch.setattr(outbox, "resolve_aged_ambiguous", resolve_aged_ambiguous)
     monkeypatch.setattr(outbox, "increment", increment)
     monkeypatch.setattr(outbox, "claim_next", claim_next)
     monkeypatch.setattr(outbox, "_leave_sending", _leave_sending)
@@ -217,13 +221,14 @@ class TestThePromptResendIsCapped:
     answer is resent, but not forever — past MAX_PROMPT_RESENDS it fails."""
 
     class _Session:
-        def __init__(self, kind, attempts):
-            self.row = (kind, attempts)
+        def __init__(self, kind, attempts, newer_edit=False):
+            self.row = (kind, attempts, newer_edit)
             self.updates = []
 
         async def execute(self, stmt, params=None):
             sql = str(stmt)
             session = self
+            self.sql = getattr(self, "sql", []) + [(sql, params)]
 
             class _R:
                 rowcount = 1
@@ -243,3 +248,135 @@ class TestThePromptResendIsCapped:
         s = self._Session("approval_prompt", outbox.MAX_PROMPT_RESENDS + 1)
         assert await outbox.resolve_ambiguous(s, outbox_id="x") == "failed"
         assert s.updates == ["failed"]
+
+    async def test_a_lost_card_edit_is_resent_under_the_same_cap(self):
+        """A `prompt_supersede` is the card's outcome edit — the one path
+        that removes its buttons now that the route no longer strips (#1297).
+        The edit is idempotent ("not modified" is success), so a lost answer
+        costs one paced call to resend; the notification's single retry would
+        leave a card live with buttons after one bad Telegram minute."""
+        s = self._Session("prompt_supersede", outbox.MAX_PROMPT_RESENDS)
+        assert await outbox.resolve_ambiguous(s, outbox_id="x") == "pending"
+        s = self._Session("prompt_supersede", outbox.MAX_PROMPT_RESENDS + 1)
+        assert await outbox.resolve_ambiguous(s, outbox_id="x") == "failed"
+
+    async def test_a_lost_edit_with_a_newer_edit_of_the_same_message_is_superseded(
+        self,
+    ):
+        """A resent edit carries ITS line; if a later `prompt_supersede` for
+        the same message ref exists (the pipeline's "✅ Posted" after the tap's
+        "✅ Approved"), resending the older one would overwrite the newer line
+        for good — so it is retired instead (#1297 re-verify)."""
+        s = self._Session("prompt_supersede", 1, newer_edit=True)
+        assert await outbox.resolve_ambiguous(s, outbox_id="x") == "superseded"
+        assert s.updates == ["superseded"]
+        assert "supersedes_ref" in s.sql[0][0] and "created_at >" in s.sql[0][0]
+
+    async def test_a_notification_still_gets_one_retry(self):
+        s = self._Session("notification", outbox.MAX_NOTIFICATION_RESENDS)
+        assert await outbox.resolve_ambiguous(s, outbox_id="x") == "pending"
+        s = self._Session("notification", outbox.MAX_NOTIFICATION_RESENDS + 1)
+        assert await outbox.resolve_ambiguous(s, outbox_id="x") == "failed"
+
+
+class TestARefusalIsDefinitive:
+    """A provider's 4xx refusal (`ChannelRefused`) is not a lost answer: the
+    message as shaped was never accepted, so the row fails outright instead
+    of entering the ambiguity policy and being resent up to the cap (#1297
+    re-verify: a refused edit on a stranded row was retried three times)."""
+
+    async def test_a_refused_send_fails_the_row_without_ambiguity(self, floor):
+        result = await outbox.settle(
+            object(),
+            ROW,
+            error=outbox.ChannelRefused(
+                "editMessageReplyMarkup: 400 message to edit not found"
+            ),
+            now=NOW,
+            chat_limit=20,
+            chat_window_seconds=60,
+            global_limit=30,
+            global_window_seconds=1,
+        )
+        assert result["state"] == "failed" and result["external_message_ref"] is None
+        assert floor["left"] == [("row-1", "failed", {})]
+        assert floor["ambiguous"] == [] and floor["holds"] == []
+
+
+class TestALostAnswerIsResolvedOnALaterTick:
+    """`settle` marks a live sender's lost answer `ambiguous`; the per-kind
+    policy (`resolve_ambiguous`) used to run only for rows a DEAD sender left
+    `sending` (`recover_stranded`), so a live sender's ambiguous row sat
+    until retention deleted it — the resend policy was unreachable for the
+    common case (#1297 re-verify). The binding's sender now applies it on a
+    later tick, after a backoff."""
+
+    class _Session:
+        def __init__(self, ids):
+            self.ids = ids
+            self.sql = []
+
+        async def execute(self, statement, params=None):
+            self.sql.append((str(statement), params))
+            ids = self.ids
+
+            class _R:
+                def fetchall(self_inner):
+                    return [(i,) for i in ids]
+
+            return _R()
+
+    async def test_aged_ambiguous_rows_go_through_the_policy_in_order(
+        self, monkeypatch
+    ):
+        resolved = []
+
+        async def resolve_ambiguous(session, *, outbox_id):
+            resolved.append(outbox_id)
+            return "pending"
+
+        monkeypatch.setattr(outbox, "resolve_ambiguous", resolve_ambiguous)
+        s = self._Session(["old-1", "old-2"])
+        assert await outbox.resolve_aged_ambiguous(s, binding_id="b-1") == [
+            "old-1",
+            "old-2",
+        ]
+        assert resolved == ["old-1", "old-2"]
+        sql, params = s.sql[0]
+        assert "state = 'ambiguous'" in sql and "updated_at" in sql
+        assert params["b"] == "b-1"
+        assert params["age"] == outbox.AMBIGUOUS_RESOLVE_AFTER_SECONDS
+
+    async def test_the_claim_resolves_the_aged_rows_after_the_stranded_ones(
+        self, floor, monkeypatch
+    ):
+        order = []
+
+        async def recover_stranded(session, *, binding_id):
+            order.append("stranded")
+            return []
+
+        async def resolve_aged_ambiguous(session, *, binding_id):
+            order.append(("aged", binding_id))
+            return []
+
+        async def claim_next(session, *, binding_id):
+            order.append("claim")
+            return None
+
+        monkeypatch.setattr(outbox, "recover_stranded", recover_stranded)
+        monkeypatch.setattr(outbox, "resolve_aged_ambiguous", resolve_aged_ambiguous)
+        monkeypatch.setattr(outbox, "claim_next", claim_next)
+        assert (
+            await outbox.pace_and_claim(
+                object(),
+                binding_id="b-1",
+                now=NOW,
+                chat_limit=20,
+                chat_window_seconds=60,
+                global_limit=30,
+                global_window_seconds=1,
+            )
+            is None
+        )
+        assert order == ["stranded", ("aged", "b-1"), "claim"]

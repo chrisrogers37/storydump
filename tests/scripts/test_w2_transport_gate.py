@@ -156,6 +156,48 @@ class TestDeliveryEndToEnd:
         finally:
             await engine.dispose()
 
+    async def test_an_aged_ambiguous_row_mints_a_sender_a_fresh_one_waits(
+        self, lane_db, sync_conn
+    ):
+        """A live sender's lost answer is resolved by the binding's sender
+        after a backoff (#1297) — and a quiet binding has no sender, so the
+        sweep must mint one for an aged `ambiguous` row, not only for pending
+        ones; a fresh ambiguous row is not yet the sweep's business."""
+        from src.services.target.outbox import AMBIGUOUS_RESOLVE_AFTER_SECONDS
+
+        chain, binding = _seed_binding_with_pending(sync_conn, "w2aged", rows=1)
+        with sync_conn.cursor() as cur:
+            cur.execute("SET app.actor_kind = 'migration'")
+            cur.execute(
+                "UPDATE channel_outbox SET state = 'ambiguous', attempts = 1"
+                " WHERE binding_id = %s",
+                (binding,),
+            )
+        sync_conn.commit()
+        engine = create_async_engine(_async_url(lane_db))
+        try:
+            assert await _sweep(engine) == 0, "a fresh ambiguous row waits"
+            with sync_conn.cursor() as cur:
+                cur.execute("SET app.actor_kind = 'migration'")
+                cur.execute(
+                    "ALTER TABLE channel_outbox DISABLE TRIGGER tg_touch_channel_outbox"
+                )
+                try:
+                    cur.execute(
+                        "UPDATE channel_outbox"
+                        " SET updated_at = now() - make_interval(secs => %s)"
+                        " WHERE binding_id = %s",
+                        (AMBIGUOUS_RESOLVE_AFTER_SECONDS + 1, binding),
+                    )
+                finally:
+                    cur.execute(
+                        "ALTER TABLE channel_outbox ENABLE TRIGGER tg_touch_channel_outbox"
+                    )
+            sync_conn.commit()
+            assert await _sweep(engine) == 1, "an aged ambiguous row needs a sender"
+        finally:
+            await engine.dispose()
+
 
 class TestDeadCredentialMidRun:
     async def test_an_auth_dead_send_marks_the_row_ambiguous_and_the_worker_survives(

@@ -44,7 +44,9 @@ admitted on its `update_id` (`command_dedup`), dispatched by
 (`callback_tokens.parse`, `v1:<post|posted|skip|reject>:<intent-uuid>`), resolve the
 chat (`fn_resolve_binding`), resolve the tapper (`user_identities`), set the actor
 GUCs, `commands.execute` as the tapping member — and committed; the route then
-answers (`answerCallbackQuery`) and strips the tapped card's keyboard, best effort.
+answers (`answerCallbackQuery`), best effort. The card's keyboard goes with the
+paced supersede edit that writes its outcome line — one Telegram message per tap
+per binding (2026-09-12); the route does not strip.
 Rules: the executors read `FOR UPDATE` and a card past `awaiting_approval` ANSWERS
 with its state, never errors; every flip supersedes the card in every binding;
 `_tap` never raises for anything but a database error (a poisoned update is the

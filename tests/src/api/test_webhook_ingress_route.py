@@ -356,14 +356,12 @@ class TestTheAcknowledgementIsWiredFromTheBotToken:
 # --- the tap is answered through the REAL transport --------------------------
 
 
-def test_a_tap_is_answered_and_stripped_through_the_real_transport(
-    client, armed, monkeypatch
-):
-    """The route's answer runs the transport's own `answer_callback` and
-    `strip_keyboard` — wired exactly as `app.py` wires them, over a scripted
-    Bot API — so a signature drift between the two (positional vs keyword
-    `show_alert`) fails HERE, not silently in production behind the
-    best-effort `except` (structural review of #1271)."""
+def test_a_tap_is_answered_through_the_real_transport(client, armed, monkeypatch):
+    """The route's answer runs the transport's own `answer_callback` — wired
+    exactly as `app.py` wires it, over a scripted Bot API — so a signature
+    drift between the two (positional vs keyword `show_alert`) fails HERE,
+    not silently in production behind the best-effort `except` (structural
+    review of #1271). It is the route's ONLY Telegram call (2026-09-12)."""
     import json as _json
 
     import httpx
@@ -404,7 +402,6 @@ def test_a_tap_is_answered_and_stripped_through_the_real_transport(
         dispatch=fake_dispatch,
         reply=transport.send_text,
         answer_callback=transport.answer_callback,
-        strip_keyboard=transport.strip_keyboard,
     )
     before = app.state.tap_metrics.snapshot()["taps_total"]
     response = _post(
@@ -420,16 +417,14 @@ def test_a_tap_is_answered_and_stripped_through_the_real_transport(
     )
     assert response.status_code == 200 and response.json()["status"] == "admitted"
     assert conn.commits == 1, "the answer follows the commit"
-    assert [c[0] for c in calls] == ["answerCallbackQuery", "editMessageReplyMarkup"]
+    # One answer and nothing else from the route: the card's keyboard goes
+    # with the paced supersede edit (one Telegram message per tap per
+    # binding, 2026-09-12), never an unpaced strip from here.
+    assert [c[0] for c in calls] == ["answerCallbackQuery"]
     assert calls[0][1] == {
         "callback_query_id": "q1",
         "text": "⏭️ Skipped for 7 days",
         "show_alert": True,
-    }
-    assert calls[1][1] == {
-        "chat_id": "-100",
-        "message_id": 555,
-        "reply_markup": {"inline_keyboard": []},
     }
     after = app.state.tap_metrics.snapshot()
     assert after["taps_total"] == before + 1 and after["answer_failed"] == 0
@@ -653,14 +648,13 @@ def test_an_admitted_tap_names_its_outcome_in_the_body(client, armed, monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_the_answer_and_strip_run_after_the_response_has_gone_out(
-    armed, monkeypatch
-):
-    """#1284: the tap's answer and strip are Telegram round trips of their
-    own; run inside the request they held this delivery's slot on the ingress
-    worker until Telegram replied. They are now background tasks — the 200's
-    body is sent BEFORE the transport is spoken to. Proven at the ASGI level:
-    the order of `http.response.body` against the answer call."""
+async def test_the_answer_runs_after_the_response_has_gone_out(armed, monkeypatch):
+    """#1284: the tap's answer is a Telegram round trip of its own; run inside
+    the request it held this delivery until Telegram replied. It is a
+    background task — the 200's body is sent BEFORE the transport is spoken
+    to. Proven at the ASGI level: the order of `http.response.body` against
+    the answer call. (The card's keyboard goes with the paced supersede edit,
+    not from the route — 2026-09-12.)"""
     import json as _json
 
     from src.services.target.telegram_dispatch import TapResult
@@ -685,16 +679,11 @@ async def test_the_answer_and_strip_run_after_the_response_has_gone_out(
         order.append("answered")
         return True
 
-    async def strip(chat_ref, message_ref):
-        order.append("stripped")
-        return True
-
     monkeypatch.setattr(webhooks, "admit", fake_admit)
     app.state.ingress = webhooks.IngressRuntime(
         connect=lambda: FakeConn(),
         dispatch=fake_dispatch,
         answer_callback=answer,
-        strip_keyboard=strip,
     )
     body = _json.dumps(
         {
@@ -743,7 +732,7 @@ async def test_the_answer_and_strip_run_after_the_response_has_gone_out(
     await app(scope, receive, send)
 
     assert "http.response.start" in messages
-    assert order == ["body-sent", "answered", "stripped"], order
+    assert order == ["body-sent", "answered"], order
 
 
 @pytest.mark.asyncio
