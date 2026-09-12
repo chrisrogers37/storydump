@@ -35,6 +35,7 @@ import psycopg2
 import pytest
 
 from src.services.target.meta_adapter import StubMetaAdapter
+from src.services.target.drive_adapter import DriveTerminalError
 from src.services.target.publish_pipeline import (
     CANCELLED,
     DEFERRED_CAP,
@@ -249,7 +250,8 @@ def _intent_row(pipe_db, intent_id):
     r = _exec(
         pipe_db,
         "SELECT state, publish_step, ig_container_id, ig_media_id,"
-        " transit_asset_ref, cap_consumed_on, cap_refunded_at"
+        " transit_asset_ref, cap_consumed_on, cap_refunded_at, last_error,"
+        " media_item_id::text"
         " FROM post_intents WHERE id = %s",
         (intent_id,),
         fetch=True,
@@ -260,6 +262,8 @@ def _intent_row(pipe_db, intent_id):
         "ig_container_id": r[2],
         "ig_media_id": r[3],
         "transit_asset_ref": r[4],
+        "last_error": r[7],
+        "media_item_id": r[8],
         "cap_consumed_on": r[5],
         "cap_refunded_at": r[6],
     }
@@ -295,13 +299,20 @@ class FakeTransit:
     unit gate (PR-A); here it would drag the cloudinary SDK into a database
     gate — same reasoning as the reconciler's injected poll."""
 
-    def __init__(self, *, upload_kills=None, destroy_raises=False):
+    def __init__(self, *, upload_kills=None, destroy_raises=False, ready_script=None):
         self.upload_calls: list[dict] = []
         self.url_calls: list[str] = []
         self.destroy_calls: list[str] = []
+        self.ready_calls: list[str] = []
         self._upload_kills = upload_kills
         self._destroy_raises = destroy_raises
+        self._ready_script = list(ready_script or [])
         self._n = 0
+
+    async def ready(self, ref, *, media_kind, sleep=None, **_):
+        # The readiness probe (2026-09-11): scripted per call, True by default.
+        self.ready_calls.append(ref)
+        return self._ready_script.pop(0) if self._ready_script else True
 
     async def upload(self, content, *, workspace_id, media_kind):
         self._n += 1
@@ -1470,4 +1481,282 @@ class TestTheJobsDoors:
             _run(go())
         assert _job_row(pipe_db, job["id"])["state"] == "leased", (
             "the new owner's lease survives the stale reschedule attempt"
+        )
+
+
+def _seed_card(pipe_db, intent):
+    """The approval card exactly as the tap leaves it: the card row already
+    `superseded` with the tap's line, the tap's own edit sent."""
+    binding = _exec(
+        pipe_db,
+        "INSERT INTO channel_bindings (workspace_id, channel, external_ref)"
+        " VALUES (%s, 'telegram_group', %s) RETURNING id",
+        (pipe_db["ws"], f"-100{intent[:8]}"),
+        fetch=True,
+    )[0][0]
+    _exec(
+        pipe_db,
+        "INSERT INTO channel_outbox (workspace_id, binding_id, kind, intent_id,"
+        " payload, state, external_message_ref)"
+        " VALUES (%s, %s, 'approval_prompt', %s,"
+        ' \'{"v": 2, "text": "📸 f.jpg", "sent_as": "text",'
+        ' "outcome_text": "✅ Approved by Ada · 12:00 UTC"}\','
+        " 'superseded', '77001'),"
+        " (%s, %s, 'prompt_supersede', %s,"
+        ' \'{"v": 1, "external_message_ref": "77001", "sent_as": "text",'
+        ' "outcome_text": "✅ Approved by Ada · 12:00 UTC"}\','
+        " 'sent', '77001')",
+        (pipe_db["ws"], binding, intent, pipe_db["ws"], binding, intent),
+    )
+    return binding
+
+
+def _card_line(pipe_db, intent):
+    return _exec(
+        pipe_db,
+        "SELECT payload->>'outcome_text' FROM channel_outbox"
+        " WHERE intent_id = %s AND kind = 'approval_prompt'",
+        (intent,),
+        fetch=True,
+    )[0][0]
+
+
+def _notices(pipe_db, intent, binding):
+    """The notifications for *intent* on *binding* — one per push binding is
+    written, and the module-scoped world accumulates bindings across tests."""
+    return [
+        r[0]
+        for r in _exec(
+            pipe_db,
+            "SELECT payload->>'text' FROM channel_outbox"
+            " WHERE intent_id = %s AND binding_id = %s AND kind = 'notification'"
+            " ORDER BY created_at",
+            (intent, binding),
+            fetch=True,
+        )
+    ]
+
+
+class TestTheFirstFetch:
+    """Investigation of 2026-09-11 (4 of 7 publishes lost to Meta 9004/2207052,
+    "the media could not be fetched", within a second of the container call —
+    the same files posted on a later attempt): the frame must serve before
+    Meta is told to fetch it, a FIRST 9004 is retried, a second is the file's
+    own answer — and every terminal outcome is said on the card and to the
+    workspace at once."""
+
+    def test_a_frame_not_serving_is_retried_never_handed_to_meta(self, pipe_db):
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref)
+        meta = StubMetaAdapter()
+        transit = FakeTransit(ready_script=[False])
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, meta, transit)))
+        assert outcome == RETRY_SCHEDULED
+        assert transit.ready_calls and meta.create_calls == [], (
+            "a URL that does not serve must not reach Meta"
+        )
+        row = _intent_row(pipe_db, intent)
+        assert (
+            row["state"] == "publishing" and row["publish_step"] == "transit_uploaded"
+        )
+        assert row["last_error"]["error"]["type"] == "TransitNotReady"
+        assert _job_row(pipe_db, job["id"])["state"] == "ready"
+
+    def test_a_first_9004_is_retried_and_the_second_attempt_posts(self, pipe_db):
+        intent, ref = _new_intent(pipe_db)
+        binding = _seed_card(pipe_db, intent)
+        job = _leased_job(pipe_db, intent, ref=ref)
+        meta = StubMetaAdapter(create_outcomes=["terminal", "ok"], ready_after_polls=1)
+        transit = FakeTransit()
+        first = _run(run_publish_pipeline(job, **_deps(pipe_db, meta, transit)))
+        assert first == RETRY_SCHEDULED, "the first 'could not be fetched' is a retry"
+        row = _intent_row(pipe_db, intent)
+        assert (
+            row["state"] == "publishing" and row["publish_step"] == "transit_uploaded"
+        )
+        assert row["last_error"]["error"]["code"] == 9004
+        op = _exec(
+            pipe_db,
+            "SELECT state, generation, response_ref::text FROM provider_operations"
+            " WHERE intent_id = %s AND op_kind = 'container_create' ORDER BY generation",
+            (intent,),
+            fetch=True,
+        )
+        assert op[0][0] == "failed" and "first_fetch" in op[0][2]
+        assert _notices(pipe_db, intent, binding) == [], (
+            "a retry in progress says nothing yet"
+        )
+
+        # A FRESH job (attempts=1), so the discriminator is the recorded 9004,
+        # not the job's attempt count (adversarial review).
+        again = _leased_job(pipe_db, intent, ref=ref, attempts=1)
+        second = _run(run_publish_pipeline(again, **_deps(pipe_db, meta, transit)))
+        assert second == POSTED
+        assert _intent_row(pipe_db, intent)["state"] == "posted"
+        assert len(meta.create_calls) == 2
+        assert _card_line(pipe_db, intent).startswith("✅ Posted")
+
+    def test_a_second_9004_fails_the_post_locks_the_file_and_says_so(self, pipe_db):
+        intent, ref = _new_intent(pipe_db)
+        binding = _seed_card(pipe_db, intent)
+        job = _leased_job(pipe_db, intent, ref=ref)
+        meta = StubMetaAdapter(create_outcomes=["terminal", "terminal"])
+        transit = FakeTransit()
+        assert (
+            _run(run_publish_pipeline(job, **_deps(pipe_db, meta, transit)))
+            == RETRY_SCHEDULED
+        )
+        again = _leased_job(pipe_db, intent, ref=ref, attempts=1)
+        assert (
+            _run(run_publish_pipeline(again, **_deps(pipe_db, meta, transit))) == FAILED
+        )
+
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "failed" and row["last_error"]["error"]["code"] == 9004
+        assert _bucket(pipe_db, _today_utc()) in (None, 0), "the cap is refunded"
+        lock = _exec(
+            pipe_db,
+            "SELECT kind, expires_at, created_by_intent_id::text FROM post_locks"
+            " WHERE media_item_id = %s AND kind = 'unsupported'",
+            (row["media_item_id"],),
+            fetch=True,
+        )
+        assert lock == [("unsupported", None, intent)], (
+            "a file Instagram twice could not take is never served again"
+        )
+        assert _card_line(pipe_db, intent).startswith("⚠️ Failed"), (
+            "the card must say it — the tap's own edit had already superseded it"
+        )
+        notices = _notices(pipe_db, intent, binding)
+        assert len(notices) == 1 and "couldn't process this file" in notices[0], notices
+
+    def test_a_file_that_is_gone_says_so_at_once(self, pipe_db):
+        intent, ref = _new_intent(pipe_db)
+        binding = _seed_card(pipe_db, intent)
+        job = _leased_job(pipe_db, intent, ref=ref)
+
+        async def gone(_intent):
+            raise DriveTerminalError("the file is gone")
+
+        outcome = _run(
+            run_publish_pipeline(
+                job, **_deps(pipe_db, StubMetaAdapter(), media_fetch=gone)
+            )
+        )
+        assert outcome == FAILED
+        assert _card_line(pipe_db, intent).startswith("⚠️ Failed")
+        notices = _notices(pipe_db, intent, binding)
+        assert len(notices) == 1 and "missing from Drive" in notices[0], notices
+        assert (
+            _exec(
+                pipe_db,
+                "SELECT count(*) FROM post_locks WHERE media_item_id = %s",
+                (_intent_row(pipe_db, intent)["media_item_id"],),
+                fetch=True,
+            )[0][0]
+            == 0
+        ), "a missing file is not an unsupported one"
+
+    def test_poison_says_so_at_once_and_latches_the_reconciler_notice(self, pipe_db):
+        intent, ref = _new_intent(pipe_db)
+        binding = _seed_card(pipe_db, intent)
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=5, max_attempts=5)
+        meta = StubMetaAdapter(create_outcomes=["retryable"])
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, meta, FakeTransit())))
+        assert outcome == POISONED
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "review_required"
+        assert row["last_error"]["evidence"]["customer_notified"] is True, (
+            "the reconciler's six-hour notice must find the latch set"
+        )
+        assert row["last_error"]["error"]["code"] == 4, "the reason survives the latch"
+        assert _card_line(pipe_db, intent).startswith("👀 Needs review")
+        notices = _notices(pipe_db, intent, binding)
+        assert len(notices) == 1 and "needs attention" in notices[0], notices
+
+    def test_a_lost_response_before_the_first_9004_does_not_make_it_terminal(
+        self, pipe_db
+    ):
+        """The discriminator is a RECORDED 9004, not the container generation:
+        a lost response mints a generation too (structural review)."""
+        intent, ref = _new_intent(pipe_db)
+        _seed_card(pipe_db, intent)
+        meta = StubMetaAdapter(create_outcomes=["transport", "terminal", "terminal"])
+        transit = FakeTransit()
+        outcomes = []
+        for attempt in (1, 2, 3):
+            job = _leased_job(pipe_db, intent, ref=ref, attempts=attempt)
+            outcomes.append(
+                _run(run_publish_pipeline(job, **_deps(pipe_db, meta, transit)))
+            )
+        assert outcomes == [RETRY_SCHEDULED, RETRY_SCHEDULED, FAILED], outcomes
+        gens = _exec(
+            pipe_db,
+            "SELECT generation, state, response_ref::text FROM provider_operations"
+            " WHERE intent_id = %s AND op_kind = 'container_create' ORDER BY generation",
+            (intent,),
+            fetch=True,
+        )
+        assert [row[0] for row in gens] == [1, 2, 3]
+        assert "lost_response" in gens[0][2] and "first_fetch" in gens[1][2]
+
+    def test_a_file_already_locked_unsupported_fails_cleanly_and_re_attributes(
+        self, pipe_db
+    ):
+        """`uq_lock_ws_scope` is one lock per (workspace, media, kind). A lock
+        that already exists — an operator's, or another account's earlier
+        failure on the same file — must not abort the failure transaction
+        (both lenses of the review): the lock is upserted to this intent."""
+        intent, ref = _new_intent(pipe_db)
+        media = _intent_row(pipe_db, intent)["media_item_id"]
+        _exec(
+            pipe_db,
+            "INSERT INTO post_locks (workspace_id, media_item_id, kind, expires_at)"
+            " VALUES (%s, %s, 'unsupported', NULL)",
+            (pipe_db["ws"], media),
+        )
+        meta = StubMetaAdapter(create_outcomes=["terminal", "terminal"])
+        outcome = None
+        for attempt in (1, 1):
+            job = _leased_job(pipe_db, intent, ref=ref, attempts=attempt)
+            outcome = _run(
+                run_publish_pipeline(job, **_deps(pipe_db, meta, FakeTransit()))
+            )
+        assert outcome == FAILED, "the failure must complete, never abort on the lock"
+        assert _intent_row(pipe_db, intent)["state"] == "failed"
+        lock = _exec(
+            pipe_db,
+            "SELECT count(*), max(created_by_intent_id::text) FROM post_locks"
+            " WHERE media_item_id = %s AND kind = 'unsupported'",
+            (media,),
+            fetch=True,
+        )[0]
+        assert lock == (1, intent), "one lock, re-attributed to this intent"
+
+    def test_poison_with_nobody_to_tell_keeps_the_reconciler_s_backstop(self, pipe_db):
+        """No push binding at poison time: no latch, so the six-hour notice
+        still fires once a binding exists (the reconciler's own rule)."""
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=5, max_attempts=5)
+        meta = StubMetaAdapter(create_outcomes=["retryable"])
+        _exec(
+            pipe_db,
+            "UPDATE channel_bindings SET state = 'revoked' WHERE workspace_id = %s",
+            (pipe_db["ws"],),
+        )
+        try:
+            outcome = _run(
+                run_publish_pipeline(job, **_deps(pipe_db, meta, FakeTransit()))
+            )
+        finally:
+            _exec(
+                pipe_db,
+                "UPDATE channel_bindings SET state = 'active' WHERE workspace_id = %s",
+                (pipe_db["ws"],),
+            )
+        assert outcome == POISONED
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "review_required"
+        assert not (row["last_error"].get("evidence") or {}).get("customer_notified"), (
+            "nobody could hear: the latch must stay off"
         )
