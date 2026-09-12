@@ -130,6 +130,9 @@ _DEAD_STATUSES = ("ERROR", "EXPIRED")
 
 # Outcome vocabulary — what one run of the executor did, for logs and tests.
 POSTED = "posted"
+#: Meta's "the media could not be fetched from this uri" (9004/2207052): on a
+#: first container attempt it is the fetch racing the asset's first serving.
+FETCH_FAILED_CODE = 9004
 DEFERRED_CAP = "deferred_cap"
 DEFERRED_META_CAP = "deferred_meta_cap"
 PARKED_AMBIGUOUS = "parked_ambiguous"
@@ -198,6 +201,10 @@ async def _leased_tx(uow, job: dict):
     async with uow.begin() as session:
         await assert_lease(session, job["id"], job["lease_token"])
         yield session
+
+
+class TransitNotReady(StorydumpError):
+    """The story frame did not serve within the readiness budget."""
 
 
 async def run_publish_pipeline(
@@ -621,6 +628,28 @@ async def _retry_or_poison(
                 raise ValueError(
                     f"intent {ctx.intent_id} left 'publishing' during poison"
                 )
+            # Said at once, not six hours later: the card gains the review
+            # line and the workspace hears; the reconciler's own notice reads
+            # the latch and stays silent (investigation of 2026-09-11).
+            await _say_outcome(
+                session,
+                ctx,
+                state="review_required",
+                at=now_fn(),
+                notice=(
+                    "A story couldn't be posted after several tries and needs"
+                    " attention. Open the Queue on the web to retry or skip it."
+                ),
+            )
+            await session.execute(
+                text(
+                    "UPDATE post_intents SET last_error = COALESCE(last_error, '{}'::jsonb)"
+                    " || jsonb_build_object('evidence', COALESCE(last_error->'evidence', '{}'::jsonb)"
+                    "    || jsonb_build_object('customer_notified', true))"
+                    " WHERE id = :intent"
+                ),
+                {"intent": ctx.intent_id},
+            )
             await finalize_job(
                 session, ctx.job["id"], ctx.job["lease_token"], "review_required"
             )
@@ -703,7 +732,7 @@ async def _ladder(
                 ctx.intent_id,
                 type(exc).__name__,
             )
-            return await _fail_terminal(uow, ctx, op_id=None, exc=exc)
+            return await _fail_terminal(uow, ctx, op_id=None, exc=exc, now_fn=now_fn)
         except (DriveError, DriveLostResponse, StorydumpError, httpx.HTTPError) as exc:
             logger.warning(
                 "publish_pipeline intent %s: fetch/upload failed (%s) — retrying",
@@ -730,6 +759,30 @@ async def _ladder(
         step = "transit_uploaded"
 
     if step == "transit_uploaded":
+        # The frame must SERVE before Meta is told to fetch it (investigation
+        # of 2026-09-11: Meta's fetch arrives within a second of the container
+        # call, and a frame not yet serving is a lost post). A transit store
+        # without a readiness probe (an older seam) is taken as ready.
+        ready = getattr(transit, "ready", None)
+        if ready is not None and not await ready(
+            ctx.intent["transit_asset_ref"],
+            media_kind=ctx.intent["media_kind"],
+            sleep=sleep,
+        ):
+            logger.warning(
+                "publish_pipeline intent %s: the story frame is not serving yet —"
+                " retrying on the ladder rather than handing Meta a dead URL",
+                ctx.intent_id,
+            )
+            return await _retry_or_poison(
+                uow,
+                ctx,
+                backoff_seconds,
+                now_fn,
+                error=_error_of(
+                    TransitNotReady("story frame not serving within budget")
+                ),
+            )
         generation = ctx.next_generation("container_create")
         permit = await _permit(
             engine, ctx, op_kind="container_create", generation=generation
@@ -745,7 +798,30 @@ async def _ladder(
                 workspace_id=ctx.workspace_id,
             )
         except MetaTerminalError as exc:
-            return await _fail_terminal(uow, ctx, op_id=permit["id"], exc=exc)
+            if exc.code == FETCH_FAILED_CODE and generation < 2:
+                # "The media could not be fetched" on the FIRST container
+                # attempt is Meta's fetch losing the race with the asset's
+                # first serving, not a verdict on the file (the same files
+                # posted on a later attempt, 2026-09-11). One more attempt on
+                # the ladder; a second 9004 is the file's own answer.
+                logger.warning(
+                    "publish_pipeline intent %s: Meta could not fetch the frame on"
+                    " the first attempt (code %s) — retrying once",
+                    ctx.intent_id,
+                    exc.code,
+                )
+                return await _retry_or_poison(
+                    uow,
+                    ctx,
+                    backoff_seconds,
+                    now_fn,
+                    resolve_op_id=permit["id"],
+                    resolve_response={"v": 1, "error": exc.code, "first_fetch": True},
+                    error=_error_of(exc),
+                )
+            return await _fail_terminal(
+                uow, ctx, op_id=permit["id"], exc=exc, now_fn=now_fn, lock_media=True
+            )
         except MetaError as exc:
             logger.warning(
                 "publish_pipeline intent %s: %s code=%s — %s",
@@ -1113,12 +1189,23 @@ async def _confirm_dry_run(
 
 
 async def _fail_terminal(
-    uow, ctx: _Ctx, *, op_id: Optional[str], exc: BaseException
+    uow,
+    ctx: _Ctx,
+    *,
+    op_id: Optional[str],
+    exc: BaseException,
+    now_fn=None,
+    lock_media: bool = False,
 ) -> str:
     """`publishing → failed` on a definitive permanent failure: permit failed
     (when a permit exists — the fetch rung has none) + state flip with the
     reason + cap refund + job failed, ONE transaction (`02` §4: the refund
-    rides the terminal flip's transaction)."""
+    rides the terminal flip's transaction). The card is restated and the
+    workspace told in the same transaction (investigation of 2026-09-11: a
+    failed post read "Approved" indefinitely and nobody was told); with
+    *lock_media* the file gains a permanent `unsupported` lock so the
+    planner never serves it again (the legacy's permanent reject)."""
+    at = now_fn() if now_fn is not None else datetime.now(timezone.utc)
     async with _leased_tx(uow, ctx.job) as session:
         if op_id is not None:
             await provider_ops.resolve_permit(
@@ -1155,8 +1242,70 @@ async def _fail_terminal(
         ).fetchone()
         if moved is None:
             raise ValueError(f"intent {ctx.intent_id} left 'publishing' during fail")
+        if lock_media:
+            await session.execute(
+                text(
+                    "INSERT INTO post_locks (workspace_id, media_item_id, kind,"
+                    " expires_at, created_by_intent_id)"
+                    " VALUES (:ws, :m, 'unsupported', NULL, :intent)"
+                ),
+                {
+                    "ws": ctx.workspace_id,
+                    "m": str(ctx.intent["media_item_id"]),
+                    "intent": ctx.intent_id,
+                },
+            )
+        await _say_outcome(
+            session,
+            ctx,
+            state="failed",
+            at=at,
+            notice=_failure_notice(exc, lock_media=lock_media),
+        )
         await finalize_job(session, ctx.job["id"], ctx.job["lease_token"], "failed")
     return FAILED
+
+
+def _failure_notice(exc: BaseException, *, lock_media: bool) -> str:
+    """The workspace's sentence for a terminal publish failure — the thing
+    that failed and what to do, never the machine detail."""
+    if lock_media:
+        return (
+            "A story didn't post: Instagram couldn't process this file, so it"
+            " won't be offered again. Open the Queue on the web to see which."
+        )
+    if isinstance(exc, DriveTerminalError):
+        return (
+            "A story didn't post: its file is missing from Drive or too large"
+            " for Instagram. Open the Queue on the web to see which."
+        )
+    return "A story didn't post. Open the Queue on the web to see which and retry."
+
+
+async def _say_outcome(session, ctx: _Ctx, *, state: str, at, notice: str) -> None:
+    """Restate every card of the intent with the outcome line (the posted
+    line's own path — the tap already superseded the card, so only a restate
+    by ref can reach it) and write ONE notification per push binding, in the
+    caller's transaction."""
+    line = prompts.outcome_line(
+        state, by=None, at=at, tz=str(ctx.intent.get("eff_tz") or "UTC")
+    )
+    bindings = await prompts.push_bindings(session, ctx.workspace_id)
+    for binding_id in bindings:
+        await outbox.restate_cards(
+            session,
+            workspace_id=ctx.workspace_id,
+            binding_id=binding_id,
+            intent_id=ctx.intent_id,
+            outcome_text=line,
+        )
+    await outbox.fanout_notification(
+        session,
+        workspace_id=ctx.workspace_id,
+        bindings=bindings,
+        text=notice,
+        intent_id=ctx.intent_id,
+    )
 
 
 async def _confirm(

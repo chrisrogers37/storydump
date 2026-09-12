@@ -72,6 +72,9 @@ STORY_HEIGHT = 1920
 #: The blur behind the picture: the legacy tier's value, kept.
 STORY_BLUR = 2000
 #: What Meta accepts for a story, by kind — the derivation's delivered format.
+#: How long `ready` waits for the story frame to serve, and how often it asks.
+READY_BUDGET_S = 20.0
+READY_POLL_S = 1.0
 STORY_FORMATS = {"image": "jpg", "video": "mp4"}
 
 
@@ -177,6 +180,7 @@ class TransitStore:
         destroy_fn: Optional[Callable[..., dict]] = None,
         resources_fn: Optional[Callable[..., dict]] = None,
         url_fn: Optional[Callable[..., tuple]] = None,
+        probe_fn: Optional[Callable[[str], Any]] = None,
     ):
         for name, value in (
             ("cloud_name", cloud_name),
@@ -212,6 +216,10 @@ class TransitStore:
         self._destroy_fn = destroy_fn
         self._resources_fn = resources_fn
         self._url_fn = url_fn
+        #: `ready`'s probe: `url -> (status, content_type)`; the default is an
+        #: egress-floored GET of the first bytes (tests inject a script).
+        self._probe_fn = probe_fn or self._default_probe
+        self._probe_client = None
 
     @staticmethod
     def _resource_type(media_kind: str) -> str:
@@ -252,14 +260,33 @@ class TransitStore:
         """
         folder = self._workspace_folder(workspace_id)
         resource_type = self._resource_type(media_kind)
+        # The public id is minted HERE, not by Cloudinary, so the story frame
+        # can be derived eagerly in the same upload (the underlay names the
+        # asset itself). Investigation of 2026-09-11: Meta fetches the frame
+        # within a second of the container call; a frame derived on demand
+        # took 2.4–3.1 s to first byte, and the first fetch of a fresh asset
+        # sometimes answered with an error image — 4 of 7 publishes lost to
+        # "could not be fetched" (9004/2207052). Eager: 0.1–0.25 s.
+        ref = f"{folder}/{uuid.uuid4().hex[:20]}"
+        eager = [
+            {
+                "transformation": story_transformation(ref, media_kind=media_kind),
+                "format": STORY_FORMATS[media_kind],
+            }
+        ]
         try:
             result = await asyncio.to_thread(
                 self._upload_fn,
                 content,
-                folder=folder,
+                public_id=ref,
                 type="authenticated",
                 resource_type=resource_type,
                 overwrite=False,
+                eager=eager,
+                # An image frame derives in well under the upload timeout; a
+                # video frame can take longer than a synchronous eager allows,
+                # so it derives in the background and `ready` waits for it.
+                eager_async=media_kind != "image",
                 timeout=self._sdk_timeout_s,
                 **self._credentials,
             )
@@ -272,6 +299,63 @@ class TransitStore:
                 f"transit upload failed: {type(exc).__name__}: {exc}"
             ) from exc
         return result["public_id"]
+
+    # -- readiness (2026-09-11 investigation) -----------------------------------
+
+    async def ready(
+        self,
+        transit_asset_ref: str,
+        *,
+        media_kind: str,
+        budget_s: float = READY_BUDGET_S,
+        sleep: Callable[[float], Any] = asyncio.sleep,
+    ) -> bool:
+        """Whether the story frame at :meth:`delivery_url` serves as media
+        NOW — the check the pipeline makes before it hands Meta the URL.
+        Polls every `READY_POLL_S` until the probe answers 200/206 with an
+        image or video content type, or *budget_s* is spent. A probe error
+        is "not yet", never an exception: the caller's ladder decides."""
+        url = self.delivery_url(transit_asset_ref, media_kind=media_kind)
+        deadline = self._now_fn() + timedelta(seconds=budget_s)
+        while True:
+            try:
+                status, content_type = await self._probe_fn(url)
+            except Exception as exc:  # noqa: BLE001 — a probe failure is "not yet"
+                status, content_type = 0, f"probe failed: {type(exc).__name__}"
+            if status in (200, 206) and str(content_type or "").lower().startswith(
+                ("image/jpeg", "image/png", "video/")
+            ):
+                return True
+            if self._now_fn() >= deadline:
+                return False
+            await sleep(READY_POLL_S)
+
+    async def _default_probe(self, url: str) -> tuple[int, str]:
+        """One egress-floored GET of the first bytes of the delivery URL —
+        status and content type only. Ranged so a video is not downloaded."""
+        from urllib.parse import urlparse
+
+        from src.services.target import egress
+
+        host = urlparse(url).hostname or ""
+        policy = egress.EgressPolicy(
+            timeout_class="standard",
+            total_budget_s=float(TIMEOUT_CLASSES["standard"]),
+            max_attempts=1,
+            allowed_hosts=frozenset({host}),
+        )
+        if self._probe_client is None:
+            import httpx
+
+            self._probe_client = httpx.AsyncClient(follow_redirects=True)
+        response = await egress.request(
+            self._probe_client,
+            "GET",
+            url,
+            policy=policy,
+            headers={"Range": "bytes=0-1023"},
+        )
+        return int(response.status_code), str(response.headers.get("content-type", ""))
 
     # -- FC-3.2 (D38): delivery ------------------------------------------------
 
