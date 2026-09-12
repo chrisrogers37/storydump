@@ -28,6 +28,7 @@ lesson — a stub that counts, not a docstring that promises).
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from datetime import date, datetime, timedelta, timezone
 
@@ -1222,6 +1223,7 @@ class TestDefinitiveFailureClassification:
         intent, ref = _new_intent(pipe_db)
         job = _leased_job(pipe_db, intent, ref=ref, attempts=5, max_attempts=5)
         meta = StubMetaAdapter(publish_outcomes=["retryable"])
+        binding = _seed_card(pipe_db, intent)
         outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, meta)))
         assert outcome == POISONED
         row = _intent_row(pipe_db, intent)
@@ -1229,6 +1231,21 @@ class TestDefinitiveFailureClassification:
         assert row["cap_refunded_at"] is None
         assert _bucket(pipe_db, _today_utc()) == 1, "poison retains the debit"
         assert _job_row(pipe_db, job["id"])["state"] == "review_required"
+        # The card keeps buttons (2026-09-12): the workspace resolves its own
+        # review — the restate's edit carries the three resolutions.
+        edit = _review_edit(pipe_db, intent, binding)
+        assert "Needs review" in edit["outcome_text"]
+        tokens = [
+            b["callback_data"]
+            for row_ in edit["reply_markup"]["inline_keyboard"]
+            for b in row_
+        ]
+        assert tokens == [
+            f"v1:itposted:{intent}",
+            f"v1:notposted:{intent}",
+            f"v1:giveup:{intent}",
+        ]
+        assert "attention" in _notices(pipe_db, intent, binding)[0]
 
     def test_a_lost_container_create_retries_on_the_ladder_never_parks(self, pipe_db):
         intent, ref = _new_intent(pipe_db)
@@ -1519,6 +1536,21 @@ def _card_line(pipe_db, intent):
         (intent,),
         fetch=True,
     )[0][0]
+
+
+def _review_edit(pipe_db, intent, binding):
+    """The pending card edit the park queued on *binding* — its payload."""
+    rows = _exec(
+        pipe_db,
+        "SELECT payload FROM channel_outbox"
+        " WHERE intent_id = %s AND binding_id = %s AND kind = 'prompt_supersede'"
+        "   AND state = 'pending' ORDER BY created_at DESC LIMIT 1",
+        (intent, binding),
+        fetch=True,
+    )
+    assert rows, "no pending card edit was queued"
+    payload = rows[0][0]
+    return payload if isinstance(payload, dict) else json.loads(payload)
 
 
 def _notices(pipe_db, intent, binding):

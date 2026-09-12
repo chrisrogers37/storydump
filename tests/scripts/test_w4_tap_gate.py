@@ -302,9 +302,12 @@ class TestARepeatOrLateTapAnswers:
         assert set(_card_states(world, i["id"]).values()) == {"superseded"}
         assert len(_supersedes(world, i["id"])) == 2
 
-    def test_a_tap_on_review_required_answers_and_never_takes_the_operator_edge(
+    def test_an_approval_tap_on_a_review_card_answers_the_review_has_its_own_buttons(
         self, world
     ):
+        """A stale approval card's `post` on a parked intent answers with
+        the state; the review card's own buttons (`retry`/`itposted`/`giveup`)
+        are the levers (2026-09-12)."""
         i = _intent(world, "review-1", state="review_required")
         r = tap(world, "post", i["id"])
         assert r.outcome == "answered" and "Needs review" in r.answer_text
@@ -627,3 +630,198 @@ class TestATapIsCheapOnRealRows:
         assert sum("has_ig_credential" in s for s in statements) == 1
         assert sum("'prompt_supersede'" in s for s in statements) == 1
         assert not any(s.startswith("SET LOCAL") for s in statements)
+
+
+# --- the review card is the workspace's to resolve (2026-09-12) --------------
+
+
+def _parked(world, tag: str, *, publish_step="publish_called", op="ambiguous") -> dict:
+    """A `review_required` intent as the pipeline leaves it: the day debited
+    (a real bucket row, so a refund is observable), the container present,
+    and the cards already SUPERSEDED by the approve tap — so a resolution can
+    only reach them by ref."""
+    i = _intent(world, tag, state="review_required")
+    _write(
+        world,
+        "UPDATE post_intents SET cap_consumed_on = current_date, publish_step = %s,"
+        " ig_container_id = 'c-1' WHERE id = %s",
+        (publish_step, i["id"]),
+    )
+    if op is not None:
+        # The publish permit the pipeline minted, in the state the park left it.
+        _write(
+            world,
+            "INSERT INTO provider_operations (workspace_id, intent_id, provider, op_kind,"
+            " business_key, generation, state, lease_token)"
+            " VALUES (%s, %s, 'ig', 'publish', %s, 1, %s, gen_random_uuid())",
+            (world["ws"], i["id"], f"ig:publish:{i['id']}:1", op),
+        )
+    _write(
+        world,
+        "INSERT INTO daily_post_counts (workspace_id, ig_account_id, local_date, count, cap_at_write)"
+        " VALUES (%s, %s, current_date, 1, 3)"
+        " ON CONFLICT (workspace_id, ig_account_id, local_date) DO UPDATE SET count = 1",
+        (world["ws"], world["iga"]),
+    )
+    _write(
+        world,
+        "UPDATE channel_outbox SET state = 'superseded',"
+        ' payload = payload || \'{"outcome_text": "✅ Approved by Ada · earlier"}\''
+        " WHERE intent_id = %s AND kind = 'approval_prompt'",
+        (i["id"],),
+    )
+    return i
+
+
+def _op_state(world, intent_id):
+    row = _one(
+        world,
+        "SELECT state, response_ref FROM provider_operations"
+        " WHERE intent_id = %s AND op_kind = 'publish' ORDER BY generation DESC LIMIT 1",
+        (intent_id,),
+    )
+    if row is None:
+        return None
+    ref = row[1] if isinstance(row[1], dict) or row[1] is None else json.loads(row[1])
+    return row[0], ref
+
+
+def _day_count(world):
+    row = _one(
+        world,
+        "SELECT count FROM daily_post_counts WHERE workspace_id = %s AND ig_account_id = %s"
+        " AND local_date = current_date",
+        (world["ws"], world["iga"]),
+    )
+    return row[0] if row else 0
+
+
+def _intent_cols(world, intent_id):
+    return _one(
+        world,
+        "SELECT state, publish_step, published_via, cap_refunded_at, attempts_by_step"
+        " FROM post_intents WHERE id = %s",
+        (intent_id,),
+    )
+
+
+class TestTheReviewCardIsTheTenantsToResolve:
+    """`review_required` is the workspace's to resolve (ruling 2026-09-12):
+    real rows, real triggers, the tap's own connection and GUCs — the audit
+    row names the tapper, the resolution reaches the superseded cards by
+    ref in BOTH groups, and each `02` §4 edge keeps its cap rule."""
+
+    def test_retry_reapproves_debit_neutral_mints_the_publish_and_restates_both_cards(
+        self, world
+    ):
+        i = _parked(world, "review-retry")
+        assert _day_count(world) == 1
+        r = tap(world, "notposted", i["id"])
+        assert r.outcome == "executed", r.answer_text
+        assert "again" in r.answer_text.lower()
+        # The member's verdict ended the ambiguous op: the rail never sees a
+        # second permitted publish call beside an unresolved one.
+        state, ref = _op_state(world, i["id"])
+        assert state == "failed" and ref["verdict"] == "not_posted"
+        assert ref["by"] == world["user"]
+        state, step, _via, refunded, attempts = _intent_cols(world, i["id"])
+        assert (state, step) == ("approved", "none")
+        assert refunded is None and _day_count(world) == 0, (
+            "debit-neutral: the recorded day is refunded; the next flip re-debits"
+        )
+        assert attempts["retries"] == 1 and attempts["v"] == 1
+        assert _audit(world, i["id"]) == [
+            ("approved", "user", world["user"], "telegram")
+        ]
+        ((kind, key, payload),) = _write(
+            world,
+            "SELECT kind, serialization_key, payload FROM jobs"
+            " WHERE payload->>'intent_id' = %s AND kind = 'publish_pipeline'",
+            (i["id"],),
+            fetch=True,
+        )
+        assert key == "ig:acct-w4-tap"
+        assert (payload if isinstance(payload, dict) else json.loads(payload))[
+            "dry_run"
+        ] is False
+        edits = _supersedes(world, i["id"])
+        assert len(edits) == 2 and {b for b, _ in edits} == set(
+            world["bindings"].values()
+        )
+        for _b, p in edits:
+            assert "Approved by Ada" in p["outcome_text"]
+            assert p["supersedes_ref"] in i["cards"].values()
+            assert "reply_markup" not in p, "the review buttons go with the line"
+        assert set(_card_states(world, i["id"]).values()) == {"superseded"}
+
+    def test_itposted_confirms_a_publish_call_with_the_posted_effects(self, world):
+        i = _parked(world, "review-posted")
+        r = tap(world, "itposted", i["id"])
+        assert r.outcome == "executed", r.answer_text
+        state, ref = _op_state(world, i["id"])
+        assert state == "succeeded" and ref["verdict"] == "posted"
+        state, step, via, refunded, _ = _intent_cols(world, i["id"])
+        assert (state, step, via) == ("posted", "effect_confirmed", "api")
+        assert refunded is None and _day_count(world) == 1, "the debit stands"
+        assert _audit(world, i["id"]) == [("posted", "user", world["user"], "telegram")]
+        (times,) = _one(
+            world, "SELECT times_posted FROM media_items WHERE id = %s", (i["media"],)
+        )
+        assert times == 1
+        (locks,) = _one(
+            world,
+            "SELECT count(*) FROM post_locks WHERE media_item_id = %s AND kind = 'recent'"
+            " AND created_by_user_id = %s",
+            (i["media"], world["user"]),
+        )
+        assert locks == 1
+        assert all(
+            "Posted by Ada" in p["outcome_text"] for _, p in _supersedes(world, i["id"])
+        )
+
+    def test_itposted_without_a_publish_call_is_told_why_and_writes_nothing(
+        self, world
+    ):
+        i = _parked(world, "review-noposted", publish_step="container_ready", op=None)
+        r = tap(world, "itposted", i["id"])
+        assert r.outcome == "nothing_to_confirm" and r.show_alert is True
+        assert "post again" in r.answer_text.lower()
+        assert _intent_cols(world, i["id"])[0] == "review_required"
+        assert _audit(world, i["id"]) == [] and _supersedes(world, i["id"]) == []
+
+    def test_itposted_after_instagram_answered_no_is_refused_the_same_way(self, world):
+        """`publish_step` stays `publish_called` when the permit resolved
+        `failed`; the op's state is the discriminator, not the step."""
+        i = _parked(world, "review-refused", op="failed")
+        r = tap(world, "itposted", i["id"])
+        assert r.outcome == "nothing_to_confirm"
+        assert _intent_cols(world, i["id"])[0] == "review_required"
+        assert _op_state(world, i["id"])[0] == "failed"
+
+    def test_giveup_cancels_and_keeps_the_debit(self, world):
+        i = _parked(world, "review-giveup")
+        r = tap(world, "giveup", i["id"])
+        assert r.outcome == "executed" and "Cancelled" in r.answer_text
+        state, _, _, refunded, _ = _intent_cols(world, i["id"])
+        assert state == "cancelled" and refunded is None
+        assert _op_state(world, i["id"])[0] == "failed", (
+            "the op retires with the intent"
+        )
+        assert _day_count(world) == 1, (
+            "`02` §4: a review may have published — no refund"
+        )
+        assert _audit(world, i["id"]) == [
+            ("cancelled", "user", world["user"], "telegram")
+        ]
+        assert all(
+            "Cancelled by Ada" in p["outcome_text"]
+            for _, p in _supersedes(world, i["id"])
+        )
+
+    def test_a_review_tap_on_a_card_that_moved_on_answers(self, world):
+        i = _parked(world, "review-moved")
+        assert tap(world, "notposted", i["id"]).outcome == "executed"
+        r = tap(world, "giveup", i["id"])
+        assert r.outcome == "answered" and "Approved" in r.answer_text
+        assert _intent_cols(world, i["id"])[0] == "approved"
+        assert len(_audit(world, i["id"])) == 1, "the second tap wrote nothing"

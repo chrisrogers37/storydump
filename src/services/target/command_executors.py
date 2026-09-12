@@ -60,7 +60,7 @@ from typing import Any, Optional
 
 from sqlalchemy import text
 
-from src.config.defaults import DEFAULT_REPOST_TTL_DAYS, DEFAULT_SKIP_TTL_DAYS
+from src.config.defaults import DEFAULT_SKIP_TTL_DAYS
 from src.config.settings import settings
 from src.services.target import (
     google_drive_oauth,
@@ -71,7 +71,9 @@ from src.services.target import (
     offboarding,
     outbox,
     prompts,
+    provider_ops,
     provisioning,
+    publish_cap,
     readers,
     workspaces,
 )
@@ -103,6 +105,7 @@ async def _intent_row(session, command: Command) -> dict[str, Any]:
         session,
         "SELECT i.id, i.workspace_id, i.state, i.media_item_id, i.ig_account_id,"
         "       i.provider_account_ref, i.cancel_requested, i.published_via,"
+        "       i.publish_step, i.ig_container_id, i.attempts_by_step,"
         "       w.api_publishing_enabled, w.repost_ttl_days, w.skip_ttl_days,"
         "       w.dry_run_mode, w.is_paused,"
         "       COALESCE(a.posts_per_day, w.posts_per_day) AS eff_ppd,"
@@ -191,16 +194,20 @@ def _tz(intent: dict[str, Any]) -> str:
 
 
 async def _settle(
-    session, intent: dict[str, Any], command: Command
+    session,
+    intent: dict[str, Any],
+    command: Command,
+    *,
+    expected: str = "awaiting_approval",
 ) -> Optional[CommandResult]:
-    """Read, then decide (F2 (a)). A row in ANY state other than
-    `awaiting_approval` — a repeat of the same tap, a finished card, the
-    operator-only `review_required` edge, a card not yet prompted — answers
-    with its current state and writes nothing to the intent. The card is
-    superseded again with that state, so a stale card (a lost supersede)
-    heals on first touch. Returns None when the row is awaiting approval and
-    the caller may flip it."""
-    if intent["state"] == "awaiting_approval":
+    """Read, then decide (F2 (a)). A row in ANY state other than *expected*
+    (`awaiting_approval` for the approval card's four commands,
+    `review_required` for the review card's resolutions) — a repeat of the
+    same tap, a finished card, a card not yet prompted — answers with its
+    current state and writes nothing to the intent. A terminal card is
+    superseded again with that state. Returns None when the row is in the
+    expected state and the caller may flip it."""
+    if intent["state"] == expected:
         return None
     found = await _settlement(
         session, workspace_id=command.workspace_id, intent_id=str(intent["id"])
@@ -255,6 +262,40 @@ async def _record_outcome(
         tz=_tz(intent),
     )
     await _supersede_everywhere(
+        session,
+        workspace_id=command.workspace_id,
+        intent_id=str(intent["id"]),
+        outcome_text=line,
+    )
+    return line
+
+
+async def _restate_everywhere(
+    session, *, workspace_id: str, intent_id: str, outcome_text: str
+) -> int:
+    """The resolution's door to a card the approve tap already superseded:
+    by ref, in every binding, one statement (`outbox.restate_everywhere`)."""
+    return await outbox.restate_everywhere(
+        session,
+        workspace_id=workspace_id,
+        intent_id=intent_id,
+        outcome_text=outcome_text,
+    )
+
+
+async def _restate_outcome(
+    session, intent: dict[str, Any], command: Command, state: str
+) -> str:
+    """After a review resolution: the outcome line, written by ref onto
+    every card of the intent — the review keyboard goes with it (the edit
+    carries no `reply_markup`, so the transport leaves none)."""
+    line = prompts.outcome_line(
+        state,
+        by=await _actor_name(session, command.actor_user_id, label=command.actor_label),
+        at=_utcnow(),
+        tz=_tz(intent),
+    )
+    await _restate_everywhere(
         session,
         workspace_id=command.workspace_id,
         intent_id=str(intent["id"]),
@@ -437,42 +478,217 @@ async def mark_posted(session, command: Command) -> CommandResult:
         raise CommandRefused(
             "illegal_transition", f"intent is {state!r}, not awaiting_approval"
         )
-    await session.execute(
-        text(
-            "UPDATE media_items SET times_posted = times_posted + 1,"
-            " last_posted_at = now() WHERE id = :media"
-        ),
-        {"media": str(intent["media_item_id"])},
-    )
-    await session.execute(
-        text(
-            "INSERT INTO post_locks (workspace_id, media_item_id, kind,"
-            " ig_account_id, expires_at, created_by_intent_id, created_by_user_id)"
-            " VALUES (:ws, :media, 'recent', :acct,"
-            "         now() + make_interval(days => :ttl_days), :intent, :u)"
-            " ON CONFLICT (workspace_id, media_item_id, kind, ig_account_id)"
-            "   WHERE ig_account_id IS NOT NULL"
-            " DO UPDATE SET expires_at = EXCLUDED.expires_at"
-        ),
-        {
-            "ws": command.workspace_id,
-            "media": str(intent["media_item_id"]),
-            "acct": str(intent["ig_account_id"]),
-            "ttl_days": int(intent["repost_ttl_days"] or DEFAULT_REPOST_TTL_DAYS),
-            "intent": str(intent["id"]),
-            "u": command.actor_user_id,
-        },
-    )
-    await session.execute(
-        text("UPDATE ig_accounts SET last_posted_at = now() WHERE id = :acct"),
-        {"acct": str(intent["ig_account_id"])},
-    )
+    await _posted_effects(session, intent, command)
     await _record_outcome(session, intent, command, "posted")
     return _result(intent, "posted", published_via="manual")
 
 
+async def _posted_effects(session, intent: dict[str, Any], command: Command) -> None:
+    """The ledger's one spelling of what a post leaves (`intent_ledger.
+    posted_effects`), with the tapper on the lock."""
+    await intent_ledger.posted_effects(
+        session,
+        workspace_id=command.workspace_id,
+        media_item_id=str(intent["media_item_id"]),
+        ig_account_id=str(intent["ig_account_id"]),
+        intent_id=str(intent["id"]),
+        ttl_days=intent.get("repost_ttl_days"),
+        created_by_user_id=command.actor_user_id,
+    )
+
+
+async def _latest_publish_op(session, intent_id: str) -> Optional[dict[str, Any]]:
+    """The intent's latest `publish` permit (`provider_operations`), or None
+    when Instagram was never asked to post it. Its state is the review's
+    discriminator: `ambiguous` = the answer was lost (it MAY have posted);
+    `failed` = Instagram answered no; `permitted` = the call may not have
+    been made."""
+    return await readers.row(
+        session,
+        "SELECT id, state FROM provider_operations"
+        " WHERE intent_id = :i AND op_kind = 'publish'"
+        " ORDER BY generation DESC LIMIT 1",
+        i=intent_id,
+    )
+
+
+async def _end_op_by_verdict(
+    session,
+    op: Optional[dict[str, Any]],
+    *,
+    outcome: str,
+    verdict: str,
+    command: Command,
+) -> None:
+    """Terminalize an unresolved publish op with the member's verdict, so no
+    op stays in the un-retirable class after its intent resolves (`02` §6)."""
+    if op is None or op["state"] not in ("ambiguous", "permitted"):
+        return
+    await provider_ops.resolve_by_human(
+        session,
+        op_id=str(op["id"]),
+        outcome=outcome,
+        verdict=verdict,
+        actor_user_id=command.actor_user_id,
+        from_state=str(op["state"]),
+    )
+
+
+#: The review card's resolutions (`02` §4's `review_required` exits a member
+#: may take; `failed` — a refund — stays the operator's).
+RESOLUTIONS: tuple[str, ...] = ("retry", "posted", "cancel")
+
+#: The one verdict a resolution may carry: the member looked, and the story
+#: is not on Instagram. `retry` needs it when the publish answer was lost.
+NOT_POSTED = "not_posted"
+
+
+async def resolve_review(session, command: Command) -> CommandResult:
+    """The review card is the workspace's to resolve (ruling 2026-09-12 —
+    first principles for many tenants: the member is the human who can look
+    at their own story, and an operator-only surface cannot scale to
+    thousands of workspaces). `args.resolution`:
+
+    - `retry`: `review_required → approved`, debit-neutral
+      (`publish_cap.resolve_retry`), and the publish job is minted again
+      under `approve`'s own gates (manual mode, a usable token). When the
+      intent's publish answer was LOST (the latest publish op is
+      `ambiguous`), Instagram may have posted: a plain retry would re-permit
+      a second call beside an unresolved one — the permit rail's one
+      forbidden thing — so it is refused (`may_have_posted`) unless the
+      member's verdict `not_posted` rides the command (the card's "🔁 Not
+      there — post again"; the web's confirm), which first ends the op.
+    - `posted`: Instagram did post it — legal only when a publish call was
+      made AND Instagram did not answer no (`02` §4 resolve-posted: the
+      latest publish op exists and is not `failed`; `publish_step` alone
+      stays `publish_called` after a definitive refusal). The debit stands,
+      the post's effects are written, the op ends `succeeded` by verdict.
+    - `cancel`: give up; the debit is RETAINED (`02` §4: the story may have
+      published). Honoured even when a cancel was already requested; the op
+      ends `failed` by verdict so it can retire.
+
+    A row in any other state answers (read-then-decide, F2 (a))."""
+    resolution = _arg(command, "resolution")
+    if resolution not in RESOLUTIONS:
+        raise CommandRefused(
+            "invalid_args", f"resolution must be one of {', '.join(RESOLUTIONS)}"
+        )
+    intent = await _intent_row(session, command)
+    settled = await _settle(session, intent, command, expected="review_required")
+    if settled is not None:
+        return settled
+    intent_id = str(intent["id"])
+    op = await _latest_publish_op(session, intent_id)
+    if resolution == "cancel":
+        return await _give_up(session, intent, command, op)
+    _refuse_if_cancelling(intent)
+    if resolution == "posted":
+        if (
+            intent.get("publish_step") != "publish_called"
+            or not intent.get("ig_container_id")
+            or op is None
+            or op["state"] == "failed"
+        ):
+            raise CommandRefused(
+                "nothing_to_confirm",
+                "Instagram did not post this one (never asked, or it answered no)"
+                " — post again, or give up",
+            )
+        if not await publish_cap.resolve_posted(session, intent_id=intent_id):
+            raise CommandRefused(
+                "illegal_transition", "the review was resolved by someone else first"
+            )
+        await _end_op_by_verdict(
+            session, op, outcome="succeeded", verdict="posted", command=command
+        )
+        await _posted_effects(session, intent, command)
+        await _restate_outcome(session, intent, command, "posted")
+        return _result(intent, "posted", published_via="api")
+    # retry — approve's gates, re-checked: the flag or the token may have
+    # gone since the card was approved.
+    if not intent["api_publishing_enabled"]:
+        raise CommandRefused(
+            "manual_mode",
+            "this workspace publishes manually; give up here and post by hand",
+        )
+    if not intent.get("dry_run_mode") and not intent.get("has_ig_credential"):
+        raise CommandRefused(
+            "not_connected",
+            "Instagram is not connected for this account — connect it in"
+            " Settings › Integrations, or post by hand",
+        )
+    if op is not None and op["state"] in ("ambiguous", "permitted"):
+        if command.args.get("verdict") != NOT_POSTED:
+            raise CommandRefused(
+                "may_have_posted",
+                "Instagram may have posted this one — check the story first",
+            )
+        await _end_op_by_verdict(
+            session, op, outcome="failed", verdict=NOT_POSTED, command=command
+        )
+    attempts = dict(intent.get("attempts_by_step") or {})
+    attempts.setdefault("v", 1)
+    attempts["retries"] = int(attempts.get("retries") or 0) + 1
+    flipped = await publish_cap.resolve_retry(
+        session,
+        intent_id=intent_id,
+        workspace_id=command.workspace_id,
+        ig_account_id=str(intent["ig_account_id"]),
+        attempts_by_step=attempts,
+    )
+    if not flipped:
+        raise CommandRefused(
+            "illegal_transition", "the review was resolved by someone else first"
+        )
+    await jobs.enqueue(
+        session,
+        kind="publish_pipeline",
+        workspace_id=command.workspace_id,
+        serialization_key=f"ig:{intent['provider_account_ref']}",
+        deadline_seconds=jobs.NO_DEADLINE,
+        payload={
+            "v": 1,
+            "intent_id": intent_id,
+            "dry_run": bool(intent.get("dry_run_mode")),
+        },
+    )
+    await _restate_outcome(session, intent, command, "approved")
+    return CommandResult(
+        "enqueued",
+        {
+            "intent_id": intent_id,
+            "state": "approved",
+            "job": "publish_pipeline",
+            "dry_run": bool(intent.get("dry_run_mode")),
+            "paused": bool(intent.get("is_paused")),
+            "retries": attempts["retries"],
+        },
+    )
+
+
+async def _give_up(
+    session, intent: dict[str, Any], command: Command, op: Optional[dict[str, Any]]
+) -> CommandResult:
+    """`review_required → cancelled`, the debit retained; the unresolved op
+    ends by verdict; the line reaches every card by ref, without buttons."""
+    if not await publish_cap.resolve_cancel(session, intent_id=str(intent["id"])):
+        raise CommandRefused(
+            "illegal_transition", "the review was resolved by someone else first"
+        )
+    await _end_op_by_verdict(
+        session, op, outcome="failed", verdict="given_up", command=command
+    )
+    await _restate_outcome(session, intent, command, "cancelled")
+    return _result(intent, "cancelled")
+
+
 async def cancel(session, command: Command) -> CommandResult:
     intent = await _intent_row(session, command)
+    if intent["state"] == "review_required":
+        # A parked row has no worker checkpoint to honour a flag at; the
+        # cancel IS the give-up (2026-09-12), and the card loses its buttons.
+        op = await _latest_publish_op(session, str(intent["id"]))
+        return await _give_up(session, intent, command, op)
     _refuse_if_cancelling(intent)
     if intent["state"] in TERMINAL_STATES:
         raise CommandRefused(
@@ -622,7 +838,7 @@ async def disable_account(session, command: Command) -> CommandResult:
     # are the ones the worker will terminalize.
     live = await readers.rows(
         session,
-        "SELECT i.id, COALESCE(a.tz, w.tz) AS eff_tz FROM post_intents i"
+        "SELECT i.id, i.state, COALESCE(a.tz, w.tz) AS eff_tz FROM post_intents i"
         "  JOIN workspaces w ON w.id = i.workspace_id"
         "  JOIN ig_accounts a ON a.id = i.ig_account_id"
         " WHERE i.workspace_id = :ws AND i.ig_account_id = :acct"
@@ -632,16 +848,37 @@ async def disable_account(session, command: Command) -> CommandResult:
         acct=account_id,
     )
     for row in live:
+        line = prompts.outcome_line(
+            "account_disabled", by=None, at=_utcnow(), tz=str(row["eff_tz"] or "UTC")
+        )
+        if row["state"] == "review_required":
+            # A parked row has no worker checkpoint to finish it at: the
+            # removal is its give-up, and its card loses the review buttons
+            # (by ref — the approve tap superseded it long ago).
+            intent_id = str(row["id"])
+            if not await publish_cap.resolve_cancel(session, intent_id=intent_id):
+                # A member resolved it between the flag and this read: their
+                # line stands, and the op was ended by their verdict.
+                continue
+            await _end_op_by_verdict(
+                session,
+                await _latest_publish_op(session, intent_id),
+                outcome="failed",
+                verdict="given_up",
+                command=command,
+            )
+            await _restate_everywhere(
+                session,
+                workspace_id=command.workspace_id,
+                intent_id=intent_id,
+                outcome_text=line,
+            )
+            continue
         await _supersede_everywhere(
             session,
             workspace_id=command.workspace_id,
             intent_id=str(row["id"]),
-            outcome_text=prompts.outcome_line(
-                "account_disabled",
-                by=None,
-                at=_utcnow(),
-                tz=str(row["eff_tz"] or "UTC"),
-            ),
+            outcome_text=line,
         )
     return CommandResult(
         "executed", {"ig_account_id": account_id, "state": "disabled", **effects}

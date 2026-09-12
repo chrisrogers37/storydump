@@ -109,7 +109,6 @@ class TestEveryCommandHasAFloorAndAnExecutorSlot:
             "move_account",
             "change_role",
             "transfer_ownership",
-            "resolve_review",
             "clear_quarantine",
         }
         for name in port.UNBUILT:

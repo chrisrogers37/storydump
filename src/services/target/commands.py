@@ -116,8 +116,11 @@ FLOORS: tuple[str, ...] = ("user", "member", "admin", "owner", "operator")
 # that can express a non-user principal, and the refusal is TWO independent
 # constructions (the branch in `execute` below AND `operator`'s absence from
 # `tenant_resolution.ROLE_ORDER`), so removing either alone changes nothing.
-# `04` sequences that at X.2, with the surface that needs it. Tracked as #1124;
-# nothing here lowers a floor in the meantime.
+# `04` sequences that at X.2, with the surface that needs it. Tracked as #1124.
+#
+# 2026-09-12: `resolve_review` LEFT the operator floor — see `ROLE_FLOOR`. The
+# operator principal is still unbuilt and `clear_quarantine` still waits on
+# it; the review card no longer does.
 
 #: Per-command floor, from `06` §2 (membership), §4 (accounts), §5 (operator).
 ROLE_FLOOR: dict[str, str] = {
@@ -153,7 +156,14 @@ ROLE_FLOOR: dict[str, str] = {
     "remove_member": "admin",
     "change_role": "admin",
     "transfer_ownership": "owner",
-    "resolve_review": "operator",
+    # Re-ruled 2026-09-12 (first principles for many tenants): the
+    # `review_required` card is the WORKSPACE's to resolve — a member holds
+    # `approve`, `mark_posted` and `cancel` already, and the resolutions are
+    # those levers on a parked row (`retry` re-approves, `posted` confirms,
+    # `cancel` gives up keeping the debit). `failed` — a refund — is not
+    # offered; it stays the operator's, with `clear_quarantine`, when the
+    # operator principal exists (#1124).
+    "resolve_review": "member",
     "clear_quarantine": "operator",
 }
 
@@ -169,6 +179,13 @@ REASONS: tuple[str, ...] = (
     "manual_mode",
     "cancelling",
     "not_connected",
+    # The review card (2026-09-12): `posted` on an intent Instagram never
+    # posted (never asked, or it answered no) has nothing to confirm; `retry`
+    # on an intent whose publish answer was LOST needs the member's verdict
+    # that the story is not there — a plain retry would re-permit a second
+    # publish call beside an unresolved one, the rail's one forbidden thing.
+    "nothing_to_confirm",
+    "may_have_posted",
 )
 
 
@@ -265,6 +282,7 @@ def _build_registry() -> dict[str, Optional[Executor]]:
             # (#1090 H1).
             "offboard_workspace": ex.offboard_workspace,
             "restore_workspace": ex.restore_workspace,
+            "resolve_review": ex.resolve_review,
         }
     )
     return registry

@@ -17,14 +17,15 @@ import {
 } from "@/components/ui/dialog";
 import { EmptyState } from "@/components/dashboard/empty-state";
 import {
-  COMMAND_LABELS,
+  ACTION_LABELS,
   accountLabel,
   actionsFor,
   formatSlot,
   refusalCopy,
+  requestFor,
   type Intent,
   type IntentState,
-  type QueueCommand,
+  type QueueAction,
 } from "@/lib/intents";
 
 /**
@@ -39,7 +40,10 @@ import {
  *
  * Reject asks first. It is the one action whose lock is permanent — the
  * story is never offered again — and the button sits beside Skip, whose
- * lock expires.
+ * lock expires. Give up asks too: it ends a review for good, and the person
+ * who can see the story on Instagram should choose It posted instead. Post
+ * again asks the review's own question — is it on your story? — because the
+ * answer travels with the command as the member's verdict.
  */
 
 /** Labels that differ from the state's own name; the badge falls back to the name. */
@@ -58,14 +62,43 @@ const STATE_TONE: Partial<Record<IntentState, string>> = {
   review_required: "bg-red-100 text-red-900",
 };
 
-const COMMAND_VARIANT: Record<
-  QueueCommand,
+const ACTION_VARIANT: Record<
+  QueueAction,
   "default" | "outline" | "destructive"
 > = {
   approve: "default",
   mark_posted: "default",
   skip: "outline",
   reject: "destructive",
+  retry: "default",
+  resolve_posted: "outline",
+  resolve_cancel: "destructive",
+};
+
+/** The actions that ask first, and what the dialog says. */
+const CONFIRM: Partial<
+  Record<QueueAction, { title: string; body: (intent: Intent) => string; verb: string }>
+> = {
+  reject: {
+    title: "Reject this post?",
+    body: (intent) =>
+      `${intent.file_name} will never be offered again for ${accountLabel(intent)}. Skip instead if it should come back later.`,
+    verb: "Reject",
+  },
+  resolve_cancel: {
+    title: "Give up on this post?",
+    body: (intent) =>
+      `Storydump will stop trying to post ${intent.file_name}. If you can already see it on Instagram, choose It posted instead.`,
+    verb: "Give up",
+  },
+  // The answer to the review's own question. The port needs it when the
+  // publish answer was lost: a plain retry could show the story twice.
+  retry: {
+    title: "Is it on your story?",
+    body: (intent) =>
+      `Check Instagram first. If ${intent.file_name} is already there, choose It posted — posting again would show it twice. If it is not there, post it again.`,
+    verb: "Not there — post again",
+  },
 };
 
 type Notice = { intentId: string; text: string };
@@ -88,9 +121,10 @@ export function QueueList({
   const [pending, setPending] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
 
-  async function run(intent: Intent, command: QueueCommand) {
+  async function run(intent: Intent, action: QueueAction) {
     setPending(intent.id);
     setNotice(null);
+    const { command, body } = requestFor(action, intent);
 
     try {
       const response = await fetch(
@@ -98,7 +132,7 @@ export function QueueList({
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ intent_id: intent.id }),
+          body: JSON.stringify(body),
         },
       );
 
@@ -141,6 +175,7 @@ export function QueueList({
             intent.state,
             apiPublishingEnabled,
             intent.cancel_requested,
+            intent.publish_step,
           );
           const MediaGlyph = intent.media_kind === "video" ? Video : ImageIcon;
 
@@ -192,25 +227,24 @@ export function QueueList({
                         aria-hidden
                       />
                     )}
-                    {actions.map((command) =>
-                      command === "reject" ? (
-                        <Dialog key={command}>
+                    {actions.map((action) => {
+                      const confirm = CONFIRM[action];
+                      return confirm ? (
+                        <Dialog key={action}>
                           <DialogTrigger asChild>
                             <Button
                               size="sm"
-                              variant={COMMAND_VARIANT[command]}
+                              variant={ACTION_VARIANT[action]}
                               disabled={pending !== null}
                             >
-                              {COMMAND_LABELS[command]}
+                              {ACTION_LABELS[action]}
                             </Button>
                           </DialogTrigger>
                           <DialogContent>
                             <DialogHeader>
-                              <DialogTitle>Reject this post?</DialogTitle>
+                              <DialogTitle>{confirm.title}</DialogTitle>
                               <DialogDescription>
-                                {intent.file_name} will never be offered again
-                                for {accountLabel(intent)}. Skip instead if it
-                                should come back later.
+                                {confirm.body(intent)}
                               </DialogDescription>
                             </DialogHeader>
                             <DialogFooter>
@@ -220,9 +254,9 @@ export function QueueList({
                               <DialogClose asChild>
                                 <Button
                                   variant="destructive"
-                                  onClick={() => void run(intent, "reject")}
+                                  onClick={() => void run(intent, action)}
                                 >
-                                  Reject
+                                  {confirm.verb}
                                 </Button>
                               </DialogClose>
                             </DialogFooter>
@@ -230,16 +264,16 @@ export function QueueList({
                         </Dialog>
                       ) : (
                         <Button
-                          key={command}
+                          key={action}
                           size="sm"
-                          variant={COMMAND_VARIANT[command]}
+                          variant={ACTION_VARIANT[action]}
                           disabled={pending !== null}
-                          onClick={() => void run(intent, command)}
+                          onClick={() => void run(intent, action)}
                         >
-                          {COMMAND_LABELS[command]}
+                          {ACTION_LABELS[action]}
                         </Button>
-                      ),
-                    )}
+                      );
+                    })}
                   </div>
                 )}
               </div>

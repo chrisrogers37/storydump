@@ -332,3 +332,41 @@ def test_a_posted_dry_run_row_words_as_a_dry_run_everywhere():
     assert prompts.outcome_word("posted", "dry_run").startswith("🧪 Dry run")
     assert prompts.outcome_word("posted", "api") == "✅ Posted"
     assert prompts.outcome_word("skipped", "dry_run") == "⏭️ Skipped"
+
+
+INTENT = "0b6e5f1a-2f4d-4c1e-9a3b-7d8e9f0a1b2c"
+
+
+class TestTheReviewKeyboard:
+    """A `review_required` card is the workspace's to resolve (2026-09-12): it
+    offers the three resolutions a member may take — post again, it posted,
+    give up — as callback buttons minted by the one token function."""
+
+    def test_it_offers_the_three_resolutions_in_two_rows(self):
+        kb = prompts.review_keyboard(INTENT)
+        rows = kb["inline_keyboard"]
+        assert [[b["callback_data"] for b in row] for row in rows] == [
+            [f"v1:itposted:{INTENT}", f"v1:notposted:{INTENT}"],
+            [f"v1:giveup:{INTENT}"],
+        ]
+        # The retry button's label carries the member's verdict: it is the
+        # answer to "is it on your story?", which is the review's question.
+        assert [b["text"] for b in rows[0]] == [
+            "✅ It posted",
+            "🔁 Not there — post again",
+        ]
+        assert rows[1][0]["text"] == "🚫 Give up"
+
+    def test_every_button_parses_back_to_its_action(self):
+        from src.services.target import callback_tokens
+
+        for row in prompts.review_keyboard(INTENT)["inline_keyboard"]:
+            for button in row:
+                tap = callback_tokens.parse(button["callback_data"])
+                assert tap is not None and tap.intent_id == INTENT
+                assert tap.action in prompts.REVIEW_ACTIONS
+
+    def test_it_is_json_serializable_for_the_outbox(self):
+        import json
+
+        json.dumps(prompts.review_keyboard(INTENT))

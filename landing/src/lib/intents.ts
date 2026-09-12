@@ -79,16 +79,84 @@ export type IntentsResponse = { intents: Intent[]; limit: number };
  * port re-validates the name, the role floor and the transition; this list
  * decides what the web tier fronts, nothing more.
  */
-export const QUEUE_COMMANDS = ["approve", "mark_posted", "skip", "reject"] as const;
+export const QUEUE_COMMANDS = [
+  "approve",
+  "mark_posted",
+  "skip",
+  "reject",
+  "resolve_review",
+] as const;
 
 export type QueueCommand = (typeof QUEUE_COMMANDS)[number];
 
-export const COMMAND_LABELS: Record<QueueCommand, string> = {
+/**
+ * The buttons a row can carry: the approval card's four, and the review
+ * card's three (2026-09-12 — a `review_required` intent is the workspace's
+ * to resolve). An action is a button; a command is what the port runs —
+ * the three review actions are ONE command with the resolution in the body.
+ */
+export const QUEUE_ACTIONS = [
+  "approve",
+  "mark_posted",
+  "skip",
+  "reject",
+  "retry",
+  "resolve_posted",
+  "resolve_cancel",
+] as const;
+
+export type QueueAction = (typeof QUEUE_ACTIONS)[number];
+
+export const ACTION_LABELS: Record<QueueAction, string> = {
   approve: "Approve",
   mark_posted: "Posted myself",
   skip: "Skip",
   reject: "Reject",
+  retry: "Post again",
+  resolve_posted: "It posted",
+  resolve_cancel: "Give up",
 };
+
+type ReviewAction = "retry" | "resolve_posted" | "resolve_cancel";
+
+const RESOLUTION_OF: Record<ReviewAction, string> = {
+  retry: "retry",
+  resolve_posted: "posted",
+  resolve_cancel: "cancel",
+};
+
+function isReviewAction(action: QueueAction): action is ReviewAction {
+  return action in RESOLUTION_OF;
+}
+
+export type ActionRequest = { command: QueueCommand; body: Record<string, unknown> };
+
+/**
+ * The command and body an action posts. A review resolution carries the
+ * row's `entered_state_at` as its `episode`: the idempotency key is derived
+ * from it (`@/lib/commands`), so a double-click replays while a LATER review
+ * of the same post — parked again after a retry — is a new command. Post
+ * again carries the member's verdict (`not_posted`): the Queue asks "is it
+ * on your story?" before sending, and the port needs that answer when the
+ * publish answer was lost — a plain retry could post the story twice.
+ */
+export function requestFor(
+  action: QueueAction,
+  intent: Pick<Intent, "id" | "entered_state_at">,
+): ActionRequest {
+  if (isReviewAction(action)) {
+    return {
+      command: "resolve_review",
+      body: {
+        intent_id: intent.id,
+        resolution: RESOLUTION_OF[action],
+        ...(action === "retry" ? { verdict: "not_posted" } : {}),
+        episode: intent.entered_state_at,
+      },
+    };
+  }
+  return { command: action, body: { intent_id: intent.id } };
+}
 
 export function isQueueCommand(value: unknown): value is QueueCommand {
   return (
@@ -97,15 +165,28 @@ export function isQueueCommand(value: unknown): value is QueueCommand {
 }
 
 /**
- * The buttons a row gets. Only `awaiting_approval` has a human lever in the
- * matrix; hybrid (`api_publishing_enabled`) keeps the manual buttons beside
- * Approve (`06` §3). Every other state renders read-only with its badge.
+ * The buttons a row gets. `awaiting_approval` has the matrix's four user
+ * edges; hybrid (`api_publishing_enabled`) keeps the manual buttons beside
+ * Approve (`06` §3). `review_required` has the three resolutions: It posted
+ * only once a publish call was made (`publish_step`, on the row — before that
+ * rung the port can only refuse it); Post again needs the API to publish;
+ * Give up is offered even while a cancel is pending, because it IS the
+ * cancel. Every other state renders read-only with its badge.
  */
 export function actionsFor(
   state: IntentState,
   apiPublishingEnabled: boolean,
   cancelRequested = false,
-): QueueCommand[] {
+  publishStep: string | null = null,
+): QueueAction[] {
+  if (state === "review_required") {
+    if (cancelRequested) return ["resolve_cancel"];
+    const actions: QueueAction[] = [];
+    if (publishStep === "publish_called") actions.push("resolve_posted");
+    if (apiPublishingEnabled) actions.push("retry");
+    actions.push("resolve_cancel");
+    return actions;
+  }
   // A card whose cancellation is requested (by `cancel`, or because its
   // destination was removed) has no lever until the worker finishes it.
   if (cancelRequested) return [];
@@ -136,6 +217,14 @@ export function refusalCopy(reason: unknown): string {
       return "This post already moved on — the list has been refreshed.";
     case "manual_mode":
       return "This workspace posts by hand. Post the story on Instagram, then tap Posted myself.";
+    case "not_connected":
+      return "Instagram is not connected for this account. Connect it in Settings › Integrations, or post by hand.";
+    case "nothing_to_confirm":
+      return "Instagram did not post this one — it was never asked, or it answered no — so there is nothing to confirm. Post again, or give up.";
+    case "may_have_posted":
+      return "Instagram may have posted this one. Check your story first: choose It posted if it is there.";
+    case "cancelling":
+      return "This post is being cancelled.";
     case "not_found":
       return "This post is no longer in the queue.";
     case "unauthenticated":
