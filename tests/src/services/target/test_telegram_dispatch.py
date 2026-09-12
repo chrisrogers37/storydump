@@ -608,3 +608,36 @@ class TestATapIsCheap:
         d = telegram_dispatch.TelegramDispatcher()
         await d(None, tap("skip"))
         assert seams["log"]["execute_kw"] == [{"tenant_bound": True}]
+
+
+class TestTheReviewTaps:
+    """The review card's three buttons are one command — `resolve_review` —
+    with the resolution in `args`; the answer names what happens next."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("action", "resolution"),
+        [("retry", "retry"), ("itposted", "posted"), ("giveup", "cancel")],
+    )
+    async def test_a_review_tap_carries_its_resolution(self, seams, action, resolution):
+        seams["result"] = CommandResult(
+            "executed", {"intent_id": INTENT, "state": "approved"}
+        )
+        d = telegram_dispatch.TelegramDispatcher()
+        r = await d(None, tap(action))
+        assert r.outcome == "executed"
+        cmd = seams["log"]["executed"][0]
+        assert cmd.kind == "resolve_review"
+        assert cmd.args == {"intent_id": INTENT, "resolution": resolution}
+
+    def test_the_answers_name_what_happens_next(self):
+        from src.services.target.telegram_dispatch import _executed_text
+
+        retry = CommandResult("enqueued", {"state": "approved", "dry_run": False})
+        assert "again" in _executed_text("retry", retry).lower()
+        assert "Posted" in _executed_text("itposted", CommandResult("executed", {}))
+        assert "Cancelled" in _executed_text("giveup", CommandResult("executed", {}))
+
+    def test_a_posted_claim_without_a_publish_call_is_told_why(self):
+        text, alert = telegram_dispatch.answer_for("no_publish_call")
+        assert alert is True and "Post again" in text
