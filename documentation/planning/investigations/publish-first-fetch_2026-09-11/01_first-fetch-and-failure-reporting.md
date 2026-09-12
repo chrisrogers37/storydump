@@ -22,7 +22,7 @@ None (main after #1291).
 
 ### Blocks
 
-The Retry action follow-up.
+The Retry action follow-up — built 2026-09-12: the parked card carries 🔁 Post again · ✅ It posted · 🚫 Give up (`resolve_review`), and the web Queue the same three.
 
 ### Steps
 

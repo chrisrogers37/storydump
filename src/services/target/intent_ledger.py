@@ -50,6 +50,7 @@ from typing import Optional
 
 from sqlalchemy import text
 
+from src.config.defaults import DEFAULT_REPOST_TTL_DAYS
 from src.exceptions.base import StorydumpError
 
 
@@ -178,3 +179,52 @@ async def current_state(session, intent_id: str) -> Optional[str]:
         )
     ).first()
     return row[0] if row else None
+
+
+async def posted_effects(
+    session,
+    *,
+    workspace_id: str,
+    media_item_id: str,
+    ig_account_id: str,
+    intent_id: str,
+    ttl_days: Optional[int],
+    created_by_user_id: Optional[str] = None,
+) -> None:
+    """What a post leaves beside the `posted` flip (`04`'s effect list), in
+    ONE spelling for its three writers — the manual path (`mark_posted`),
+    the pipeline's confirm and the review card's "it posted": the media's
+    count and last-posted stamp, the repost lock keyed to the account
+    (created by the intent, and by the person when a person did it), the
+    account's last-posted stamp. *ttl_days* falls back to the product
+    default."""
+    await session.execute(
+        text(
+            "UPDATE media_items SET times_posted = times_posted + 1,"
+            " last_posted_at = now() WHERE id = :media"
+        ),
+        {"media": str(media_item_id)},
+    )
+    await session.execute(
+        text(
+            "INSERT INTO post_locks (workspace_id, media_item_id, kind,"
+            " ig_account_id, expires_at, created_by_intent_id, created_by_user_id)"
+            " VALUES (:ws, :media, 'recent', :acct,"
+            "         now() + make_interval(days => :ttl_days), :intent, :u)"
+            " ON CONFLICT (workspace_id, media_item_id, kind, ig_account_id)"
+            "   WHERE ig_account_id IS NOT NULL"
+            " DO UPDATE SET expires_at = EXCLUDED.expires_at"
+        ),
+        {
+            "ws": str(workspace_id),
+            "media": str(media_item_id),
+            "acct": str(ig_account_id),
+            "ttl_days": int(ttl_days or DEFAULT_REPOST_TTL_DAYS),
+            "intent": str(intent_id),
+            "u": created_by_user_id,
+        },
+    )
+    await session.execute(
+        text("UPDATE ig_accounts SET last_posted_at = now() WHERE id = :acct"),
+        {"acct": str(ig_account_id)},
+    )

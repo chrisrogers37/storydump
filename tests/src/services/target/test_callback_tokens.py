@@ -26,8 +26,9 @@ class TestRoundTrip:
     def test_the_card_and_the_parser_share_one_token_function(self):
         assert prompts._token is callback_tokens.token
 
-    def test_a_token_stays_within_telegrams_64_bytes(self):
-        assert len(callback_tokens.token("posted", INTENT).encode()) <= 64
+    @pytest.mark.parametrize("action", callback_tokens.ACTIONS)
+    def test_a_token_stays_within_telegrams_64_bytes(self, action):
+        assert len(callback_tokens.token(action, INTENT).encode()) <= 64
 
 
 class TestRefusals:
@@ -48,4 +49,9 @@ class TestRefusals:
         assert callback_tokens.parse(data) is None
 
     def test_the_action_set_is_the_cards(self):
-        assert set(callback_tokens.ACTIONS) == set(prompts._ACTIONS_API)
+        """Every action a card can mint — the approval card's four and the
+        review card's three — and nothing a card cannot."""
+        assert set(callback_tokens.ACTIONS) == set(prompts._ACTIONS_API) | set(
+            prompts.REVIEW_ACTIONS
+        )
+        assert not set(prompts._ACTIONS_API) & set(prompts.REVIEW_ACTIONS)

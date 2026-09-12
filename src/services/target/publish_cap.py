@@ -217,6 +217,34 @@ async def resolve_retry(
     return flipped is not None
 
 
+async def resolve_posted(session, *, intent_id: str) -> bool:
+    """`review_required → posted` — "it did publish" (`02` §4 resolve-posted,
+    pass 2): legal only when a publish call was made (`publish_step =
+    'publish_called'`, the container present) — the WHERE is the rule, so a
+    caller cannot confirm a post Instagram was never asked for. The one
+    statement sets `publish_step = 'effect_confirmed'` and `published_via =
+    'api'` with the flip, satisfying `ck_posted_complete` (the debit, taken
+    at the flip to `publishing`, stands). No media id is known; the
+    reconciler's evidence, if any, is on `last_error`. Returns False on a
+    lost race or an intent that never called publish."""
+    flipped = (
+        await session.execute(
+            text(
+                "UPDATE post_intents"
+                "   SET state = 'posted', publish_step = 'effect_confirmed',"
+                "       published_via = 'api'"
+                " WHERE id = :intent AND state = 'review_required'"
+                "   AND publish_step = 'publish_called'"
+                "   AND ig_container_id IS NOT NULL"
+                "   AND cap_consumed_on IS NOT NULL"
+                " RETURNING id"
+            ),
+            {"intent": intent_id},
+        )
+    ).fetchone()
+    return flipped is not None
+
+
 async def resolve_cancel(session, *, intent_id: str) -> bool:
     """`review_required → cancelled`, RETAINING the debit (pass-5 decision):
     a `review_required` intent may have published, so refunding on cancel risks

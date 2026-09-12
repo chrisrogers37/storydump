@@ -676,6 +676,56 @@ class TestTheReconcilerResolvesTheAmbiguityInBothModes:
         )
         assert any("stories" in e for e in trail), "the exhaustion tail must run"
 
+    def test_the_park_puts_the_review_on_the_card_with_the_three_buttons(self, ops_db):
+        """The workspace resolves its own review (2026-09-12): the park
+        restates the card the approve tap already superseded — by ref — with
+        the review line and ✅ It posted · 🔁 Not there — post again · 🚫 Give up."""
+        intent, _ = self._ambiguous(ops_db)
+        # `channel_bindings` is governance-audited: the trigger refuses an
+        # actor-less write, so the seed names the migration actor.
+        binding = _exec(
+            ops_db,
+            "SET app.actor_kind = 'migration';"
+            " INSERT INTO channel_bindings (workspace_id, channel, external_ref)"
+            " VALUES (%s, 'telegram_group', %s) RETURNING id",
+            (ops_db["ws"], f"-100{uuid.uuid4().int % 10_000_000}"),
+            fetch=True,
+        )[0][0]
+        _exec(
+            ops_db,
+            "INSERT INTO channel_outbox (workspace_id, binding_id, kind, intent_id,"
+            " payload, state, external_message_ref)"
+            " VALUES (%s, %s, 'approval_prompt', %s,"
+            ' \'{"v": 2, "text": "📸 f.jpg", "sent_as": "text",'
+            " \"outcome_text\": \"✅ Approved by Ada · 12:00 UTC\"}', 'superseded', '88001')",
+            (ops_db["ws"], binding, intent),
+        )
+        outcome, _ = self._reconcile(
+            ops_db, intent, status="PUBLISHED", mode="evidence_capture", checks=99
+        )
+        assert outcome == "review_required"
+        rows = _exec(
+            ops_db,
+            "SELECT payload FROM channel_outbox WHERE intent_id = %s AND binding_id = %s"
+            " AND kind = 'prompt_supersede' AND state = 'pending'",
+            (intent, binding),
+            fetch=True,
+        )
+        assert len(rows) == 1, "one edit per card ref"
+        payload = rows[0][0]
+        assert payload["supersedes_ref"] == "88001"
+        assert "Needs review" in payload["outcome_text"]
+        tokens = [
+            b["callback_data"]
+            for r in payload["reply_markup"]["inline_keyboard"]
+            for b in r
+        ]
+        assert tokens == [
+            f"v1:itposted:{intent}",
+            f"v1:notposted:{intent}",
+            f"v1:giveup:{intent}",
+        ]
+
 
 class TestTheGuardsAreLoadBearing:
     """House standard: drop each DB-enforced guard and confirm the refusal

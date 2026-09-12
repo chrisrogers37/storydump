@@ -372,6 +372,9 @@ class TelegramTransport:
         ref = str(payload["supersedes_ref"])
         message_id = _message_id(ref)
         outcome = payload.get("outcome_text")
+        # The keyboard the state offers: the review card's three resolutions
+        # ride the row (2026-09-12); every other edit leaves none.
+        markup = payload.get("reply_markup") or _EMPTY_KEYBOARD
         if outcome:
             header = payload.get("header")
             body = f"{header}\n{outcome}" if header else str(outcome)
@@ -386,7 +389,7 @@ class TelegramTransport:
                         "chat_id": external_ref,
                         "message_id": message_id,
                         field: body[:limit],
-                        "reply_markup": _EMPTY_KEYBOARD,
+                        "reply_markup": markup,
                     },
                 )
                 return SendReceipt(ref, sent_as="edit")
@@ -401,7 +404,7 @@ class TelegramTransport:
             {
                 "chat_id": external_ref,
                 "message_id": message_id,
-                "reply_markup": _EMPTY_KEYBOARD,
+                "reply_markup": markup,
             },
         )
         return SendReceipt(ref, sent_as="edit")

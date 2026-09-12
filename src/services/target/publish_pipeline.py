@@ -90,7 +90,13 @@ import httpx
 from sqlalchemy import text
 
 from src.exceptions.base import StorydumpError
-from src.services.target import outbox, prompts, provider_ops, publish_cap
+from src.services.target import (
+    intent_ledger,
+    outbox,
+    prompts,
+    provider_ops,
+    publish_cap,
+)
 from src.services.target.drive_adapter import (
     DriveError,
     DriveLostResponse,
@@ -191,9 +197,17 @@ class _Ctx:
         fetch losing the race and a file Meta cannot take. Counted on the
         recorded outcome, not the generation: a lost response or a rate
         limit also mints a generation and must not make the FIRST real 9004
-        terminal (structural review of the 2026-09-11 fix)."""
+        terminal (structural review of the 2026-09-11 fix). Counted within
+        THIS episode only: a review-card retry (2026-09-12) uploads a fresh
+        asset, and an earlier episode's 9004 says nothing about it — ops
+        created before the intent's current `entered_state_at` (the flip to
+        `publishing` that started this run) are another episode's."""
+        since = self.intent.get("entered_state_at")
         for op in self.ops:
             if op["op_kind"] != op_kind or op["state"] != "failed":
+                continue
+            created = op.get("created_at")
+            if since is not None and created is not None and created < since:
                 continue
             ref = op.get("response_ref") or {}
             if isinstance(ref, str):
@@ -366,7 +380,7 @@ async def _load(uow, job: dict) -> Optional[_Ctx]:
                     text(
                         "SELECT i.id, i.state, i.publish_step, i.cancel_requested,"
                         "       i.media_item_id, i.ig_account_id, i.ig_container_id,"
-                        "       i.transit_asset_ref,"
+                        "       i.transit_asset_ref, i.entered_state_at,"
                         "       a.provider_account_ref, i.workspace_id,"
                         "       w.is_paused,"
                         "       m.source_id, m.mime_type,"
@@ -396,7 +410,7 @@ async def _load(uow, job: dict) -> Optional[_Ctx]:
                 await session.execute(
                     text(
                         "SELECT id, op_kind, state, generation, business_key,"
-                        "       response_ref"
+                        "       response_ref, created_at"
                         "  FROM provider_operations WHERE intent_id = :intent"
                     ),
                     {"intent": str(intent_id)},
@@ -659,8 +673,11 @@ async def _retry_or_poison(
                 at=now_fn(),
                 notice=(
                     "A story couldn't be posted after several tries and needs"
-                    " attention. Open the Queue on the web."
+                    " attention: choose on its card, or open the Queue on the web."
                 ),
+                # The card keeps buttons: the workspace resolves its own
+                # review (2026-09-12) — post again, it posted, give up.
+                reply_markup=prompts.review_keyboard(ctx.intent_id),
             )
             if told:
                 # The latch is the reconciler's own rule (`reconciler.py`): it is
@@ -1167,35 +1184,15 @@ async def _confirm_dry_run(
         ).fetchone()
         if moved is None:
             raise ValueError(f"intent {ctx.intent_id} left 'publishing' during dry run")
-        await session.execute(
-            text(
-                "UPDATE media_items SET times_posted = times_posted + 1,"
-                " last_posted_at = now() WHERE id = :media"
-            ),
-            {"media": str(ctx.intent["media_item_id"])},
-        )
-        await session.execute(
-            text(
-                "INSERT INTO post_locks (workspace_id, media_item_id, kind,"
-                " ig_account_id, expires_at)"
-                " VALUES (:ws, :media, 'recent', :acct,"
-                "         now() + make_interval(days => :ttl_days))"
-                " ON CONFLICT (workspace_id, media_item_id, kind, ig_account_id)"
-                "   WHERE ig_account_id IS NOT NULL"
-                " DO UPDATE SET expires_at = EXCLUDED.expires_at"
-            ),
-            {
-                "ws": ctx.workspace_id,
-                "media": str(ctx.intent["media_item_id"]),
-                "acct": str(ctx.intent["ig_account_id"]),
-                "ttl_days": int(
-                    ctx.intent["repost_ttl_days"] or repost_ttl_days_default
-                ),
-            },
-        )
-        await session.execute(
-            text("UPDATE ig_accounts SET last_posted_at = now() WHERE id = :acct"),
-            {"acct": str(ctx.intent["ig_account_id"])},
+        # `04`'s effect list, in the ledger's one spelling (shared with the
+        # manual path and the review card's "it posted").
+        await intent_ledger.posted_effects(
+            session,
+            workspace_id=ctx.workspace_id,
+            media_item_id=str(ctx.intent["media_item_id"]),
+            ig_account_id=str(ctx.intent["ig_account_id"]),
+            intent_id=ctx.intent_id,
+            ttl_days=int(ctx.intent["repost_ttl_days"] or repost_ttl_days_default),
         )
         line = prompts.outcome_line(
             "dry_run",
@@ -1317,7 +1314,15 @@ def _failure_notice(exc: BaseException, *, lock_media: bool) -> str:
     return "A story didn't post. Open the Queue on the web to see which."
 
 
-async def _say_outcome(session, ctx: _Ctx, *, state: str, at, notice: str) -> int:
+async def _say_outcome(
+    session,
+    ctx: _Ctx,
+    *,
+    state: str,
+    at,
+    notice: str,
+    reply_markup: Optional[dict] = None,
+) -> int:
     """Restate every card of the intent with the outcome line (the posted
     line's own path — the tap already superseded the card, so only a restate
     by ref can reach it) and write ONE notification per push binding, in the
@@ -1334,6 +1339,7 @@ async def _say_outcome(session, ctx: _Ctx, *, state: str, at, notice: str) -> in
             binding_id=binding_id,
             intent_id=ctx.intent_id,
             outcome_text=line,
+            reply_markup=reply_markup,
         )
     await outbox.fanout_notification(
         session,
@@ -1379,35 +1385,15 @@ async def _confirm(
         ).fetchone()
         if moved is None:
             raise ValueError(f"intent {ctx.intent_id} left 'publishing' during confirm")
-        await session.execute(
-            text(
-                "UPDATE media_items SET times_posted = times_posted + 1,"
-                " last_posted_at = now() WHERE id = :media"
-            ),
-            {"media": str(ctx.intent["media_item_id"])},
-        )
-        await session.execute(
-            text(
-                "INSERT INTO post_locks (workspace_id, media_item_id, kind,"
-                " ig_account_id, expires_at)"
-                " VALUES (:ws, :media, 'recent', :acct,"
-                "         now() + make_interval(days => :ttl_days))"
-                " ON CONFLICT (workspace_id, media_item_id, kind, ig_account_id)"
-                "   WHERE ig_account_id IS NOT NULL"
-                " DO UPDATE SET expires_at = EXCLUDED.expires_at"
-            ),
-            {
-                "ws": ctx.workspace_id,
-                "media": str(ctx.intent["media_item_id"]),
-                "acct": str(ctx.intent["ig_account_id"]),
-                "ttl_days": int(
-                    ctx.intent["repost_ttl_days"] or repost_ttl_days_default
-                ),
-            },
-        )
-        await session.execute(
-            text("UPDATE ig_accounts SET last_posted_at = now() WHERE id = :acct"),
-            {"acct": str(ctx.intent["ig_account_id"])},
+        # `04`'s effect list, in the ledger's one spelling (shared with the
+        # manual path and the review card's "it posted").
+        await intent_ledger.posted_effects(
+            session,
+            workspace_id=ctx.workspace_id,
+            media_item_id=str(ctx.intent["media_item_id"]),
+            ig_account_id=str(ctx.intent["ig_account_id"]),
+            intent_id=ctx.intent_id,
+            ttl_days=int(ctx.intent["repost_ttl_days"] or repost_ttl_days_default),
         )
         # The card said "✅ Approved by … — posting shortly"; now it says
         # posted. The tap already superseded the card (its buttons are gone),

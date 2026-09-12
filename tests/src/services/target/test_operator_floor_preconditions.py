@@ -230,14 +230,22 @@ def test_the_publish_pipeline_has_exactly_one_producer_and_it_is_manual_mode_gat
     assert minters == ["target/command_executors.py"], (
         f"the set of publish_pipeline job producers is now {minters} —"
         " `review_required` may be reachable without api_publishing_enabled."
-        " Reopen #1090 D6 (#1124) and recheck whether `resolve_review` now has parked"
-        " intents to resolve."
+        " Recheck the review card's resolutions (`resolve_review`, 2026-09-12)."
     )
 
     source = (SERVICES / "target" / "command_executors.py").read_text()
     approve = source.split("async def approve(")[1].split("\nasync def ")[0]
-    assert len(mints.findall(source)) == 1 and mints.search(approve), (
-        "a publish_pipeline job is now minted outside `approve` — see above."
+    # Since 2026-09-12 the review card's `retry` resolution re-mints the job
+    # for an intent that ALREADY passed `approve`'s gate, and re-checks the
+    # flag itself — so the manual-mode gate holds at both doors.
+    resolve = source.split("async def resolve_review(")[1].split("\nasync def ")[0]
+    assert "manual_mode" in resolve, "the retry resolution must keep approve's gate"
+    assert (
+        len(mints.findall(source)) == 2
+        and mints.search(approve)
+        and mints.search(resolve)
+    ), (
+        "a publish_pipeline job is now minted outside `approve`/`resolve_review` — see above."
     )
     assert '"manual_mode"' in approve, (
         "`approve` no longer refuses in manual mode — the gate that makes the"

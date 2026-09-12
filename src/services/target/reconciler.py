@@ -418,7 +418,7 @@ async def reconcile_intent(
             {"stories": await _maybe_await(stories_check, intent_id=intent_id)}
         )
     await _record_evidence(conn, intent_id=intent_id, checks=checks + 1, trail=trail)
-    await _park_review_required(conn, intent_id=intent_id)
+    await _park_review_required(conn, intent_id=intent_id, workspace_id=workspace_id)
     return "review_required"
 
 
@@ -481,11 +481,39 @@ async def _terminalize(conn, *, intent_id, state: str, trail: list) -> None:
         )
 
 
-async def _park_review_required(conn, *, intent_id) -> None:
-    await conn.execute(
-        text(
-            "UPDATE post_intents SET state = 'review_required'"
-            " WHERE id = :intent AND state = 'publishing_ambiguous'"
-        ),
-        {"intent": str(intent_id)},
+async def _park_review_required(conn, *, intent_id, workspace_id) -> None:
+    """Park, and put the review on the card at once (2026-09-12): the
+    workspace resolves its own `review_required` intent, so every card of it
+    is restated with the review line and the three resolution buttons. The
+    notice keeps `06` §5's window (`notify_parked`)."""
+    from datetime import datetime, timezone  # noqa: PLC0415 — local, as the module's other imports
+
+    from src.services.target import outbox, prompts  # noqa: PLC0415 — cycle
+
+    moved = (
+        await conn.execute(
+            text(
+                "UPDATE post_intents SET state = 'review_required'"
+                " WHERE id = :intent AND state = 'publishing_ambiguous'"
+                " RETURNING (SELECT COALESCE(a.tz, w.tz) FROM workspaces w"
+                "            JOIN ig_accounts a ON a.id = post_intents.ig_account_id"
+                "           WHERE w.id = post_intents.workspace_id) AS tz"
+            ),
+            {"intent": str(intent_id)},
+        )
+    ).first()
+    if moved is None:
+        return
+    line = prompts.outcome_line(
+        "review_required",
+        by=None,
+        at=datetime.now(timezone.utc),
+        tz=str(moved[0] or "UTC"),
+    )
+    await outbox.restate_everywhere(
+        conn,
+        workspace_id=str(workspace_id),
+        intent_id=str(intent_id),
+        outcome_text=line,
+        reply_markup=prompts.review_keyboard(str(intent_id)),
     )

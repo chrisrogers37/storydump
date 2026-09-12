@@ -257,6 +257,31 @@ async def resolve_permit(
     await _advance(conn, op_id=op_id, to_state=outcome, response_ref=response_ref)
 
 
+async def resolve_by_human(
+    conn,
+    *,
+    op_id,
+    outcome: str,
+    verdict: str,
+    actor_user_id: str,
+    from_state: str = "ambiguous",
+) -> None:
+    """Record a HUMAN's answer for an op the provider never answered — the
+    review card's resolutions (2026-09-12): `succeeded` with verdict `posted`
+    (the member sees the story), `failed` with `not_posted` (they do not; the
+    intent is re-approved and a NEW generation may be permitted — never
+    beside an unresolved one) or `given_up`. The verdict and who gave it ride
+    `response_ref`, beside the reconciler's evidence if any; the op leaves
+    the un-retirable class (`02` §6, `ix_ops_retire`)."""
+    await _advance(
+        conn,
+        op_id=op_id,
+        to_state=outcome,
+        response_ref={"v": 1, "verdict": verdict, "by": str(actor_user_id)},
+        from_state=from_state,
+    )
+
+
 async def resume_unresolved(conn, *, op: dict, intent_id) -> str:
     """A permit committed and no outcome was recorded. The op kinds DIVERGE.
 

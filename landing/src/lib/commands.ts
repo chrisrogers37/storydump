@@ -118,12 +118,51 @@ function submissionCommand(
  * Adding a row makes the route *capable* of a command. It does not wire a
  * control; that is the epic's P3/P4.
  */
+const RESOLUTIONS = ["retry", "posted", "cancel"] as const;
+
+/**
+ * The review card's one command (2026-09-12): the intent and which of the
+ * port's three resolutions. `episode` (the row's `entered_state_at`) is not
+ * forwarded — the port has the row — but it is part of the identity, so a
+ * double-click replays while a later review of the same post is a new key.
+ */
+function resolveReviewCommand(): CommandSpec {
+  return {
+    parse(raw) {
+      if (!isPlainObject(raw)) return { ok: false, error: "malformed_body" };
+      const intentId = raw.intent_id;
+      if (!isUuidLike(intentId)) return { ok: false, error: "invalid_intent" };
+      const resolution = raw.resolution;
+      if (
+        typeof resolution !== "string" ||
+        !(RESOLUTIONS as readonly string[]).includes(resolution)
+      ) {
+        return { ok: false, error: "invalid_resolution" };
+      }
+      const episode =
+        typeof raw.episode === "string" && raw.episode.length > 0 ? raw.episode : "";
+      // The one verdict the port knows: the member looked, the story is not
+      // there. Anything else is not forwarded — the port would refuse it.
+      const verdict = raw.verdict === "not_posted" ? { verdict: "not_posted" } : {};
+      return {
+        ok: true,
+        body: { intent_id: intentId, resolution, ...verdict },
+        identity: episode
+          ? `${intentId}:${resolution}:${episode}`
+          : `${intentId}:${resolution}`,
+      };
+    },
+  };
+}
+
 export const COMMAND_SPECS: Record<string, CommandSpec> = {
   // Intent-keyed (the queue). Behaviour identical to what the route hard-coded.
   approve: intentCommand(),
   mark_posted: intentCommand(),
   skip: intentCommand(),
   reject: intentCommand(),
+  // The review card's resolutions (2026-09-12).
+  resolve_review: resolveReviewCommand(),
 
   // Entity-less. Capable, deliberately unwired until P3/P4.
   settings_change: submissionCommand((raw) => {
