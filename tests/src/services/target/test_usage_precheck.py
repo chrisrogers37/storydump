@@ -92,3 +92,18 @@ class TestTheCache:
         await check.check(stub, "igu-1")
         await check.check(stub, "igu-2")
         assert stub.usage_calls == ["igu-1", "igu-2"]
+
+
+class TestADegenerateAnswerIsNotACap:
+    """A 200 with no quota total (an empty `data`, a row without `config`)
+    flattens to `quota_total = 0`; read as "0 >= 0 ⇒ at cap" it would defer
+    EVERY publish of the account and, cached, renew itself each TTL — the
+    inverse of §8's "error ⇒ proceed" (adversarial review of #1299). No
+    total is no verdict: proceed, uncached, and say so."""
+
+    async def test_no_quota_total_proceeds_and_is_not_cached(self):
+        stub = StubMetaAdapter(quota_usage=0, quota_total=0)
+        check = UsagePrecheck(ttl_seconds=300, clock=FakeClock())
+        assert await check.check(stub, "acct") == "proceed"
+        assert await check.check(stub, "acct") == "proceed"
+        assert len(stub.usage_calls) == 2, "a degenerate answer must not be cached"

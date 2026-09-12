@@ -70,5 +70,15 @@ class UsagePrecheck:
                     exc_info=True,
                 )
                 return PROCEED
+            if total <= 0:
+                # A 200 with no quota total (an empty `data`, a row without
+                # `config`) is not a cap of zero: read as "at cap" it would
+                # defer every publish of the account and renew itself each
+                # TTL. No total is no verdict — proceed, and do not cache.
+                logger.warning(
+                    "usage pre-check answer carries no quota total; proceeding"
+                    " (error 9 remains the arbiter)"
+                )
+                return PROCEED
             self._cache[provider_account_ref] = (now, usage, total)
         return DEFER if usage >= total else PROCEED

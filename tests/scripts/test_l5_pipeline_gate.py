@@ -1457,6 +1457,39 @@ class TestThePrecheck:
         )
         assert [a[0] for a in audits] == ["meta_advisory"]
 
+    def test_under_the_cap_the_check_reads_once_and_the_publish_proceeds(self, pipe_db):
+        """The other answer, through `_admit` with a real `UsagePrecheck`:
+        one usage read, then the ladder runs to `posted` untouched."""
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref)
+        meta = StubMetaAdapter(quota_usage=1, quota_total=100)
+        outcome = _run(
+            run_publish_pipeline(
+                job, **_deps(pipe_db, meta, precheck=UsagePrecheck(ttl_seconds=300))
+            )
+        )
+        assert outcome == POSTED
+        assert len(meta.usage_calls) == 1
+        assert _intent_row(pipe_db, intent)["state"] == "posted"
+
+    def test_a_dry_run_never_reads_usage_even_with_the_check_armed(self, pipe_db):
+        """Dry Run Mode's contract is that nothing reaches Instagram; the
+        usage read is a Meta call with the account's token, and Meta's cap
+        must not hold a rehearsal that spends none of it (adversarial review
+        of #1299)."""
+        from src.services.target.publish_pipeline import POSTED_DRY_RUN
+
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref, dry_run=True)
+        meta = StubMetaAdapter(quota_usage=100, quota_total=100)
+        outcome = _run(
+            run_publish_pipeline(
+                job, **_deps(pipe_db, meta, precheck=UsagePrecheck(ttl_seconds=300))
+            )
+        )
+        assert outcome == POSTED_DRY_RUN
+        assert meta.usage_calls == [] and meta.create_calls == []
+
     def test_the_default_is_off_no_precheck_no_usage_reads(self, pipe_db):
         """C7: the flag is OFF by default — the default executor call makes
         zero usage reads (`02` §8: a cost the check has not yet earned)."""

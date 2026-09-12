@@ -506,9 +506,11 @@ async def _admit(
             )
         return CANCELLED
 
-    if precheck is not None:
+    if precheck is not None and not ctx.dry_run:
         # A provider read — deliberately OUTSIDE any transaction (`02` §8:
-        # "immediately before the §4 flip transaction").
+        # "immediately before the §4 flip transaction"). Never for a dry run:
+        # nothing reaches Instagram in a rehearsal, and Meta's cap must not
+        # hold one that spends none of it (adversarial review of #1299).
         verdict = await precheck.check(meta, ctx.intent["provider_account_ref"])
         if verdict == DEFER:
             run_at = _next_slot(ctx, now_fn, backoff_seconds)

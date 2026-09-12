@@ -66,6 +66,25 @@ class WorkerTaskDied(RuntimeError):
     """A supervised background task exited before stop was requested."""
 
 
+#: `02` §8's default-off flag for the advisory Meta usage pre-check (the S.5
+#: canary decides). Truthy spellings only; anything else leaves the seam None
+#: and no usage read is ever made.
+USAGE_PRECHECK_ENV = "TARGET_USAGE_PRECHECK_ENABLED"
+_TRUTHY = ("1", "true", "yes", "on")
+
+
+def _precheck_from_env(env):
+    raw = str(env.get(USAGE_PRECHECK_ENV) or "").strip().lower()
+    if raw not in _TRUTHY:
+        return None
+    from src.services.target.usage_precheck import DEFAULT_TTL_SECONDS, UsagePrecheck
+
+    # Said at compose time: the `worker up` line is identical either way,
+    # and a canary that is armed must be visible in the deploy log.
+    logger.info("usage pre-check armed (ttl=%ds)", int(DEFAULT_TTL_SECONDS))
+    return UsagePrecheck()
+
+
 def _transit_from_env(env):
     name = env.get("CLOUDINARY_CLOUD_NAME")
     key = env.get("CLOUDINARY_API_KEY")
@@ -261,6 +280,7 @@ def compose(
         transport=transport,
         poll=_poll_from(engine, meta),
         refresh=refresh if refresh is not None else credential_lifecycle.ig_refresh,
+        precheck=_precheck_from_env(env),
         drive=drive,
         engine=engine,
         config=config,
