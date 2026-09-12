@@ -42,6 +42,8 @@ class RecordingSdk:
     def upload(self, source, **options):
         self.upload_calls.append({"source": source, **options})
         folder = options.get("folder", "")
+        if options.get("public_id"):
+            return {"public_id": options["public_id"], "secure_url": "https://x/y"}
         return {
             "public_id": f"{folder}/r4nd0m1d" if folder else "r4nd0m1d",
             "secure_url": "https://res.cloudinary.com/x/raw",
@@ -128,7 +130,11 @@ class TestUploadFC3:
         Mutation that reddens: drop or flatten the folder option."""
         sdk = RecordingSdk()
         await _store(sdk).upload(b"bytes", workspace_id=WS, media_kind="image")
-        assert sdk.upload_calls[0]["folder"] == f"ws/{WS}"
+        # The public id is minted by the store under the workspace folder
+        # (the eager story frame needs the id before the upload).
+        public_id = sdk.upload_calls[0]["public_id"]
+        assert public_id.startswith(f"ws/{WS}/") and "folder" not in sdk.upload_calls[0]
+        assert len(public_id.rsplit("/", 1)[1]) == 20
 
     @pytest.mark.asyncio
     async def test_upload_is_authenticated_type_never_public(self):
@@ -161,7 +167,8 @@ class TestUploadFC3:
         Mutation that reddens: return anything but result['public_id']."""
         sdk = RecordingSdk()
         ref = await _store(sdk).upload(b"bytes", workspace_id=WS, media_kind="image")
-        assert ref == f"ws/{WS}/r4nd0m1d"
+        assert ref == sdk.upload_calls[0]["public_id"]
+        assert ref.startswith(f"ws/{WS}/")
 
     @pytest.mark.asyncio
     async def test_upload_never_overwrites_and_bounds_its_time(self):
@@ -203,7 +210,7 @@ class TestUploadFC3:
         Mutation that reddens: interpolate the raw workspace_id."""
         sdk = RecordingSdk()
         await _store(sdk).upload(b"b", workspace_id=WS.upper(), media_kind="image")
-        assert sdk.upload_calls[0]["folder"] == f"ws/{WS}"
+        assert sdk.upload_calls[0]["public_id"].startswith(f"ws/{WS}/")
 
     @pytest.mark.asyncio
     async def test_a_workspace_id_that_is_not_a_uuid_never_reaches_the_provider(self):
@@ -710,3 +717,101 @@ class TestTheStoryFrame:
 
         with pytest.raises(ValueError, match="media_kind"):
             story_transformation("ws/x/y", media_kind="gif")
+
+
+class TestTheStoryFrameIsDerivedEagerly:
+    """Investigation of 2026-09-11: Meta fetches the frame within a second of
+    the container call; a frame derived on demand took 2.4–3.1 s to first
+    byte and the first fetch of a fresh asset could answer with an error
+    image — 4 of 7 publishes lost to 9004/2207052. The upload derives the
+    frame eagerly, so it exists before anyone asks."""
+
+    @pytest.mark.asyncio
+    async def test_an_image_upload_derives_the_story_frame_synchronously(self):
+        from src.services.target.transit import STORY_FORMATS, story_transformation
+
+        sdk = RecordingSdk()
+        ref = await _store(sdk).upload(b"bytes", workspace_id=WS, media_kind="image")
+        call = sdk.upload_calls[0]
+        assert call["eager"] == [
+            {
+                "transformation": story_transformation(ref, media_kind="image"),
+                "format": STORY_FORMATS["image"],
+            }
+        ]
+        assert call["eager_async"] is False, "an image frame derives in the upload"
+
+    @pytest.mark.asyncio
+    async def test_a_video_frame_derives_in_the_background(self):
+        from src.services.target.transit import STORY_FORMATS
+
+        sdk = RecordingSdk()
+        await _store(sdk).upload(b"bytes", workspace_id=WS, media_kind="video")
+        call = sdk.upload_calls[0]
+        assert call["eager"][0]["format"] == STORY_FORMATS["video"]
+        assert call["eager_async"] is True, "a video frame may outlast a sync eager"
+
+
+class TestReadiness:
+    """`ready()` — the check the pipeline makes before handing Meta the URL."""
+
+    def _store_with(self, script, *, now_step_s=1.0):
+        from datetime import datetime, timedelta, timezone
+
+        sdk = RecordingSdk()
+        probes = []
+        clock = {"t": datetime(2030, 1, 1, tzinfo=timezone.utc)}
+
+        async def probe(url):
+            probes.append(url)
+            answer = script.pop(0) if script else script_default
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+
+        def now_fn():
+            clock["t"] += timedelta(seconds=now_step_s)
+            return clock["t"]
+
+        script_default = (200, "image/jpeg")
+        store = _store(sdk, probe_fn=probe, now_fn=now_fn)
+        return store, probes
+
+    @pytest.mark.asyncio
+    async def test_ready_when_the_frame_serves_as_an_image(self):
+        store, probes = self._store_with([(206, "image/jpeg")])
+        assert await store.ready(f"ws/{WS}/abc", media_kind="image", sleep=_no_sleep)
+        assert len(probes) == 1 and "abc" in probes[0]
+
+    @pytest.mark.asyncio
+    async def test_an_error_image_is_not_ready_until_the_frame_serves(self):
+        store, probes = self._store_with(
+            [(404, "image/gif"), (200, "text/html"), (200, "image/jpeg")]
+        )
+        assert await store.ready(f"ws/{WS}/abc", media_kind="image", sleep=_no_sleep)
+        assert len(probes) == 3, "polled until a real image answered"
+
+    @pytest.mark.asyncio
+    async def test_a_frame_that_never_serves_is_not_ready_within_the_budget(self):
+        store, probes = self._store_with([], now_step_s=7.0)
+        # Every probe answers the error image; the clock advances 7 s per read.
+        store._probe_fn = _always((404, "image/gif"))
+        assert not await store.ready(
+            f"ws/{WS}/abc", media_kind="image", budget_s=20.0, sleep=_no_sleep
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_probe_failure_is_not_yet_never_an_exception(self):
+        store, probes = self._store_with([RuntimeError("dns"), (200, "video/mp4")])
+        assert await store.ready(f"ws/{WS}/abc", media_kind="video", sleep=_no_sleep)
+
+
+def _always(answer):
+    async def probe(url):
+        return answer
+
+    return probe
+
+
+async def _no_sleep(_s):
+    return None
