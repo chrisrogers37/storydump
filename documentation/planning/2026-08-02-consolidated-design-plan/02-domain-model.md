@@ -1109,12 +1109,12 @@ SELECT (SELECT count(*) FROM debit) AS debited,
 --   two-statement form could commit a debit around a zero-row flip, consuming capacity without
 --   entering publishing; the CTE coupling plus the asserted row count closes that leak (R2).
 -- unique_violation on uq_publish_exclusive ⇒ the real account already has a publishing or
---   publishing_ambiguous intent in some workspace: the flip runs in a SAVEPOINT (2026-09-12: the
---   refusal used to abort the whole transaction and the deferral's own writes crashed), the debit
---   rolls back with it, and the intent waits SECONDS and tries again (`BUSY`, audit reason
---   `exclusive`) — not the next product slot, which is a cap denial's wait; no error surfaced.
+--   publishing_ambiguous intent in some workspace: treated exactly as a cap denial (transaction
+--   rolls back — debit included — defer, no error surfaced to the user).
 COMMIT;  -- or ROLLBACK per the outcome above
 ```
+**Amendment (2026-09-12, #1301):** the key-4 refusal is NOT "treated exactly as a cap denial" any more. The flip's CTE runs in a SAVEPOINT — the refusal used to abort the whole admission transaction, so the deferral's own writes crashed and the job burned an attempt on the failure ladder (five approvals in six seconds cost four such crashes) — and the outcome is its own (`FlipOutcome.BUSY`, audit reason `exclusive`): the intent waits `BUSY_RETRY_SECONDS` (20 s) and tries again, because a sibling's publish takes seconds, where a cap denial rightly waits for the next product slot. The debit still rolls back with the savepoint; no error is surfaced.
+
 
 Cap refund (the `publishing → failed`, ambiguous → failed, and `review_required → failed` companion, same tx as the terminal flip): `UPDATE daily_post_counts SET count = count - 1 WHERE (workspace_id, ig_account_id, local_date) = (:ws, :acct, intent.cap_consumed_on) AND count > 0;` plus `cap_refunded_at = now()` on the intent. The refund targets **the recorded debit day** (`cap_consumed_on`), so a timezone change or midnight crossing between debit and refund cannot touch the wrong bucket. `local_date` is computed in the account's effective tz *at debit time* — service-side, the one tz consumer outside SQL: a zone the service runtime fails to resolve degrades to UTC for this computation (the §0 fn_safe_tz rule applied at that site; reachable only through service/database tzdata divergence, since the write CHECKs gate storage). The product-facing DST/tz-change and mid-day-cadence-change rules live in 06 §3 — the one home.
 
