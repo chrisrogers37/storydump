@@ -106,8 +106,12 @@ from src.services.target.rate_counters import increment, window_start
 logger = logging.getLogger(__name__)
 
 #: `02` §6 kinds whose ambiguity resolves by resend rather than retry-once.
-#: Two live cards are tolerable; a duplicate notification is not.
-RESEND_KINDS = frozenset({"approval_prompt", "invitation"})
+#: Two live cards are tolerable; a duplicate notification is not. A card EDIT
+#: (`prompt_supersede`) is idempotent — "not modified" is success — so a lost
+#: answer costs one paced call to resend; and since the route no longer strips
+#: a card (#1297), this row is the only path that removes its buttons, so it
+#: may not die after the notification's single retry.
+RESEND_KINDS = frozenset({"approval_prompt", "invitation", "prompt_supersede"})
 
 #: Kinds whose ambiguity is retried EXACTLY once, then failed.
 RETRY_ONCE_KINDS = frozenset({"notification", "ack"})
@@ -408,8 +412,9 @@ async def resolve_ambiguous(session, *, outbox_id: str) -> str:
     kind, attempts = row[0], row[1]
 
     if kind in RESEND_KINDS:
-        # Resend — the duplicate card is tolerated — but not forever: a card
-        # that keeps losing its answer ends `failed` after MAX_PROMPT_RESENDS.
+        # Resend — a duplicate card is tolerated, and a card edit is
+        # idempotent — but not forever: a row that keeps losing its answer
+        # ends `failed` after MAX_PROMPT_RESENDS.
         to_state = "pending" if attempts <= MAX_PROMPT_RESENDS else "failed"
     elif attempts <= MAX_NOTIFICATION_RESENDS:
         to_state = "pending"  # the ONE retry the policy allows

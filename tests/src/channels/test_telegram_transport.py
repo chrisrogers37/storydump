@@ -615,56 +615,6 @@ class TestAnsweringATap:
         assert await t.answer_callback("q1", "x") is False
 
 
-class TestEditingACard:
-    async def test_caption_and_text_edits_name_their_methods(self):
-        calls = []
-
-        def handler(request):
-            calls.append(
-                (str(request.url).rsplit("/", 1)[-1], json.loads(request.content))
-            )
-            return _ok()
-
-        t = _transport(handler)
-        assert await t.edit_caption("-100", "555", "📸 @brand\n✅ Approved") is True
-        assert await t.edit_text("-100", "556", "📸 f.jpg\n⏭️ Skipped") is True
-        assert [c[0] for c in calls] == ["editMessageCaption", "editMessageText"]
-        assert calls[0][1] == {
-            "chat_id": "-100",
-            "message_id": 555,
-            "caption": "📸 @brand\n✅ Approved",
-        }
-        assert calls[1][1]["text"] == "📸 f.jpg\n⏭️ Skipped"
-
-    async def test_not_modified_is_success(self):
-        def handler(request):
-            return httpx.Response(
-                400,
-                json={
-                    "ok": False,
-                    "error_code": 400,
-                    "description": "Bad Request: message is not modified",
-                },
-            )
-
-        t = _transport(handler)
-        assert await t.edit_reply_markup("-100", "555", {"inline_keyboard": []}) is True
-
-    async def test_any_other_400_on_an_edit_is_false(self):
-        def handler(request):
-            return httpx.Response(
-                400,
-                json={
-                    "ok": False,
-                    "error_code": 400,
-                    "description": "Bad Request: message to edit not found",
-                },
-            )
-
-        t = _transport(handler)
-        assert await t.edit_text("-100", "555", "x") is False
-
-
 class TestTheSupersedeRowEditsTheCard:
     """`prompt_supersede` rows edit the card in ONE call: the original header
     plus the outcome line with an empty keyboard in the same request (one

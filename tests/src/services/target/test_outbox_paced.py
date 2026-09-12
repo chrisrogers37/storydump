@@ -243,3 +243,20 @@ class TestThePromptResendIsCapped:
         s = self._Session("approval_prompt", outbox.MAX_PROMPT_RESENDS + 1)
         assert await outbox.resolve_ambiguous(s, outbox_id="x") == "failed"
         assert s.updates == ["failed"]
+
+    async def test_a_lost_card_edit_is_resent_under_the_same_cap(self):
+        """A `prompt_supersede` is the card's outcome edit — the one path
+        that removes its buttons now that the route no longer strips (#1297).
+        The edit is idempotent ("not modified" is success), so a lost answer
+        costs one paced call to resend; the notification's single retry would
+        leave a card live with buttons after one bad Telegram minute."""
+        s = self._Session("prompt_supersede", outbox.MAX_PROMPT_RESENDS)
+        assert await outbox.resolve_ambiguous(s, outbox_id="x") == "pending"
+        s = self._Session("prompt_supersede", outbox.MAX_PROMPT_RESENDS + 1)
+        assert await outbox.resolve_ambiguous(s, outbox_id="x") == "failed"
+
+    async def test_a_notification_still_gets_one_retry(self):
+        s = self._Session("notification", outbox.MAX_NOTIFICATION_RESENDS)
+        assert await outbox.resolve_ambiguous(s, outbox_id="x") == "pending"
+        s = self._Session("notification", outbox.MAX_NOTIFICATION_RESENDS + 1)
+        assert await outbox.resolve_ambiguous(s, outbox_id="x") == "failed"

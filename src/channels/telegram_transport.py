@@ -354,44 +354,6 @@ class TelegramTransport:
                 return
             raise
 
-    async def _edit_quietly(
-        self, method: str, payload: dict, *, policy: Optional[EgressPolicy] = None
-    ) -> bool:
-        try:
-            await self._edit(method, payload, policy=policy)
-        except TelegramSendError as exc:
-            logger.warning("%s failed: %s", method, self._redact(str(exc)))
-            return False
-        return True
-
-    async def edit_reply_markup(
-        self, chat_id: str, message_ref: str, reply_markup: dict
-    ) -> bool:
-        return await self._edit_quietly(
-            "editMessageReplyMarkup",
-            {
-                "chat_id": chat_id,
-                "message_id": _message_id(message_ref),
-                "reply_markup": reply_markup,
-            },
-        )
-
-    async def edit_caption(self, chat_id: str, message_ref: str, caption: str) -> bool:
-        return await self._edit_quietly(
-            "editMessageCaption",
-            {
-                "chat_id": chat_id,
-                "message_id": _message_id(message_ref),
-                "caption": caption,
-            },
-        )
-
-    async def edit_text(self, chat_id: str, message_ref: str, text: str) -> bool:
-        return await self._edit_quietly(
-            "editMessageText",
-            {"chat_id": chat_id, "message_id": _message_id(message_ref), "text": text},
-        )
-
     async def _supersede(self, external_ref: str, row: dict) -> SendReceipt:
         """A `prompt_supersede` row edits the card it names in ONE call: the
         original header plus the outcome line — a caption for a media card,
