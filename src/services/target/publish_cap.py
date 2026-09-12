@@ -59,10 +59,16 @@ _PUBLISH_EXCLUSIVE = "uq_publish_exclusive"
 
 
 class FlipOutcome(enum.Enum):
-    """The §4 flip's two non-error outcomes. `(1,0)` is not here — it raises."""
+    """The §4 flip's non-error outcomes. `(1,0)` is not here — it raises.
+
+    `DEFERRED` is the cap's answer (the day is spent — wait for the next
+    slot); `BUSY` is key 4's (a sibling of the real account is publishing
+    right now — wait seconds, not a slot). The two were one value until
+    2026-09-12, and a burst of approvals waited a day for its second story."""
 
     PROCEED = "proceed"
     DEFERRED = "deferred"
+    BUSY = "busy"
 
 
 class IntentNotApproved(StorydumpError):
@@ -89,47 +95,56 @@ async def flip_to_publishing(
 ) -> FlipOutcome:
     """The `approved → publishing` flip (`02` §4), inside the caller's UoW tx.
 
-    Returns PROCEED or DEFERRED; raises :class:`IntentNotApproved` on `(1,0)`.
+    Returns PROCEED, DEFERRED (the cap) or BUSY (key 4); raises
+    :class:`IntentNotApproved` on `(1,0)`.
     Runs the one CTE and reads back `(debited, flipped)` — the row counts ARE
     the decision, because a rowcount here cannot be faked the way #883's could:
     a debited-but-not-flipped tuple is a real race, not a self-transition
     no-op, and it is exactly what must roll back.
     """
     try:
-        row = (
-            await session.execute(
-                text(
-                    "WITH debit AS ("
-                    "  INSERT INTO daily_post_counts AS d"
-                    "    (workspace_id, ig_account_id, local_date, count, cap_at_write)"
-                    "  VALUES (:ws, :acct, :local_date, 1, :cap)"
-                    "  ON CONFLICT (workspace_id, ig_account_id, local_date)"
-                    "    DO UPDATE SET count = d.count + 1 WHERE d.count < d.cap_at_write"
-                    "  RETURNING local_date"
-                    "), flip AS ("
-                    "  UPDATE post_intents"
-                    "     SET state = 'publishing',"
-                    "         cap_consumed_on = (SELECT local_date FROM debit)"
-                    "   WHERE id = :intent AND state = 'approved'"
-                    "     AND EXISTS (SELECT 1 FROM debit)"
-                    "  RETURNING id"
-                    ") SELECT (SELECT count(*) FROM debit) AS debited,"
-                    "         (SELECT count(*) FROM flip)  AS flipped"
-                ),
-                {
-                    "ws": workspace_id,
-                    "acct": ig_account_id,
-                    "local_date": local_date,
-                    "cap": effective_cap,
-                    "intent": intent_id,
-                },
-            )
-        ).one()
+        # In a SAVEPOINT: key 4's refusal (`uq_publish_exclusive`, a sibling
+        # of the real account already publishing) is an error the database
+        # raises, and without the savepoint it aborts the caller's admission
+        # transaction — the deferral's own writes then fail and the job burns
+        # an attempt on the failure ladder (2026-09-12, five approvals in six
+        # seconds). Rolled back to here, the deferral proceeds like a cap
+        # denial.
+        async with session.begin_nested():
+            row = (
+                await session.execute(
+                    text(
+                        "WITH debit AS ("
+                        "  INSERT INTO daily_post_counts AS d"
+                        "    (workspace_id, ig_account_id, local_date, count, cap_at_write)"
+                        "  VALUES (:ws, :acct, :local_date, 1, :cap)"
+                        "  ON CONFLICT (workspace_id, ig_account_id, local_date)"
+                        "    DO UPDATE SET count = d.count + 1 WHERE d.count < d.cap_at_write"
+                        "  RETURNING local_date"
+                        "), flip AS ("
+                        "  UPDATE post_intents"
+                        "     SET state = 'publishing',"
+                        "         cap_consumed_on = (SELECT local_date FROM debit)"
+                        "   WHERE id = :intent AND state = 'approved'"
+                        "     AND EXISTS (SELECT 1 FROM debit)"
+                        "  RETURNING id"
+                        ") SELECT (SELECT count(*) FROM debit) AS debited,"
+                        "         (SELECT count(*) FROM flip)  AS flipped"
+                    ),
+                    {
+                        "ws": workspace_id,
+                        "acct": ig_account_id,
+                        "local_date": local_date,
+                        "cap": effective_cap,
+                        "intent": intent_id,
+                    },
+                )
+            ).one()
     except IntegrityError as exc:
         if _is_publish_exclusive_violation(exc):
             # key 4: the real account is already publishing/ambiguous elsewhere.
-            # Defer exactly like a cap denial — the caller rolls back the debit.
-            return FlipOutcome.DEFERRED
+            # The savepoint rolled the debit back; the caller waits seconds.
+            return FlipOutcome.BUSY
         raise
 
     debited, flipped = int(row.debited), int(row.flipped)
