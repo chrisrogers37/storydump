@@ -1587,7 +1587,9 @@ class TestTheFirstFetch:
             "a retry in progress says nothing yet"
         )
 
-        again = _leased_job(pipe_db, intent, ref=ref, attempts=2)
+        # A FRESH job (attempts=1), so the discriminator is the recorded 9004,
+        # not the job's attempt count (adversarial review).
+        again = _leased_job(pipe_db, intent, ref=ref, attempts=1)
         second = _run(run_publish_pipeline(again, **_deps(pipe_db, meta, transit)))
         assert second == POSTED
         assert _intent_row(pipe_db, intent)["state"] == "posted"
@@ -1604,7 +1606,7 @@ class TestTheFirstFetch:
             _run(run_publish_pipeline(job, **_deps(pipe_db, meta, transit)))
             == RETRY_SCHEDULED
         )
-        again = _leased_job(pipe_db, intent, ref=ref, attempts=2)
+        again = _leased_job(pipe_db, intent, ref=ref, attempts=1)
         assert (
             _run(run_publish_pipeline(again, **_deps(pipe_db, meta, transit))) == FAILED
         )
@@ -1671,3 +1673,90 @@ class TestTheFirstFetch:
         assert _card_line(pipe_db, intent).startswith("👀 Needs review")
         notices = _notices(pipe_db, intent, binding)
         assert len(notices) == 1 and "needs attention" in notices[0], notices
+
+    def test_a_lost_response_before_the_first_9004_does_not_make_it_terminal(
+        self, pipe_db
+    ):
+        """The discriminator is a RECORDED 9004, not the container generation:
+        a lost response mints a generation too (structural review)."""
+        intent, ref = _new_intent(pipe_db)
+        _seed_card(pipe_db, intent)
+        meta = StubMetaAdapter(create_outcomes=["transport", "terminal", "terminal"])
+        transit = FakeTransit()
+        outcomes = []
+        for attempt in (1, 2, 3):
+            job = _leased_job(pipe_db, intent, ref=ref, attempts=attempt)
+            outcomes.append(
+                _run(run_publish_pipeline(job, **_deps(pipe_db, meta, transit)))
+            )
+        assert outcomes == [RETRY_SCHEDULED, RETRY_SCHEDULED, FAILED], outcomes
+        gens = _exec(
+            pipe_db,
+            "SELECT generation, state, response_ref::text FROM provider_operations"
+            " WHERE intent_id = %s AND op_kind = 'container_create' ORDER BY generation",
+            (intent,),
+            fetch=True,
+        )
+        assert [row[0] for row in gens] == [1, 2, 3]
+        assert "lost_response" in gens[0][2] and "first_fetch" in gens[1][2]
+
+    def test_a_file_already_locked_unsupported_fails_cleanly_and_re_attributes(
+        self, pipe_db
+    ):
+        """`uq_lock_ws_scope` is one lock per (workspace, media, kind). A lock
+        that already exists — an operator's, or another account's earlier
+        failure on the same file — must not abort the failure transaction
+        (both lenses of the review): the lock is upserted to this intent."""
+        intent, ref = _new_intent(pipe_db)
+        media = _intent_row(pipe_db, intent)["media_item_id"]
+        _exec(
+            pipe_db,
+            "INSERT INTO post_locks (workspace_id, media_item_id, kind, expires_at)"
+            " VALUES (%s, %s, 'unsupported', NULL)",
+            (pipe_db["ws"], media),
+        )
+        meta = StubMetaAdapter(create_outcomes=["terminal", "terminal"])
+        outcome = None
+        for attempt in (1, 1):
+            job = _leased_job(pipe_db, intent, ref=ref, attempts=attempt)
+            outcome = _run(
+                run_publish_pipeline(job, **_deps(pipe_db, meta, FakeTransit()))
+            )
+        assert outcome == FAILED, "the failure must complete, never abort on the lock"
+        assert _intent_row(pipe_db, intent)["state"] == "failed"
+        lock = _exec(
+            pipe_db,
+            "SELECT count(*), max(created_by_intent_id::text) FROM post_locks"
+            " WHERE media_item_id = %s AND kind = 'unsupported'",
+            (media,),
+            fetch=True,
+        )[0]
+        assert lock == (1, intent), "one lock, re-attributed to this intent"
+
+    def test_poison_with_nobody_to_tell_keeps_the_reconciler_s_backstop(self, pipe_db):
+        """No push binding at poison time: no latch, so the six-hour notice
+        still fires once a binding exists (the reconciler's own rule)."""
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=5, max_attempts=5)
+        meta = StubMetaAdapter(create_outcomes=["retryable"])
+        _exec(
+            pipe_db,
+            "UPDATE channel_bindings SET state = 'revoked' WHERE workspace_id = %s",
+            (pipe_db["ws"],),
+        )
+        try:
+            outcome = _run(
+                run_publish_pipeline(job, **_deps(pipe_db, meta, FakeTransit()))
+            )
+        finally:
+            _exec(
+                pipe_db,
+                "UPDATE channel_bindings SET state = 'active' WHERE workspace_id = %s",
+                (pipe_db["ws"],),
+            )
+        assert outcome == POISONED
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "review_required"
+        assert not (row["last_error"].get("evidence") or {}).get("customer_notified"), (
+            "nobody could hear: the latch must stay off"
+        )

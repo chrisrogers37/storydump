@@ -72,8 +72,10 @@ STORY_HEIGHT = 1920
 #: The blur behind the picture: the legacy tier's value, kept.
 STORY_BLUR = 2000
 #: What Meta accepts for a story, by kind — the derivation's delivered format.
-#: How long `ready` waits for the story frame to serve, and how often it asks.
-READY_BUDGET_S = 20.0
+#: How long `ready` waits for the story frame to serve, per media kind (a
+#: video frame derives in the background and takes longer), and how often it
+#: asks. The worker's lease (90 s) is extended by the heartbeat meanwhile.
+READY_BUDGET_S = {"image": 20.0, "video": 60.0}
 READY_POLL_S = 1.0
 STORY_FORMATS = {"image": "jpg", "video": "mp4"}
 
@@ -307,7 +309,7 @@ class TransitStore:
         transit_asset_ref: str,
         *,
         media_kind: str,
-        budget_s: float = READY_BUDGET_S,
+        budget_s: Optional[float] = None,
         sleep: Callable[[float], Any] = asyncio.sleep,
     ) -> bool:
         """Whether the story frame at :meth:`delivery_url` serves as media
@@ -316,6 +318,8 @@ class TransitStore:
         image or video content type, or *budget_s* is spent. A probe error
         is "not yet", never an exception: the caller's ladder decides."""
         url = self.delivery_url(transit_asset_ref, media_kind=media_kind)
+        if budget_s is None:
+            budget_s = READY_BUDGET_S.get(media_kind, READY_BUDGET_S["image"])
         deadline = self._now_fn() + timedelta(seconds=budget_s)
         while True:
             try:
@@ -331,8 +335,11 @@ class TransitStore:
             await sleep(READY_POLL_S)
 
     async def _default_probe(self, url: str) -> tuple[int, str]:
-        """One egress-floored GET of the first bytes of the delivery URL —
-        status and content type only. Ranged so a video is not downloaded."""
+        """One egress-floored HEAD of the delivery URL — status and content
+        type, no body (a video frame can be tens of megabytes and the floor
+        caps bodies). The floor owns redirects (it refuses cross-host hops);
+        the host allow-list is the URL's own, which the SDK built from our
+        cloud name, and the private-address block still guards it."""
         from urllib.parse import urlparse
 
         from src.services.target import egress
@@ -347,14 +354,8 @@ class TransitStore:
         if self._probe_client is None:
             import httpx
 
-            self._probe_client = httpx.AsyncClient(follow_redirects=True)
-        response = await egress.request(
-            self._probe_client,
-            "GET",
-            url,
-            policy=policy,
-            headers={"Range": "bytes=0-1023"},
-        )
+            self._probe_client = httpx.AsyncClient()
+        response = await egress.request(self._probe_client, "HEAD", url, policy=policy)
         return int(response.status_code), str(response.headers.get("content-type", ""))
 
     # -- FC-3.2 (D38): delivery ------------------------------------------------
