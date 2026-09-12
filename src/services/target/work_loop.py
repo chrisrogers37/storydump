@@ -94,7 +94,8 @@ class WorkerConfig:
     global_limit: int = 25  # 05: global sends per window
     global_window_seconds: int = 1
     reap_limit: int = 200
-    approval_ttl_seconds: int = 72 * 3600
+    # 05 §4: 1,440 min (24 h) when the workspace's approval_ttl_minutes is NULL.
+    approval_ttl_seconds: int = 24 * 3600
     approved_ttl_seconds: int = 72 * 3600
     reconcile_limit: int = 50
     reconcile_notify_after_seconds: int = 6 * 3600

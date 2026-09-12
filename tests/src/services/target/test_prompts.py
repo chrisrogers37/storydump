@@ -13,7 +13,7 @@ PR body, never ridden.
 """
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 
@@ -370,3 +370,81 @@ class TestTheReviewKeyboard:
         import json
 
         json.dumps(prompts.review_keyboard(INTENT))
+
+
+class TestARendersAgainForAResend:
+    """`rerender_prompt` (2026-09-12): a card that is sent again — a lost
+    answer's resend, or a first send that waited — is rendered from the
+    intent AS IT IS NOW: the workspace's current buttons, and nothing at all
+    when the slot has already moved on."""
+
+    class _Session:
+        def __init__(self, row):
+            self.row = row
+            self.sql = []
+
+        async def execute(self, statement, params=None):
+            self.sql.append((str(statement), params))
+            row = self.row
+
+            class _M:
+                def first(self_inner):
+                    return row
+
+            class _R:
+                def mappings(self_inner):
+                    return _M()
+
+            return _R()
+
+    @pytest.mark.asyncio
+    async def test_a_live_slot_renders_with_the_workspaces_current_buttons(self):
+        s = self._Session(
+            {
+                "id": INTENT,
+                "state": "awaiting_approval",
+                "workspace_id": "ws",
+                "schedule_slot_at": datetime(2026, 9, 12, 13, 0, tzinfo=timezone.utc),
+                "file_name": "f.jpg",
+                "media_kind": "image",
+                "mime_type": "image/jpeg",
+                "source_id": "src",
+                "provider_file_ref": "ref",
+                "handle": "brand",
+                "tz": "America/New_York",
+                "api_publishing_enabled": True,
+            }
+        )
+        payload = await prompts.rerender_prompt(s, intent_id=INTENT)
+        assert payload is not None
+        tokens = [
+            b.get("callback_data")
+            for r in payload["reply_markup"]["inline_keyboard"]
+            for b in r
+        ]
+        assert f"v1:post:{INTENT}" in tokens
+        assert "WHERE i.id = :id" in s.sql[0][0]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("state", ["skipped", "expired", "approved", "posted"])
+    async def test_a_slot_that_moved_on_renders_nothing(self, state):
+        s = self._Session(
+            {"id": INTENT, "state": state, "api_publishing_enabled": True}
+        )
+        assert await prompts.rerender_prompt(s, intent_id=INTENT) is None
+
+    @pytest.mark.asyncio
+    async def test_a_prompt_still_pending_is_live(self):
+        s = self._Session(
+            {
+                "id": INTENT,
+                "state": "prompt_pending",
+                "workspace_id": "ws",
+                "schedule_slot_at": datetime(2026, 9, 12, 13, 0, tzinfo=timezone.utc),
+                "file_name": "f.jpg",
+                "tz": "UTC",
+                "api_publishing_enabled": False,
+            }
+        )
+        payload = await prompts.rerender_prompt(s, intent_id=INTENT)
+        assert payload is not None and "v1:post:" not in str(payload)
