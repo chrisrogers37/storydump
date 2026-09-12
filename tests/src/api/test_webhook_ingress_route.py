@@ -648,9 +648,7 @@ def test_an_admitted_tap_names_its_outcome_in_the_body(client, armed, monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_the_answer_and_strip_run_after_the_response_has_gone_out(
-    armed, monkeypatch
-):
+async def test_the_answer_runs_after_the_response_has_gone_out(armed, monkeypatch):
     """#1284: the tap's answer is a Telegram round trip of its own; run inside
     the request it held this delivery until Telegram replied. It is a
     background task — the 200's body is sent BEFORE the transport is spoken

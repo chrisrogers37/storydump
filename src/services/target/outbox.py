@@ -149,6 +149,22 @@ CHAT_SCOPED_GLOBAL_BRAKE_SECONDS = 2
 MAX_PROMPT_RESENDS = 3
 
 
+class ChannelRefused(StorydumpError):
+    """The provider answered, and said no for good — a 4xx that is neither a
+    gone destination, a dead credential nor a flood limit. DEFINITIVE, like
+    :class:`DestinationGone`: the message as shaped never landed, so the row
+    fails outright instead of entering the ambiguity policy (a refused edit
+    retried to the resend cap was four paced calls for nothing; #1297)."""
+
+
+#: A live sender's lost answer (`settle` → `ambiguous`) waits this long
+#: before the binding's next claim applies the per-kind policy
+#: (`resolve_ambiguous`): long enough for the provider's answer, had it been
+#: merely slow, to have been a timeout rather than a partition. `02` §6's
+#: "retry once after backoff" — this is the backoff.
+AMBIGUOUS_RESOLVE_AFTER_SECONDS = 30
+
+
 class DestinationGone(StorydumpError):
     """The transport's DEFINITIVE answer that the destination no longer takes
     messages — the bot kicked or blocked, the chat deleted or migrated. Not a
@@ -384,7 +400,9 @@ async def mark_ambiguous(session, *, outbox_id: str) -> None:
     """`sending → ambiguous`: the send left, the response did not come back.
 
     R8's no-blind-retry rule lands here. Resolution is the per-kind policy in
-    :func:`resolve_ambiguous`, never an immediate re-send at the call site.
+    :func:`resolve_ambiguous`, never an immediate re-send at the call site:
+    the binding's sender applies it on a later tick, once the row has waited
+    `AMBIGUOUS_RESOLVE_AFTER_SECONDS` (`resolve_aged_ambiguous`).
     """
     await _leave_sending(session, outbox_id, "ambiguous")
 
@@ -605,6 +623,34 @@ async def restate_cards(
     return len(seen)
 
 
+async def resolve_aged_ambiguous(session, *, binding_id: str) -> list:
+    """Apply the per-kind policy to the binding's `ambiguous` rows that have
+    waited the backoff. Returns the ids resolved, oldest first.
+
+    `settle` marks a live sender's lost answer `ambiguous` and, until #1297,
+    nothing ever came back for it — only a DEAD sender's stranded rows went
+    through `resolve_ambiguous` (`pace_and_claim`), so the resend policy was
+    unreachable for the common case and the row sat until retention deleted
+    it. Bounded per tick; the binding's sender is single (`tg:<binding_id>`),
+    so no other writer races the rows."""
+    rows = (
+        await session.execute(
+            text(
+                "SELECT id FROM channel_outbox"
+                " WHERE binding_id = :b AND state = 'ambiguous'"
+                "   AND updated_at <= now() - make_interval(secs => :age)"
+                " ORDER BY created_at LIMIT 20"
+            ),
+            {"b": binding_id, "age": AMBIGUOUS_RESOLVE_AFTER_SECONDS},
+        )
+    ).fetchall()
+    resolved = []
+    for (outbox_id,) in rows:
+        await resolve_ambiguous(session, outbox_id=str(outbox_id))
+        resolved.append(str(outbox_id))
+    return resolved
+
+
 async def recover_stranded(session, *, binding_id: str) -> list:
     """Resolve rows a dead predecessor left `sending`. Returns their ids.
 
@@ -707,6 +753,8 @@ async def pace_and_claim(
     stranded = await recover_stranded(session, binding_id=binding_id)
     for outbox_id in stranded:
         await resolve_ambiguous(session, outbox_id=outbox_id)
+    # A live sender's own lost answers, once they have waited the backoff.
+    await resolve_aged_ambiguous(session, binding_id=binding_id)
 
     # Claim FIRST, then pace: nothing pending means nothing debited, so an
     # idle poller never spends the chat's (or the fleet's) window on empty
@@ -853,6 +901,11 @@ async def settle(
             "destination_gone": True,
             "migrate_to": error.migrate_to,
         }
+    if isinstance(error, ChannelRefused):
+        # Definitive, like a gone destination: the provider said this message
+        # as shaped will never land. Nothing to resend; the row fails.
+        await _leave_sending(session, row["id"], "failed")
+        return {**row, "state": "failed", "external_message_ref": None}
     if error is not None:
         # A lost response is the ambiguous case.
         await mark_ambiguous(session, outbox_id=row["id"])

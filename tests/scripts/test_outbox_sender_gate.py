@@ -616,6 +616,68 @@ class TestTheLostAckPolicyIsBoundedPerKind:
             await engine.dispose()
 
     @pytest.mark.asyncio
+    async def test_a_live_senders_lost_answer_is_resolved_after_the_backoff(
+        self, outbox_db
+    ):
+        """`settle` marks a lost answer `ambiguous`; only a DEAD sender's
+        stranded rows used to reach the policy (#1297 re-verify). The binding's
+        next claim now resolves the rows that have waited the backoff — the
+        aged card is resent (pending, then claimed), the fresh one is left
+        for a later tick, and a settled row is never touched."""
+        from src.services.target.outbox import (
+            AMBIGUOUS_RESOLVE_AFTER_SECONDS,
+            pace_and_claim,
+        )
+
+        binding = _new_binding(outbox_db)
+        aged = _enqueue(outbox_db, kind="prompt_supersede", binding=binding)
+        fresh = _enqueue(outbox_db, kind="prompt_supersede", binding=binding)
+        _owner_exec(
+            outbox_db,
+            "UPDATE channel_outbox SET state = 'ambiguous', attempts = 1 WHERE id IN (%s, %s)",
+            (aged, fresh),
+        )
+        # The touch trigger stamps `updated_at` on every UPDATE, so the age is
+        # set in a second statement (the trigger's own value is overridden).
+        _owner_exec(
+            outbox_db,
+            "ALTER TABLE channel_outbox DISABLE TRIGGER tg_touch_channel_outbox",
+        )
+        try:
+            _owner_exec(
+                outbox_db,
+                "UPDATE channel_outbox SET updated_at = now() - make_interval(secs => %s)"
+                " WHERE id = %s",
+                (AMBIGUOUS_RESOLVE_AFTER_SECONDS + 1, aged),
+            )
+        finally:
+            _owner_exec(
+                outbox_db,
+                "ALTER TABLE channel_outbox ENABLE TRIGGER tg_touch_channel_outbox",
+            )
+        engine = self._engine(outbox_db)
+        try:
+            async with engine.connect() as conn:
+                await self._tenant(conn, outbox_db)
+                claimed = await pace_and_claim(
+                    conn,
+                    binding_id=binding,
+                    now=datetime.now(timezone.utc),
+                    chat_limit=20,
+                    chat_window_seconds=CHAT_WINDOW_S,
+                    global_limit=GLOBAL_LIMIT,
+                    global_window_seconds=GLOBAL_WINDOW_S,
+                )
+                await conn.commit()
+        finally:
+            await engine.dispose()
+        assert claimed is not None and str(claimed["id"]) == aged, (
+            "the aged row went back to pending and was the next claim"
+        )
+        assert _state(outbox_db, aged)[0] == "sending"
+        assert _state(outbox_db, fresh)[0] == "ambiguous", "not yet its turn"
+
+    @pytest.mark.asyncio
     async def test_an_approval_prompt_resends_rather_than_failing(self, outbox_db):
         """Two live cards are tolerable; a silently dropped prompt is not.
         The resend is bounded at MAX_PROMPT_RESENDS (phase 3a step 3 — a

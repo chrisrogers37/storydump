@@ -142,7 +142,7 @@ Ratifier: owner. Status: **locked** (owner, 2026-09-09 — "go with the plan; if
 ## Companion Plans
 
 - `documentation/planning/2026-08-02-consolidated-design-plan/` — `01` §R5/R6/T2/H1/H2/H5, `02` §5 (commands are not jobs; job-kind registry; transaction-per-checkpoint), `02` §6 (`rate_counters`, outbox), `04` Phase S (S.1, S.2, S.3), `05` (the numbers; `05:51` is revised by F12), `06` §5 (what each tap answers). This plan builds W4 and the S.1/S.2 content the tap needs; it does not touch the publish pipeline itself.
-- #1040 ("W4 … dispatch through `commands.ingest`"): the issue that names this work; closed by phase 1. The plan departs from it twice, by ruling: admission stays the webhook's `update_id` ledger (no re-admission through `ingest`, #985), and the answer and the immediate strip speak Telegram from the route (F1/F4 Context say why).
+- #1040 ("W4 … dispatch through `commands.ingest`"): the issue that names this work; closed by phase 1. The plan departs from it twice, by ruling: admission stays the webhook's `update_id` ledger (no re-admission through `ingest`, #985), and the answer (and, until 2026-09-12, the immediate strip) speak Telegram from the route (F1/F4 Context say why; the strip was retired by the throughput pass, F4's re-ruling).
 - #854 (chat-inbound commands): its tap half lands here; it stays open for typed commands (its 2026-09-05 comment), which are out of scope.
 - #1220 step 3 (the publish leg): the `post` action's `publish_pipeline` job is already enqueued by `approve`; that leg lands the worker's side of it and is this epic's closing conjunct. F11 places it.
 - #1260 (rate row held during upload): closed by phase 1 (F8).

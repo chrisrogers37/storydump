@@ -220,9 +220,11 @@ async def _settle(
         # superseded here: the flip's own supersede rows edited every copy,
         # and a repeat tap answers without writing (one write per tap is the
         # throughput ruling, 2026-09-12). The accepted window: a copy whose
-        # supersede row failed twice keeps its buttons until the settled-card
-        # sweep writes the terminal line on every copy when the intent ends
-        # (review of #1271; #1297).
+        # supersede row failed past the resend cap keeps its buttons — the
+        # sweep and `supersede_everywhere` address live rows only, and the
+        # pipeline's restate-by-ref reaches a superseded card at posted,
+        # failed or review — until a restate-by-ref on touch is built
+        # (review of #1271; #1297 re-verify).
         await _supersede_everywhere(
             session,
             workspace_id=command.workspace_id,

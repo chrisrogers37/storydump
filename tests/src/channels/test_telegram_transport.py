@@ -736,7 +736,7 @@ class TestTheSupersedeRowEditsTheCard:
     async def test_a_failed_outcome_edit_escapes_after_one_call(self):
         """Only a definitive refusal takes the strip fallback. A 5xx means
         the edit MAY have landed: it escapes to the outbox's own policy
-        (ambiguous → one resend → failed) — a second call here would
+        (ambiguous → resent under the prompt cap → failed) — a second call here would
         double-spend the pacing debit and could strip a card whose line
         already landed."""
         calls = []
@@ -765,6 +765,14 @@ class TestTheSupersedeRowEditsTheCard:
             await t.for_chat("-100")(row)
         assert not isinstance(info.value, TelegramRefused)
         assert calls == ["editMessageText"], "no strip after a non-refusal"
+
+    def test_a_refusal_is_the_outboxs_definitive_kind(self):
+        """`settle` fails a `ChannelRefused` row outright — a 400 is Telegram
+        saying the message as shaped will never land, not a lost answer."""
+        from src.services.target.outbox import ChannelRefused
+
+        assert issubclass(TelegramRefused, ChannelRefused)
+        assert not issubclass(TelegramPaced, ChannelRefused)
 
     async def test_a_paced_outcome_edit_escapes_after_one_call(self):
         """A 429 on the combined edit is the sender's pacing signal, not a

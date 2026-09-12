@@ -43,7 +43,7 @@ import httpx
 
 from src.services.target import egress
 from src.services.target.egress import EgressPolicy
-from src.services.target.outbox import ChannelPaced, DestinationGone
+from src.services.target.outbox import ChannelPaced, ChannelRefused, DestinationGone
 
 logger = logging.getLogger("channels.telegram")
 
@@ -113,10 +113,11 @@ class TelegramPaced(ChannelPaced, TelegramSendError):
     on the GLOBAL row (bounded) and, for a chat-addressed call, the chat's."""
 
 
-class TelegramRefused(TelegramSendError):
+class TelegramRefused(ChannelRefused, TelegramSendError):
     """Telegram answered, and said no for good: `ok: false` with a 4xx that is
     neither a gone chat, a dead token nor 429 — a DEFINITIVE refusal, so a
-    caller may try another shape of the same message. A transport failure, a
+    caller may try another shape of the same message, and one that escapes
+    to the outbox fails the row (`ChannelRefused`). A transport failure, a
     429 or a 5xx is NOT this: the message may have landed, and only the
     outbox's ambiguity policy may decide what happens next."""
 
@@ -365,8 +366,8 @@ class TelegramTransport:
         by the type-agnostic `editMessageReplyMarkup` — the call that must
         land. Only a definitive refusal takes the fallback: a 429, a 5xx or a
         transport failure escapes as it did before, and the outbox settles it
-        (paced, or ambiguous → one resend → failed). A refusal of the
-        fallback escapes the same way (F4 (a))."""
+        (paced, or ambiguous → resent under the prompt cap → failed). A
+        refusal of the fallback escapes too, and fails the row (F4 (a))."""
         payload = row.get("payload") or {}
         ref = str(payload["supersedes_ref"])
         message_id = _message_id(ref)
