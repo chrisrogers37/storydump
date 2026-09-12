@@ -738,3 +738,77 @@ class TestKTasksPerLane:
         assert "interactive[tasks=2 processed=7 parked=0 failures=2" in line
         assert "bulk[tasks=1 processed=1" in line
         assert "waits=0" in line
+
+
+class TestTheUsagePrecheckIsWiredBehindItsFlag:
+    """`02` §8 / `05` §8: the advisory Meta usage pre-check ships behind a
+    default-off flag the S.5 canary flips. Before 2026-09-12 nothing in
+    production composed it — the pipeline's `precheck` seam always received
+    None — so the flag had nothing to flip. `TARGET_USAGE_PRECHECK_ENABLED`
+    now composes one `UsagePrecheck` (the 5-minute cache, shared across the
+    process) into the pipeline's deps; absent or off, the seam stays None and
+    no usage read is ever made (the l5 gate pins that end)."""
+
+    ENV = {
+        "CLOUDINARY_CLOUD_NAME": "c",
+        "CLOUDINARY_API_KEY": "k",
+        "CLOUDINARY_API_SECRET": "s",
+    }
+
+    def test_off_by_default_the_seam_is_none(self):
+        app = compose(
+            engine=object(), config=WorkerConfig(), env=dict(self.ENV), drive=object()
+        )
+        assert app.deps.precheck is None
+
+    @pytest.mark.parametrize("value", ["0", "false", "no", "", "off"])
+    def test_a_falsy_flag_keeps_it_off(self, value):
+        env = {**self.ENV, "TARGET_USAGE_PRECHECK_ENABLED": value}
+        app = compose(engine=object(), config=WorkerConfig(), env=env, drive=object())
+        assert app.deps.precheck is None
+
+    @pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on"])
+    def test_the_flag_composes_the_shared_cache_and_says_so(self, value, caplog):
+        """A canary that is armed must be visible in the deploy log — the
+        `worker up` line is identical either way."""
+        import logging
+
+        from src.services.target.usage_precheck import UsagePrecheck
+
+        env = {**self.ENV, "TARGET_USAGE_PRECHECK_ENABLED": value}
+        with caplog.at_level(logging.INFO, logger="target.worker"):
+            app = compose(
+                engine=object(), config=WorkerConfig(), env=env, drive=object()
+            )
+        assert isinstance(app.deps.precheck, UsagePrecheck)
+        assert any("usage pre-check armed" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_the_pipeline_receives_the_composed_precheck(self, monkeypatch):
+        """The registry's `publish_pipeline` executor passes `deps.precheck`
+        through — the one seam the flag reaches."""
+        from src.services.target import publish_pipeline, work_loop
+
+        seen = {}
+
+        async def run_publish_pipeline(job, **kw):
+            seen.update(kw)
+            return "posted"
+
+        monkeypatch.setattr(
+            publish_pipeline, "run_publish_pipeline", run_publish_pipeline
+        )
+        sentinel = object()
+        deps = work_loop.WorkerDeps(
+            meta=object(),
+            transit=object(),
+            media_fetch=lambda row: None,
+            precheck=sentinel,
+            engine=object(),
+        )
+        registry = work_loop.build_registry(deps)
+        assert not isinstance(registry["publish_pipeline"], Parked)
+        await registry["publish_pipeline"](
+            None, {"id": "j", "kind": "publish_pipeline"}
+        )
+        assert seen["precheck"] is sentinel

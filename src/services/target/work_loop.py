@@ -208,6 +208,9 @@ class WorkerDeps:
     transport: Optional[Callable[[dict], Any]] = None
     poll: Optional[Callable[..., Any]] = None
     refresh: Optional[Callable[..., Any]] = None
+    #: The advisory Meta usage pre-check (`02` §8), or None — off by default;
+    #: `TARGET_USAGE_PRECHECK_ENABLED` composes it (2026-09-12).
+    precheck: Any = None
     engine: Any = None
     config: WorkerConfig = field(default_factory=WorkerConfig)
 
@@ -406,6 +409,7 @@ def build_registry(deps: WorkerDeps) -> dict:
             meta=deps.meta,
             transit=deps.transit,
             media_fetch=deps.media_fetch,
+            precheck=deps.precheck,
         )
         logger.info("publish_pipeline %s -> %s", job["id"], outcome)
         # The pipeline finalizes or reschedules its own job in its own
