@@ -616,23 +616,6 @@ class TestAnsweringATap:
 
 
 class TestEditingACard:
-    async def test_strip_keyboard_is_an_empty_reply_markup_edit(self):
-        seen = {}
-
-        def handler(request):
-            seen["url"] = str(request.url)
-            seen["json"] = json.loads(request.content)
-            return _ok()
-
-        t = _transport(handler)
-        assert await t.strip_keyboard("-100", "555") is True
-        assert seen["url"].endswith("/editMessageReplyMarkup")
-        assert seen["json"] == {
-            "chat_id": "-100",
-            "message_id": 555,
-            "reply_markup": {"inline_keyboard": []},
-        }
-
     async def test_caption_and_text_edits_name_their_methods(self):
         calls = []
 
@@ -665,7 +648,7 @@ class TestEditingACard:
             )
 
         t = _transport(handler)
-        assert await t.strip_keyboard("-100", "555") is True
+        assert await t.edit_reply_markup("-100", "555", {"inline_keyboard": []}) is True
 
     async def test_any_other_400_on_an_edit_is_false(self):
         def handler(request):
@@ -683,11 +666,13 @@ class TestEditingACard:
 
 
 class TestTheSupersedeRowEditsTheCard:
-    """`prompt_supersede` rows strip the keyboard FIRST (the call that must
-    land) and then, when the row carries an outcome, write the original header
-    plus the outcome line — a caption for a media card, text otherwise."""
+    """`prompt_supersede` rows edit the card in ONE call: the original header
+    plus the outcome line with an empty keyboard in the same request (one
+    Telegram message per tap per binding, 2026-09-12). A row without an
+    outcome strips alone; a refused combined edit falls back to the
+    type-agnostic strip — the call that must land."""
 
-    async def test_strip_then_caption_for_a_media_card(self):
+    async def test_one_caption_edit_carries_the_line_and_removes_the_keyboard(self):
         calls = []
 
         def handler(request):
@@ -711,17 +696,21 @@ class TestTheSupersedeRowEditsTheCard:
         }
         ref = await t.for_chat("-100")(row)
         assert ref == "555"
-        assert [c[0] for c in calls] == ["editMessageReplyMarkup", "editMessageCaption"]
+        assert [c[0] for c in calls] == ["editMessageCaption"], "one call, not two"
         assert (
-            calls[1][1]["caption"]
+            calls[0][1]["caption"]
             == "📸 @brand\nSlot: 2026-09-09 14:00 UTC\n✅ Approved by Chris · 2026-09-09 14:14 UTC"
         )
+        assert calls[0][1]["reply_markup"] == {"inline_keyboard": []}
+        assert calls[0][1]["message_id"] == 555
 
-    async def test_strip_then_text_for_a_text_card(self):
+    async def test_one_text_edit_for_a_text_card(self):
         calls = []
 
         def handler(request):
-            calls.append(str(request.url).rsplit("/", 1)[-1])
+            calls.append(
+                (str(request.url).rsplit("/", 1)[-1], json.loads(request.content))
+            )
             return _ok()
 
         t = _transport(handler)
@@ -738,7 +727,9 @@ class TestTheSupersedeRowEditsTheCard:
             },
         }
         assert await t.for_chat("-100")(row) == "555"
-        assert calls == ["editMessageReplyMarkup", "editMessageText"]
+        assert [c[0] for c in calls] == ["editMessageText"]
+        assert calls[0][1]["text"] == "📸 f.jpg\n⏭️ Skipped"
+        assert calls[0][1]["reply_markup"] == {"inline_keyboard": []}
 
     async def test_without_an_outcome_it_only_strips(self):
         calls = []
@@ -757,9 +748,14 @@ class TestTheSupersedeRowEditsTheCard:
         assert await t.for_chat("-100")(row) == "555"
         assert calls == ["editMessageReplyMarkup"]
 
-    async def test_a_failed_outcome_edit_does_not_fail_the_row(self):
+    async def test_a_refused_outcome_edit_still_strips_the_keyboard(self):
+        """The caption Telegram will not take must not leave the buttons: the
+        type-agnostic strip is the fallback, and the row is sent."""
+        calls = []
+
         def handler(request):
             name = str(request.url).rsplit("/", 1)[-1]
+            calls.append(name)
             if name == "editMessageCaption":
                 return httpx.Response(
                     400,
@@ -785,6 +781,36 @@ class TestTheSupersedeRowEditsTheCard:
             },
         }
         assert await t.for_chat("-100")(row) == "555"
+        assert calls == ["editMessageCaption", "editMessageReplyMarkup"]
+
+    async def test_not_modified_is_success_in_one_call(self):
+        calls = []
+
+        def handler(request):
+            calls.append(str(request.url).rsplit("/", 1)[-1])
+            return httpx.Response(
+                400,
+                json={
+                    "ok": False,
+                    "error_code": 400,
+                    "description": "Bad Request: message is not modified",
+                },
+            )
+
+        t = _transport(handler)
+        row = {
+            "id": "ob-9",
+            "kind": "prompt_supersede",
+            "intent_id": "i1",
+            "payload": {
+                "v": 1,
+                "supersedes_ref": "555",
+                "outcome_text": "x",
+                "sent_as": "text",
+            },
+        }
+        assert await t.for_chat("-100")(row) == "555"
+        assert calls == ["editMessageText"], "an edit that already stands is done"
 
     async def test_a_failed_strip_fails_the_row(self):
         def handler(request):
@@ -803,6 +829,32 @@ class TestTheSupersedeRowEditsTheCard:
             "kind": "prompt_supersede",
             "intent_id": "i1",
             "payload": {"v": 1, "supersedes_ref": "555"},
+        }
+        with pytest.raises(TelegramRefused):
+            await t.for_chat("-100")(row)
+
+    async def test_a_refused_edit_and_a_refused_strip_fail_the_row(self):
+        def handler(request):
+            return httpx.Response(
+                400,
+                json={
+                    "ok": False,
+                    "error_code": 400,
+                    "description": "Bad Request: message to edit not found",
+                },
+            )
+
+        t = _transport(handler)
+        row = {
+            "id": "ob-9",
+            "kind": "prompt_supersede",
+            "intent_id": "i1",
+            "payload": {
+                "v": 1,
+                "supersedes_ref": "555",
+                "outcome_text": "x",
+                "sent_as": "text",
+            },
         }
         with pytest.raises(TelegramRefused):
             await t.for_chat("-100")(row)

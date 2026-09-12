@@ -6,13 +6,14 @@ registration constant), the rest queued as Telegram's `pending_update_count`
 would be, and every non-2xx redelivered on a documented schedule (Telegram's
 is undocumented; ours is `REDELIVERY_SCHEDULE_S`). Every delivery attempt is
 timed; the fake Telegram supplies the other end — when the answer arrived,
-when the strip and the outcome edit landed on each card.
+when the buttons went and the outcome edit landed on each card (the same
+edit since 2026-09-12: one paced message per tap per binding).
 
 **Which latency is which** (the F1 evidence names it): `answer` is tap →
 `answerCallbackQuery` received at the fake, end to end from the FIRST
 delivery attempt, redelivery included — the SLO. `route` is the 200's
 round trip. `strip` and `outcome` are edit-landed times for the card the
-tap named (the route's immediate strip; the sender's paced outcome line).
+tap named (the sender's paced edit carries both; the route only answers).
 """
 
 from __future__ import annotations
@@ -208,9 +209,15 @@ class Scenario:
         arrived after the scenario's settle belongs to no scenario's number."""
         cutoff = self.settled_until
         answers = {k: v for k, v in self.fake.answers().items() if v <= cutoff}
+        # Buttons gone = the card's FIRST edit of any kind: since 2026-09-12 the
+        # outcome edit carries the empty keyboard itself (one message per tap
+        # per binding); `editMessageReplyMarkup` alone is the no-outcome or
+        # fallback strip.
         strips = {
             k: v
-            for k, v in self.fake.edits(("editMessageReplyMarkup",)).items()
+            for k, v in self.fake.edits(
+                ("editMessageReplyMarkup", "editMessageCaption", "editMessageText")
+            ).items()
             if v <= cutoff
         }
         outcomes = {

@@ -598,7 +598,6 @@ def create_app(
             dispatch=TelegramDispatcher(),
             reply=None if bot is None else bot.send_text,
             answer_callback=None if bot is None else bot.answer_callback,
-            strip_keyboard=None if bot is None else bot.strip_keyboard,
         )
         if app.state.engine is not None
         else None
