@@ -358,7 +358,13 @@ async def execute_plan_slot(
     oldest-first within the drawn one. No pool behind that set: a removed
     folder's rows and an Off folder's are the two things that must never post,
     and they are all that would be left. `rng` is injectable so a test can
-    seed the draw; production uses the system generator."""
+    seed the draw; production uses the system generator.
+
+    Within the drawn folder: never-posted files go in the folder's shuffled
+    order — the row's random id, not index time, which put a batch exported
+    together in a row (2026-09-12) — and once everything has posted, the
+    least-recently-posted file goes first so a small folder rotates
+    (review of #1251)."""
     draw = rng if rng is not None else random.SystemRandom()
     # `06` §3's rule in full: available, not already live for this account,
     # minus the workspace-wide locks (skip/reject/hold/seasonal/unsupported)
@@ -380,7 +386,10 @@ async def execute_plan_slot(
         "                     AND (l.expires_at IS NULL OR l.expires_at > now())"
         "                     AND (l.ig_account_id IS NULL OR l.ig_account_id = :acct))"
     )
-    order = " ORDER BY m.last_posted_at NULLS FIRST, m.created_at LIMIT 1"
+    # Never-posted first, in the folder's shuffled order: `m.id` is a random
+    # UUID, a stable per-file shuffle key — index time put a batch exported
+    # together in a row (2026-09-12: four look-alike cards in a morning).
+    order = " ORDER BY m.last_posted_at NULLS FIRST, m.id LIMIT 1"
     # The connected folders and their current weights (owner ruling
     # 2026-09-08: the mix is keyed on the source; a name is a label). A row
     # without a source_id — set before 071 — is not joined and shapes nothing.

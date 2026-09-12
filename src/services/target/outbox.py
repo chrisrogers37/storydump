@@ -358,6 +358,12 @@ async def _leave_sending(session, outbox_id: str, to_state: str, **extra) -> Non
             "payload = payload || jsonb_build_object('sent_as', CAST(:sent_as AS text))"
         )
         params["sent_as"] = str(extra["sent_as"])
+    if "payload" in extra:
+        # The card as rendered at claim time (`_claim_current`): the record
+        # must be what is about to be sent, so the ambiguous path and the
+        # later edits read the right header.
+        sets.append("payload = CAST(:p AS jsonb)")
+        params["p"] = json.dumps(extra["payload"])
     if extra.get("restore_attempt"):
         # A provider's limit (429) is not the row's failure: the attempt the
         # claim consumed is given back, so R8's ambiguity budget (one retry for
@@ -711,6 +717,37 @@ async def restate_cards(
     return len(seen)
 
 
+def _needs_refresh(row: dict) -> bool:
+    """Whether a claimed row is rendered again before the send: every
+    `approval_prompt` with an intent (a card is minted on the assumption it
+    leaves within seconds; anything that delays it — a lost answer, a pacing
+    hold, a dead sender — ships a snapshot of settings that may have
+    changed)."""
+    return row.get("kind") == "approval_prompt" and bool(row.get("intent_id"))
+
+
+async def _claim_current(session, *, binding_id: str) -> Optional[dict]:
+    """The next row to send, as the slot IS now (2026-09-12): a card is
+    rendered again at claim time (`prompts.rerender_prompt`) — the
+    workspace's current buttons, the slot in its clock — and its record
+    rewritten through the one fence before the send; a card whose slot has
+    moved on is retired unsent and the next row claimed. (A lost answer's
+    resend three days later showed the keyboard of the day it was minted.)"""
+    from src.services.target import prompts  # noqa: PLC0415 — cycle
+
+    while (row := await claim_next(session, binding_id=binding_id)) is not None:
+        if not _needs_refresh(row):
+            return row
+        fresh = await prompts.rerender_prompt(session, intent_id=str(row["intent_id"]))
+        if fresh is None:
+            await _leave_sending(session, row["id"], "superseded")
+            continue
+        await _leave_sending(session, row["id"], "sending", payload=fresh)
+        row["payload"] = fresh
+        return row
+    return None
+
+
 async def resolve_aged_ambiguous(session, *, binding_id: str) -> list:
     """Apply the per-kind policy to the binding's `ambiguous` rows that have
     waited the backoff. Returns the ids resolved, oldest first.
@@ -850,7 +887,7 @@ async def pace_and_claim(
     # of silence and defer the card that then arrives (review of #1271). A
     # paced claim raises, and the caller's rollback un-claims the row — the
     # order was always a preference, never the guard (see `deliver`).
-    row = await claim_next(session, binding_id=binding_id)
+    row = await _claim_current(session, binding_id=binding_id)
     if row is None:
         return None
 
@@ -1042,9 +1079,7 @@ async def _edit_sent_card(session, row: dict, receipt, *, force: bool) -> bool:
         session, workspace_id=str(row["workspace_id"]), intent_id=str(row["intent_id"])
     )
     state = found["state"]
-    if state is None or (
-        not force and state in ("scheduled", "prompt_pending", "awaiting_approval")
-    ):
+    if state is None or (not force and state in prompts.LIVE_FOR_A_CARD):
         return False
     tz_row = (
         await session.execute(
@@ -1054,11 +1089,7 @@ async def _edit_sent_card(session, row: dict, receipt, *, force: bool) -> bool:
     ).first()
     tz = str(tz_row[0]) if tz_row and tz_row[0] else "UTC"
     outcome = carried
-    if outcome is None and state not in (
-        "scheduled",
-        "prompt_pending",
-        "awaiting_approval",
-    ):
+    if outcome is None and state not in prompts.LIVE_FOR_A_CARD:
         by = (
             await identity.display_name_for(session, user_id=found["by_user_id"])
             if found.get("by_user_id")
