@@ -1,13 +1,16 @@
 import { describe, it, expect } from "vitest";
 import {
+  ACTION_LABELS,
   INTENT_STATES,
   NON_TERMINAL_STATES,
+  QUEUE_ACTIONS,
   QUEUE_COMMANDS,
   accountLabel,
   actionsFor,
   formatSlot,
   isQueueCommand,
   refusalCopy,
+  requestFor,
 } from "./intents";
 import { idempotencyKeyFor } from "./commands";
 
@@ -40,11 +43,44 @@ describe("which actions an intent offers", () => {
     expect(actionsFor("awaiting_approval", false, true)).toEqual([]);
   });
 
+  it("offers the three resolutions on review_required — the workspace resolves its own review (2026-09-12)", () => {
+    expect(actionsFor("review_required", true)).toEqual([
+      "retry",
+      "resolve_posted",
+      "resolve_cancel",
+    ]);
+    // Post again re-mints the publish job, so it needs the API to publish.
+    expect(actionsFor("review_required", false)).toEqual([
+      "resolve_posted",
+      "resolve_cancel",
+    ]);
+    // A cancel already asked for is honoured by Give up alone.
+    expect(actionsFor("review_required", true, true)).toEqual(["resolve_cancel"]);
+  });
+
   it("offers nothing on every other state — those rows are the ledger's read-only view", () => {
     for (const state of INTENT_STATES) {
-      if (state === "awaiting_approval") continue;
+      if (state === "awaiting_approval" || state === "review_required") continue;
       expect(actionsFor(state, true), state).toEqual([]);
       expect(actionsFor(state, false), state).toEqual([]);
+    }
+  });
+
+  it("maps every action to one command and the body the port reads", () => {
+    const intent = { id: "0b6e5f1a-2f4d-4c1e-9a3b-7d8e9f0a1b2c", entered_state_at: "2026-09-12T10:00:00+00:00" };
+    expect(requestFor("approve", intent)).toEqual({
+      command: "approve",
+      body: { intent_id: intent.id },
+    });
+    expect(requestFor("retry", intent)).toEqual({
+      command: "resolve_review",
+      body: { intent_id: intent.id, resolution: "retry", episode: intent.entered_state_at },
+    });
+    expect(requestFor("resolve_posted", intent).body.resolution).toBe("posted");
+    expect(requestFor("resolve_cancel", intent).body.resolution).toBe("cancel");
+    for (const action of QUEUE_ACTIONS) {
+      expect(ACTION_LABELS[action], action).toBeTruthy();
+      expect(isQueueCommand(requestFor(action, intent).command), action).toBe(true);
     }
   });
 
@@ -62,8 +98,14 @@ describe("which actions an intent offers", () => {
 });
 
 describe("the command allowlist", () => {
-  it("admits exactly the four v1 commands and nothing else the vocabulary knows", () => {
-    expect(QUEUE_COMMANDS).toEqual(["approve", "mark_posted", "skip", "reject"]);
+  it("admits exactly the five commands the queue fronts and nothing else the vocabulary knows", () => {
+    expect(QUEUE_COMMANDS).toEqual([
+      "approve",
+      "mark_posted",
+      "skip",
+      "reject",
+      "resolve_review",
+    ]);
     for (const c of QUEUE_COMMANDS) expect(isQueueCommand(c), c).toBe(true);
     // Real vocabulary names that the queue must NOT forward: `cancel` has no
     // audit row and `autopost_now` is unbuilt (501) — a follow-up each.

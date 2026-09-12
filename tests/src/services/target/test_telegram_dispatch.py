@@ -635,7 +635,10 @@ class TestTheReviewTaps:
 
         retry = CommandResult("enqueued", {"state": "approved", "dry_run": False})
         assert "again" in _executed_text("retry", retry).lower()
-        assert "posted" in _executed_text("itposted", CommandResult("executed", {})).lower()
+        assert (
+            "posted"
+            in _executed_text("itposted", CommandResult("executed", {})).lower()
+        )
         assert "Cancelled" in _executed_text("giveup", CommandResult("executed", {}))
 
     def test_a_posted_claim_without_a_publish_call_is_told_why(self):

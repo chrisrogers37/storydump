@@ -54,6 +54,7 @@ describe("every offered command can produce an idempotency key", () => {
     mark_posted: { intent_id: UUID },
     skip: { intent_id: UUID },
     reject: { intent_id: UUID },
+    resolve_review: { intent_id: UUID, resolution: "retry", episode: "2026-09-12T10:00:00+00:00" },
     settings_change: { submission_id: UUID, settings: { posts_per_day: 3 } },
     sync_now: { submission_id: UUID, source_id: UUID2 },
     rename_workspace: { submission_id: UUID, name: "Northside Coffee" },
@@ -418,6 +419,52 @@ describe("restore_workspace", () => {
       ok: true,
       body: {},
       identity: UUID,
+    });
+  });
+});
+
+describe("resolve_review — the review card's three resolutions (2026-09-12)", () => {
+  it("forwards the intent and the resolution, and nothing else", () => {
+    const parsed = parseCommand("resolve_review", {
+      intent_id: UUID,
+      resolution: "posted",
+      episode: "2026-09-12T10:00:00+00:00",
+      extra: "ignored",
+    });
+    expect(parsed).toEqual({
+      ok: true,
+      body: { intent_id: UUID, resolution: "posted" },
+      identity: `${UUID}:posted:2026-09-12T10:00:00+00:00`,
+    });
+  });
+
+  it("keys on the review episode, so a second review of the same post is a new command and a double-click is not", () => {
+    const first = parseCommand("resolve_review", { intent_id: UUID, resolution: "retry", episode: "t1" });
+    const again = parseCommand("resolve_review", { intent_id: UUID, resolution: "retry", episode: "t1" });
+    const later = parseCommand("resolve_review", { intent_id: UUID, resolution: "retry", episode: "t2" });
+    expect(first.ok && again.ok && later.ok).toBe(true);
+    if (!first.ok || !again.ok || !later.ok) return;
+    expect(idempotencyKeyFor("resolve_review", first.identity)).toBe(
+      idempotencyKeyFor("resolve_review", again.identity),
+    );
+    expect(idempotencyKeyFor("resolve_review", first.identity)).not.toBe(
+      idempotencyKeyFor("resolve_review", later.identity),
+    );
+    // Without an episode the key is still per (intent, resolution).
+    const bare = parseCommand("resolve_review", { intent_id: UUID, resolution: "cancel" });
+    expect(bare.ok && bare.identity).toBe(`${UUID}:cancel`);
+  });
+
+  it("refuses a resolution the port does not know, by name, before any round trip", () => {
+    for (const bad of ["failed", "", undefined, 3, "RETRY"]) {
+      expect(parseCommand("resolve_review", { intent_id: UUID, resolution: bad }), String(bad)).toEqual({
+        ok: false,
+        error: "invalid_resolution",
+      });
+    }
+    expect(parseCommand("resolve_review", { intent_id: "nope", resolution: "retry" })).toEqual({
+      ok: false,
+      error: "invalid_intent",
     });
   });
 });
