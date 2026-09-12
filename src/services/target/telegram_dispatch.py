@@ -210,9 +210,10 @@ def _chat_channel(message: dict) -> str:
 @dataclass(frozen=True)
 class TapResult:
     """What a served `callback_query` leaves for the route: the outcome (for
-    the log and the counters), the query to answer and the card to strip. The
-    route answers AFTER the commit, best effort; the transaction is the ack
-    (R5). `reply` exists so `_acknowledge`'s `/start` branch reads False."""
+    the log and the counters), the query to answer and the card it came from
+    (`chat_ref`/`message_ref` — the no-message gate reads them; the route no
+    longer strips, 2026-09-12). The route answers AFTER the commit, best
+    effort; the transaction is the ack (R5). `reply` exists so `_acknowledge`'s `/start` branch reads False."""
 
     outcome: str
     handled: bool
@@ -286,7 +287,8 @@ class TelegramDispatcher:
         resolve the tapper → the command port, as the tapping member, on this
         connection with the actor GUCs set. Every refusal is an ANSWER; only a
         database error escapes (the route maps it). Nothing here speaks to
-        Telegram — the route answers and strips after the commit."""
+        Telegram — the route answers after the commit; the card's edit is the
+        outbox's."""
         started = time.monotonic()
         cq: dict[str, Any] = payload["callback_query"]
         qid = cq.get("id")
@@ -333,7 +335,7 @@ class TelegramDispatcher:
             action = tap.action
             if chat_ref is None or message_ref is None:
                 # Inline mode, or a message Telegram no longer shows us: there
-                # is no card to act on and nothing to strip.
+                # is no card to act on.
                 return done("no_message")
             try:
                 tenant = await tenant_resolution.resolve_chat(

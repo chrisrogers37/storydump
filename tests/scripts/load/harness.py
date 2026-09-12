@@ -255,9 +255,10 @@ class Scenario:
                 if at - d.offered_at > QUERY_EXPIRY_S:
                     late += 1
             if d.outcome == "executed":
-                # Edits are keyed to the tap that FLIPPED the card (the route
-                # strips on a repeat too, but the card's first edit is the
-                # flipping tap's, and the timing question is that tap's).
+                # Edits are keyed to the tap that FLIPPED the card (a repeat
+                # tap answers and writes nothing; the card's first edit is
+                # the flipping tap's supersede, and the timing question is
+                # that tap's).
                 key = (d.tap.chat, d.tap.message_id)
                 if key in strips:
                     strip_lat.append(strips[key] - d.first_attempt_at)

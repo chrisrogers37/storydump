@@ -783,6 +783,75 @@ class TestTheSupersedeRowEditsTheCard:
         assert await t.for_chat("-100")(row) == "555"
         assert calls == ["editMessageCaption", "editMessageReplyMarkup"]
 
+    async def test_a_failed_outcome_edit_escapes_after_one_call(self):
+        """Only a definitive refusal takes the strip fallback. A 5xx means
+        the edit MAY have landed: it escapes to the outbox's own policy
+        (ambiguous → one resend → failed) — a second call here would
+        double-spend the pacing debit and could strip a card whose line
+        already landed."""
+        calls = []
+
+        def handler(request):
+            calls.append(str(request.url).rsplit("/", 1)[-1])
+            return httpx.Response(
+                502,
+                json={"ok": False, "error_code": 502, "description": "Bad Gateway"},
+            )
+
+        t = _transport(handler)
+        row = {
+            "id": "ob-9",
+            "kind": "prompt_supersede",
+            "intent_id": "i1",
+            "payload": {
+                "v": 1,
+                "supersedes_ref": "555",
+                "outcome_text": "x",
+                "header": "h",
+                "sent_as": "text",
+            },
+        }
+        with pytest.raises(TelegramSendError) as info:
+            await t.for_chat("-100")(row)
+        assert not isinstance(info.value, TelegramRefused)
+        assert calls == ["editMessageText"], "no strip after a non-refusal"
+
+    async def test_a_paced_outcome_edit_escapes_after_one_call(self):
+        """A 429 on the combined edit is the sender's pacing signal, not a
+        refusal: it escapes as `TelegramPaced` from the one call, so the
+        outbox writes its hold instead of this branch hitting Telegram again."""
+        calls = []
+
+        def handler(request):
+            calls.append(str(request.url).rsplit("/", 1)[-1])
+            return httpx.Response(
+                429,
+                json={
+                    "ok": False,
+                    "error_code": 429,
+                    "description": "Too Many Requests: retry after 7",
+                    "parameters": {"retry_after": 7},
+                },
+            )
+
+        t = _transport(handler)
+        row = {
+            "id": "ob-9",
+            "kind": "prompt_supersede",
+            "intent_id": "i1",
+            "payload": {
+                "v": 1,
+                "supersedes_ref": "555",
+                "outcome_text": "x",
+                "header": "h",
+                "sent_as": "media",
+            },
+        }
+        with pytest.raises(TelegramPaced) as info:
+            await t.for_chat("-100")(row)
+        assert info.value.retry_after_s == 7.0
+        assert calls == ["editMessageCaption"]
+
     async def test_not_modified_is_success_in_one_call(self):
         calls = []
 

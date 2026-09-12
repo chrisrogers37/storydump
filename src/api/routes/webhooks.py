@@ -118,9 +118,8 @@ class IngressRuntime:
     #: show_alert) -> bool`. The tapped card's keyboard is removed by the
     #: paced supersede edit in the same call that writes the outcome line
     #: (2026-09-12: one Telegram message per tap per binding) — there is no
-    #: separate unpaced strip any more.
-    #: `(chat_ref, message_ref) -> bool`. Both best effort, after the commit
-    #: (phase 1 of the 2026-09-09 tap plan, step 10). None = silent.
+    #: separate unpaced strip any more. Best effort, after the commit (phase
+    #: 1 of the 2026-09-09 tap plan, step 10). None = silent.
     answer_callback: Optional[Callable[[str, str, bool], Awaitable[bool]]] = None
 
 

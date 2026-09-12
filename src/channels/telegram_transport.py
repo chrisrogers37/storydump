@@ -401,7 +401,10 @@ class TelegramTransport:
         without an outcome strips the keyboard alone. If the combined edit is
         refused (a caption Telegram will not take), the keyboard still goes
         by the type-agnostic `editMessageReplyMarkup` — the call that must
-        land; a refusal of THAT fails the row (F4 (a))."""
+        land. Only a definitive refusal takes the fallback: a 429, a 5xx or a
+        transport failure escapes as it did before, and the outbox settles it
+        (paced, or ambiguous → one resend → failed). A refusal of the
+        fallback escapes the same way (F4 (a))."""
         payload = row.get("payload") or {}
         ref = str(payload["supersedes_ref"])
         message_id = _message_id(ref)

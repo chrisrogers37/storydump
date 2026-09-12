@@ -217,9 +217,12 @@ async def _settle(
     if state in intent_ledger.TERMINAL_STATES:
         # A stale card heals on first touch — with its FINAL line. A card in a
         # transit state (`approved`, `publishing`, `review_required`) is not
-        # superseded here (the route strips the tapped copy's buttons; other
-        # copies keep theirs and answer); the settled-card sweep writes the
-        # terminal line on every copy when the intent ends (review of #1271).
+        # superseded here: the flip's own supersede rows edited every copy,
+        # and a repeat tap answers without writing (one write per tap is the
+        # throughput ruling, 2026-09-12). The accepted window: a copy whose
+        # supersede row failed twice keeps its buttons until the settled-card
+        # sweep writes the terminal line on every copy when the intent ends
+        # (review of #1271; #1297).
         await _supersede_everywhere(
             session,
             workspace_id=command.workspace_id,
