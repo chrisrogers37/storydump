@@ -256,6 +256,13 @@
       "label": "§20 ix_jobs_leased_lane_ws for K claimers per lane (074, tap plan phase 3b)",
       "doc": "07-security-model.md",
       "ordinal": 18
+    },
+    {
+      "sha256": "ab8f906bc57b741286248d59b4b112ab5fc1fdcc0b084d90fdc1022c5b56688b",
+      "class": "normative",
+      "label": "§21 ix_outbox_ambiguous_age for the sender's lost-answer resolution (075, #1297)",
+      "doc": "07-security-model.md",
+      "ordinal": 19
     }
   ],
   "policy_expansion": {

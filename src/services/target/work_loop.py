@@ -1086,11 +1086,13 @@ async def ensure_sender_jobs(session) -> int:
             "        jsonb_build_object('v', 1, 'binding_id', b.id)"
             "   FROM channel_bindings b"
             "  WHERE b.state = 'active' AND b.channel LIKE 'telegram%'"
-            "    AND EXISTS (SELECT 1 FROM channel_outbox o"
-            "                 WHERE o.binding_id = b.id"
-            "                   AND (o.state = 'pending'"
-            "                        OR (o.state = 'ambiguous'"
-            "                            AND o.updated_at <= now() - make_interval(secs => :age))))"
+            # Two EXISTS, not one OR: each arm rides its own partial index
+            # (`ix_outbox_due` on pending, `ix_outbox_ambiguous_age`, 075).
+            "    AND (EXISTS (SELECT 1 FROM channel_outbox o"
+            "                  WHERE o.binding_id = b.id AND o.state = 'pending')"
+            "         OR EXISTS (SELECT 1 FROM channel_outbox o"
+            "                     WHERE o.binding_id = b.id AND o.state = 'ambiguous'"
+            "                       AND o.updated_at <= now() - make_interval(secs => :age)))"
             "    AND NOT EXISTS (SELECT 1 FROM jobs j"
             "                     WHERE j.serialization_key = 'tg:' || b.id"
             "                       AND j.state IN ('ready', 'leased'))"

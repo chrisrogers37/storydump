@@ -687,30 +687,41 @@ class TestTheLostAckPolicyIsBoundedPerKind:
         from src.services.target.outbox import resolve_ambiguous
 
         binding = _new_binding(outbox_db)
+        # The newer-edit check joins on the intent (it rides `ix_outbox_intent`,
+        # 072): the rows carry the chain's intent, as every card edit does.
+        ((intent,),) = _owner_exec(
+            outbox_db,
+            "SELECT id FROM post_intents WHERE workspace_id = %s LIMIT 1",
+            (outbox_db["ws"],),
+            fetch=True,
+        )
         older = _owner_exec(
             outbox_db,
-            "INSERT INTO channel_outbox (workspace_id, binding_id, kind, payload, state, attempts)"
-            " VALUES (%s, %s, 'prompt_supersede',"
+            "INSERT INTO channel_outbox"
+            " (workspace_id, binding_id, kind, intent_id, payload, state, attempts)"
+            " VALUES (%s, %s, 'prompt_supersede', %s,"
             ' \'{"v": 1, "supersedes_ref": "9001", "outcome_text": "Approved"}\','
             " 'ambiguous', 1) RETURNING id",
-            (outbox_db["ws"], binding),
+            (outbox_db["ws"], binding, intent),
             fetch=True,
         )[0][0]
         _owner_exec(
             outbox_db,
-            "INSERT INTO channel_outbox (workspace_id, binding_id, kind, payload, state)"
-            " VALUES (%s, %s, 'prompt_supersede',"
+            "INSERT INTO channel_outbox"
+            " (workspace_id, binding_id, kind, intent_id, payload, state)"
+            " VALUES (%s, %s, 'prompt_supersede', %s,"
             ' \'{"v": 1, "supersedes_ref": "9001", "outcome_text": "Posted"}\','
             " 'sent')",
-            (outbox_db["ws"], binding),
+            (outbox_db["ws"], binding, intent),
         )
         lone = _owner_exec(
             outbox_db,
-            "INSERT INTO channel_outbox (workspace_id, binding_id, kind, payload, state, attempts)"
-            " VALUES (%s, %s, 'prompt_supersede',"
+            "INSERT INTO channel_outbox"
+            " (workspace_id, binding_id, kind, intent_id, payload, state, attempts)"
+            " VALUES (%s, %s, 'prompt_supersede', %s,"
             ' \'{"v": 1, "supersedes_ref": "9002", "outcome_text": "Skipped"}\','
             " 'ambiguous', 1) RETURNING id",
-            (outbox_db["ws"], binding),
+            (outbox_db["ws"], binding, intent),
             fetch=True,
         )[0][0]
         engine = self._engine(outbox_db)

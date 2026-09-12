@@ -359,6 +359,9 @@ class TestTheBoundaryIsDerivedAndLoud:
             # 074: ix_jobs_leased_lane_ws — the per-workspace count under K
             # claimers per lane (07 §20, tap plan phase 3b).
             "074_jobs_leased_lane_ws_index.sql",
+            # 075: ix_outbox_ambiguous_age — a binding's aged ambiguous rows for
+            # the sender's lost-answer resolution (07 §21, #1297).
+            "075_outbox_ambiguous_age_index.sql",
         ], (
             f"the target lineage is {above}. If you are landing the next F.2"
             " increment, add it here — deliberately, and at the end: arm (b)"

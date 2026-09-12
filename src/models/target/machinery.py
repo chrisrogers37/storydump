@@ -187,6 +187,14 @@ class ChannelOutbox(TargetBase):
                 "state IN ('sent','superseded','failed','ambiguous')"
             ),
         ),
+        # 075 (07 §21, #1297): a binding's `ambiguous` rows older than the
+        # resolution backoff — the sender sweep and the sender's own tick.
+        Index(
+            "ix_outbox_ambiguous_age",
+            "binding_id",
+            "updated_at",
+            postgresql_where=text("state = 'ambiguous'"),
+        ),
     )
 
 

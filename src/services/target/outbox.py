@@ -419,9 +419,12 @@ async def resolve_ambiguous(session, *, outbox_id: str) -> str:
             text(
                 "SELECT o.kind, o.attempts,"
                 # A later edit of the SAME message (any state): resending this
-                # one would land its older line over the newer (#1297).
+                # one would land its older line over the newer (#1297). Joined
+                # on the intent so it rides `ix_outbox_intent` (072); an
+                # intent-less edit (an invitation card's) has no such check.
                 "       EXISTS (SELECT 1 FROM channel_outbox n"
-                "                WHERE n.binding_id = o.binding_id"
+                "                WHERE n.intent_id = o.intent_id"
+                "                  AND n.binding_id = o.binding_id"
                 "                  AND n.kind = 'prompt_supersede'"
                 "                  AND n.payload->>'supersedes_ref' = o.payload->>'supersedes_ref'"
                 "                  AND n.created_at > o.created_at) AS newer_edit"
