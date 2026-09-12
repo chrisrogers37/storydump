@@ -42,7 +42,7 @@ Unit + the pipeline gate above; the full suites.
 
 ## What NOT To Do
 
-Do not lock media on a FIRST 9004 (the race, not the file). Do not retry a second 9004 (the file). Do not notify on a retry in progress.
+Do not lock media on a FIRST 9004 (the race, not the file). ~~Do not retry a second 9004 (the file).~~ **Corrected 2026-09-12:** a second 9004 is not the file's answer either — photo-output (105) failed twice, sixty seconds apart, in under half a second each, on a frame that served a valid JPEG to every client tried (HEAD, GET, Meta's user agent, encoded commas); a sibling from the same batch posted on its retry. A 9004 rides the ladder every time; the ladder's end is the workspace's review card (`resolve_review`), and nothing locks the file on Meta's word. Do not notify on a retry in progress.
 
 ## Context
 

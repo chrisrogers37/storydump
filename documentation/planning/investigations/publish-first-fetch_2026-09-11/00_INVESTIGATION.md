@@ -32,7 +32,7 @@ Not the cause, each ruled out by the rows: the daily cap, the worker, rate limit
 1. Derive the story frame eagerly at upload (the store mints the asset id so the underlay can name it); verify the delivery URL serves media before the container call (20 s budget; not serving → the ladder, never Meta).
 2. A first 9004 at the container step is retried once on the ladder; a second is the file's own answer.
 3. Every terminal outcome is said at once: the card restated by reference and one notification per push binding, in the flip's transaction; a poisoned post likewise, with the reconciler's six-hour notice latched off; a file Meta twice could not take gains a permanent `unsupported` lock.
-4. Follow-ups: a Retry action on the card and in the web Queue (the legacy had one) — **built 2026-09-12** as the review card's three resolutions (`resolve_review`: post again / it posted / give up, by the workspace member); the burst-deferral and Queue-visibility gaps (#1279 area) — filed separately.
+4. Follow-ups: a Retry action on the card and in the web Queue (the legacy had one) — **built 2026-09-12** as the review card's three resolutions (`resolve_review`: post again / it posted / give up, by the workspace member); **the "second 9004 = the file" rule was wrong** (2026-09-12 live test: two fetch failures sixty seconds apart on a frame that served a valid JPEG; a 9004 now always rides the ladder and never locks the file); the burst-deferral and Queue-visibility gaps (#1279 area) — filed separately.
 
 ## Also observed (not this incident)
 
