@@ -96,35 +96,43 @@ async def flip_to_publishing(
     no-op, and it is exactly what must roll back.
     """
     try:
-        row = (
-            await session.execute(
-                text(
-                    "WITH debit AS ("
-                    "  INSERT INTO daily_post_counts AS d"
-                    "    (workspace_id, ig_account_id, local_date, count, cap_at_write)"
-                    "  VALUES (:ws, :acct, :local_date, 1, :cap)"
-                    "  ON CONFLICT (workspace_id, ig_account_id, local_date)"
-                    "    DO UPDATE SET count = d.count + 1 WHERE d.count < d.cap_at_write"
-                    "  RETURNING local_date"
-                    "), flip AS ("
-                    "  UPDATE post_intents"
-                    "     SET state = 'publishing',"
-                    "         cap_consumed_on = (SELECT local_date FROM debit)"
-                    "   WHERE id = :intent AND state = 'approved'"
-                    "     AND EXISTS (SELECT 1 FROM debit)"
-                    "  RETURNING id"
-                    ") SELECT (SELECT count(*) FROM debit) AS debited,"
-                    "         (SELECT count(*) FROM flip)  AS flipped"
-                ),
-                {
-                    "ws": workspace_id,
-                    "acct": ig_account_id,
-                    "local_date": local_date,
-                    "cap": effective_cap,
-                    "intent": intent_id,
-                },
-            )
-        ).one()
+        # In a SAVEPOINT: key 4's refusal (`uq_publish_exclusive`, a sibling
+        # of the real account already publishing) is an error the database
+        # raises, and without the savepoint it aborts the caller's admission
+        # transaction — the deferral's own writes then fail and the job burns
+        # an attempt on the failure ladder (2026-09-12, five approvals in six
+        # seconds). Rolled back to here, the deferral proceeds like a cap
+        # denial.
+        async with session.begin_nested():
+            row = (
+                await session.execute(
+                    text(
+                        "WITH debit AS ("
+                        "  INSERT INTO daily_post_counts AS d"
+                        "    (workspace_id, ig_account_id, local_date, count, cap_at_write)"
+                        "  VALUES (:ws, :acct, :local_date, 1, :cap)"
+                        "  ON CONFLICT (workspace_id, ig_account_id, local_date)"
+                        "    DO UPDATE SET count = d.count + 1 WHERE d.count < d.cap_at_write"
+                        "  RETURNING local_date"
+                        "), flip AS ("
+                        "  UPDATE post_intents"
+                        "     SET state = 'publishing',"
+                        "         cap_consumed_on = (SELECT local_date FROM debit)"
+                        "   WHERE id = :intent AND state = 'approved'"
+                        "     AND EXISTS (SELECT 1 FROM debit)"
+                        "  RETURNING id"
+                        ") SELECT (SELECT count(*) FROM debit) AS debited,"
+                        "         (SELECT count(*) FROM flip)  AS flipped"
+                    ),
+                    {
+                        "ws": workspace_id,
+                        "acct": ig_account_id,
+                        "local_date": local_date,
+                        "cap": effective_cap,
+                        "intent": intent_id,
+                    },
+                )
+            ).one()
     except IntegrityError as exc:
         if _is_publish_exclusive_violation(exc):
             # key 4: the real account is already publishing/ambiguous elsewhere.

@@ -1697,8 +1697,7 @@ class TestTheFirstFetch:
             "a retry in progress says nothing yet"
         )
 
-        # A FRESH job (attempts=1), so the discriminator is the recorded 9004,
-        # not the job's attempt count (adversarial review).
+        # A fresh job for the retry rung.
         again = _leased_job(pipe_db, intent, ref=ref, attempts=1)
         second = _run(run_publish_pipeline(again, **_deps(pipe_db, meta, transit)))
         assert second == POSTED
