@@ -221,13 +221,14 @@ class TestThePromptResendIsCapped:
     answer is resent, but not forever — past MAX_PROMPT_RESENDS it fails."""
 
     class _Session:
-        def __init__(self, kind, attempts):
-            self.row = (kind, attempts)
+        def __init__(self, kind, attempts, newer_edit=False):
+            self.row = (kind, attempts, newer_edit)
             self.updates = []
 
         async def execute(self, stmt, params=None):
             sql = str(stmt)
             session = self
+            self.sql = getattr(self, "sql", []) + [(sql, params)]
 
             class _R:
                 rowcount = 1
@@ -258,6 +259,18 @@ class TestThePromptResendIsCapped:
         assert await outbox.resolve_ambiguous(s, outbox_id="x") == "pending"
         s = self._Session("prompt_supersede", outbox.MAX_PROMPT_RESENDS + 1)
         assert await outbox.resolve_ambiguous(s, outbox_id="x") == "failed"
+
+    async def test_a_lost_edit_with_a_newer_edit_of_the_same_message_is_superseded(
+        self,
+    ):
+        """A resent edit carries ITS line; if a later `prompt_supersede` for
+        the same message ref exists (the pipeline's "✅ Posted" after the tap's
+        "✅ Approved"), resending the older one would overwrite the newer line
+        for good — so it is retired instead (#1297 re-verify)."""
+        s = self._Session("prompt_supersede", 1, newer_edit=True)
+        assert await outbox.resolve_ambiguous(s, outbox_id="x") == "superseded"
+        assert s.updates == ["superseded"]
+        assert "supersedes_ref" in s.sql[0][0] and "created_at >" in s.sql[0][0]
 
     async def test_a_notification_still_gets_one_retry(self):
         s = self._Session("notification", outbox.MAX_NOTIFICATION_RESENDS)

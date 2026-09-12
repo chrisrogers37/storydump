@@ -1072,8 +1072,10 @@ async def ensure_sender_jobs(session) -> int:
 
     The sweep-driven cycle is the design: a sender hold drains and the job
     finalizes `succeeded`; the next sweep re-mints only while pending rows
-    exist, so an empty outbox mints nothing and a busy one always has exactly
-    one live sender per binding.
+    exist — or an `ambiguous` row has waited the resolution backoff (#1297:
+    a live sender's lost answer is resolved by the binding's sender, and a
+    quiet binding has none) — so an empty outbox mints nothing and a busy
+    one always has exactly one live sender per binding.
     """
     result = await session.execute(
         text(
@@ -1085,12 +1087,16 @@ async def ensure_sender_jobs(session) -> int:
             "   FROM channel_bindings b"
             "  WHERE b.state = 'active' AND b.channel LIKE 'telegram%'"
             "    AND EXISTS (SELECT 1 FROM channel_outbox o"
-            "                 WHERE o.binding_id = b.id AND o.state = 'pending')"
+            "                 WHERE o.binding_id = b.id"
+            "                   AND (o.state = 'pending'"
+            "                        OR (o.state = 'ambiguous'"
+            "                            AND o.updated_at <= now() - make_interval(secs => :age))))"
             "    AND NOT EXISTS (SELECT 1 FROM jobs j"
             "                     WHERE j.serialization_key = 'tg:' || b.id"
             "                       AND j.state IN ('ready', 'leased'))"
             # H5: a sweep is bounded; the next one takes the rest.
             "  LIMIT 200"
-        )
+        ),
+        {"age": outbox.AMBIGUOUS_RESOLVE_AFTER_SECONDS},
     )
     return result.rowcount

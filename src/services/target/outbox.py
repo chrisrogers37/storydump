@@ -417,8 +417,16 @@ async def resolve_ambiguous(session, *, outbox_id: str) -> str:
     row = (
         await session.execute(
             text(
-                "SELECT kind, attempts FROM channel_outbox"
-                " WHERE id = :i AND state = 'ambiguous'"
+                "SELECT o.kind, o.attempts,"
+                # A later edit of the SAME message (any state): resending this
+                # one would land its older line over the newer (#1297).
+                "       EXISTS (SELECT 1 FROM channel_outbox n"
+                "                WHERE n.binding_id = o.binding_id"
+                "                  AND n.kind = 'prompt_supersede'"
+                "                  AND n.payload->>'supersedes_ref' = o.payload->>'supersedes_ref'"
+                "                  AND n.created_at > o.created_at) AS newer_edit"
+                "  FROM channel_outbox o"
+                " WHERE o.id = :i AND o.state = 'ambiguous'"
             ),
             {"i": outbox_id},
         )
@@ -427,9 +435,13 @@ async def resolve_ambiguous(session, *, outbox_id: str) -> str:
         raise OutboxFenced(
             f"outbox {outbox_id}: not 'ambiguous' — already resolved elsewhere"
         )
-    kind, attempts = row[0], row[1]
+    kind, attempts, newer_edit = row[0], row[1], bool(row[2])
 
-    if kind in RESEND_KINDS:
+    if kind == "prompt_supersede" and newer_edit:
+        # The message has a newer line queued or landed; this edit is stale
+        # and is retired, never resent (a resend carries ITS line).
+        to_state = "superseded"
+    elif kind in RESEND_KINDS:
         # Resend — a duplicate card is tolerated, and a card edit is
         # idempotent — but not forever: a row that keeps losing its answer
         # ends `failed` after MAX_PROMPT_RESENDS.

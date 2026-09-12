@@ -678,6 +678,54 @@ class TestTheLostAckPolicyIsBoundedPerKind:
         assert _state(outbox_db, fresh)[0] == "ambiguous", "not yet its turn"
 
     @pytest.mark.asyncio
+    async def test_a_lost_edit_is_retired_when_a_newer_edit_of_the_message_exists(
+        self, outbox_db
+    ):
+        """Real rows: an aged ambiguous `prompt_supersede` whose message ref
+        has a LATER `prompt_supersede` (any state) is `superseded`, never
+        resent — the older line must not land over the newer one."""
+        from src.services.target.outbox import resolve_ambiguous
+
+        binding = _new_binding(outbox_db)
+        older = _owner_exec(
+            outbox_db,
+            "INSERT INTO channel_outbox (workspace_id, binding_id, kind, payload, state, attempts)"
+            " VALUES (%s, %s, 'prompt_supersede',"
+            ' \'{"v": 1, "supersedes_ref": "9001", "outcome_text": "Approved"}\','
+            " 'ambiguous', 1) RETURNING id",
+            (outbox_db["ws"], binding),
+            fetch=True,
+        )[0][0]
+        _owner_exec(
+            outbox_db,
+            "INSERT INTO channel_outbox (workspace_id, binding_id, kind, payload, state)"
+            " VALUES (%s, %s, 'prompt_supersede',"
+            ' \'{"v": 1, "supersedes_ref": "9001", "outcome_text": "Posted"}\','
+            " 'sent')",
+            (outbox_db["ws"], binding),
+        )
+        lone = _owner_exec(
+            outbox_db,
+            "INSERT INTO channel_outbox (workspace_id, binding_id, kind, payload, state, attempts)"
+            " VALUES (%s, %s, 'prompt_supersede',"
+            ' \'{"v": 1, "supersedes_ref": "9002", "outcome_text": "Skipped"}\','
+            " 'ambiguous', 1) RETURNING id",
+            (outbox_db["ws"], binding),
+            fetch=True,
+        )[0][0]
+        engine = self._engine(outbox_db)
+        try:
+            async with engine.connect() as conn:
+                await self._tenant(conn, outbox_db)
+                assert await resolve_ambiguous(conn, outbox_id=older) == "superseded"
+                assert await resolve_ambiguous(conn, outbox_id=lone) == "pending"
+                await conn.commit()
+        finally:
+            await engine.dispose()
+        assert _state(outbox_db, older)[0] == "superseded"
+        assert _state(outbox_db, lone)[0] == "pending"
+
+    @pytest.mark.asyncio
     async def test_an_approval_prompt_resends_rather_than_failing(self, outbox_db):
         """Two live cards are tolerable; a silently dropped prompt is not.
         The resend is bounded at MAX_PROMPT_RESENDS (phase 3a step 3 — a
