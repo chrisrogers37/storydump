@@ -647,6 +647,21 @@ def seed_workspace_chain(conn, name: str) -> dict:
     return {"user": user, "ws": ws, **chain}
 
 
+def seed_intent(dsn: str, workspace_id, name: str, *, state: str | None = None) -> dict:
+    """`seed_intent_chain` on its own owner connection, as the migration actor,
+    committed — for a gate whose module-scoped world's one intent is other
+    tests' fixture and that needs an intent of its own in *state*."""
+    conn = psycopg2.connect(dsn)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SET app.actor_kind = 'migration'")
+            chain = seed_intent_chain(cur, workspace_id, name, state=state)
+        conn.commit()
+        return chain
+    finally:
+        conn.close()
+
+
 def seed_intent_chain(
     cur, workspace_id, name: str, *, state: str | None = None
 ) -> dict:

@@ -812,3 +812,19 @@ class TestTheUsagePrecheckIsWiredBehindItsFlag:
             None, {"id": "j", "kind": "publish_pipeline"}
         )
         assert seen["precheck"] is sentinel
+
+
+def test_the_approval_ttl_default_is_the_documented_number():
+    """`05`'s row is normative and the worker's default is pinned TO IT — not
+    to a literal copied from it (the first slice shipped 72 h against a doc
+    that said 24, and three-day-old cards were live on 2026-09-12)."""
+    import re
+    from pathlib import Path
+
+    doc = (
+        Path(__file__).resolve().parents[2]
+        / "documentation/planning/2026-08-02-consolidated-design-plan/05-operational-numbers.md"
+    ).read_text()
+    row = next(line for line in doc.splitlines() if "Approval TTL default" in line)
+    minutes = int(re.search(r"\|\s*([\d,]+) min", row).group(1).replace(",", ""))
+    assert WorkerConfig().approval_ttl_seconds == minutes * 60

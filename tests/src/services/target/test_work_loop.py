@@ -868,6 +868,21 @@ class TestWeightedCategorySelection:
         assert set(picks) == {self.MEMES, self.MERCH}
         assert picks[self.MEMES] > picks[self.MERCH], picks
 
+    async def test_never_posted_files_go_in_the_folders_shuffled_order(self):
+        """A batch exported together indexes together, and oldest-first served
+        it in a row (the four look-alike cards of 2026-09-12). The pick orders
+        never-posted files by the row's random id — a stable per-file shuffle
+        — and posted ones least-recently-posted first."""
+        s = self._session(
+            rows=self._rows(**{self.MEMES: 1.0}),
+            counts=[{"source_id": self.MEMES, "n": 9}],
+        )
+        await self._plan(s, 3)
+        pick_sql, pick_params = s.statements[2]
+        assert "ORDER BY m.last_posted_at NULLS FIRST, m.id LIMIT 1" in pick_sql
+        assert "created_at" not in pick_sql and "OFFSET" not in pick_sql
+        assert pick_params["source_id"] == self.MEMES
+
     async def test_a_weighted_folder_with_no_media_is_never_drawn(self):
         for seed in range(20):
             s = self._session(

@@ -38,6 +38,7 @@ Concurrency doctrine, inherited from #883/#890 and load-bearing:
 from __future__ import annotations
 
 import itertools
+import json
 import threading
 import time
 import uuid
@@ -51,6 +52,7 @@ from tests.scripts.conftest import (
     _scratch,
     as_user,
     replay_advertised_stream,
+    seed_intent,
     seed_workspace_chain,
     set_test_passwords,
 )
@@ -211,16 +213,52 @@ def _new_binding(outbox_db) -> str:
     )
 
 
-def _enqueue(outbox_db, *, kind="notification", intent_id=None, binding=None) -> str:
+def _enqueue(
+    outbox_db,
+    *,
+    kind="notification",
+    intent_id=None,
+    binding=None,
+    payload=None,
+    attempts=0,
+) -> str:
     """One `pending` row as the owner; returns its id."""
     return _owner_exec(
         outbox_db,
         "INSERT INTO channel_outbox"
-        " (workspace_id, binding_id, kind, intent_id, payload)"
-        " VALUES (%s, %s, %s, %s, '{\"v\": 1}') RETURNING id",
-        (outbox_db["ws"], binding or outbox_db["binding"], kind, intent_id),
+        " (workspace_id, binding_id, kind, intent_id, payload, attempts)"
+        " VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+        (
+            outbox_db["ws"],
+            binding or outbox_db["binding"],
+            kind,
+            intent_id,
+            json.dumps(payload if payload is not None else {"v": 1}),
+            attempts,
+        ),
         fetch=True,
     )[0][0]
+
+
+def _engine(outbox_db, *, pool_size=2):
+    """The worker's async engine on the scratch database."""
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    return create_async_engine(
+        outbox_db["worker"].replace("postgresql://", "postgresql+asyncpg://", 1),
+        pool_size=pool_size,
+        max_overflow=0,
+    )
+
+
+async def _tenant(conn, outbox_db):
+    """The worker's tenant and actor GUCs on one connection."""
+    from sqlalchemy import text as _t
+
+    await conn.execute(
+        _t("SELECT set_config('app.tenant_id', :v, false)"), {"v": outbox_db["ws"]}
+    )
+    await conn.execute(_t("SELECT set_config('app.actor_kind', 'system', false)"))
 
 
 def _state(outbox_db, outbox_id):
@@ -1751,3 +1789,113 @@ class TestASlowChatDoesNotDelayAnother:
         # hold, each with its short sessions and poller ticks one at a time,
         # never more than one connection each plus a claim in flight.
         assert watch.checked_out_peak <= 3, watch.checked_out_peak
+
+
+class TestACardIsRenderedAgainAtClaimTime:
+    """2026-09-12: two three-day-old cards were resent at 01:22 with the
+    keyboard rendered on the 9th (manual mode). A card is now rendered again
+    when the sender claims it: a card whose slot moved on is retired without
+    a send; a live one goes out with the workspace's current buttons, and the
+    row's record is the fresh card."""
+
+    def _stale_card(self, outbox_db, binding, intent):
+        """A card as the 9th rendered it: manual buttons, one attempt spent."""
+        return _enqueue(
+            outbox_db,
+            kind="approval_prompt",
+            intent_id=intent,
+            binding=binding,
+            payload={
+                "v": 2,
+                "text": "📸 old",
+                "reply_markup": {
+                    "inline_keyboard": [
+                        [{"text": "Posted myself", "callback_data": "v1:posted:x"}]
+                    ]
+                },
+            },
+            attempts=1,
+        )
+
+    async def _deliver(self, outbox_db, binding, transport):
+        from src.services.target.outbox import deliver
+
+        engine = _engine(outbox_db)
+        try:
+            async with engine.connect() as conn:
+                await _tenant(conn, outbox_db)
+                result = await deliver(
+                    conn,
+                    binding_id=binding,
+                    transport=transport,
+                    now=_now(),
+                    chat_limit=CHAT_LIMIT,
+                    chat_window_seconds=CHAT_WINDOW_S,
+                    global_limit=GLOBAL_LIMIT,
+                    global_window_seconds=GLOBAL_WINDOW_S,
+                )
+                await conn.commit()
+            return result
+        finally:
+            await engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_a_card_for_a_slot_that_moved_on_is_retired_not_sent(self, outbox_db):
+        binding = _new_binding(outbox_db)
+        intent = str(
+            seed_intent(
+                outbox_db["owner_stream"], outbox_db["ws"], "gone", state="skipped"
+            )["intent"]
+        )
+        row_id = self._stale_card(outbox_db, binding, intent)
+        sent = []
+
+        async def transport(row):
+            sent.append(row["id"])
+            return "tg-never"
+
+        result = await self._deliver(outbox_db, binding, transport)
+        assert result is None and sent == []
+        assert _state(outbox_db, row_id)[0] == "superseded"
+
+    @pytest.mark.asyncio
+    async def test_a_card_for_a_live_slot_carries_the_workspaces_current_buttons(
+        self, outbox_db
+    ):
+        binding = _new_binding(outbox_db)
+        intent = str(
+            seed_intent(
+                outbox_db["owner_stream"],
+                outbox_db["ws"],
+                "live",
+                state="awaiting_approval",
+            )["intent"]
+        )
+        _owner_exec(
+            outbox_db,
+            "UPDATE workspaces SET api_publishing_enabled = true WHERE id = %s",
+            (outbox_db["ws"],),
+        )
+        row_id = self._stale_card(outbox_db, binding, intent)
+        sent = []
+
+        async def transport(row):
+            sent.append(row["payload"])
+            return "tg-fresh"
+
+        result = await self._deliver(outbox_db, binding, transport)
+        assert result is not None and result["state"] == "sent"
+        assert len(sent) == 1
+        tokens = [
+            b.get("callback_data")
+            for r in sent[0]["reply_markup"]["inline_keyboard"]
+            for b in r
+        ]
+        assert f"v1:post:{intent}" in tokens, "the card the member sees is today's"
+        stored = _owner_exec(
+            outbox_db,
+            "SELECT payload::text FROM channel_outbox WHERE id = %s",
+            (row_id,),
+            fetch=True,
+        )[0][0]
+        assert f"v1:post:{intent}" in stored and "📸 old" not in stored

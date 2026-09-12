@@ -243,21 +243,7 @@ async def prompt_intent(session, intent_row: dict, bindings: list) -> None:
     await intent_ledger.transition(session, intent_id, "prompt_pending")
     if not bindings:
         return
-    payload = render_card(
-        {
-            "intent_id": intent_id,
-            "workspace_id": intent_row.get("workspace_id"),
-            "file_name": intent_row.get("file_name"),
-            "media_kind": intent_row.get("media_kind"),
-            "mime_type": intent_row.get("mime_type"),
-            "source_id": intent_row.get("source_id"),
-            "provider_file_ref": intent_row.get("provider_file_ref"),
-            "handle": intent_row.get("handle"),
-            "schedule_slot_at": intent_row.get("schedule_slot_at"),
-            "tz": intent_row.get("tz"),
-        },
-        api_publishing_enabled=bool(intent_row.get("api_publishing_enabled")),
-    )
+    payload = _card_for(intent_row, intent_id=intent_id)
     for binding in bindings:
         await outbox.enqueue(
             session,
@@ -267,6 +253,56 @@ async def prompt_intent(session, intent_row: dict, bindings: list) -> None:
             payload=payload,
             intent_id=intent_id,
         )
+
+
+#: The states in which a card still waits for its person — the slot has not
+#: moved on. (`scheduled` is included: a card is minted in the transaction
+#: that leaves it, and a fixture may not.) The sender's after-send edit reads
+#: the same set.
+LIVE_FOR_A_CARD = ("scheduled", "prompt_pending", "awaiting_approval")
+
+#: Everything a card is rendered from — the one spelling for the prompt sweep
+#: and for a card rendered again at send time; each caller adds its WHERE.
+_CARD_SELECT = (
+    "SELECT i.id, i.state, i.workspace_id, i.schedule_slot_at,"
+    "       m.file_name, m.media_kind, m.mime_type,"
+    "       m.source_id, m.provider_file_ref, a.handle, w.tz,"
+    "       w.api_publishing_enabled"
+    "  FROM post_intents i"
+    "  JOIN workspaces w ON w.id = i.workspace_id"
+    "  JOIN media_items m ON m.id = i.media_item_id"
+    "   AND m.workspace_id = i.workspace_id"
+    "  LEFT JOIN ig_accounts a ON a.id = i.ig_account_id"
+    "   AND a.workspace_id = i.workspace_id"
+)
+
+
+def _card_for(row, *, intent_id: str) -> dict:
+    """The card for one `_CARD_SELECT` row (`render_card` reads the keys it
+    needs and ignores the rest)."""
+    return render_card(
+        {**row, "intent_id": intent_id},
+        api_publishing_enabled=bool(row.get("api_publishing_enabled")),
+    )
+
+
+async def rerender_prompt(session, *, intent_id: str) -> Optional[dict]:
+    """The card for *intent_id* rendered from the intent AS IT IS NOW — at
+    send time (2026-09-12): the workspace's current buttons, the slot in its
+    clock. None when the slot has moved on (answered, expired, ended) — such
+    a card is never sent."""
+    row = (
+        (
+            await session.execute(
+                text(_CARD_SELECT + " WHERE i.id = :id"), {"id": intent_id}
+            )
+        )
+        .mappings()
+        .first()
+    )
+    if row is None or row.get("state") not in LIVE_FOR_A_CARD:
+        return None
+    return _card_for(row, intent_id=intent_id)
 
 
 async def push_bindings(session, workspace_id: str) -> list[str]:
@@ -393,17 +429,8 @@ async def sweep_due_prompts(session, *, limit: int = 50) -> dict:
         (
             await session.execute(
                 text(
-                    "SELECT i.id, i.workspace_id, i.schedule_slot_at,"
-                    "       m.file_name, m.media_kind, m.mime_type,"
-                    "       m.source_id, m.provider_file_ref, a.handle, w.tz,"
-                    "       w.api_publishing_enabled"
-                    "  FROM post_intents i"
-                    "  JOIN workspaces w ON w.id = i.workspace_id"
-                    "  JOIN media_items m ON m.id = i.media_item_id"
-                    "   AND m.workspace_id = i.workspace_id"
-                    "  LEFT JOIN ig_accounts a ON a.id = i.ig_account_id"
-                    "   AND a.workspace_id = i.workspace_id"
-                    " WHERE i.state = 'scheduled' AND i.schedule_slot_at <= now()"
+                    _CARD_SELECT
+                    + " WHERE i.state = 'scheduled' AND i.schedule_slot_at <= now()"
                     "   AND w.state = 'active' AND NOT w.is_paused"
                     " ORDER BY i.schedule_slot_at LIMIT :lim"
                 ),

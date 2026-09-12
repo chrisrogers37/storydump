@@ -991,6 +991,47 @@ def _new_media_in(clock_db, source_id, category=None):
     )
 
 
+async def _plan_slot(clock_db, account, seed):
+    """One `plan_slot` for *account* at a slot *seed* seconds out, drawn with
+    a generator seeded by *seed*, as the worker."""
+    import random
+
+    from sqlalchemy import text as _t
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from src.services.target.scheduler import execute_plan_slot
+
+    slot = _owner_exec(
+        clock_db, "SELECT now() + make_interval(secs => %s)", (seed,), fetch=True
+    )[0][0]
+    engine = create_async_engine(
+        clock_db["worker"].replace("postgresql://", "postgresql+asyncpg://", 1)
+    )
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(
+                _t("SELECT set_config('app.tenant_id', :v, false)"),
+                {"v": clock_db["ws"]},
+            )
+            await conn.execute(
+                _t("SELECT set_config('app.actor_kind', 'system', false)")
+            )
+            out = await execute_plan_slot(
+                conn,
+                workspace_id=clock_db["ws"],
+                ig_account_id=account,
+                slot_at=slot,
+                provider_account_ref=f"ref-{uuid.uuid4().hex[:8]}",
+                approval_mode="manual",
+                no_media_notice_after_seconds=24 * 3600,
+                rng=random.Random(seed),
+            )
+            await conn.commit()
+    finally:
+        await engine.dispose()
+    return out
+
+
 def _set_mix(clock_db, mix, *, automatic=()):
     """`[(source_id, ratio)]`; the label rides along as `category`. The pool
     is workspace-wide and every earlier test leaves sources with media behind,
@@ -1041,31 +1082,7 @@ class TestTheCategoryMixShapesTheDraw:
         )
 
     async def _plan(self, clock_db, account, seed):
-        import random
-
-        from src.services.target.scheduler import execute_plan_slot
-
-        slot = _owner_exec(
-            clock_db, "SELECT now() + make_interval(secs => %s)", (seed,), fetch=True
-        )[0][0]
-        engine = self._engine(clock_db)
-        try:
-            async with engine.connect() as conn:
-                await self._tenant(conn, clock_db)
-                out = await execute_plan_slot(
-                    conn,
-                    workspace_id=clock_db["ws"],
-                    ig_account_id=account,
-                    slot_at=slot,
-                    provider_account_ref=f"ref-{uuid.uuid4().hex[:8]}",
-                    approval_mode="manual",
-                    no_media_notice_after_seconds=24 * 3600,
-                    rng=random.Random(seed),
-                )
-                await conn.commit()
-        finally:
-            await engine.dispose()
-        return out
+        return await _plan_slot(clock_db, account, seed)
 
     def _source_of(self, clock_db, intent_id):
         return str(
@@ -1193,3 +1210,59 @@ class TestTheCategoryMixShapesTheDraw:
         )
         out = await self._plan(clock_db, account, 5)
         assert out.intent_id is not None
+
+
+class TestNeverPostedFilesGoInTheFoldersShuffledOrder:
+    """2026-09-12: a library indexed in one sync served look-alike files in a
+    row, because within the drawn folder the pick was oldest-first by index
+    time. Never-posted files now go in the folder's shuffled order — the
+    row's random id — and once everything has posted, the least-recently-
+    posted file goes first so a small folder rotates."""
+
+    async def _plan(self, clock_db, account, seed):
+        return await _plan_slot(clock_db, account, seed)
+
+    def _media_of(self, clock_db, intent_id):
+        return str(
+            _owner_exec(
+                clock_db,
+                "SELECT media_item_id FROM post_intents WHERE id = %s",
+                (intent_id,),
+                fetch=True,
+            )[0][0]
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_draw_follows_the_shuffle_key_not_the_index_order(self, clock_db):
+        account = _new_account(clock_db)
+        folder = _new_source(clock_db, "batch")
+        indexed = [_new_media_in(clock_db, folder) for _ in range(8)]
+        _set_mix(clock_db, [(folder, 1.0)])
+        drawn = []
+        for seed in range(8):
+            out = await self._plan(clock_db, account, 100 + seed)
+            assert out.intent_id is not None
+            drawn.append(self._media_of(clock_db, out.intent_id))
+        # The row's random id is the shuffle key: every file once, in id
+        # order — which has nothing to do with the order they were indexed.
+        assert drawn == sorted(indexed), "the folder's fixed shuffled order"
+
+    @pytest.mark.asyncio
+    async def test_once_everything_has_posted_the_least_recent_goes_first(
+        self, clock_db
+    ):
+        account = _new_account(clock_db)
+        folder = _new_source(clock_db, "rotating")
+        files = [_new_media_in(clock_db, folder) for _ in range(3)]
+        _set_mix(clock_db, [(folder, 1.0)])
+        # Posted on three different days; the middle one longest ago.
+        for media, days in zip(files, (2, 9, 5)):
+            _owner_exec(
+                clock_db,
+                "UPDATE media_items SET last_posted_at = now() - make_interval(days => %s)"
+                " WHERE id = %s",
+                (days, media),
+            )
+        out = await self._plan(clock_db, account, 41)
+        assert out.intent_id is not None
+        assert self._media_of(clock_db, out.intent_id) == files[1]

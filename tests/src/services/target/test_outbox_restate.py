@@ -12,6 +12,7 @@ shape `supersede_everywhere` set for the tap (#1286).
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
 import pytest
 
@@ -180,3 +181,97 @@ class TestACardLandingOnAParkedIntentKeepsTheReviewButtons:
         seams["state"] = "posted"
         payload = await self._land(seams)
         assert "Posted" in payload["outcome_text"] and "reply_markup" not in payload
+
+
+class TestACardIsRenderedAgainAtClaimTime:
+    """`_claim_current` (2026-09-12): every claimed `approval_prompt` with an
+    intent is rendered again before the send; a slot that moved on is retired
+    unsent and the next row claimed; a live one goes out as the fresh card,
+    written through the one `sending` fence."""
+
+    def test_the_rule(self):
+        assert outbox._needs_refresh({"kind": "approval_prompt", "intent_id": "i"})
+        assert not outbox._needs_refresh({"kind": "notification", "intent_id": "i"})
+        assert not outbox._needs_refresh({"kind": "approval_prompt", "intent_id": None})
+
+    @pytest.fixture
+    def claims(self, monkeypatch):
+        from src.services.target import prompts
+
+        seen = {"claimed": [], "left": [], "rendered": {}}
+
+        async def recover_stranded(session, *, binding_id):
+            return []
+
+        async def resolve_aged_ambiguous(session, *, binding_id):
+            return []
+
+        async def claim_next(session, *, binding_id):
+            return seen["claimed"].pop(0) if seen["claimed"] else None
+
+        async def _leave_sending(session, outbox_id, to_state, **extra):
+            seen["left"].append((outbox_id, to_state, extra))
+
+        async def rerender_prompt(session, *, intent_id):
+            return seen["rendered"].get(intent_id)
+
+        async def increment(session, **kw):
+            return 1
+
+        monkeypatch.setattr(outbox, "recover_stranded", recover_stranded)
+        monkeypatch.setattr(outbox, "resolve_aged_ambiguous", resolve_aged_ambiguous)
+        monkeypatch.setattr(outbox, "claim_next", claim_next)
+        monkeypatch.setattr(outbox, "_leave_sending", _leave_sending)
+        monkeypatch.setattr(prompts, "rerender_prompt", rerender_prompt)
+        monkeypatch.setattr(outbox, "increment", increment)
+        return seen
+
+    async def _claim(self):
+        return await outbox.pace_and_claim(
+            object(),
+            binding_id="b",
+            now=datetime(2026, 9, 12, 12, 0, tzinfo=timezone.utc),
+            chat_limit=20,
+            chat_window_seconds=60,
+            global_limit=30,
+            global_window_seconds=1,
+        )
+
+    async def test_a_stale_card_is_retired_and_the_next_row_is_claimed(self, claims):
+        claims["claimed"] = [
+            {
+                "id": "ob-1",
+                "kind": "approval_prompt",
+                "intent_id": "gone",
+                "attempts": 2,
+                "payload": {},
+            },
+            {
+                "id": "ob-2",
+                "kind": "notification",
+                "intent_id": None,
+                "attempts": 1,
+                "payload": {},
+            },
+        ]
+        row = await self._claim()
+        assert row is not None and row["id"] == "ob-2"
+        assert claims["left"] == [("ob-1", "superseded", {})]
+
+    async def test_a_live_card_goes_out_as_the_fresh_card(self, claims):
+        fresh = {"v": 2, "text": "new", "reply_markup": {"inline_keyboard": []}}
+        claims["claimed"] = [
+            {
+                "id": "ob-1",
+                "kind": "approval_prompt",
+                "intent_id": "live",
+                "attempts": 1,
+                "payload": {"v": 2, "text": "old"},
+            },
+        ]
+        claims["rendered"] = {"live": fresh}
+        row = await self._claim()
+        assert row is not None and row["payload"] == fresh
+        assert claims["left"] == [("ob-1", "sending", {"payload": fresh})], (
+            "the record is rewritten through the one fence, in the claim transaction"
+        )
