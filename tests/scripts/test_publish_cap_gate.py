@@ -247,7 +247,7 @@ class TestTheFlipOutcomes:
             "the (1,0) rollback must return the debit — no leaked cap slot (#862)"
         )
 
-    def test_a_second_live_publisher_on_one_account_defers_on_key4(self, cap_db):
+    def test_a_second_live_publisher_on_one_account_is_busy_on_key4(self, cap_db):
         _clear_bucket(cap_db)
         ref = f"acct-{uuid.uuid4()}"
         # One publishing intent already live on the real account.
@@ -258,8 +258,8 @@ class TestTheFlipOutcomes:
 
         outcome = _run(_flip(cap_db["engine"], cap_db, second))
 
-        assert outcome is FlipOutcome.DEFERRED, (
-            "uq_publish_exclusive must refuse the second flip → defer"
+        assert outcome is FlipOutcome.BUSY, (
+            "key 4 is its own answer (2026-09-12): the caller waits seconds, not a slot"
         )
         assert _intent(cap_db, second)["state"] == "approved"
         assert _bucket_count(cap_db) == before, "the key-4 defer rolls the debit back"

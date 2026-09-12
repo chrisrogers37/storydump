@@ -140,6 +140,18 @@ POSTED = "posted"
 #: first container attempt it is the fetch racing the asset's first serving.
 FETCH_FAILED_CODE = 9004
 DEFERRED_CAP = "deferred_cap"
+#: Key 4 (`uq_publish_exclusive`): a sibling of the real account is publishing
+#: right now. The story waits this long and tries again — seconds, because a
+#: publish takes seconds; a cap denial waits for the next product slot
+#: instead, which is hours (adversarial review of #1301).
+DEFERRED_BUSY = "deferred_busy"
+BUSY_RETRY_SECONDS = 20
+#: Meta's "media could not be fetched" (9004) is a fetch losing a race, not the
+#: file (2026-09-11, -12): its own short ladder, because while the intent is
+#: `publishing` it holds the account (key 4) and the bulk ladder's hour-long
+#: rung would block every sibling for that hour. Five attempts park it for the
+#: workspace's review in about eight minutes.
+FETCH_RETRY_SECONDS = (30, 60, 120, 300)
 DEFERRED_META_CAP = "deferred_meta_cap"
 PARKED_AMBIGUOUS = "parked_ambiguous"
 RETRY_SCHEDULED = "retry_scheduled"
@@ -190,34 +202,6 @@ class _Ctx:
     def next_generation(self, op_kind: str) -> int:
         gens = [op["generation"] for op in self.ops if op["op_kind"] == op_kind]
         return (max(gens) + 1) if gens else 1
-
-    def fetch_failed_before(self, op_kind: str) -> bool:
-        """Whether an earlier *op_kind* permit of this intent ended with Meta's
-        "could not be fetched" (9004) — the discriminator between a first
-        fetch losing the race and a file Meta cannot take. Counted on the
-        recorded outcome, not the generation: a lost response or a rate
-        limit also mints a generation and must not make the FIRST real 9004
-        terminal (structural review of the 2026-09-11 fix). Counted within
-        THIS episode only: a review-card retry (2026-09-12) uploads a fresh
-        asset, and an earlier episode's 9004 says nothing about it — ops
-        created before the intent's current `entered_state_at` (the flip to
-        `publishing` that started this run) are another episode's."""
-        since = self.intent.get("entered_state_at")
-        for op in self.ops:
-            if op["op_kind"] != op_kind or op["state"] != "failed":
-                continue
-            created = op.get("created_at")
-            if since is not None and created is not None and created < since:
-                continue
-            ref = op.get("response_ref") or {}
-            if isinstance(ref, str):
-                try:
-                    ref = json.loads(ref)
-                except ValueError:
-                    ref = {}
-            if str(ref.get("error")) == str(FETCH_FAILED_CODE):
-                return True
-        return False
 
     def latest(self, op_kind: str) -> Optional[dict]:
         rows = [op for op in self.ops if op["op_kind"] == op_kind]
@@ -380,7 +364,7 @@ async def _load(uow, job: dict) -> Optional[_Ctx]:
                     text(
                         "SELECT i.id, i.state, i.publish_step, i.cancel_requested,"
                         "       i.media_item_id, i.ig_account_id, i.ig_container_id,"
-                        "       i.transit_asset_ref, i.entered_state_at,"
+                        "       i.transit_asset_ref,"
                         "       a.provider_account_ref, i.workspace_id,"
                         "       w.is_paused,"
                         "       m.source_id, m.mime_type,"
@@ -410,7 +394,7 @@ async def _load(uow, job: dict) -> Optional[_Ctx]:
                 await session.execute(
                     text(
                         "SELECT id, op_kind, state, generation, business_key,"
-                        "       response_ref, created_at"
+                        "       response_ref"
                         "  FROM provider_operations WHERE intent_id = :intent"
                     ),
                     {"intent": str(intent_id)},
@@ -541,8 +525,15 @@ async def _admit(
                 local_date=_local_date(ctx, now_fn),
                 effective_cap=int(ctx.intent["eff_ppd"]),
             )
-            if flip is FlipOutcome.DEFERRED:
-                run_at = _next_slot(ctx, now_fn, backoff_seconds)
+            if flip is FlipOutcome.PROCEED:
+                deferred = None
+            else:
+                busy = flip is FlipOutcome.BUSY
+                run_at = (
+                    now_fn() + timedelta(seconds=BUSY_RETRY_SECONDS)
+                    if busy
+                    else _next_slot(ctx, now_fn, backoff_seconds)
+                )
                 await reschedule_job(
                     session,
                     ctx.job["id"],
@@ -551,11 +542,13 @@ async def _admit(
                     restore_attempt=True,
                 )
                 await _audit_deferral(
-                    session, ctx, reason="cap", next_run_at=run_at, state="approved"
+                    session,
+                    ctx,
+                    reason="exclusive" if busy else "cap",
+                    next_run_at=run_at,
+                    state="approved",
                 )
-                deferred = True
-            else:
-                deferred = False
+                deferred = DEFERRED_BUSY if busy else DEFERRED_CAP
     except IntentNotApproved:
         # (1,0): a race moved the intent while we held the job. The UoW
         # rolled back (debit included). Route on what it became.
@@ -580,7 +573,7 @@ async def _admit(
             else:
                 raise
         return CANCELLED
-    return DEFERRED_CAP if deferred else None
+    return deferred
 
 
 async def _park(uow, ctx: _Ctx, op_id) -> str:
@@ -842,31 +835,31 @@ async def _ladder(
                 workspace_id=ctx.workspace_id,
             )
         except MetaTerminalError as exc:
-            if exc.code == FETCH_FAILED_CODE and not ctx.fetch_failed_before(
-                "container_create"
-            ):
-                # "The media could not be fetched" on the FIRST container
-                # attempt is Meta's fetch losing the race with the asset's
-                # first serving, not a verdict on the file (the same files
-                # posted on a later attempt, 2026-09-11). One more attempt on
-                # the ladder; a second 9004 is the file's own answer.
+            if exc.code == FETCH_FAILED_CODE:
+                # "The media could not be fetched" is Meta's FETCH failing,
+                # never a verdict on the file: on 2026-09-11 the same files
+                # posted on a later attempt, and on 2026-09-12 a frame that
+                # served a valid JPEG to every client failed twice, sixty
+                # seconds apart, in under half a second each. It rides the
+                # ladder like any retryable answer; the ladder's end is the
+                # workspace's review card, not a lock on the file.
                 logger.warning(
-                    "publish_pipeline intent %s: Meta could not fetch the frame on"
-                    " the first attempt (code %s) — retrying once",
+                    "publish_pipeline intent %s: Meta could not fetch the frame"
+                    " (code %s) — one more rung",
                     ctx.intent_id,
                     exc.code,
                 )
                 return await _retry_or_poison(
                     uow,
                     ctx,
-                    backoff_seconds,
+                    FETCH_RETRY_SECONDS,
                     now_fn,
                     resolve_op_id=permit["id"],
-                    resolve_response={"v": 1, "error": exc.code, "first_fetch": True},
+                    resolve_response={"v": 1, "error": exc.code, "fetch_failed": True},
                     error=_error_of(exc),
                 )
             return await _fail_terminal(
-                uow, ctx, op_id=permit["id"], exc=exc, now_fn=now_fn, lock_media=True
+                uow, ctx, op_id=permit["id"], exc=exc, now_fn=now_fn
             )
         except MetaError as exc:
             logger.warning(
@@ -1221,16 +1214,15 @@ async def _fail_terminal(
     op_id: Optional[str],
     exc: BaseException,
     now_fn=None,
-    lock_media: bool = False,
 ) -> str:
     """`publishing → failed` on a definitive permanent failure: permit failed
     (when a permit exists — the fetch rung has none) + state flip with the
     reason + cap refund + job failed, ONE transaction (`02` §4: the refund
     rides the terminal flip's transaction). The card is restated and the
     workspace told in the same transaction (investigation of 2026-09-11: a
-    failed post read "Approved" indefinitely and nobody was told); with
-    *lock_media* the file gains a permanent `unsupported` lock so the
-    planner never serves it again (the legacy's permanent reject)."""
+    failed post read "Approved" indefinitely and nobody was told). Nothing
+    here locks the file: no answer Meta gives about a fetch is the file's
+    own (2026-09-12), and a file that is gone or too large is Drive's."""
     at = now_fn() if now_fn is not None else datetime.now(timezone.utc)
     async with _leased_tx(uow, ctx.job) as session:
         if op_id is not None:
@@ -1268,46 +1260,16 @@ async def _fail_terminal(
         ).fetchone()
         if moved is None:
             raise ValueError(f"intent {ctx.intent_id} left 'publishing' during fail")
-        if lock_media:
-            await session.execute(
-                text(
-                    # An upsert: the same file can be live for two accounts of
-                    # the workspace (055 allows it), and a second terminal
-                    # failure must not abort ITS failure transaction on
-                    # `uq_lock_ws_scope` (both lenses of the review).
-                    "INSERT INTO post_locks (workspace_id, media_item_id, kind,"
-                    " expires_at, created_by_intent_id)"
-                    " VALUES (:ws, :m, 'unsupported', NULL, :intent)"
-                    " ON CONFLICT (workspace_id, media_item_id, kind)"
-                    "   WHERE ig_account_id IS NULL"
-                    " DO UPDATE SET expires_at = NULL,"
-                    "               created_by_intent_id = EXCLUDED.created_by_intent_id"
-                ),
-                {
-                    "ws": ctx.workspace_id,
-                    "m": str(ctx.intent["media_item_id"]),
-                    "intent": ctx.intent_id,
-                },
-            )
         await _say_outcome(
-            session,
-            ctx,
-            state="failed",
-            at=at,
-            notice=_failure_notice(exc, lock_media=lock_media),
+            session, ctx, state="failed", at=at, notice=_failure_notice(exc)
         )
         await finalize_job(session, ctx.job["id"], ctx.job["lease_token"], "failed")
     return FAILED
 
 
-def _failure_notice(exc: BaseException, *, lock_media: bool) -> str:
+def _failure_notice(exc: BaseException) -> str:
     """The workspace's sentence for a terminal publish failure — the thing
     that failed and what to do, never the machine detail."""
-    if lock_media:
-        return (
-            "A story didn't post: Instagram couldn't process this file, so it"
-            " won't be offered again. Open the Queue on the web to see which."
-        )
     if isinstance(exc, DriveTerminalError):
         return (
             "A story didn't post: its file is missing from Drive or too large"

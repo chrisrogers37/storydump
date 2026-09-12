@@ -41,6 +41,7 @@ from src.services.target.publish_pipeline import (
     CANCELLED,
     DEFERRED_CAP,
     DEFERRED_META_CAP,
+    FETCH_RETRY_SECONDS,
     FAILED,
     PARKED_AMBIGUOUS,
     POISONED,
@@ -135,13 +136,14 @@ def _new_intent(
     publish_step="none",
     cancel_requested=False,
     transit_ref=None,
+    ref=None,
 ):
     """An intent born directly in *state* on a fresh media item (the L.3/L.5
     template: migration-actor birth, fresh media per uq_intent_live_subject,
     debited states carry cap_consumed_on + a real bucket row so refunds have
     something to return)."""
     ws, iga = pipe_db["ws"], pipe_db["iga"]
-    ref = f"acct-{uuid.uuid4()}"
+    ref = ref or f"acct-{uuid.uuid4()}"
     debited = state in ("publishing", "publishing_ambiguous", "review_required")
     rows = _exec(
         pipe_db,
@@ -403,6 +405,55 @@ def _today_utc():
 
 
 class TestTheFlipIntegration:
+    def test_a_sibling_publishing_on_the_same_account_defers_without_an_error(
+        self, pipe_db
+    ):
+        """Key 4 (`uq_publish_exclusive`): while one intent of a real account
+        is `publishing`, a sibling's flip is refused by the index. The refusal
+        used to abort the admission transaction, so the deferral's own writes
+        then failed ("current transaction is aborted") and the job burned an
+        attempt on the failure ladder — five approvals in six seconds on
+        2026-09-12 cost four such crashes. The flip runs in a savepoint, and
+        the sibling waits a few seconds and tries again — NOT the account's
+        next product slot, hours away, which a cap denial rightly waits for
+        (adversarial review of #1301) — attempt restored, no error."""
+        from src.services.target.publish_pipeline import (
+            BUSY_RETRY_SECONDS,
+            DEFERRED_BUSY,
+        )
+
+        slot = datetime.now(timezone.utc) + timedelta(hours=2)
+        _exec(
+            pipe_db,
+            "UPDATE ig_accounts SET next_slot_at = %s WHERE id = %s",
+            (slot, pipe_db["iga"]),
+        )
+        busy, ref = _new_intent(pipe_db, state="publishing")
+        sibling, _ = _new_intent(pipe_db, ref=ref)
+        job = _leased_job(pipe_db, sibling, ref=ref, attempts=1)
+        meta = StubMetaAdapter()
+        transit = FakeTransit()
+        before = datetime.now(timezone.utc)
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, meta, transit)))
+        assert outcome == DEFERRED_BUSY
+        assert _intent_row(pipe_db, sibling)["state"] == "approved"
+        assert _intent_row(pipe_db, busy)["state"] == "publishing"
+        after = _job_row(pipe_db, job["id"])
+        assert after["state"] == "ready" and after["attempts"] == 0
+        wait = (after["run_at"] - before).total_seconds()
+        assert 0 < wait <= BUSY_RETRY_SECONDS + 5, (
+            f"a busy account is retried in seconds, not at the next slot ({wait:.0f}s)"
+        )
+        assert transit.upload_calls == [] and meta.create_calls == []
+        audits = _exec(
+            pipe_db,
+            "SELECT detail->>'reason' FROM audit_events WHERE entity_id = %s"
+            " AND detail->>'event' = 'cap_deferred'",
+            (sibling,),
+            fetch=True,
+        )
+        assert [a[0] for a in audits] == ["exclusive"]
+
     def test_proceed_debits_exactly_once_on_the_way_to_posted(self, pipe_db):
         """Gate item 2, PROCEED arm: the §4 flip inside the pipeline debits
         the account-local day exactly once for the whole ladder."""
@@ -1603,12 +1654,18 @@ def _notices(pipe_db, intent, binding):
 
 
 class TestTheFirstFetch:
-    """Investigation of 2026-09-11 (4 of 7 publishes lost to Meta 9004/2207052,
+    """Investigation of 2026-09-11, corrected 2026-09-12: Meta's "media could
+    not be fetched" (9004) is a FETCH failure every time it happens — on the
+    12th a frame that served a valid JPEG to every client failed twice, sixty
+    seconds apart, in under half a second each — so it rides the ladder like
+    any retryable answer and can never lock a file or fail a story on its
+    own; the ladder's end is the workspace's review.
+
+    Investigation of 2026-09-11 (4 of 7 publishes lost to Meta 9004/2207052,
     "the media could not be fetched", within a second of the container call —
     the same files posted on a later attempt): the frame must serve before
-    Meta is told to fetch it, a FIRST 9004 is retried, a second is the file's
-    own answer — and every terminal outcome is said on the card and to the
-    workspace at once."""
+    Meta is told to fetch it, a 9004 is retried — and every terminal outcome
+    is said on the card and to the workspace at once."""
 
     def test_a_frame_not_serving_is_retried_never_handed_to_meta(self, pipe_db):
         intent, ref = _new_intent(pipe_db)
@@ -1647,13 +1704,12 @@ class TestTheFirstFetch:
             (intent,),
             fetch=True,
         )
-        assert op[0][0] == "failed" and "first_fetch" in op[0][2]
+        assert op[0][0] == "failed" and "fetch_failed" in op[0][2]
         assert _notices(pipe_db, intent, binding) == [], (
             "a retry in progress says nothing yet"
         )
 
-        # A FRESH job (attempts=1), so the discriminator is the recorded 9004,
-        # not the job's attempt count (adversarial review).
+        # A fresh job for the retry rung.
         again = _leased_job(pipe_db, intent, ref=ref, attempts=1)
         second = _run(run_publish_pipeline(again, **_deps(pipe_db, meta, transit)))
         assert second == POSTED
@@ -1661,39 +1717,78 @@ class TestTheFirstFetch:
         assert len(meta.create_calls) == 2
         assert _card_line(pipe_db, intent).startswith("✅ Posted")
 
-    def test_a_second_9004_fails_the_post_locks_the_file_and_says_so(self, pipe_db):
+    def test_a_second_9004_is_still_a_fetch_failure_and_rides_the_ladder(self, pipe_db):
+        """2026-09-12: photo-output (105) — two 9004s sixty seconds apart on a
+        frame that served a valid JPEG to every client; the old rule read
+        the second as the file's own answer, failed the story and locked the
+        file. A second 9004 is one more rung: the intent stays `publishing`,
+        the attempt is kept, no lock, nothing said yet."""
         intent, ref = _new_intent(pipe_db)
         binding = _seed_card(pipe_db, intent)
-        job = _leased_job(pipe_db, intent, ref=ref)
-        meta = StubMetaAdapter(create_outcomes=["terminal", "terminal"])
+        meta = StubMetaAdapter(create_outcomes=["terminal", "terminal", "ok"])
         transit = FakeTransit()
-        assert (
-            _run(run_publish_pipeline(job, **_deps(pipe_db, meta, transit)))
-            == RETRY_SCHEDULED
+        outcomes = []
+        for attempts in (1, 2):
+            job = _leased_job(pipe_db, intent, ref=ref, attempts=attempts)
+            outcomes.append(
+                _run(run_publish_pipeline(job, **_deps(pipe_db, meta, transit)))
+            )
+            assert _job_row(pipe_db, job["id"])["attempts"] == attempts, (
+                "a fetch failure keeps the attempt the claim consumed"
+            )
+        assert outcomes == [RETRY_SCHEDULED, RETRY_SCHEDULED]
+        # Its own quick ladder: a fetch race resolves in seconds, and while
+        # the intent is `publishing` it holds the account — the bulk ladder's
+        # hour-long rung would block every sibling for that long.
+        wait = (
+            _job_row(pipe_db, job["id"])["run_at"] - datetime.now(timezone.utc)
+        ).total_seconds()
+        assert wait <= FETCH_RETRY_SECONDS[1] * 1.3, (
+            f"the second rung is short ({wait:.0f}s)"
         )
-        again = _leased_job(pipe_db, intent, ref=ref, attempts=1)
-        assert (
-            _run(run_publish_pipeline(again, **_deps(pipe_db, meta, transit))) == FAILED
-        )
-
         row = _intent_row(pipe_db, intent)
-        assert row["state"] == "failed" and row["last_error"]["error"]["code"] == 9004
-        assert _bucket(pipe_db, _today_utc()) in (None, 0), "the cap is refunded"
-        lock = _exec(
+        assert (
+            row["state"] == "publishing" and row["last_error"]["error"]["code"] == 9004
+        )
+        locks = _exec(
             pipe_db,
-            "SELECT kind, expires_at, created_by_intent_id::text FROM post_locks"
-            " WHERE media_item_id = %s AND kind = 'unsupported'",
+            "SELECT count(*) FROM post_locks WHERE media_item_id = %s",
             (row["media_item_id"],),
             fetch=True,
+        )[0][0]
+        assert locks == 0, "a fetch failure never locks the file"
+        assert _notices(pipe_db, intent, binding) == []
+        third = _leased_job(pipe_db, intent, ref=ref, attempts=3)
+        assert (
+            _run(run_publish_pipeline(third, **_deps(pipe_db, meta, transit))) == POSTED
         )
-        assert lock == [("unsupported", None, intent)], (
-            "a file Instagram twice could not take is never served again"
-        )
-        assert _card_line(pipe_db, intent).startswith("⚠️ Failed"), (
-            "the card must say it — the tap's own edit had already superseded it"
-        )
+
+    def test_fetch_failures_that_exhaust_the_ladder_park_for_the_workspace(
+        self, pipe_db
+    ):
+        """The ladder's end is the review card, not a verdict on the file: the
+        workspace looks and chooses — the cap is retained, no lock."""
+        intent, ref = _new_intent(pipe_db)
+        binding = _seed_card(pipe_db, intent)
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=5, max_attempts=5)
+        meta = StubMetaAdapter(create_outcomes=["terminal"])
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, meta, FakeTransit())))
+        assert outcome == POISONED
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "review_required"
+        assert row["last_error"]["error"]["code"] == 9004
+        assert row["cap_refunded_at"] is None
+        locks = _exec(
+            pipe_db,
+            "SELECT count(*) FROM post_locks WHERE media_item_id = %s",
+            (row["media_item_id"],),
+            fetch=True,
+        )[0][0]
+        assert locks == 0
+        edit = _review_edit(pipe_db, intent, binding)
+        assert "Needs review" in edit["outcome_text"] and edit["reply_markup"]
         notices = _notices(pipe_db, intent, binding)
-        assert len(notices) == 1 and "couldn't process this file" in notices[0], notices
+        assert len(notices) == 1 and "attention" in notices[0]
 
     def test_a_file_that_is_gone_says_so_at_once(self, pipe_db):
         intent, ref = _new_intent(pipe_db)
@@ -1738,65 +1833,6 @@ class TestTheFirstFetch:
         assert _card_line(pipe_db, intent).startswith("👀 Needs review")
         notices = _notices(pipe_db, intent, binding)
         assert len(notices) == 1 and "needs attention" in notices[0], notices
-
-    def test_a_lost_response_before_the_first_9004_does_not_make_it_terminal(
-        self, pipe_db
-    ):
-        """The discriminator is a RECORDED 9004, not the container generation:
-        a lost response mints a generation too (structural review)."""
-        intent, ref = _new_intent(pipe_db)
-        _seed_card(pipe_db, intent)
-        meta = StubMetaAdapter(create_outcomes=["transport", "terminal", "terminal"])
-        transit = FakeTransit()
-        outcomes = []
-        for attempt in (1, 2, 3):
-            job = _leased_job(pipe_db, intent, ref=ref, attempts=attempt)
-            outcomes.append(
-                _run(run_publish_pipeline(job, **_deps(pipe_db, meta, transit)))
-            )
-        assert outcomes == [RETRY_SCHEDULED, RETRY_SCHEDULED, FAILED], outcomes
-        gens = _exec(
-            pipe_db,
-            "SELECT generation, state, response_ref::text FROM provider_operations"
-            " WHERE intent_id = %s AND op_kind = 'container_create' ORDER BY generation",
-            (intent,),
-            fetch=True,
-        )
-        assert [row[0] for row in gens] == [1, 2, 3]
-        assert "lost_response" in gens[0][2] and "first_fetch" in gens[1][2]
-
-    def test_a_file_already_locked_unsupported_fails_cleanly_and_re_attributes(
-        self, pipe_db
-    ):
-        """`uq_lock_ws_scope` is one lock per (workspace, media, kind). A lock
-        that already exists — an operator's, or another account's earlier
-        failure on the same file — must not abort the failure transaction
-        (both lenses of the review): the lock is upserted to this intent."""
-        intent, ref = _new_intent(pipe_db)
-        media = _intent_row(pipe_db, intent)["media_item_id"]
-        _exec(
-            pipe_db,
-            "INSERT INTO post_locks (workspace_id, media_item_id, kind, expires_at)"
-            " VALUES (%s, %s, 'unsupported', NULL)",
-            (pipe_db["ws"], media),
-        )
-        meta = StubMetaAdapter(create_outcomes=["terminal", "terminal"])
-        outcome = None
-        for attempt in (1, 1):
-            job = _leased_job(pipe_db, intent, ref=ref, attempts=attempt)
-            outcome = _run(
-                run_publish_pipeline(job, **_deps(pipe_db, meta, FakeTransit()))
-            )
-        assert outcome == FAILED, "the failure must complete, never abort on the lock"
-        assert _intent_row(pipe_db, intent)["state"] == "failed"
-        lock = _exec(
-            pipe_db,
-            "SELECT count(*), max(created_by_intent_id::text) FROM post_locks"
-            " WHERE media_item_id = %s AND kind = 'unsupported'",
-            (media,),
-            fetch=True,
-        )[0]
-        assert lock == (1, intent), "one lock, re-attributed to this intent"
 
     def test_poison_with_nobody_to_tell_keeps_the_reconciler_s_backstop(self, pipe_db):
         """No push binding at poison time: no latch, so the six-hour notice

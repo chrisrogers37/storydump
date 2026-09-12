@@ -23,8 +23,9 @@ errors and the executor routes on type — each class selects one `02` behavior:
   that default — a separate retryable set would be dead code, since nothing
   falls past it). Retries ride the job ladder (`05` backoff); attempts
   exhausted → G5 poison.
-- :class:`MetaTerminalError` — definitive and permanent (9004: the file cannot
-  be parsed — no retry can fix the media). Fail + refund.
+- :class:`MetaTerminalError` — Meta's definitive answer to THIS call (9004:
+  "the media could not be fetched"). Definitive for the call, not for the
+  file: the pipeline rides its own short ladder on it (2026-09-12).
 - :class:`MetaLostResponse` — the transport died (timeout, connection loss,
   5xx): the call may or may not have landed and NO ANSWER exists, which is
   why it is deliberately NOT a MetaError subclass. The executor catches
@@ -54,7 +55,7 @@ from src.exceptions.base import StorydumpError
 #: Meta's publish-cap error code (`02` §8; verified against primary docs at 0.4).
 CAP_ERROR_CODE = 9
 
-#: Definitive-permanent codes: 9004 = the uploaded file cannot be parsed.
+#: Definitive for the call: 9004 = Meta could not fetch the media this time.
 TERMINAL_CODES = frozenset({9004})
 #: Meta's OAuth error code. The real adapter reports a dead or absent token as
 #: a retryable error with this code, and the pipeline hands it straight to a
