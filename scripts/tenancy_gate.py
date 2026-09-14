@@ -99,6 +99,11 @@ _TENANCY_IRRELEVANT: tuple[str, ...] = (
     # `expected_tenancy` and none of them is an index — so DROP INDEX is inert
     # here exactly as CREATE INDEX above already is.
     "DROP INDEX ",
+    # 076 (the float, plan 03) replaces a door's body in place. A function
+    # definition touches no table, policy or RLS bit — inert on the four facts
+    # exactly as CREATE FUNCTION above; the `OR REPLACE` form is a new prefix,
+    # not a new kind.
+    "CREATE OR REPLACE FUNCTION ",
 )
 
 

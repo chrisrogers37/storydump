@@ -131,6 +131,37 @@ def outcome_line(
     return f"{word}{who} · {stamp(at, tz)}"
 
 
+def waiting_line(
+    next_run_at: datetime, *, tz: str, now: datetime, day_spent: bool = False
+) -> str:
+    """What an approved card says while its story waits for a slot that is
+    hours away (the float, plan 03: a wait the user should know about is
+    said on the card; a wait of seconds says nothing): the state's word and
+    when it posts, in the workspace's zone — "today 14:00", "tomorrow
+    09:00", or the weekday. *day_spent* is the local cap's case: the day's
+    count is at its cap, so a slot later today cannot post and the line
+    promises tomorrow without a time the clock has not chosen yet
+    (adversarial review of #1306)."""
+    from zoneinfo import ZoneInfo
+
+    try:
+        zone = ZoneInfo(tz)
+    except Exception:  # noqa: BLE001 — an unknown zone reads as UTC, never a crash
+        zone = ZoneInfo("UTC")
+    at = next_run_at.astimezone(zone)
+    today = now.astimezone(zone).date()
+    days = (at.date() - today).days
+    if day_spent and days <= 0:
+        return f"{outcome_word('approved')} · posts tomorrow"
+    if days <= 0:
+        day = "today"
+    elif days == 1:
+        day = "tomorrow"
+    else:
+        day = at.strftime("%a")
+    return f"{outcome_word('approved')} · posts {day} {at.strftime('%H:%M')}"
+
+
 _LABELS = {
     "post": "🚀 Post now",
     "posted": "✅ Posted myself",

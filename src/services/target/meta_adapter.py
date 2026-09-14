@@ -185,6 +185,17 @@ class StubMetaAdapter:
                     "http_status": 400,
                 },
             )
+        if outcome == "container_gone":
+            # 2026-09-13 23:18: four seconds after Meta reported a container
+            # ready, the publish call was answered "The requested resource
+            # does not exist" (24/2207006). Retryable — and the float
+            # recreates the container rather than re-publishing the id.
+            raise MetaRetryableError(
+                code=24,
+                subcode=2207006,
+                message="stubbed: The requested resource does not exist",
+                detail={"error_subcode": 2207006, "http_status": 400},
+            )
         if outcome == "transport":
             raise MetaLostResponse("stub transport lost")
         raise ValueError(f"unknown stub outcome: {outcome!r}")

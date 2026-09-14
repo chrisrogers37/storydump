@@ -298,6 +298,13 @@ DOORS = {
         "svc_worker",
         "SELECT * FROM fn_reaper_sweep(5, interval '1 day', interval '1 day')",
     ),
+    # The fourteenth door (076, plan 03 of the first-fetch investigation): the
+    # reaper's listing of stale approved stories, read across tenants for the
+    # reap executor's per-row park.
+    "fn_reaper_stale_approved": (
+        "svc_worker",
+        "SELECT * FROM fn_reaper_stale_approved(interval '3 days', 5)",
+    ),
     "fn_retention_batch": (
         "svc_worker",
         "SELECT * FROM fn_retention_batch('jobs_ok', interval '90 days', 5)",
@@ -903,7 +910,7 @@ class TestDoorsAreExercisedAndExclusive:
         with pytest.raises(psycopg2.errors.InsufficientPrivilege):
             _exec(other, call)
 
-    def test_the_catalog_agrees_thirteen_doors_and_these_grants(self, target):
+    def test_the_catalog_agrees_fourteen_doors_and_these_grants(self, target):
         rows = _exec(
             target["owner_stream"],
             "SELECT p.proname, r.rolname FROM pg_proc p"

@@ -69,6 +69,10 @@ class FlipOutcome(enum.Enum):
     PROCEED = "proceed"
     DEFERRED = "deferred"
     BUSY = "busy"
+    #: A cancel landed on the approved row (the float, plan 03 D3): the flip
+    #: refused it in its own WHERE, so a cancel between the pipeline's read
+    #: and its flip can never post after the card said cancelled.
+    CANCELLED = "cancelled"
 
 
 class IntentNotApproved(StorydumpError):
@@ -95,12 +99,21 @@ async def flip_to_publishing(
 ) -> FlipOutcome:
     """The `approved → publishing` flip (`02` §4), inside the caller's UoW tx.
 
-    Returns PROCEED, DEFERRED (the cap) or BUSY (key 4); raises
-    :class:`IntentNotApproved` on `(1,0)`.
-    Runs the one CTE and reads back `(debited, flipped)` — the row counts ARE
-    the decision, because a rowcount here cannot be faked the way #883's could:
-    a debited-but-not-flipped tuple is a real race, not a self-transition
-    no-op, and it is exactly what must roll back.
+    Returns PROCEED, DEFERRED (the cap), BUSY (key 4) or CANCELLED; raises
+    :class:`IntentNotApproved` when the row is not approved.
+    Runs the one CTE and reads back `(debited, flipped, was_approved,
+    cancelling)` — the row counts ARE the decision, because a rowcount here
+    cannot be faked the way #883's could: a debited-but-not-flipped tuple is
+    a real race, not a self-transition no-op, and it is exactly what must
+    roll back.
+
+    Re-entrant since the float (plan 03 D3): a story that stepped back to
+    `approved` between attempts carries `cap_consumed_on`, and the debit CTE
+    runs only when it does not — the debit it carries IS the debit, so
+    `(0,1,1)` proceeds and the cap counts the story exactly once. `COALESCE`
+    keeps `ck_publishing_debited` true on re-entry. The flip's own WHERE
+    refuses a `cancel_requested` row, closing the window between the
+    pipeline's read and its flip.
     """
     try:
         # In a SAVEPOINT: key 4's refusal (`uq_publish_exclusive`, a sibling
@@ -114,22 +127,31 @@ async def flip_to_publishing(
             row = (
                 await session.execute(
                     text(
-                        "WITH debit AS ("
+                        "WITH me AS ("
+                        "  SELECT cap_consumed_on, cancel_requested FROM post_intents"
+                        "   WHERE id = :intent AND state = 'approved'"
+                        "), debit AS ("
                         "  INSERT INTO daily_post_counts AS d"
                         "    (workspace_id, ig_account_id, local_date, count, cap_at_write)"
-                        "  VALUES (:ws, :acct, :local_date, 1, :cap)"
+                        "  SELECT :ws, :acct, :local_date, 1, :cap FROM me"
+                        "   WHERE me.cap_consumed_on IS NULL AND NOT me.cancel_requested"
                         "  ON CONFLICT (workspace_id, ig_account_id, local_date)"
                         "    DO UPDATE SET count = d.count + 1 WHERE d.count < d.cap_at_write"
                         "  RETURNING local_date"
                         "), flip AS ("
-                        "  UPDATE post_intents"
+                        "  UPDATE post_intents p"
                         "     SET state = 'publishing',"
-                        "         cap_consumed_on = (SELECT local_date FROM debit)"
-                        "   WHERE id = :intent AND state = 'approved'"
-                        "     AND EXISTS (SELECT 1 FROM debit)"
+                        "         cap_consumed_on = COALESCE(p.cap_consumed_on,"
+                        "                                    (SELECT local_date FROM debit))"
+                        "   WHERE p.id = :intent AND p.state = 'approved'"
+                        "     AND NOT p.cancel_requested"
+                        "     AND (p.cap_consumed_on IS NOT NULL"
+                        "          OR EXISTS (SELECT 1 FROM debit))"
                         "  RETURNING id"
                         ") SELECT (SELECT count(*) FROM debit) AS debited,"
-                        "         (SELECT count(*) FROM flip)  AS flipped"
+                        "         (SELECT count(*) FROM flip)  AS flipped,"
+                        "         (SELECT count(*) FROM me) AS was_approved,"
+                        "         (SELECT bool_or(cancel_requested) FROM me) AS cancelling"
                     ),
                     {
                         "ws": workspace_id,
@@ -148,11 +170,20 @@ async def flip_to_publishing(
         raise
 
     debited, flipped = int(row.debited), int(row.flipped)
-    if debited == 1 and flipped == 1:
+    was_approved = int(row.was_approved)
+    if flipped == 1 and debited in (0, 1):
+        # (1,1): a fresh debit; (0,1): re-entry on the debit the story carries.
         return FlipOutcome.PROCEED
-    if debited == 0 and flipped == 0:
+    if flipped == 0 and debited == 0:
+        if was_approved == 0:
+            # The row is not approved (publishing, terminal, gone): today's
+            # (0,0) misread that as a cap denial and deferred a row that will
+            # never flip; it is the caller's error to answer.
+            raise IntentNotApproved(f"intent {intent_id}: no approved row to flip")
+        if bool(row.cancelling):
+            return FlipOutcome.CANCELLED
         return FlipOutcome.DEFERRED
-    # (1, 0): debited but the intent was not 'approved'. Roll it all back.
+    # (1, 0): debited but the intent did not flip. Roll it all back.
     raise IntentNotApproved(
         f"intent {intent_id}: cap debited but flip matched no approved row"
         f" (debited={debited}, flipped={flipped}) — rolling back (#862 §4)"

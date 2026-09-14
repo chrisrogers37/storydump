@@ -283,8 +283,10 @@ class TestAgainstTheRealDocs:
         # dry-run `published_via` (073, owner ruling 2026-09-10) makes it 31;
         # §20's `ix_jobs_leased_lane_ws` for K claimers (074, tap plan phase
         # 3b) makes it 32; §21's `ix_outbox_ambiguous_age` for the sender's
-        # lost-answer resolution (075, #1297) makes it 33.
-        assert classes.count("normative") == 33
+        # lost-answer resolution (075, #1297) makes it 33; §22's two float
+        # edges and the reaper's withdrawn approved leg (076, plan 03) make
+        # it 34.
+        assert classes.count("normative") == 34
         assert classes.count("illustrative") == 4
 
     def test_real_stream_expands_the_fifteen_policies(self):

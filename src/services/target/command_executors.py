@@ -626,9 +626,11 @@ async def resolve_review(session, command: Command) -> CommandResult:
         await _end_op_by_verdict(
             session, op, outcome="failed", verdict=NOT_POSTED, command=command
         )
-    attempts = dict(intent.get("attempts_by_step") or {})
-    attempts.setdefault("v", 1)
-    attempts["retries"] = int(attempts.get("retries") or 0) + 1
+    # A fresh float (plan 03 D2): the class counters and the float's start are
+    # zeroed — a story parked after six fetch waits must not re-park on its
+    # first refusal — and only the retry count is kept.
+    previous = dict(intent.get("attempts_by_step") or {})
+    attempts = {"v": 1, "retries": int(previous.get("retries") or 0) + 1}
     flipped = await publish_cap.resolve_retry(
         session,
         intent_id=intent_id,
