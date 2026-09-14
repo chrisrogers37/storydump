@@ -124,9 +124,44 @@ In value order. F1 and F3 are the ones this investigation would have been a ledg
 
 - The decisive experiment: it makes container calls on the owner's real account, which is a posting-related action and waits for the owner's explicit approval. (The Railway login was restored on 09-13; the legacy record and the two Cloudinary experiments above ran once it was.)
 
+## The evening of 09-13: a real burst with the evidence on, and the twelve-trial run from the worker
+
+**The burst (23:13–23:40, the owner tapping):** 26 taps in 95 s, 17 approved, 9 skipped, every tap answered. Every container call now carries the worker's own read of the frame and Meta's answer (#1302, deployed 22:04).
+
+| Story | The worker's read, just before the call | Meta | Elapsed |
+|---|---|---|---|
+| A8A4EA44, first | JPEG, 133 KB, 46 ms | refused 9004/2207052 | 704 ms |
+| A8A4EA44, +32 s | JPEG, 166 ms | accepted | 3.2 s |
+| 0F1CF39F, first / +31 s / +92 s | JPEG each time | refused / refused / accepted | 378 / 538 / 3001 ms |
+| BC4F427C, first / +31 s / +92 s | JPEG each time | refused / refused / accepted | 307 / 589 / 3756 ms |
+| nine others, first | JPEG, 40–173 ms | accepted | 2.8–4.8 s |
+
+Meta's full text, now on the ledger: title "Media download has failed. The media URI doesn't meet our requirements.", message "The media could not be fetched from this URI: <the exact url we sent, signature intact>", `is_transient: false`, HTTP 400, a `fbtrace_id` each time. So Meta's own fetch fails, on a url the worker read as a valid JPEG from the same region within the previous second, and the same url is accepted 30–90 s later. Retries at ~30 s failed 3 of 4 times; at ~90 s succeeded 2 of 2.
+
+**A second Meta-side surprise:** BC4F427C's container, reported ready, was answered `24/2207006 "The requested resource does not exist"` on the publish call four seconds after creation. The pipeline classed it retryable (right) but the two fetch refusals had spent attempts, so it landed on the 15-minute rung with the same container id, holding the account's slot while seven siblings polled behind it; the retry at +15 min published that same container. Meta's own guidance for 2207006 is to create a new container.
+
+**The twelve-trial run (23:1x–23:2x, inside the worker container, real already-posted files, each uploaded twice, 24 assets destroyed, nothing published):**
+
+| Arm | Accepted first try | Refused |
+|---|---|---|
+| Public, unsigned, on the same eager frame (the legacy shape) | 12 of 12 | 0 |
+| Authenticated, signed (the production shape) | 10 of 12 | 2 |
+
+Trial 1 (photo-output 103): authenticated refused at 0 s; a different url and a separately derived frame of the SAME original (`dpr_1.0`) refused at once; the plain url refused at +30 s; accepted at +150 s. Trial 2 (IMG_7452): refused at 0 s; the different url accepted 5 s later; the plain url accepted at +30 s. The public copy of the identical bytes, uploaded seconds earlier, was accepted every time.
+
+**What is settled.** Over 49 first fetches of authenticated assets (three days of production plus this run) Meta refused 13, ≈ 27 %; over 12 public uploads tonight and 1,609 legacy posts, none of that kind. The refusal belongs to the authenticated (signed) delivery path of a freshly uploaded asset for a window of seconds to a few minutes on Meta's side of the CDN. It is not the url or its cache key (a fresh key was refused too), not the file, not the hour, not the worker's region, and a public asset of the same bytes has no such window. Mechanism (a) stands; (b) and (c) are out.
+
+**The ruling this asks for (owner):** F0 — the transit asset Meta reads becomes `type=upload` with the unguessable id it already has (destroy-on-post and the 24 h sweep unchanged); FC-3.3 is amended and, if the url stays unsigned, FC-3.2. The url can probably stay signed (FC-3.2 kept literally); signed-plus-public was not an arm tonight — one more run of the same script with that arm settles it. F1 (serve the frame from our API) keeps both constraints and also fixes it, at the cost of a route, a token and streaming.
+
+**Added to the list tonight:**
+- **F8 — a publish-time `24/2207006` recreates the container** (step back to `transit_uploaded`, as the dead-container path does) on its own rung, rather than re-publishing an id Meta says it cannot find.
+- **F5 and F6 are no longer theoretical:** an unrelated failure inherited the 15-minute rung from two fetch refusals, and seven stories waited behind one for that long.
+- **F9 (nit) — `post_intents.last_error` is not cleared when a story posts;** BC4F427C reads as posted with a code-24 error beside it.
+
 ## Verification checklist
 
 - [x] Experiment run once from the developer machine: 8 of 8 accepted (above).
-- [ ] Experiment rerun from inside the worker container, or the Cloudinary error report read for the timestamps above.
+- [x] Experiment rerun from inside the worker container: public 12 of 12, authenticated 10 of 12 (above).
+- [ ] One more arm: public AND signed, to decide whether FC-3.2 can be kept literally under F0.
 - [x] Legacy record read: 1,609 API posts, 20 `permanent_reject` locks (§7).
 - [ ] Each fix above lands as its own PR with a gate that reproduces the refused fetch (a probe answering a GIF; a first call refused, a fresh key accepted).
