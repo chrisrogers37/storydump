@@ -149,9 +149,19 @@ Meta's full text, now on the ledger: title "Media download has failed. The media
 
 Trial 1 (photo-output 103): authenticated refused at 0 s; a different url and a separately derived frame of the SAME original (`dpr_1.0`) refused at once; the plain url refused at +30 s; accepted at +150 s. Trial 2 (IMG_7452): refused at 0 s; the different url accepted 5 s later; the plain url accepted at +30 s. The public copy of the identical bytes, uploaded seconds earlier, was accepted every time.
 
-**What is settled.** Over 49 first fetches of authenticated assets (three days of production plus this run) Meta refused 13, ≈ 27 %; over 12 public uploads tonight and 1,609 legacy posts, none of that kind. The refusal belongs to the authenticated (signed) delivery path of a freshly uploaded asset for a window of seconds to a few minutes on Meta's side of the CDN. It is not the url or its cache key (a fresh key was refused too), not the file, not the hour, not the worker's region, and a public asset of the same bytes has no such window. Mechanism (a) stands; (b) and (c) are out.
+**What last night seemed to settle, and what the morning run took back.** Over 49 first fetches of authenticated assets Meta had refused 13, ≈ 27 %, against none of the 12 public copies and the legacy's 1.2 %, so the authenticated path looked like the difference. **The 09-14 09:20 run (twelve trials, three arms per trial: authenticated signed, public unsigned, public signed) refused all three at the same rate.**
 
-**The ruling this asks for (owner):** F0 — the transit asset Meta reads becomes `type=upload` with the unguessable id it already has (destroy-on-post and the 24 h sweep unchanged); FC-3.3 is amended and, if the url stays unsigned, FC-3.2. The url can probably stay signed (FC-3.2 kept literally); signed-plus-public was not an arm tonight — one more run of the same script with that arm settles it. F1 (serve the frame from our API) keeps both constraints and also fixes it, at the cost of a route, a token and streaming.
+| Arm, 09-14 morning, inside the worker | Accepted first try | Refused |
+|---|---|---|
+| Authenticated, signed (production) | 8 of 12 | 4 |
+| Public, unsigned (legacy shape) | 8 of 12 | 4 |
+| Public, signed | 9 of 12 | 3 |
+
+Combined over both runs: authenticated 6 of 24 refused, public unsigned 4 of 24, public signed 3 of 12 — last night's clean public arm was within chance (a 17 % rate gives 0 of 12 about one time in nine). **The delivery type is not the difference.** What holds across every run: the refusal is on a freshly uploaded asset within its first minutes, on a url the worker had just read as a valid JPEG; a refused url tends to stay refused for 30–120 s (accepted at +30 s in 10 of 17 retries, at +120 s in 4 of 6); and a DIFFERENT url of the same original (`dpr_1.0`, a separately derived frame) was accepted at once in 5 of 6 tries. The legacy's 1.2 % over eight months is real but from another era of Meta's and Cloudinary's infrastructure and is not reproducible; it no longer points at the url type.
+
+**Mechanism, restated:** something between Meta's fetcher and Cloudinary's CDN refuses a fresh asset's first fetch about a quarter of the time and remembers the refusal per url for a minute or two. Whether the memory is at the CDN edge or inside Meta's fetcher is not visible from our side; the fresh-url success says it is keyed by url, not by asset.
+
+**What follows for the fixes.** F0 (a public transit asset) is withdrawn: it does not avoid the refusal, and there is no constraint ruling to ask for. **F1 — serve the frame to Meta from our own API** is the structural fix: Meta's path then has no CDN at all, the bytes come from the side that has read them (the readiness probe has never once failed from the worker's vantage), and every fetch Meta makes is logged. **F4′ — on a refusal, retry at once with a fresh derived url of the same original** (5 of 6 accepted immediately; one extra derivation) is the cheap mitigation that can ship first, alongside F5, F6 and F8.
 
 **Added to the list tonight:**
 - **F8 — a publish-time `24/2207006` recreates the container** (step back to `transit_uploaded`, as the dead-container path does) on its own rung, rather than re-publishing an id Meta says it cannot find.
@@ -162,6 +172,6 @@ Trial 1 (photo-output 103): authenticated refused at 0 s; a different url and a 
 
 - [x] Experiment run once from the developer machine: 8 of 8 accepted (above).
 - [x] Experiment rerun from inside the worker container: public 12 of 12, authenticated 10 of 12 (above).
-- [ ] One more arm: public AND signed, to decide whether FC-3.2 can be kept literally under F0.
+- [x] One more arm: public AND signed — refused 3 of 12, like the others (09-14 morning). F0 withdrawn.
 - [x] Legacy record read: 1,609 API posts, 20 `permanent_reject` locks (§7).
 - [ ] Each fix above lands as its own PR with a gate that reproduces the refused fetch (a probe answering a GIF; a first call refused, a fresh key accepted).
