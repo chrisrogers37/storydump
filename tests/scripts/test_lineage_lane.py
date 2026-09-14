@@ -362,6 +362,10 @@ class TestTheBoundaryIsDerivedAndLoud:
             # 075: ix_outbox_ambiguous_age — a binding's aged ambiguous rows for
             # the sender's lost-answer resolution (07 §21, #1297).
             "075_outbox_ambiguous_age_index.sql",
+            # 076: the float's two legal edges (publishing → approved,
+            # approved → review_required) and the reaper's approved leg
+            # withdrawn (07 §22, plan 03 of the first-fetch investigation).
+            "076_publish_wait_edges.sql",
         ], (
             f"the target lineage is {above}. If you are landing the next F.2"
             " increment, add it here — deliberately, and at the end: arm (b)"

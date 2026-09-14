@@ -7,7 +7,8 @@ tables, columns (type + nullability), CHECK constraints (by name AND normalized
 definition), uniqueness semantics and foreign keys.
 
 **Deliberately absent, and this increment has more of it than the last two.**
-055 carries four trigger functions, eleven triggers and 27 seeded rows; none of
+055 carries four trigger functions, eleven triggers and 27 seeded rows (29 with
+076's two float edges); none of
 that is mirrored here. The comparator is relation-scoped, so restating a
 `plpgsql` body or a seed would be an unchecked second copy — the drift class
 these modules exist to prevent. The state machine is enforced by
@@ -298,7 +299,7 @@ class DailyPostCount(TargetBase):
 
 class PostIntentTransition(TargetBase):
     """The legal-edge reference table. `trg_intent_guard` reads it on every
-    UPDATE, so the 27 rows migration 055 seeds are load-bearing rather than
+    UPDATE, so the 27 rows migration 055 seeds (29 with 076) are load-bearing rather than
     fixture data — an unseeded copy of this schema rejects every transition.
 
     Insert-only (§0 class): edges are added or deleted, never updated, so there

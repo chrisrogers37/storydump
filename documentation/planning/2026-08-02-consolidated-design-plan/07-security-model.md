@@ -1104,3 +1104,109 @@ no such check and is resent under the cap as before.
 -- became a full scan of an unbounded table. The partial index serves exactly both predicates.
 CREATE INDEX ix_outbox_ambiguous_age ON channel_outbox (binding_id, updated_at) WHERE state = 'ambiguous';
 ```
+
+### §22. The float's two legal edges, the reaper's approved leg withdrawn, and the fourteenth door that lists for it (076, plan 03 of the first-fetch investigation)
+
+**Why:** an approved story that must wait between attempts (Instagram refused its frame's
+fetch, lost its container, rate-limited it, or the cap is spent) used to wait as `publishing`,
+holding the account's publish slot (key 4) for the whole wait — on 2026-09-13 seven stories
+waited fifteen minutes behind one. The float (plan 03) has it step back to `approved` with its
+progress and its cap debit intact and re-enter through the same flip, made re-entrant in
+`publish_cap.flip_to_publishing` (no second debit when `cap_consumed_on` is set; the flip refuses
+a `cancel_requested` row in its own WHERE). And a decision the workspace made is never silently
+undone: a dead job, or the reaper's 72-hour safety net, parks an approved story for the
+workspace's review — the card with its three resolutions and one notice — instead of leaving it
+Approved forever or expiring it. Two edges for that; the reaper's `approved → expired` leg is
+withdrawn from the door because parking must speak to the workspace, which a SQL door cannot, so
+the reap executor does it in Python after the sweep. The door's signature, owner and grant are
+unchanged; `approved → expired` stays seeded but is no longer taken.
+
+**The fourteenth door, `fn_reaper_stale_approved`** (both review lenses of the float PR): the reap
+job is a system singleton with `app.tenant_id = ''`, under which a plain SELECT over
+`post_intents` matches nothing once the worker runs as `svc_worker` (`p_tenant`) — the same
+shape the reconciler's docstring records. So the executor's leg LISTS through a SECURITY DEFINER
+read as `svc_maintenance` (every row: `p_maint_intents`, `p_maint_ws`), then asserts each row's
+tenant (`apply_gucs`) before it parks — or, for a row the workspace had flagged
+`cancel_requested` with no job left to honour it, refunds the debit it carries and cancels it.
+A paused workspace's stories wait on purpose and are not listed. EXECUTE to `svc_worker` only;
+the CREATE bracket is 059's and 062's.
+
+```sql
+-- The float (plan 03, 2026-09-14): a story that must wait between attempts steps back from
+-- `publishing` to `approved`, keeping its progress and its cap debit, so the account's publish
+-- slot (key 4) is free while it waits; and a decision the workspace made is never silently
+-- undone — a dead job or the reaper's safety net parks an approved story for the workspace's
+-- review instead of expiring it. Two edges; the `02` §4 matrix becomes 29.
+INSERT INTO post_intent_transitions (from_state, to_state)
+VALUES ('publishing', 'approved'), ('approved', 'review_required')
+ON CONFLICT DO NOTHING;
+
+-- The reaper's `approved → expired` leg is withdrawn: an approved story past `p_approved_ttl` is
+-- parked for review by the reap executor (`scheduler.execute_reap_expired`), which can restate
+-- the card and tell the workspace — a SQL door cannot. The parameter stays so the signature, the
+-- grant and the executor's call are unchanged. Every other leg is 059's, verbatim.
+CREATE OR REPLACE FUNCTION fn_reaper_sweep(p_lim int, p_approval_ttl interval, p_approved_ttl interval)
+RETURNS int LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+DECLARE n int := 0; c int; rem int := GREATEST(p_lim, 0);
+BEGIN
+  PERFORM set_config('app.actor_kind', 'reaper', true);
+  UPDATE jobs SET state = 'ready', locked_by = NULL, lease_token = NULL, locked_until = NULL
+   WHERE id IN (SELECT id FROM jobs
+                 WHERE state = 'leased' AND locked_until < now() LIMIT rem);
+  GET DIAGNOSTICS c = ROW_COUNT; n := n + c; rem := rem - c;
+  UPDATE post_intents SET state = 'expired'
+   WHERE id IN (SELECT id FROM post_intents
+                 WHERE state IN ('scheduled','prompt_pending') AND schedule_slot_at < now()
+                 LIMIT rem);
+  GET DIAGNOSTICS c = ROW_COUNT; n := n + c; rem := rem - c;
+  UPDATE post_intents i SET state = 'expired'
+   WHERE i.id IN (
+     SELECT i2.id FROM post_intents i2 JOIN workspaces w ON w.id = i2.workspace_id
+      WHERE i2.state = 'awaiting_approval'
+        AND i2.entered_state_at
+            < now() - COALESCE(w.approval_ttl_minutes * interval '1 minute', p_approval_ttl)
+      LIMIT rem);
+  GET DIAGNOSTICS c = ROW_COUNT; n := n + c; rem := rem - c;
+  DELETE FROM post_locks
+   WHERE id IN (SELECT id FROM post_locks
+                 WHERE expires_at IS NOT NULL AND expires_at < now() LIMIT rem);
+  GET DIAGNOSTICS c = ROW_COUNT; n := n + c; rem := rem - c;
+  UPDATE workspace_invitations SET state = 'expired'
+   WHERE id IN (SELECT id FROM workspace_invitations
+                 WHERE state = 'pending' AND expires_at < now() LIMIT rem);
+  GET DIAGNOSTICS c = ROW_COUNT; n := n + c; rem := rem - c;
+  DELETE FROM onboarding_sessions
+   WHERE id IN (SELECT id FROM onboarding_sessions WHERE expires_at < now() LIMIT rem);
+  GET DIAGNOSTICS c = ROW_COUNT; n := n + c;
+  RETURN n;
+END $$;
+
+-- The listing door for the executor's approved leg. The reap job is a system singleton
+-- (`app.tenant_id = ''`), under which a plain SELECT over post_intents matches nothing once the
+-- worker runs as svc_worker (`p_tenant`; the reconciler's own lesson, `reconciler.py`). SECURITY
+-- DEFINER as svc_maintenance, which reads every row (`p_maint_intents`, `p_maint_ws`); the
+-- executor asserts each row's tenant before it parks or cancels it. A paused workspace's stories
+-- wait on purpose and are not listed. The fourteenth `02` §7 door. Bracketed as 059 and 062:
+-- ALTER FUNCTION … OWNER TO needs the new owner to hold CREATE on the schema, granted here and
+-- revoked below; the steady-state matrix never carries CREATE for a door owner.
+GRANT CREATE ON SCHEMA public TO svc_maintenance;
+
+CREATE FUNCTION fn_reaper_stale_approved(p_approved_ttl interval, p_lim int)
+RETURNS TABLE (o_intent_id uuid, o_workspace_id uuid)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+  SELECT i.id, i.workspace_id
+    FROM post_intents i JOIN workspaces w ON w.id = i.workspace_id
+   WHERE i.state = 'approved' AND NOT w.is_paused
+     AND i.entered_state_at < now() - p_approved_ttl
+   ORDER BY i.entered_state_at
+   LIMIT GREATEST(p_lim, 0)
+$$;
+
+ALTER FUNCTION fn_reaper_stale_approved(interval, int) OWNER TO svc_maintenance;
+
+REVOKE CREATE ON SCHEMA public FROM svc_maintenance;
+
+REVOKE ALL ON FUNCTION fn_reaper_stale_approved(interval, int) FROM PUBLIC;
+
+GRANT EXECUTE ON FUNCTION fn_reaper_stale_approved(interval, int) TO svc_worker;
+```

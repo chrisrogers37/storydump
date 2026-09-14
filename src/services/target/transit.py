@@ -89,6 +89,11 @@ STORY_FORMATS = {"image": "jpg", "video": "mp4"}
 #: floor's byte cap is the backstop should a range ever be ignored.
 PROBE_RANGE_BYTES = 1024
 PROBE_MAX_RESPONSE_BYTES = 64 * 1024
+#: The float (plan 03 of the first-fetch investigation, D1): a refused fetch is
+#: retried with a url Meta has never seen for this story — the same chain plus
+#: `n` of this no-op step (validated on the real cloud 2026-09-13/14: a
+#: distinct signed url and a distinct derived asset, identical bytes).
+URL_VARIANT_STEP = {"dpr": "1.0"}
 #: An ISO base-media file (MP4/MOV) opens with a 4-byte size and a 4-byte box
 #: type; `ftyp` is usual, but `free`/`skip`/`wide`/`mdat`/`moov` first are
 #: legal and appear (adversarial review of the 2026-09-13 PR).
@@ -429,6 +434,7 @@ class TransitStore:
         media_kind: str,
         budget_s: Optional[float] = None,
         sleep: Callable[[float], Any] = asyncio.sleep,
+        variant: int = 0,
     ) -> Readiness:
         """Whether the story frame at :meth:`delivery_url` serves as media
         NOW — the check the pipeline makes before it hands Meta the URL.
@@ -437,7 +443,9 @@ class TransitStore:
         or *budget_s* is spent. A probe error is "not yet", never an
         exception: the caller's ladder decides. The answer is truthy iff
         ready and carries the last probe's observation for the ledger."""
-        url = self.delivery_url(transit_asset_ref, media_kind=media_kind)
+        url = self.delivery_url(
+            transit_asset_ref, media_kind=media_kind, variant=variant
+        )
         if budget_s is None:
             budget_s = READY_BUDGET_S.get(media_kind, READY_BUDGET_S["image"])
         deadline = self._now_fn() + timedelta(seconds=budget_s)
@@ -533,16 +541,23 @@ class TransitStore:
 
     # -- FC-3.2 (D38): delivery ------------------------------------------------
 
-    def delivery_url(self, transit_asset_ref: str, *, media_kind: str) -> str:
+    def delivery_url(
+        self, transit_asset_ref: str, *, media_kind: str, variant: int = 0
+    ) -> str:
         """The signed, non-expiring delivery URL Meta pulls the asset from —
         framed for a story (:func:`story_transformation`): the signature
         covers the transformation, so the framed derivation is the only one
-        an authenticated asset serves."""
+        an authenticated asset serves. *variant* `n > 0` appends `n` no-op
+        steps (`URL_VARIANT_STEP`): a url Meta has never seen for this
+        story, with the same bytes behind it (the float, plan 03 D1)."""
+        if variant < 0:
+            raise ValueError(f"a url variant counts up from zero, not {variant}")
         url, _options = self._url_fn(
             transit_asset_ref,
             transformation=story_transformation(
                 transit_asset_ref, media_kind=media_kind
-            ),
+            )
+            + [URL_VARIANT_STEP] * variant,
             # Meta's story spec: a JPEG image, an MP4/MOV video. The source
             # may be anything Drive holds (HEIC from a phone, WEBP, WEBM);
             # the derivation is delivered in the format Meta accepts, and

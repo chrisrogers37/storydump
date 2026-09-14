@@ -448,3 +448,65 @@ class TestARendersAgainForAResend:
         )
         payload = await prompts.rerender_prompt(s, intent_id=INTENT)
         assert payload is not None and "v1:post:" not in str(payload)
+
+
+class TestWaitingLine:
+    """The approved card's line while its story waits for a slot that is
+    hours away (plan 03, UX principle 1): the state's word and when it posts,
+    in the workspace's zone. Structural review of #1306: the gate pinned only
+    the prefix, so a wrong day or time passed."""
+
+    NOW = datetime(2026, 9, 14, 20, 0, tzinfo=timezone.utc)  # 16:00 in New York
+    TZ = "America/New_York"
+
+    def test_a_slot_later_today(self):
+        from datetime import timedelta
+
+        line = prompts.waiting_line(
+            self.NOW + timedelta(hours=2), tz=self.TZ, now=self.NOW
+        )
+        assert line == "✅ Approved · posts today 18:00"
+
+    def test_a_slot_tomorrow_morning(self):
+        from datetime import timedelta
+
+        slot = self.NOW + timedelta(hours=17)  # 09:00 tomorrow in New York
+        assert (
+            prompts.waiting_line(slot, tz=self.TZ, now=self.NOW)
+            == "✅ Approved · posts tomorrow 09:00"
+        )
+
+    def test_a_slot_days_away_names_the_weekday(self):
+        from datetime import timedelta
+        from zoneinfo import ZoneInfo
+
+        slot = self.NOW + timedelta(days=3)
+        day = slot.astimezone(ZoneInfo(self.TZ)).strftime("%a")
+        assert (
+            prompts.waiting_line(slot, tz=self.TZ, now=self.NOW)
+            == f"✅ Approved · posts {day} 16:00"
+        )
+
+    def test_the_days_cap_spent_promises_tomorrow_without_a_time(self):
+        """The local cap is at its count: a slot later today cannot post, and
+        the clock has not chosen tomorrow's time yet."""
+        from datetime import timedelta
+
+        slot = self.NOW + timedelta(hours=2)
+        line = prompts.waiting_line(slot, tz=self.TZ, now=self.NOW, day_spent=True)
+        assert line == "✅ Approved · posts tomorrow"
+
+    def test_the_days_cap_spent_with_tomorrows_slot_keeps_its_time(self):
+        from datetime import timedelta
+
+        slot = self.NOW + timedelta(hours=17)
+        line = prompts.waiting_line(slot, tz=self.TZ, now=self.NOW, day_spent=True)
+        assert line == "✅ Approved · posts tomorrow 09:00"
+
+    def test_an_unknown_zone_reads_as_utc(self):
+        from datetime import timedelta
+
+        line = prompts.waiting_line(
+            self.NOW + timedelta(hours=2), tz="Mars/Olympus", now=self.NOW
+        )
+        assert line == "✅ Approved · posts today 22:00"

@@ -329,6 +329,26 @@ class TestTheReviewCardIsTheTenantsToResolve:
         ], "the human verdict ends the ambiguous op BEFORE a new generation exists"
         assert len(parked["retries"]) == 1 and len(parked["jobs"]) == 1
 
+    async def test_retry_starts_a_fresh_float_with_zeroed_counters(self, parked):
+        """The float (plan 03 D2): a story parked after six fetch waits must
+        not re-park on its first refusal, and the next notice must not report
+        a float that never ran — "post again" zeroes the class counters and
+        the float's start, keeping only the retry count."""
+        parked["op"] = {"id": "op-9", "state": "failed"}
+        parked["row"]["attempts_by_step"] = {
+            "v": 1,
+            "retries": 1,
+            "fetch_refusals": 28,
+            "fetch_waits": 6,
+            "container_gone": 1,
+            "busy_waits": 2,
+            "float_since": "2026-09-14T00:00:00+00:00",
+        }
+        out = await command_executors.resolve_review(_Session(), _review("retry"))
+        assert out.outcome == "enqueued"
+        (_intent_id, _ws, _acct, attempts) = parked["retries"][0]
+        assert attempts == {"v": 1, "retries": 2}
+
     async def test_retry_after_a_definitive_failure_needs_no_verdict(self, parked):
         parked["op"] = {"id": "op-9", "state": "failed"}
         out = await command_executors.resolve_review(_Session(), _review("retry"))

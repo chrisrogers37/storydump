@@ -492,3 +492,78 @@ class TestPass5ResolveEffects:
         _run(fail_with_refund())
         assert _bucket_count(cap_db) == 0, "the refund returned the recorded day"
         assert _intent(cap_db, intent)["cap_refunded_at"] is not None
+
+
+class TestReEntry:
+    """The float (plan 03, D3): a story that stepped back to `approved` with
+    its debit re-enters through the same flip without a second debit; a
+    cancel that landed while it waited wins over the flip; key 4 still
+    refuses it while a sibling is mid-call."""
+
+    def _stepped_back(self, cap_db):
+        intent = _new_intent(cap_db)  # approved, undebited
+        assert _run(_flip(cap_db["engine"], cap_db, intent)) is FlipOutcome.PROCEED
+        # The hop the pipeline makes on a wait (edge 076): progress and the
+        # debit stay on the row.
+        _exec(
+            cap_db,
+            "UPDATE post_intents SET state = 'approved',"
+            " publish_step = 'transit_uploaded' WHERE id = %s",
+            (intent,),
+        )
+        return intent
+
+    def test_a_stepped_back_story_re_enters_without_a_second_debit(self, cap_db):
+        _clear_bucket(cap_db)
+        intent = self._stepped_back(cap_db)
+        assert _bucket_count(cap_db) == 1
+
+        outcome = _run(_flip(cap_db["engine"], cap_db, intent))
+
+        assert outcome is FlipOutcome.PROCEED
+        assert _bucket_count(cap_db) == 1, "the debit it carries IS the debit"
+        row = _intent(cap_db, intent)
+        assert row["state"] == "publishing" and str(row["cap_consumed_on"]) == str(DAY)
+        assert row["publish_step"] == "transit_uploaded", "progress survives the hop"
+
+    def test_a_cancel_that_landed_while_waiting_wins_over_the_flip(self, cap_db):
+        _clear_bucket(cap_db)
+        intent = self._stepped_back(cap_db)
+        _exec(
+            cap_db,
+            "UPDATE post_intents SET cancel_requested = true WHERE id = %s",
+            (intent,),
+        )
+
+        outcome = _run(_flip(cap_db["engine"], cap_db, intent))
+
+        assert outcome is FlipOutcome.CANCELLED
+        assert _intent(cap_db, intent)["state"] == "approved"
+        assert _bucket_count(cap_db) == 1, "nothing debited, nothing refunded here"
+
+    def test_a_fresh_cancel_flagged_approval_never_debits(self, cap_db):
+        _clear_bucket(cap_db)
+        intent = _new_intent(cap_db)
+        _exec(
+            cap_db,
+            "UPDATE post_intents SET cancel_requested = true WHERE id = %s",
+            (intent,),
+        )
+        assert _run(_flip(cap_db["engine"], cap_db, intent)) is FlipOutcome.CANCELLED
+        assert _bucket_count(cap_db) is None
+
+    def test_re_entry_still_meets_key4(self, cap_db):
+        _clear_bucket(cap_db)
+        ref = f"acct-{uuid.uuid4()}"
+        waiting = _new_intent(cap_db, account_ref=ref)
+        assert _run(_flip(cap_db["engine"], cap_db, waiting)) is FlipOutcome.PROCEED
+        _exec(
+            cap_db,
+            "UPDATE post_intents SET state = 'approved' WHERE id = %s",
+            (waiting,),
+        )
+        _new_intent(cap_db, state="publishing", account_ref=ref)  # a sibling mid-call
+
+        assert _run(_flip(cap_db["engine"], cap_db, waiting)) is FlipOutcome.BUSY
+        assert _bucket_count(cap_db) == 1
+        assert _intent(cap_db, waiting)["state"] == "approved"

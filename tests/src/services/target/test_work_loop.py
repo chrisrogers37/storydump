@@ -1155,18 +1155,32 @@ class TestTheBudgetCeiling:
             for sql, _ in session.statements
         )
 
-    async def test_a_publish_job_the_loop_fails_tells_the_workspace(self, monkeypatch):
+    async def test_a_publish_job_the_loop_fails_parks_its_story_for_review(
+        self, monkeypatch
+    ):
         """Only `approve` mints `publish_pipeline`; an exception that ESCAPES the
-        pipeline past the ceiling would strand the intent with nobody told."""
+        pipeline past the ceiling would strand the intent with nobody told.
+        Plan 03: the story is parked for the workspace's review through the
+        pipeline's own door (the card with its buttons, one honest line) —
+        the generic exhausted notice is not the answer for a story."""
+        from src.services.target import publish_pipeline
+
+        parked = []
+
+        async def park_exhausted(session, job):
+            parked.append(job["id"])
+            return True
 
         async def executor(session, job):
             raise RuntimeError("pool timeout")
 
+        monkeypatch.setattr(publish_pipeline, "park_exhausted", park_exhausted)
         loop, calls = self._loop(monkeypatch, executor=executor)
         loop._registry["publish_pipeline"] = executor
-        await loop._run_job(self._job(kind="publish_pipeline", attempts=5))
+        job = self._job(kind="publish_pipeline", attempts=5)
+        await loop._run_job(job)
         assert calls["finalized"] == ["failed"]
-        assert calls["notices"][0][2] == work_loop.FAILURE_NOTICES["publish_pipeline"]
+        assert parked == [job["id"]] and calls["notices"] == []
 
     async def test_a_notice_that_cannot_be_written_does_not_stop_the_finalize(
         self, monkeypatch
@@ -1598,3 +1612,33 @@ class TestAnExecutorThatOwnsItsTransactions:
             entry = registry[kind]
             assert not hasattr(entry, "reason"), f"{kind} must be live here"
             assert getattr(entry, "owns_transactions", False), kind
+
+
+class TestADeadPublishJobParksItsStory:
+    """Plan 03: a `publish_pipeline` job whose budget is spent parks its story
+    for the workspace's review through the pipeline's own door — never the
+    generic exhausted notice alone, which would leave the card reading
+    Approved forever."""
+
+    async def test_the_exhausted_notice_routes_a_publish_job_to_the_park(
+        self, monkeypatch
+    ):
+        from src.services.target import publish_pipeline
+
+        parked, fanned = [], []
+
+        async def park_exhausted(session, job):
+            parked.append(job["id"])
+
+        async def fanout_notification(*a, **k):  # pragma: no cover — must not run
+            fanned.append(k)
+
+        monkeypatch.setattr(publish_pipeline, "park_exhausted", park_exhausted)
+        monkeypatch.setattr(
+            work_loop.outbox, "fanout_notification", fanout_notification
+        )
+        await work_loop._notify_exhausted(
+            _FakeSession(),
+            {"id": "j1", "kind": "publish_pipeline", "workspace_id": "ws"},
+        )
+        assert parked == ["j1"] and fanned == []
