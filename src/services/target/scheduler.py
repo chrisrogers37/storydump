@@ -515,7 +515,9 @@ async def execute_reap_expired(
     is the R6 defect the door's own comment records (independent per-leg limits
     made the sweep 7× its bound).
     """
-    return (
+    from src.services.target import publish_pipeline  # noqa: PLC0415 — cycle
+
+    swept = (
         await session.execute(
             text(
                 "SELECT fn_reaper_sweep(:lim, make_interval(secs => :a),"
@@ -524,6 +526,18 @@ async def execute_reap_expired(
             {"lim": limit, "a": approval_ttl_seconds, "b": approved_ttl_seconds},
         )
     ).scalar()
+    # The approved leg left the door with 076 (plan 03): an approved story
+    # past its TTL is parked for the workspace's review, which must restate
+    # its card and speak — a SQL door cannot. Bounded by the same limit.
+    remaining = max(0, int(limit) - int(swept or 0))
+    parked = (
+        await publish_pipeline.park_stale_approved(
+            session, older_than_seconds=approved_ttl_seconds, limit=remaining
+        )
+        if remaining
+        else 0
+    )
+    return int(swept or 0) + parked
 
 
 async def execute_reap_transit_assets(

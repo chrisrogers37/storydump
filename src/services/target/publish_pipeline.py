@@ -41,14 +41,16 @@ advisory pre-check "immediately before the §4 flip transaction" AND values it
 as "skipping doomed container/transit work" — both hold only if the flip
 precedes that work. The intent is `publishing` throughout the ladder.
 
-**Error 9 leaves the intent IN `publishing`.** There is no
-`publishing → approved` edge in the seeded matrix, so "same path as a local
-cap denial" (#915) means the defer MECHANICS — reschedule to the account's
-next slot + `cap_deferred` audit row — not the intent state. The permit
-resolves `failed` (error 9 is Meta saying the publish definitively did not
-happen — exactly §6's "confirmed-safe failure"), so the next attempt permits
-generation+1 and calls again. Key 4 stays held while parked, which is
-CORRECT: a sibling intent on the same real account would hit the same cap.
+**A story never waits inside the slot (the float, plan 03, 2026-09-14).**
+Every wait between attempts — a refused fetch's round spent, a container Meta
+cannot find, a rate limit, a pending poll, error 9 — steps the intent back
+`publishing → approved` (edge 076) with `publish_step`, the transit asset and
+the cap debit intact, so key 4 is held only for the seconds of a call and any
+number of stories wait side by side; re-entry is `flip_to_publishing`, made
+re-entrant (no second debit). Error 9's permit resolves `failed` (Meta saying
+the publish definitively did not happen — §6's "confirmed-safe failure"), so
+the next attempt permits generation+1 and calls again, and the card says when
+("✅ Approved · posts tomorrow 09:00").
 
 **A deferral restores the attempt the claim consumed** (`reschedule_job`
 docstring carries the §4/§6 derivation); a retryable failure keeps it, and
@@ -146,13 +148,25 @@ DEFERRED_CAP = "deferred_cap"
 #: publish takes seconds; a cap denial waits for the next product slot
 #: instead, which is hours (adversarial review of #1301).
 DEFERRED_BUSY = "deferred_busy"
-BUSY_RETRY_SECONDS = 20
-#: Meta's "media could not be fetched" (9004) is a fetch losing a race, not the
-#: file (2026-09-11, -12): its own short ladder, because while the intent is
-#: `publishing` it holds the account (key 4) and the bulk ladder's hour-long
-#: rung would block every sibling for that hour. Five attempts park it for the
-#: workspace's review in about eight minutes.
-FETCH_RETRY_SECONDS = (30, 60, 120, 300)
+#: A busy re-check backs off (the float, plan 03): a flat 20 s behind a long
+#: hold would turn N waiting siblings into thousands of claims a day each.
+BUSY_RETRY_SECONDS = (20, 40, 60)
+#: The float (plan 03 of the first-fetch investigation, 2026-09-14). Meta's
+#: "media could not be fetched" (9004) is a refusal of a fresh asset's first
+#: fetch about a quarter of the time, remembered per url for a minute or two,
+#: never the file. A refused fetch is retried AT ONCE with a url Meta has
+#: never seen (`FRESH_URLS_PER_ROUND` per run), then the story steps back out
+#: of the account's slot and waits its own ladder — six waits, 33.5 minutes —
+#: before the workspace's review card. The waits are counted on the story
+#: (`attempts_by_step.fetch_waits`), never on the job's attempts.
+FRESH_URLS_PER_ROUND = 3
+FETCH_RETRY_SECONDS = (30, 60, 120, 300, 600, 900)
+#: Meta's "The requested resource does not exist" (24/2207006) at the publish
+#: call, about a container it had just reported ready (2026-09-13 23:18): the
+#: container is recreated from the same upload after a short wait — never
+#: re-published by an id Meta says it cannot find (plan 03 D4).
+CONTAINER_GONE_CODE = 24
+CONTAINER_GONE_RETRY_SECONDS = (10, 30, 60)
 DEFERRED_META_CAP = "deferred_meta_cap"
 PARKED_AMBIGUOUS = "parked_ambiguous"
 RETRY_SCHEDULED = "retry_scheduled"
@@ -180,6 +194,10 @@ class _Ctx:
         self.job = job
         self.intent = intent
         self.ops = ops
+        raw = intent.get("attempts_by_step")
+        if isinstance(raw, str):
+            raw = json.loads(raw)
+        intent["attempts_by_step"] = dict(raw or {"v": 1})
         #: The typed error a readiness poll met when it answers "unauthorized",
         #: so the caller can record it on the intent.
         self.poll_error: Optional[BaseException] = None
@@ -193,6 +211,13 @@ class _Ctx:
     @property
     def workspace_id(self) -> str:
         return str(self.job["workspace_id"])
+
+    def count(self, key: str) -> int:
+        """A per-class counter on the story (`attempts_by_step`, the float)."""
+        return int((self.intent.get("attempts_by_step") or {}).get(key) or 0)
+
+    def counters(self) -> dict:
+        return dict(self.intent.get("attempts_by_step") or {"v": 1})
 
     def unresolved(self, op_kind: str) -> Optional[dict]:
         for op in self.ops:
@@ -284,7 +309,9 @@ async def run_publish_pipeline(
             # spent: the job waits and re-checks; the card keeps its line. A
             # cancel asked for meanwhile is honoured by `_admit`, not held.
             return await _defer_paused(uow, ctx, now_fn)
-        outcome = await _admit(uow, ctx, meta, precheck, backoff_seconds, now_fn)
+        outcome = await _admit(
+            uow, ctx, meta, precheck, backoff_seconds, now_fn, transit=transit
+        )
         if outcome is not None:
             return outcome
         # Flip committed — the ladder proceeds as a publishing intent (the
@@ -365,7 +392,7 @@ async def _load(uow, job: dict) -> Optional[_Ctx]:
                     text(
                         "SELECT i.id, i.state, i.publish_step, i.cancel_requested,"
                         "       i.media_item_id, i.ig_account_id, i.ig_container_id,"
-                        "       i.transit_asset_ref,"
+                        "       i.transit_asset_ref, i.cap_consumed_on, i.attempts_by_step,"
                         "       a.provider_account_ref, i.workspace_id,"
                         "       w.is_paused,"
                         "       m.source_id, m.mime_type,"
@@ -424,13 +451,21 @@ def _local_date(ctx: _Ctx, now_fn) -> date:
     return now_fn().astimezone(tz).date()
 
 
-def _next_slot(ctx: _Ctx, now_fn, backoff_seconds) -> datetime:
-    """The deferral target: the account's next product slot, or one backoff
-    rung when the clock has not stamped one yet."""
+def _slot_at(ctx: _Ctx, now_fn) -> Optional[datetime]:
+    """The account's next product slot when the clock has stamped one that
+    is still ahead; None when it has not (the caller waits one fallback rung
+    and says nothing on the card — a wait of a minute is not a wait the user
+    should know about; adversarial review of #1306)."""
     slot = ctx.intent["next_slot_at"]
     if slot is not None and slot > now_fn():
         return slot
-    return now_fn() + timedelta(seconds=backoff_seconds[0])
+    return None
+
+
+def _next_slot(ctx: _Ctx, now_fn, backoff_seconds) -> datetime:
+    """The deferral target: the account's next product slot, or one backoff
+    rung when the clock has not stamped one yet."""
+    return _slot_at(ctx, now_fn) or now_fn() + timedelta(seconds=backoff_seconds[0])
 
 
 async def _audit_deferral(
@@ -466,39 +501,30 @@ async def _audit_deferral(
 
 
 async def _admit(
-    uow, ctx: _Ctx, meta, precheck, backoff_seconds, now_fn
+    uow, ctx: _Ctx, meta, precheck, backoff_seconds, now_fn, transit=None
 ) -> Optional[str]:
     """The admission gate for an `approved` intent: cancel honor, the §8
     advisory pre-check, then the §4 flip. Returns an outcome to stop with,
     or None to continue into the ladder."""
     if ctx.intent["cancel_requested"]:
-        async with _leased_tx(uow, ctx.job) as session:
-            cancelled = (
-                await session.execute(
-                    text(
-                        "UPDATE post_intents SET state = 'cancelled'"
-                        " WHERE id = :intent AND state = 'approved' RETURNING id"
-                    ),
-                    {"intent": ctx.intent_id},
-                )
-            ).fetchone()
-            await finalize_job(
-                session, ctx.job["id"], ctx.job["lease_token"], "cancelled"
-            )
-        if cancelled is None:
-            raise ValueError(
-                f"intent {ctx.intent_id} left 'approved' during cancel honor"
-            )
-        return CANCELLED
+        return await _honour_cancel(uow, ctx, transit)
 
-    if precheck is not None and not ctx.dry_run:
+    # A story re-entering from a wait (the float, plan 03 D3) carries its
+    # debit; the advisory pre-check would send it to the next slot with an
+    # asset the sweep reaps — it was admitted once, and that answer stands.
+    if (
+        precheck is not None
+        and not ctx.dry_run
+        and ctx.intent.get("cap_consumed_on") is None
+    ):
         # A provider read — deliberately OUTSIDE any transaction (`02` §8:
         # "immediately before the §4 flip transaction"). Never for a dry run:
         # nothing reaches Instagram in a rehearsal, and Meta's cap must not
         # hold one that spends none of it (adversarial review of #1299).
         verdict = await precheck.check(meta, ctx.intent["provider_account_ref"])
         if verdict == DEFER:
-            run_at = _next_slot(ctx, now_fn, backoff_seconds)
+            slot = _slot_at(ctx, now_fn)
+            run_at = slot or now_fn() + timedelta(seconds=backoff_seconds[0])
             async with uow.begin() as session:
                 await reschedule_job(
                     session,
@@ -514,6 +540,10 @@ async def _admit(
                     next_run_at=run_at,
                     state="approved",
                 )
+                if slot is not None:
+                    # Meta's quota is a wait of hours like the cap's: said on
+                    # the card (plan 03, UX principle 1).
+                    await _say_waiting(session, ctx, next_run_at=slot)
             return DEFERRED_META_CAP
 
     try:
@@ -528,13 +558,27 @@ async def _admit(
             )
             if flip is FlipOutcome.PROCEED:
                 deferred = None
+                if ctx.count("busy_waits"):
+                    await _bump(session, ctx, busy_waits=0)
+            elif flip is FlipOutcome.CANCELLED:
+                # The flip refused a cancel that landed after `_load`'s
+                # snapshot (plan 03 D3): the same honor as the snapshot's,
+                # in this transaction.
+                deferred = CANCELLED
+                await _cancel_in(session, ctx)
             else:
                 busy = flip is FlipOutcome.BUSY
-                run_at = (
-                    now_fn() + timedelta(seconds=BUSY_RETRY_SECONDS)
-                    if busy
-                    else _next_slot(ctx, now_fn, backoff_seconds)
-                )
+                slot = None
+                if busy:
+                    waits = ctx.count("busy_waits")
+                    seconds = BUSY_RETRY_SECONDS[
+                        min(waits, len(BUSY_RETRY_SECONDS) - 1)
+                    ]
+                    run_at = now_fn() + timedelta(seconds=seconds)
+                    await _bump(session, ctx, busy_waits=waits + 1)
+                else:
+                    slot = _slot_at(ctx, now_fn)
+                    run_at = slot or now_fn() + timedelta(seconds=backoff_seconds[0])
                 await reschedule_job(
                     session,
                     ctx.job["id"],
@@ -549,18 +593,29 @@ async def _admit(
                     next_run_at=run_at,
                     state="approved",
                 )
+                if slot is not None:
+                    # A wait of hours is said on the card; a wait of seconds —
+                    # the busy re-check, the one-minute fallback when no slot
+                    # is stamped — is not (plan 03, UX principle 1). The day's
+                    # count is at its cap, so a slot later today cannot post:
+                    # the line promises tomorrow.
+                    await _say_waiting(session, ctx, next_run_at=slot, day_spent=True)
                 deferred = DEFERRED_BUSY if busy else DEFERRED_CAP
     except IntentNotApproved:
         # (1,0): a race moved the intent while we held the job. The UoW
         # rolled back (debit included). Route on what it became.
-        async with uow.begin() as session:
-            current = (
+        cancelled_here = False
+        async with _leased_tx(uow, ctx.job) as session:
+            row = (
                 await session.execute(
-                    text("SELECT state FROM post_intents WHERE id = :intent"),
+                    text(
+                        "SELECT state, cancel_requested FROM post_intents"
+                        " WHERE id = :intent"
+                    ),
                     {"intent": ctx.intent_id},
                 )
-            ).scalar_one()
-            if current in (
+            ).one()
+            if row.state in (
                 "posted",
                 "failed",
                 "cancelled",
@@ -571,10 +626,72 @@ async def _admit(
                 await finalize_job(
                     session, ctx.job["id"], ctx.job["lease_token"], "cancelled"
                 )
+            elif row.state == "approved" and row.cancel_requested:
+                # The cancel landed inside the flip's window (structural
+                # review of #1306): the flip's own WHERE refused it and the
+                # debit rolled back. The route is the cancel's — the refund
+                # and the destroy a stepped-back story carries — never a
+                # crash rung.
+                await _cancel_in(session, ctx)
+                cancelled_here = True
             else:
                 raise
+        if cancelled_here:
+            await _destroy_after_cancel(ctx, transit)
         return CANCELLED
+    if deferred == CANCELLED:
+        await _destroy_after_cancel(ctx, transit)
     return deferred
+
+
+async def _cancel_in(session, ctx: _Ctx) -> None:
+    """`approved → cancelled` in the caller's transaction, with the refund a
+    stepped-back story carries taken FIRST (the terminal freeze forbids a
+    refund after the flip; plan 03 D3) and the job finalized."""
+    if ctx.intent.get("cap_consumed_on") is not None:
+        await publish_cap.refund_cap(
+            session,
+            intent_id=ctx.intent_id,
+            workspace_id=ctx.workspace_id,
+            ig_account_id=str(ctx.intent["ig_account_id"]),
+        )
+    cancelled = (
+        await session.execute(
+            text(
+                "UPDATE post_intents SET state = 'cancelled'"
+                " WHERE id = :intent AND state = 'approved' RETURNING id"
+            ),
+            {"intent": ctx.intent_id},
+        )
+    ).fetchone()
+    if cancelled is None:
+        raise ValueError(f"intent {ctx.intent_id} left 'approved' during cancel honor")
+    await finalize_job(session, ctx.job["id"], ctx.job["lease_token"], "cancelled")
+
+
+async def _destroy_after_cancel(ctx: _Ctx, transit) -> None:
+    """After the cancel committed: the transit asset a stepped-back story
+    carries is destroyed best-effort (FC-3.5); the FC-3.6 sweep is the
+    guarantee. Never inside the transaction — a provider call."""
+    ref = ctx.intent.get("transit_asset_ref")
+    if not ref or transit is None:
+        return
+    try:
+        await transit.destroy(ref, media_kind=ctx.intent["media_kind"])
+    except Exception:  # noqa: BLE001 — the sweep owns what this misses
+        logger.warning(
+            "publish_pipeline intent %s: transit destroy after cancel failed;"
+            " the sweep will reap it",
+            ctx.intent_id,
+        )
+
+
+async def _honour_cancel(uow, ctx: _Ctx, transit) -> str:
+    """The snapshot's cancel (`cancel_requested` seen at `_load`)."""
+    async with _leased_tx(uow, ctx.job) as session:
+        await _cancel_in(session, ctx)
+    await _destroy_after_cancel(ctx, transit)
+    return CANCELLED
 
 
 async def _park(uow, ctx: _Ctx, op_id) -> str:
@@ -605,16 +722,34 @@ async def _retry_or_poison(
     step_back_to: Optional[str] = None,
     error: Optional[dict] = None,
     poison_now: bool = False,
+    attempt: Optional[int] = None,
+    spent: Optional[bool] = None,
+    wait: str = "retry",
+    counters: Optional[dict] = None,
+    restore_attempt: bool = False,
 ) -> str:
-    """R8's retryable-failure edge: reschedule on the `05` ladder while the
-    attempts budget holds; G5 poison (`publishing → review_required`, debit
-    retained) when it is exhausted. *resolve_op_id* records a definitive
-    failure on the permit in the same transaction; *step_back_to* rewinds the
-    ladder (the dead-container case)."""
+    """R8's retryable-failure edge: reschedule on the ladder while the budget
+    holds; G5 poison (`publishing → review_required`, debit retained) when it
+    is spent. *resolve_op_id* records a definitive failure on the permit in
+    the same transaction; *step_back_to* rewinds the ladder (the dead- or
+    gone-container case).
+
+    The float (plan 03): every wait STEPS BACK — `publishing → approved` in
+    this same transaction, progress and debit kept, so the account's slot is
+    free while the story waits — and is audited with its class (*wait*), its
+    rung and the story's counters. *attempt* is the count that indexes the
+    rung (a class's own, e.g. `fetch_waits`; the job's attempts when None),
+    *spent* says the class's ladder is exhausted (the job's budget when None),
+    *counters* merge into `attempts_by_step`, and *restore_attempt* keeps the
+    job's attempt for the classes whose bound is their own ladder.
+    """
     attempts = int(ctx.job["attempts"])
     # *poison_now*: the failure cannot be retried into success (a dead
     # credential) — skip the ladder, hand the intent to a human at once.
-    exhausted = poison_now or attempts >= int(ctx.job["max_attempts"])
+    if spent is None:
+        spent = attempts >= int(ctx.job["max_attempts"])
+    exhausted = poison_now or spent
+    now = now_fn()
     async with _leased_tx(uow, ctx.job) as session:
         if error is not None:
             # The reason, on the row, for whichever surface reads it next —
@@ -633,9 +768,11 @@ async def _retry_or_poison(
                 outcome="failed",
                 response_ref=resolve_response,
             )
+        if counters:
+            await _bump(session, ctx, **counters)
         # `step_back_to` is the caller saying the artifacts BEYOND that rung are
-        # abandoned — today only the dead-container paths pass it. So it is also
-        # the signal for whether `ig_container_id` still points at anything, and
+        # abandoned — the dead- and gone-container paths. So it is also the
+        # signal for whether `ig_container_id` still points at anything, and
         # it is the right discriminator on BOTH branches below.
         #
         # It must NOT be a blanket clear on poison. Poison is shared by every
@@ -644,6 +781,11 @@ async def _retry_or_poison(
         # away a valid pointer. Only a caller that rewound past the container
         # rung is telling us the container is gone (#938).
         drop_container = ", ig_container_id = NULL" if step_back_to else ""
+        # A step back to `none` is the caller saying the UPLOAD is abandoned
+        # too (the swept asset): the ref goes with the container, and the next
+        # run uploads afresh.
+        if step_back_to == "none":
+            drop_container += ", transit_asset_ref = NULL"
         if exhausted:
             moved = (
                 await session.execute(
@@ -666,11 +808,8 @@ async def _retry_or_poison(
                 session,
                 ctx,
                 state="review_required",
-                at=now_fn(),
-                notice=(
-                    "A story couldn't be posted after several tries and needs"
-                    " attention: choose on its card, or open the Queue on the web."
-                ),
+                at=now,
+                notice=_poison_notice(ctx, now),
                 # The card keeps buttons: the workspace resolves its own
                 # review (2026-09-12) — post again, it posted, give up.
                 reply_markup=prompts.review_keyboard(ctx.intent_id),
@@ -701,15 +840,143 @@ async def _retry_or_poison(
                 ),
                 {"step": step_back_to, "intent": ctx.intent_id},
             )
-        rung = backoff_seconds[min(attempts - 1, len(backoff_seconds) - 1)]
+        index = (attempt if attempt is not None else attempts) - 1
+        rung = backoff_seconds[max(0, min(index, len(backoff_seconds) - 1))]
+        run_at = now + timedelta(seconds=rung)
         await reschedule_job(
             session,
             ctx.job["id"],
             ctx.job["lease_token"],
-            run_at=now_fn() + timedelta(seconds=rung),
-            restore_attempt=False,
+            run_at=run_at,
+            restore_attempt=restore_attempt,
+        )
+        # The wait itself (plan 03 D3): out of the slot, on the record.
+        await _step_back(session, ctx)
+        if not ctx.counters().get("float_since"):
+            await _bump(session, ctx, float_since=now.isoformat())
+        await _audit_wait(
+            session,
+            ctx,
+            wait=wait,
+            rung=index + 1,
+            seconds=rung,
+            next_run_at=run_at,
         )
     return RETRY_SCHEDULED
+
+
+def _poison_notice(ctx: _Ctx, now: datetime) -> str:
+    """The one sentence the workspace hears when a story parks (plan 03 D6):
+    how long Instagram was tried when the float's start is on the row."""
+    since = ctx.counters().get("float_since")
+    if since:
+        try:
+            started = datetime.fromisoformat(str(since))
+            minutes = max(1, int((now - started).total_seconds() // 60))
+            return (
+                f"A story couldn't be posted after {minutes} minutes of trying and"
+                " needs attention: choose on its card, or open the Queue on the web."
+            )
+        except (ValueError, TypeError):
+            pass
+    return (
+        "A story couldn't be posted after several tries and needs"
+        " attention: choose on its card, or open the Queue on the web."
+    )
+
+
+async def _bump(session, ctx: _Ctx, **changes) -> dict:
+    """Merge *changes* into the story's `attempts_by_step`, on the row (`||`,
+    never a wholesale write from this copy, so a key another writer adds
+    while the job holds the story survives — adversarial review of #1306)
+    and on the context."""
+    merged = {**ctx.counters(), **changes}
+    await session.execute(
+        text(
+            "UPDATE post_intents SET attempts_by_step ="
+            " COALESCE(attempts_by_step, '{}'::jsonb) || CAST(:c AS jsonb)"
+            " WHERE id = :intent"
+        ),
+        {"c": json.dumps(changes), "intent": ctx.intent_id},
+    )
+    ctx.intent["attempts_by_step"] = merged
+    return merged
+
+
+async def _step_back(session, ctx: _Ctx) -> None:
+    """`publishing → approved` (edge 076): the story waits outside the
+    account's slot with its progress and its debit intact. A zero-row update
+    is a race the caller must hear about, as every checkpoint's is."""
+    moved = (
+        await session.execute(
+            text(
+                "UPDATE post_intents SET state = 'approved'"
+                " WHERE id = :intent AND state = 'publishing' RETURNING id"
+            ),
+            {"intent": ctx.intent_id},
+        )
+    ).fetchone()
+    if moved is None:
+        raise ValueError(f"intent {ctx.intent_id} left 'publishing' during a wait")
+    ctx.intent["state"] = "approved"
+
+
+async def _audit_wait(
+    session, ctx: _Ctx, *, wait: str, rung: int, seconds: float, next_run_at: datetime
+) -> None:
+    """The wait's own audit row (plan 03 D3): the trigger's `publishing →
+    approved` row carries no detail, so the class, the rung and the story's
+    counters ride a direct row in `_audit_deferral`'s shape."""
+    await session.execute(
+        text(
+            "INSERT INTO audit_events (workspace_id, entity_kind, entity_id,"
+            " from_state, to_state, actor_kind, actor_user_id, channel, detail)"
+            " VALUES (:ws, 'post_intent', :intent, 'approved', 'approved',"
+            "         current_setting('app.actor_kind'),"
+            "         NULLIF(current_setting('app.actor_user_id', true), '')::uuid,"
+            "         NULLIF(current_setting('app.channel', true), ''),"
+            "         CAST(:detail AS jsonb))"
+        ),
+        {
+            "ws": ctx.workspace_id,
+            "intent": ctx.intent_id,
+            "detail": json.dumps(
+                {
+                    "v": 1,
+                    "event": "float_wait",
+                    "class": wait,
+                    "rung": rung,
+                    "seconds": seconds,
+                    "next_run_at": next_run_at.isoformat(),
+                    "counters": ctx.counters(),
+                }
+            ),
+        },
+    )
+
+
+async def _say_waiting(
+    session, ctx: _Ctx, *, next_run_at: datetime, day_spent: bool = False
+) -> None:
+    """A wait the user should know about — hours, a cap — is said on the
+    card's line ("✅ Approved · posts tomorrow 09:00"); no notice (plan 03,
+    UX principle 1). A wait of seconds says nothing. *day_spent* is the
+    local cap's case: a slot later today cannot post, so the line promises
+    tomorrow."""
+    line = prompts.waiting_line(
+        next_run_at,
+        tz=str(ctx.intent.get("eff_tz") or "UTC"),
+        now=datetime.now(timezone.utc),
+        day_spent=day_spent,
+    )
+    for binding_id in await prompts.push_bindings(session, ctx.workspace_id):
+        await outbox.restate_cards(
+            session,
+            workspace_id=ctx.workspace_id,
+            binding_id=binding_id,
+            intent_id=ctx.intent_id,
+            outcome_text=line,
+        )
 
 
 async def _permit(engine, ctx: _Ctx, *, op_kind: str, generation: int) -> dict:
@@ -797,164 +1064,254 @@ async def _ladder(
         step = "transit_uploaded"
 
     if step == "transit_uploaded":
-        # The frame must SERVE before Meta is told to fetch it (investigation
-        # of 2026-09-11: Meta's fetch arrives within a second of the container
-        # call, and a frame not yet serving is a lost post). A transit store
-        # without a readiness probe (an older seam) is taken as ready.
-        ready = getattr(transit, "ready", None)
-        readiness = (
-            await ready(
+        # The fresh-url round (plan 03 D1): a refused fetch is retried AT ONCE
+        # with a url Meta has never seen for this story — variant n, where n is
+        # the story's refusal count, so no round re-offers a refused url — up
+        # to FRESH_URLS_PER_ROUND per run; then the story steps back and waits.
+        # A fresh url for a VIDEO is a fresh encode — tens of seconds, not the
+        # probe's budget — so a refused video offers no fresh urls: it steps
+        # back at once and offers the same url after the wait, accepted at
+        # +30 s in 10 of 17 trials (`02`, the evening; plan 03 D1 as amended
+        # 2026-09-14).
+        fresh_budget = (
+            FRESH_URLS_PER_ROUND if ctx.intent["media_kind"] == "image" else 0
+        )
+        fresh_this_run = 0
+        while True:
+            variant = ctx.count("fetch_refusals") if fresh_budget else 0
+            # The frame must SERVE before Meta is told to fetch it
+            # (investigation of 2026-09-11: Meta's fetch arrives within a
+            # second of the container call, and a frame not yet serving is a
+            # lost post). A transit store without a readiness probe (an older
+            # seam) is taken as ready.
+            ready = getattr(transit, "ready", None)
+            readiness = (
+                await ready(
+                    ctx.intent["transit_asset_ref"],
+                    media_kind=ctx.intent["media_kind"],
+                    sleep=sleep,
+                    variant=variant,
+                )  # the budget is the store's, per media kind
+                if ready is not None
+                else None
+            )
+            # What the worker itself saw of the frame, kept beside Meta's
+            # answer on the permit (2026-09-13).
+            probe = getattr(readiness, "observation", None)
+            if ready is not None and not readiness:
+                logger.warning(
+                    "publish_pipeline intent %s: the story frame is not serving yet —"
+                    " retrying on the ladder rather than handing Meta a dead URL"
+                    " (the probe saw %s)",
+                    ctx.intent_id,
+                    probe,
+                )
+                not_ready = _error_of(
+                    TransitNotReady("story frame not serving within budget")
+                )
+                not_ready["error"]["probe"] = probe
+                # A 404 after the probe's budget is an asset the CDN does not
+                # know — swept while the story waited past the transit TTL (a
+                # weekend without slots, a long pause; adversarial review of
+                # #1306) — so the story steps back to step `none` without its
+                # ref and the next run uploads again. Any other answer is
+                # "not yet": the asset and the step stay.
+                gone = bool(probe) and probe.get("status") in (404, 410)
+                return await _retry_or_poison(
+                    uow,
+                    ctx,
+                    backoff_seconds,
+                    now_fn,
+                    error=not_ready,
+                    step_back_to="none" if gone else None,
+                )
+            generation = ctx.next_generation("container_create")
+            permit = await _permit(
+                engine, ctx, op_kind="container_create", generation=generation
+            )
+            # The next fresh url's permit must see this one (plan 03 D5):
+            # `next_generation` reads `ctx.ops`, loaded once.
+            ctx.ops.append(
+                {
+                    "id": permit["id"],
+                    "op_kind": "container_create",
+                    "generation": generation,
+                    "state": "permitted",
+                }
+            )
+            media_url = transit.delivery_url(
                 ctx.intent["transit_asset_ref"],
                 media_kind=ctx.intent["media_kind"],
-                sleep=sleep,
-            )  # the budget is the store's, per media kind (a video derives longer)
-            if ready is not None
-            else None
-        )
-        # What the worker itself saw of the frame, kept beside Meta's answer
-        # on the permit (2026-09-13): the refusals' investigation could not
-        # say what the probe had seen two seconds before Meta was refused.
-        probe = getattr(readiness, "observation", None)
-        if ready is not None and not readiness:
-            logger.warning(
-                "publish_pipeline intent %s: the story frame is not serving yet —"
-                " retrying on the ladder rather than handing Meta a dead URL"
-                " (the probe saw %s)",
-                ctx.intent_id,
-                probe,
+                variant=variant,
             )
-            not_ready = _error_of(
-                TransitNotReady("story frame not serving within budget")
-            )
-            not_ready["error"]["probe"] = probe
-            return await _retry_or_poison(
-                uow, ctx, backoff_seconds, now_fn, error=not_ready
-            )
-        generation = ctx.next_generation("container_create")
-        permit = await _permit(
-            engine, ctx, op_kind="container_create", generation=generation
-        )
-        media_url = transit.delivery_url(
-            ctx.intent["transit_asset_ref"], media_kind=ctx.intent["media_kind"]
-        )
-        started = time.perf_counter()
-        try:
-            container_id = await meta.create_container(
-                ctx.intent["provider_account_ref"],
-                media_url=media_url,
-                media_kind=ctx.intent["media_kind"],
-                workspace_id=ctx.workspace_id,
-            )
-        except MetaTerminalError as exc:
-            if exc.code == FETCH_FAILED_CODE:
-                # "The media could not be fetched" is Meta's FETCH failing,
-                # never a verdict on the file: on 2026-09-11 the same files
-                # posted on a later attempt, and on 2026-09-12 a frame that
-                # served a valid JPEG to every client failed twice, sixty
-                # seconds apart, in under half a second each. It rides the
-                # ladder like any retryable answer; the ladder's end is the
-                # workspace's review card, not a lock on the file.
-                elapsed_ms = _ms_since(started)
+            started = time.perf_counter()
+            try:
+                container_id = await meta.create_container(
+                    ctx.intent["provider_account_ref"],
+                    media_url=media_url,
+                    media_kind=ctx.intent["media_kind"],
+                    workspace_id=ctx.workspace_id,
+                )
+            except MetaTerminalError as exc:
+                if exc.code == FETCH_FAILED_CODE:
+                    elapsed_ms = _ms_since(started)
+                    refusals = ctx.count("fetch_refusals") + 1
+                    record = _permit_record(
+                        {
+                            "v": 1,
+                            "error": exc.code,
+                            "fetch_failed": True,
+                            "url_variant": variant,
+                        },
+                        exc=exc,
+                        elapsed_ms=elapsed_ms,
+                        probe=probe,
+                    )
+                    if fresh_this_run < fresh_budget:
+                        fresh_this_run += 1
+                        logger.warning(
+                            "publish_pipeline intent %s: Meta could not fetch the frame"
+                            " (code %s/%s, trace %s, %d ms; the probe saw %s) — a fresh"
+                            " url at once (%d of %d this round)",
+                            ctx.intent_id,
+                            exc.code,
+                            exc.subcode,
+                            exc.detail.get("fbtrace_id"),
+                            elapsed_ms,
+                            probe,
+                            fresh_this_run,
+                            fresh_budget,
+                        )
+                        async with _leased_tx(uow, ctx.job) as session:
+                            await provider_ops.resolve_permit(
+                                session,
+                                op_id=permit["id"],
+                                outcome="failed",
+                                response_ref=record,
+                            )
+                            await session.execute(
+                                text(
+                                    "UPDATE post_intents SET last_error = CAST(:e AS jsonb)"
+                                    " WHERE id = :intent"
+                                ),
+                                {
+                                    "e": json.dumps(_error_of(exc)),
+                                    "intent": ctx.intent_id,
+                                },
+                            )
+                            await _bump(session, ctx, fetch_refusals=refusals)
+                        ctx.ops[-1]["state"] = "failed"
+                        continue
+                    waits = ctx.count("fetch_waits") + 1
+                    logger.warning(
+                        "publish_pipeline intent %s: Meta could not fetch the frame"
+                        " (code %s/%s, trace %s, %d ms) — the round is spent; wait %d",
+                        ctx.intent_id,
+                        exc.code,
+                        exc.subcode,
+                        exc.detail.get("fbtrace_id"),
+                        elapsed_ms,
+                        waits,
+                    )
+                    return await _retry_or_poison(
+                        uow,
+                        ctx,
+                        FETCH_RETRY_SECONDS,
+                        now_fn,
+                        resolve_op_id=permit["id"],
+                        resolve_response=record,
+                        error=_error_of(exc),
+                        attempt=waits,
+                        spent=waits > len(FETCH_RETRY_SECONDS),
+                        wait="fetch",
+                        counters={
+                            "fetch_refusals": refusals,
+                            "fetch_waits": min(waits, len(FETCH_RETRY_SECONDS)),
+                        },
+                        restore_attempt=True,
+                    )
+                return await _fail_terminal(
+                    uow,
+                    ctx,
+                    op_id=permit["id"],
+                    exc=exc,
+                    now_fn=now_fn,
+                    record=_permit_record(
+                        {"url_variant": variant},
+                        exc=exc,
+                        elapsed_ms=_ms_since(started),
+                        probe=probe,
+                    ),
+                )
+            except MetaError as exc:
                 logger.warning(
-                    "publish_pipeline intent %s: Meta could not fetch the frame"
-                    " (code %s/%s, trace %s, %d ms; the probe saw %s) — one more rung",
+                    "publish_pipeline intent %s: %s code=%s — %s",
                     ctx.intent_id,
+                    type(exc).__name__,
                     exc.code,
-                    exc.subcode,
-                    exc.detail.get("fbtrace_id"),
-                    elapsed_ms,
-                    probe,
+                    "handing to a human" if _dead_credential(exc) else "retrying",
                 )
                 return await _retry_or_poison(
                     uow,
                     ctx,
-                    FETCH_RETRY_SECONDS,
+                    backoff_seconds,
                     now_fn,
                     resolve_op_id=permit["id"],
                     resolve_response=_permit_record(
-                        {"v": 1, "error": exc.code, "fetch_failed": True},
+                        {"v": 1, "error": exc.code, "url_variant": variant},
                         exc=exc,
-                        elapsed_ms=elapsed_ms,
+                        elapsed_ms=_ms_since(started),
                         probe=probe,
                     ),
                     error=_error_of(exc),
+                    poison_now=_dead_credential(exc),
                 )
-            return await _fail_terminal(
-                uow,
-                ctx,
-                op_id=permit["id"],
-                exc=exc,
-                now_fn=now_fn,
-                record=_permit_record(
-                    {}, exc=exc, elapsed_ms=_ms_since(started), probe=probe
-                ),
-            )
-        except MetaError as exc:
-            logger.warning(
-                "publish_pipeline intent %s: %s code=%s — %s",
-                ctx.intent_id,
-                type(exc).__name__,
-                exc.code,
-                "handing to a human" if _dead_credential(exc) else "retrying",
-            )
-            return await _retry_or_poison(
-                uow,
-                ctx,
-                backoff_seconds,
-                now_fn,
-                resolve_op_id=permit["id"],
-                resolve_response=_permit_record(
-                    {"v": 1, "error": exc.code},
-                    exc=exc,
-                    elapsed_ms=_ms_since(started),
-                    probe=probe,
-                ),
-                error=_error_of(exc),
-                poison_now=_dead_credential(exc),
-            )
-        except MetaLostResponse:
-            # Lost response on a RECOVERABLE effect (`02` §6): resolve it the
-            # way a crash-resume would — failed/lost_response — and retry on
-            # the ladder. Never intent-level ambiguity for a container.
-            # (Anything untyped propagates: a crash must look like a crash.)
-            return await _retry_or_poison(
-                uow,
-                ctx,
-                backoff_seconds,
-                now_fn,
-                resolve_op_id=permit["id"],
-                resolve_response=_permit_record(
-                    {"v": 1, "error": "lost_response"},
-                    elapsed_ms=_ms_since(started),
-                    probe=probe,
-                ),
-            )
-        elapsed_ms = _ms_since(started)
-        async with _leased_tx(uow, ctx.job) as session:
-            await provider_ops.resolve_permit(
-                session,
-                op_id=permit["id"],
-                outcome="succeeded",
-                response_ref=_permit_record(
-                    {"v": 1, "container_id": container_id},
-                    elapsed_ms=elapsed_ms,
-                    probe=probe,
-                ),
-            )
-            advanced = (
-                await session.execute(
-                    text(
-                        "UPDATE post_intents SET ig_container_id = :cid,"
-                        " publish_step = 'container_created'"
-                        " WHERE id = :intent AND state = 'publishing' RETURNING id"
+            except MetaLostResponse:
+                # Lost response on a RECOVERABLE effect (`02` §6): resolve it
+                # the way a crash-resume would — failed/lost_response — and
+                # retry on the ladder. Never intent-level ambiguity for a
+                # container. (Anything untyped propagates: a crash must look
+                # like a crash.)
+                return await _retry_or_poison(
+                    uow,
+                    ctx,
+                    backoff_seconds,
+                    now_fn,
+                    resolve_op_id=permit["id"],
+                    resolve_response=_permit_record(
+                        {"v": 1, "error": "lost_response", "url_variant": variant},
+                        elapsed_ms=_ms_since(started),
+                        probe=probe,
                     ),
-                    {"cid": container_id, "intent": ctx.intent_id},
                 )
-            ).fetchone()
-        if advanced is None:
-            raise ValueError(f"intent {ctx.intent_id} left 'publishing' mid-ladder")
-        ctx.intent["ig_container_id"] = container_id
-        step = "container_created"
+            elapsed_ms = _ms_since(started)
+            async with _leased_tx(uow, ctx.job) as session:
+                await provider_ops.resolve_permit(
+                    session,
+                    op_id=permit["id"],
+                    outcome="succeeded",
+                    response_ref=_permit_record(
+                        {"v": 1, "container_id": container_id, "url_variant": variant},
+                        elapsed_ms=elapsed_ms,
+                        probe=probe,
+                    ),
+                )
+                advanced = (
+                    await session.execute(
+                        text(
+                            "UPDATE post_intents SET ig_container_id = :cid,"
+                            " publish_step = 'container_created'"
+                            " WHERE id = :intent AND state = 'publishing' RETURNING id"
+                        ),
+                        {"cid": container_id, "intent": ctx.intent_id},
+                    )
+                ).fetchone()
+            if advanced is None:
+                raise ValueError(f"intent {ctx.intent_id} left 'publishing' mid-ladder")
+            ctx.ops[-1]["state"] = "succeeded"
+            ctx.intent["ig_container_id"] = container_id
+            step = "container_created"
+            break
 
     if step == "container_created":
         verdict = await _await_ready(ctx, meta, sleep)
@@ -1053,8 +1410,9 @@ async def _ladder(
             )
         except MetaCapDeferral as exc:
             # Error 9 (`02` §8): a cap, not a fault. Definitive non-effect →
-            # resolve failed; defer to the next slot; debit and key 4 stand.
-            run_at = _next_slot(ctx, now_fn, backoff_seconds)
+            # resolve failed; defer to the next slot; the debit stands.
+            slot = _slot_at(ctx, now_fn)
+            run_at = slot or now_fn() + timedelta(seconds=backoff_seconds[0])
             async with _leased_tx(uow, ctx.job) as session:
                 await provider_ops.resolve_permit(
                     session,
@@ -1073,17 +1431,53 @@ async def _ladder(
                     run_at=run_at,
                     restore_attempt=True,
                 )
+                # A wait of hours leaves the slot (plan 03: a story never waits
+                # inside it); the container is kept. Said on the card when the
+                # wait is a slot, not the one-minute fallback.
+                await _step_back(session, ctx)
                 await _audit_deferral(
                     session,
                     ctx,
                     reason="error_9",
                     next_run_at=run_at,
-                    state="publishing",
+                    state="approved",
                 )
+                if slot is not None:
+                    await _say_waiting(session, ctx, next_run_at=slot)
             return DEFERRED_META_CAP
         except MetaTerminalError as exc:
             return await _fail_terminal(uow, ctx, op_id=permit["id"], exc=exc)
         except MetaError as exc:
+            if exc.code == CONTAINER_GONE_CODE:
+                gone = ctx.count("container_gone") + 1
+                logger.warning(
+                    "publish_pipeline intent %s: Meta cannot find the container it"
+                    " reported ready (code %s/%s, trace %s) — recreating it, wait %d",
+                    ctx.intent_id,
+                    exc.code,
+                    exc.subcode,
+                    exc.detail.get("fbtrace_id"),
+                    gone,
+                )
+                return await _retry_or_poison(
+                    uow,
+                    ctx,
+                    CONTAINER_GONE_RETRY_SECONDS,
+                    now_fn,
+                    resolve_op_id=permit["id"],
+                    resolve_response=_permit_record(
+                        {"v": 1, "error": exc.code, "container_gone": True}, exc=exc
+                    ),
+                    error=_error_of(exc),
+                    step_back_to="transit_uploaded",
+                    attempt=gone,
+                    spent=gone > len(CONTAINER_GONE_RETRY_SECONDS),
+                    wait="container",
+                    counters={
+                        "container_gone": min(gone, len(CONTAINER_GONE_RETRY_SECONDS))
+                    },
+                    restore_attempt=True,
+                )
             logger.warning(
                 "publish_pipeline intent %s: %s code=%s — %s",
                 ctx.intent_id,
@@ -1097,7 +1491,7 @@ async def _ladder(
                 backoff_seconds,
                 now_fn,
                 resolve_op_id=permit["id"],
-                resolve_response={"v": 1, "error": exc.code},
+                resolve_response=_permit_record({"v": 1, "error": exc.code}, exc=exc),
                 error=_error_of(exc),
                 poison_now=_dead_credential(exc),
             )
@@ -1218,12 +1612,16 @@ async def _await_ready(ctx: _Ctx, meta, sleep) -> str:
 
 
 async def _defer_paused(uow, ctx: _Ctx, now_fn) -> str:
-    """The workspace is paused: reschedule without spending an attempt. From
-    the `approved` branch nothing is debited; from the post-flip hold (step
-    `none`, no permits) the row is already `publishing` with its debit — it
-    waits with it, and a `publishing` TTL is a follow-up. Resume is a fresh
-    run."""
+    """The workspace is paused: reschedule without spending an attempt. A
+    fresh `approved` row carries nothing; a stepped-back one (the float)
+    carries its progress and its debit and waits with them; from the
+    post-flip hold (step `none`, no permits) the row is `publishing` with its
+    debit — it steps back and waits with it, so no wait holds the slot
+    (structural review of #1306); the re-entrant flip takes it in again.
+    Resume is a fresh run."""
     async with _leased_tx(uow, ctx.job) as session:
+        if ctx.intent["state"] == "publishing":
+            await _step_back(session, ctx)
         await reschedule_job(
             session,
             ctx.job["id"],
@@ -1251,7 +1649,7 @@ async def _confirm_dry_run(
         moved = (
             await session.execute(
                 text(
-                    "UPDATE post_intents SET state = 'posted',"
+                    "UPDATE post_intents SET state = 'posted', last_error = NULL,"
                     " publish_step = 'effect_confirmed',"
                     " published_via = 'dry_run', ig_media_id = 'dry-run'"
                     " WHERE id = :intent AND state = 'publishing' RETURNING id"
@@ -1380,27 +1778,260 @@ async def _say_outcome(
     by ref can reach it) and write ONE notification per push binding, in the
     caller's transaction. Returns how many bindings could hear it — zero
     means nobody was told, and the caller must not pretend otherwise."""
-    line = prompts.outcome_line(
-        state, by=None, at=at, tz=str(ctx.intent.get("eff_tz") or "UTC")
+    return await _restate_and_notify(
+        session,
+        workspace_id=ctx.workspace_id,
+        intent_id=ctx.intent_id,
+        state=state,
+        at=at,
+        tz=str(ctx.intent.get("eff_tz") or "UTC"),
+        notice=notice,
+        reply_markup=reply_markup,
     )
-    bindings = await prompts.push_bindings(session, ctx.workspace_id)
+
+
+async def _restate_and_notify(
+    session,
+    *,
+    workspace_id: str,
+    intent_id: str,
+    state: str,
+    at,
+    tz: str,
+    notice: str,
+    reply_markup: Optional[dict] = None,
+) -> int:
+    line = prompts.outcome_line(state, by=None, at=at, tz=tz)
+    bindings = await prompts.push_bindings(session, workspace_id)
     for binding_id in bindings:
         await outbox.restate_cards(
             session,
-            workspace_id=ctx.workspace_id,
+            workspace_id=workspace_id,
             binding_id=binding_id,
-            intent_id=ctx.intent_id,
+            intent_id=intent_id,
             outcome_text=line,
             reply_markup=reply_markup,
         )
     await outbox.fanout_notification(
         session,
-        workspace_id=ctx.workspace_id,
+        workspace_id=workspace_id,
         bindings=bindings,
         text=notice,
-        intent_id=ctx.intent_id,
+        intent_id=intent_id,
     )
     return len(bindings)
+
+
+# -- the float's safety nets (plan 03, UX principle 2) ----------------------
+# An approval is never silently undone: the only exits from Approved are
+# Posted and Needs review. A dead job and the reaper's safety net end on the
+# review card with its three buttons and one honest line.
+
+_INTENT_FOR_PARK = (
+    "SELECT i.state, i.workspace_id, COALESCE(a.tz, w.tz) AS tz"
+    "  FROM post_intents i"
+    "  JOIN ig_accounts a ON a.id = i.ig_account_id"
+    "  JOIN workspaces w ON w.id = i.workspace_id"
+    " WHERE i.id = :intent"
+)
+
+
+async def park_for_review(
+    session,
+    *,
+    workspace_id: str,
+    intent_id: str,
+    from_state: str,
+    tz: str,
+    notice: str,
+    at: Optional[datetime] = None,
+) -> bool:
+    """`from_state → review_required` (edges 055 and 076), the card restated
+    with the review keyboard, one notice per push binding, the
+    `customer_notified` latch when anyone heard — in the caller's
+    transaction. False when the row had already moved on."""
+    at = at or datetime.now(timezone.utc)
+    moved = (
+        await session.execute(
+            text(
+                "UPDATE post_intents SET state = 'review_required'"
+                " WHERE id = :intent AND state = :from_state RETURNING id"
+            ),
+            {"intent": intent_id, "from_state": from_state},
+        )
+    ).fetchone()
+    if moved is None:
+        return False
+    told = await _restate_and_notify(
+        session,
+        workspace_id=workspace_id,
+        intent_id=intent_id,
+        state="review_required",
+        at=at,
+        tz=tz,
+        notice=notice,
+        reply_markup=prompts.review_keyboard(intent_id),
+    )
+    if told:
+        await session.execute(
+            text(
+                "UPDATE post_intents SET last_error = COALESCE(last_error, '{}'::jsonb)"
+                " || jsonb_build_object('evidence', COALESCE(last_error->'evidence', '{}'::jsonb)"
+                "    || jsonb_build_object('customer_notified', true))"
+                " WHERE id = :intent"
+            ),
+            {"intent": intent_id},
+        )
+    return True
+
+
+async def park_exhausted(session, job: dict) -> bool:
+    """A `publish_pipeline` job whose budget is spent (five untyped crashes):
+    the story it carried is parked for review from wherever it stood —
+    `publishing` mid-ladder or `approved` between attempts — with the line
+    that says what is known. A story already settled parks nothing."""
+    payload = job.get("payload") or {}
+    if isinstance(payload, str):
+        payload = json.loads(payload)
+    intent_id = payload.get("intent_id")
+    if not intent_id:
+        return False
+    row = (
+        (await session.execute(text(_INTENT_FOR_PARK), {"intent": str(intent_id)}))
+        .mappings()
+        .first()
+    )
+    if row is None or row["state"] not in ("publishing", "approved"):
+        return False
+    tries = int(job.get("attempts") or job.get("max_attempts") or 0) or 5
+    return await park_for_review(
+        session,
+        workspace_id=str(row["workspace_id"]),
+        intent_id=str(intent_id),
+        from_state=row["state"],
+        tz=str(row["tz"] or "UTC"),
+        notice=(
+            f"We hit a fault on our side {tries} times trying to post this story:"
+            " choose on its card, or open the Queue on the web."
+        ),
+    )
+
+
+async def park_stale_approved(session, *, older_than_seconds: int, limit: int) -> int:
+    """The reaper's safety net (plan 03): an `approved` story the pipeline
+    has not finished within the TTL is parked for review — never expired,
+    which would undo a decision the workspace made without a word. A
+    floating story re-enters `approved` at every hop, so its clock restarts
+    and it never reaches the TTL; a paused workspace's stories wait on
+    purpose and are not listed. Returns how many rows were moved.
+
+    The reap job is a system singleton (`app.tenant_id = ''`), under which a
+    plain SELECT here matches nothing once the worker runs as `svc_worker`
+    (`p_tenant`; the reconciler's own lesson — both review lenses of #1306).
+    So the stale rows are listed through `fn_reaper_stale_approved` (076,
+    SECURITY DEFINER) and each row's tenant is asserted before it is
+    touched, under a savepoint per row (one story's fault must not roll back
+    the door's sweep), and the session's own scope is restored after — the
+    settled-cards sweep reads across tenants in this same transaction next.
+    A story flagged `cancel_requested` has no job left to honour the flag:
+    the reaper does — the refund it carries first, then `cancelled` — rather
+    than park a story the workspace gave up on."""
+    rows = (
+        await session.execute(
+            text(
+                "SELECT o_intent_id, o_workspace_id"
+                "  FROM fn_reaper_stale_approved(make_interval(secs => :ttl), :lim)"
+            ),
+            {"ttl": int(older_than_seconds), "lim": int(limit)},
+        )
+    ).all()
+    if not rows:
+        return 0
+    before = (
+        await session.execute(
+            text(
+                "SELECT current_setting('app.tenant_id', true),"
+                " current_setting('app.actor_kind', true)"
+            )
+        )
+    ).one()
+    before_tenant, before_actor = before[0] or "", before[1] or None
+    days = max(1, round(int(older_than_seconds) / 86400))
+    moved = 0
+    for intent_id, workspace_id in rows:
+        try:
+            async with session.begin_nested():
+                moved += await _park_or_cancel_stale(
+                    session,
+                    intent_id=str(intent_id),
+                    workspace_id=str(workspace_id),
+                    days=days,
+                )
+        except Exception:  # noqa: BLE001 — isolated, logged, the sweep goes on
+            logger.exception(
+                "reaper: stale approved story %s skipped this tick", intent_id
+            )
+            continue
+    await apply_gucs(session, tenant_id=before_tenant, actor_kind=before_actor)
+    return moved
+
+
+async def _park_or_cancel_stale(
+    session, *, intent_id: str, workspace_id: str, days: int
+) -> int:
+    """One stale approved story, under its own tenant: cancelled with its
+    refund when the workspace had asked for that, parked for review
+    otherwise. Returns 1 when the row moved."""
+    await apply_gucs(session, tenant_id=workspace_id, actor_kind="reaper")
+    row = (
+        (
+            await session.execute(
+                text(
+                    "SELECT i.cancel_requested, i.cap_consumed_on, i.ig_account_id,"
+                    "       COALESCE(a.tz, w.tz) AS tz"
+                    "  FROM post_intents i"
+                    "  JOIN ig_accounts a ON a.id = i.ig_account_id"
+                    "  JOIN workspaces w ON w.id = i.workspace_id"
+                    " WHERE i.id = :intent AND i.state = 'approved'"
+                ),
+                {"intent": intent_id},
+            )
+        )
+        .mappings()
+        .first()
+    )
+    if row is None:
+        return 0
+    if row["cancel_requested"]:
+        if row["cap_consumed_on"] is not None:
+            await publish_cap.refund_cap(
+                session,
+                intent_id=intent_id,
+                workspace_id=workspace_id,
+                ig_account_id=str(row["ig_account_id"]),
+            )
+        cancelled = (
+            await session.execute(
+                text(
+                    "UPDATE post_intents SET state = 'cancelled'"
+                    " WHERE id = :intent AND state = 'approved' RETURNING id"
+                ),
+                {"intent": intent_id},
+            )
+        ).fetchone()
+        return 1 if cancelled else 0
+    parked = await park_for_review(
+        session,
+        workspace_id=workspace_id,
+        intent_id=intent_id,
+        from_state="approved",
+        tz=str(row["tz"] or "UTC"),
+        notice=(
+            f"We lost track of this story for {days} days: choose on its card,"
+            " or open the Queue on the web."
+        ),
+    )
+    return 1 if parked else 0
 
 
 async def _confirm(
@@ -1428,7 +2059,7 @@ async def _confirm(
         moved = (
             await session.execute(
                 text(
-                    "UPDATE post_intents SET state = 'posted',"
+                    "UPDATE post_intents SET state = 'posted', last_error = NULL,"
                     " publish_step = 'effect_confirmed', ig_media_id = :mid"
                     " WHERE id = :intent AND state = 'publishing' RETURNING id"
                 ),

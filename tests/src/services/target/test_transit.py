@@ -1010,6 +1010,87 @@ class TestReadiness:
         assert answer.length == 2004 and answer.head[:2] == b"\xff\xd8"
 
 
+class TestFreshUrls:
+    """The float (plan 03, D1): a refused fetch is retried with a url Meta has
+    never seen for this story — the same original through the same chain plus
+    `n` no-op steps (`dpr_1.0`, validated 2026-09-13/14), a distinct signed
+    url and a distinct derived asset with identical bytes for every `n`."""
+
+    def test_variant_n_appends_n_no_op_steps_and_stays_signed(self):
+        from src.services.target.transit import (
+            URL_VARIANT_STEP,
+            story_transformation,
+        )
+
+        sdk = RecordingSdk()
+        store = _store(sdk)
+        ref = f"ws/{WS}/abc"
+        store.delivery_url(ref, media_kind="image", variant=3)
+        call = sdk.url_calls[-1]
+        assert (
+            call["transformation"]
+            == story_transformation(ref, media_kind="image") + [URL_VARIANT_STEP] * 3
+        )
+        assert call["sign_url"] is True and call["type"] == "authenticated"
+
+    def test_variant_zero_is_todays_url(self):
+        from src.services.target.transit import story_transformation
+
+        sdk = RecordingSdk()
+        store = _store(sdk)
+        ref = f"ws/{WS}/abc"
+        plain = store.delivery_url(ref, media_kind="image")
+        zero = store.delivery_url(ref, media_kind="image", variant=0)
+        assert plain == zero
+        assert sdk.url_calls[-1]["transformation"] == story_transformation(
+            ref, media_kind="image"
+        )
+
+    def test_every_variant_is_a_distinct_signed_url_through_the_real_sdk(self):
+        """No network: `cloudinary_url` signs locally. Five variants, five urls,
+        each carrying its `dpr_1.0` steps and its own signature."""
+        import cloudinary.utils
+
+        store = _store(RecordingSdk(), url_fn=cloudinary.utils.cloudinary_url)
+        ref = f"ws/{WS}/abc"
+        urls = [
+            store.delivery_url(ref, media_kind="image", variant=n) for n in range(6)
+        ]
+        assert len(set(urls)) == 6
+        for n, url in enumerate(urls):
+            assert url.count("dpr_1.0") == n
+            assert "/s--" in url, "a variant is signed like the plain url"
+
+    def test_a_negative_variant_is_refused(self):
+        store = _store(RecordingSdk())
+        with pytest.raises(ValueError):
+            store.delivery_url(f"ws/{WS}/abc", media_kind="image", variant=-1)
+
+    @pytest.mark.asyncio
+    async def test_ready_probes_the_variant_url(self):
+        sdk = RecordingSdk()
+        probes = []
+
+        async def probe(url):
+            probes.append(url)
+            return (206, "image/jpeg")
+
+        # The recording sdk's url ignores the transformation, so distinctness is
+        # proven above; here the probe must be handed the VARIANT's url call.
+        store = _store(sdk, probe_fn=probe)
+        assert await store.ready(
+            f"ws/{WS}/abc", media_kind="image", variant=2, sleep=_no_sleep
+        )
+        assert len(probes) == 1
+        from src.services.target.transit import URL_VARIANT_STEP, story_transformation
+
+        assert (
+            sdk.url_calls[-1]["transformation"]
+            == story_transformation(f"ws/{WS}/abc", media_kind="image")
+            + [URL_VARIANT_STEP] * 2
+        )
+
+
 def _always(answer):
     async def probe(url):
         return answer

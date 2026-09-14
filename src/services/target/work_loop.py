@@ -736,6 +736,14 @@ async def _notify_exhausted(session, job) -> None:
     workspace_id = job.get("workspace_id")
     if workspace_id is None or kind in _REMINTED_KINDS:
         return
+    if kind == "publish_pipeline":
+        # Plan 03: the story a dead publish job carried is parked for the
+        # workspace's review — the card with its buttons and one honest
+        # line — never left reading Approved behind a generic notice.
+        from src.services.target import publish_pipeline  # noqa: PLC0415 — cycle
+
+        await publish_pipeline.park_exhausted(session, job)
+        return
     if kind in _SYNC_KINDS:
         await _rearm_source(session, job)
     from src.services.target import prompts  # noqa: PLC0415 — cycle

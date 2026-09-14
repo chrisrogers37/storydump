@@ -263,6 +263,13 @@
       "label": "§21 ix_outbox_ambiguous_age for the sender's lost-answer resolution (075, #1297)",
       "doc": "07-security-model.md",
       "ordinal": 19
+    },
+    {
+      "sha256": "a9e69d761cacf6a5dfe3d35328b955aa283301dbe8b193c0b556dfe6940c9092",
+      "class": "normative",
+      "label": "§22 the float's two legal edges, the reaper's approved leg withdrawn, and the door that lists for it (076, plan 03)",
+      "doc": "07-security-model.md",
+      "ordinal": 20
     }
   ],
   "policy_expansion": {
