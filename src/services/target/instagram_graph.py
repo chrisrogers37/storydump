@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, Awaitable, Callable, Optional
 
 import httpx
@@ -60,6 +61,12 @@ from src.services.target.meta_adapter import (
 
 logger = logging.getLogger(__name__)
 
+#: Text Meta answers with is bound for the ledger (`provider_operations`,
+#: `post_intents.last_error`): capped, and scrubbed of a Cloudinary url
+#: signature should Meta ever echo the media url (D38: the signed url does
+#: not expire). The token is scrubbed by `_redact` on every field.
+LEDGER_TEXT_MAX = 500
+_SIGNATURE = re.compile(r"s--[A-Za-z0-9_-]+--")
 GRAPH_BASE = "https://graph.instagram.com"
 DEFAULT_GRAPH_VERSION = "v21.0"
 
@@ -270,16 +277,17 @@ class InstagramGraphAdapter:
         if isinstance(body, dict) and isinstance(body.get("error"), dict):
             error = body["error"]
             code = _int(error.get("code"))
-            subcode = error.get("error_subcode")
-            message = self._redact(str(error.get("message") or ""), token)
+            subcode = _subcode_of(error.get("error_subcode"))
+            message = self._scrub(error.get("message"), token) or ""
             if response.status_code >= 500:
                 raise MetaLostResponse(
                     f"{where}: HTTP {response.status_code} code={code}: {message}"
                 )
             raise classify_error(code)(
                 code=code,
-                subcode=int(subcode) if isinstance(subcode, int) else None,
+                subcode=subcode,
                 message=message,
+                detail=self._detail_of(error, response.status_code, token),
             )
         if response.status_code >= 500:
             raise MetaLostResponse(f"{where}: HTTP {response.status_code}")
@@ -291,12 +299,50 @@ class InstagramGraphAdapter:
     def _redact(text: str, token: str) -> str:
         return text.replace(token, "<TOKEN>") if token else text
 
+    @classmethod
+    def _scrub(cls, value: Any, token: str) -> Optional[str]:
+        """A text field bound for the ledger: the token and any Cloudinary url
+        signature scrubbed, NUL dropped (PostgreSQL's jsonb refuses it —
+        a crash inside the retry's own transaction, not a retry), capped."""
+        if value is None or value == "":
+            return None
+        text = cls._redact(str(value), token).replace("\x00", "")
+        text = _SIGNATURE.sub("s--<SIG>--", text)
+        return text[:LEDGER_TEXT_MAX] or None
+
+    @classmethod
+    def _detail_of(cls, error: dict, http_status: int, token: str) -> dict:
+        """Meta's answer for the ledger (2026-09-13), every text field
+        scrubbed and capped: the subcode, the user-facing title and message,
+        the trace id Meta support asks for, the transient hint Meta
+        documents, and the HTTP status."""
+        return {
+            "error_subcode": _subcode_of(error.get("error_subcode")),
+            "error_user_title": cls._scrub(error.get("error_user_title"), token),
+            "error_user_msg": cls._scrub(error.get("error_user_msg"), token),
+            "fbtrace_id": cls._scrub(error.get("fbtrace_id"), token),
+            "is_transient": bool(error.get("is_transient")),
+            "http_status": int(http_status),
+        }
+
 
 def _int(value: Any) -> int:
     try:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _subcode_of(value: Any) -> Optional[int]:
+    """Meta's `error_subcode`: an int, sometimes a decimal string; never a
+    bool read as 1."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdecimal():
+        return int(value.strip())
+    return None
 
 
 __all__ = [

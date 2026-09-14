@@ -72,9 +72,22 @@ class MetaError(StorydumpError):
     """A DEFINITIVE, typed answer from Meta. Everything outside this
     hierarchy is a lost response and must be handled as ambiguous (R8)."""
 
-    def __init__(self, *, code: int, subcode: Optional[int] = None, message: str = ""):
+    def __init__(
+        self,
+        *,
+        code: int,
+        subcode: Optional[int] = None,
+        message: str = "",
+        detail: Optional[dict] = None,
+    ):
         self.code = code
         self.subcode = subcode
+        #: Meta's whole answer, for the ledger (2026-09-13): `error_subcode`,
+        #: `error_user_title`, `error_user_msg`, `fbtrace_id`, `http_status`,
+        #: every text field already scrubbed of the token by the adapter. A
+        #: refused fetch used to leave `{"error": 9004}` on its permit, and
+        #: its investigation re-derived the rest from a removed deploy's logs.
+        self.detail: dict = dict(detail or {})
         super().__init__(
             f"meta error {code}"
             + (f"/{subcode}" if subcode is not None else "")
@@ -158,7 +171,20 @@ class StubMetaAdapter:
         if outcome == "retryable":
             raise MetaRetryableError(code=4, message="stubbed rate limit")
         if outcome == "terminal":
-            raise MetaTerminalError(code=9004, message="stubbed unparseable media")
+            # The shape Meta answered on 2026-09-12: 9004/2207052 with a user
+            # message and a trace id — the gate proves they reach the ledger.
+            raise MetaTerminalError(
+                code=9004,
+                subcode=2207052,
+                message="stubbed unparseable media",
+                detail={
+                    "error_subcode": 2207052,
+                    "error_user_title": "Media fetch failed",
+                    "error_user_msg": "Only photo or video can be accepted as media type.",
+                    "fbtrace_id": "stub-fbtrace",
+                    "http_status": 400,
+                },
+            )
         if outcome == "transport":
             raise MetaLostResponse("stub transport lost")
         raise ValueError(f"unknown stub outcome: {outcome!r}")
