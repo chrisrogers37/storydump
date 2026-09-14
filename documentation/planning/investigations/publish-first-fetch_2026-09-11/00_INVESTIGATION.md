@@ -37,3 +37,7 @@ Not the cause, each ruled out by the rows: the daily cap, the worker, rate limit
 ## Also observed (not this incident)
 
 Phase 3a's Telegram pacing worked live: 14 card edits in two minutes hit the chat's 18/min budget, Telegram answered 429, the sender wrote the durable hold, rescheduled itself 31 s out and drained the rest.
+
+## Continued (2026-09-13)
+
+The first-fetch failures outlived the fixes above (3 of 5 first calls on 2026-09-12). The continuation — evidence, mechanism, the one decisive experiment and the robustness changes — is `02_the-fetch-path_2026-09-13.md`.

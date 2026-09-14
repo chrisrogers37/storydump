@@ -805,6 +805,210 @@ class TestReadiness:
         store, probes = self._store_with([RuntimeError("dns"), (200, "video/mp4")])
         assert await store.ready(f"ws/{WS}/abc", media_kind="video", sleep=_no_sleep)
 
+    # -- 2026-09-13: the bytes decide, and the answer says what it saw ---------
+
+    @pytest.mark.asyncio
+    async def test_a_placeholder_labelled_as_an_image_is_not_ready_until_the_bytes_are(
+        self,
+    ):
+        """Cloudinary answers a miss with a 404 GIF; a relabelled or truncated
+        body would pass a headers-only check. The first bytes decide."""
+        from src.services.target.transit import ProbeAnswer
+
+        store, probes = self._store_with(
+            [
+                ProbeAnswer(200, "image/jpeg", head=b"GIF89a\x01\x00"),
+                ProbeAnswer(206, "image/jpeg", head=b"\xff\xd8\xff\xe0\x00\x10JFIF"),
+            ]
+        )
+        ready = await store.ready(f"ws/{WS}/abc", media_kind="image", sleep=_no_sleep)
+        assert ready and len(probes) == 2, "polled until the bytes were a JPEG"
+        assert ready.observation["polls"] == 2 and ready.observation["status"] == 206
+
+    @pytest.mark.asyncio
+    async def test_the_answer_carries_what_the_probe_saw_for_the_ledger(self):
+        from src.services.target.transit import ProbeAnswer
+
+        store, _ = self._store_with(
+            [
+                ProbeAnswer(
+                    206,
+                    "image/jpeg",
+                    head=b"\xff\xd8\xff",
+                    length=137673,
+                    request_id="b094d14f",
+                    elapsed_ms=190,
+                )
+            ]
+        )
+        ready = await store.ready(f"ws/{WS}/abc", media_kind="image", sleep=_no_sleep)
+        assert bool(ready) is True
+        assert ready.observation == {
+            "status": 206,
+            "content_type": "image/jpeg",
+            "length": 137673,
+            "request_id": "b094d14f",
+            "elapsed_ms": 190,
+            "polls": 1,
+            "bytes_read": True,
+            "magic": "jpeg",
+        }
+
+    @pytest.mark.asyncio
+    async def test_a_body_that_was_read_but_is_empty_is_not_the_frame(self):
+        """An edge still filling the object can answer 200 image/jpeg with no
+        bytes yet; a read that returned nothing proves nothing (adversarial
+        review of the 2026-09-13 PR). Only a headers-only answer is judged on
+        headers."""
+        from src.services.target.transit import ProbeAnswer
+
+        store, probes = self._store_with(
+            [
+                ProbeAnswer(200, "image/jpeg", head=b"", bytes_read=True),
+                ProbeAnswer(200, "image/jpeg", head=b"", bytes_read=False),
+            ]
+        )
+        ready = await store.ready(f"ws/{WS}/abc", media_kind="image", sleep=_no_sleep)
+        assert ready and len(probes) == 2
+        assert ready.observation["bytes_read"] is False
+
+    @pytest.mark.asyncio
+    async def test_an_answer_of_no_known_shape_is_not_yet_never_an_exception(self):
+        store, probes = self._store_with([None, (200, "x", "y"), (206, "image/jpeg")])
+        assert await store.ready(f"ws/{WS}/abc", media_kind="image", sleep=_no_sleep)
+        assert len(probes) == 3
+
+    @pytest.mark.asyncio
+    async def test_a_frame_that_never_serves_reports_the_last_answer(self):
+        store, _ = self._store_with([], now_step_s=7.0)
+        store._probe_fn = _always((404, "image/gif"))
+        ready = await store.ready(
+            f"ws/{WS}/abc", media_kind="image", budget_s=20.0, sleep=_no_sleep
+        )
+        assert not ready
+        assert ready.observation["status"] == 404
+        assert ready.observation["content_type"] == "image/gif"
+        assert ready.observation["polls"] >= 2 and ready.observation["magic"] is None
+
+    @pytest.mark.asyncio
+    async def test_a_video_frame_needs_its_container_signature(self):
+        from src.services.target.transit import ProbeAnswer
+
+        store, probes = self._store_with(
+            [
+                ProbeAnswer(206, "video/mp4", head=b"\x00" * 16),
+                ProbeAnswer(206, "video/mp4", head=b"\x00\x00\x00\x18ftypisom"),
+            ]
+        )
+        assert await store.ready(f"ws/{WS}/abc", media_kind="video", sleep=_no_sleep)
+        assert len(probes) == 2
+
+    def test_every_legal_first_box_of_a_video_container_is_its_signature(self):
+        """`ftyp` is usual; `free`/`skip`/`wide`/`mdat`/`moov` first are legal
+        ISO-BMFF too (adversarial review). A video that opened with one would
+        otherwise poll its whole budget on every attempt."""
+        from src.services.target.transit import magic_of
+
+        for box in (b"ftyp", b"moov", b"mdat", b"free", b"skip", b"wide"):
+            assert magic_of(b"\x00\x00\x00\x08" + box + b"isom") == "mp4", box
+        assert magic_of(b"\x00\x00\x00\x08junk") is None
+        assert magic_of(b"ftyp") is None, "a box needs its 4-byte size first"
+
+    def test_the_total_length_is_read_only_from_a_range_that_served(self):
+        from src.services.target.transit import _total_length
+
+        assert _total_length({"content-range": "bytes 0-1023/137673"}) == 137673
+        assert _total_length({"content-range": "bytes */137673"}) is None, "a 416"
+        assert _total_length({"content-range": "bytes 0-1023/*"}) is None
+        assert _total_length({}) is None
+
+    def _floor_store(self, handler):
+        """The default probe against the REAL egress floor: a mock transport
+        answers, a static resolver keeps DNS out, the floor's cap is live."""
+        import httpx
+
+        store = _store(RecordingSdk(), probe_resolver=lambda host: ["93.184.216.34"])
+        store._probe_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        return store
+
+    FRAME_URL = "https://res.cloudinary.com/c/image/authenticated/s--sig--/c_limit/v1/ws/a/b.jpg"
+
+    @pytest.mark.asyncio
+    async def test_the_default_probe_reads_the_first_bytes_under_the_floor(self):
+        """A ranged GET, not a HEAD: headers cannot prove bytes."""
+        import httpx
+
+        from src.services.target import transit
+
+        calls = []
+
+        def handler(request):
+            calls.append((request.method, request.headers.get("range")))
+            return httpx.Response(
+                206,
+                headers={
+                    "content-type": "image/jpeg",
+                    "content-range": "bytes 0-1023/137673",
+                    "x-request-id": "b094d14f79c6",
+                },
+                content=b"\xff\xd8\xff\xe0" + b"\x00" * 1020,
+            )
+
+        answer = await self._floor_store(handler)._default_probe(self.FRAME_URL)
+        assert calls == [("GET", f"bytes=0-{transit.PROBE_RANGE_BYTES - 1}")]
+        assert answer.status == 206 and answer.content_type == "image/jpeg"
+        assert answer.bytes_read is True and answer.head[:2] == b"\xff\xd8"
+        assert len(answer.head) <= transit.PROBE_RANGE_BYTES
+        assert answer.length == 137673 and answer.request_id == "b094d14f79c6"
+        assert isinstance(answer.elapsed_ms, int)
+
+    @pytest.mark.asyncio
+    async def test_a_frame_answered_whole_past_the_cap_falls_back_to_its_headers(
+        self,
+    ):
+        """Both reviews of the 2026-09-13 PR: a 200 carrying the whole frame
+        (the range ignored) must not read as "never ready" — the floor's cap
+        trips, a HEAD answers the headers as before, and `bytes_read=False`
+        on the ledger says the bytes were not judged."""
+        import httpx
+
+        from src.services.target import transit
+        from src.services.target.transit import serves_media
+
+        calls = []
+
+        def handler(request):
+            calls.append(request.method)
+            if request.method == "HEAD":
+                return httpx.Response(200, headers={"content-type": "image/jpeg"})
+            return httpx.Response(
+                200,
+                headers={"content-type": "image/jpeg"},
+                content=b"\xff\xd8"
+                + b"\x00" * (transit.PROBE_MAX_RESPONSE_BYTES + 4096),
+            )
+
+        answer = await self._floor_store(handler)._default_probe(self.FRAME_URL)
+        assert calls == ["GET", "HEAD"]
+        assert answer.status == 200 and answer.bytes_read is False
+        assert answer.head == b"" and answer.length is None
+        assert serves_media(answer, "image"), "headers decide, as the HEAD did"
+
+    @pytest.mark.asyncio
+    async def test_a_whole_frame_under_the_cap_is_read_and_measured(self):
+        import httpx
+
+        def handler(request):
+            return httpx.Response(
+                200,
+                headers={"content-type": "image/jpeg"},
+                content=b"\xff\xd8\xff\xe0" + b"\x00" * 2000,
+            )
+
+        answer = await self._floor_store(handler)._default_probe(self.FRAME_URL)
+        assert answer.status == 200 and answer.bytes_read is True
+        assert answer.length == 2004 and answer.head[:2] == b"\xff\xd8"
+
 
 def _always(answer):
     async def probe(url):

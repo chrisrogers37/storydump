@@ -81,6 +81,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Optional
@@ -801,24 +802,33 @@ async def _ladder(
         # call, and a frame not yet serving is a lost post). A transit store
         # without a readiness probe (an older seam) is taken as ready.
         ready = getattr(transit, "ready", None)
-        if ready is not None and not await ready(
-            ctx.intent["transit_asset_ref"],
-            media_kind=ctx.intent["media_kind"],
-            sleep=sleep,
-        ):  # the budget is the store's, per media kind (a video derives longer)
+        readiness = (
+            await ready(
+                ctx.intent["transit_asset_ref"],
+                media_kind=ctx.intent["media_kind"],
+                sleep=sleep,
+            )  # the budget is the store's, per media kind (a video derives longer)
+            if ready is not None
+            else None
+        )
+        # What the worker itself saw of the frame, kept beside Meta's answer
+        # on the permit (2026-09-13): the refusals' investigation could not
+        # say what the probe had seen two seconds before Meta was refused.
+        probe = getattr(readiness, "observation", None)
+        if ready is not None and not readiness:
             logger.warning(
                 "publish_pipeline intent %s: the story frame is not serving yet —"
-                " retrying on the ladder rather than handing Meta a dead URL",
+                " retrying on the ladder rather than handing Meta a dead URL"
+                " (the probe saw %s)",
                 ctx.intent_id,
+                probe,
             )
+            not_ready = _error_of(
+                TransitNotReady("story frame not serving within budget")
+            )
+            not_ready["error"]["probe"] = probe
             return await _retry_or_poison(
-                uow,
-                ctx,
-                backoff_seconds,
-                now_fn,
-                error=_error_of(
-                    TransitNotReady("story frame not serving within budget")
-                ),
+                uow, ctx, backoff_seconds, now_fn, error=not_ready
             )
         generation = ctx.next_generation("container_create")
         permit = await _permit(
@@ -827,6 +837,7 @@ async def _ladder(
         media_url = transit.delivery_url(
             ctx.intent["transit_asset_ref"], media_kind=ctx.intent["media_kind"]
         )
+        started = time.perf_counter()
         try:
             container_id = await meta.create_container(
                 ctx.intent["provider_account_ref"],
@@ -843,11 +854,16 @@ async def _ladder(
                 # seconds apart, in under half a second each. It rides the
                 # ladder like any retryable answer; the ladder's end is the
                 # workspace's review card, not a lock on the file.
+                elapsed_ms = _ms_since(started)
                 logger.warning(
                     "publish_pipeline intent %s: Meta could not fetch the frame"
-                    " (code %s) — one more rung",
+                    " (code %s/%s, trace %s, %d ms; the probe saw %s) — one more rung",
                     ctx.intent_id,
                     exc.code,
+                    exc.subcode,
+                    exc.detail.get("fbtrace_id"),
+                    elapsed_ms,
+                    probe,
                 )
                 return await _retry_or_poison(
                     uow,
@@ -855,11 +871,23 @@ async def _ladder(
                     FETCH_RETRY_SECONDS,
                     now_fn,
                     resolve_op_id=permit["id"],
-                    resolve_response={"v": 1, "error": exc.code, "fetch_failed": True},
+                    resolve_response=_permit_record(
+                        {"v": 1, "error": exc.code, "fetch_failed": True},
+                        exc=exc,
+                        elapsed_ms=elapsed_ms,
+                        probe=probe,
+                    ),
                     error=_error_of(exc),
                 )
             return await _fail_terminal(
-                uow, ctx, op_id=permit["id"], exc=exc, now_fn=now_fn
+                uow,
+                ctx,
+                op_id=permit["id"],
+                exc=exc,
+                now_fn=now_fn,
+                record=_permit_record(
+                    {}, exc=exc, elapsed_ms=_ms_since(started), probe=probe
+                ),
             )
         except MetaError as exc:
             logger.warning(
@@ -875,7 +903,12 @@ async def _ladder(
                 backoff_seconds,
                 now_fn,
                 resolve_op_id=permit["id"],
-                resolve_response={"v": 1, "error": exc.code},
+                resolve_response=_permit_record(
+                    {"v": 1, "error": exc.code},
+                    exc=exc,
+                    elapsed_ms=_ms_since(started),
+                    probe=probe,
+                ),
                 error=_error_of(exc),
                 poison_now=_dead_credential(exc),
             )
@@ -890,14 +923,23 @@ async def _ladder(
                 backoff_seconds,
                 now_fn,
                 resolve_op_id=permit["id"],
-                resolve_response={"v": 1, "error": "lost_response"},
+                resolve_response=_permit_record(
+                    {"v": 1, "error": "lost_response"},
+                    elapsed_ms=_ms_since(started),
+                    probe=probe,
+                ),
             )
+        elapsed_ms = _ms_since(started)
         async with _leased_tx(uow, ctx.job) as session:
             await provider_ops.resolve_permit(
                 session,
                 op_id=permit["id"],
                 outcome="succeeded",
-                response_ref={"v": 1, "container_id": container_id},
+                response_ref=_permit_record(
+                    {"v": 1, "container_id": container_id},
+                    elapsed_ms=elapsed_ms,
+                    probe=probe,
+                ),
             )
             advanced = (
                 await session.execute(
@@ -1089,18 +1131,58 @@ def _dead_credential(exc: BaseException) -> bool:
     return isinstance(exc, MetaRetryableError) and exc.code == OAUTH_ERROR_CODE
 
 
+def _ms_since(started: float) -> int:
+    return int((time.perf_counter() - started) * 1000)
+
+
+def _permit_record(
+    base: dict,
+    *,
+    exc: Optional[BaseException] = None,
+    elapsed_ms: Optional[int] = None,
+    probe: Optional[dict] = None,
+) -> dict:
+    """The container permit's `response_ref` (2026-09-13): the outcome, how
+    long Meta took to answer, what the worker's own probe had just seen of
+    the frame and, on a refusal, Meta's whole answer — so the next refused
+    fetch is a ledger query, not a day's forensics over a removed deploy's
+    logs."""
+    record = dict(base)
+    if elapsed_ms is not None:
+        record["elapsed_ms"] = elapsed_ms
+    if probe is not None:
+        record["probe"] = probe
+    if exc is not None:
+        detail = getattr(exc, "detail", None) or {}
+        record["meta"] = {
+            "subcode": getattr(exc, "subcode", None),
+            "user_title": detail.get("error_user_title"),
+            "user_msg": detail.get("error_user_msg"),
+            "fbtrace_id": detail.get("fbtrace_id"),
+            "http_status": detail.get("http_status"),
+        }
+    return record
+
+
 def _error_of(exc: BaseException) -> dict:
     """What `post_intents.last_error` records for a retry or a poison: the
-    type, the provider code when there is one, and the (already redacted)
-    message — so the operator surface can say WHY, not just that."""
-    return {
-        "v": 1,
-        "error": {
-            "type": type(exc).__name__,
-            "code": getattr(exc, "code", None),
-            "message": str(exc)[:500],
-        },
+    type, the provider code (and subcode and trace id when Meta gave them),
+    and the (already redacted) message — so the operator surface can say
+    WHY, not just that."""
+    error: dict = {
+        "type": type(exc).__name__,
+        "code": getattr(exc, "code", None),
+        # NUL would make PostgreSQL refuse the jsonb inside the retry's own
+        # transaction — a crash where a retry was meant.
+        "message": str(exc).replace("\x00", "")[:500],
     }
+    subcode = getattr(exc, "subcode", None)
+    if subcode is not None:
+        error["subcode"] = subcode
+    trace = (getattr(exc, "detail", None) or {}).get("fbtrace_id")
+    if trace:
+        error["fbtrace_id"] = trace
+    return {"v": 1, "error": error}
 
 
 async def _await_ready(ctx: _Ctx, meta, sleep) -> str:
@@ -1214,6 +1296,7 @@ async def _fail_terminal(
     op_id: Optional[str],
     exc: BaseException,
     now_fn=None,
+    record: Optional[dict] = None,
 ) -> str:
     """`publishing → failed` on a definitive permanent failure: permit failed
     (when a permit exists — the fetch rung has none) + state flip with the
@@ -1231,6 +1314,11 @@ async def _fail_terminal(
                 op_id=op_id,
                 outcome="failed",
                 response_ref={
+                    # The container rung passes Meta's answer, the call's
+                    # duration and the probe's observation (2026-09-13); the
+                    # fixed keys come last so the record can never rename
+                    # the outcome.
+                    **(record or {}),
                     "v": 1,
                     "error": getattr(exc, "code", type(exc).__name__),
                     "terminal": True,

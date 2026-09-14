@@ -314,8 +314,32 @@ class FakeTransit:
 
     async def ready(self, ref, *, media_kind, sleep=None, **_):
         # The readiness probe (2026-09-11): scripted per call, True by default.
+        # Its answer carries what the probe saw (2026-09-13), as the real one's.
+        from src.services.target.transit import Readiness
+
         self.ready_calls.append(ref)
-        return self._ready_script.pop(0) if self._ready_script else True
+        ok = self._ready_script.pop(0) if self._ready_script else True
+        if ok:
+            observation = {
+                "status": 206,
+                "content_type": "image/jpeg",
+                "length": 137673,
+                "request_id": "fake-rid",
+                "elapsed_ms": 12,
+                "polls": 1,
+                "magic": "jpeg",
+            }
+        else:
+            observation = {
+                "status": 404,
+                "content_type": "image/gif",
+                "length": None,
+                "request_id": "fake-rid",
+                "elapsed_ms": 9,
+                "polls": 20,
+                "magic": None,
+            }
+        return Readiness(bool(ok), observation)
 
     async def upload(self, content, *, workspace_id, media_kind):
         self._n += 1
@@ -1682,6 +1706,9 @@ class TestTheFirstFetch:
             row["state"] == "publishing" and row["publish_step"] == "transit_uploaded"
         )
         assert row["last_error"]["error"]["type"] == "TransitNotReady"
+        # 2026-09-13: what the probe last saw rides the reason.
+        assert row["last_error"]["error"]["probe"]["status"] == 404
+        assert row["last_error"]["error"]["probe"]["content_type"] == "image/gif"
         assert _job_row(pipe_db, job["id"])["state"] == "ready"
 
     def test_a_first_9004_is_retried_and_the_second_attempt_posts(self, pipe_db):
@@ -1705,6 +1732,14 @@ class TestTheFirstFetch:
             fetch=True,
         )
         assert op[0][0] == "failed" and "fetch_failed" in op[0][2]
+        # 2026-09-13: the refusal's evidence is on the row — what Meta said
+        # and what the worker had just seen — not in a log that a deploy drops.
+        refused = json.loads(op[0][2])
+        assert refused["meta"]["subcode"] == 2207052 and refused["meta"]["fbtrace_id"]
+        assert isinstance(refused["elapsed_ms"], int)
+        assert refused["probe"]["status"] == 206 and refused["probe"]["magic"] == "jpeg"
+        assert row["last_error"]["error"]["subcode"] == 2207052
+        assert row["last_error"]["error"]["fbtrace_id"] == "stub-fbtrace"
         assert _notices(pipe_db, intent, binding) == [], (
             "a retry in progress says nothing yet"
         )
@@ -1716,6 +1751,19 @@ class TestTheFirstFetch:
         assert _intent_row(pipe_db, intent)["state"] == "posted"
         assert len(meta.create_calls) == 2
         assert _card_line(pipe_db, intent).startswith("✅ Posted")
+        ops = _exec(
+            pipe_db,
+            "SELECT state, generation, response_ref::text FROM provider_operations"
+            " WHERE intent_id = %s AND op_kind = 'container_create' ORDER BY generation",
+            (intent,),
+            fetch=True,
+        )
+        accepted = json.loads(ops[1][2])
+        assert ops[1][0] == "succeeded" and accepted["container_id"]
+        assert isinstance(accepted["elapsed_ms"], int)
+        assert accepted["probe"]["status"] == 206, (
+            "an accepted fetch keeps its evidence too"
+        )
 
     def test_a_second_9004_is_still_a_fetch_failure_and_rides_the_ladder(self, pipe_db):
         """2026-09-12: photo-output (105) — two 9004s sixty seconds apart on a

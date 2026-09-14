@@ -1,0 +1,132 @@
+---
+title: "The story frame's first fetch, continued — what Meta is answered, and by whom (2026-09-13)"
+type: audit
+status: in-progress
+owner: chris
+created: 2026-09-13
+---
+
+## Summary
+
+The 2026-09-11 fixes (eager frame, readiness check, no lock on a 9004) did not end the first-fetch failures: on 2026-09-12 three of five first calls to Meta still failed with 9004/2207052 in under a second, and every retry that came five minutes or more later succeeded on the SAME url, while the one retry that came 62 s later failed again. This document records what the ledger, the removed deploy's logs, Cloudinary's Admin API and the CDN itself say, what is ruled out, the mechanism the evidence supports, the one experiment that can settle it, and the robustness changes that follow whichever way it settles.
+
+Read with `00_INVESTIGATION.md` (the incident and the first fixes) and `01_first-fetch-and-failure-reporting.md` (what was built).
+
+## Evidence
+
+All times America/New_York. Production rows were read with SELECTs only.
+
+### 1. Every container call the target path has made
+
+| Day | Calls | Failed 9004 | Success took | Failure took |
+|---|---|---|---|---|
+| 09-10 | 4 | 1 | 6.2–7.7 s | 0.6 s |
+| 09-11 | 13 | 3 | 4.5–8.1 s | 0.3–0.5 s |
+| 09-12 | 8 | 4 | 3.0–4.6 s | 0.5–1.0 s |
+
+25 calls, 8 failures. Every failure is the FIRST Meta fetch of a freshly uploaded transit asset. Every failure carries the same answer, `9004/2207052: Only photo or video can be accepted as media type.` Retries on the same url: +62 s failed again (photo-output 105); +301 s posted (102); +3602 s posted (103). Files that failed on 09-11 posted first-try that evening as fresh uploads (6 of 6). Success and failure are not separated by file, size, position in the burst, or the seconds between upload and the call (4–5 s in every case).
+
+### 2. The asset Meta was refused (photo-output 105), read from Cloudinary's Admin API on 09-13
+
+- Uploaded 2026-09-12 16:14:48Z as `type=authenticated`, jpg 2048 × 1996, 365,819 bytes.
+- Exactly one derived asset: the story frame, transformation IDENTICAL to the delivery url's, 137,673 bytes. The eager derivation and the url Meta is given name the same object; nothing was derived on the fly.
+- The delivery host is `res.cloudinary.com`, served by Cloudflare (`server: cloudflare`), `cache-control: public, no-transform, immutable, max-age=2592000`.
+- From this machine: HEAD 200 (1.91 s cold), GET 200 with a complete JPEG (0.23 s), GET as `facebookexternalhit/1.1` 200, ranged GET 206. Every client we can be sees the frame.
+
+### 3. The worker's own check passed every time
+
+The removed deploy's logs (Railway deployment 82e889dd, 16:12–16:40Z) carry the three "Meta could not fetch the frame on the first attempt" warnings and never once the "story frame is not serving yet" warning: the readiness HEAD answered 200 image/jpeg on its first poll before each of the three refused calls. The same logs hold the seven `InFailedSQLTransactionError` crashes (the key-4 collision, fixed in #1301) with reschedules of 50–71 s, 271–332 s, 800–997 s and 4157 s — the delays, not the refusals.
+
+### 4. What Cloudinary's CDN answers when it does not know an asset (public demo cloud, no credentials, 09-13 11:45)
+
+- A miss is **HTTP 404 with `content-type: image/gif`** (a placeholder image) and `x-cld-error: Resource not found`, answered in 0.03–0.4 s.
+- Although that answer says `cache-control: private, no-cache, max-age=0`, the edge **re-served the identical answer (same `x-request-id`) for at least 80 s**, alternating with a `text/plain NOT_FOUND` variant for two more minutes.
+- A cold on-the-fly derivation of an existing public asset: 200 in 0.49 s.
+
+### 5. What Meta documents
+
+"We cURL media used in publishing attempts, so the media must be hosted on a publicly accessible server at the time of the attempt." JPEG is the only image format accepted. 2207052 is "The media could not be fetched from this uri".
+
+### 6. What the ledger records today
+
+The permit row keeps `{"error": 9004}`; `post_intents.last_error` keeps the message. Meta's `error_subcode`, `error_user_msg` and `fbtrace_id` are parsed or available in the adapter but not stored; the readiness probe's observation (status, content type, length, request id, elapsed) is not stored anywhere. This investigation had to re-derive from logs what the ledger should have said.
+
+### 7. The legacy path, same cloud, same host, same account (read 09-13 after the Railway login was restored)
+
+The legacy scheduler posted **1,609 stories through the Instagram API** from January to August 2026, calling Meta 1–3 s after an upload with a PUBLIC, unsigned, on-the-fly `type=upload` url on the same `res.cloudinary.com` cloud. It recorded every Meta 9004 as a `permanent_reject` lock: **20 in eight months, 1.2 % of API posts**, and the files are the kind Meta genuinely refuses (iPhone `.JPG` files that carry HEIC, two `.mov` videos sent raw). The target path's rate is **8 of 25, 32 %**, every one a sub-second first fetch that a later retry accepted. Same Meta, same cloud, 25× the rate: the difference is on our side of the url.
+
+| Path | Delivery url | Frame | API posts | 9004 |
+|---|---|---|---|---|
+| Legacy (Jan–Aug) | `type=upload`, public, unsigned | on the fly | 1,609 | 20 (1.2 %), file rejects |
+| Target (09-10 → 09-12) | `type=authenticated`, signed | eager | 25 | 8 (32 %), first fetches |
+
+### 8. Fresh uploads on the real cloud, from this machine (09-13, throwaway folder, destroyed after)
+
+- Three fresh `type=authenticated` uploads with the eager frame: the pipeline's HEAD answered 200 within 0.1–0.2 s of the upload returning; every GET after it, including eight per trial with a cache-busting query string and two with a different version segment, answered 200 with a complete JPEG.
+- Every one of those answers carried the HEAD's own `x-request-id`: **a query string or the version segment does NOT change the cache key on Cloudinary's CDN.** The only way to force a different key is a different transformation string (a no-op step such as `dpr_1.0`, which is also a separate derived asset).
+- A url fetched BEFORE its asset existed was answered 404 (image/gif) and the second fetch was served from cache; four seconds after the upload the same url answered 200 with a new request id. At this edge the negative entry did not outlive the upload.
+
+## Ruled out, with the evidence that rules it out
+
+- **The file.** The same files posted later, some as the same url.
+- **A mismatch between the eager frame and the delivery url.** Identical transformation, one derived asset.
+- **The url's shape.** Commas, colons, the `v1` version segment, Meta's user agent: all serve 200.
+- **Our readiness check.** It never failed; it also never proves what Meta sees (a HEAD from the worker's network, headers only).
+- **Meta's publish cap, the worker's crashes, deploys.** The cap stood at 2–5 of 100; the crashes delayed jobs but every refused call was a clean call that Meta answered.
+
+## Mechanism
+
+**Best supported:** Meta's cURL reaches a Cloudinary delivery path that does not yet know the fresh asset, is answered the placeholder GIF, and reports it as "only photo or video can be accepted" (a GIF is neither) within a second. The CDN edge on Meta's path then reuses that negative answer for minutes, so a retry inside the window fails again and a retry outside it succeeds. It fits the message, the sub-second timing, the first-fetch-only pattern, the 62 s re-failure, the 5-minute and 60-minute successes, and why no client of ours ever sees it: the worker's HEAD and our probes travel a different path, and the HEAD does not read a body.
+
+**Sharpened by §7:** the legacy path handed Meta the same cloud and host for 1,609 posts with a 1.2 % refusal rate made of real file rejects; the target path hands Meta a `type=authenticated`, signed url and is refused 32 % of the time on first fetch. A public on-the-fly url needs only the original bytes, which the store holds consistently; a signed authenticated url has to be validated against the asset's record on whichever delivery path Meta's edge reaches. If that record lags the upload by seconds on some paths, Meta is answered the placeholder and we never are.
+
+**Alive but less likely:** (b) Cloudflare bot mitigation intermittently challenging Meta's fetcher on `res.cloudinary.com` — weakened by §7, since the legacy used the same host for eight months; (c) a fetch cache on Meta's side (explains the 62 s re-failure, not the first refusal).
+
+The experiment below separates them, and its public arm tests the fix directly. None of them is visible from our side of the CDN.
+
+## The decisive experiment — first run (09-13 12:40, from the developer machine, approved by the owner)
+
+Four library JPEGs the page had already posted on 09-12 (photo-output 104, 103, 102 and IMG_7452), read from Drive through the worker's own door, each uploaded twice (authenticated as production does; public as the legacy did). **Eight container calls, eight accepted**, 2.7–8.1 s each; the readiness HEAD answered 200 on both urls every time; every upload destroyed afterwards; nothing published.
+
+What that run does and does not say. It ran from the developer's machine, so the upload, the readiness HEAD and the Meta call originated on a different network from production's; Meta's own path to the CDN was the same. Eight acceptances at the same hour of day the 09-12 refusals happened rule out "this hour" and "these files", and show that from this vantage a fresh signed authenticated url is accepted within four seconds of upload. They do not reproduce the worker's vantage (Railway `us-east4`), and the refusals only ever appeared from there. The same script, launched inside the worker container, is the faithful rerun (`railway ssh --service worker -- "$(cat remote_cmd.txt)"`, prepared); it waits on the owner because the session's permission gate refuses a remote write into the production container.
+
+## The decisive experiment (design)
+
+Container creation only — `POST /{ig-user}/media` with `media_type=STORIES` — never `media_publish`. A container that is never published appears nowhere and expires in 24 hours. Script: `meta_fetch_experiment.py` (scratch), which contains no publish call.
+
+Per trial, one throwaway JPEG is uploaded twice under a throwaway `ws/<uuid>` folder: once exactly as production does (`type=authenticated`, signed, eager frame) and once as the legacy did (`type=upload`, unsigned, the same eager frame). The pipeline's readiness HEAD runs on both, then the container call is made for each, in alternating order. On a 9004: at once, the same original through a no-op variant of the chain (`dpr_1.0`: a different signed url, a separate derived asset, identical bytes); then the plain url at +30 s and, if still refused, at +120 s. Four trials by default, eight if the first four are ambiguous; every transit asset is destroyed at the end.
+
+What each outcome means:
+
+- Authenticated refused, public accepted, same file, same seconds → the url type is the cause; the fix is F0 below.
+- Both refused, the no-op variant accepted at once → the edge's negative entry was the blocker, not the origin.
+- Both refused, the variant refused, the plain url accepted at +30 s or +120 s → the origin path did not know the asset yet; the window is measured.
+- Nothing refused → rerun from the worker's own container (the vantage the refusals came from); if still nothing, instrument production (F2, F3) and let the next real burst be the experiment.
+
+If the owner prefers zero Meta calls first: Cloudinary's console (Reports → delivery errors) for 2026-09-12 16:14:52Z, 16:15:54Z, 16:16:07Z and 16:33:59Z, and 2026-09-11 16:37:34Z, 16:37:49Z, 20:02:47Z — a 404 on a `ws/…` url at those seconds confirms the mechanism with no experiment at all.
+
+Quota: Meta's published-post quota counts publishes; container calls are expected not to count, and at most ~24 calls is small against 100 either way.
+
+## What makes the system robust, whichever way the experiment settles
+
+In value order. F1 and F3 are the ones this investigation would have been a ledger query with.
+
+- **F0 — Hand Meta the url shape that posted 1,609 times.** If the experiment's public arm is accepted where the authenticated arm is refused, the transit asset Meta reads becomes `type=upload` with the unguessable `ws/<workspace>/<20 hex>` id it already has, destroyed on post and swept by the TTL as today. What is given up is the signature on the url (FC-3.2 as amended by D38): the time-limit property already lives on the ASSET, not the url, and the id has 80 bits of entropy. Requires an amendment to `07` and the FC-3 rows, stated rather than slipped in.
+- **F1 — Own the fetch path, or at least see it.** Serve the story frame to Meta from our API: `GET /f/<signed, short-lived token>` streams the derived JPEG from Cloudinary server-side, from the region the worker just verified. Meta's path then has no CDN edge and no negative cache, every fetch is logged (user agent, status, bytes, elapsed), and a failure becomes observable rather than inferred. The worker can read the whole derived JPEG once and verify its bytes before Meta is told. Cost: one route, a token, ~150 KB–20 MB streamed per story.
+- **F2 — The readiness probe proves bytes, not headers.** **Built 2026-09-13:** `transit.ready()` answers a `Readiness` carrying the last probe's observation; the default probe is a ranged GET of the first 1,024 bytes under the floor's cap, judged by the JPEG/PNG/MP4 signature (`serves_media`). (A probe-specific cache key is not possible: per §8 neither a query string nor the version segment changes the CDN's key; the probe and Meta read the same object, which is what we want to prove.)
+- **F3 — Record the evidence when it happens.** **Built 2026-09-13:** the container permit's `response_ref` carries `elapsed_ms`, `probe` (status, content type, length, request id, elapsed, polls, magic) and on a refusal `meta` (subcode, user title and message, `fbtrace_id`, HTTP status); `post_intents.last_error` carries the subcode and trace id; the adapter's typed error carries Meta's whole answer as `detail`, every field scrubbed of the token.
+- **F4 — A fresh cache key per attempt** in the url Meta is given, if Cloudinary stays on Meta's path: no negative answer can be reused across attempts. Per §8 the key must change in the TRANSFORMATION (a no-op step such as `dpr_1.0`, one extra derivation per retry); a query string or the version segment changes nothing.
+- **F5 — Rungs indexed by fetch failures only.** `post_intents.attempts_by_step` exists for this and is unused; today the rung is indexed by every attempt the job ever consumed, which is how a collision pushed a fetch retry to the 60-minute rung.
+- **F6 — Bound the slot hold.** A story waiting on a rung keeps `uq_publish_exclusive` for the whole wait (it stays `publishing`). With F4 the fetch ladder can be short (20/40/80 s, then the review card); releasing the slot instead means a `publishing → approved` rewind the reconciler must understand — a design decision, not a patch.
+- **F7 — Burst serialization at claim time** (later): publish jobs already carry `ig:<account>` as their serialization key; a claim that skips a key with a leased sibling makes bursts collision-free without the 20 s poll.
+
+## Blocked
+
+- The decisive experiment: it makes container calls on the owner's real account, which is a posting-related action and waits for the owner's explicit approval. (The Railway login was restored on 09-13; the legacy record and the two Cloudinary experiments above ran once it was.)
+
+## Verification checklist
+
+- [x] Experiment run once from the developer machine: 8 of 8 accepted (above).
+- [ ] Experiment rerun from inside the worker container, or the Cloudinary error report read for the timestamps above.
+- [x] Legacy record read: 1,609 API posts, 20 `permanent_reject` locks (§7).
+- [ ] Each fix above lands as its own PR with a gate that reproduces the refused fetch (a probe answering a GIF; a first call refused, a fresh key accepted).
