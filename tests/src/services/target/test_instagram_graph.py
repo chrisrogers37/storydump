@@ -277,3 +277,99 @@ class TestTheTaxonomy:
             "quota_usage": 7,
             "quota_total": 25,
         }
+
+
+class TestTheLedgerKeepsMetasWord:
+    """2026-09-13: a refused fetch was investigated from logs because the
+    ledger kept `{"error": 9004}` and the message. The typed error now
+    carries Meta's whole answer — subcode, user title and message, trace id,
+    HTTP status — with the token scrubbed from every field."""
+
+    @pytest.mark.asyncio
+    async def test_an_error_answer_keeps_metas_whole_word(self):
+        def handler(request):
+            return httpx.Response(
+                400,
+                json={
+                    "error": {
+                        "message": f"Only photo or video can be accepted. {TOKEN}",
+                        "type": "OAuthException",
+                        "code": 9004,
+                        "error_subcode": 2207052,
+                        "is_transient": False,
+                        "error_user_title": "Media fetch failed",
+                        "error_user_msg": f"The media could not be fetched {TOKEN}",
+                        "fbtrace_id": "AbCdEf123",
+                    }
+                },
+            )
+
+        with pytest.raises(MetaTerminalError) as info:
+            await _adapter(handler).create_container(
+                REF, media_url="u", media_kind="image"
+            )
+        exc = info.value
+        assert exc.code == 9004 and exc.subcode == 2207052
+        assert exc.detail["error_subcode"] == 2207052
+        assert exc.detail["error_user_title"] == "Media fetch failed"
+        assert exc.detail["error_user_msg"].startswith("The media could not be fetched")
+        assert exc.detail["fbtrace_id"] == "AbCdEf123"
+        assert exc.detail["http_status"] == 400
+        assert TOKEN not in str(exc.detail) and TOKEN not in str(exc)
+
+    @pytest.mark.asyncio
+    async def test_a_bare_error_answer_still_types_with_an_empty_detail(self):
+        def handler(request):
+            return httpx.Response(400, json={"error": {"code": 4}})
+
+        with pytest.raises(MetaRetryableError) as info:
+            await _adapter(handler).create_container(
+                REF, media_url="u", media_kind="image"
+            )
+        assert info.value.subcode is None
+        assert info.value.detail["http_status"] == 400
+        assert info.value.detail["fbtrace_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_metas_text_is_capped_and_scrubbed_before_the_ledger(self):
+        """NUL would make PostgreSQL refuse the jsonb inside the retry's own
+        transaction; a signed Cloudinary url does not expire (D38); a
+        message is bounded like `last_error`'s."""
+        from src.services.target.instagram_graph import LEDGER_TEXT_MAX
+
+        long_msg = "x" * (LEDGER_TEXT_MAX + 200)
+
+        def handler(request):
+            return httpx.Response(
+                400,
+                json={
+                    "error": {
+                        "message": f"bad\x00url https://h/image/authenticated/s--AbC12_-x--/v1/f.jpg {TOKEN}",
+                        "code": 9004,
+                        "error_subcode": "2207052",
+                        "error_user_msg": long_msg,
+                        "fbtrace_id": f"tr\x00ace{TOKEN}",
+                        "is_transient": True,
+                    }
+                },
+            )
+
+        with pytest.raises(MetaTerminalError) as info:
+            await _adapter(handler).create_container(
+                REF, media_url="u", media_kind="image"
+            )
+        exc = info.value
+        assert exc.subcode == 2207052, "a decimal string subcode still types"
+        assert "\x00" not in str(exc) and "s--AbC12_-x--" not in str(exc)
+        assert "s--<SIG>--" in str(exc) and TOKEN not in str(exc)
+        assert exc.detail["error_user_msg"] == "x" * LEDGER_TEXT_MAX
+        assert exc.detail["fbtrace_id"] == "trace<TOKEN>"
+        assert exc.detail["is_transient"] is True
+
+    def test_a_subcode_is_an_int_or_a_decimal_string_never_a_bool(self):
+        from src.services.target.instagram_graph import _subcode_of
+
+        assert _subcode_of(2207052) == 2207052
+        assert _subcode_of("2207052") == 2207052
+        assert _subcode_of(True) is None
+        assert _subcode_of("abc") is None and _subcode_of(None) is None

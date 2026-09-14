@@ -56,7 +56,10 @@ internals and will not catch a violation here — named rather than implied.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 
@@ -78,6 +81,116 @@ STORY_BLUR = 2000
 READY_BUDGET_S = {"image": 20.0, "video": 60.0}
 READY_POLL_S = 1.0
 STORY_FORMATS = {"image": "jpg", "video": "mp4"}
+#: What the readiness probe READS of the frame (2026-09-13): the first bytes,
+#: enough for the format's signature, never the file — a video frame is tens
+#: of megabytes. A HEAD proved headers only; the CDN answers a miss with a
+#: 404 whose body is a placeholder GIF, and a relabelled or truncated body
+#: would pass a headers-only check. Cloudinary honours ranges (206); the
+#: floor's byte cap is the backstop should a range ever be ignored.
+PROBE_RANGE_BYTES = 1024
+PROBE_MAX_RESPONSE_BYTES = 64 * 1024
+#: An ISO base-media file (MP4/MOV) opens with a 4-byte size and a 4-byte box
+#: type; `ftyp` is usual, but `free`/`skip`/`wide`/`mdat`/`moov` first are
+#: legal and appear (adversarial review of the 2026-09-13 PR).
+_ISO_BMFF_BOXES = (b"ftyp", b"moov", b"mdat", b"free", b"skip", b"wide")
+
+
+@dataclass(frozen=True)
+class ProbeAnswer:
+    """One probe's reading of the delivery url: status and content type (the
+    headers-only seam of 2026-09-11) and, since 2026-09-13, the first bytes,
+    the total length when the answer names it, the CDN's request id and how
+    long the read took — what the ledger keeps beside Meta's own answer.
+
+    *bytes_read* says whether the body was READ and so must carry the kind's
+    signature: True for a ranged read (an empty body then fails — a frame the
+    edge is still filling), False for a headers-only answer (a HEAD). Unset,
+    it follows *head*: an injected probe that hands bytes is judged on them."""
+
+    status: int
+    content_type: str
+    head: bytes = b""
+    length: Optional[int] = None
+    request_id: Optional[str] = None
+    elapsed_ms: Optional[int] = None
+    bytes_read: Optional[bool] = None
+
+    @property
+    def judges_bytes(self) -> bool:
+        return bool(self.head) if self.bytes_read is None else self.bytes_read
+
+
+class Readiness:
+    """`ready()`'s answer: true iff the frame serves as media, carrying the
+    LAST probe's observation for the ledger. Truthiness keeps the 2026-09-11
+    call sites (`if not await ready(...)`) as they are."""
+
+    __slots__ = ("ok", "observation")
+
+    def __init__(self, ok: bool, observation: dict):
+        self.ok = bool(ok)
+        self.observation = observation
+
+    def __bool__(self) -> bool:
+        return self.ok
+
+    def __repr__(self) -> str:
+        return f"Readiness({self.ok}, {self.observation})"
+
+
+def magic_of(head: bytes) -> Optional[str]:
+    """The format the first bytes announce: 'jpeg', 'png', 'mp4', or None."""
+    if head[:2] == b"\xff\xd8":
+        return "jpeg"
+    if head[:4] == b"\x89PNG":
+        return "png"
+    if len(head) >= 8 and head[4:8] in _ISO_BMFF_BOXES:
+        return "mp4"
+    return None
+
+
+def serves_media(answer: ProbeAnswer, media_kind: str) -> bool:
+    """Whether the answer IS the frame: a 200/206 with the kind's content
+    type and — when the body was read — a body that opens with the kind's
+    signature (an empty one fails). A headers-only answer is judged on the
+    headers alone, as before 2026-09-13."""
+    if answer.status not in (200, 206):
+        return False
+    ctype = answer.content_type.lower()
+    if media_kind == "video":
+        if not ctype.startswith("video/"):
+            return False
+        return magic_of(answer.head) == "mp4" if answer.judges_bytes else True
+    if not ctype.startswith(("image/jpeg", "image/png")):
+        return False
+    if not answer.judges_bytes:
+        return True
+    return magic_of(answer.head) in ("jpeg", "png")
+
+
+def _as_answer(raw: Any, *, elapsed_ms: int) -> ProbeAnswer:
+    """A probe may answer the 2026-09-11 pair `(status, content_type)` or a
+    full :class:`ProbeAnswer`; either becomes one shape. Anything else
+    raises, which `ready()` reads as "not yet"."""
+    if isinstance(raw, ProbeAnswer):
+        if raw.elapsed_ms is None:
+            return dataclasses.replace(raw, elapsed_ms=elapsed_ms)
+        return raw
+    status, content_type = raw
+    return ProbeAnswer(int(status), str(content_type or ""), elapsed_ms=elapsed_ms)
+
+
+def _total_length(headers: Any) -> Optional[int]:
+    """The frame's full length when a range answer names it —
+    `Content-Range: bytes 0-1023/137673`; a 416's `bytes */137673` served
+    nothing and names nothing here. (A 200's `Content-Length` is dropped by
+    the floor — it described the wire body — so it is not read.)"""
+    content_range = str(headers.get("content-range", "") or "").strip()
+    if content_range.startswith("bytes ") and "/" in content_range:
+        served, _, total = content_range[len("bytes ") :].partition("/")
+        if served.strip() != "*" and total.strip().isdecimal():
+            return int(total.strip())
+    return None
 
 
 def story_transformation(transit_asset_ref: str, *, media_kind: str) -> list[dict]:
@@ -183,6 +296,7 @@ class TransitStore:
         resources_fn: Optional[Callable[..., dict]] = None,
         url_fn: Optional[Callable[..., tuple]] = None,
         probe_fn: Optional[Callable[[str], Any]] = None,
+        probe_resolver: Optional[Callable[[str], list]] = None,
     ):
         for name, value in (
             ("cloud_name", cloud_name),
@@ -218,10 +332,14 @@ class TransitStore:
         self._destroy_fn = destroy_fn
         self._resources_fn = resources_fn
         self._url_fn = url_fn
-        #: `ready`'s probe: `url -> (status, content_type)`; the default is an
-        #: egress-floored GET of the first bytes (tests inject a script).
+        #: `ready`'s probe: `url -> ProbeAnswer` (or the 2026-09-11 pair
+        #: `(status, content_type)`); the default is an egress-floored ranged
+        #: GET of the first bytes (tests inject a script). *probe_resolver*
+        #: is the floor's DNS seam for that default — tests hand it a static
+        #: answer so no name is looked up.
         self._probe_fn = probe_fn or self._default_probe
         self._probe_client = None
+        self._probe_resolver = probe_resolver
 
     @staticmethod
     def _resource_type(media_kind: str) -> str:
@@ -311,35 +429,58 @@ class TransitStore:
         media_kind: str,
         budget_s: Optional[float] = None,
         sleep: Callable[[float], Any] = asyncio.sleep,
-    ) -> bool:
+    ) -> Readiness:
         """Whether the story frame at :meth:`delivery_url` serves as media
         NOW — the check the pipeline makes before it hands Meta the URL.
-        Polls every `READY_POLL_S` until the probe answers 200/206 with an
-        image or video content type, or *budget_s* is spent. A probe error
-        is "not yet", never an exception: the caller's ladder decides."""
+        Polls every `READY_POLL_S` until the probe answers 200/206 with the
+        kind's content type and (when it reads bytes) the kind's signature,
+        or *budget_s* is spent. A probe error is "not yet", never an
+        exception: the caller's ladder decides. The answer is truthy iff
+        ready and carries the last probe's observation for the ledger."""
         url = self.delivery_url(transit_asset_ref, media_kind=media_kind)
         if budget_s is None:
             budget_s = READY_BUDGET_S.get(media_kind, READY_BUDGET_S["image"])
         deadline = self._now_fn() + timedelta(seconds=budget_s)
+        polls = 0
         while True:
+            polls += 1
+            started = time.perf_counter()
             try:
-                status, content_type = await self._probe_fn(url)
-            except Exception as exc:  # noqa: BLE001 — a probe failure is "not yet"
-                status, content_type = 0, f"probe failed: {type(exc).__name__}"
-            if status in (200, 206) and str(content_type or "").lower().startswith(
-                ("image/jpeg", "image/png", "video/")
-            ):
-                return True
+                answer = _as_answer(
+                    await self._probe_fn(url),
+                    elapsed_ms=int((time.perf_counter() - started) * 1000),
+                )
+            except Exception as exc:  # noqa: BLE001 — a failed probe, or an answer of no known shape, is "not yet"
+                answer = ProbeAnswer(
+                    0,
+                    f"probe failed: {type(exc).__name__}",
+                    elapsed_ms=int((time.perf_counter() - started) * 1000),
+                )
+            observation = {
+                "status": answer.status,
+                "content_type": answer.content_type,
+                "length": answer.length,
+                "request_id": answer.request_id,
+                "elapsed_ms": answer.elapsed_ms,
+                "polls": polls,
+                "bytes_read": answer.judges_bytes,
+                "magic": magic_of(answer.head) if answer.head else None,
+            }
+            if serves_media(answer, media_kind):
+                return Readiness(True, observation)
             if self._now_fn() >= deadline:
-                return False
+                return Readiness(False, observation)
             await sleep(READY_POLL_S)
 
-    async def _default_probe(self, url: str) -> tuple[int, str]:
-        """One egress-floored HEAD of the delivery URL — status and content
-        type, no body (a video frame can be tens of megabytes and the floor
-        caps bodies). The floor owns redirects (it refuses cross-host hops);
-        the host allow-list is the URL's own, which the SDK built from our
-        cloud name, and the private-address block still guards it."""
+    async def _default_probe(self, url: str) -> ProbeAnswer:
+        """One egress-floored ranged GET of the delivery url's first bytes
+        (2026-09-13; a HEAD before, which proved headers only): status,
+        content type, the bytes the signature check needs, the total length
+        the range answer names, the CDN's request id and the read's
+        duration. The floor owns redirects (it refuses cross-host hops); the
+        host allow-list is the url's own, which the SDK built from our cloud
+        name, and the private-address block still guards it. The byte cap
+        bounds the body should the range ever be ignored."""
         from urllib.parse import urlparse
 
         from src.services.target import egress
@@ -349,14 +490,46 @@ class TransitStore:
             timeout_class="standard",
             total_budget_s=float(TIMEOUT_CLASSES["standard"]),
             max_attempts=1,
+            max_response_bytes=PROBE_MAX_RESPONSE_BYTES,
             allowed_hosts=frozenset({host}),
         )
         if self._probe_client is None:
             import httpx
 
             self._probe_client = httpx.AsyncClient()
-        response = await egress.request(self._probe_client, "HEAD", url, policy=policy)
-        return int(response.status_code), str(response.headers.get("content-type", ""))
+        seam = {"resolver": self._probe_resolver} if self._probe_resolver else {}
+        started = time.perf_counter()
+        try:
+            response = await egress.request(
+                self._probe_client,
+                "GET",
+                url,
+                policy=policy,
+                headers={"Range": f"bytes=0-{PROBE_RANGE_BYTES - 1}"},
+                **seam,
+            )
+            bytes_read = True
+        except egress.ResponseTooLarge:
+            # The range was ignored and the whole frame came back past the
+            # cap (both reviews of the 2026-09-13 PR): the headers still
+            # answer, as the HEAD did before, and `bytes_read=False` on the
+            # ledger says the bytes were not judged.
+            response = await egress.request(
+                self._probe_client, "HEAD", url, policy=policy, **seam
+            )
+            bytes_read = False
+        length = _total_length(response.headers)
+        if length is None and bytes_read and response.status_code == 200:
+            length = len(response.content)  # the whole frame, under the cap
+        return ProbeAnswer(
+            status=int(response.status_code),
+            content_type=str(response.headers.get("content-type", "")),
+            head=bytes(response.content[:PROBE_RANGE_BYTES]) if bytes_read else b"",
+            length=length,
+            request_id=response.headers.get("x-request-id") or None,
+            elapsed_ms=int((time.perf_counter() - started) * 1000),
+            bytes_read=bytes_read,
+        )
 
     # -- FC-3.2 (D38): delivery ------------------------------------------------
 
