@@ -204,6 +204,13 @@ class Command:
     #: passes the request body into `args` verbatim, and a name there would
     #: be a member's own choice of what the group reads after "by".
     actor_label: Optional[str] = None
+    #: The card the command came from, when the adapter knows it: the
+    #: binding it was tapped in and the message ref Telegram named. A settled
+    #: story's answer uses them to ADOPT a card the ledger never learned — the
+    #: twin a resend leaves when a send's answer was lost (2026-09-15) — and
+    #: edit it; a web command carries neither.
+    binding_id: Optional[str] = None
+    card_ref: Optional[str] = None
 
 
 @dataclass(frozen=True)

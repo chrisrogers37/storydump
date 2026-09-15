@@ -816,7 +816,7 @@ class TestTheLostAckPolicyIsBoundedPerKind:
     async def test_supersede_all_targets_every_known_ref_and_converges(self, outbox_db):
         """Prompts converge on supersede: every live card is retired and a
         `prompt_supersede` row is queued per KNOWN ref; a card whose ref was
-        lost is still retired and simply ages out (R6)."""
+        lost is still retired; it heals on first touch (`adopt_card`, 2026-09-15)."""
         from src.services.target.outbox import supersede_all
 
         binding = _new_binding(outbox_db)

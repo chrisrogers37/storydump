@@ -226,22 +226,31 @@ async def _settle(
         # transit state (`approved`, `publishing`, `review_required`) is not
         # superseded here: the flip's own supersede rows edited every copy,
         # and a repeat tap answers without writing (one write per tap is the
-        # throughput ruling, 2026-09-12). The accepted window: a copy whose
-        # supersede row failed past the resend cap keeps its buttons — the
-        # sweep and `supersede_everywhere` address live rows only, and the
-        # pipeline's restate-by-ref reaches a superseded card at posted,
-        # failed or review — until a restate-by-ref on touch is built
-        # (review of #1271; #1297 re-verify).
-        await _supersede_everywhere(
+        # throughput ruling, 2026-09-12). A copy whose supersede row failed
+        # past the resend cap keeps its buttons until touched: the sweep and
+        # `supersede_everywhere` address live rows only, and the pipeline's
+        # restate-by-ref reaches a superseded card at posted, failed or
+        # review.
+        adopted = await _supersede_and_adopt(session, intent, command, line)
+    else:
+        adopted = await _adopt_touched(
             session,
-            workspace_id=command.workspace_id,
-            intent_id=str(intent["id"]),
-            outcome_text=line,
+            intent,
+            command,
+            line,
+            reply_markup=(
+                prompts.review_keyboard(str(intent["id"]))
+                if state == "review_required"
+                else None
+            ),
         )
     return CommandResult(
         "answered",
         {
             "intent_id": str(intent["id"]),
+            # A repeat tap that adopted a card WROTE (a row and a paced edit):
+            # the tap's admission spends on it (adversarial review of #1308).
+            "adopted": adopted,
             "state": state,
             "settled_by": found["by"],
             "settled_at": prompts.stamp(at, _tz(intent)),
@@ -251,22 +260,102 @@ async def _settle(
     )
 
 
+async def _adopt_touched(
+    session,
+    intent: dict[str, Any],
+    command: Command,
+    line: str,
+    *,
+    reply_markup: Optional[dict] = None,
+) -> bool:
+    """Restate-by-ref on touch (2026-09-15; the window the review of #1271
+    named). The message a tap came from may be one the ledger never learned
+    — a resend's twin, left with live buttons through Approved and Posted
+    because no edit could name it. The tap is the moment its id is known:
+    adopt it as a card of the story and edit it with *line* — the same line
+    every known card carries, with the review keyboard when the story is
+    parked — so every later line reaches it too. Every tap that writes a
+    line calls this: the deciding tap, a resolution, a repeat on a settled
+    story (structural review of #1308: the deciding tap is as likely to come
+    from the twin). A web command carries no card and adopts nothing."""
+    if not (command.card_ref and command.binding_id):
+        return False
+    return await outbox.adopt_card(
+        session,
+        workspace_id=command.workspace_id,
+        binding_id=command.binding_id,
+        intent_id=str(intent["id"]),
+        ref=command.card_ref,
+        outcome_text=line,
+        reply_markup=reply_markup,
+    )
+
+
+async def _supersede_and_adopt(
+    session, intent: dict[str, Any], command: Command, line: str
+) -> bool:
+    """Supersede every known card with *line*, and — when the card the tap
+    came from was not among them — adopt it (:func:`_adopt_touched`). The
+    every-binding door answers both in its one statement, so the ordinary
+    tap, from a card the ledger knows, reads nothing more (#1286's budget
+    holds). Returns whether a card was adopted."""
+    if not (command.card_ref and command.binding_id):
+        await _supersede_everywhere(
+            session,
+            workspace_id=command.workspace_id,
+            intent_id=str(intent["id"]),
+            outcome_text=line,
+        )
+        return False
+    touched = await outbox.supersede_everywhere_touched(
+        session,
+        workspace_id=command.workspace_id,
+        intent_id=str(intent["id"]),
+        outcome_text=line,
+        touched=(command.binding_id, command.card_ref),
+    )
+    if touched.touched_known:
+        return False
+    return await _adopt_touched(session, intent, command, line)
+
+
+async def _restate_and_adopt(
+    session, intent: dict[str, Any], command: Command, line: str
+) -> bool:
+    """`_supersede_and_adopt`'s shape for the review resolutions, which
+    restate by ref."""
+    if not (command.card_ref and command.binding_id):
+        await _restate_everywhere(
+            session,
+            workspace_id=command.workspace_id,
+            intent_id=str(intent["id"]),
+            outcome_text=line,
+        )
+        return False
+    touched = await outbox.restate_everywhere_touched(
+        session,
+        workspace_id=command.workspace_id,
+        intent_id=str(intent["id"]),
+        outcome_text=line,
+        touched=(command.binding_id, command.card_ref),
+    )
+    if touched.touched_known:
+        return False
+    return await _adopt_touched(session, intent, command, line)
+
+
 async def _record_outcome(
     session, intent: dict[str, Any], command: Command, state: str
 ) -> str:
-    """After a flip: the outcome line, written onto every card of the intent."""
+    """After a flip: the outcome line, written onto every card of the intent
+    — and onto the card the tap came from, when the ledger did not know it."""
     line = prompts.outcome_line(
         state,
         by=await _actor_name(session, command.actor_user_id, label=command.actor_label),
         at=_utcnow(),
         tz=_tz(intent),
     )
-    await _supersede_everywhere(
-        session,
-        workspace_id=command.workspace_id,
-        intent_id=str(intent["id"]),
-        outcome_text=line,
-    )
+    await _supersede_and_adopt(session, intent, command, line)
     return line
 
 
@@ -295,12 +384,7 @@ async def _restate_outcome(
         at=_utcnow(),
         tz=_tz(intent),
     )
-    await _restate_everywhere(
-        session,
-        workspace_id=command.workspace_id,
-        intent_id=str(intent["id"]),
-        outcome_text=line,
-    )
+    await _restate_and_adopt(session, intent, command, line)
     return line
 
 

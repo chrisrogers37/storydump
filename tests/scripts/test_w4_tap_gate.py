@@ -226,6 +226,17 @@ def _supersedes(world, intent_id):
     return [(b, p if isinstance(p, dict) else json.loads(p)) for b, p in rows]
 
 
+def _lost_answer(world, intent_id):
+    """The evidence a twin leaves: the card's row shows two send attempts —
+    the first lost its answer, the second is the ref the ledger knows."""
+    _write(
+        world,
+        "UPDATE channel_outbox SET attempts = 2"
+        " WHERE intent_id = %s AND kind = 'approval_prompt'",
+        (intent_id,),
+    )
+
+
 def _card_states(world, intent_id):
     return dict(
         _write(
@@ -294,13 +305,250 @@ class TestARepeatOrLateTapAnswers:
 
     def test_a_tap_on_a_posted_card_answers_and_heals_the_card(self, world):
         i = _intent(world, "posted-1", state="posted")
-        r = tap(world, "skip", i["id"])
+        # From the card the ledger knows: an id it does not know is a twin,
+        # adopted and edited — the tests below (2026-09-15).
+        r = tap(world, "skip", i["id"], message_id=int(i["cards"]["a"]))
         assert r.outcome == "answered" and "Posted" in r.answer_text
         assert _state(world, i["id"]) == "posted"
         assert _audit(world, i["id"]) == []
         # The stale card (a lost supersede) heals on first touch: both copies.
         assert set(_card_states(world, i["id"]).values()) == {"superseded"}
         assert len(_supersedes(world, i["id"])) == 2
+
+    def test_a_tap_from_a_twin_card_the_ledger_never_learned_heals_that_message(
+        self, world
+    ):
+        """2026-09-15: a card's first send lost its answer and was resent by
+        policy — two messages in the chat, one ref in the ledger. The twin
+        kept live buttons through Approved and Posted because no edit could
+        name it. The tap is the moment the ledger learns its id: the message
+        is ADOPTED as a card of the intent (superseded, with the twin's own
+        content) and edited at once with the story's line — and, adopted,
+        every later line by ref reaches it too."""
+        i = _intent(world, "twin-1", state="posted")
+        _lost_answer(world, i["id"])
+        known_a = i["cards"]["a"]
+        r = tap(world, "skip", i["id"], message_id=4242)
+        assert r.outcome == "answered" and "Posted" in r.answer_text
+        sups = _supersedes(world, i["id"])
+        for_twin = [p for _, p in sups if p.get("supersedes_ref") == "4242"]
+        assert len(for_twin) == 1, sups
+        assert for_twin[0]["outcome_text"].startswith("✅ Posted")
+        assert for_twin[0]["sent_as"] == "text", (
+            "the twin is edited as its card was sent"
+        )
+        assert for_twin[0]["header"].startswith("📸 f.jpg"), (
+            "the card's own header rides the edit"
+        )
+        assert "reply_markup" not in for_twin[0], "a posted story leaves no buttons"
+        cards = _card_states(world, i["id"])
+        assert cards["4242"] == "superseded", "adopted as a card the ledger knows"
+        assert cards[known_a] == "superseded"
+        # Known now: a second tap from the twin queues nothing new — for it
+        # or for anyone (the known cards are superseded already).
+        again = tap(world, "post", i["id"], message_id=4242)
+        assert again.outcome == "answered"
+        assert len(_supersedes(world, i["id"])) == 3, (
+            "two known cards and the twin, once"
+        )
+        # Nor does a tap from the ORIGINAL card, now that the twin sits beside
+        # it in the ledger: every known ref is checked, not the newest row.
+        original = tap(world, "post", i["id"], message_id=int(known_a))
+        assert original.outcome == "answered"
+        assert len(_supersedes(world, i["id"])) == 3
+        assert len(_card_states(world, i["id"])) == 3
+
+    def test_a_twin_adopted_while_the_story_waits_gets_every_later_line(self, world):
+        """The adoption is what makes the twin reachable: a twin tapped while
+        the story is still approved is edited with the Approved line now, and
+        the pipeline's later restate-by-ref (the Posted line) reaches it."""
+        from sqlalchemy.ext.asyncio import create_async_engine
+        from sqlalchemy.pool import NullPool
+
+        from src.services.target import outbox
+        from src.services.target.unit_of_work import apply_gucs
+
+        i = _intent(world, "twin-2", state="approved")
+        _lost_answer(world, i["id"])
+        r = tap(world, "post", i["id"], message_id=4343)
+        assert r.outcome == "answered" and "Approved" in r.answer_text
+        first = [
+            p
+            for _, p in _supersedes(world, i["id"])
+            if p.get("supersedes_ref") == "4343"
+        ]
+        assert len(first) == 1 and first[0]["outcome_text"].startswith("✅ Approved")
+        assert "reply_markup" not in first[0], (
+            "only a parked story's twin keeps buttons"
+        )
+        assert _card_states(world, i["id"])["4343"] == "superseded"
+
+        async def posted_line():
+            engine = create_async_engine(
+                asyncpg_url(world["ingress"]), poolclass=NullPool
+            )
+            try:
+                async with engine.connect() as conn:
+                    async with conn.begin():
+                        await apply_gucs(
+                            conn, tenant_id=world["ws"], actor_kind="system"
+                        )
+                        return await outbox.restate_cards(
+                            conn,
+                            workspace_id=world["ws"],
+                            binding_id=world["bindings"]["a"],
+                            intent_id=i["id"],
+                            outcome_text="✅ Posted · later",
+                        )
+            finally:
+                await engine.dispose()
+
+        assert asyncio.run(posted_line()) == 2, "the known card and the adopted twin"
+        posted = [
+            p
+            for _, p in _supersedes(world, i["id"])
+            if p.get("supersedes_ref") == "4343"
+            and p.get("outcome_text") == "✅ Posted · later"
+        ]
+        assert len(posted) == 1
+
+    def test_a_twin_adopted_during_review_keeps_the_review_buttons(self, world):
+        """A twin of a parked story's card is edited to "👀 Needs review" WITH
+        the three resolutions, as the known card was — a twin with dead
+        approval buttons and no review buttons would be a story nobody can
+        resolve from that message."""
+        i = _intent(world, "twin-3", state="review_required")
+        _lost_answer(world, i["id"])
+        r = tap(world, "post", i["id"], message_id=4444)
+        assert r.outcome == "answered" and "Needs review" in r.answer_text
+        sup = [
+            p
+            for _, p in _supersedes(world, i["id"])
+            if p.get("supersedes_ref") == "4444"
+        ]
+        assert len(sup) == 1
+        buttons = [b for row in sup[0]["reply_markup"]["inline_keyboard"] for b in row]
+        assert len(buttons) == 3, sup[0]
+
+    def test_a_deciding_tap_from_a_twin_edits_the_twin_too(self, world):
+        """Structural review of #1308: the tap that FLIPS the story is as
+        likely to come from the twin as from the known card (they sit side by
+        side). The flip's outcome edits every known card; the twin is adopted
+        and edited in the same transaction, not on a second tap."""
+        i = _intent(world, "twin-4")
+        _lost_answer(world, i["id"])
+        r = tap(world, "skip", i["id"], message_id=4545)
+        assert r.outcome == "executed"
+        assert _state(world, i["id"]) == "skipped"
+        sups = _supersedes(world, i["id"])
+        assert len(sups) == 3, sups
+        twin = [p for _, p in sups if p.get("supersedes_ref") == "4545"]
+        assert len(twin) == 1 and twin[0]["outcome_text"].startswith("⏭️ Skipped")
+        assert "reply_markup" not in twin[0]
+        assert _card_states(world, i["id"])["4545"] == "superseded"
+
+    def test_a_resolution_tap_from_a_twin_edits_the_twin_too(self, world):
+        """The review card's resolutions restate by ref; a twin of the review
+        card tapped for a resolution is adopted and gets the resolution's line."""
+        i = _intent(world, "twin-5", state="review_required")
+        _lost_answer(world, i["id"])
+        r = tap(world, "giveup", i["id"], message_id=4646)
+        assert r.outcome == "executed", r.answer_text
+        assert _state(world, i["id"]) == "cancelled"
+        twin = [
+            p
+            for _, p in _supersedes(world, i["id"])
+            if p.get("supersedes_ref") == "4646"
+        ]
+        assert len(twin) == 1 and twin[0]["outcome_text"].startswith("🚫 Cancelled")
+        assert _card_states(world, i["id"])["4646"] == "superseded"
+
+    def test_a_tap_naming_another_stories_message_adopts_nothing(self, world):
+        """Structural review of #1308: Telegram does not bind a callback's
+        intent token to its message id — a modified client can send story
+        X's token with story Y's message. A message the ledger already owns
+        (any row on the binding: a card, an invitation, a notice) is never
+        adopted by another story, so Y's card keeps its buttons."""
+        x = _intent(world, "twin-x", state="posted")
+        _lost_answer(world, x["id"])
+        y = _intent(world, "twin-y")
+        r = tap(world, "skip", x["id"], message_id=int(y["cards"]["a"]))
+        assert r.outcome == "answered"
+        assert y["cards"]["a"] not in _card_states(world, x["id"]), "not adopted by X"
+        assert _card_states(world, y["id"])[y["cards"]["a"]] == "sent", "Y untouched"
+        assert not any(
+            p.get("supersedes_ref") == y["cards"]["a"]
+            for _, p in _supersedes(world, x["id"])
+        )
+        assert _state(world, y["id"]) == "awaiting_approval"
+
+    def test_a_twin_is_adopted_only_where_the_story_has_a_card(self, world):
+        """A twin exists only in a chat where the story's card was sent: a
+        tap from a binding with no card of the story adopts nothing."""
+        x = _intent(world, "twin-z", state="posted")
+        _lost_answer(world, x["id"])
+        _write(
+            world,
+            "DELETE FROM channel_outbox WHERE intent_id = %s AND binding_id = %s",
+            (x["id"], world["bindings"]["b"]),
+        )
+        r = tap(world, "skip", x["id"], chat=CHAT_B, message_id=4747)
+        assert r.outcome == "answered"
+        assert "4747" not in _card_states(world, x["id"])
+        assert not any(
+            p.get("supersedes_ref") == "4747" for _, p in _supersedes(world, x["id"])
+        )
+
+    def test_a_twins_id_may_equal_another_bindings_ref(self, world):
+        """Message ids are per chat: a twin in group A whose id happens to
+        equal B's known ref is still A's twin — the ownership check is per
+        binding."""
+        x = _intent(world, "twin-ab", state="posted")
+        _lost_answer(world, x["id"])
+        clash = int(x["cards"]["b"])
+        r = tap(world, "skip", x["id"], chat=CHAT_A, message_id=clash)
+        assert r.outcome == "answered"
+        adopted = _write(
+            world,
+            "SELECT state FROM channel_outbox WHERE intent_id = %s AND binding_id = %s"
+            " AND kind = 'approval_prompt' AND external_message_ref = %s",
+            (x["id"], world["bindings"]["a"], str(clash)),
+            fetch=True,
+        )
+        assert adopted == [("superseded",)], adopted
+
+    def test_a_card_sent_once_has_no_twin_to_adopt(self, world):
+        """Adversarial review of #1308: a twin exists only per lost answer.
+        A card whose row shows ONE send cannot have a twin, so a tap from an
+        unknown message id — a forged callback, a forwarded copy — adopts
+        nothing and edits nothing."""
+        i = _intent(world, "once-1", state="posted")
+        _write(
+            world,
+            "UPDATE channel_outbox SET attempts = 1"
+            " WHERE intent_id = %s AND kind = 'approval_prompt'",
+            (i["id"],),
+        )
+        r = tap(world, "skip", i["id"], message_id=4848)
+        assert r.outcome == "answered"
+        assert "4848" not in _card_states(world, i["id"])
+        assert len(_supersedes(world, i["id"])) == 2, "the two known cards only"
+
+    def test_a_tap_from_a_known_card_adopts_nothing(self, world):
+        """The ordinary repeat tap — from the card the ledger already knows —
+        writes exactly what it wrote before: no adoption row, no extra edit."""
+        i = _intent(world, "known-1", state="posted")
+        # Evidence of a twin, so neither the no-card nor the evidence guard is
+        # what protects here: the known card is live, so the deciding edit's
+        # own flag says it was among the cards edited.
+        _lost_answer(world, i["id"])
+        known_a = int(i["cards"]["a"])
+        r = tap(world, "skip", i["id"], message_id=known_a)
+        assert r.outcome == "answered"
+        assert set(_card_states(world, i["id"])) == set(i["cards"].values())
+        assert len(_supersedes(world, i["id"])) == 2, (
+            "one edit per known card, nothing more"
+        )
 
     def test_an_approval_tap_on_a_review_card_answers_the_review_has_its_own_buttons(
         self, world
@@ -533,6 +781,18 @@ class TestTapAdmissionOnTheLedger:
         assert tap(world, "skip", i["id"]).outcome == "answered"
         assert self._count(world) == before + 1, "an answered repeat spends nothing"
 
+    def test_an_adopting_tap_spends_one_unit_and_a_plain_repeat_none(self, world):
+        """An answered tap that adopted a twin wrote a row and a paced edit:
+        it spends one unit of admission on the ledger; the next tap from the
+        same, now-known, message spends nothing (re-verification of #1308)."""
+        i = _intent(world, "adm-adopt", state="posted")
+        _lost_answer(world, i["id"])
+        before = self._count(world) or 0
+        assert tap(world, "skip", i["id"], message_id=4949).outcome == "answered"
+        assert self._count(world) == before + 1, "the adoption spent one"
+        assert tap(world, "skip", i["id"], message_id=4949).outcome == "answered"
+        assert self._count(world) == before + 1, "a known card's repeat spends nothing"
+
     def test_at_the_limit_the_tap_is_told_and_the_card_keeps_its_state(self, world):
         from src.config.settings import settings
 
@@ -606,6 +866,8 @@ TAP_STATEMENT_BUDGET = 11
 
 class TestATapIsCheapOnRealRows:
     def test_a_post_tap_spends_at_most_its_budget(self, world):
+        # From the card the ledger knows — the ordinary tap. An id it does
+        # not know is a twin, whose adoption reads twice more (2026-09-15).
         from sqlalchemy import event
         from sqlalchemy.engine import Engine
 
@@ -617,7 +879,7 @@ class TestATapIsCheapOnRealRows:
         event.listen(Engine, "before_cursor_execute", listen)
         try:
             i = _intent(world, "post-cheap")
-            r = tap(world, "post", i["id"])
+            r = tap(world, "post", i["id"], message_id=int(i["cards"]["a"]))
         finally:
             event.remove(Engine, "before_cursor_execute", listen)
 

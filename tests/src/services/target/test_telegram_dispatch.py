@@ -363,6 +363,33 @@ class TestTheTap:
         assert gucs["actor_user_id"] == "u1" and gucs["channel"] == "telegram"
 
     @pytest.mark.asyncio
+    async def test_the_command_carries_the_card_the_tap_came_from(self, seams):
+        """2026-09-15: a settled story's answer adopts a message the ledger
+        never learned (a resend's twin) and edits it — so the command names
+        the binding it was tapped in and the message ref, on their own
+        fields, never in `args`."""
+        d = telegram_dispatch.TelegramDispatcher()
+        await d(None, tap("skip"))
+        command = seams["log"]["executed"][0]
+        assert command.binding_id == "b1" and command.card_ref == "555"
+        assert "card_ref" not in command.args and "binding_id" not in command.args
+
+    async def test_an_answered_tap_that_adopted_a_card_spends_admission(self, seams):
+        """An answered no-op spends nothing (F12); an answered tap that
+        ADOPTED a twin wrote a row and a paced edit, so it spends one
+        (adversarial review of #1308)."""
+        seams["result"] = CommandResult(
+            "answered", {"intent_id": INTENT, "state": "posted", "adopted": False}
+        )
+        d = telegram_dispatch.TelegramDispatcher()
+        await d(None, tap("skip"))
+        assert seams["log"]["debits"] == [], "a plain answered tap spends nothing"
+        seams["result"] = CommandResult(
+            "answered", {"intent_id": INTENT, "state": "posted", "adopted": True}
+        )
+        await d(None, tap("skip"))
+        assert len(seams["log"]["debits"]) == 1, "the adoption spent one"
+
     async def test_post_maps_to_approve_and_tells_the_truth_about_publishing(
         self, seams
     ):
