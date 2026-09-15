@@ -8,6 +8,13 @@ database URL or a webhook secret is redacted before printing — inside the
 document for JSON, so the output stays valid JSON, and in every string a
 renderer is handed for a person. Rendering is per kind; a kind without a
 renderer prints its data as indented JSON rather than nothing.
+
+The read views share one data shape — ``{"workspaces": [{"workspace_id",
+"rows"}]}`` — and one frame for a person: a ``workspace <id>`` line, then
+that workspace's table (``story`` and ``burst`` in sections), or the view's
+own word for nothing. Id columns never wrap: an id folded over two lines
+cannot be copied, so when a table is wider than the terminal the other
+columns give.
 """
 
 from __future__ import annotations
@@ -15,9 +22,10 @@ from __future__ import annotations
 import json
 import re
 import sys
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 from rich.console import Console
+from rich.padding import Padding
 from rich.table import Table
 
 #: The three secret shapes the spec names (§6, redaction at the client).
@@ -102,6 +110,12 @@ def _table(*columns: str) -> Table:
     return table
 
 
+def _handle(value: object) -> str:
+    """An Instagram handle with exactly one leading @, whatever the ledger stored."""
+    text = _text(value, "?")
+    return text if text.startswith("@") else "@" + text
+
+
 def _text(value: Any, absent: str) -> str:
     return absent if value is None or value == "" else str(value)
 
@@ -184,9 +198,383 @@ def _render_generic(console: Console, data: Any) -> None:
     console.print(json.dumps(data, indent=2, sort_keys=True))
 
 
+# --- the read views (phase 02) ------------------------------------------------
+
+#: A column: its header, and the row field it shows or a function of the row.
+Column = tuple[str, Any]
+
+#: Fields that are ids: never folded, whatever the width.
+ID_FIELDS = frozenset(
+    {
+        "id",
+        "intent_id",
+        "binding_id",
+        "posted_id",
+        "waiting_id",
+        "ig_account_id",
+        "media_item_id",
+        "actor_user_id",
+    }
+)
+
+#: What a workspace with no rows says, per view.
+EMPTY: Mapping[str, str] = {
+    "story": "no such story here",
+    "cards": "nothing sent for it here",
+    "floating": "nothing floating",
+    "account": "no such account here",
+    "jobs": "no jobs",
+    "outbox": "outbox empty",
+    "burst": "nothing in the window",
+}
+
+STORY_FIELDS: Sequence[Column] = (
+    ("state", "state"),
+    ("step", "publish_step"),
+    ("since", "entered_state_at"),
+    ("slot", "schedule_slot_at"),
+    ("cap", "cap_consumed_on"),
+    ("attempts", "attempts_by_step"),
+    ("account", "ig_account_id"),
+    ("media", "media_item_id"),
+    ("error", "last_error"),
+)
+AUDIT_COLUMNS: Sequence[Column] = (
+    ("at", "at"),
+    ("from", "from_state"),
+    ("to", "to_state"),
+    ("actor", "actor_kind"),
+    ("user", "actor_user_id"),
+    ("channel", "channel"),
+    ("detail", "detail"),
+)
+OPERATION_COLUMNS: Sequence[Column] = (
+    ("at", "at"),
+    ("kind", "op_kind"),
+    ("gen", "generation"),
+    ("state", "state"),
+    ("variant", "url_variant"),
+    ("error", "error"),
+    ("subcode", "subcode"),
+    ("ms", "elapsed_ms"),
+)
+SENT_COLUMNS: Sequence[Column] = (
+    ("at", "at"),
+    ("binding", "binding_id"),
+    ("kind", "kind"),
+    ("state", "state"),
+    ("message ref", "external_message_ref"),
+    ("attempts", "attempts"),
+    ("outcome", "outcome_text"),
+)
+CARDS_COLUMNS: Sequence[Column] = (
+    ("id", "id"),
+    ("created", "created_at"),
+    ("binding", "binding_id"),
+    ("channel", "channel"),
+    ("kind", "kind"),
+    ("state", "state"),
+    ("message ref", "external_message_ref"),
+    ("attempts", "attempts"),
+    ("outcome", "outcome_text"),
+    ("updated", "updated_at"),
+)
+
+
+def _job_of(row: Mapping[str, Any]) -> Any:
+    """``ready (2)``: the job's state and its attempts."""
+    state = row.get("job_state")
+    if state is None:
+        return None
+    attempts = row.get("job_attempts")
+    return f"{state} ({attempts})" if attempts is not None else str(state)
+
+
+def _wait_of(row: Mapping[str, Any]) -> Any:
+    """``container_not_ready/2``: the last wait's class and rung."""
+    klass = row.get("last_wait_class")
+    if klass is None:
+        return None
+    rung = row.get("last_wait_rung")
+    return f"{klass}/{rung}" if rung is not None else str(klass)
+
+
+FLOATING_COLUMNS: Sequence[Column] = (
+    ("id", "id"),
+    ("step", "publish_step"),
+    ("attempts", "attempts_by_step"),
+    ("cap", "cap_consumed_on"),
+    ("since", "entered_state_at"),
+    ("job", _job_of),
+    ("run at", "job_run_at"),
+    ("wait", _wait_of),
+    ("waited at", "last_wait_at"),
+)
+RECENT_COLUMNS: Sequence[Column] = (
+    ("id", "id"),
+    ("state", "state"),
+    ("since", "entered_state_at"),
+)
+JOBS_COLUMNS: Sequence[Column] = (
+    ("kind", "kind"),
+    ("lane", "lane"),
+    ("state", "state"),
+    ("count", "count"),
+    ("oldest run at", "oldest_run_at"),
+)
+SAMPLE_COLUMNS: Sequence[Column] = (
+    ("id", "id"),
+    ("attempts", "attempts"),
+    ("run at", "run_at"),
+    ("error", "error"),
+)
+OUTBOX_COLUMNS: Sequence[Column] = (
+    ("binding", "binding_id"),
+    ("channel", "channel"),
+    ("ref", "external_ref"),
+    ("kind", "kind"),
+    ("state", "state"),
+    ("count", "count"),
+    ("oldest", "oldest_created_at"),
+)
+#: The burst's sections in the order they read, each with its columns.
+BURST_SECTIONS: Sequence[tuple[str, Sequence[Column]]] = (
+    (
+        "tap",
+        (
+            ("at", "at"),
+            ("story", "intent_id"),
+            ("from", "from_state"),
+            ("to", "to_state"),
+            ("actor", "actor_kind"),
+            ("channel", "channel"),
+        ),
+    ),
+    (
+        "permit",
+        (
+            ("at", "at"),
+            ("story", "intent_id"),
+            ("gen", "generation"),
+            ("state", "state"),
+            ("variant", "url_variant"),
+            ("error", "error"),
+            ("subcode", "subcode"),
+            ("ms", "elapsed_ms"),
+        ),
+    ),
+    (
+        "float_wait",
+        (
+            ("at", "at"),
+            ("story", "intent_id"),
+            ("class", "wait_class"),
+            ("rung", "rung"),
+            ("seconds", "seconds"),
+            ("next run", "next_run_at"),
+        ),
+    ),
+    (
+        "sibling",
+        (
+            ("at", "at"),
+            ("posted", "posted_id"),
+            ("waiting", "waiting_id"),
+            ("class", "wait_class"),
+        ),
+    ),
+    (
+        "review",
+        (
+            ("at", "at"),
+            ("story", "intent_id"),
+            ("from", "from_state"),
+            ("last error", "last_error"),
+        ),
+    ),
+    ("outcome", (("state", "state"), ("count", "count"))),
+)
+MIGRATION_COLUMNS: Sequence[Column] = (
+    ("version", "version"),
+    ("status", "status"),
+    ("applied at", "applied_at"),
+    ("checksum", "checksum"),
+)
+RLS_COLUMNS: Sequence[Column] = (
+    ("table", "table"),
+    ("enabled", "enabled"),
+    ("forced", "forced"),
+)
+DOOR_COLUMNS: Sequence[Column] = (("name", "name"), ("owner", "owner"))
+
+
+def _cell(value: Any) -> str:
+    """One cell: ``-`` for nothing, ``yes``/``no`` for a flag, ``k=v`` pairs
+    for a mapping, compact JSON for a list."""
+    if value is None or value == "":
+        return "-"
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if isinstance(value, dict):
+        return " ".join(f"{k}={_cell(v)}" for k, v in value.items()) or "-"
+    if isinstance(value, list):
+        return json.dumps(value, separators=(",", ":"))
+    return str(value)
+
+
+def _rows_table(rows: Sequence[Mapping[str, Any]], columns: Sequence[Column]) -> Table:
+    """A table that never crops: an id column keeps its width, every other
+    column folds when the terminal is narrower than the table."""
+    table = Table(box=None, pad_edge=False, header_style="bold")
+    for header, field in columns:
+        if isinstance(field, str) and field in ID_FIELDS:
+            table.add_column(header, no_wrap=True)
+        else:
+            table.add_column(header, overflow="fold")
+    for row in rows:
+        table.add_row(
+            *(
+                _cell(field(row) if callable(field) else row.get(field))
+                for _, field in columns
+            )
+        )
+    return table
+
+
+def _indented(table: Table, indent: int) -> Padding:
+    return Padding(table, (0, 0, 0, indent), expand=False)
+
+
+def _dicts(value: Any) -> list[dict[str, Any]]:
+    return [item for item in (value or []) if isinstance(item, dict)]
+
+
+def _section(
+    console: Console, title: str, rows: Any, columns: Sequence[Column], indent: int = 2
+) -> None:
+    console.print(" " * indent + title)
+    items = _dicts(rows)
+    if not items:
+        console.print(" " * (indent + 2) + "none")
+        return
+    console.print(_indented(_rows_table(items, columns), indent + 2))
+
+
+def _entries(data: Any) -> list[tuple[str, list[dict[str, Any]]]]:
+    workspaces = data.get("workspaces") if isinstance(data, dict) else None
+    return [
+        (_text(entry.get("workspace_id"), "?"), _dicts(entry.get("rows")))
+        for entry in _dicts(workspaces)
+    ]
+
+
+def _view(
+    kind: str, render_rows: Callable[[Console, list[dict[str, Any]]], None]
+) -> Callable[[Console, Any], None]:
+    """The frame every workspace view shares: a header per workspace, then
+    its rows or the view's word for none."""
+
+    def render(console: Console, data: Any) -> None:
+        entries = _entries(data)
+        if not entries:
+            console.print("no workspaces to read")
+            return
+        for index, (workspace_id, rows) in enumerate(entries):
+            if index:
+                console.print()
+            console.print(f"workspace {workspace_id}")
+            if not rows:
+                console.print(f"  {EMPTY[kind]}")
+                continue
+            render_rows(console, rows)
+
+    return render
+
+
+def _table_of(
+    columns: Sequence[Column],
+) -> Callable[[Console, list[dict[str, Any]]], None]:
+    def render_rows(console: Console, rows: list[dict[str, Any]]) -> None:
+        console.print(_indented(_rows_table(rows, columns), 2))
+
+    return render_rows
+
+
+def _render_story_rows(console: Console, rows: list[dict[str, Any]]) -> None:
+    for row in rows:
+        intent = row.get("intent") if isinstance(row.get("intent"), dict) else {}
+        console.print(f"  story {_text(intent.get('id'), '?')}")
+        for label, field in STORY_FIELDS:
+            console.print(f"    {label:<9} {_cell(intent.get(field))}")
+        _section(console, "audit", row.get("audit"), AUDIT_COLUMNS)
+        _section(console, "operations", row.get("operations"), OPERATION_COLUMNS)
+        _section(console, "outbox", row.get("cards"), SENT_COLUMNS)
+
+
+def _render_account_rows(console: Console, rows: list[dict[str, Any]]) -> None:
+    for row in rows:
+        today = row.get("today") if isinstance(row.get("today"), dict) else None
+        used = (
+            f"{_cell(today.get('count'))}/{_cell(today.get('cap_at_write'))}"
+            f" on {_cell(today.get('local_date'))}"
+            if today
+            else "nothing yet"
+        )
+        console.print(f"  {_handle(row.get('handle'))}  {_text(row.get('id'), '?')}")
+        console.print(f"    cap/day   {_cell(row.get('posts_per_day'))}")
+        console.print(f"    today     {used}")
+        console.print(f"    tz        {_cell(row.get('tz'))}")
+        console.print(f"    next slot {_cell(row.get('next_slot_at'))}")
+        _section(console, "recent", row.get("recent"), RECENT_COLUMNS, indent=4)
+
+
+def _render_jobs_rows(console: Console, rows: list[dict[str, Any]]) -> None:
+    console.print(_indented(_rows_table(rows, JOBS_COLUMNS), 2))
+    for row in rows:
+        samples = _dicts(row.get("samples"))
+        if samples:
+            title = f"{_cell(row.get('kind'))}/{_cell(row.get('lane'))} {_cell(row.get('state'))}"
+            _section(console, title, samples, SAMPLE_COLUMNS)
+
+
+def _render_burst_rows(console: Console, rows: list[dict[str, Any]]) -> None:
+    known = {section for section, _ in BURST_SECTIONS}
+    for section, columns in BURST_SECTIONS:
+        matching = [row for row in rows if row.get("section") == section]
+        if matching:
+            _section(console, section, matching, columns)
+    for row in rows:
+        if row.get("section") not in known:
+            console.print("  " + json.dumps(row, sort_keys=True))
+
+
+def _render_posture(console: Console, data: Any) -> None:
+    posture = data if isinstance(data, dict) else {}
+    role = posture.get("role") if isinstance(posture.get("role"), dict) else {}
+    console.print(
+        f"role {_text(role.get('user'), '?')}  bypassrls {_cell(role.get('bypassrls'))}"
+    )
+    # present | absent | unreadable — the F7 grant signal, not the same as an
+    # empty list of migrations
+    console.print(f"ledger {_text(posture.get('ledger'), '?')}")
+    _section(
+        console, "migrations", posture.get("migrations"), MIGRATION_COLUMNS, indent=0
+    )
+    _section(console, "rls", posture.get("rls"), RLS_COLUMNS, indent=0)
+    _section(console, "doors", posture.get("doors"), DOOR_COLUMNS, indent=0)
+
+
 RENDERERS: Mapping[str, Callable[[Console, Any], None]] = {
     "login": _render_login,
     "whoami": _render_whoami,
     "tokens": _render_tokens,
     "logout": _render_logout,
+    "story": _view("story", _render_story_rows),
+    "cards": _view("cards", _table_of(CARDS_COLUMNS)),
+    "floating": _view("floating", _table_of(FLOATING_COLUMNS)),
+    "account": _view("account", _render_account_rows),
+    "jobs": _view("jobs", _render_jobs_rows),
+    "outbox": _view("outbox", _table_of(OUTBOX_COLUMNS)),
+    "burst": _view("burst", _render_burst_rows),
+    "posture": _render_posture,
 }

@@ -160,3 +160,42 @@ def test_a_5xx_is_unreachable():
     with pytest.raises(Unreachable) as caught:
         _client(handler).principal()
     assert caught.value.status == 503
+
+
+def test_the_ops_routes():
+    handler, seen = _recording(
+        200,
+        {"v": 1, "kind": "x", "data": {"workspace_id": WS, "rows": []}, "error": None},
+    )
+    client = _client(handler)
+    client.ops_story(WS, TOKEN_ID)
+    client.ops_cards(WS, TOKEN_ID)
+    client.ops_floating(WS)
+    client.ops_floating(WS, limit=5)
+    client.ops_account(WS, "a/b")
+    client.ops_jobs(WS, "2026-09-15T12:00:00Z")
+    client.ops_outbox(WS, "2026-09-15T12:00:00Z")
+    client.ops_burst(WS, "2026-09-15T12:00:00Z")
+    client.ops_posture()
+    assert [
+        (
+            r.method,
+            str(r.url.raw_path, "ascii").split("?")[0],
+            str(r.url.query, "ascii"),
+        )
+        for r in seen
+    ] == [
+        ("GET", f"/api/v1/ops/workspaces/{WS}/story/{TOKEN_ID}", ""),
+        ("GET", f"/api/v1/ops/workspaces/{WS}/cards/{TOKEN_ID}", ""),
+        ("GET", f"/api/v1/ops/workspaces/{WS}/floating", ""),
+        ("GET", f"/api/v1/ops/workspaces/{WS}/floating", "limit=5"),
+        ("GET", f"/api/v1/ops/workspaces/{WS}/account/a%2Fb", ""),
+        ("GET", f"/api/v1/ops/workspaces/{WS}/jobs", "since=2026-09-15T12%3A00%3A00Z"),
+        (
+            "GET",
+            f"/api/v1/ops/workspaces/{WS}/outbox",
+            "since=2026-09-15T12%3A00%3A00Z",
+        ),
+        ("GET", f"/api/v1/ops/workspaces/{WS}/burst", "since=2026-09-15T12%3A00%3A00Z"),
+        ("GET", "/api/v1/ops/posture", ""),
+    ]
