@@ -419,6 +419,11 @@ class TelegramDispatcher:
                 # field, never in `args` — so the outcome line needs no
                 # second identity read (#1286).
                 actor_label=actor_label,
+                # The card this tap came from (2026-09-15): a settled story's
+                # answer adopts a message the ledger never learned — a resend's
+                # twin — and edits it, so no card keeps dead buttons.
+                binding_id=tenant.channel_binding_id,
+                card_ref=message_ref,
             )
             # S.2 for taps (F12): the workspace's window is DEBITED inside the
             # savepoint below, only for a flip that ran — the increment's own
@@ -473,11 +478,17 @@ class TelegramDispatcher:
     @staticmethod
     async def _debit(conn, workspace_id: str, window, limit: int, result) -> None:
         """Spend one unit of the workspace's tap admission for a flip that
-        RAN (`executed`, or `enqueued` — a `post` that minted its job). An
-        `answered` no-op and a refusal spend nothing (F12). Raises
-        :class:`_AdmissionExhausted` when the window is full — inside the
-        caller's savepoint, so the flip rolls back with it."""
-        if getattr(result, "outcome", None) not in ("executed", "enqueued"):
+        RAN (`executed`, or `enqueued` — a `post` that minted its job), and
+        for an `answered` tap that ADOPTED a card (a row and a paced edit —
+        adversarial review of #1308). An `answered` no-op and a refusal spend
+        nothing (F12). Raises :class:`_AdmissionExhausted` when the window is
+        full — inside the caller's savepoint, so the flip rolls back with it."""
+        outcome = getattr(result, "outcome", None)
+        wrote = outcome in ("executed", "enqueued") or (
+            outcome == "answered"
+            and bool((getattr(result, "data", None) or {}).get("adopted"))
+        )
+        if not wrote:
             return
         n = await rate_counters.increment(
             conn,
