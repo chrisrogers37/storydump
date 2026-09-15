@@ -61,6 +61,15 @@ TOKEN_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("GET", "/api/v1/workspaces/{ws}/tokens"),
         ("DELETE", "/api/v1/workspaces/{ws}/tokens/{token_id}"),
         ("POST", "/api/v1/workspaces/{ws}/commands/{command}"),
+        # phase 02: the read views (`src/api/routes/ops.py`)
+        ("GET", "/api/v1/ops/workspaces/{ws}/story/{intent_id}"),
+        ("GET", "/api/v1/ops/workspaces/{ws}/cards/{intent_id}"),
+        ("GET", "/api/v1/ops/workspaces/{ws}/floating"),
+        ("GET", "/api/v1/ops/workspaces/{ws}/account/{key}"),
+        ("GET", "/api/v1/ops/workspaces/{ws}/jobs"),
+        ("GET", "/api/v1/ops/workspaces/{ws}/outbox"),
+        ("GET", "/api/v1/ops/workspaces/{ws}/burst"),
+        ("GET", "/api/v1/ops/posture"),
     }
 )
 

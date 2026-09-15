@@ -57,8 +57,8 @@ the web). Branch names: `implement/cli-v2-01-tokens`, `implement/cli-v2-02-reads
 
 | Phase | Doc | Status | PR | CI | Live |
 |---|---|---|---|---|---|
-| 01 Tokens | `01_tokens.md` | in progress | — | — | — |
-| 02 Reads | `02_reads.md` | queued | — | — | — |
+| 01 Tokens | `01_tokens.md` | DONE — merged 2026-09-15 23:01 UTC | #1310 | green (9/9 on `29b20d7`) | Railway deploys of `218c864` watched (§5) |
+| 02 Reads | `02_reads.md` | in progress | — | — | — |
 | 03 Writes, environment, deletion | `03_writes-and-deletion.md` | queued | — | — | — |
 
 ## 5. Per-phase entries
@@ -122,6 +122,63 @@ the web). Branch names: `implement/cli-v2-01-tokens`, `implement/cli-v2-02-reads
   pre-deploy runner applies 077 and the runner grants its ledger on that run) and the web on
   Vercel. Merged = live once both Railway deploys read SUCCESS on the merge commit; the runner's
   log line for 077 is the confirmation to read.
+
+### Invariant registry after the phase 01 merge (`218c864`, run on main)
+
+| # | Result |
+|---|---|
+| I1 | `sessions.py` diff vs the merge base is `new_token` only (13+/2−): the re-draw; `resolve`/`_RESOLVE`/`token_hash` untouched |
+| I2 | `test_advertised_ddl` + `test_lineage_lane` in the 74-passed DB run; the tenancy lane inside them; CI Test green |
+| I3 | `tests/storydump_cli/test_import_boundary.py` passed (in the 47) |
+| I4 | `tests/scripts/test_w4_tap_gate.py` (in the 74) + `test_commands.py` (in the 47) green |
+| I5 | `tests/test_agent_docs.py` passed |
+| I6 | the CLI's redaction tests passed (in the 103 CLI tests); `grep -rn sdt_ src storydump_cli` shows the prefix constant and the tests only |
+| I7 | `tests/scripts/test_service_tokens_gate.py` 3 passed (in the 74) |
+| I8 | `python scripts/telegram_ratchet.py` → `[ok] provider_account_ref_log_sites: 0 (baseline 0)`; CI FC-2 green |
+
+### Phase 02 — reads
+
+- Branch `implement/cli-v2-02-reads` cut from `218c864` (no stacking).
+- Build (tests first): the views, the router, the allowlist entries and the gate by the runner;
+  the CLI read verbs and `--watch` by one background general-purpose agent against a written
+  row contract, then cross-checked by that agent against the real routes (one mismatch found and
+  fixed: `floating`'s job join, see the plan's Build notes). Composition as in phase 01.
+- Gate `tests/scripts/test_ops_views_gate.py`: two workspaces created through the API by two
+  people and seeded alike (a floating story with its ready job, a float whose retry died, a
+  refused-then-accepted container, a float wait, a review card, a posted story, a card with its
+  binding, a failed notification, today's bucket; a real `skip` through each owner's token), plus
+  one system job; three arms — every view returns only A's rows as `svc_ingress` under the
+  policies; the routes admit a readonly token, a session and a service identity for its own
+  workspace, refuse a stranger with 404 and a foreign service identity with `wrong_workspace`;
+  and the same reads as a role that bypasses RLS return only A's rows. `3 passed`.
+- Evidence (fresh runs): units `tests/src` + agent docs + `tests/storydump_cli`: `3897 passed`
+  (+129 over phase 01's merge; the one failure was the producer pin
+  `test_operator_floor_preconditions` matching the view's `kind = 'publish_pipeline'` SQL —
+  rephrased as `kind IN (...)`, the pin is about producers); `tests/storydump_cli` `204 passed`;
+  the view gate `3 passed` (ingress arm, route scopes, bypass-RLS arm); ruff clean.
+- Live sample (the demo rig again: a replayed schema seeded with the gate's ledger — a floating
+  story with a ready retry, a float whose retry died, a refused-then-accepted container, a float
+  wait, a review card, a posted story, a card, a failed notification, today's bucket; the API
+  as `svc_ingress`; a readonly token minted through the API): `whoami`, `floating` (both floats,
+  `ready (0)` vs `failed (5)`), `floating --watch --every 1` → the first read printed both rows
+  as added and exited 6 with "1 floating story whose job has failed", `story <id>` (the intent,
+  the float-wait audit row, both permits with variants 0/1 and Meta's 9004/2207052, the card),
+  `cards`, `account @demo_acct` (cap 5, today 2/5, zone, next slot, recent outcomes), `jobs
+  --since 72h` (groups + failed samples), `outbox` (the failed notification by binding), `burst
+  --since 3h` (tap, permit ×2, float_wait, review, outcomes), `--json floating` (one envelope),
+  `posture` (role svc_ingress, bypassrls no, 17 tables under RLS, ledger absent on a replayed
+  database), `story <unknown>` → exit 1, `--workspace "Demo workspace"` by name, `--workspace
+  nope` → exit 1, `--workspace <uuid not a member>` → exit 3, `--since yesterday` → exit 64.
+  Transcript in the PR body. One cosmetic defect seen and fixed: the account render doubled the
+  `@` on a handle stored with one.
+- Battery `tests/mutations/cli_v2_02.sh` on the committed tree: 22 mutations, all killed after
+  four test gaps were closed (first run 18 killed, 4 survived, none a defect): a leaked foreign
+  `burst` row carries the caller's workspace label, so the gate now asserts no foreign id (the
+  other workspace's stories, account, binding) appears in any row; the floating story now also
+  has an old failed retry so the live-over-dead preference is exercised; `posture`'s ledger
+  answers are pinned by a new unit module (`test_ops_views.py`: absent / unreadable / present,
+  the empty story, the burst ordering, the bounds and the tenant predicate on every statement);
+  a naive ISO timestamp joined the refused windows.
 
 ## 6. Review rounds
 
@@ -198,6 +255,43 @@ of untested behaviours). Every finding folded or recorded; the class sweep per f
   without the CTE guard, because the resolver runs inside the authentication transaction, which
   rolls back on refusal — the guard documents the reading and is pinned by a unit test; the
   gate's refused-attempt check proves the rollback.
+
+### Phase 02 — round 1 (two lenses: structural + simplify, adversarial)
+
+Verdicts: both "request changes", neither with a blocker; no cross-tenant read found by either
+(every statement's predicates read line by line). Folded, each as a class sweep:
+
+- **`burst` rows carried the caller's workspace label** (adversarial Major 1; the bypass arm
+  could not see a leaked section row). Class: every row a view emits. Every burst section now
+  selects the table's own `workspace_id`; the outcome census groups by it; the gate asserts no
+  foreign id (the other workspace's stories, account, binding) in any row and B's skip is not
+  counted into A's outcomes. Unit + battery (the tap mutation is killed by the bypass arm).
+- **A `since` overflow was a 500 at the API and a traceback at the CLI** (adversarial Major 2).
+  Class: every parse of a window. One grammar now lives in the vocabulary module
+  (`window_start`): span, timestamp, bare date; thirty days at most; never the future;
+  `OverflowError` caught; the API answers 422 and the CLI usage 64. Units on both sides + the
+  overflow route test.
+- **Burst watch keys collided** (both lenses): two permits of one story in one transaction, one
+  post past two waiters. The key carries `generation` and `waiting_id`. Unit.
+- **The watch exited 6 on a failure that predated it** (both lenses). The first read is the
+  baseline; failure is judged on rows that arrive or change afterwards. Units rewritten
+  (a pre-existing failure is printed, not fatal; a group that grows is fatal).
+- **`posture` could not show the two facts it exists for** (structural Majors 1–2): the RLS
+  list filtered on `relrowsecurity` (a dropped policy vanished) → every tenant-plane table with
+  its state; the human render dropped the ledger state → printed. The new gate test found a
+  third: `to_regclass` on a schema without USAGE raises, so a role without the grant got a
+  500 → the ledger is probed by catalog oid (absent / unreadable / present, each proven live).
+- **The sibling join had no positive test and no bound on its waits side** (both): the seed's
+  wait now precedes the post by a minute (a real `sibling` row asserted); the waits side is
+  bounded to the window less a day.
+- Smaller folds: `jobs`/`outbox` list owed rows at any age and window the finished ones (the
+  probes' "not finished, any age"); handles match case-insensitively; `supersedes_ref` on cards
+  (the twin signal the plan named); `rolsuper` counts as bypassing; `--every` at least a second;
+  `--limit` 1–500 and a UUID story id as usage errors; every workspace of a duplicated name is
+  read; help text names the watch's waiting; the producer-pin dodge is commented; docstrings say
+  "one bounded read per list"; `07` §1 records posture's disclosure as deliberate.
+- Recorded, not built: the CLI's `_run_view` restructuring the structural lens sketched; keying
+  the watch's diff on full tuples; `Watched.kind` duplication.
 
 ## 7. Owner-decision queue
 
