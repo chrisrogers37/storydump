@@ -20,7 +20,10 @@ class TenantResolutionError(RefusalError):
     insufficient_role | unknown_channel | unprovisioned_channel (legacy-era:
     the deployment's global notification channel has no settings row — an
     operator condition, deliberately distinct from unknown_binding so no edge
-    tells an operator to run /start).
+    tells an operator to run /start) | invalid_token | expired_token |
+    revoked_token (a bearer API token that did not resolve — the token
+    resolver's three answers, mapped like their session twins: 401, and the
+    response never says which).
 
     A reason outside the vocabulary is a programming error and is refused at
     construction, so the closed list is closed in practice and not only in
@@ -40,11 +43,39 @@ class TenantResolutionError(RefusalError):
         "insufficient_role",
         "unknown_channel",
         "unprovisioned_channel",
+        "invalid_token",
+        "expired_token",
+        "revoked_token",
     )
 
     def __init__(self, reason: str, detail: str = ""):
         if reason not in self.REASONS:
             raise ValueError(f"not a resolution reason: {reason!r}")
+        super().__init__(reason, detail)
+
+
+class TokenRefused(RefusalError):
+    """A bearer API token that RESOLVED was refused for what it asked.
+
+    A separate type from :class:`TenantResolutionError` because these are
+    not identity failures: the token is live and known, and the answer must
+    carry its reason (403 with ``reason``) so the CLI can say the right
+    sentence — the resolution handler deliberately says nothing.
+
+    ``reason``: session_required (the route is for signed-in web sessions
+    only — minting, invitations, the OAuth legs) | readonly_token (a
+    ``readonly`` token, or any workspace service identity, on a write) |
+    wrong_workspace (a service identity addressing a workspace that is not
+    its own).
+    """
+
+    _prefix = "token refused"
+
+    REASONS = ("session_required", "readonly_token", "wrong_workspace")
+
+    def __init__(self, reason: str, detail: str = ""):
+        if reason not in self.REASONS:
+            raise ValueError(f"not a token refusal: {reason!r}")
         super().__init__(reason, detail)
 
 

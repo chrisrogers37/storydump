@@ -29,9 +29,20 @@ setup(
         "sqlalchemy>=2.0.23",
         "uvicorn>=0.27.0",
     ],
+    # The v2 CLI's own dependencies (decision F2: `keyring` never ships to
+    # the API or the worker). `pip install 'storydump[cli]'` for the terminal.
+    extras_require={
+        "cli": [
+            "click>=8.1.7",
+            "httpx>=0.25.2",
+            "rich>=13.7.0",
+            "keyring>=25,<26",
+        ],
+    },
     entry_points={
         "console_scripts": [
             "storydump-cli=cli.main:cli",
+            "storydump=storydump_cli.main:main",
         ],
     },
     python_requires=">=3.10",

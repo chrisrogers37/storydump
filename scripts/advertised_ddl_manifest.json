@@ -270,6 +270,13 @@
       "label": "§22 the float's two legal edges, the reaper's approved leg withdrawn, and the door that lists for it (076, plan 03)",
       "doc": "07-security-model.md",
       "ordinal": 20
+    },
+    {
+      "sha256": "a062178336786018edf04c1b8bc4816953c22f946271df810eb119177eb820d8",
+      "class": "normative",
+      "label": "§23 a token's subject: person-bound tokens beside workspace service identities (077, plan 2026-09-15-cli-v2 phase 01)",
+      "doc": "07-security-model.md",
+      "ordinal": 21
     }
   ],
   "policy_expansion": {

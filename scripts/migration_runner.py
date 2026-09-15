@@ -324,9 +324,28 @@ def _acquire_lock(conn) -> None:
         cur.execute("SELECT pg_advisory_lock(%s)", (RUNNER_LOCK_KEY,))
 
 
+#: The API reads the ledger for `storydump posture` (the v2 CLI plan, fork
+#: F7 (c)): the grant is the runner's own, made where the ledger is made and
+#: re-asserted on every run, because the advertised stream replays into a
+#: database that has no `runner` schema — a GRANT there would fail every
+#: gate — and because the role may not exist yet the first time the ledger
+#: is created (057 creates it). Idempotent; guarded on the role.
+LEDGER_GRANT_SQL = """
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'svc_ingress') THEN
+        GRANT USAGE ON SCHEMA runner TO svc_ingress;
+        GRANT SELECT ON runner.schema_migrations TO svc_ingress;
+    END IF;
+END
+$$;
+"""
+
+
 def _ensure_ledger(conn) -> None:
     with conn.cursor() as cur:
         cur.execute(LEDGER_DDL)
+        cur.execute(LEDGER_GRANT_SQL)
 
 
 def _ledger_rows(conn) -> dict:

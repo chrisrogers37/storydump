@@ -110,6 +110,10 @@ class ServiceToken(TargetBase):
     name = Column(Text, nullable=False)
     token_hash = Column(Text, nullable=False)
     role = Column(Text, nullable=False)
+    #: Exactly one subject (077 `ck_service_token_subject`): a person, or a
+    #: workspace. A person-bound token acts as the person across their
+    #: memberships; a workspace service identity reads its one workspace.
+    user_id = fk("users.id", "CASCADE", nullable=True)
     workspace_id = fk("workspaces.id", "CASCADE", nullable=True)
     expires_at = Column(TZ, nullable=True)
     revoked_at = Column(TZ, nullable=True)
@@ -119,6 +123,10 @@ class ServiceToken(TargetBase):
     __table_args__ = (
         CheckConstraint(
             "role IN ('operator','readonly')", name="ck_service_token_role"
+        ),
+        CheckConstraint(
+            "(user_id IS NULL) <> (workspace_id IS NULL)",
+            name="ck_service_token_subject",
         ),
         UniqueConstraint("token_hash", name="uq_service_token"),
     )

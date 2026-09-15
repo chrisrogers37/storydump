@@ -193,6 +193,37 @@ with the PR.
 - Do not make `Command.actor_user_id` optional; a service identity never reaches the port.
 - Do not put `keyring` in `install_requires`; it lives in the `storydump[cli]` extra.
 
+## Build notes (2026-09-15)
+
+Built as PR `implement/cli-v2-01-tokens`. Deviations from the steps above, each deliberate:
+
+- The client's config file is `config.json`, not `config.toml`: CI runs Python 3.10 and
+  `tomllib` is 3.11+; a TOML dependency for two keys was not worth it.
+- The CLI's tests live in `tests/storydump_cli/` (mirroring the package's top-level home), not
+  `tests/src/cli/`; the console script is `storydump=storydump_cli.main:main` (a function
+  returning the exit code; Click runs with `standalone_mode=False` inside it).
+- The `cli_command` audit row and the port's transition row pair on `(entity_id, created_at,
+  channel)`: both are written in one transaction and share its `now()`; the trigger row cannot
+  carry `external_ref`, and the label GUC was rejected (F4 (b)).
+- A service identity may revoke only itself (a kill switch, never a lever over the workspace's
+  other identities); the step above said "the workspace's".
+- The service identity's workspace-state check is its own tenant-scoped read (two statements
+  after the token lookup): a join to `workspaces` on the authentication connection is hidden by
+  RLS, which the gate caught as a 401.
+- The token routes live in `src/api/routes/tokens.py` under the v1 prefix, with the allowlist
+  `TOKEN_ROUTES` in `src/api/principal.py`.
+- `keyring` is in the `storydump[cli]` extra only — not in `requirements.txt`, which builds the
+  API and the worker on Railway (the first commit had it there; the review caught it).
+- `Principal.kind` is a plain `str` (`vocabulary.PRINCIPAL_KINDS` names the two values), not the
+  `Literal` the step wrote; the constructor's defaults keep every existing session principal.
+- After the review: a `readonly` person-bound token may revoke only itself (the two DELETE
+  routes carry the same write fence as the command route); the `cli_command` row's entity is
+  the story the port acted on (the result's `intent_id`), never the body's claim; `last_used_at`
+  is stamped only by an authenticated use; the CLI refuses to send a token over plain http to a
+  host that is not this machine (`STORYDUMP_INSECURE_HTTP=1` for a dev server); a session value
+  is re-drawn if it would start with `sdt_`; token id path segments are `uuid.UUID` like every
+  other id (a malformed one is a 422).
+
 ## Context
 
 area: API auth, ledger audit, web settings, CLI skeleton · effort: L · risk: medium (auth on

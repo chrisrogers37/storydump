@@ -1013,10 +1013,12 @@ class TestAuthPlaneMaintenanceOnlyThroughTheSweep:
             "        ('f4-live', %s, now() + interval '2 days')",
             params=(str(user), str(user)),
         )
+        # 077: a token has exactly one subject — this one is the user's.
         _exec(
             target["ingress"],
-            "INSERT INTO service_tokens (name, token_hash, role)"
-            " VALUES ('f4-survivor', 'f4-service-survivor', 'readonly')",
+            "INSERT INTO service_tokens (name, token_hash, role, user_id)"
+            " VALUES ('f4-survivor', 'f4-service-survivor', 'readonly', %s)",
+            params=(str(user),),
         )
         _exec(target["worker"], DOORS["fn_auth_plane_sweep"][1], fetch=True)
         remaining = _exec(

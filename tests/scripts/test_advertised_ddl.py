@@ -285,8 +285,9 @@ class TestAgainstTheRealDocs:
         # 3b) makes it 32; §21's `ix_outbox_ambiguous_age` for the sender's
         # lost-answer resolution (075, #1297) makes it 33; §22's two float
         # edges and the reaper's withdrawn approved leg (076, plan 03) make
-        # it 34.
-        assert classes.count("normative") == 34
+        # it 34; §23's person-bound token subject (077, the v2 CLI plan,
+        # phase 01) makes it 35.
+        assert classes.count("normative") == 35
         assert classes.count("illustrative") == 4
 
     def test_real_stream_expands_the_fifteen_policies(self):

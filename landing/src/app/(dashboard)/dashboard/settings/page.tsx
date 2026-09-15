@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
-import { getSession } from "@/lib/session";
+import { getSession, getSessionToken } from "@/lib/session";
+import { targetFetch } from "@/lib/target-api";
 import { workspaceFetch } from "@/lib/workspaces";
 import {
   deriveSettings,
@@ -18,6 +19,8 @@ import { MembersCard } from "@/components/dashboard/settings/members-card";
 import { CategoryWeightsCard } from "@/components/dashboard/settings/category-weights-card";
 import type { CategoryMixResponse } from "@/lib/category-mix";
 import { IntegrationsTab } from "@/components/dashboard/settings/integrations-tab";
+import { ApiTokensTab } from "@/components/dashboard/settings/api-tokens-tab";
+import { tokenRowsFrom } from "@/lib/tokens";
 
 /**
  * Settings — General writes, Accounts writes ONE thing (adding a destination,
@@ -99,6 +102,11 @@ export default async function SettingsPage({
   // list was unreachable — hides it: a delete control whose refusal we cannot
   // predict is worse than a missing one, and the port refuses non-owners anyway.
   const isOwner = membership?.role === "owner";
+  // Service identities are minted, listed and revoked by admins and owners
+  // (CLI v2 spec §2). A member is not shown that card at all: the API
+  // answers them 403, and a card whose every control is refused is worse
+  // than none. An unknown role — the list was unreachable — hides it too.
+  const isAdmin = membership?.role === "owner" || membership?.role === "admin";
 
   const [
     configResult,
@@ -109,6 +117,8 @@ export default async function SettingsPage({
     statsResult,
     driveResult,
     mixResult,
+    personalTokensResult,
+    serviceTokensResult,
   ] = await Promise.all([
     workspaceFetch<WorkspaceConfig>("", workspaceId),
     workspaceFetch<AccountsResponse>("accounts", workspaceId),
@@ -118,6 +128,18 @@ export default async function SettingsPage({
     workspaceFetch<StatsResponse>("stats", workspaceId),
     workspaceFetch<DriveStatusResponse>("drive", workspaceId),
     workspaceFetch<CategoryMixResponse>("category-mix", workspaceId),
+    // The one TENANT-LESS read on this page: a person's tokens are theirs,
+    // not a workspace's, so it is `targetFetch` with the session token
+    // rather than `workspaceFetch`. Non-critical, like `drive`: a failed
+    // read is a null the card names, never a bail.
+    targetFetch<{ tokens?: unknown }>("/me/tokens", await getSessionToken()),
+    // Service identities are read only for an admin or owner. A member is
+    // answered 403, and asking for a refusal to render its own absence is a
+    // wasted call; `null` here is "not asked", which the card never sees
+    // because it is not rendered for a member.
+    isAdmin
+      ? workspaceFetch<{ tokens?: unknown }>("tokens", workspaceId)
+      : Promise.resolve(null),
   ]);
 
   // All four, for the reason above: every tab on this screen renders current
@@ -143,7 +165,9 @@ export default async function SettingsPage({
       ? "integrations"
       : params.tab === "accounts"
         ? "accounts"
-        : "general";
+        : params.tab === "tokens"
+          ? "tokens"
+          : "general";
   const settings = deriveSettings(
     configResult.data,
     sourcesResult.data.sources ?? [],
@@ -151,13 +175,22 @@ export default async function SettingsPage({
     drive,
   );
   const accounts = accountsResult.data.accounts ?? [];
+  // `tokenRowsFrom` is the same reshape the proxy applies, so the tab sees
+  // one row shape whether a list came from this read or from the browser.
+  // A list that is not a list is `null` — "could not be loaded" — not `[]`.
+  const personalTokens = personalTokensResult.ok
+    ? tokenRowsFrom(personalTokensResult.data?.tokens)
+    : null;
+  const serviceTokens = serviceTokensResult?.ok
+    ? tokenRowsFrom(serviceTokensResult.data?.tokens)
+    : null;
 
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-bold tracking-tight">Settings</h1>
         <p className="text-sm text-muted-foreground mt-1">
-          Your posting schedule, accounts, and integrations.
+          Your posting schedule, accounts, integrations, and API tokens.
         </p>
       </div>
 
@@ -208,6 +241,7 @@ export default async function SettingsPage({
           <TabsTrigger value="general">General</TabsTrigger>
           <TabsTrigger value="accounts">Accounts</TabsTrigger>
           <TabsTrigger value="integrations">Integrations</TabsTrigger>
+          <TabsTrigger value="tokens">API tokens</TabsTrigger>
         </TabsList>
 
         <TabsContent value="general">
@@ -228,7 +262,7 @@ export default async function SettingsPage({
                     : null
                 }
                 editable={
-                  membership?.role === "owner" || membership?.role === "admin"
+                  isAdmin
                 }
               />
             }
@@ -278,6 +312,22 @@ export default async function SettingsPage({
             workspaceId={workspaceId}
             telegramLinked={session.telegramLinked}
             telegramDisplayName={session.telegramDisplayName}
+          />
+        </TabsContent>
+
+        {/*
+          API tokens (CLI v2 phase 01, spec §2): the first step of the
+          first-time clock. Every write on this tab is REST at the proxy —
+          a token is a resource, not a command — and every read above is
+          non-critical, so the tab stands when a list could not be loaded
+          and says so on the card.
+        */}
+        <TabsContent value="tokens">
+          <ApiTokensTab
+            personalTokens={personalTokens}
+            serviceTokens={serviceTokens}
+            workspaceId={workspaceId}
+            isAdmin={isAdmin}
           />
         </TabsContent>
       </Tabs>

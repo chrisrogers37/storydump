@@ -40,6 +40,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
 from src.exceptions.base import StorydumpError
+from src.services.target import vocabulary
 from src.services.target import offboarding, readers
 from src.services.target._dbapi import driver_candidates
 from src.services.target.unit_of_work import apply_gucs
@@ -366,23 +367,10 @@ async def list_invitations(executor, *, workspace_id: str) -> list[dict]:
     )
 
 
-#: `02` §4's intent states — the closed set `ck_intent_state` admits. The
-#: list filter validates against this so a typo is a 422, not an empty page.
-INTENT_STATES: tuple[str, ...] = (
-    "scheduled",
-    "prompt_pending",
-    "awaiting_approval",
-    "approved",
-    "publishing",
-    "publishing_ambiguous",
-    "review_required",
-    "posted",
-    "skipped",
-    "rejected",
-    "expired",
-    "failed",
-    "cancelled",
-)
+#: `02` §4's intent states — the closed set `ck_intent_state` admits, owned
+#: by the vocabulary module (pinned against the migration there). The list
+#: filter validates against this so a typo is a 422, not an empty page.
+INTENT_STATES: tuple[str, ...] = vocabulary.INTENT_STATES
 
 #: `ck_media_state`.
 MEDIA_STATES: tuple[str, ...] = ("available", "unsupported", "removed")
