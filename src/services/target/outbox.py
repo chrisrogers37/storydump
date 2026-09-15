@@ -75,7 +75,9 @@ unresolved send becomes `ambiguous` and the per-kind policy decides.
   are tolerable: both resolve to the same intent and terminal-state-first reads
   (R6) make whichever is tapped later render the terminal state. On any intent
   state change, **supersede-all** — `prompt_supersede` rows target every known
-  `external_message_ref`; a card whose ref was lost ages out under R6.
+  `external_message_ref`; a card whose ref was lost keeps its buttons until
+  touched: the tap carries its id and :func:`adopt_card` makes it a known card
+  (2026-09-15).
 * **Edits always go supersede-then-send** — never edit-in-place on an ambiguous
   ref. :func:`supersede_all` is the only edit path there is.
 
@@ -96,7 +98,7 @@ from __future__ import annotations
 import json
 from datetime import timedelta
 import logging
-from typing import Any, Optional
+from typing import Any, NamedTuple, Optional
 
 from sqlalchemy import text
 
@@ -510,8 +512,8 @@ async def supersede_all(
     """Supersede every live card for *intent_id* and queue the supersede rows.
 
     `02` §6: on any intent state change, `prompt_supersede` rows target **every
-    known** `external_message_ref`; a card whose ref was lost simply ages out.
-    Returns the number of cards superseded.
+    known** `external_message_ref`; a card whose ref was lost waits for its
+    first touch (:func:`adopt_card`). Returns the number of cards superseded.
 
     This is also the only edit path — "edits always go supersede-then-send,
     never edit-in-place on an ambiguous ref". With *outcome_text* the edit
@@ -543,7 +545,7 @@ async def supersede_all(
 
     for ref, payload in live:
         if ref is None:
-            continue  # the ref was lost (or never sent); the card ages out under R6
+            continue  # the ref was lost (or never sent); the card heals on first touch
         await enqueue(
             session,
             workspace_id=workspace_id,
@@ -555,6 +557,32 @@ async def supersede_all(
     return len(live)
 
 
+class Touched(NamedTuple):
+    """An every-binding edit's answer when the caller names the card a tap
+    came from: how many cards it edited, and whether that card was among
+    them. When it was not, the caller adopts it (:func:`adopt_card`) — a
+    twin the ledger never learned — without a second read of the ledger on
+    the ordinary tap (the #1286 statement budget holds)."""
+
+    count: int
+    touched_known: bool
+
+
+_TOUCHED_FLAG = (
+    ", (SELECT count(*) FROM {src} s2"
+    "     WHERE s2.binding_id = CAST(:tb AS uuid)"
+    "       AND s2.external_message_ref = CAST(:tref AS text)) AS touched_known"
+)
+
+
+def _touched_params(touched: Optional[tuple[str, str]]) -> dict:
+    """The flag's parameters — none when no card was named, so the count
+    form's statement and parameters are exactly what they were (#1286)."""
+    if touched is None:
+        return {}
+    return {"tb": str(touched[0]), "tref": str(touched[1])}
+
+
 async def supersede_everywhere(
     session, *, workspace_id: str, intent_id: str, outcome_text: Optional[str]
 ) -> int:
@@ -563,6 +591,28 @@ async def supersede_everywhere(
     the `prompt_supersede` rows are one round trip inside the tap's
     transaction instead of one read plus two writes per binding. The payload
     is `_supersede_payload`'s, built in SQL. Returns the cards superseded."""
+    return (
+        await supersede_everywhere_touched(
+            session,
+            workspace_id=workspace_id,
+            intent_id=intent_id,
+            outcome_text=outcome_text,
+            touched=None,
+        )
+    ).count
+
+
+async def supersede_everywhere_touched(
+    session,
+    *,
+    workspace_id: str,
+    intent_id: str,
+    outcome_text: Optional[str],
+    touched: Optional[tuple[str, str]],
+) -> Touched:
+    """:func:`supersede_everywhere`, also answering whether *touched* — the
+    `(binding_id, external_message_ref)` a tap came from — was among the
+    cards it superseded (2026-09-15)."""
     row = (
         await session.execute(
             text(
@@ -594,11 +644,124 @@ async def supersede_everywhere(
                 ")"
                 " SELECT (SELECT count(*) FROM sup) AS superseded,"
                 "        (SELECT count(*) FROM ins) AS queued"
+                + (_TOUCHED_FLAG.format(src="sup") if touched is not None else "")
             ),
-            {"ws": workspace_id, "i": intent_id, "o": outcome_text},
+            {
+                "ws": workspace_id,
+                "i": intent_id,
+                "o": outcome_text,
+                **_touched_params(touched),
+            },
         )
     ).first()
-    return int(row[0] or 0) if row is not None else 0
+    if row is None:
+        return Touched(0, False)
+    # The flag is the statement's last column; a caller that named no card
+    # asked no question (and a scripted session may answer a bare tuple).
+    return Touched(int(row[0] or 0), bool(row[-1]) if touched is not None else False)
+
+
+async def adopt_card(
+    session,
+    *,
+    workspace_id: str,
+    binding_id: str,
+    intent_id: str,
+    ref: str,
+    outcome_text: str,
+    reply_markup: Optional[dict] = None,
+) -> bool:
+    """A message the ledger never learned becomes a card it knows — restate-
+    by-ref on touch (2026-09-15).
+
+    An `approval_prompt` whose first send lost its answer is RESENT by policy
+    (`RESEND_KINDS`): two messages in the chat, one ref on the row. The twin
+    kept live buttons through Approved and Posted because no edit could name
+    it. A tap on it carries its message id, so: if *ref* is not a card of
+    *intent_id* on *binding_id*, INSERT it as one — `superseded`, with the
+    known card's own content (header, `sent_as`) so the edit renders as the
+    card was sent — and queue the edit that writes *outcome_text* onto it
+    (with *reply_markup* when the state still offers buttons). Adopted, every
+    later restate-by-ref (the Posted line, a review resolution) reaches it as
+    it reaches the known card. Returns True when a card was adopted. Adopts
+    nothing when the ref is a card the ledger knows (its edits ride the
+    ordinary paths), when the story has no card on the binding, when any row
+    on the binding already owns the ref (another story's card, an invitation,
+    a notice — Telegram does not bind a callback's token to its message), or
+    past the evidence: the known row's send attempts bound the twins it can
+    have (one per lost answer). In the caller's transaction."""
+    known = (
+        await session.execute(
+            text(
+                "SELECT payload, external_message_ref, attempts FROM channel_outbox"
+                " WHERE workspace_id = :ws AND binding_id = :b AND intent_id = :i"
+                "   AND kind = 'approval_prompt'"
+                " ORDER BY created_at DESC"
+            ),
+            {"ws": workspace_id, "b": binding_id, "i": intent_id},
+        )
+    ).fetchall()
+    if not known:
+        # A twin exists only where the story's card was sent (structural
+        # review of #1308): no card on this binding, nothing to adopt.
+        return False
+    owned = (
+        await session.execute(
+            text(
+                "SELECT 1 FROM channel_outbox"
+                " WHERE workspace_id = :ws AND binding_id = :b"
+                "   AND external_message_ref = :ref LIMIT 1"
+            ),
+            {"ws": workspace_id, "b": binding_id, "ref": str(ref)},
+        )
+    ).first()
+    if owned is not None:
+        # Telegram does not bind a callback's intent token to its message id:
+        # a modified client can send this story's token with another bot
+        # message's id. A message the ledger already owns on this binding —
+        # this story's own known card, another story's card, an invitation,
+        # a notice — is never adopted (structural review of #1308).
+        return False
+    sends = max(int(r[2] or 0) for r in known)
+    if len(known) >= sends:
+        # A twin exists only per lost answer: the card's row counts its send
+        # attempts, so a card sent once has no twin and a row showing two
+        # sends can have one. Adoption stays within that evidence — a forged
+        # callback with a fresh message id adopts nothing past it
+        # (adversarial review of #1308).
+        return False
+    template = known[0][0]
+    if isinstance(template, str):
+        template = json.loads(template)
+    template = dict(template or {})
+    template.setdefault("v", 2)
+    await session.execute(
+        text(
+            "INSERT INTO channel_outbox"
+            " (workspace_id, binding_id, kind, intent_id, payload, state,"
+            "  external_message_ref)"
+            " VALUES (:ws, :b, 'approval_prompt', :i, CAST(:p AS jsonb),"
+            "         'superseded', :ref)"
+        ),
+        {
+            "ws": workspace_id,
+            "b": binding_id,
+            "i": intent_id,
+            "p": json.dumps({**template, "outcome_text": outcome_text}),
+            "ref": str(ref),
+        },
+    )
+    await enqueue(
+        session,
+        workspace_id=workspace_id,
+        binding_id=binding_id,
+        kind="prompt_supersede",
+        payload=_supersede_payload(
+            str(ref), template, outcome_text, reply_markup=reply_markup
+        ),
+        intent_id=intent_id,
+    )
+    return True
 
 
 async def restate_everywhere(
@@ -609,6 +772,28 @@ async def restate_everywhere(
     outcome_text: str,
     reply_markup: Optional[dict] = None,
 ) -> int:
+    """The count form of :func:`restate_everywhere_touched`."""
+    return (
+        await restate_everywhere_touched(
+            session,
+            workspace_id=workspace_id,
+            intent_id=intent_id,
+            outcome_text=outcome_text,
+            reply_markup=reply_markup,
+            touched=None,
+        )
+    ).count
+
+
+async def restate_everywhere_touched(
+    session,
+    *,
+    workspace_id: str,
+    intent_id: str,
+    outcome_text: str,
+    reply_markup: Optional[dict] = None,
+    touched: Optional[tuple[str, str]],
+) -> Touched:
     """`restate_cards` for EVERY active Telegram binding of the workspace, in
     one statement — the review resolutions' door (2026-09-12): the card a
     `review_required` intent shows was superseded by the approve tap, so the
@@ -649,16 +834,22 @@ async def restate_everywhere(
                 "  RETURNING id"
                 ")"
                 " SELECT (SELECT count(*) FROM ins) AS queued"
+                + (_TOUCHED_FLAG.format(src="refs") if touched is not None else "")
             ),
             {
                 "ws": workspace_id,
                 "i": intent_id,
                 "o": outcome_text,
-                "kb": None if reply_markup is None else json.dumps(reply_markup),
+                "kb": json.dumps(reply_markup) if reply_markup is not None else None,
+                **_touched_params(touched),
             },
         )
     ).first()
-    return int(row[0] or 0) if row is not None else 0
+    if row is None:
+        return Touched(0, False)
+    # The flag is the statement's last column; a caller that named no card
+    # asked no question (and a scripted session may answer a bare tuple).
+    return Touched(int(row[0] or 0), bool(row[-1]) if touched is not None else False)
 
 
 async def restate_cards(

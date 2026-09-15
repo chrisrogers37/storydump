@@ -185,6 +185,7 @@ The owner tapped through the open board — 20 cards: 13 approved, 7 skipped —
 - **Ordering as a product guarantee** (owner's observation, 2026-09-15): a "post these in order" mode would have to hold a waiter's followers behind it — the head-of-line blocking the float exists to remove — so it must be an explicit choice per sequence, never the default. Posting order already follows approval order for every story that does not wait.
 - **Video** offers no fresh urls (an encode each) and waits with its url; measure refused videos before eager variants.
 - The refusal rate itself (38 % today) is worth a weekly read.
+- **Seen in the burst, fixed the same day:** the last card served showed twice — a send whose answer was lost was re-sent by policy, and the twin kept live buttons because the ledger had no id for it (the row: two attempts, one ref; 3 of 118 cards in a week). A tap on such a twin now adopts it as a card of the story and edits it at once (`outbox.adopt_card`, the heal-on-tap PR); an untouched twin still sits with buttons until touched — Telegram gives a bot no way to find a message whose id it never received.
 
 ## Verification checklist
 
