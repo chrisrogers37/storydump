@@ -63,6 +63,8 @@ backup/
 # But allow SQL scripts in scripts/ directory
 !scripts/*.sql
 !scripts/**/*.sql
+# read-only production probes committed as a plan's evidence (no dumps live there)
+!documentation/planning/**/probes/*.sql
 
 # Media files (don't commit user media)
 media/stories/*
