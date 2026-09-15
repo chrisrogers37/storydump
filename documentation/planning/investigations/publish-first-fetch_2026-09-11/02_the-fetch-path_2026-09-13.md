@@ -168,6 +168,24 @@ Combined over both runs: authenticated 6 of 24 refused, public unsigned 4 of 24,
 - **F5 and F6 are no longer theoretical:** an unrelated failure inherited the 15-minute rung from two fetch refusals, and seven stories waited behind one for that long.
 - **F9 (nit) — `post_intents.last_error` is not cleared when a story posts** (**built 2026-09-14**, plan 03 D6)**;** BC4F427C reads as posted with a code-24 error beside it.
 
+## The float, live — the first burst on the new worker (2026-09-15 14:54–14:58 UTC)
+
+The owner tapped through the open board — 20 cards: 13 approved, 7 skipped — about ninety minutes after the worker took the float (PR #1306, `e7ed7aa`, 076 applied by the pre-deploy runner). Read from the ledger only (`audit_events`, `provider_operations`, `daily_post_counts`, `channel_outbox`):
+
+- **20 taps, 20 outcomes, none lost:** 13 `posted`, 7 `skipped`; every posted card reads "✅ Posted · HH:MM America/New_York". The one card open afterwards was minted by the clock at 15:06, after the burst.
+- **21 container calls, 8 first-fetch refusals** (`9004/2207052`, 38 % of calls — above the ~25 % of the experiments): six of the thirteen stories were refused at least once; one was refused three times in a row (variants 0, 1, 2 within six seconds) before its fourth url was accepted. **Every refusal cleared inside the same run with a fresh url, 3–4 s later: 8 of 8** (the experiments said 5 of 6). The fetch ladder never had to wait.
+- **The float engaged once, on another class:** a story whose container had been accepted on its second url was answered `MetaRetryableError 9007` at the publish call (the container not yet available). It stepped back (`float_wait`: class `retry`, rung 1, 60 s), **five siblings posted past it**, it re-entered 99 s later (the slot was busy — the 20/40/60 s back-off) and posted in 3 s. Its card read Approved, then Posted; no notice. On 2026-09-13 the same shape held seven stories for fifteen minutes.
+- **13 stories in 3 min 34 s** (~16 s each); one debit per story (the day's row reads 13/20 — the re-entrant flip did not double-debit); no review card, no failure, nothing mid-flight afterwards.
+- **Order:** posting order equalled tap order for 12 of 13; the story that waited posted last — the float's trade, by design (a waiting story lets its siblings pass). Tap order followed the served order (the older cards first).
+
+**What this settles.** F4′ — a fresh url at once — is the mitigation, and it cleared every refusal today. F5/F6 behaved as designed on the one wait (its own class counted, the slot released, siblings through). F9: the posted cards carry no error. **Not exercised live, gate-proven only:** the fetch wait ladder (never needed), a container gone (`24`), the cap line (13 of 20), the review card, video, the reaper's approved leg (nothing stale).
+
+**Open after the burst.**
+- **F1 — hold.** Fresh urls cleared 8 of 8; serving the frame from our own API is justified only if refusals start outlasting a round. Decide after a week of `float_wait` rows (the read is `state = 'approved' AND cap_consumed_on IS NOT NULL`, `detail->>'event' = 'float_wait'`, permits with `url_variant > 0`).
+- **Ordering as a product guarantee** (owner's observation, 2026-09-15): a "post these in order" mode would have to hold a waiter's followers behind it — the head-of-line blocking the float exists to remove — so it must be an explicit choice per sequence, never the default. Posting order already follows approval order for every story that does not wait.
+- **Video** offers no fresh urls (an encode each) and waits with its url; measure refused videos before eager variants.
+- The refusal rate itself (38 % today) is worth a weekly read.
+
 ## Verification checklist
 
 - [x] Experiment run once from the developer machine: 8 of 8 accepted (above).
@@ -175,4 +193,5 @@ Combined over both runs: authenticated 6 of 24 refused, public unsigned 4 of 24,
 - [x] One more arm: public AND signed — refused 3 of 12, like the others (09-14 morning). F0 withdrawn.
 - [x] Legacy record read: 1,609 API posts, 20 `permanent_reject` locks (§7).
 - [x] F4′, F5, F6, F8 and F9 landed together as one change — the float (`03_the-float_2026-09-14.md`, 2026-09-14): the owner ruled them one behaviour, not five patches. The l5 gate reproduces the refused fetch: a first call refused `9004`, the next url accepted; three refusals in a row, the story steps back and waits; six waits, the review card.
-- [ ] F1 (the frame served from our own API) is decided after a few days of the float measured from the ledger (plan 03's checklist). F7 (burst serialization at claim time) stays later.
+- [x] The float measured live once (2026-09-15, above): 8 of 8 refusals cleared by a fresh url, one retryable answer floated out of the slot, 13 of 13 posted, none lost.
+- [ ] F1 (the frame served from our own API) is decided after a week of `float_wait` rows; today's read says hold. F7 (burst serialization at claim time) stays later.
