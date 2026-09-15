@@ -130,6 +130,48 @@ Written red first; one named mutation per behaviour in `tests/mutations/cli_v2_0
 - No unbounded query; every view has a `LIMIT` or a window.
 - No raw SQL in the CLI package; no Telegram assumption in a shape.
 
+## Build notes (2026-09-15)
+
+Built as PR `implement/cli-v2-02-reads`. Deviations from the steps above, each deliberate:
+
+- `floating` joins the story's retry job in any of `ready`, `leased` **or `failed`** (a live one
+  preferred): the step named the live job only, but a float whose retry died is exactly the
+  failure `--watch` exits 6 on, and the CLI builder found the condition could never fire as
+  written.
+- The gate has a third arm: the same reads as a role that bypasses row-level security
+  (production's posture today), so the explicit `workspace_id` predicates are proven, not
+  shadowed by the policies. The predicate mutations in `tests/mutations/cli_v2_02.sh` are killed
+  by that arm only.
+- `posture` reports the ledger as `present`, `absent` (a replayed gate database has no runner
+  schema) or `unreadable` (present, no grant) rather than failing; `migrations` is empty unless
+  present and readable.
+- `burst` is one flat timeline with a `section` discriminator (`tap`, `permit`, `float_wait`,
+  `sibling`, `review`, `outcome`) rather than the step's several result sets — one row shape per
+  view holds, and the CLI groups on the section. Refusals are `permit` rows in state `failed`.
+- `jobs` rows are groups by kind × lane × state with up to five samples for failed and
+  review-required groups; a publish job's sample carries its story's `last_error` (jobs record no
+  error of their own).
+- `account` matches a handle with or without the `@`, or the account id.
+- The CLI: `--workspace` takes an id or an exact name (a name is resolved through
+  `/me/principal`; every workspace of that name is read; a bad name exits 1); `posture` has no
+  `--workspace`/`--watch`; under `--watch` a missing key waits for the row rather than exiting 1;
+  the first read prints every row as `added`, removals are printed too, and `burst`'s mid-flight
+  test is a `permitted` permit or a story in `publishing` (taps are not counted, or a fixed
+  window would never drain).
+- After the review round: one window grammar (`vocabulary.window_start`) serves the API's `since`
+  and the CLI's `--since` — a span, an ISO-8601 timestamp (naive = UTC) or a bare date, at most
+  thirty days, never in the future, an overflow refused (422 / usage 64, not a 500 or a
+  traceback); `burst` rows carry the table's own `workspace_id` (a stamp from the parameter hid a
+  leaked row from the bypass arm); the sibling join's waits side is bounded to the window less a
+  day; `jobs` and `outbox` list owed rows at any age and window the finished ones; handles match
+  case-insensitively; cards carry `supersedes_ref`; `posture` lists every tenant-plane table with
+  its RLS state (a dropped policy shows as `enabled: false`), reports the role's `rolsuper` as
+  bypassing too, and probes the ledger by catalog oid (a name lookup in a schema without USAGE
+  is a permission error — found by the gate); the CLI's `--watch` judges failure on what ARRIVES
+  after the baseline read, keys burst rows on generation and waiter too, refuses `--every`
+  below a second and `--limit` above 500 as usage, validates story ids as UUIDs, prints the
+  ledger state under `posture`.
+
 ## Context
 
 area: API operator surface, ledger reads, CLI · effort: L · risk: low-medium (RLS-correct

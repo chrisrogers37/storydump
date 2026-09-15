@@ -26,7 +26,14 @@ PY
   # bytecode cache it considers valid (mtime + size match), so the second run executes the
   # first mutation's code — the expiry mutation "survived" twice that way. Purge it.
   rm -rf "$(dirname "$file")/__pycache__"
-  if eval "$runner $sel" > /tmp/claude/mut.log 2>&1; then echo "SURVIVED (bad): $name  [$(grep -E '^=+ .*(passed|failed|error)|Tests +[0-9]' /tmp/claude/mut.log | tail -1)]"; else echo "killed: $name  [$(grep -E '^=+ .*(passed|failed|error)|Tests +[0-9]' /tmp/claude/mut.log | tail -1)]"; fi
+  eval "$runner $sel" > /tmp/claude/mut.log 2>&1; local rc=$?
+  local summary; summary=$(grep -E '^=+ .*(passed|failed|error|deselected|no tests ran)|Tests +[0-9]|No test files found' /tmp/claude/mut.log | tail -1)
+  # A selector that matches no test exits non-zero too — that is not a kill. Nor is a kill by a
+  # collection or fixture error a test's verdict; both are flagged for a human to read.
+  if grep -qE '/ 0 selected|no tests ran|No test files found' /tmp/claude/mut.log; then echo "NO TEST SELECTED (bad): $name  [$summary]"
+  elif [ $rc -eq 0 ]; then echo "SURVIVED (bad): $name  [$summary]"
+  elif ! grep -qE '^=+ .*[0-9]+ failed|Tests +[0-9]+ failed' /tmp/claude/mut.log; then echo "KILLED BY ERROR (check): $name  [$summary]"
+  else echo "killed: $name  [$summary]"; fi
   cd /Users/chris/Projects/storydump && git checkout -- "$file"
 }
 PR=src/api/principal.py

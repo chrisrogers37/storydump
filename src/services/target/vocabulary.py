@@ -20,6 +20,8 @@ Three kinds of thing live here:
 
 from __future__ import annotations
 
+import datetime as dt
+import re
 from typing import Any, Mapping, Optional
 
 #: The closed inbound vocabulary — `01` §Interaction-layer port, verbatim
@@ -275,3 +277,51 @@ OUTCOME_SENTENCES: Mapping[str, str] = {
 
 #: Words that belong to the Telegram adapter and never to a terminal.
 TAP_WORDS: tuple[str, ...] = ("tap", "button", "card", "keyboard")
+
+
+# --- the read views' windows ------------------------------------------------
+
+#: A span back from now: ``45m``, ``3h``, ``2d`` (at most six digits — the cap
+#: below refuses anything wide long before the digits run out).
+WINDOW_SPAN = re.compile(r"^(\d{1,6})([mhd])$")
+WINDOW_UNITS: Mapping[str, str] = {"m": "minutes", "h": "hours", "d": "days"}
+#: The widest window any read view answers; wider is refused (the API 422,
+#: the CLI a usage error) rather than scanned.
+MAX_WINDOW_DAYS = 30
+#: `jobs`, `outbox` and `burst` look back this far by default.
+DEFAULT_WINDOW = "3h"
+
+
+def window_start(value: str, now: dt.datetime) -> dt.datetime:
+    """The start of a window: a span back from *now*, or an ISO-8601
+    timestamp (``Z`` or an offset; a naive one is read as UTC; a bare date
+    is its midnight UTC). Always an
+    aware UTC datetime no wider than :data:`MAX_WINDOW_DAYS` and not in the
+    future. Anything else raises ``ValueError`` with the sentence to show —
+    the one grammar the API's ``since`` and the CLI's ``--since`` share.
+    """
+    text = value.strip()
+    anchor = now.astimezone(dt.timezone.utc).replace(microsecond=0)
+    span = WINDOW_SPAN.match(text)
+    try:
+        if span:
+            amount, unit = span.groups()
+            start = anchor - dt.timedelta(**{WINDOW_UNITS[unit]: int(amount)})
+        else:
+            # Python 3.10's fromisoformat does not know the Z suffix
+            parsed = dt.datetime.fromisoformat(
+                text[:-1] + "+00:00" if text.endswith("Z") else text
+            )
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=dt.timezone.utc)
+            start = parsed.astimezone(dt.timezone.utc)
+    except (ValueError, OverflowError):
+        raise ValueError(
+            f"not a window: {text!r} — give a span back from now (15m, 3h, 1d)"
+            " or an ISO-8601 timestamp"
+        ) from None
+    if anchor - start > dt.timedelta(days=MAX_WINDOW_DAYS):
+        raise ValueError(f"a window is at most {MAX_WINDOW_DAYS} days: {text!r}")
+    if start > anchor:
+        raise ValueError(f"a window cannot start in the future: {text!r}")
+    return start

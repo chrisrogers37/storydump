@@ -21,9 +21,11 @@ from __future__ import annotations
 import io
 import os
 import sys
+import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional
 from urllib.parse import urlparse
 
 import click
@@ -32,7 +34,7 @@ import httpx
 from src.services.target import vocabulary
 from storydump_cli import __version__
 from storydump_cli.client import ApiError, Client, Unreachable, InsecureApiUrl
-from storydump_cli.commands import auth, global_options
+from storydump_cli.commands import auth, global_options, reads
 from storydump_cli.config import (
     API_URL_ENV,
     DEFAULT_API_URL,
@@ -64,6 +66,10 @@ INSECURE_HTTP_ENV = "STORYDUMP_INSECURE_HTTP"
 DEFAULT_FIX = "see storydump --help"
 
 
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 @dataclass
 class Runtime:
     config_dir: Path
@@ -75,6 +81,11 @@ class Runtime:
     env: Mapping[str, str] = field(default_factory=dict)
     #: The verb in flight, for the envelope of a failure it never saw.
     kind: Optional[str] = None
+    #: The clock and the sleeper — ``--since`` is measured from the clock and
+    #: ``--watch`` waits on the sleeper — so a test runs a scripted watch
+    #: instantly with a fixed ``now``.
+    now_fn: Callable[[], datetime] = utc_now
+    sleep_fn: Callable[[float], None] = time.sleep
 
     @property
     def api_host(self) -> str:
@@ -277,7 +288,15 @@ def cli() -> None:
     \b
       storydump login
       storydump whoami
-      storydump tokens list
+      storydump floating --watch
+      storydump story <id> --json
+      storydump burst --since 3h
+
+    A read answers for every workspace the token can see unless --workspace
+    names one. --watch re-reads on an interval and prints only what changed:
+    it ends 0 on the verb's terminal condition (floating drained, a burst
+    with nothing mid-flight) or on Ctrl-C, and 6 when a read shows the
+    verb's failure condition.
 
     \b
     Exit codes:
@@ -287,7 +306,7 @@ def cli() -> None:
     """
 
 
-for command in auth.COMMANDS:
+for command in (*auth.COMMANDS, *reads.COMMANDS):
     cli.add_command(command)
 
 
