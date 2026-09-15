@@ -48,39 +48,14 @@ from typing import Any, Awaitable, Callable, Mapping, Optional
 
 from src.exceptions.base import StorydumpError
 from src.exceptions.tenancy import TenantResolutionError
-from src.services.target import tenant_resolution, webhook_ingress
+from src.services.target import tenant_resolution, vocabulary, webhook_ingress
 from src.services.target.workspaces import InvalidWorkspaceArgs
 
 #: The closed inbound vocabulary — `01` §Interaction-layer port, verbatim
-#: order. Set-equality with the doc is asserted by the unit gate.
-VOCABULARY: tuple[str, ...] = (
-    "approve",
-    "skip",
-    "reject",
-    "mark_posted",
-    "cancel",
-    "autopost_now",
-    "sync_now",
-    "settings_change",
-    "account_settings_change",
-    "pause_workspace",
-    "resume_workspace",
-    "connect_account",
-    "reconnect_account",
-    "disconnect_account",
-    "move_account",
-    "disable_account",
-    "create_workspace",
-    "rename_workspace",
-    "offboard_workspace",
-    "restore_workspace",
-    "invite_member",
-    "remove_member",
-    "change_role",
-    "transfer_ownership",
-    "resolve_review",
-    "clear_quarantine",
-)
+#: order, owned by :mod:`src.services.target.vocabulary` (the one home the
+#: CLI package may import) and re-exported here for every existing caller.
+#: Set-equality with the doc is asserted by the unit gate.
+VOCABULARY: tuple[str, ...] = vocabulary.COMMANDS
 
 #: The floor ladder. ``user`` = any active signed-in user, no membership
 #: (the workspace does not exist yet); ``member``/``admin``/``owner`` = the
@@ -167,26 +142,10 @@ ROLE_FLOOR: dict[str, str] = {
     "clear_quarantine": "operator",
 }
 
-#: `CommandRefused.reason`, closed. Adapters map it without parsing prose, and
-#: the web adapter's status table is pinned TOTAL over this tuple.
-REASONS: tuple[str, ...] = (
-    "unknown_command",
-    "not_built",
-    "workspace_required",
-    "invalid_args",
-    "illegal_transition",
-    "not_found",
-    "manual_mode",
-    "cancelling",
-    "not_connected",
-    # The review card (2026-09-12): `posted` on an intent Instagram never
-    # posted (never asked, or it answered no) has nothing to confirm; `retry`
-    # on an intent whose publish answer was LOST needs the member's verdict
-    # that the story is not there — a plain retry would re-permit a second
-    # publish call beside an unresolved one, the rail's one forbidden thing.
-    "nothing_to_confirm",
-    "may_have_posted",
-)
+#: `CommandRefused.reason`, closed, owned by the vocabulary module. Adapters
+#: map it without parsing prose, and the web adapter's status table is pinned
+#: TOTAL over this tuple.
+REASONS: tuple[str, ...] = vocabulary.REASONS
 
 
 @dataclass(frozen=True)

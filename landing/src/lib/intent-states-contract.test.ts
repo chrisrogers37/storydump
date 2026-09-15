@@ -38,7 +38,7 @@ import {
  */
 const API_WORKSPACES = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
-  "../../../src/services/target/workspaces.py",
+  "../../../src/services/target/vocabulary.py",
 );
 
 function apiIntentStates(): string[] {

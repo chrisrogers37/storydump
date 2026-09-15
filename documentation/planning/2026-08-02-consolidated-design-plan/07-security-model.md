@@ -25,6 +25,7 @@ CREATE TRIGGER tg_touch_session_tokens BEFORE UPDATE ON session_tokens
 - **The flow (server-side confidential client — X.3):** `GET /auth/google` issues an anonymous `oauth_states` row (`purpose='signin'`, §2) and redirects to Google's authorization endpoint; the callback exchanges the code server-side (the client secret never leaves the server), verifies the `id_token` against Google's published JWKS — `iss`, `aud`, `exp`, and the `nonce` binding stated in §2 — and signs the user in. JWKS is fetched from Google's discovery endpoint and cached with its HTTP cache headers; **three** OIDC hosts join the egress allowlist at X.3 (`04`): `accounts.google.com`, `oauth2.googleapis.com`, and `www.googleapis.com` — the discovery document's `jwks_uri` lives on the third (`https://www.googleapis.com/oauth2/v3/certs`, verified against the live discovery document 2026-08-04; the pass-4 two-host list would have blocked ID-token verification under the strict egress floor — R4 finding). The OIDC verification utility is the only genuinely new code class in this ruling, and it is small.
 - **Identity (D32 — `sub`, never email):** success upserts `user_identities(provider='google', external_id = <OIDC sub>, verified_at = now())`, creating the `users` row on first sign-in. `external_id` is the provider's immutable subject — **never the email address**: emails are mutable and recyclable, so keying identity on email is an account-takeover primitive. The verified email claim is metadata, refreshed at each sign-in; `users.primary_email` fills from it when NULL; a claim colliding with a *different* user's `primary_email` surfaces as an error — it never merges accounts (D35).
 - **Sessions:** opaque random 256-bit value in an httpOnly/SameSite=Lax/secure cookie; only the hash is stored; verification is one indexed lookup + expiry/revocation check; sliding renewal. Sign-out and admin revoke set `revoked_at`. There is no JWT for human web sessions — and none exists anywhere on `main` today (pass-4 anchor: current API auth is HMAC-signed WebApp init-data + signed URL tokens, `src/utils/webapp_auth.py`); the machine/consumer surfaces carry `workspace_id` in their signed payloads (born workspace-aware at X.2 — the pass-4 dual-shape migration window died with FC-7), and first-party service auth is §6's `service_tokens`.
+- **API tokens — the second credential (plan `2026-09-15-cli-v2`, phase 01; §6, §23):** a bearer value that starts with `sdt_` is an API token, never a session — the prefix routes it to the token resolver, every other bearer value and the cookie stay on the session path byte for byte. Two principal kinds on one table: a **person-bound** token (`user_id`) acts as that person across their memberships, never above the membership role, over the `cli` channel, and leaves one direct `cli_command` audit row (the token's id and name, the command's idempotency reference) beside the port's own transition row — the two share the transaction's `now()`; a **workspace service identity** (`workspace_id`) reads its one workspace under its own name and never writes in this release (F10). Tokens are admitted to an explicit route allowlist (`src/api/principal.py` `TOKEN_ROUTES`: `/me/principal`, own-token list and revoke, the command route; the `/ops` views join it in phase 02) — every other route depends on `require_session` and refuses a token with `reason: session_required`, so a token can never mint a token, accept an invitation, or drive an OAuth leg. Minting is a signed-in session's act on the web (Settings › API tokens): the secret is shown once and stored as its SHA-256; default expiry 90 days, ceiling a year; revocation sets `revoked_at`; every authenticated use stamps `last_used_at` (throttled like the session slide; a refused attempt rolls back); a revoked, expired or unknown token and a disabled person's token all answer 401 without saying which; a live token asking for what it may not have answers 403 **with** its reason (`readonly_token`, `wrong_workspace`, `session_required`) so the CLI says the right sentence. The client keeps the secret in the OS keychain by default, failing closed (fork F2).
 - **Pre-auth rate limiting:** the sign-in endpoints ride the `preauth_ip` scope (`rate_counters`, `02` §6; the `05` pre-auth row; the client-IP source rule is stated once at the `02` §6 table) — a mechanism deliberately distinct from the per-workspace S.2 admission, which is fail-closed on tenant context and structurally cannot serve unauthenticated requests. The OTP-specific scopes died with OTP.
 - **Recovery:** account recovery is Google's problem — a strictly stronger posture than pass 3's "losing the mailbox loses the account". Email *change* ceases to exist as a flow: email is a provider claim, not stored credential material. Telegram-identity users are unaffected (different provider row).
 - **Linking (D35 — explicit-only, stated once here):** identities attach to a user only through an action performed inside that user's authenticated session — §2's `link` purpose covers both directions (Telegram-first → Google via OAuth redirect; Google-first → Telegram via the start-token transport). No email auto-merge exists, in any direction; a (provider, subject) already attached to another user rejects with "already linked elsewhere" (`uq_identity_per_provider`); merging two populated users is an operator action with an audit trail, explicitly out of v1.
@@ -156,7 +157,7 @@ CREATE POLICY p_auth_sweep_states   ON oauth_states   FOR ALL TO svc_maintenance
 | EmailSender port + Resend default + bounce webhook | X.3 (the `send_email` job kind exists from L.2's registry; the `email_global` budget scope from L.2) |
 | rate_counters pre-auth scope (`preauth_ip`) | schema at L.2 (`02` §6); consumed here at X.3 |
 | `archive` schema (audit exports + M.3 snapshots) | created by the `02` §7-DDL block (F.2 schema landing); M.3 snapshot tables ALTER OWNER to svc_maintenance; exports live from S.4; access rules §4 |
-| service_tokens + CLI routing | X.2 (pass 5 — relocated from the deleted W.6) |
+| service_tokens + CLI routing | X.2 (pass 5 — relocated from the deleted W.6); the person-bound subject (077, §23), the bearer principal with its route allowlist, the minting routes and the web's Settings › API tokens panel land with the v2 CLI plan's phase 01 (`documentation/planning/2026-09-15-cli-v2/`) |
 | hygiene ratchet patterns (provider_account_ref out of logs) | F.6 (second pattern list on the same ratchet) |
 
 ## §8. Intent self-transition guard (integrity, not auth — #883)
@@ -1209,4 +1210,34 @@ REVOKE CREATE ON SCHEMA public FROM svc_maintenance;
 REVOKE ALL ON FUNCTION fn_reaper_stale_approved(interval, int) FROM PUBLIC;
 
 GRANT EXECUTE ON FUNCTION fn_reaper_stale_approved(interval, int) TO svc_worker;
+```
+
+### §23. A token's subject: person-bound tokens beside workspace service identities (077, plan 2026-09-15-cli-v2 phase 01)
+
+**Why:** the CLI and automation authenticate with a bearer API token (§6), and the plan for the
+v2 CLI settled one token model with two principal kinds. A **person-bound** token carries
+`user_id` and no workspace: it acts as that person in every workspace they belong to, never above
+their membership role (the command port's own gate authorizes every write), and is audited as the
+person over the `cli` channel with the token's name riding a direct `cli_command` row beside the
+port's own. A **workspace service identity** carries `workspace_id` and no user: it reads its one
+workspace under its own name and, in this release, never writes (fork F10 — the port authorizes
+writes by membership and a service identity has none). `ck_service_token_subject` makes "exactly
+one subject" a database fact, and the §6 comment's reading of a NULL workspace as "all workspaces
+(operator)" is retired: nothing acts across every workspace, and a token with no workspace is a
+person's. The partial index serves the person's own-token list and the cascade on `users` means a
+deleted account leaves no token behind. Minting stays session-only by dependency at the API (a
+token never mints a token); the resolver refuses a revoked, expired or disabled-person token in
+the order that discloses least and stamps `last_used_at`, throttled like the session slide. The
+runner's ledger grant for `posture` (plan fork F7) is the runner's own, outside this stream.
+
+```sql
+-- [§23 service_tokens: the person-bound subject beside the workspace one]
+-- A token acts for exactly one subject: a person (user_id set, workspace_id NULL — acts as that
+-- person across their memberships, never above the membership role) or a workspace (a service
+-- identity: workspace_id set, user_id NULL — reads its one workspace under its own name). The 060
+-- reading of "workspace_id NULL = all workspaces (operator)" is retired: a token with no
+-- workspace is a person's, and nothing acts across every workspace.
+ALTER TABLE service_tokens ADD COLUMN user_id UUID NULL REFERENCES users(id) ON DELETE CASCADE;
+ALTER TABLE service_tokens ADD CONSTRAINT ck_service_token_subject CHECK ((user_id IS NULL) <> (workspace_id IS NULL));
+CREATE INDEX ix_service_tokens_user ON service_tokens (user_id) WHERE user_id IS NOT NULL;
 ```

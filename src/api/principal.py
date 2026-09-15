@@ -7,6 +7,15 @@ not two credentials — the bearer form exists so SSR can call the API without
 the browser, and it is verified by the same hash lookup. Verification is
 `sessions.resolve`, which also slides the expiry; nothing here re-implements it.
 
+The second credential is the API token (`07` §6; plan `2026-09-15-cli-v2`):
+a bearer value that starts with ``sdt_`` is routed to `service_tokens.resolve`
+and yields a token principal — a person-bound token acts as its person over
+the ``cli`` channel, a workspace service identity has no person and reads.
+The prefix routes BEARER values only; the cookie is always a session. Tokens
+are admitted to :data:`TOKEN_ROUTES` and nowhere else: every other route
+depends on `require_session`, which refuses a token with a reason the CLI can
+act on. That allowlist is the contract the gate enumerates.
+
 A user with no workspace is a valid principal. Tenancy is decided per route by
 the central gate (`tenant_resolution.authorize_member`), never here — on the
 greenfield every user starts tenant-less, so refusing them at the door would
@@ -27,26 +36,76 @@ variable, never a silent fallback to the settings-built URL (#1010's class).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Optional
 from urllib.parse import urlsplit
 
-from fastapi import HTTPException, Request, Response
+from fastapi import Depends, HTTPException, Request, Response
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from src.config.settings import settings
-from src.exceptions.tenancy import TenantResolutionError
-from src.services.target import sessions
+from src.exceptions.tenancy import TenantResolutionError, TokenRefused
+from src.services.target import service_tokens, sessions
 
 #: The session cookie. One name, imported by the auth routes and the tests.
 COOKIE = "sd_session"
 
+#: The routes a token may reach, as ``(method, path)`` after the router
+#: prefix. Everything else is session-only by dependency. No minting route
+#: is here, whatever the token's role — a token never mints a token.
+TOKEN_ROUTES: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("GET", "/api/v1/me/principal"),
+        ("GET", "/api/v1/me/tokens"),
+        ("DELETE", "/api/v1/me/tokens/{token_id}"),
+        ("GET", "/api/v1/workspaces/{ws}/tokens"),
+        ("DELETE", "/api/v1/workspaces/{ws}/tokens/{token_id}"),
+        ("POST", "/api/v1/workspaces/{ws}/commands/{command}"),
+    }
+)
+
 
 @dataclass(frozen=True)
 class Principal:
-    """Who is calling: which session row, which user."""
+    """Who is calling: a session (which row, which user) or a token.
 
-    session_id: str
-    user_id: str
+    The defaults keep a session principal's shape exactly what it was —
+    ``Principal(session_id=…, user_id=…)`` — so nothing that builds one
+    changes. A token principal has ``kind="token"``, ``channel="cli"`` and
+    the token's facts; a service identity is the one with no ``user_id``.
+    """
+
+    session_id: Optional[str]
+    user_id: Optional[str]
+    kind: str = "session"
+    channel: str = "web"
+    token_id: Optional[str] = None
+    token_name: Optional[str] = None
+    token_role: Optional[str] = None
+    token_workspace_id: Optional[str] = None
+    token_expires_at: Optional[datetime] = None
+
+    @property
+    def is_token(self) -> bool:
+        return self.kind == "token"
+
+    @property
+    def is_service_identity(self) -> bool:
+        return self.kind == "token" and self.user_id is None
+
+    @property
+    def actor_kind(self) -> str:
+        """The `app.actor_kind` GUC: a person is a user whichever carrier
+        they arrive on; a service identity is the operator kind."""
+        return "operator" if self.is_service_identity else "user"
+
+    @property
+    def dedup_principal(self) -> str:
+        """The `command_dedup.principal` slot: the session id, or the token
+        id under a prefix so the two namespaces can never collide."""
+        if self.is_token:
+            return f"token:{self.token_id}"
+        return self.session_id or ""
 
 
 def require_engine(request: Request) -> AsyncEngine:
@@ -139,25 +198,71 @@ def require_deliverable_session() -> None:
         )
 
 
-def presented_token(request: Request) -> Optional[str]:
-    """The opaque session value the request carries, bearer first."""
+def presented_bearer(request: Request) -> Optional[str]:
+    """The ``Authorization: Bearer`` value alone, or None."""
     auth = request.headers.get("authorization", "")
     if auth[:7].lower() == "bearer ":
         value = auth[7:].strip()
         if value:
             return value
-    return request.cookies.get(COOKIE) or None
+    return None
+
+
+def presented_token(request: Request) -> Optional[str]:
+    """The opaque session value the request carries, bearer first."""
+    return presented_bearer(request) or request.cookies.get(COOKIE) or None
 
 
 async def current_principal(request: Request) -> Principal:
-    """FastAPI dependency: authenticate, slide, return the principal."""
+    """FastAPI dependency: authenticate, slide or stamp, return the principal.
+
+    A bearer value with the token prefix is a token and resolves through the
+    token resolver; every other value — bearer or cookie — is a session and
+    takes the path it always took.
+    """
     engine = require_engine(request)
-    value = presented_token(request)
+    bearer = presented_bearer(request)
+    if bearer is not None and service_tokens.is_token(bearer):
+        async with engine.begin() as conn:
+            token = await service_tokens.resolve(
+                conn, token_hash=service_tokens.token_hash(bearer)
+            )
+        return Principal(
+            session_id=None,
+            user_id=token.user_id,
+            kind="token",
+            channel="cli",
+            token_id=token.token_id,
+            token_name=token.name,
+            token_role=token.role,
+            token_workspace_id=token.workspace_id,
+            token_expires_at=token.expires_at,
+        )
+    value = bearer or request.cookies.get(COOKIE) or None
     if value is None:
         raise TenantResolutionError("invalid_session", "no session presented")
     async with engine.begin() as conn:
         session = await sessions.resolve(conn, token_hash=sessions.token_hash(value))
     return Principal(session_id=session.id, user_id=session.user_id)
+
+
+def require_own_workspace(principal: Principal, workspace_id: str) -> None:
+    """A workspace service identity addresses its own workspace and no other
+    — the one check both routers make, with the one sentence."""
+    if principal.token_workspace_id != workspace_id:
+        raise TokenRefused("wrong_workspace", "this token belongs to another workspace")
+
+
+async def require_session(
+    principal: Principal = Depends(current_principal),
+) -> Principal:
+    """FastAPI dependency for every route outside :data:`TOKEN_ROUTES`: a
+    session passes through; a token is refused with ``session_required``."""
+    if principal.is_token:
+        raise TokenRefused(
+            "session_required", "this route needs a signed-in web session"
+        )
+    return principal
 
 
 def set_session_cookie(response: Response, value: str) -> None:

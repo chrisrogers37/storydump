@@ -166,6 +166,14 @@ class TestRefusalMappingsAreTotal:
         assert set(module._INVITATION_STATUS) == set(invitations.REASONS)
         assert set(module._INVITATION_DETAIL) == set(invitations.REASONS)
 
+    def test_token_reasons(self):
+        """A live token's refusals answer WITH a reason; a fourth reason
+        without a status would reach the unmapped 500."""
+        from src.api import app as module
+        from src.exceptions.tenancy import TokenRefused
+
+        assert set(module._TOKEN_STATUS) == set(TokenRefused.REASONS)
+
     def test_tenant_reasons_are_a_subset_of_the_closed_vocabulary(self):
         from src.api import app as module
         from src.exceptions.tenancy import TenantResolutionError

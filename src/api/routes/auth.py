@@ -507,9 +507,10 @@ _ATTACH_REASON = {
 async def _presenting_user(request: Request) -> Optional[str]:
     """The user id of the session the returning browser carries, or None.
 
-    Resolved exactly as `current_principal` resolves it (the same cookie, the
+    Resolved as `current_principal` resolves a SESSION (the same cookie, the
     same `sessions.resolve`), on the engine directly: this runs before any
-    tenant is known. A refusal of any kind is None — the caller's answer is
+    tenant is known. An API token (`sdt_…`) is not a browser and never
+    reaches an OAuth callback; here it hashes as a session and is None. A refusal of any kind is None — the caller's answer is
     the same closed `state_refused` either way, so a prober learns nothing.
     """
     value = presented_token(request)

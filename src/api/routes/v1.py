@@ -41,7 +41,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 
-from src.api.principal import Principal, current_principal, require_engine
+from src.api.principal import (
+    Principal,
+    current_principal,
+    require_engine,
+    require_own_workspace,
+    require_session,
+)
 from src.api import google_client, instagram_client
 from src.config.settings import settings
 from src.services.target.drive_adapter import (
@@ -68,6 +74,8 @@ from src.services.target import (
 from src.services.target.commands import Command, CommandResult
 from src.services.target.ig_login_oauth import STATE_TTL_SECONDS, issue_state
 from src.services.target.unit_of_work import unit_of_work
+from src.exceptions.tenancy import TokenRefused
+from sqlalchemy import text
 
 
 #: Telegram's username shape for a BOT: 5-32 characters of letters, digits and
@@ -125,13 +133,19 @@ LIST_LIMIT_MAX = 200
 
 def _open_tenant(request: Request, workspace_id: str, principal: Principal):
     """The request's tenant-scoped unit of work: tenant + actor GUCs applied,
-    one transaction. The one seam the unit gate replaces."""
+    one transaction. The one seam the unit gate replaces.
+
+    The GUCs come from the principal: a person is ``user`` on ``web`` or, via
+    a person-bound token, on ``cli``; a service identity is ``operator`` with
+    no user, which the audit triggers read as such. The triggers never see a
+    token's name — that rides the direct `cli_command` row (F4).
+    """
     return unit_of_work(
         require_engine(request),
         workspace_id,
-        actor_kind="user",
+        actor_kind=principal.actor_kind,
         actor_user_id=principal.user_id,
-        channel=CHANNEL,
+        channel=principal.channel,
     ).begin()
 
 
@@ -197,23 +211,105 @@ async def _dispatch(
     nothing. The dedup fingerprint is taken over the raw body — never over
     *extra*, which is what this adapter adds (the pre-assigned workspace id).
     """
+    if principal.is_token:
+        _refuse_token_write(principal, tenant)
     key = _idempotency_key(request)
     body = await _json_object(request)
     command = Command(
         kind=kind,
         workspace_id=workspace_id,
         actor_user_id=principal.user_id,
-        channel=CHANNEL,
+        channel=principal.channel,
         args={**body, **(extra or {})},
+        actor_label=principal.token_name,
     )
     async with _open_tenant(request, tenant, principal) as session:
-        return await commands.ingest(
+        result = await commands.ingest(
             session,
             command,
             external_ref=key,
-            principal=principal.session_id,
+            principal=principal.dedup_principal,
             payload=body,
         )
+        if principal.is_token:
+            await _audit_cli_command(
+                session,
+                workspace_id=tenant,
+                command=command,
+                principal=principal,
+                external_ref=key,
+                result=result,
+            )
+        return result
+
+
+def _refuse_token_write(principal: Principal, workspace_id: str) -> None:
+    """The write rule for tokens, decided before the key or body is read: a
+    service identity never writes (F10) and never addresses another
+    workspace; a ``readonly`` person-bound token never writes either. A
+    person-bound ``operator`` token proceeds as the person — the membership
+    gate inside the port is the authorization, unchanged."""
+    if principal.is_service_identity:
+        require_own_workspace(principal, workspace_id)
+        raise TokenRefused("readonly_token", "a service identity reads only")
+    if principal.token_role != "operator":
+        raise TokenRefused("readonly_token", "this token is read-only")
+
+
+#: The direct audit row a token's command leaves beside the port's own (F4):
+#: the actor GUCs name the person, this row names the token and the command's
+#: idempotency reference. Both rows share the transaction's ``now()``, so
+#: they pair on (entity, created_at, channel) — the trigger row cannot carry
+#: a label and the label GUC was rejected (fork F4 (b)).
+_CLI_COMMAND_AUDIT = text(
+    "INSERT INTO audit_events"
+    "  (workspace_id, entity_kind, entity_id, from_state, to_state,"
+    "   actor_kind, actor_user_id, channel, detail)"
+    " VALUES (CAST(:ws AS uuid), :entity_kind, CAST(:entity_id AS uuid), NULL, NULL,"
+    "   current_setting('app.actor_kind'),"
+    "   NULLIF(current_setting('app.actor_user_id', true), '')::uuid,"
+    "   NULLIF(current_setting('app.channel', true), ''), CAST(:detail AS jsonb))"
+)
+
+
+async def _audit_cli_command(
+    session,
+    *,
+    workspace_id: str,
+    command: Command,
+    principal: Principal,
+    external_ref: str,
+    result: CommandResult,
+) -> None:
+    """Write the `cli_command` row in the command's own transaction — after
+    `ingest`, so a replay or a refusal leaves no row (`ingest` raised). The
+    entity is the story the PORT acted on (the result names it), never the
+    caller's claim: a body may name any uuid, and a row attached to a story
+    the command never touched would be a lie the ledger cannot detect."""
+    intent_id = result.data.get("intent_id") if isinstance(result.data, dict) else None
+    entity_kind, entity_id = "workspace", workspace_id
+    if isinstance(intent_id, str):
+        try:
+            entity_kind, entity_id = "post_intent", str(uuid.UUID(intent_id))
+        except ValueError:
+            pass
+    detail = {
+        "v": 1,
+        "event": "cli_command",
+        "kind": command.kind,
+        "token_id": principal.token_id,
+        "token_name": principal.token_name,
+        "external_ref": external_ref,
+    }
+    await session.execute(
+        _CLI_COMMAND_AUDIT,
+        {
+            "ws": workspace_id,
+            "entity_kind": entity_kind,
+            "entity_id": entity_id,
+            "detail": json.dumps(detail, separators=(",", ":")),
+        },
+    )
 
 
 def _render(result: CommandResult, *, status: Optional[int] = None) -> JSONResponse:
@@ -228,7 +324,7 @@ def _render(result: CommandResult, *, status: Optional[int] = None) -> JSONRespo
 
 
 @router.get("/me")
-async def me(request: Request, principal: Principal = Depends(current_principal)):
+async def me(request: Request, principal: Principal = Depends(require_session)):
     """The user, their identities, and their memberships (through the
     memberships door, `064`). A user with zero workspaces is the normal first
     state on the greenfield, not an error."""
@@ -243,7 +339,7 @@ async def me(request: Request, principal: Principal = Depends(current_principal)
 
 @router.post("/me/telegram/link")
 async def telegram_link(
-    request: Request, principal: Principal = Depends(current_principal)
+    request: Request, principal: Principal = Depends(require_session)
 ):
     """The link a signed-in user taps to attach their Telegram identity
     (`07` §2 `link`: only from an authenticated session; the row pins the
@@ -268,7 +364,7 @@ async def telegram_link(
 
 @router.post("/workspaces/{ws}/telegram/bind-link")
 async def telegram_group_bind_link(
-    ws: uuid.UUID, request: Request, principal: Principal = Depends(current_principal)
+    ws: uuid.UUID, request: Request, principal: Principal = Depends(require_session)
 ):
     """The admin's one-shot link that binds a Telegram group to THIS workspace
     (`07` §13; owner ruling 2026-09-05). Opens Telegram's group picker; the
@@ -297,7 +393,7 @@ async def telegram_group_bind_link(
 
 @router.get("/workspaces")
 async def list_workspaces(
-    request: Request, principal: Principal = Depends(current_principal)
+    request: Request, principal: Principal = Depends(require_session)
 ):
     engine = require_engine(request)
     async with engine.connect() as conn:
@@ -307,7 +403,7 @@ async def list_workspaces(
 
 @router.post("/workspaces", status_code=201)
 async def create_workspace(
-    request: Request, principal: Principal = Depends(current_principal)
+    request: Request, principal: Principal = Depends(require_session)
 ):
     """`create_workspace`: workspace + owner membership in ONE transaction.
 
@@ -332,7 +428,7 @@ async def create_workspace(
 
 @router.get("/workspaces/{ws}")
 async def get_workspace(
-    ws: uuid.UUID, request: Request, principal: Principal = Depends(current_principal)
+    ws: uuid.UUID, request: Request, principal: Principal = Depends(require_session)
 ):
     async with _member(request, str(ws), principal) as session:
         row = await workspaces.get_workspace(session, workspace_id=str(ws))
@@ -343,14 +439,14 @@ async def get_workspace(
 
 @router.get("/workspaces/{ws}/members")
 async def list_members(
-    ws: uuid.UUID, request: Request, principal: Principal = Depends(current_principal)
+    ws: uuid.UUID, request: Request, principal: Principal = Depends(require_session)
 ):
     return await _collection(request, ws, principal, workspaces.list_members, "members")
 
 
 @router.get("/workspaces/{ws}/accounts")
 async def list_accounts(
-    ws: uuid.UUID, request: Request, principal: Principal = Depends(current_principal)
+    ws: uuid.UUID, request: Request, principal: Principal = Depends(require_session)
 ):
     return await _collection(
         request, ws, principal, workspaces.list_accounts, "accounts"
@@ -359,14 +455,14 @@ async def list_accounts(
 
 @router.get("/workspaces/{ws}/sources")
 async def list_sources(
-    ws: uuid.UUID, request: Request, principal: Principal = Depends(current_principal)
+    ws: uuid.UUID, request: Request, principal: Principal = Depends(require_session)
 ):
     return await _collection(request, ws, principal, workspaces.list_sources, "sources")
 
 
 @router.get("/workspaces/{ws}/bindings")
 async def list_bindings(
-    ws: uuid.UUID, request: Request, principal: Principal = Depends(current_principal)
+    ws: uuid.UUID, request: Request, principal: Principal = Depends(require_session)
 ):
     return await _collection(
         request, ws, principal, workspaces.list_bindings, "bindings"
@@ -375,7 +471,7 @@ async def list_bindings(
 
 @router.get("/workspaces/{ws}/invitations")
 async def list_invitations(
-    ws: uuid.UUID, request: Request, principal: Principal = Depends(current_principal)
+    ws: uuid.UUID, request: Request, principal: Principal = Depends(require_session)
 ):
     return await _collection(
         request, ws, principal, workspaces.list_invitations, "invitations"
@@ -399,7 +495,7 @@ def _states(state: Optional[str]) -> list[str]:
 async def list_intents(
     ws: uuid.UUID,
     request: Request,
-    principal: Principal = Depends(current_principal),
+    principal: Principal = Depends(require_session),
     state: Optional[str] = Query(None),
     limit: int = Query(LIST_LIMIT_DEFAULT, ge=1, le=LIST_LIMIT_MAX),
 ):
@@ -418,7 +514,7 @@ async def list_intents(
 async def list_media(
     ws: uuid.UUID,
     request: Request,
-    principal: Principal = Depends(current_principal),
+    principal: Principal = Depends(require_session),
     state: Optional[str] = Query(None),
     never_posted: bool = Query(False),
     limit: int = Query(LIST_LIMIT_DEFAULT, ge=1, le=LIST_LIMIT_MAX),
@@ -443,7 +539,7 @@ async def get_media(
     ws: uuid.UUID,
     media_id: uuid.UUID,
     request: Request,
-    principal: Principal = Depends(current_principal),
+    principal: Principal = Depends(require_session),
 ):
     async with _member(request, str(ws), principal) as session:
         row = await workspaces.get_media(
@@ -456,7 +552,7 @@ async def get_media(
 
 @router.get("/workspaces/{ws}/stats")
 async def get_stats(
-    ws: uuid.UUID, request: Request, principal: Principal = Depends(current_principal)
+    ws: uuid.UUID, request: Request, principal: Principal = Depends(require_session)
 ):
     """Server-side aggregates (#1044). A bounded list cannot answer an
     aggregate question, so these are counted where the rows are."""
@@ -469,7 +565,7 @@ async def get_intent(
     ws: uuid.UUID,
     intent_id: uuid.UUID,
     request: Request,
-    principal: Principal = Depends(current_principal),
+    principal: Principal = Depends(require_session),
 ):
     async with _member(request, str(ws), principal) as session:
         row = await workspaces.get_intent(
@@ -507,7 +603,7 @@ async def _admin(request: Request, workspace_id: str, principal: Principal):
 
 @router.post("/workspaces/{ws}/accounts", status_code=201)
 async def create_account(
-    ws: uuid.UUID, request: Request, principal: Principal = Depends(current_principal)
+    ws: uuid.UUID, request: Request, principal: Principal = Depends(require_session)
 ):
     """Add a destination — the Instagram handle this workspace schedules for.
 
@@ -563,7 +659,7 @@ async def create_account(
 
 @router.post("/workspaces/{ws}/sources", status_code=201)
 async def create_source(
-    ws: uuid.UUID, request: Request, principal: Principal = Depends(current_principal)
+    ws: uuid.UUID, request: Request, principal: Principal = Depends(require_session)
 ):
     """Pick a Drive folder UNDER the workspace's grant (owner ruling
     2026-09-05, #1165 lean (b); `07` §15).
@@ -644,7 +740,7 @@ async def remove_source(
     ws: uuid.UUID,
     source_id: uuid.UUID,
     request: Request,
-    principal: Principal = Depends(current_principal),
+    principal: Principal = Depends(require_session),
 ):
     """Remove a folder from the workspace's sync — a PAUSE, never a delete
     (`provisioning.pause_media_source`): the media and its history stay, and
@@ -660,7 +756,7 @@ async def remove_source(
 
 @router.get("/workspaces/{ws}/category-mix")
 async def get_category_mix(
-    ws: uuid.UUID, request: Request, principal: Principal = Depends(current_principal)
+    ws: uuid.UUID, request: Request, principal: Principal = Depends(require_session)
 ):
     """The workspace's posting mix, keyed on the CONNECTED FOLDER (owner
     ruling 2026-09-08): every connected folder with its label, media count,
@@ -681,7 +777,7 @@ def _mix_response(rows: list[dict]) -> dict:
 
 @router.put("/workspaces/{ws}/category-mix")
 async def put_category_mix(
-    ws: uuid.UUID, request: Request, principal: Principal = Depends(current_principal)
+    ws: uuid.UUID, request: Request, principal: Principal = Depends(require_session)
 ):
     """Replace the workspace's posting mix (owner ruling 2026-09-08: the
     connected folder is the group — memes 70 / merch 30 as two connected
@@ -712,7 +808,7 @@ async def put_category_mix(
 
 @router.get("/workspaces/{ws}/drive")
 async def drive_status(
-    ws: uuid.UUID, request: Request, principal: Principal = Depends(current_principal)
+    ws: uuid.UUID, request: Request, principal: Principal = Depends(require_session)
 ):
     """The workspace's Google Drive grant — presence and freshness, never a
     token (`workspaces.drive_status`). Member floor: it says whether the
@@ -724,7 +820,7 @@ async def drive_status(
 
 @router.post("/workspaces/{ws}/drive/connect")
 async def connect_drive(
-    ws: uuid.UUID, request: Request, principal: Principal = Depends(current_principal)
+    ws: uuid.UUID, request: Request, principal: Principal = Depends(require_session)
 ):
     """Start the Drive grant for the WORKSPACE: mint the state the callback
     will consume and hand back where the browser goes (owner ruling
@@ -791,7 +887,7 @@ def _drive_adapter(request: Request):
 async def list_drive_folders(
     ws: uuid.UUID,
     request: Request,
-    principal: Principal = Depends(current_principal),
+    principal: Principal = Depends(require_session),
     parent: Optional[str] = Query(default=None),
 ):
     """The folders under `parent` (the Drive root when absent), read through
@@ -839,7 +935,7 @@ async def list_drive_folders(
 
 @router.post("/workspaces/{ws}/accounts/connect")
 async def connect_workspace_account(
-    ws: uuid.UUID, request: Request, principal: Principal = Depends(current_principal)
+    ws: uuid.UUID, request: Request, principal: Principal = Depends(require_session)
 ):
     """Start the Instagram Login grant for an account that is NOT yet a
     destination here — the way a destination is ADDED (owner ruling
@@ -893,7 +989,7 @@ async def connect_account(
     ws: uuid.UUID,
     account_id: uuid.UUID,
     request: Request,
-    principal: Principal = Depends(current_principal),
+    principal: Principal = Depends(require_session),
 ):
     """Start the Instagram Login grant for ONE destination: mint the state the
     callback will consume and hand back where the browser goes (#1220 step 2,
@@ -951,7 +1047,7 @@ async def run_command(
 
 @router.post("/invitations/{token}/accept")
 async def accept_invitation(
-    token: str, request: Request, principal: Principal = Depends(current_principal)
+    token: str, request: Request, principal: Principal = Depends(require_session)
 ):
     """Possession of the one-shot token accepts; the door resolves the
     workspace itself, so this runs tenant-less (`invitations.accept`)."""
