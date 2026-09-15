@@ -121,6 +121,28 @@ storydump-cli update-category-mix
 
 31 commands are registered; `storydump-cli --help` is the authoritative list.
 
+## The `storydump` CLI (v2)
+
+`storydump` is the developer and agent console over the target API — a pure
+HTTP client, never a database connection
+(`documentation/planning/2026-09-15-cli-v2/`). Install it with
+`pip install -e '.[cli]'`.
+
+1. Mint a token on the web: **Settings › API tokens**. A person-bound token
+   acts as you in every workspace you belong to, never above your role; the
+   secret is shown once.
+2. `storydump login` — paste the secret at the prompt (or pipe it on stdin).
+   It is kept in the OS keychain; `--insecure-storage` writes a 0600 file
+   instead; agents and CI set `STORYDUMP_TOKEN` and never run `login`.
+3. `storydump whoami`, `storydump tokens list`, `storydump tokens revoke <id>`,
+   `storydump logout`. `--json` on any verb prints one envelope
+   `{"v": 1, "kind", "data", "error"}`. Exit codes: 0 ok · 1 not found ·
+   2 refused · 3 not authorized · 4 API unreachable · 64 usage.
+   `STORYDUMP_API` overrides the API URL (default `https://api.storydump.app`).
+
+`storydump --help` is the authoritative list. The legacy `storydump-cli`
+(above) stays until the plan's phase 03 deletes it.
+
 ## Testing
 
 ```bash

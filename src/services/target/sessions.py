@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from sqlalchemy import text
 
 from src.exceptions.tenancy import TenantResolutionError
+from src.services.target import vocabulary
 
 #: `07` §1: "now() + 30 days (05 seam), sliding on use".
 SESSION_TTL_SECONDS = 30 * 24 * 3600
@@ -76,8 +77,18 @@ def token_hash(value: str) -> str:
 
 
 def new_token() -> str:
-    """256 bits, URL-safe. Never logged, never stored in the clear."""
-    return secrets.token_urlsafe(32)
+    """256 bits, URL-safe. Never logged, never stored in the clear.
+
+    Re-drawn while it starts with the API token prefix: a bearer wearing
+    that prefix is routed to the token resolver (`src/api/principal.py`),
+    so a session value that happened to wear it would fail every
+    server-side call until the next sign-in. One draw in sixteen million
+    — a re-draw costs nothing and closes it.
+    """
+    while True:
+        value = secrets.token_urlsafe(32)
+        if not value.startswith(vocabulary.TOKEN_PREFIX):
+            return value
 
 
 async def issue(executor, *, user_id: str) -> str:

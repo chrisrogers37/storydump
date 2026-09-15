@@ -58,16 +58,18 @@ from src.api.routes.auth import router as auth_router
 from src.api.routes.retired import router as retired_router
 from src.api.routes.v1 import IDEMPOTENCY_HEADER
 from src.api.routes.v1 import router as v1_router
+from src.api.routes.tokens import router as tokens_router
 from src.api.routes import webhooks
 from src.api.routes.meta import router as meta_router
 from src.api.routes.webhooks import router as webhooks_router
 from src.config.settings import settings
-from src.exceptions.tenancy import TenantResolutionError
+from src.exceptions.tenancy import TenantResolutionError, TokenRefused
 from src.services.target.commands import CommandNotBuilt, CommandRefused
 from src.services.target.invitations import InvitationRefused
 from src.services.target.category_mix import MixInvalid
 from src.services.target.provisioning import ProvisioningRefused
 from src.services.target import backpressure, posting_health, scheduling_health
+from src.services.target.service_tokens import TokenArgsInvalid
 from src.services.target.work_loop import WorkerConfig
 from src.services.target.unit_of_work import (
     connection_role,
@@ -169,8 +171,23 @@ _TENANT_STATUS = {
     "disabled_user": 401,
     "not_a_member": 404,
     "insufficient_role": 403,
+    # The token resolver's three answers (phase 01 of the v2 CLI): like their
+    # session twins, 401 and the response never says which.
+    "invalid_token": 401,
+    "expired_token": 401,
+    "revoked_token": 401,
 }
 _TENANT_DETAIL = {401: "authentication required", 404: "not found", 403: "forbidden"}
+
+#: `TokenRefused.reason` → 403 WITH the reason: a live token asked for
+#: something it may not have, and the CLI says the right sentence only if the
+#: answer names it. Pinned total over `TokenRefused.REASONS` by the factory
+#: test.
+_TOKEN_STATUS = {
+    "session_required": 403,
+    "readonly_token": 403,
+    "wrong_workspace": 403,
+}
 
 #: `CommandRefused.reason` → status. Pinned TOTAL over `commands.REASONS` by
 #: the factory test, so a new reason cannot ship without a row here.
@@ -274,6 +291,22 @@ def _register_handlers(app: FastAPI) -> None:
         logger.info("refused %s %s: %s", request.method, request.url.path, exc)
         return JSONResponse(
             status_code=status, content={"detail": _TENANT_DETAIL[status]}
+        )
+
+    @app.exception_handler(TokenRefused)
+    async def _token(request: Request, exc: TokenRefused):
+        status = _TOKEN_STATUS.get(exc.reason)
+        if status is None:
+            return _unmapped(request, exc)
+        logger.info("refused %s %s: %s", request.method, request.url.path, exc)
+        return JSONResponse(
+            status_code=status, content={"detail": str(exc), "reason": exc.reason}
+        )
+
+    @app.exception_handler(TokenArgsInvalid)
+    async def _token_args(request: Request, exc: TokenArgsInvalid):
+        return JSONResponse(
+            status_code=400, content={"detail": str(exc), "reason": "invalid_args"}
         )
 
     @app.exception_handler(CommandRefused)
@@ -625,6 +658,9 @@ def create_app(
 
     app.include_router(auth_router, prefix="/auth")
     app.include_router(v1_router, prefix="/api/v1")
+    # The token routes and `/me/principal` (phase 01 of the v2 CLI) share the
+    # v1 prefix and the v1 seams; their own file keeps the allowlist readable.
+    app.include_router(tokens_router, prefix="/api/v1")
     app.include_router(webhooks_router, prefix="/webhooks")
     # Meta's policy callbacks (#410). Under the same prefix as the other
     # provider-called doors; the URLs are not registered with Meta yet.

@@ -366,6 +366,10 @@ class TestTheBoundaryIsDerivedAndLoud:
             # approved → review_required) and the reaper's approved leg
             # withdrawn (07 §22, plan 03 of the first-fetch investigation).
             "076_publish_wait_edges.sql",
+            # 077: a token's subject — service_tokens.user_id and
+            # ck_service_token_subject for person-bound tokens (07 §23, the
+            # v2 CLI plan, phase 01).
+            "077_service_token_subject.sql",
         ], (
             f"the target lineage is {above}. If you are landing the next F.2"
             " increment, add it here — deliberately, and at the end: arm (b)"

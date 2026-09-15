@@ -1,7 +1,7 @@
 ---
 title: "storydump v2 CLI — the developer and agent console over the target API (epic)"
 type: plan
-status: draft
+status: active
 owner: chris
 created: 2026-09-15
 updated: 2026-09-15
