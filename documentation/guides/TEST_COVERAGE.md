@@ -324,43 +324,12 @@
 
 ---
 
-## CLI Layer Tests (18 tests)
+## CLI Layer Tests
 
-### MediaCommands (9 tests)
-- ✅ index-media command
-- ✅ index-media nonexistent directory
-- ✅ list-media command
-- ✅ list-media with filters
-- ✅ validate-image valid
-- ✅ validate-image invalid
-- ✅ validate-image nonexistent
-
-**File**: `tests/cli/test_media_commands.py`
-
-### QueueCommands (5 tests)
-- ✅ create-schedule command
-- ✅ create-schedule with no media
-- ✅ list-queue command
-- ✅ list-queue with status filter
-- ✅ process-queue command
-- ✅ **process-queue --force** - **Added 2026-01-04**
-
-**File**: `tests/cli/test_queue_commands.py`
-
-### UserCommands (5 tests)
-- ✅ list-users command
-- ✅ list-users empty database
-- ✅ promote-user command
-- ✅ promote-user nonexistent
-- ✅ promote-user invalid role
-
-**File**: `tests/cli/test_user_commands.py`
-
-### HealthCommands (2 tests)
-- ✅ check-health command
-- ✅ check-health shows all checks
-
-**File**: `tests/cli/test_health_commands.py`
+The legacy `cli/` package and its `tests/cli/` (Media, Queue, User and Health command tests)
+were deleted on 2026-09-15 with the v2 CLI plan's phase 03. The `storydump` CLI's tests live in
+`tests/storydump_cli/` (the verbs against a scripted API, the watch, the token store, the import
+boundary) and `tests/scripts/test_cli_writes_gate.py` (the real CLI against the real app).
 
 ---
 

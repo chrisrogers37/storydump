@@ -222,7 +222,7 @@ async def handle_pause(self, update, context):
 
 2. **Consider Adding Optional Admin-Only Mode**
    - If you want to restrict certain commands later, the codebase already supports role-based access
-   - Users can be promoted to admin via `storydump-cli promote-user <id> --role admin`
+   - Members are invited and removed from the Members card under Settings › General; changing a member's role is the `change_role` command — registered in the vocabulary, not yet built (answers 501)
    - See code example in Section 2 above for implementation
 
 3. **Add Security Best Practices Documentation**

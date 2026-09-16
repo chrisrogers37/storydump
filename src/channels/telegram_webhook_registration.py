@@ -7,8 +7,8 @@ with `message` alone every button tap was dropped before it reached the route
 this module so they cannot disagree — the API registers itself at startup
 (`src/api/app.py`, idempotent on every deploy: the API holds the token and the
 secret already, and a human step that has to follow every deploy is a step
-that will be missed) and `scripts/telegram_webhook.py` is the operator's
-verify / register / deregister tool.
+that will be missed) and `storydump webhook status|register|deregister` is the operator's
+verify / register / deregister tool (the v2 CLI, phase 03).
 """
 
 from __future__ import annotations
@@ -19,44 +19,42 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_WEBHOOK_URL = "https://api.storydump.app/webhooks/telegram"
-URL_VAR = "TARGET_TELEGRAM_WEBHOOK_URL"
-#: The update kinds the target ingress serves: `/start` taps and group messages
-#: ride `message`; a button tap on an approval card is a `callback_query`.
-#: Typed chat commands (#854) are still not dispatched.
-ALLOWED_UPDATES = ["message", "callback_query"]
-#: `setWebhook`'s `max_connections`: how many simultaneous deliveries Telegram
-#: opens against the route — its true concurrency ceiling (default 40, at most
-#: 100). Set deliberately to the ingress's connection budget: one process ×
-#: `POOL_SIZE_SEAM` (10) today; 20 if the API runs two workers (F5).
-MAX_CONNECTIONS_VAR = "TARGET_TELEGRAM_WEBHOOK_MAX_CONNECTIONS"
-DEFAULT_MAX_CONNECTIONS = 10
+# The spellings live in the vocabulary module — the ONE `src` module the CLI
+# imports — so the API's self-registration and `storydump webhook` cannot
+# disagree; they are re-exported here for the callers that import them.
+from src.services.target.vocabulary import (  # noqa: E402
+    ALLOWED_UPDATES,
+    DEFAULT_MAX_CONNECTIONS,
+    DEFAULT_WEBHOOK_URL,
+    MAX_CONNECTIONS_VAR,
+    BadMaxConnections,
+    bot_matches,
+    max_connections_from,
+)
+from src.services.target.vocabulary import WEBHOOK_URL_VAR as URL_VAR  # noqa: E402
+
+__all__ = [
+    "ALLOWED_UPDATES",
+    "AUTOREGISTER_VAR",
+    "DEFAULT_MAX_CONNECTIONS",
+    "DEFAULT_WEBHOOK_URL",
+    "ENVIRONMENT_VAR",
+    "MAX_CONNECTIONS_VAR",
+    "URL_VAR",
+    "BadMaxConnections",
+    "autoregister_enabled",
+    "bot_matches",
+    "max_connections_from",
+    "register",
+]
+
 #: The API's startup registration is ON in Railway's production environment
 #: and OFF anywhere else unless this says `1` — any second process holding
 #: the production token (a laptop, a tunnel, a preview) must never re-point
 #: production's webhook at itself with its own secret. `0`/`false`/`no`
-#: switches it off in production too (an operator driving the script by hand).
+#: switches it off in production too (an operator driving the CLI by hand).
 AUTOREGISTER_VAR = "TARGET_TELEGRAM_WEBHOOK_AUTOREGISTER"
 ENVIRONMENT_VAR = "RAILWAY_ENVIRONMENT_NAME"
-
-
-class BadMaxConnections(ValueError):
-    """The connection cap is outside Telegram's 1..100."""
-
-
-def max_connections_from(raw: Optional[str]) -> int:
-    """The connection cap, from an environment value, within Telegram's 1..100."""
-    if raw is None or not raw.strip():
-        return DEFAULT_MAX_CONNECTIONS
-    try:
-        value = int(raw.strip())
-    except ValueError:
-        value = 0
-    if not 1 <= value <= 100:
-        raise BadMaxConnections(
-            f"{MAX_CONNECTIONS_VAR} must be an integer from 1 to 100 (got {raw!r})"
-        )
-    return value
 
 
 def autoregister_enabled(raw: Optional[str], *, environment: Optional[str]) -> bool:
@@ -69,14 +67,6 @@ def autoregister_enabled(raw: Optional[str], *, environment: Optional[str]) -> b
     if value in ("1", "true", "yes", "on"):
         return True
     return (environment or "").strip().lower() == "production"
-
-
-def bot_matches(username: str, expected: Optional[str]) -> bool:
-    """The configured bot, if any, must be the token's bot — registering the
-    door on the wrong bot is the one mistake this refuses by construction."""
-    if not expected:
-        return True
-    return username.lstrip("@").lower() == expected.lstrip("@").lower()
 
 
 async def register(

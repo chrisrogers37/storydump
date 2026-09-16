@@ -9,22 +9,27 @@ That is not hypothetical. Both documents named `storydump-cli process-queue`
 and `storydump-cli create-schedule` in their NEVER-run blocks for a month after
 neither command existed, and the credential-destroying `revoke-tokens` and
 `rotate-keys` were in neither. The list looked authoritative the whole time.
+The legacy CLI is gone (the v2 CLI plan, phase 03); the same guard now pins
+`storydump`, whose verbs nest (`storydump tokens revoke`), so a subcommand is
+pinned, not its group.
 
-Two properties, because the two failures are independent:
+Three properties, because the failures are independent:
 
-1. Every `storydump-cli` command either document names is a command the CLI
-   actually registers. Catches the ghosts.
+1. Every `storydump` invocation either document writes AS CODE (a backtick
+   span or a fenced block) names a verb the CLI actually registers, and a
+   subcommand its group actually has. Catches the ghosts. Prose that merely
+   says "storydump" is not an invocation.
 2. The NEVER-run lists agree with each other exactly. That is the "the two
-   files must not disagree" requirement made structural rather than a habit —
-   the overlap between them is small and deliberate, and this is what keeps it
-   honest when someone edits one and not the other.
+   files must not disagree" requirement made structural rather than a habit.
+3. A NEVER-run entry under a group names the subcommand (`tokens revoke`),
+   never the group alone — a bare group would forbid its harmless reads too.
 
 **Bound, stated because it is the direction that reads clean.** This pins that
 named commands EXIST and that the two lists MATCH. It cannot know whether a
 command that is absent from the list ought to be on it — dangerousness is not
-derivable from the registry — so it would not have caught `revoke-tokens` being
-missing. Adding a command to the CLI without classifying it stays a human
-judgement, and `AGENTS.md` says so where a reader will meet it.
+derivable from the registry — so it would not catch a new destructive verb
+being left off. Adding a verb without classifying it stays a human judgement,
+and `AGENTS.md` says so where a reader will meet it.
 """
 
 from __future__ import annotations
@@ -32,22 +37,41 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import click
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 DOCS = ("CLAUDE.md", "AGENTS.md")
 
-#: `storydump-cli <name>`, where a name is the click convention (lowercase,
-#: hyphens). Trailing flags and comments are not part of the name.
-_INVOCATION = re.compile(r"\bstorydump-cli\s+([a-z][a-z0-9-]*)")
+#: `storydump [--global options] <verb> [<sub>]` inside code: a verb is Click's
+#: convention (lowercase, hyphens); a placeholder (`<story>`) or a comment ends it,
+#: and a global option before the verb (`--json`, `--api URL`) is stepped over.
+_INVOCATION = re.compile(
+    r"(?<![\w-])storydump(?:\s+--?[\w-]+(?:[= ]\S+)?)*\s+([a-z][a-z0-9-]*)"
+    r"(?:\s+([a-z][a-z0-9-]*))?"
+)
+_FENCE = re.compile(r"(?:```|~~~)[^\n]*\n(.*?)(?:```|~~~)", re.S)
+_SPAN = re.compile(r"`([^`\n]+)`")
 
 
 def _doc(name: str) -> str:
     return (ROOT / name).read_text()
 
 
-def _named_commands(text: str) -> set[str]:
-    return set(_INVOCATION.findall(text))
+def _code(text: str) -> list[str]:
+    """Every fenced block and every backtick span — the places a command is
+    written to be typed."""
+    fences = _FENCE.findall(text)
+    prose = _FENCE.sub("", text)
+    return fences + _SPAN.findall(prose)
+
+
+def _named_invocations(text: str) -> set[tuple[str, str | None]]:
+    return {
+        (verb, sub or None)
+        for code in _code(text)
+        for verb, sub in _INVOCATION.findall(code)
+    }
 
 
 def _never_run_block(text: str) -> list[str]:
@@ -66,21 +90,31 @@ def _never_run_block(text: str) -> list[str]:
     return lines
 
 
-def _registry() -> set[str]:
-    from cli.main import cli
+def _registry() -> dict[str, set[str] | None]:
+    """Every verb, and for a group the subcommands it registers."""
+    from storydump_cli.main import cli
 
-    return set(cli.commands.keys())
+    return {
+        name: set(command.commands) if isinstance(command, click.Group) else None
+        for name, command in cli.commands.items()
+    }
 
 
 @pytest.mark.parametrize("doc", DOCS)
 def test_every_command_the_doc_names_actually_exists(doc):
-    named = _named_commands(_doc(doc))
+    named = _named_invocations(_doc(doc))
     assert named, (
-        f"{doc} names no storydump-cli commands — the regex or the doc changed"
+        f"{doc} names no storydump verbs in code — the regex or the doc changed"
     )
-    missing = sorted(named - _registry())
-    assert not missing, (
-        f"{doc} names storydump-cli command(s) that do not exist: {missing}."
+    registry = _registry()
+    ghosts = []
+    for verb, sub in sorted(named, key=str):
+        if verb not in registry:
+            ghosts.append(f"storydump {verb}")
+        elif sub and registry[verb] is not None and sub not in registry[verb]:
+            ghosts.append(f"storydump {verb} {sub}")
+    assert not ghosts, (
+        f"{doc} names storydump command(s) that do not exist: {ghosts}."
         " A safety list pointing at a command nobody can run protects nothing"
         " — remove it, or register the command."
     )
@@ -95,10 +129,31 @@ def test_the_two_never_run_lists_are_identical():
     )
 
 
-def test_the_never_run_list_is_not_empty_and_covers_the_worker():
+def test_the_never_run_list_is_not_empty_and_covers_the_worker_and_the_cli():
     """Positive control: a parser returning nothing would pass both tests above."""
     block = _never_run_block(_doc("AGENTS.md"))
     assert block, "the NEVER-run block parsed empty"
     assert any("python -m src.main" in line for line in block), (
         "the worker entry point is no longer in the NEVER-run list"
     )
+    assert any(line.startswith("storydump ") for line in block), (
+        "the CLI's destructive verbs are no longer in the NEVER-run list"
+    )
+    assert not any("storydump-cli" in line for line in block), (
+        "the legacy CLI is gone; a guard pointing at it protects nothing"
+    )
+
+
+def test_a_never_run_entry_under_a_group_names_the_subcommand():
+    registry = _registry()
+    for line in _never_run_block(_doc("AGENTS.md")):
+        words = line.split()
+        if words[:1] != ["storydump"]:
+            continue
+        verb = words[1]
+        assert verb in registry, line
+        if registry[verb] is not None:
+            assert len(words) > 2 and words[2] in registry[verb], (
+                f"{line!r} forbids a whole group; name the destructive"
+                f" subcommand ({', '.join(sorted(registry[verb]))})"
+            )

@@ -336,7 +336,7 @@ Build a delightful Instagram Story automation system that:
 - Command discovery through native Telegram UI improves UX significantly
 - Users can clean up verbose bot messages (queue lists, status reports)
 - Clear semantic distinction: "reset" = start over, "cleanup" = tidy up
-- CLI aligned: `storydump-cli reset-queue` matches Telegram's `/reset`
+- CLI aligned: the legacy CLI's queue reset matched Telegram's `/reset` (that CLI was retired on 2026-09-15; the target tier has no queue to reset)
 **Status**: ✅ COMPLETE - Ready for testing
 
 ### 2026-01-24: Phase 2 Complete - Instagram API Automation + Multi-Account

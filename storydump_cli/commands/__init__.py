@@ -11,7 +11,8 @@ hands back the runtime.
 
 from __future__ import annotations
 
-from typing import Any, Callable
+import uuid
+from typing import Any, Callable, Optional
 
 import click
 
@@ -43,6 +44,25 @@ def _set_json(ctx: click.Context, _param: click.Parameter, value: bool) -> None:
 def _set_api(ctx: click.Context, _param: click.Parameter, value: str) -> None:
     if value:
         runtime_of(ctx).api_url = value
+
+
+def as_uuid(value: Any) -> Optional[str]:
+    """*value* as a canonical UUID string, or None."""
+    try:
+        return str(uuid.UUID(str(value)))
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+def uuid_argument(ctx: click.Context, param: click.Parameter, value: str) -> str:
+    """An id argument is a full UUID; the probes' eight-character habit is a
+    usage error here, not a 422 from the API."""
+    canonical = as_uuid(value)
+    if canonical is None:
+        raise click.BadParameter(
+            f"{param.human_readable_name.lower()} is a full UUID", ctx=ctx, param=param
+        )
+    return canonical
 
 
 def global_options(command: Callable[..., Any]) -> Callable[..., Any]:

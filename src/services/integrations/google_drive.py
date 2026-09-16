@@ -165,7 +165,7 @@ class GoogleDriveService(BaseService):
         if not db_token:
             raise GoogleDriveAuthError(
                 "No Google Drive credentials found. "
-                "Run 'storydump-cli connect-google-drive' first."
+                "Connect Google Drive under Settings › Integrations first."
             )
 
         try:

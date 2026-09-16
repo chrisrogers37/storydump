@@ -19,6 +19,7 @@ import httpx
 
 from storydump_cli.config import ConfigError
 
+from src.services.target.vocabulary import IDEMPOTENCY_HEADER
 from storydump_cli import __version__
 
 API_PREFIX = "/api/v1"
@@ -80,7 +81,8 @@ class Client:
         allow_insecure_http: bool = False,
     ) -> None:
         refuse_plain_http(base_url, allow=allow_insecure_http)
-        self.base_url = base_url.rstrip("/") + API_PREFIX
+        self.root_url = base_url.rstrip("/")
+        self.base_url = self.root_url + API_PREFIX
         self.token = token
         self.transport = transport
         self.timeout = timeout
@@ -88,23 +90,32 @@ class Client:
     def _headers(self) -> dict[str, str]:
         headers = {
             "Accept": "application/json",
-            "User-Agent": f"storydump-cli/{__version__}",
+            "User-Agent": f"storydump/{__version__}",
         }
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
         return headers
 
     def _request(
-        self, method: str, path: str, params: Optional[Mapping[str, Any]] = None
+        self,
+        method: str,
+        path: str,
+        params: Optional[Mapping[str, Any]] = None,
+        *,
+        json_body: Optional[Mapping[str, Any]] = None,
+        headers: Optional[Mapping[str, str]] = None,
+        root: bool = False,
     ) -> Any:
+        """One request under `/api/v1` (or at the root for the health
+        surfaces); the API's JSON, or the failure it answered."""
         try:
             with httpx.Client(
-                base_url=self.base_url,
-                headers=self._headers(),
+                base_url=self.root_url if root else self.base_url,
+                headers={**self._headers(), **(headers or {})},
                 transport=self.transport,
                 timeout=self.timeout,
             ) as http:
-                response = http.request(method, path, params=params)
+                response = http.request(method, path, params=params, json=json_body)
         except httpx.TransportError as exc:
             raise Unreachable(0, None, f"{type(exc).__name__}: {exc}") from exc
         try:
@@ -128,6 +139,46 @@ class Client:
 
     def principal(self) -> dict[str, Any]:
         return self._request("GET", "/me/principal")
+
+    def command(
+        self,
+        workspace_id: str,
+        command: str,
+        args: Mapping[str, Any],
+        *,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """One command through the port, under the caller's idempotency key —
+        the same door a tap or a web click uses."""
+        return self._request(
+            "POST",
+            f"/workspaces/{_segment(workspace_id)}/commands/{_segment(command)}",
+            json_body=dict(args),
+            headers={IDEMPOTENCY_HEADER: idempotency_key},
+        )
+
+    def health_api(self) -> dict[str, Any]:
+        """`/health` alone — liveness, unauthenticated, at the root."""
+        return self._request("GET", "/health", root=True)
+
+    def health(self) -> dict[str, Any]:
+        """The API's three health surfaces. `/health` must answer; the two
+        dependency-touching surfaces may not (a 503 with no engine), and then
+        the report carries that surface's error rather than losing the rest."""
+        surfaces: dict[str, Any] = {"api": self.health_api()}
+        for name, path in (
+            ("scheduling", "/health/scheduling"),
+            ("posting", "/health/posting"),
+        ):
+            try:
+                surfaces[name] = self._request("GET", path, root=True)
+            except (Unreachable, ApiError) as exc:
+                surfaces[name] = {
+                    "error": f"HTTP {exc.status}: {exc.detail}"
+                    if exc.status
+                    else exc.detail
+                }
+        return surfaces
 
     def list_my_tokens(self) -> dict[str, Any]:
         return self._request("GET", "/me/tokens")

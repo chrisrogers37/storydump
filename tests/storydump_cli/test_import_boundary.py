@@ -28,6 +28,12 @@ MODULES = (
     "storydump_cli.output",
     "storydump_cli.commands",
     "storydump_cli.commands.auth",
+    "storydump_cli.commands.reads",
+    "storydump_cli.commands.writes",
+    "storydump_cli.commands.env",
+    "storydump_cli.watch",
+    "storydump_cli.railway",
+    "storydump_cli.webhook",
 )
 
 FORBIDDEN_PACKAGES = {

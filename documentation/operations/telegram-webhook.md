@@ -28,8 +28,8 @@ retired in BotFather once the webhook below is confirmed.
 
 ## The tool
 
-`scripts/telegram_webhook.py` — stdlib only, reads the three deployment
-variables from the shell, and **never prints a token or a secret**, so its
+`storydump webhook` (the v2 CLI, `pip install -e '.[cli]'`) reads the three
+deployment variables from the shell, and **never prints a token or a secret**, so its
 output is safe to paste anywhere. It refuses a non-`https` URL and never
 follows a redirect (either would carry the secret somewhere else), and
 `register` refuses unless the token's bot is the configured bot. Run it from
@@ -40,11 +40,11 @@ that holds them.
 export TARGET_TELEGRAM_BOT_TOKEN='…'              # worker → Variables
 export TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN='…'   # API → Variables
 export TARGET_TELEGRAM_BOT_USERNAME='storydump_app_bot'
-python -m scripts.telegram_webhook status
-python -m scripts.telegram_webhook register --drop-pending   # first arming of a bot
+storydump webhook status
+storydump webhook register --drop-pending   # first arming of a bot
 ```
 
-`status` answers four questions and exits 1 if any fails:
+`status` answers four questions and exits 4 if any fails (64 for a missing variable):
 
 1. **Who is the bot** — `getMe`; and that it IS `TARGET_TELEGRAM_BOT_USERNAME`.
 2. **Is a webhook registered, where, with what backlog** — `getWebhookInfo`.
@@ -84,7 +84,7 @@ result on the site after a reload.
 
 1. `TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN` and `TARGET_TELEGRAM_BOT_USERNAME`
    on the **API** service (redeploys).
-2. `python -m scripts.telegram_webhook register --drop-pending`.
+2. `storydump webhook register --drop-pending`.
 3. Settings › Integrations → Link Telegram → open in Telegram → Start →
    reload.
 

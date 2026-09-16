@@ -220,3 +220,74 @@ class TestTheWindowGrammar:
         with pytest.raises(ValueError) as caught:
             vocabulary.window_start(value, self.NOW)
         assert str(caught.value), value
+
+
+class TestTheWriteSentences:
+    def test_every_write_sentence_names_a_port_command_and_an_outcome(self):
+        for (command, outcome), sentence in vocabulary.WRITE_SENTENCES.items():
+            assert command in vocabulary.COMMANDS, command
+            assert outcome in vocabulary.OUTCOME_SENTENCES, outcome
+            assert sentence and sentence[0].islower()
+            for word in vocabulary.TAP_WORDS:
+                assert word not in sentence.lower().split(), (command, sentence)
+
+    def test_the_replay_sentence_is_the_outcomes_own(self):
+        assert vocabulary.write_sentence("skip", "replayed") == "already done"
+        assert vocabulary.write_sentence("approve", "enqueued") == (
+            "approved — posting shortly"
+        )
+        assert vocabulary.write_sentence("no_such", "executed") == "done"
+
+
+class TestTheWebhookSpellings:
+    """One spelling of the deployment's names, shared by the API's startup
+    self-registration and the CLI's `webhook` verb (phase 03)."""
+
+    def test_the_registration_asks_for_taps(self):
+        assert list(vocabulary.ALLOWED_UPDATES) == ["message", "callback_query"]
+
+    def test_the_variables_are_the_deployments(self):
+        assert vocabulary.TELEGRAM_TOKEN_VAR == "TARGET_TELEGRAM_BOT_TOKEN"
+        assert vocabulary.TELEGRAM_SECRET_VAR == "TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN"
+        assert vocabulary.TELEGRAM_BOT_VAR == "TARGET_TELEGRAM_BOT_USERNAME"
+        assert vocabulary.WEBHOOK_URL_VAR == "TARGET_TELEGRAM_WEBHOOK_URL"
+        assert (
+            vocabulary.MAX_CONNECTIONS_VAR == "TARGET_TELEGRAM_WEBHOOK_MAX_CONNECTIONS"
+        )
+        assert vocabulary.WEBHOOK_SECRET_HEADER == "X-Telegram-Bot-Api-Secret-Token"
+        assert (
+            vocabulary.DEFAULT_WEBHOOK_URL
+            == "https://api.storydump.app/webhooks/telegram"
+        )
+
+    @pytest.mark.parametrize(
+        "raw,expected", [(None, 10), ("", 10), (" 20 ", 20), ("1", 1), ("100", 100)]
+    )
+    def test_the_connection_cap_is_read_within_telegrams_range(self, raw, expected):
+        assert vocabulary.max_connections_from(raw) == expected
+
+    @pytest.mark.parametrize("raw", ["0", "101", "many", "-1"])
+    def test_a_cap_outside_the_range_is_refused_naming_the_variable(self, raw):
+        with pytest.raises(vocabulary.BadMaxConnections) as exc:
+            vocabulary.max_connections_from(raw)
+        assert vocabulary.MAX_CONNECTIONS_VAR in str(exc.value)
+
+    def test_bot_matches_ignores_case_and_the_at_sign(self):
+        assert vocabulary.bot_matches("Storydump_App_Bot", "@storydump_app_bot")
+        assert vocabulary.bot_matches("x_bot", None), (
+            "no configured bot: nothing to refuse"
+        )
+        assert not vocabulary.bot_matches("storydumpapp_bot", "storydump_app_bot")
+
+    def test_the_api_module_re_exports_them_unchanged(self):
+        from src.channels import telegram_webhook_registration as reg
+
+        assert reg.ALLOWED_UPDATES is vocabulary.ALLOWED_UPDATES
+        assert reg.max_connections_from is vocabulary.max_connections_from
+        assert reg.bot_matches is vocabulary.bot_matches
+        assert reg.DEFAULT_WEBHOOK_URL == vocabulary.DEFAULT_WEBHOOK_URL
+
+
+class TestTheIngressConflict:
+    def test_the_ingress_conflict_has_a_sentence(self):
+        assert "idempotency key" in vocabulary.REASON_SENTENCES["admission_conflict"]

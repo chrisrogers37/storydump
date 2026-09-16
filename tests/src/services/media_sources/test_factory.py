@@ -249,7 +249,7 @@ class TestANamedTenantNeverResolvesToTheServiceAccount:
         )
         gdrive.get_provider.side_effect = GoogleDriveAuthError(
             "No Google Drive credentials found. "
-            "Run 'storydump-cli connect-google-drive' first."
+            "Connect Google Drive under Settings › Integrations first."
         )
 
         with pytest.raises(GoogleDriveAuthError) as exc:
@@ -262,7 +262,7 @@ class TestANamedTenantNeverResolvesToTheServiceAccount:
         assert "/connect_drive" in str(exc.value), (
             f"the tenant's own error did not surface: {exc.value}"
         )
-        assert "storydump-cli" not in str(exc.value), (
+        assert "Settings › Integrations" not in str(exc.value), (
             f"the service account's error masked the tenant's: {exc.value}"
         )
 

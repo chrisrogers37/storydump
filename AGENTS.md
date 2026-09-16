@@ -18,10 +18,13 @@ Telegram on behalf of paying tenants.
 
 ```bash
 python -m src.main                   # Starts the posting scheduler + Telegram bot
-storydump-cli reset-queue            # Mutates the posting queue
-storydump-cli instagram-auth         # Mutates stored authentication
-storydump-cli revoke-tokens          # Destroys stored OAuth tokens for a service
-storydump-cli rotate-keys            # Re-encrypts every stored token row
+storydump approve <story>            # Posts a story to Instagram — the user's decision, never an agent's
+storydump cancel <story>             # Cancels a story: refunds its debit, destroys its upload
+storydump resolve <story> cancel     # Gives up on a story parked for review; its debit is retained
+storydump resolve <story> retry      # Posts the story again; --not-posted overrides the lost-answer guard
+storydump tokens revoke <id>         # Revokes an API token; it stops working at once
+storydump webhook register           # Re-points the production bot's webhook; --drop-pending discards queued taps
+storydump webhook deregister         # Detaches the bot's webhook — Telegram delivers nothing until it is registered again
 ```
 
 ### Before ANY posting-related action
@@ -42,12 +45,15 @@ Never run against production: the posting scheduler, or mutating SQL on
 
 ### Reading this list correctly
 
-It names commands that are **unambiguously** destructive. It is not a complete
-read-only/read-write taxonomy: several inspection-flavoured commands do write
-(`index-media` writes the media index, `sync-media` pulls from Drive, and
-`dedup-media` mutates under `--apply` though it is dry-run by default). When a
-command is not on this list, check what it does before running it rather than
-inferring that absence means safe.
+It names what posts, destroys, or re-points the bot. It is not a complete
+read-only/read-write taxonomy: the other write verbs (`skip`, `reject`,
+`posted`, `pause`, `resume`, `sync`) change the ledger through the command port
+too — a skip or a reject is a terminal state for that story — and every one of
+them is a posting-related action under the STOP rule above. The read verbs,
+`health`, `deploys` and `doctor` read only, and `webhook status` changes nothing
+(its door check is an empty POST the API refuses by design). When a verb is
+not on this list, check what it does before running it rather than inferring
+that absence means safe.
 
 ---
 
@@ -113,13 +119,16 @@ that is not the worker. Tests additionally need `ENCRYPTION_KEY`, a Fernet key.
 ## Commands
 
 ```bash
-storydump-cli check-health
-storydump-cli queue-preview
-storydump-cli list-categories
-storydump-cli update-category-mix
+storydump whoami
+storydump floating --watch
+storydump story <intent_id>
+storydump skip <story> --workspace <ws>
+storydump health
+storydump doctor
 ```
 
-31 commands are registered; `storydump-cli --help` is the authoritative list.
+`storydump --help` is the authoritative list, grouped by auth, reads, writes and
+environment; the section below walks it.
 
 ## The `storydump` CLI (v2)
 
@@ -137,8 +146,8 @@ HTTP client, never a database connection
 3. `storydump whoami`, `storydump tokens list`, `storydump tokens revoke <id>`,
    `storydump logout`. `--json` on any verb prints one envelope
    `{"v": 1, "kind", "data", "error"}`. Exit codes: 0 ok · 1 not found ·
-   2 refused · 3 not authorized · 4 API unreachable · 6 a watched condition
-   ended in failure · 64 usage. `STORYDUMP_API` overrides the API URL
+   2 refused · 3 not authorized · 4 API unreachable or failed · 5 Railway
+   unreachable · 6 a watched condition ended in failure · 64 usage. `STORYDUMP_API` overrides the API URL
    (default `https://api.storydump.app`).
 4. Read the ledger (every workspace you belong to, or `--workspace <id or name>`;
    `--json`; `--watch [--every 30]` prints only changes):
@@ -151,9 +160,37 @@ HTTP client, never a database connection
    waits, siblings, review cards, outcomes) · `storydump posture` (the
    migration ledger, the role, RLS, the doors). The guide:
    `documentation/operations/reading-the-ledger.md`.
+5. Write through the command port — the same door a tap or a web click uses,
+   so admission, tenancy and audit apply unchanged. `--workspace <id or name>`
+   is required (a write goes to ONE workspace). A story verb's idempotency key
+   is deterministic (`<command>:<story>`, the web's), so a re-run replays as
+   "already done" (exit 0) and `--idempotency-key <k>` is the deliberate second
+   execution; a resolution's key carries the review episode, so a later review
+   of the same story is new; `pause`, `resume` and `sync` mint a fresh key per
+   invocation (their effects are idempotent — a retry is harmless, a later
+   action always executes):
+   `storydump approve|skip|reject|posted|cancel <story>` ·
+   `storydump resolve <story> retry|posted|cancel [--not-posted]` ·
+   `storydump pause` / `storydump resume` · `storydump sync <source_id>`. A
+   refusal is an answer, not a failure: the reason's sentence, the fixing
+   verb, exit 2. The Telegram adapter's words never appear in a terminal.
+6. The environment: `storydump health` (the API's three health surfaces,
+   judged by the fleet monitors' own verdicts — the `classify` of
+   `scripts/scheduling_monitor.py` and `scripts/posting_monitor.py`, imported:
+   not well when a monitor would page; exit 4 then, the report and each verdict
+   still printed) · `storydump deploys
+   [--watch]` (the latest deployments on Railway through your own `railway`
+   login, with the linked project checked first; exit 5 with the fix when
+   Railway cannot be read; `--watch` ends 0 on both SUCCESS, 6 on a failure)
+   · `storydump webhook status|register|deregister` (the bot's Telegram
+   webhook, the deployment's variables read from this shell, no secret ever
+   printed; exit 4 when a check fails) · `storydump doctor` (the token, the
+   API, the token store, the config, Railway, the migration ledger against
+   this checkout — each ok, wrong, missing or skipped with a one-line fix).
 
-`storydump --help` is the authoritative list. The legacy `storydump-cli`
-(above) stays until the plan's phase 03 deletes it.
+`storydump --help` is the authoritative list. A new verb is classified for the
+safety block above before it ships: `tests/test_agent_docs.py` pins the names
+the two documents use to the registry, not the judgement of what is dangerous.
 
 ## Testing
 

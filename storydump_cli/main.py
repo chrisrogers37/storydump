@@ -22,19 +22,20 @@ import io
 import os
 import sys
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional, Sequence
 from urllib.parse import urlparse
 
 import click
 import httpx
 
 from src.services.target import vocabulary
-from storydump_cli import __version__
+from storydump_cli import __version__, railway
 from storydump_cli.client import ApiError, Client, Unreachable, InsecureApiUrl
-from storydump_cli.commands import auth, global_options, reads
+from storydump_cli.commands import auth, env, global_options, reads, writes
 from storydump_cli.config import (
     API_URL_ENV,
     DEFAULT_API_URL,
@@ -61,7 +62,23 @@ FIXES: Mapping[str, str] = {
     "readonly_token": "use a token minted with the operator role",
     "wrong_workspace": "use a token minted for that workspace, or a person-bound token",
     "not_a_member": "check the workspace id, and this token's workspaces with storydump whoami",
+    # the command port's refusals (phase 03): the fixing verb, named
+    "manual_mode": "turn Instagram API posting on under Settings › General, or approve on the web",
+    "not_connected": "connect the Instagram account under Settings › Integrations",
+    "may_have_posted": (
+        "look at Instagram, then storydump resolve <story> retry --not-posted"
+        " or storydump resolve <story> posted"
+    ),
+    "illegal_transition": "storydump story <story> shows the state the story is in",
+    "not_found": "storydump floating and storydump story <story> find a story",
+    "nothing_to_confirm": "storydump story <story> shows what Instagram was asked",
+    "cancelling": "wait for the cancel to land; storydump story <story> shows it",
+    "invalid_args": "see storydump <verb> --help",
+    "workspace_required": "pass --workspace <id or name>",
+    "admission_conflict": "pass --idempotency-key <a new key> to send a different command",
 }
+#: The repository's migration files `doctor` compares the ledger against.
+REPO_MIGRATIONS = Path(__file__).resolve().parents[1] / "scripts" / "migrations"
 INSECURE_HTTP_ENV = "STORYDUMP_INSECURE_HTTP"
 DEFAULT_FIX = "see storydump --help"
 
@@ -86,6 +103,15 @@ class Runtime:
     #: instantly with a fixed ``now``.
     now_fn: Callable[[], datetime] = utc_now
     sleep_fn: Callable[[float], None] = time.sleep
+    #: A fresh identity for the verbs that mint one per invocation (the web's
+    #: submission id) — a test scripts it.
+    uuid_fn: Callable[[], str] = lambda: str(uuid.uuid4())
+    #: The `railway` binary behind one callable (`deploys`, `doctor`) — a test
+    #: scripts its answers.
+    run_process: Callable[[Sequence[str]], tuple[int, str, str]] = railway.run_railway
+    #: Where `doctor` reads the repository's migration files; absent outside a
+    #: checkout, and the comparison is then skipped.
+    migrations_dir: Path = REPO_MIGRATIONS
 
     @property
     def api_host(self) -> str:
@@ -255,9 +281,33 @@ def dispatch(
         )
 
 
+#: The help's sections, in order: every verb belongs to exactly one.
+SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Auth", tuple(c.name for c in auth.COMMANDS)),
+    ("Reads", tuple(c.name for c in reads.COMMANDS)),
+    ("Writes", tuple(c.name for c in writes.COMMANDS)),
+    ("Environment", tuple(c.name for c in env.COMMANDS)),
+)
+
+
 class Cli(click.Group):
     """The root group. Its ``main`` owns the exit codes: in standalone mode
-    it exits with the CLI's code, never Click's; otherwise it returns it."""
+    it exits with the CLI's code, never Click's; otherwise it returns it.
+    Its help lists the verbs by section."""
+
+    def format_commands(
+        self, ctx: click.Context, formatter: click.HelpFormatter
+    ) -> None:
+        limit = formatter.width - 6 - max(len(name) for name in self.commands)
+        for title, names in SECTIONS:
+            rows = [
+                (name, self.commands[name].get_short_help_str(limit))
+                for name in names
+                if name in self.commands
+            ]
+            if rows:
+                with formatter.section(title):
+                    formatter.write_dl(rows)
 
     def main(  # type: ignore[override]
         self,
@@ -291,12 +341,18 @@ def cli() -> None:
       storydump floating --watch
       storydump story <id> --json
       storydump burst --since 3h
+      storydump skip <id> --workspace <ws>
+      storydump deploys --watch
+      storydump doctor
 
     A read answers for every workspace the token can see unless --workspace
     names one. --watch re-reads on an interval and prints only what changed:
     it ends 0 on the verb's terminal condition (floating drained, a burst
-    with nothing mid-flight) or on Ctrl-C, and 6 when a read shows the
-    verb's failure condition.
+    with nothing mid-flight, both deploys SUCCESS) or on Ctrl-C, and 6 when
+    a read shows the verb's failure condition. A write goes to ONE workspace
+    (--workspace is required); a story verb's idempotency key is deterministic,
+    so a re-run replays, while pause, resume and sync mint a fresh one; a
+    refusal is an answer (exit 2), never a traceback.
 
     \b
     Exit codes:
@@ -306,7 +362,7 @@ def cli() -> None:
     """
 
 
-for command in (*auth.COMMANDS, *reads.COMMANDS):
+for command in (*auth.COMMANDS, *reads.COMMANDS, *writes.COMMANDS, *env.COMMANDS):
     cli.add_command(command)
 
 

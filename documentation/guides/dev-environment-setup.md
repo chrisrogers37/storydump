@@ -91,7 +91,7 @@ alias sl-db-reset='cd ~/Projects/storydump && make reset-db'
 # Railway operations
 alias sl-logs='railway logs --service worker'
 alias sl-logs-web='railway logs --service web'
-alias sl-health='railway shell --service worker -c "storydump-cli check-health"'
+alias sl-health='storydump health'
 alias sl-restart='railway restart --service worker'
 
 # Production database queries (via Neon)

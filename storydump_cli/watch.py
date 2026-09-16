@@ -50,6 +50,15 @@ class Watched:
     #: Whether the watch has reached its end, given the previous read's rows
     #: (None on the first read) and the current ones.
     done: Callable[[Optional[list[Row]], list[Row]], bool]
+    #: The key of a reading's entries (a workspace's id for the views, the
+    #: service's name for `deploys`) and the name of the list the JSON watch
+    #: envelope carries them under.
+    scope: str = "workspace_id"
+    collection: str = "workspaces"
+    #: Whether the FIRST read is judged too: a view's baseline is what was
+    #: already there (printed, not fatal); a deploy that has already failed
+    #: is the answer.
+    failed_on_baseline: bool = False
 
 
 # --- keys ---------------------------------------------------------------------
@@ -164,10 +173,12 @@ WATCHED: Mapping[str, Watched] = {
 # --- the diff -------------------------------------------------------------------
 
 
-def _keyed(reading: Reading, key: KeyFn) -> dict[str, dict[Hashable, Row]]:
+def _keyed(
+    reading: Reading, key: KeyFn, scope: str = "workspace_id"
+) -> dict[str, dict[Hashable, Row]]:
     keyed: dict[str, dict[Hashable, Row]] = {}
     for entry in reading:
-        rows = keyed.setdefault(str(entry.get("workspace_id")), {})
+        rows = keyed.setdefault(str(entry.get(scope)), {})
         for row in entry.get("rows") or []:
             if isinstance(row, dict):
                 rows[key(row)] = row
@@ -175,14 +186,18 @@ def _keyed(reading: Reading, key: KeyFn) -> dict[str, dict[Hashable, Row]]:
 
 
 def diff(
-    previous: Optional[Reading], current: Reading, key: KeyFn
+    previous: Optional[Reading],
+    current: Reading,
+    key: KeyFn,
+    *,
+    scope: str = "workspace_id",
 ) -> list[dict[str, Any]]:
-    """``[{"workspace_id", "changes": [{"change", "row"}]}]`` — every
-    workspace of the current read in its order (added and changed rows in
-    the read's order, then the rows that have gone), then any workspace
-    that has gone with all its rows removed."""
-    before = {} if previous is None else _keyed(previous, key)
-    after = _keyed(current, key)
+    """``[{<scope>, "changes": [{"change", "row"}]}]`` — every entry of the
+    current read in its order (added and changed rows in the read's order,
+    then the rows that have gone), then any entry that has gone with all its
+    rows removed. *scope* is the entry's key: a workspace's id for the views."""
+    before = {} if previous is None else _keyed(previous, key, scope)
+    after = _keyed(current, key, scope)
     out: list[dict[str, Any]] = []
     for workspace_id, rows in after.items():
         old = before.get(workspace_id, {})
@@ -195,12 +210,12 @@ def diff(
         for k, row in old.items():
             if k not in rows:
                 changes.append({"change": "removed", "row": row})
-        out.append({"workspace_id": workspace_id, "changes": changes})
+        out.append({scope: workspace_id, "changes": changes})
     for workspace_id, rows in before.items():
         if workspace_id not in after:
             out.append(
                 {
-                    "workspace_id": workspace_id,
+                    scope: workspace_id,
                     "changes": [
                         {"change": "removed", "row": row} for row in rows.values()
                     ],
@@ -246,13 +261,13 @@ def summarize(kind: str, row: Row) -> str:
 
 def _print(runtime: Any, watched: Watched, changes: list[dict[str, Any]]) -> None:
     if runtime.json_mode:
-        emit(envelope(watched.kind, {"workspaces": changes}), json_mode=True)
+        emit(envelope(watched.kind, {watched.collection: changes}), json_mode=True)
         return
     stamp = runtime.now_fn().strftime("%H:%M:%S")
     for entry in changes:
         for change in entry["changes"]:
             line = (
-                f"{stamp}  {change['change']:<7}  {entry['workspace_id']}"
+                f"{stamp}  {change['change']:<7}  {entry[watched.scope]}"
                 f"  {summarize(watched.kind, change['row'])}"
             )
             sys.stdout.write(redact(line) + "\n")
@@ -270,7 +285,7 @@ def watch(
     try:
         while True:
             current = read()
-            changes = diff(previous, current, watched.key)
+            changes = diff(previous, current, watched.key, scope=watched.scope)
             _print(runtime, watched, changes)
             rows = _flatten(current)
             # the first read is the baseline: what was already failing is
@@ -283,7 +298,10 @@ def watch(
                 for change in entry["changes"]
                 if change["change"] in ("added", "changed")
             ]
-            failure = watched.failed(fresh) if previous is not None else None
+            if previous is None and watched.failed_on_baseline:
+                failure = watched.failed(rows)
+            else:
+                failure = watched.failed(fresh) if previous is not None else None
             if failure is not None:
                 raise Failure(
                     code=EXIT_WATCH_FAILED,

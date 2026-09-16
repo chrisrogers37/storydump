@@ -24,15 +24,16 @@ shapes, all of which express the same hazard:
 
 **Shapes 3 and 4 were added after review, and that is the point of this file
 rather than a footnote to it.** The first version matched only 1 and 2 — and
-shape 3 is exactly the idiom ``cli/commands/backfill.py`` uses, so the gate
-written to stop this class recurring had a blind spot shaped precisely like the
-code shipped beside it. The next person to write one would most plausibly copy
+shape 3 was exactly the idiom the legacy ``cli/commands/backfill.py`` used
+(the package was deleted in the v2 CLI plan's phase 03, 2026-09-15), so the
+gate written to stop this class recurring had a blind spot shaped precisely
+like the code shipped beside it. The next person to write one would most plausibly copy
 that idiom and sail straight past. A prevention mechanism with an undisclosed
 hole in its own matching is the failure it exists to prevent, one layer up.
 
 It does NOT flag an operator edge naming the admin chat where no chat parameter
-is in scope — that is the target state (``cli/commands/queue.py`` and
-``cli/commands/instagram.py``). Nor does it see a fallback routed through an
+is in scope — that was the target state (the legacy ``cli/commands/queue.py``
+and ``cli/commands/instagram.py``, now gone). Nor does it see a fallback routed through an
 indirection it cannot resolve statically; it is a floor, not a proof.
 
 ## Sanctioned grants are DECLARED, not inferred
@@ -58,7 +59,9 @@ import pathlib
 
 import pytest
 
-ROOTS = ("src", "cli")
+#: The trees scanned. ``cli/`` was one until the v2 CLI plan's phase 03 deleted
+#: it (the ``storydump`` CLI is an HTTP client and names no chat at all).
+ROOTS = ("src",)
 ADMIN = "ADMIN_TELEGRAM_CHAT_ID"
 
 
@@ -283,7 +286,7 @@ class TestSanctionedGrantsAreDeclaredRatherThanInferred:
     cannot see, so the context is declared instead of guessed at."""
 
     def _mk(self, tmp_path, src):
-        p = tmp_path / "cli" / "c.py"
+        p = tmp_path / "src" / "c.py"
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(src, encoding="utf-8")
         return tmp_path
@@ -296,7 +299,7 @@ class TestSanctionedGrantsAreDeclaredRatherThanInferred:
             "settings.ADMIN_TELEGRAM_CHAT_ID  # admin-grant-ok: operator edge\n",
         )
         assert admin_fallback_sites(root) == []
-        assert declared_admin_grants(root) == ["cli/c.py:2"]
+        assert declared_admin_grants(root) == ["src/c.py:2"]
 
     def test_without_the_marker_the_same_line_IS_flagged(self, tmp_path):
         """Paired negative — otherwise the suppression test proves only that
@@ -307,7 +310,7 @@ class TestSanctionedGrantsAreDeclaredRatherThanInferred:
             "    target = chat_id if chat_id is not None else "
             "settings.ADMIN_TELEGRAM_CHAT_ID\n",
         )
-        assert admin_fallback_sites(root) == ["cli/c.py:2::cmd"]
+        assert admin_fallback_sites(root) == ["src/c.py:2::cmd"]
 
     def test_a_marker_on_the_wrong_line_does_not_suppress(self, tmp_path):
         """It is line-scoped on purpose: a marker floating elsewhere in the
@@ -319,14 +322,14 @@ class TestSanctionedGrantsAreDeclaredRatherThanInferred:
             "    target = chat_id if chat_id is not None else "
             "settings.ADMIN_TELEGRAM_CHAT_ID\n",
         )
-        assert admin_fallback_sites(root) == ["cli/c.py:3::cmd"]
+        assert admin_fallback_sites(root) == ["src/c.py:3::cmd"]
 
-    def test_the_real_trees_declared_grants_are_exactly_one(self):
-        """Equality, not a ceiling — borrowed from the F.6 ratchet. A second
-        sanctioned admin grant must arrive as a visible line in a diff."""
-        assert declared_admin_grants(_repo()) == [
-            "cli/commands/backfill.py:118",
-        ], (
+    def test_the_real_trees_declared_grants_are_pinned_exactly(self):
+        """Equality, not a ceiling — borrowed from the F.6 ratchet. A
+        sanctioned admin grant must arrive as a visible line in a diff. The
+        one declared grant (``cli/commands/backfill.py:118``) left with the
+        legacy CLI (phase 03, 2026-09-15); ``src/`` declares none."""
+        assert declared_admin_grants(_repo()) == [], (
             "the set of DECLARED admin grants changed. Each one is a place "
             "where privilege is handed out on absent input on purpose; adding "
             "or moving one is a review decision, not a refactor."

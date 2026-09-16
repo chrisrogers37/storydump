@@ -19,8 +19,7 @@ railway logs --service worker
 railway logs --service web
 
 # Run health check via Railway shell
-railway shell --service worker
-storydump-cli check-health
+storydump health
 ```
 
 ### Common Status Indicators

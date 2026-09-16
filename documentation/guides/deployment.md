@@ -211,22 +211,21 @@ curl https://your-app.up.railway.app/health
 
 ```bash
 # Via Railway shell
-railway shell --service worker -c "storydump-cli sync-media"
-railway shell --service worker -c "storydump-cli list-media"
+storydump sync <source_id> --workspace <ws>   # or Sync Now under Settings › Integrations
+# the Media Library on the web lists what was indexed
 ```
 
 ### Create Initial Schedule
 
 ```bash
-railway shell --service worker -c "storydump-cli create-schedule --days 7"
-# Creates 7 days of scheduled posts
+# Nothing to run by hand: the worker mints each day's slots from the schedule card (Settings › General).
 ```
 
 ### Verify Queue
 
 ```bash
-railway shell --service worker -c "storydump-cli list-queue"
-# Should show scheduled items
+storydump floating --workspace <ws>
+# approved stories waiting to post; the web's Queue shows every slot
 ```
 
 ---
@@ -247,11 +246,8 @@ Each team member needs to:
 ### Promote Admins (Optional)
 
 ```bash
-# Get their Telegram user ID
-railway shell --service worker -c "storydump-cli list-users"
-
-# Promote
-railway shell --service worker -c "storydump-cli promote-user <telegram_user_id> --role admin"
+# Members live on the web: the Members card under Settings › General (invite, remove).
+# Changing a member's role is the `change_role` command — registered, not yet built.
 ```
 
 ---
@@ -340,7 +336,7 @@ Phase 1 is **manual posting**, so prepare your workflow:
   - Verify `DRY_RUN_MODE=true` in Railway env vars
   - Verify notifications arrive in Telegram
   - Test "Posted" and "Skip" buttons
-  - Check queue via `storydump-cli list-queue`
+  - Check the queue via `storydump floating` or the web's Queue
 
 - [ ] **Day 1 Afternoon:**
   - Set `DRY_RUN_MODE=false` in Railway env vars
@@ -404,7 +400,7 @@ railway logs --service worker
 
 ### Weekly
 - [ ] Add new media to Google Drive folder
-- [ ] Run media sync: `/sync` in Telegram or `storydump-cli sync-media`
+- [ ] Run media sync: Sync Now under Settings › Integrations, or `storydump sync <source_id> --workspace <ws>`
 - [ ] Check health: `/status` in Telegram
 
 ### Monthly
@@ -414,8 +410,8 @@ railway logs --service worker
 - [ ] Review team permissions
 
 ### As Needed
-- [ ] Create new schedule: `storydump-cli create-schedule --days 7`
-- [ ] Promote team members: `storydump-cli promote-user <id> --role admin`
+- [ ] Review the schedule card under Settings › General
+- [ ] Invite team members from the Members card under Settings › General (role changes: `change_role`, not yet built)
 - [ ] Clear old queue items if needed
 
 ---
@@ -446,7 +442,7 @@ psql "$DATABASE_URL" -c "SELECT version();"
 ### No Notifications Arriving
 ```bash
 # Check queue has items
-railway shell --service worker -c "storydump-cli list-queue"
+storydump floating --workspace <ws>
 
 # Check service is running
 railway logs --service worker

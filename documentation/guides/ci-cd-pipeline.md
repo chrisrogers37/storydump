@@ -86,7 +86,7 @@ railway logs --service worker
 railway logs --service web
 
 # Verify health after deploy
-railway shell --service worker -c "storydump-cli check-health"
+storydump health
 ```
 
 ---

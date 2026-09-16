@@ -126,30 +126,9 @@ check-db: ## Check if database exists and is accessible
 		echo "$(GREEN)✓ Database is accessible$(NC)" || \
 		echo "$(RED)✗ Cannot connect to database$(NC)"
 
-check-health: ## Run application health checks
+check-health: ## Health of the deployed API (storydump health)
 	@echo "$(GREEN)Running health checks...$(NC)"
-	storydump-cli check-health
-
-index-media: ## Index media files from MEDIA_DIR
-	@echo "$(GREEN)Indexing media files...$(NC)"
-	@if [ -z "$(DIR)" ]; then \
-		echo "$(YELLOW)Usage: make index-media DIR=path/to/media$(NC)"; \
-		exit 1; \
-	fi
-	storydump-cli index-media $(DIR)
-
-create-schedule: ## Create posting schedule (default: 7 days)
-	@echo "$(GREEN)Creating posting schedule...$(NC)"
-	storydump-cli create-schedule --days $(or $(DAYS),7)
-
-list-queue: ## List pending queue items
-	storydump-cli list-queue
-
-list-media: ## List indexed media items
-	storydump-cli list-media --limit $(or $(LIMIT),50)
-
-list-users: ## List all users
-	storydump-cli list-users
+	storydump health
 
 run: ## Run the main application
 	@echo "$(GREEN)Starting Storydump...$(NC)"
@@ -208,8 +187,8 @@ quickstart: env-example install setup-db ## Quick start: setup everything for fi
 	@echo ""
 	@echo "$(YELLOW)Next steps:$(NC)"
 	@echo "  1. Edit .env and configure your settings"
-	@echo "  2. Run: make index-media DIR=media/stories"
-	@echo "  3. Run: make create-schedule"
+	@echo "  2. Connect Google Drive and a Telegram group on the web (Settings › Integrations)"
+	@echo "  3. Set the schedule on the web (Settings › General, the schedule card)"
 	@echo "  4. Run: make run"
 	@echo ""
 

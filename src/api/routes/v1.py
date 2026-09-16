@@ -70,6 +70,7 @@ from src.services.target import (
     provisioning,
     tenant_resolution,
     workspaces,
+    vocabulary,
 )
 from src.services.target.commands import Command, CommandResult
 from src.services.target.ig_login_oauth import STATE_TTL_SECONDS, issue_state
@@ -120,8 +121,8 @@ CHANNEL = "web"
 #: mints it as ``<command>:<intent_id>`` in its route handler, so a repeated
 #: click replays rather than re-executes; the server owns nothing but the
 #: dedup row.
-IDEMPOTENCY_HEADER = "Idempotency-Key"
-IDEMPOTENCY_KEY_MAX = 200
+IDEMPOTENCY_HEADER = vocabulary.IDEMPOTENCY_HEADER
+IDEMPOTENCY_KEY_MAX = vocabulary.IDEMPOTENCY_KEY_MAX
 #: `01` H5: every list is bounded. The clamp is a Query constraint, so an
 #: out-of-range value is a 422 rather than silently narrowed.
 LIST_LIMIT_DEFAULT = 50

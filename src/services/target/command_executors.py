@@ -75,6 +75,7 @@ from src.services.target import (
     provisioning,
     publish_cap,
     readers,
+    vocabulary,
     workspaces,
 )
 from src.services.target.ig_login_oauth import issue_state
@@ -620,11 +621,11 @@ async def _end_op_by_verdict(
 
 #: The review card's resolutions (`02` §4's `review_required` exits a member
 #: may take; `failed` — a refund — stays the operator's).
-RESOLUTIONS: tuple[str, ...] = ("retry", "posted", "cancel")
+RESOLUTIONS: tuple[str, ...] = vocabulary.RESOLUTIONS
 
 #: The one verdict a resolution may carry: the member looked, and the story
 #: is not on Instagram. `retry` needs it when the publish answer was lost.
-NOT_POSTED = "not_posted"
+NOT_POSTED = vocabulary.NOT_POSTED
 
 
 async def resolve_review(session, command: Command) -> CommandResult:

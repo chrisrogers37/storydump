@@ -41,7 +41,6 @@ setup(
     },
     entry_points={
         "console_scripts": [
-            "storydump-cli=cli.main:cli",
             "storydump=storydump_cli.main:main",
         ],
     },

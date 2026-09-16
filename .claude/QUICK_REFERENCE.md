@@ -3,14 +3,14 @@
 ## ⚠️ CRITICAL SAFETY RULES
 
 **NEVER run these commands** (they post to Instagram or modify production):
-- `storydump-cli process-queue`
-- `storydump-cli create-schedule`
-- `storydump-cli reset-queue`
+- `storydump approve <story>` (posts to Instagram)
+- `storydump cancel <story>` / `storydump resolve <story> cancel`
+- `storydump tokens revoke <id>` / `storydump webhook deregister`
 - `python -m src.main`
 
 **SAFE commands** (read-only):
-- `storydump-cli list-queue` / `list-media` / `list-categories` / `list-users`
-- `storydump-cli check-health` / `instagram-status`
+- `storydump floating` / `storydump story <id>` / `storydump cards <id>` / `storydump jobs`
+- `storydump health` / `storydump doctor` / `storydump deploys`
 - `pytest` (all tests)
 
 ---
@@ -36,7 +36,7 @@ CLI/Telegram → Services → Repositories → Models/DB
 | `src/services/integrations/` | Instagram API, external services |
 | `src/repositories/` | Database access (CRUD only) |
 | `src/models/` | SQLAlchemy models |
-| `cli/commands/` | CLI command definitions |
+| `storydump_cli/` | The `storydump` CLI (an HTTP client of the API) |
 | `tests/` | Mirrors src/ structure |
 
 ---

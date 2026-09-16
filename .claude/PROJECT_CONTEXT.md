@@ -21,7 +21,7 @@ Storydump is a hosted, multi-tenant Instagram Story scheduling service with Tele
 ```
 ┌─────────────────────────────────────┐
 │  Interface Layer                    │
-│  • cli/commands/  - CLI interface   │
+│  • storydump_cli/ - the storydump CLI│
 │  • TelegramService - Bot handlers   │
 └───────────────┬─────────────────────┘
                 │
@@ -96,12 +96,13 @@ Storydump is a hosted, multi-tenant Instagram Story scheduling service with Tele
 ## Safety Rules
 
 **NEVER suggest running:**
-- `storydump-cli process-queue` (posts to Instagram)
-- `storydump-cli create-schedule` (modifies queue)
+- `storydump approve <story>` (posts to Instagram — the user's decision)
+- `storydump cancel <story>` / `storydump resolve <story> cancel` (destructive)
+- `storydump tokens revoke <id>` / `storydump webhook deregister`
 - `python -m src.main` (starts the bot)
 
 **SAFE to suggest:**
-- `storydump-cli list-queue` / `list-media` / `check-health`
+- `storydump floating` / `storydump story <id>` / `storydump health` / `storydump doctor` (reads)
 - `pytest tests/`
 - Database SELECT queries
 

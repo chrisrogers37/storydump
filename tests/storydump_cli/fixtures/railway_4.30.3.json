@@ -1,0 +1,907 @@
+{
+  "railway_version": "4.30.3",
+  "captured": "2026-09-16",
+  "how": "railway status --json (whole); railway deployment list --service <svc> --environment production --json (the two newest, whole objects). Real ids; nothing secret.",
+  "status": {
+    "id": "33d1ccca-353c-4236-8d39-0d8fd916f054",
+    "name": "storydump",
+    "deletedAt": null,
+    "workspace": {
+      "name": "Christopher Rogers's Projects"
+    },
+    "environments": {
+      "edges": [
+        {
+          "node": {
+            "id": "4c80ee3a-5141-4610-a216-9d4a95f02512",
+            "name": "production",
+            "canAccess": true,
+            "deletedAt": null,
+            "serviceInstances": {
+              "edges": [
+                {
+                  "node": {
+                    "id": "41f2db7f-793d-40d8-84c0-e00cdaf0b84f",
+                    "serviceId": "9af6a3ec-640e-4fec-8ae6-22b43b83c466",
+                    "serviceName": "worker",
+                    "environmentId": "4c80ee3a-5141-4610-a216-9d4a95f02512",
+                    "latestDeployment": {
+                      "canRedeploy": true,
+                      "id": "6676b929-6f77-49a4-bde8-26c819a17ca9",
+                      "meta": {
+                        "branch": "main",
+                        "buildOnly": false,
+                        "commitAuthor": "chrisrogers37",
+                        "commitHash": "0b0badcd985d9dda7cc9fcbbfe8880571dd933c2",
+                        "commitMessage": "feat(cli): the ledger read verbs \u2014 story, cards, floating, account, jobs, outbox, burst, posture (v2 CLI plan, phase 02) (#1311)\n\nEight tenant-scoped read views behind `/api/v1/ops/...` (fork F6, one file\nfor the operator surface), admitted to tokens: a story's whole timeline\n(audit rows incl. the cli_command rows, every container permit with its url\nvariant and Meta's answer, its cards); a story's cards on every binding,\nadopted twins included; what is floating (approved with a debit) with the\njob that retries it \u2014 or the failed one, the failure `--watch` exits 6 on;\nan account against its cap today; the job queue by kind \u00d7 lane \u00d7 state\nwith failed samples; what is still owed or lost on the chats; a burst as\none timeline (taps, permits, float waits, siblings, review cards, outcomes);\nand the database's posture (the runner's ledger under the runner's own\ngrant \u2014 F7 \u2014 the connected role, every tenant table's RLS state, the\nSECURITY DEFINER doors).\n\nEvery view is one bounded statement with an explicit workspace_id\npredicate on every table, and every row carries the table's own\nworkspace_id rather than a stamp from the parameter; rate_counters and the\nsystem jobs, both outside RLS, are never read. The gate seeds two\nworkspaces through the API and proves every view three ways \u2014 as\nsvc_ingress under the policies, by route scope (a readonly token, a\nsession, a service identity for its own workspace; a stranger 404, a\nforeign identity wrong_workspace), and as a role that bypasses RLS, so the\npredicates confine the rows, not the policies \u2014 and proves posture's RLS\ndrift and each ledger state live. One window grammar in the vocabulary\nmodule serves the API's `since` and the CLI's `--since`: Nm|Nh|Nd, an\nISO-8601 timestamp (naive = UTC) or a bare date, thirty days at most,\nnever in the future, an overflow refused (422 / usage 64). Jobs and outbox\nrows still owed are listed at any age; the finished ones are windowed.\n\nThe CLI: `storydump story|cards|floating|account|jobs|outbox|burst|posture`,\nevery workspace the token can read or `--workspace <id or name>`, one\nenvelope shape (`data.workspaces[].rows`), `--watch [--every N]` printing\nonly changes with the first read as the baseline (exit 0 on the terminal\ncondition, 6 on a failure that arrives, Ctrl-C 0), the CLI's own\nsentences. The guide documentation/operations/reading-the-ledger.md\nreplaces the SQL recipes.\n\nCo-authored-by: Claude Fable 5.1 <noreply@anthropic.com>",
+                        "configFile": "/railway.toml",
+                        "duration": 0,
+                        "fileServiceManifest": {
+                          "build": {
+                            "buildCommand": "pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media",
+                            "builder": "NIXPACKS"
+                          },
+                          "deploy": {
+                            "drainingSeconds": 60,
+                            "healthcheckPath": "/health",
+                            "healthcheckTimeout": 30,
+                            "preDeployCommand": [
+                              "python -m scripts.migration_runner apply"
+                            ],
+                            "restartPolicyMaxRetries": 10,
+                            "restartPolicyType": "ON_FAILURE"
+                          }
+                        },
+                        "imageDigest": "sha256:15242d9ffe6c59bd6bdffb8c4251be1b51f664ba35322f370254caecb845ce3e",
+                        "logsV2": true,
+                        "nixpacksProviders": [],
+                        "plan": "pro",
+                        "propertyFileMapping": {
+                          "build.buildCommand": "$.build.buildCommand",
+                          "build.builder": "$.build.builder",
+                          "deploy.drainingSeconds": "$.deploy.drainingSeconds",
+                          "deploy.healthcheckPath": "$.deploy.healthcheckPath",
+                          "deploy.healthcheckTimeout": "$.deploy.healthcheckTimeout",
+                          "deploy.preDeployCommand": "$.deploy.preDeployCommand",
+                          "deploy.restartPolicyMaxRetries": "$.deploy.restartPolicyMaxRetries",
+                          "deploy.restartPolicyType": "$.deploy.restartPolicyType"
+                        },
+                        "reason": "deploy",
+                        "repo": "chrisrogers37/storydump",
+                        "rootDirectory": null,
+                        "runtime": "V2",
+                        "serviceManifest": {
+                          "build": {
+                            "buildCommand": "pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media",
+                            "buildEnvironment": "V3",
+                            "builder": "NIXPACKS",
+                            "dockerfilePath": null,
+                            "nixpacksConfigPath": null,
+                            "nixpacksPlan": null,
+                            "watchPatterns": []
+                          },
+                          "deploy": {
+                            "cronSchedule": null,
+                            "drainingSeconds": 60,
+                            "healthcheckPath": "/health",
+                            "healthcheckTimeout": 30,
+                            "ipv6EgressEnabled": false,
+                            "limitOverride": null,
+                            "multiRegionConfig": {
+                              "us-east4-eqdc4a": {
+                                "numReplicas": 1
+                              }
+                            },
+                            "numReplicas": 1,
+                            "overlapSeconds": null,
+                            "preDeployCommand": [
+                              "python -m scripts.migration_runner apply"
+                            ],
+                            "preDeployTimeoutSeconds": null,
+                            "region": null,
+                            "registryCredentials": null,
+                            "requiredMountPath": null,
+                            "restartPolicyMaxRetries": 10,
+                            "restartPolicyType": "ON_FAILURE",
+                            "runtime": "V2",
+                            "sleepApplication": false,
+                            "startCommand": "python -m src.main",
+                            "useLegacyStacker": false
+                          }
+                        },
+                        "volumeMounts": []
+                      },
+                      "status": "SUCCESS",
+                      "createdAt": "2026-09-16T02:15:40.322Z",
+                      "deploymentStopped": false
+                    },
+                    "activeDeployments": [
+                      {
+                        "id": "6676b929-6f77-49a4-bde8-26c819a17ca9",
+                        "status": "SUCCESS",
+                        "createdAt": "2026-09-16T02:15:40.322Z",
+                        "meta": {
+                          "branch": "main",
+                          "buildOnly": false,
+                          "commitAuthor": "chrisrogers37",
+                          "commitHash": "0b0badcd985d9dda7cc9fcbbfe8880571dd933c2",
+                          "commitMessage": "feat(cli): the ledger read verbs \u2014 story, cards, floating, account, jobs, outbox, burst, posture (v2 CLI plan, phase 02) (#1311)\n\nEight tenant-scoped read views behind `/api/v1/ops/...` (fork F6, one file\nfor the operator surface), admitted to tokens: a story's whole timeline\n(audit rows incl. the cli_command rows, every container permit with its url\nvariant and Meta's answer, its cards); a story's cards on every binding,\nadopted twins included; what is floating (approved with a debit) with the\njob that retries it \u2014 or the failed one, the failure `--watch` exits 6 on;\nan account against its cap today; the job queue by kind \u00d7 lane \u00d7 state\nwith failed samples; what is still owed or lost on the chats; a burst as\none timeline (taps, permits, float waits, siblings, review cards, outcomes);\nand the database's posture (the runner's ledger under the runner's own\ngrant \u2014 F7 \u2014 the connected role, every tenant table's RLS state, the\nSECURITY DEFINER doors).\n\nEvery view is one bounded statement with an explicit workspace_id\npredicate on every table, and every row carries the table's own\nworkspace_id rather than a stamp from the parameter; rate_counters and the\nsystem jobs, both outside RLS, are never read. The gate seeds two\nworkspaces through the API and proves every view three ways \u2014 as\nsvc_ingress under the policies, by route scope (a readonly token, a\nsession, a service identity for its own workspace; a stranger 404, a\nforeign identity wrong_workspace), and as a role that bypasses RLS, so the\npredicates confine the rows, not the policies \u2014 and proves posture's RLS\ndrift and each ledger state live. One window grammar in the vocabulary\nmodule serves the API's `since` and the CLI's `--since`: Nm|Nh|Nd, an\nISO-8601 timestamp (naive = UTC) or a bare date, thirty days at most,\nnever in the future, an overflow refused (422 / usage 64). Jobs and outbox\nrows still owed are listed at any age; the finished ones are windowed.\n\nThe CLI: `storydump story|cards|floating|account|jobs|outbox|burst|posture`,\nevery workspace the token can read or `--workspace <id or name>`, one\nenvelope shape (`data.workspaces[].rows`), `--watch [--every N]` printing\nonly changes with the first read as the baseline (exit 0 on the terminal\ncondition, 6 on a failure that arrives, Ctrl-C 0), the CLI's own\nsentences. The guide documentation/operations/reading-the-ledger.md\nreplaces the SQL recipes.\n\nCo-authored-by: Claude Fable 5.1 <noreply@anthropic.com>",
+                          "configFile": "/railway.toml",
+                          "duration": 0,
+                          "fileServiceManifest": {
+                            "build": {
+                              "buildCommand": "pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media",
+                              "builder": "NIXPACKS"
+                            },
+                            "deploy": {
+                              "drainingSeconds": 60,
+                              "healthcheckPath": "/health",
+                              "healthcheckTimeout": 30,
+                              "preDeployCommand": [
+                                "python -m scripts.migration_runner apply"
+                              ],
+                              "restartPolicyMaxRetries": 10,
+                              "restartPolicyType": "ON_FAILURE"
+                            }
+                          },
+                          "imageDigest": "sha256:15242d9ffe6c59bd6bdffb8c4251be1b51f664ba35322f370254caecb845ce3e",
+                          "logsV2": true,
+                          "nixpacksProviders": [],
+                          "plan": "pro",
+                          "propertyFileMapping": {
+                            "build.buildCommand": "$.build.buildCommand",
+                            "build.builder": "$.build.builder",
+                            "deploy.drainingSeconds": "$.deploy.drainingSeconds",
+                            "deploy.healthcheckPath": "$.deploy.healthcheckPath",
+                            "deploy.healthcheckTimeout": "$.deploy.healthcheckTimeout",
+                            "deploy.preDeployCommand": "$.deploy.preDeployCommand",
+                            "deploy.restartPolicyMaxRetries": "$.deploy.restartPolicyMaxRetries",
+                            "deploy.restartPolicyType": "$.deploy.restartPolicyType"
+                          },
+                          "reason": "deploy",
+                          "repo": "chrisrogers37/storydump",
+                          "rootDirectory": null,
+                          "runtime": "V2",
+                          "serviceManifest": {
+                            "build": {
+                              "buildCommand": "pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media",
+                              "buildEnvironment": "V3",
+                              "builder": "NIXPACKS",
+                              "dockerfilePath": null,
+                              "nixpacksConfigPath": null,
+                              "nixpacksPlan": null,
+                              "watchPatterns": []
+                            },
+                            "deploy": {
+                              "cronSchedule": null,
+                              "drainingSeconds": 60,
+                              "healthcheckPath": "/health",
+                              "healthcheckTimeout": 30,
+                              "ipv6EgressEnabled": false,
+                              "limitOverride": null,
+                              "multiRegionConfig": {
+                                "us-east4-eqdc4a": {
+                                  "numReplicas": 1
+                                }
+                              },
+                              "numReplicas": 1,
+                              "overlapSeconds": null,
+                              "preDeployCommand": [
+                                "python -m scripts.migration_runner apply"
+                              ],
+                              "preDeployTimeoutSeconds": null,
+                              "region": null,
+                              "registryCredentials": null,
+                              "requiredMountPath": null,
+                              "restartPolicyMaxRetries": 10,
+                              "restartPolicyType": "ON_FAILURE",
+                              "runtime": "V2",
+                              "sleepApplication": false,
+                              "startCommand": "python -m src.main",
+                              "useLegacyStacker": false
+                            }
+                          },
+                          "volumeMounts": []
+                        }
+                      }
+                    ],
+                    "source": {
+                      "repo": "chrisrogers37/storydump",
+                      "image": null
+                    },
+                    "domains": {
+                      "serviceDomains": [],
+                      "customDomains": []
+                    },
+                    "cronSchedule": null,
+                    "nextCronRunAt": null,
+                    "startCommand": "python -m src.main"
+                  }
+                },
+                {
+                  "node": {
+                    "id": "7e9701ba-e064-429c-81b5-9fa3abb1d49b",
+                    "serviceId": "ceab816e-ac42-4521-9e97-800d06ef17b6",
+                    "serviceName": "storydump",
+                    "environmentId": "4c80ee3a-5141-4610-a216-9d4a95f02512",
+                    "latestDeployment": {
+                      "canRedeploy": true,
+                      "id": "50399727-608b-4f1c-bbd3-0f82ede8cfa7",
+                      "meta": {
+                        "branch": "main",
+                        "buildOnly": false,
+                        "commitAuthor": "chrisrogers37",
+                        "commitHash": "0b0badcd985d9dda7cc9fcbbfe8880571dd933c2",
+                        "commitMessage": "feat(cli): the ledger read verbs \u2014 story, cards, floating, account, jobs, outbox, burst, posture (v2 CLI plan, phase 02) (#1311)\n\nEight tenant-scoped read views behind `/api/v1/ops/...` (fork F6, one file\nfor the operator surface), admitted to tokens: a story's whole timeline\n(audit rows incl. the cli_command rows, every container permit with its url\nvariant and Meta's answer, its cards); a story's cards on every binding,\nadopted twins included; what is floating (approved with a debit) with the\njob that retries it \u2014 or the failed one, the failure `--watch` exits 6 on;\nan account against its cap today; the job queue by kind \u00d7 lane \u00d7 state\nwith failed samples; what is still owed or lost on the chats; a burst as\none timeline (taps, permits, float waits, siblings, review cards, outcomes);\nand the database's posture (the runner's ledger under the runner's own\ngrant \u2014 F7 \u2014 the connected role, every tenant table's RLS state, the\nSECURITY DEFINER doors).\n\nEvery view is one bounded statement with an explicit workspace_id\npredicate on every table, and every row carries the table's own\nworkspace_id rather than a stamp from the parameter; rate_counters and the\nsystem jobs, both outside RLS, are never read. The gate seeds two\nworkspaces through the API and proves every view three ways \u2014 as\nsvc_ingress under the policies, by route scope (a readonly token, a\nsession, a service identity for its own workspace; a stranger 404, a\nforeign identity wrong_workspace), and as a role that bypasses RLS, so the\npredicates confine the rows, not the policies \u2014 and proves posture's RLS\ndrift and each ledger state live. One window grammar in the vocabulary\nmodule serves the API's `since` and the CLI's `--since`: Nm|Nh|Nd, an\nISO-8601 timestamp (naive = UTC) or a bare date, thirty days at most,\nnever in the future, an overflow refused (422 / usage 64). Jobs and outbox\nrows still owed are listed at any age; the finished ones are windowed.\n\nThe CLI: `storydump story|cards|floating|account|jobs|outbox|burst|posture`,\nevery workspace the token can read or `--workspace <id or name>`, one\nenvelope shape (`data.workspaces[].rows`), `--watch [--every N]` printing\nonly changes with the first read as the baseline (exit 0 on the terminal\ncondition, 6 on a failure that arrives, Ctrl-C 0), the CLI's own\nsentences. The guide documentation/operations/reading-the-ledger.md\nreplaces the SQL recipes.\n\nCo-authored-by: Claude Fable 5.1 <noreply@anthropic.com>",
+                        "configFile": "/railway.toml",
+                        "duration": 0,
+                        "fileServiceManifest": {
+                          "build": {
+                            "buildCommand": "pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media",
+                            "builder": "NIXPACKS"
+                          },
+                          "deploy": {
+                            "drainingSeconds": 60,
+                            "healthcheckPath": "/health",
+                            "healthcheckTimeout": 30,
+                            "preDeployCommand": [
+                              "python -m scripts.migration_runner apply"
+                            ],
+                            "restartPolicyMaxRetries": 10,
+                            "restartPolicyType": "ON_FAILURE"
+                          }
+                        },
+                        "imageDigest": "sha256:0f6fc227cbdff9491318d4604c49bb1f93cb98533827f71dde507f95792da2ec",
+                        "logsV2": true,
+                        "nixpacksProviders": [],
+                        "plan": "pro",
+                        "propertyFileMapping": {
+                          "build.buildCommand": "$.build.buildCommand",
+                          "build.builder": "$.build.builder",
+                          "deploy.drainingSeconds": "$.deploy.drainingSeconds",
+                          "deploy.healthcheckPath": "$.deploy.healthcheckPath",
+                          "deploy.healthcheckTimeout": "$.deploy.healthcheckTimeout",
+                          "deploy.preDeployCommand": "$.deploy.preDeployCommand",
+                          "deploy.restartPolicyMaxRetries": "$.deploy.restartPolicyMaxRetries",
+                          "deploy.restartPolicyType": "$.deploy.restartPolicyType"
+                        },
+                        "reason": "deploy",
+                        "repo": "chrisrogers37/storydump",
+                        "rootDirectory": null,
+                        "runtime": "V2",
+                        "serviceManifest": {
+                          "build": {
+                            "buildCommand": "pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media",
+                            "buildEnvironment": "V3",
+                            "builder": "NIXPACKS",
+                            "dockerfilePath": null,
+                            "nixpacksConfigPath": null,
+                            "nixpacksPlan": null,
+                            "watchPatterns": []
+                          },
+                          "deploy": {
+                            "cronSchedule": null,
+                            "drainingSeconds": 60,
+                            "healthcheckPath": "/health",
+                            "healthcheckTimeout": 30,
+                            "ipv6EgressEnabled": false,
+                            "limitOverride": null,
+                            "multiRegionConfig": {
+                              "us-east4-eqdc4a": {
+                                "numReplicas": 1
+                              }
+                            },
+                            "numReplicas": 1,
+                            "overlapSeconds": null,
+                            "preDeployCommand": [
+                              "python -m scripts.migration_runner apply"
+                            ],
+                            "preDeployTimeoutSeconds": null,
+                            "region": null,
+                            "registryCredentials": null,
+                            "requiredMountPath": null,
+                            "restartPolicyMaxRetries": 10,
+                            "restartPolicyType": "ON_FAILURE",
+                            "runtime": "V2",
+                            "sleepApplication": false,
+                            "startCommand": "uvicorn src.api.app:app --host 0.0.0.0 --port ${PORT:-8000}",
+                            "useLegacyStacker": false
+                          }
+                        },
+                        "volumeMounts": []
+                      },
+                      "status": "SUCCESS",
+                      "createdAt": "2026-09-16T02:15:40.322Z",
+                      "deploymentStopped": false
+                    },
+                    "activeDeployments": [
+                      {
+                        "id": "50399727-608b-4f1c-bbd3-0f82ede8cfa7",
+                        "status": "SUCCESS",
+                        "createdAt": "2026-09-16T02:15:40.322Z",
+                        "meta": {
+                          "branch": "main",
+                          "buildOnly": false,
+                          "commitAuthor": "chrisrogers37",
+                          "commitHash": "0b0badcd985d9dda7cc9fcbbfe8880571dd933c2",
+                          "commitMessage": "feat(cli): the ledger read verbs \u2014 story, cards, floating, account, jobs, outbox, burst, posture (v2 CLI plan, phase 02) (#1311)\n\nEight tenant-scoped read views behind `/api/v1/ops/...` (fork F6, one file\nfor the operator surface), admitted to tokens: a story's whole timeline\n(audit rows incl. the cli_command rows, every container permit with its url\nvariant and Meta's answer, its cards); a story's cards on every binding,\nadopted twins included; what is floating (approved with a debit) with the\njob that retries it \u2014 or the failed one, the failure `--watch` exits 6 on;\nan account against its cap today; the job queue by kind \u00d7 lane \u00d7 state\nwith failed samples; what is still owed or lost on the chats; a burst as\none timeline (taps, permits, float waits, siblings, review cards, outcomes);\nand the database's posture (the runner's ledger under the runner's own\ngrant \u2014 F7 \u2014 the connected role, every tenant table's RLS state, the\nSECURITY DEFINER doors).\n\nEvery view is one bounded statement with an explicit workspace_id\npredicate on every table, and every row carries the table's own\nworkspace_id rather than a stamp from the parameter; rate_counters and the\nsystem jobs, both outside RLS, are never read. The gate seeds two\nworkspaces through the API and proves every view three ways \u2014 as\nsvc_ingress under the policies, by route scope (a readonly token, a\nsession, a service identity for its own workspace; a stranger 404, a\nforeign identity wrong_workspace), and as a role that bypasses RLS, so the\npredicates confine the rows, not the policies \u2014 and proves posture's RLS\ndrift and each ledger state live. One window grammar in the vocabulary\nmodule serves the API's `since` and the CLI's `--since`: Nm|Nh|Nd, an\nISO-8601 timestamp (naive = UTC) or a bare date, thirty days at most,\nnever in the future, an overflow refused (422 / usage 64). Jobs and outbox\nrows still owed are listed at any age; the finished ones are windowed.\n\nThe CLI: `storydump story|cards|floating|account|jobs|outbox|burst|posture`,\nevery workspace the token can read or `--workspace <id or name>`, one\nenvelope shape (`data.workspaces[].rows`), `--watch [--every N]` printing\nonly changes with the first read as the baseline (exit 0 on the terminal\ncondition, 6 on a failure that arrives, Ctrl-C 0), the CLI's own\nsentences. The guide documentation/operations/reading-the-ledger.md\nreplaces the SQL recipes.\n\nCo-authored-by: Claude Fable 5.1 <noreply@anthropic.com>",
+                          "configFile": "/railway.toml",
+                          "duration": 0,
+                          "fileServiceManifest": {
+                            "build": {
+                              "buildCommand": "pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media",
+                              "builder": "NIXPACKS"
+                            },
+                            "deploy": {
+                              "drainingSeconds": 60,
+                              "healthcheckPath": "/health",
+                              "healthcheckTimeout": 30,
+                              "preDeployCommand": [
+                                "python -m scripts.migration_runner apply"
+                              ],
+                              "restartPolicyMaxRetries": 10,
+                              "restartPolicyType": "ON_FAILURE"
+                            }
+                          },
+                          "imageDigest": "sha256:0f6fc227cbdff9491318d4604c49bb1f93cb98533827f71dde507f95792da2ec",
+                          "logsV2": true,
+                          "nixpacksProviders": [],
+                          "plan": "pro",
+                          "propertyFileMapping": {
+                            "build.buildCommand": "$.build.buildCommand",
+                            "build.builder": "$.build.builder",
+                            "deploy.drainingSeconds": "$.deploy.drainingSeconds",
+                            "deploy.healthcheckPath": "$.deploy.healthcheckPath",
+                            "deploy.healthcheckTimeout": "$.deploy.healthcheckTimeout",
+                            "deploy.preDeployCommand": "$.deploy.preDeployCommand",
+                            "deploy.restartPolicyMaxRetries": "$.deploy.restartPolicyMaxRetries",
+                            "deploy.restartPolicyType": "$.deploy.restartPolicyType"
+                          },
+                          "reason": "deploy",
+                          "repo": "chrisrogers37/storydump",
+                          "rootDirectory": null,
+                          "runtime": "V2",
+                          "serviceManifest": {
+                            "build": {
+                              "buildCommand": "pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media",
+                              "buildEnvironment": "V3",
+                              "builder": "NIXPACKS",
+                              "dockerfilePath": null,
+                              "nixpacksConfigPath": null,
+                              "nixpacksPlan": null,
+                              "watchPatterns": []
+                            },
+                            "deploy": {
+                              "cronSchedule": null,
+                              "drainingSeconds": 60,
+                              "healthcheckPath": "/health",
+                              "healthcheckTimeout": 30,
+                              "ipv6EgressEnabled": false,
+                              "limitOverride": null,
+                              "multiRegionConfig": {
+                                "us-east4-eqdc4a": {
+                                  "numReplicas": 1
+                                }
+                              },
+                              "numReplicas": 1,
+                              "overlapSeconds": null,
+                              "preDeployCommand": [
+                                "python -m scripts.migration_runner apply"
+                              ],
+                              "preDeployTimeoutSeconds": null,
+                              "region": null,
+                              "registryCredentials": null,
+                              "requiredMountPath": null,
+                              "restartPolicyMaxRetries": 10,
+                              "restartPolicyType": "ON_FAILURE",
+                              "runtime": "V2",
+                              "sleepApplication": false,
+                              "startCommand": "uvicorn src.api.app:app --host 0.0.0.0 --port ${PORT:-8000}",
+                              "useLegacyStacker": false
+                            }
+                          },
+                          "volumeMounts": []
+                        }
+                      },
+                      {
+                        "id": "1a0d22d4-5799-495c-a961-a978fddaabaa",
+                        "status": "SUCCESS",
+                        "createdAt": "2026-09-15T23:01:56.352Z",
+                        "meta": {
+                          "branch": "main",
+                          "buildOnly": false,
+                          "commitAuthor": "chrisrogers37",
+                          "commitHash": "218c8649a978ee97c8e977fcfac7c54e92cf8d66",
+                          "commitMessage": "feat(auth): API tokens as the second credential, and the storydump CLI (v2 CLI plan, phase 01) (#1310)\n\nTokens as principals. A bearer value with the `sdt_` prefix is an API token\nand resolves through `service_tokens.resolve`; every other bearer value and\nthe cookie stay on the session path byte for byte. Two principal kinds on\none table (077 `service_tokens.user_id` + `ck_service_token_subject`, `07`\n\u00a723): a person-bound token acts as its person across their memberships,\nnever above the membership role, over the `cli` channel, with one direct\n`cli_command` audit row (token id + name, the idempotency reference)\nbeside the port's own transition row; a workspace service identity reads\nits one workspace and never writes (F10). Tokens are admitted to\n`TOKEN_ROUTES` only (`/me/principal`, own-token list/revoke, the command\nroute); every other route depends on `require_session` and refuses a token\nwith `reason: session_required`. A revoked, expired or unknown token and a\ndisabled person's token answer 401 without saying which; a live token asking\nfor what it may not have answers 403 with its reason.\n\nMinting is a session's act on the web: Settings \u203a API tokens (personal\ntokens; workspace service identities for admins and owners, role forced\nreadonly), the secret shown once with a copy control, list, revoke \u2014 BFF\nroutes under /api/me/tokens and /api/workspaces/{id}/tokens.\n\nThe `storydump` CLI (`pip install -e '.[cli]'`): login (secret from the\nprompt or stdin; OS keychain by default, failing closed; a 0600 file by\n--insecure-storage; STORYDUMP_TOKEN overrides \u2014 F2 (d)), logout, whoami,\ntokens list|revoke; --json envelopes; exit codes 0/1/2/3/4/64; redaction.\nIt imports nothing from `src` but the new vocabulary module, which owns the\nclosed sets, the envelope, the exit codes and the CLI's sentences (the\ncommand port re-exports VOCABULARY and REASONS).\n\nThe migration runner grants SELECT on its own ledger to svc_ingress where\nit creates the ledger (F7 (c)) \u2014 outside the advertised stream, which the\ngates replay into a database with no runner schema.\n\nTests: units for the service, the principal, the routes, the vocabulary,\nthe storage backends, the client, the output and the entry point; the gate\n`tests/scripts/test_service_tokens_gate.py` drives the real app as\nsvc_ingress end to end; the runner's grant gate; the web's lib, route and\ntab tests; the mutation battery tests/mutations/cli_v2_01.sh.\n\nCo-authored-by: Claude Fable 5.1 <noreply@anthropic.com>",
+                          "configFile": "/railway.toml",
+                          "duration": 11729,
+                          "fileServiceManifest": {
+                            "build": {
+                              "buildCommand": "pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media",
+                              "builder": "NIXPACKS"
+                            },
+                            "deploy": {
+                              "drainingSeconds": 60,
+                              "healthcheckPath": "/health",
+                              "healthcheckTimeout": 30,
+                              "preDeployCommand": [
+                                "python -m scripts.migration_runner apply"
+                              ],
+                              "restartPolicyMaxRetries": 10,
+                              "restartPolicyType": "ON_FAILURE"
+                            }
+                          },
+                          "imageDigest": "sha256:4659a1661d4ca2e4557744ef9861815bd9065bbad44f59d173d537ac8dc88e83",
+                          "isDraining": true,
+                          "logsV2": true,
+                          "nixpacksProviders": [],
+                          "plan": "pro",
+                          "propertyFileMapping": {
+                            "build.buildCommand": "$.build.buildCommand",
+                            "build.builder": "$.build.builder",
+                            "deploy.drainingSeconds": "$.deploy.drainingSeconds",
+                            "deploy.healthcheckPath": "$.deploy.healthcheckPath",
+                            "deploy.healthcheckTimeout": "$.deploy.healthcheckTimeout",
+                            "deploy.preDeployCommand": "$.deploy.preDeployCommand",
+                            "deploy.restartPolicyMaxRetries": "$.deploy.restartPolicyMaxRetries",
+                            "deploy.restartPolicyType": "$.deploy.restartPolicyType"
+                          },
+                          "reason": "deploy",
+                          "repo": "chrisrogers37/storydump",
+                          "rootDirectory": null,
+                          "runtime": "V2",
+                          "serviceManifest": {
+                            "build": {
+                              "buildCommand": "pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media",
+                              "buildEnvironment": "V3",
+                              "builder": "NIXPACKS",
+                              "dockerfilePath": null,
+                              "nixpacksConfigPath": null,
+                              "nixpacksPlan": null,
+                              "watchPatterns": []
+                            },
+                            "deploy": {
+                              "cronSchedule": null,
+                              "drainingSeconds": 60,
+                              "healthcheckPath": "/health",
+                              "healthcheckTimeout": 30,
+                              "ipv6EgressEnabled": false,
+                              "limitOverride": null,
+                              "multiRegionConfig": {
+                                "us-east4-eqdc4a": {
+                                  "numReplicas": 1
+                                }
+                              },
+                              "numReplicas": 1,
+                              "overlapSeconds": null,
+                              "preDeployCommand": [
+                                "python -m scripts.migration_runner apply"
+                              ],
+                              "preDeployTimeoutSeconds": null,
+                              "region": null,
+                              "registryCredentials": null,
+                              "requiredMountPath": null,
+                              "restartPolicyMaxRetries": 10,
+                              "restartPolicyType": "ON_FAILURE",
+                              "runtime": "V2",
+                              "sleepApplication": false,
+                              "startCommand": "uvicorn src.api.app:app --host 0.0.0.0 --port ${PORT:-8000}",
+                              "useLegacyStacker": false
+                            }
+                          },
+                          "volumeMounts": []
+                        }
+                      }
+                    ],
+                    "source": {
+                      "repo": "chrisrogers37/storydump",
+                      "image": null
+                    },
+                    "domains": {
+                      "serviceDomains": [
+                        {
+                          "id": "0c0f4f82-4477-442f-9fcf-d147a38681b9",
+                          "domain": "storyline-ai-production.up.railway.app",
+                          "targetPort": null
+                        }
+                      ],
+                      "customDomains": [
+                        {
+                          "id": "94242048-5c2b-4f55-bfa9-c0794e0bb38b",
+                          "domain": "api.storydump.app",
+                          "targetPort": 8080
+                        }
+                      ]
+                    },
+                    "cronSchedule": null,
+                    "nextCronRunAt": null,
+                    "startCommand": "uvicorn src.api.app:app --host 0.0.0.0 --port ${PORT:-8000}"
+                  }
+                }
+              ]
+            },
+            "volumeInstances": {
+              "edges": []
+            }
+          }
+        }
+      ]
+    },
+    "services": {
+      "edges": [
+        {
+          "node": {
+            "id": "9af6a3ec-640e-4fec-8ae6-22b43b83c466",
+            "name": "worker"
+          }
+        },
+        {
+          "node": {
+            "id": "ceab816e-ac42-4521-9e97-800d06ef17b6",
+            "name": "storydump"
+          }
+        }
+      ]
+    }
+  },
+  "deployments": {
+    "worker": [
+      {
+        "id": "6676b929-6f77-49a4-bde8-26c819a17ca9",
+        "status": "SUCCESS",
+        "createdAt": "2026-09-16T02:15:40.322Z",
+        "meta": {
+          "branch": "main",
+          "buildOnly": false,
+          "commitAuthor": "chrisrogers37",
+          "commitHash": "0b0badcd985d9dda7cc9fcbbfe8880571dd933c2",
+          "commitMessage": "feat(cli): the ledger read verbs \u2014 story, cards, floating, account, jobs, outbox, burst, posture (v2 CLI plan, phase 02) (#1311)\n\nEight tenant-scoped read views behind `/api/v1/ops/...` (fork F6, one file\nfor the operator surface), admitted to tokens: a story's whole timeline\n(audit rows incl. the cli_command rows, every container permit with its url\nvariant and Meta's answer, its cards); a story's cards on every binding,\nadopted twins included; what is floating (approved with a debit) with the\njob that retries it \u2014 or the failed one, the failure `--watch` exits 6 on;\nan account against its cap today; the job queue by kind \u00d7 lane \u00d7 state\nwith failed samples; what is still owed or lost on the chats; a burst as\none timeline (taps, permits, float waits, siblings, review cards, outcomes);\nand the database's posture (the runner's ledger under the runner's own\ngrant \u2014 F7 \u2014 the connected role, every tenant table's RLS state, the\nSECURITY DEFINER doors).\n\nEvery view is one bounded statement with an explicit workspace_id\npredicate on every table, and every row carries the table's own\nworkspace_id rather than a stamp from the parameter; rate_counters and the\nsystem jobs, both outside RLS, are never read. The gate seeds two\nworkspaces through the API and proves every view three ways \u2014 as\nsvc_ingress under the policies, by route scope (a readonly token, a\nsession, a service identity for its own workspace; a stranger 404, a\nforeign identity wrong_workspace), and as a role that bypasses RLS, so the\npredicates confine the rows, not the policies \u2014 and proves posture's RLS\ndrift and each ledger state live. One window grammar in the vocabulary\nmodule serves the API's `since` and the CLI's `--since`: Nm|Nh|Nd, an\nISO-8601 timestamp (naive = UTC) or a bare date, thirty days at most,\nnever in the future, an overflow refused (422 / usage 64). Jobs and outbox\nrows still owed are listed at any age; the finished ones are windowed.\n\nThe CLI: `storydump story|cards|floating|account|jobs|outbox|burst|posture`,\nevery workspace the token can read or `--workspace <id or name>`, one\nenvelope shape (`data.workspaces[].rows`), `--watch [--every N]` printing\nonly changes with the first read as the baseline (exit 0 on the terminal\ncondition, 6 on a failure that arrives, Ctrl-C 0), the CLI's own\nsentences. The guide documentation/operations/reading-the-ledger.md\nreplaces the SQL recipes.\n\nCo-authored-by: Claude Fable 5.1 <noreply@anthropic.com>",
+          "configFile": "/railway.toml",
+          "duration": 0,
+          "fileServiceManifest": {
+            "build": {
+              "buildCommand": "pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media",
+              "builder": "NIXPACKS"
+            },
+            "deploy": {
+              "drainingSeconds": 60,
+              "healthcheckPath": "/health",
+              "healthcheckTimeout": 30,
+              "preDeployCommand": [
+                "python -m scripts.migration_runner apply"
+              ],
+              "restartPolicyMaxRetries": 10,
+              "restartPolicyType": "ON_FAILURE"
+            }
+          },
+          "imageDigest": "sha256:15242d9ffe6c59bd6bdffb8c4251be1b51f664ba35322f370254caecb845ce3e",
+          "logsV2": true,
+          "nixpacksProviders": [],
+          "plan": "pro",
+          "propertyFileMapping": {
+            "build.buildCommand": "$.build.buildCommand",
+            "build.builder": "$.build.builder",
+            "deploy.drainingSeconds": "$.deploy.drainingSeconds",
+            "deploy.healthcheckPath": "$.deploy.healthcheckPath",
+            "deploy.healthcheckTimeout": "$.deploy.healthcheckTimeout",
+            "deploy.preDeployCommand": "$.deploy.preDeployCommand",
+            "deploy.restartPolicyMaxRetries": "$.deploy.restartPolicyMaxRetries",
+            "deploy.restartPolicyType": "$.deploy.restartPolicyType"
+          },
+          "reason": "deploy",
+          "repo": "chrisrogers37/storydump",
+          "rootDirectory": null,
+          "runtime": "V2",
+          "serviceManifest": {
+            "build": {
+              "buildCommand": "pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media",
+              "buildEnvironment": "V3",
+              "builder": "NIXPACKS",
+              "dockerfilePath": null,
+              "nixpacksConfigPath": null,
+              "nixpacksPlan": null,
+              "watchPatterns": []
+            },
+            "deploy": {
+              "cronSchedule": null,
+              "drainingSeconds": 60,
+              "healthcheckPath": "/health",
+              "healthcheckTimeout": 30,
+              "ipv6EgressEnabled": false,
+              "limitOverride": null,
+              "multiRegionConfig": {
+                "us-east4-eqdc4a": {
+                  "numReplicas": 1
+                }
+              },
+              "numReplicas": 1,
+              "overlapSeconds": null,
+              "preDeployCommand": [
+                "python -m scripts.migration_runner apply"
+              ],
+              "preDeployTimeoutSeconds": null,
+              "region": null,
+              "registryCredentials": null,
+              "requiredMountPath": null,
+              "restartPolicyMaxRetries": 10,
+              "restartPolicyType": "ON_FAILURE",
+              "runtime": "V2",
+              "sleepApplication": false,
+              "startCommand": "python -m src.main",
+              "useLegacyStacker": false
+            }
+          },
+          "volumeMounts": []
+        }
+      },
+      {
+        "id": "7e324709-553e-46ad-8d8b-0f5410c68c88",
+        "status": "REMOVED",
+        "createdAt": "2026-09-15T23:01:56.352Z",
+        "meta": {
+          "branch": "main",
+          "buildOnly": false,
+          "commitAuthor": "chrisrogers37",
+          "commitHash": "218c8649a978ee97c8e977fcfac7c54e92cf8d66",
+          "commitMessage": "feat(auth): API tokens as the second credential, and the storydump CLI (v2 CLI plan, phase 01) (#1310)\n\nTokens as principals. A bearer value with the `sdt_` prefix is an API token\nand resolves through `service_tokens.resolve`; every other bearer value and\nthe cookie stay on the session path byte for byte. Two principal kinds on\none table (077 `service_tokens.user_id` + `ck_service_token_subject`, `07`\n\u00a723): a person-bound token acts as its person across their memberships,\nnever above the membership role, over the `cli` channel, with one direct\n`cli_command` audit row (token id + name, the idempotency reference)\nbeside the port's own transition row; a workspace service identity reads\nits one workspace and never writes (F10). Tokens are admitted to\n`TOKEN_ROUTES` only (`/me/principal`, own-token list/revoke, the command\nroute); every other route depends on `require_session` and refuses a token\nwith `reason: session_required`. A revoked, expired or unknown token and a\ndisabled person's token answer 401 without saying which; a live token asking\nfor what it may not have answers 403 with its reason.\n\nMinting is a session's act on the web: Settings \u203a API tokens (personal\ntokens; workspace service identities for admins and owners, role forced\nreadonly), the secret shown once with a copy control, list, revoke \u2014 BFF\nroutes under /api/me/tokens and /api/workspaces/{id}/tokens.\n\nThe `storydump` CLI (`pip install -e '.[cli]'`): login (secret from the\nprompt or stdin; OS keychain by default, failing closed; a 0600 file by\n--insecure-storage; STORYDUMP_TOKEN overrides \u2014 F2 (d)), logout, whoami,\ntokens list|revoke; --json envelopes; exit codes 0/1/2/3/4/64; redaction.\nIt imports nothing from `src` but the new vocabulary module, which owns the\nclosed sets, the envelope, the exit codes and the CLI's sentences (the\ncommand port re-exports VOCABULARY and REASONS).\n\nThe migration runner grants SELECT on its own ledger to svc_ingress where\nit creates the ledger (F7 (c)) \u2014 outside the advertised stream, which the\ngates replay into a database with no runner schema.\n\nTests: units for the service, the principal, the routes, the vocabulary,\nthe storage backends, the client, the output and the entry point; the gate\n`tests/scripts/test_service_tokens_gate.py` drives the real app as\nsvc_ingress end to end; the runner's grant gate; the web's lib, route and\ntab tests; the mutation battery tests/mutations/cli_v2_01.sh.\n\nCo-authored-by: Claude Fable 5.1 <noreply@anthropic.com>",
+          "configFile": "/railway.toml",
+          "duration": 11630,
+          "fileServiceManifest": {
+            "build": {
+              "buildCommand": "pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media",
+              "builder": "NIXPACKS"
+            },
+            "deploy": {
+              "drainingSeconds": 60,
+              "healthcheckPath": "/health",
+              "healthcheckTimeout": 30,
+              "preDeployCommand": [
+                "python -m scripts.migration_runner apply"
+              ],
+              "restartPolicyMaxRetries": 10,
+              "restartPolicyType": "ON_FAILURE"
+            }
+          },
+          "imageDigest": "sha256:224ae1dde44042039885843c5e9c99cb3676e95c6feabdf3f41b1695c149ad39",
+          "isDraining": true,
+          "logsV2": true,
+          "nixpacksProviders": [],
+          "plan": "pro",
+          "propertyFileMapping": {
+            "build.buildCommand": "$.build.buildCommand",
+            "build.builder": "$.build.builder",
+            "deploy.drainingSeconds": "$.deploy.drainingSeconds",
+            "deploy.healthcheckPath": "$.deploy.healthcheckPath",
+            "deploy.healthcheckTimeout": "$.deploy.healthcheckTimeout",
+            "deploy.preDeployCommand": "$.deploy.preDeployCommand",
+            "deploy.restartPolicyMaxRetries": "$.deploy.restartPolicyMaxRetries",
+            "deploy.restartPolicyType": "$.deploy.restartPolicyType"
+          },
+          "reason": "deploy",
+          "repo": "chrisrogers37/storydump",
+          "rootDirectory": null,
+          "runtime": "V2",
+          "serviceManifest": {
+            "build": {
+              "buildCommand": "pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media",
+              "buildEnvironment": "V3",
+              "builder": "NIXPACKS",
+              "dockerfilePath": null,
+              "nixpacksConfigPath": null,
+              "nixpacksPlan": null,
+              "watchPatterns": []
+            },
+            "deploy": {
+              "cronSchedule": null,
+              "drainingSeconds": 60,
+              "healthcheckPath": "/health",
+              "healthcheckTimeout": 30,
+              "ipv6EgressEnabled": false,
+              "limitOverride": null,
+              "multiRegionConfig": {
+                "us-east4-eqdc4a": {
+                  "numReplicas": 1
+                }
+              },
+              "numReplicas": 1,
+              "overlapSeconds": null,
+              "preDeployCommand": [
+                "python -m scripts.migration_runner apply"
+              ],
+              "preDeployTimeoutSeconds": null,
+              "region": null,
+              "registryCredentials": null,
+              "requiredMountPath": null,
+              "restartPolicyMaxRetries": 10,
+              "restartPolicyType": "ON_FAILURE",
+              "runtime": "V2",
+              "sleepApplication": false,
+              "startCommand": "python -m src.main",
+              "useLegacyStacker": false
+            }
+          },
+          "volumeMounts": []
+        }
+      }
+    ],
+    "storydump": [
+      {
+        "id": "50399727-608b-4f1c-bbd3-0f82ede8cfa7",
+        "status": "SUCCESS",
+        "createdAt": "2026-09-16T02:15:40.322Z",
+        "meta": {
+          "branch": "main",
+          "buildOnly": false,
+          "commitAuthor": "chrisrogers37",
+          "commitHash": "0b0badcd985d9dda7cc9fcbbfe8880571dd933c2",
+          "commitMessage": "feat(cli): the ledger read verbs \u2014 story, cards, floating, account, jobs, outbox, burst, posture (v2 CLI plan, phase 02) (#1311)\n\nEight tenant-scoped read views behind `/api/v1/ops/...` (fork F6, one file\nfor the operator surface), admitted to tokens: a story's whole timeline\n(audit rows incl. the cli_command rows, every container permit with its url\nvariant and Meta's answer, its cards); a story's cards on every binding,\nadopted twins included; what is floating (approved with a debit) with the\njob that retries it \u2014 or the failed one, the failure `--watch` exits 6 on;\nan account against its cap today; the job queue by kind \u00d7 lane \u00d7 state\nwith failed samples; what is still owed or lost on the chats; a burst as\none timeline (taps, permits, float waits, siblings, review cards, outcomes);\nand the database's posture (the runner's ledger under the runner's own\ngrant \u2014 F7 \u2014 the connected role, every tenant table's RLS state, the\nSECURITY DEFINER doors).\n\nEvery view is one bounded statement with an explicit workspace_id\npredicate on every table, and every row carries the table's own\nworkspace_id rather than a stamp from the parameter; rate_counters and the\nsystem jobs, both outside RLS, are never read. The gate seeds two\nworkspaces through the API and proves every view three ways \u2014 as\nsvc_ingress under the policies, by route scope (a readonly token, a\nsession, a service identity for its own workspace; a stranger 404, a\nforeign identity wrong_workspace), and as a role that bypasses RLS, so the\npredicates confine the rows, not the policies \u2014 and proves posture's RLS\ndrift and each ledger state live. One window grammar in the vocabulary\nmodule serves the API's `since` and the CLI's `--since`: Nm|Nh|Nd, an\nISO-8601 timestamp (naive = UTC) or a bare date, thirty days at most,\nnever in the future, an overflow refused (422 / usage 64). Jobs and outbox\nrows still owed are listed at any age; the finished ones are windowed.\n\nThe CLI: `storydump story|cards|floating|account|jobs|outbox|burst|posture`,\nevery workspace the token can read or `--workspace <id or name>`, one\nenvelope shape (`data.workspaces[].rows`), `--watch [--every N]` printing\nonly changes with the first read as the baseline (exit 0 on the terminal\ncondition, 6 on a failure that arrives, Ctrl-C 0), the CLI's own\nsentences. The guide documentation/operations/reading-the-ledger.md\nreplaces the SQL recipes.\n\nCo-authored-by: Claude Fable 5.1 <noreply@anthropic.com>",
+          "configFile": "/railway.toml",
+          "duration": 0,
+          "fileServiceManifest": {
+            "build": {
+              "buildCommand": "pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media",
+              "builder": "NIXPACKS"
+            },
+            "deploy": {
+              "drainingSeconds": 60,
+              "healthcheckPath": "/health",
+              "healthcheckTimeout": 30,
+              "preDeployCommand": [
+                "python -m scripts.migration_runner apply"
+              ],
+              "restartPolicyMaxRetries": 10,
+              "restartPolicyType": "ON_FAILURE"
+            }
+          },
+          "imageDigest": "sha256:0f6fc227cbdff9491318d4604c49bb1f93cb98533827f71dde507f95792da2ec",
+          "logsV2": true,
+          "nixpacksProviders": [],
+          "plan": "pro",
+          "propertyFileMapping": {
+            "build.buildCommand": "$.build.buildCommand",
+            "build.builder": "$.build.builder",
+            "deploy.drainingSeconds": "$.deploy.drainingSeconds",
+            "deploy.healthcheckPath": "$.deploy.healthcheckPath",
+            "deploy.healthcheckTimeout": "$.deploy.healthcheckTimeout",
+            "deploy.preDeployCommand": "$.deploy.preDeployCommand",
+            "deploy.restartPolicyMaxRetries": "$.deploy.restartPolicyMaxRetries",
+            "deploy.restartPolicyType": "$.deploy.restartPolicyType"
+          },
+          "reason": "deploy",
+          "repo": "chrisrogers37/storydump",
+          "rootDirectory": null,
+          "runtime": "V2",
+          "serviceManifest": {
+            "build": {
+              "buildCommand": "pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media",
+              "buildEnvironment": "V3",
+              "builder": "NIXPACKS",
+              "dockerfilePath": null,
+              "nixpacksConfigPath": null,
+              "nixpacksPlan": null,
+              "watchPatterns": []
+            },
+            "deploy": {
+              "cronSchedule": null,
+              "drainingSeconds": 60,
+              "healthcheckPath": "/health",
+              "healthcheckTimeout": 30,
+              "ipv6EgressEnabled": false,
+              "limitOverride": null,
+              "multiRegionConfig": {
+                "us-east4-eqdc4a": {
+                  "numReplicas": 1
+                }
+              },
+              "numReplicas": 1,
+              "overlapSeconds": null,
+              "preDeployCommand": [
+                "python -m scripts.migration_runner apply"
+              ],
+              "preDeployTimeoutSeconds": null,
+              "region": null,
+              "registryCredentials": null,
+              "requiredMountPath": null,
+              "restartPolicyMaxRetries": 10,
+              "restartPolicyType": "ON_FAILURE",
+              "runtime": "V2",
+              "sleepApplication": false,
+              "startCommand": "uvicorn src.api.app:app --host 0.0.0.0 --port ${PORT:-8000}",
+              "useLegacyStacker": false
+            }
+          },
+          "volumeMounts": []
+        }
+      },
+      {
+        "id": "1a0d22d4-5799-495c-a961-a978fddaabaa",
+        "status": "SUCCESS",
+        "createdAt": "2026-09-15T23:01:56.352Z",
+        "meta": {
+          "branch": "main",
+          "buildOnly": false,
+          "commitAuthor": "chrisrogers37",
+          "commitHash": "218c8649a978ee97c8e977fcfac7c54e92cf8d66",
+          "commitMessage": "feat(auth): API tokens as the second credential, and the storydump CLI (v2 CLI plan, phase 01) (#1310)\n\nTokens as principals. A bearer value with the `sdt_` prefix is an API token\nand resolves through `service_tokens.resolve`; every other bearer value and\nthe cookie stay on the session path byte for byte. Two principal kinds on\none table (077 `service_tokens.user_id` + `ck_service_token_subject`, `07`\n\u00a723): a person-bound token acts as its person across their memberships,\nnever above the membership role, over the `cli` channel, with one direct\n`cli_command` audit row (token id + name, the idempotency reference)\nbeside the port's own transition row; a workspace service identity reads\nits one workspace and never writes (F10). Tokens are admitted to\n`TOKEN_ROUTES` only (`/me/principal`, own-token list/revoke, the command\nroute); every other route depends on `require_session` and refuses a token\nwith `reason: session_required`. A revoked, expired or unknown token and a\ndisabled person's token answer 401 without saying which; a live token asking\nfor what it may not have answers 403 with its reason.\n\nMinting is a session's act on the web: Settings \u203a API tokens (personal\ntokens; workspace service identities for admins and owners, role forced\nreadonly), the secret shown once with a copy control, list, revoke \u2014 BFF\nroutes under /api/me/tokens and /api/workspaces/{id}/tokens.\n\nThe `storydump` CLI (`pip install -e '.[cli]'`): login (secret from the\nprompt or stdin; OS keychain by default, failing closed; a 0600 file by\n--insecure-storage; STORYDUMP_TOKEN overrides \u2014 F2 (d)), logout, whoami,\ntokens list|revoke; --json envelopes; exit codes 0/1/2/3/4/64; redaction.\nIt imports nothing from `src` but the new vocabulary module, which owns the\nclosed sets, the envelope, the exit codes and the CLI's sentences (the\ncommand port re-exports VOCABULARY and REASONS).\n\nThe migration runner grants SELECT on its own ledger to svc_ingress where\nit creates the ledger (F7 (c)) \u2014 outside the advertised stream, which the\ngates replay into a database with no runner schema.\n\nTests: units for the service, the principal, the routes, the vocabulary,\nthe storage backends, the client, the output and the entry point; the gate\n`tests/scripts/test_service_tokens_gate.py` drives the real app as\nsvc_ingress end to end; the runner's grant gate; the web's lib, route and\ntab tests; the mutation battery tests/mutations/cli_v2_01.sh.\n\nCo-authored-by: Claude Fable 5.1 <noreply@anthropic.com>",
+          "configFile": "/railway.toml",
+          "duration": 11729,
+          "fileServiceManifest": {
+            "build": {
+              "buildCommand": "pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media",
+              "builder": "NIXPACKS"
+            },
+            "deploy": {
+              "drainingSeconds": 60,
+              "healthcheckPath": "/health",
+              "healthcheckTimeout": 30,
+              "preDeployCommand": [
+                "python -m scripts.migration_runner apply"
+              ],
+              "restartPolicyMaxRetries": 10,
+              "restartPolicyType": "ON_FAILURE"
+            }
+          },
+          "imageDigest": "sha256:4659a1661d4ca2e4557744ef9861815bd9065bbad44f59d173d537ac8dc88e83",
+          "isDraining": true,
+          "logsV2": true,
+          "nixpacksProviders": [],
+          "plan": "pro",
+          "propertyFileMapping": {
+            "build.buildCommand": "$.build.buildCommand",
+            "build.builder": "$.build.builder",
+            "deploy.drainingSeconds": "$.deploy.drainingSeconds",
+            "deploy.healthcheckPath": "$.deploy.healthcheckPath",
+            "deploy.healthcheckTimeout": "$.deploy.healthcheckTimeout",
+            "deploy.preDeployCommand": "$.deploy.preDeployCommand",
+            "deploy.restartPolicyMaxRetries": "$.deploy.restartPolicyMaxRetries",
+            "deploy.restartPolicyType": "$.deploy.restartPolicyType"
+          },
+          "reason": "deploy",
+          "repo": "chrisrogers37/storydump",
+          "rootDirectory": null,
+          "runtime": "V2",
+          "serviceManifest": {
+            "build": {
+              "buildCommand": "pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media",
+              "buildEnvironment": "V3",
+              "builder": "NIXPACKS",
+              "dockerfilePath": null,
+              "nixpacksConfigPath": null,
+              "nixpacksPlan": null,
+              "watchPatterns": []
+            },
+            "deploy": {
+              "cronSchedule": null,
+              "drainingSeconds": 60,
+              "healthcheckPath": "/health",
+              "healthcheckTimeout": 30,
+              "ipv6EgressEnabled": false,
+              "limitOverride": null,
+              "multiRegionConfig": {
+                "us-east4-eqdc4a": {
+                  "numReplicas": 1
+                }
+              },
+              "numReplicas": 1,
+              "overlapSeconds": null,
+              "preDeployCommand": [
+                "python -m scripts.migration_runner apply"
+              ],
+              "preDeployTimeoutSeconds": null,
+              "region": null,
+              "registryCredentials": null,
+              "requiredMountPath": null,
+              "restartPolicyMaxRetries": 10,
+              "restartPolicyType": "ON_FAILURE",
+              "runtime": "V2",
+              "sleepApplication": false,
+              "startCommand": "uvicorn src.api.app:app --host 0.0.0.0 --port ${PORT:-8000}",
+              "useLegacyStacker": false
+            }
+          },
+          "volumeMounts": []
+        }
+      }
+    ]
+  }
+}
