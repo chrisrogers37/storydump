@@ -128,6 +128,14 @@ class Client:
                 raise Unreachable(status, None, "the answer was not the API's JSON")
             return body
         detail = body.get("detail") if isinstance(body, dict) else None
+        if isinstance(detail, list):
+            # FastAPI's validation answer: one message per bad field
+            detail = "; ".join(
+                f"{'.'.join(str(p) for p in item.get('loc', [])[1:]) or 'body'}:"
+                f" {item.get('msg')}"
+                for item in detail
+                if isinstance(item, dict)
+            )
         if not isinstance(detail, str) or not detail:
             detail = f"HTTP {status} {response.reason_phrase}".strip()
         reason = body.get("reason") if isinstance(body, dict) else None

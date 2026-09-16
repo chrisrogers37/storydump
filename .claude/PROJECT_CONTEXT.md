@@ -97,9 +97,14 @@ Storydump is a hosted, multi-tenant Instagram Story scheduling service with Tele
 
 **NEVER suggest running:**
 - `storydump approve <story>` (posts to Instagram — the user's decision)
+- `storydump resolve <story> retry` (posts it again)
 - `storydump cancel <story>` / `storydump resolve <story> cancel` (destructive)
-- `storydump tokens revoke <id>` / `storydump webhook deregister`
+- `storydump tokens revoke <id>`
+- `storydump webhook register` / `storydump webhook deregister` (the production bot's webhook)
 - `python -m src.main` (starts the bot)
+
+The canonical list is the safety block in `CLAUDE.md`; this copy is pinned to
+it by `tests/test_agent_docs.py`.
 
 **SAFE to suggest:**
 - `storydump floating` / `storydump story <id>` / `storydump health` / `storydump doctor` (reads)

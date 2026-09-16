@@ -23,14 +23,26 @@ import datetime as dt
 from typing import Any
 
 from src.services.target import readers
+from src.services.target.vocabulary import FLOATING_LIMIT, FLOATING_LIMIT_MAX
 
-#: `floating`'s default and ceiling; every other list is windowed by `since`.
-FLOATING_LIMIT = 100
-FLOATING_LIMIT_MAX = 500
 #: The bound inside a story's own timeline (audit rows) and per-section lists.
+#: A list past its bound keeps its NEWEST rows — an operator reads the current
+#: state, not how it started — and is still returned oldest first; a story
+#: names the lists that were cut (`truncated`).
 STORY_ROWS = 500
 SECTION_ROWS = 500
 SAMPLES = 5
+
+
+def _newest(select: str, *, order: str, limit: int, columns: str) -> str:
+    """*select* bounded to its newest *limit* rows by *order* (a descending
+    list), then answered oldest first: ``SELECT columns FROM (select ORDER BY
+    order DESC LIMIT limit) t ORDER BY order ASC``."""
+    terms = [t.strip() for t in order.split(",")]
+    desc = ", ".join(f"{t} DESC" for t in terms)
+    asc = ", ".join(terms)
+    return f"SELECT {columns} FROM ({select} ORDER BY {desc} LIMIT {limit}) t ORDER BY {asc}"
+
 
 _INTENT = (
     "SELECT i.id, i.workspace_id, i.state, i.publish_step, i.cap_consumed_on,"
@@ -39,29 +51,36 @@ _INTENT = (
     " FROM post_intents i WHERE i.workspace_id = :ws AND i.id = :id"
 )
 
-_AUDIT = (
+_AUDIT = _newest(
     "SELECT a.created_at AS at, a.from_state, a.to_state, a.actor_kind,"
-    " a.actor_user_id, a.channel, a.detail"
-    " FROM audit_events a WHERE a.workspace_id = :ws AND a.entity_id = :id"
-    f" ORDER BY a.id LIMIT {STORY_ROWS}"
+    " a.actor_user_id, a.channel, a.detail, a.id AS row_id"
+    " FROM audit_events a WHERE a.workspace_id = :ws AND a.entity_id = :id",
+    order="at, row_id",
+    limit=STORY_ROWS + 1,
+    columns="at, from_state, to_state, actor_kind, actor_user_id, channel, detail",
 )
 
-_OPERATIONS = (
+_OPERATIONS = _newest(
     "SELECT o.created_at AS at, o.op_kind, o.generation, o.state,"
     " NULLIF(o.response_ref->>'url_variant', '')::int AS url_variant,"
     " o.response_ref->>'error' AS error,"
     " o.response_ref->'meta'->>'subcode' AS subcode,"
     " NULLIF(o.response_ref->>'elapsed_ms', '')::int AS elapsed_ms"
-    " FROM provider_operations o WHERE o.workspace_id = :ws AND o.intent_id = :id"
-    f" ORDER BY o.created_at, o.generation LIMIT {STORY_ROWS}"
+    " FROM provider_operations o WHERE o.workspace_id = :ws AND o.intent_id = :id",
+    order="at, generation",
+    limit=STORY_ROWS + 1,
+    columns="at, op_kind, generation, state, url_variant, error, subcode, elapsed_ms",
 )
 
-_STORY_CARDS = (
+_STORY_CARDS = _newest(
     "SELECT o.created_at AS at, o.binding_id, o.kind, o.state,"
     " o.external_message_ref, o.attempts, o.payload->>'outcome_text' AS outcome_text,"
-    " o.payload->>'supersedes_ref' AS supersedes_ref"
-    " FROM channel_outbox o WHERE o.workspace_id = :ws AND o.intent_id = :id"
-    f" ORDER BY o.created_at LIMIT {STORY_ROWS}"
+    " o.payload->>'supersedes_ref' AS supersedes_ref, o.id AS row_id"
+    " FROM channel_outbox o WHERE o.workspace_id = :ws AND o.intent_id = :id",
+    order="at, row_id",
+    limit=STORY_ROWS + 1,
+    columns="at, binding_id, kind, state, external_message_ref, attempts,"
+    " outcome_text, supersedes_ref",
 )
 
 
@@ -74,26 +93,38 @@ async def story(conn, *, workspace_id: str, intent_id: str) -> list[dict[str, An
     if intent is None:
         return []
     params = {"ws": workspace_id, "id": intent_id}
+    fetched = {
+        "audit": await readers.rows(conn, _AUDIT, **params),
+        "operations": await readers.rows(conn, _OPERATIONS, **params),
+        "cards": await readers.rows(conn, _STORY_CARDS, **params),
+    }
+    # each statement fetches one row past the bound, so a list at the bound
+    # was cut exactly when that extra (oldest) row came back — said, rather
+    # than a timeline that quietly ends early
     return [
         {
             "workspace_id": workspace_id,
             "intent": intent,
-            "audit": await readers.rows(conn, _AUDIT, **params),
-            "operations": await readers.rows(conn, _OPERATIONS, **params),
-            "cards": await readers.rows(conn, _STORY_CARDS, **params),
+            **{name: rows[-STORY_ROWS:] for name, rows in fetched.items()},
+            "truncated": [
+                name for name, rows in fetched.items() if len(rows) > STORY_ROWS
+            ],
         }
     ]
 
 
-_CARDS = (
+_CARDS = _newest(
     "SELECT o.workspace_id, o.id, o.binding_id, b.channel, b.external_ref, o.kind,"
     " o.state, o.external_message_ref, o.attempts,"
     " o.payload->>'outcome_text' AS outcome_text,"
     " o.payload->>'supersedes_ref' AS supersedes_ref, o.created_at, o.updated_at"
     " FROM channel_outbox o"
     " JOIN channel_bindings b ON b.workspace_id = o.workspace_id AND b.id = o.binding_id"
-    " WHERE o.workspace_id = :ws AND o.intent_id = :id"
-    f" ORDER BY o.created_at LIMIT {STORY_ROWS}"
+    " WHERE o.workspace_id = :ws AND o.intent_id = :id",
+    order="created_at, id",
+    limit=STORY_ROWS,
+    columns="workspace_id, id, binding_id, channel, external_ref, kind, state,"
+    " external_message_ref, attempts, outcome_text, supersedes_ref, created_at, updated_at",
 )
 
 
@@ -107,7 +138,7 @@ _FLOATING = (
     " i.cap_consumed_on, i.entered_state_at,"
     " j.state AS job_state, j.run_at AS job_run_at, j.attempts AS job_attempts,"
     " w.detail->>'class' AS last_wait_class,"
-    " NULLIF(w.detail->>'rung', '')::int AS last_wait_rung, w.created_at AS last_wait_at"
+    " NULLIF(w.detail->>'rung', '')::numeric::int AS last_wait_rung, w.created_at AS last_wait_at"
     " FROM post_intents i"
     " LEFT JOIN LATERAL ("
     "   SELECT j.state, j.run_at, j.attempts FROM jobs j"
@@ -186,11 +217,14 @@ _JOBS = (
     "        LEFT JOIN post_intents p ON p.workspace_id = x.workspace_id"
     "         AND p.id::text = x.payload->>'intent_id'"
     "       WHERE x.workspace_id = j.workspace_id AND x.kind = j.kind"
-    "         AND x.lane = j.lane AND x.state = j.state AND x.created_at >= :since"
+    "         AND x.lane = j.lane AND x.state = j.state AND x.updated_at >= :since"
     f"       ORDER BY x.run_at DESC LIMIT {SAMPLES}) s)"
     " END AS samples"
+    # `updated_at`, not `created_at`: a job's row lives across its retries
+    # (`reschedule_job` re-readies the same row), so the window is when it
+    # last CHANGED — a long float's retry that died today is today's failure
     " FROM jobs j WHERE j.workspace_id = :ws"
-    "   AND (j.state IN ('ready', 'leased') OR j.created_at >= :since)"
+    "   AND (j.state IN ('ready', 'leased') OR j.updated_at >= :since)"
     " GROUP BY j.workspace_id, j.kind, j.lane, j.state"
     " ORDER BY j.kind, j.lane, j.state"
 )
@@ -199,9 +233,10 @@ _JOBS = (
 async def jobs(conn, *, workspace_id: str, since: dt.datetime) -> list[dict[str, Any]]:
     """This workspace's jobs, counted by kind × lane × state: everything
     still owed (`ready`, `leased`) at any age — a stuck job is the one to see
-    — and the finished ones minted in the window; the oldest runnable and a
-    few failed samples (a publish job's sample carries its story's
-    `last_error`). System singletons have no workspace and never appear."""
+    — and the finished ones that last changed in the window (a job's row
+    lives across its retries); the oldest runnable and a few failed samples
+    (a publish job's sample carries its story's `last_error`). System
+    singletons have no workspace and never appear."""
     return await readers.rows(conn, _JOBS, ws=workspace_id, since=since)
 
 
@@ -230,16 +265,18 @@ async def outbox(
 # Every section selects the table's OWN workspace_id — never a stamp from the
 # parameter — so a row that crossed workspaces would carry the other one's id
 # and the gate's bypass arm would see it.
-_TAPS = (
+_TAPS = _newest(
     "SELECT a.workspace_id, a.created_at AS at, a.entity_id AS intent_id,"
     " a.from_state, a.to_state,"
-    " a.actor_kind, a.channel"
+    " a.actor_kind, a.channel, a.id AS row_id"
     " FROM audit_events a"
     " WHERE a.workspace_id = :ws AND a.entity_kind = 'post_intent'"
-    "   AND a.from_state = 'awaiting_approval' AND a.created_at >= :since"
-    f" ORDER BY a.created_at LIMIT {SECTION_ROWS}"
+    "   AND a.from_state = 'awaiting_approval' AND a.created_at >= :since",
+    order="at, row_id",
+    limit=SECTION_ROWS,
+    columns="workspace_id, at, intent_id, from_state, to_state, actor_kind, channel",
 )
-_PERMITS = (
+_PERMITS = _newest(
     "SELECT o.workspace_id, o.created_at AS at, o.intent_id, o.generation, o.state,"
     " NULLIF(o.response_ref->>'url_variant', '')::int AS url_variant,"
     " o.response_ref->>'error' AS error,"
@@ -247,23 +284,31 @@ _PERMITS = (
     " NULLIF(o.response_ref->>'elapsed_ms', '')::int AS elapsed_ms"
     " FROM provider_operations o"
     " WHERE o.workspace_id = :ws AND o.op_kind = 'container_create'"
-    "   AND o.created_at >= :since"
-    f" ORDER BY o.created_at LIMIT {SECTION_ROWS}"
+    "   AND o.created_at >= :since",
+    order="at, generation",
+    limit=SECTION_ROWS,
+    columns="workspace_id, at, intent_id, generation, state, url_variant, error,"
+    " subcode, elapsed_ms",
 )
-_WAITS = (
+# `seconds` is the ladder's float (`publish_pipeline` writes `60.0`): a text
+# `'60.0'` does not cast to int directly — through numeric it does
+_WAITS = _newest(
     "SELECT a.workspace_id, a.created_at AS at, a.entity_id AS intent_id,"
-    " a.detail->>'class' AS wait_class, NULLIF(a.detail->>'rung', '')::int AS rung,"
-    " NULLIF(a.detail->>'seconds', '')::int AS seconds,"
-    " a.detail->>'next_run_at' AS next_run_at"
+    " a.detail->>'class' AS wait_class,"
+    " NULLIF(a.detail->>'rung', '')::numeric::int AS rung,"
+    " round(NULLIF(a.detail->>'seconds', '')::numeric)::int AS seconds,"
+    " a.detail->>'next_run_at' AS next_run_at, a.id AS row_id"
     " FROM audit_events a"
     " WHERE a.workspace_id = :ws AND a.detail->>'event' = 'float_wait'"
-    "   AND a.created_at >= :since"
-    f" ORDER BY a.created_at LIMIT {SECTION_ROWS}"
+    "   AND a.created_at >= :since",
+    order="at, row_id",
+    limit=SECTION_ROWS,
+    columns="workspace_id, at, intent_id, wait_class, rung, seconds, next_run_at",
 )
-_SIBLINGS = (
+_SIBLINGS = _newest(
     "SELECT p.workspace_id, p.created_at AS at, p.entity_id AS intent_id,"
     " p.entity_id AS posted_id, w.entity_id AS waiting_id,"
-    " w.detail->>'class' AS wait_class"
+    " w.detail->>'class' AS wait_class, p.id AS row_id"
     " FROM audit_events p"
     " JOIN post_intents pi ON pi.workspace_id = p.workspace_id AND pi.id = p.entity_id"
     " JOIN audit_events w ON w.workspace_id = p.workspace_id"
@@ -273,17 +318,21 @@ _SIBLINGS = (
     "  AND (w.detail->>'next_run_at')::timestamptz > p.created_at"
     " JOIN post_intents wi ON wi.workspace_id = w.workspace_id AND wi.id = w.entity_id"
     "  AND wi.ig_account_id = pi.ig_account_id"
-    " WHERE p.workspace_id = :ws AND p.to_state = 'posted' AND p.created_at >= :since"
-    f" ORDER BY p.created_at LIMIT {SECTION_ROWS}"
+    " WHERE p.workspace_id = :ws AND p.to_state = 'posted' AND p.created_at >= :since",
+    order="at, row_id, waiting_id",
+    limit=SECTION_ROWS,
+    columns="workspace_id, at, intent_id, posted_id, waiting_id, wait_class",
 )
-_REVIEWS = (
+_REVIEWS = _newest(
     "SELECT a.workspace_id, a.created_at AS at, a.entity_id AS intent_id,"
-    " a.from_state, i.last_error"
+    " a.from_state, i.last_error, a.id AS row_id"
     " FROM audit_events a"
     " JOIN post_intents i ON i.workspace_id = a.workspace_id AND i.id = a.entity_id"
     " WHERE a.workspace_id = :ws AND a.to_state = 'review_required'"
-    "   AND a.created_at >= :since"
-    f" ORDER BY a.created_at LIMIT {SECTION_ROWS}"
+    "   AND a.created_at >= :since",
+    order="at, row_id",
+    limit=SECTION_ROWS,
+    columns="workspace_id, at, intent_id, from_state, last_error",
 )
 _OUTCOMES = (
     "SELECT i.workspace_id, i.state, count(*) AS count FROM post_intents i"

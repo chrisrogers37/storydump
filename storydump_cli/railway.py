@@ -19,7 +19,11 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any, Callable, Optional, Sequence
 
-from src.services.target.vocabulary import EXIT_RAILWAY_UNREACHABLE
+from src.services.target.vocabulary import (
+    EXIT_RAILWAY_UNREACHABLE,
+    RAILWAY_PROJECT_ID,
+    RAILWAY_PROJECT_NAME,
+)
 from storydump_cli.output import Failure
 
 #: The `railway` version the parsers were written against; the fixture
@@ -28,8 +32,8 @@ from storydump_cli.output import Failure
 TESTED_VERSION = "4.30.3"
 #: The repository's project on Railway. A link to any other project is refused
 #: before a deployment is read.
-PROJECT_NAME = "storydump"
-PROJECT_ID = "33d1ccca-353c-4236-8d39-0d8fd916f054"
+PROJECT_NAME = RAILWAY_PROJECT_NAME
+PROJECT_ID = RAILWAY_PROJECT_ID
 #: The services `main` deploys — the API and the worker — in display order.
 SERVICES: tuple[str, ...] = ("storydump", "worker")
 #: How many deployments per service a read lists.
@@ -49,7 +53,9 @@ ENVIRONMENT = "production"
 #: A deployment's terminal statuses, as Railway spells them: a SLEEPING
 #: deployment is a successful one asleep, a SKIPPED one had nothing to build.
 DONE_STATUSES: tuple[str, ...] = ("SUCCESS", "SLEEPING", "SKIPPED")
-FAILED_STATUSES: tuple[str, ...] = ("FAILED", "CRASHED")
+#: ... and a REMOVED one was taken down: waiting for it to succeed is waiting
+#: forever, so a watch reads it as that deployment failing.
+FAILED_STATUSES: tuple[str, ...] = ("FAILED", "CRASHED", "REMOVED")
 
 ProcessResult = tuple[int, str, str]
 RunProcess = Callable[[Sequence[str]], ProcessResult]
@@ -108,12 +114,16 @@ def first_line(value: Any) -> Optional[str]:
 def deployment_row(service: str, deployment: dict[str, Any]) -> dict[str, Any]:
     """One deployment as the CLI shows it: status, when, which commit."""
     meta = deployment.get("meta") if isinstance(deployment.get("meta"), dict) else {}
+    full = meta.get("commitHash")
     return {
         "id": deployment.get("id"),
         "service": service,
         "status": deployment.get("status"),
         "created_at": deployment.get("createdAt"),
-        "commit": short_hash(meta.get("commitHash")),
+        "commit": short_hash(full),
+        # the whole hash too: `--commit` is matched against it, so the 40
+        # characters a push prints match as well as the seven shown
+        "commit_hash": full if isinstance(full, str) and full else None,
         "branch": meta.get("branch"),
         "message": first_line(meta.get("commitMessage")),
     }

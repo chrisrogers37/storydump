@@ -9,6 +9,7 @@ here instead of at a CLI that prints a state it has never heard of.
 
 from __future__ import annotations
 
+import datetime as dt
 import re
 from pathlib import Path
 
@@ -138,30 +139,51 @@ class TestTheEnvelope:
             {"v": 2, "kind": "x", "data": {}, "error": None},
             {"v": 1, "kind": "", "data": {}, "error": None},
             {"v": 1, "kind": "x", "data": None, "error": None},  # neither
-            {  # both
+            {  # both (a documented reason, so ONLY the exclusivity rule refuses it)
                 "v": 1,
                 "kind": "x",
                 "data": {},
-                "error": {"code": 3, "reason": "r", "detail": "d", "fix": "f"},
+                "error": {
+                    "code": 3,
+                    "reason": "not_authorized",
+                    "detail": "d",
+                    "fix": "f",
+                },
             },
             {"v": 1, "kind": "x", "data": None, "error": {"code": 3}},
             {  # a success code on an error
                 "v": 1,
                 "kind": "x",
                 "data": None,
-                "error": {"code": 0, "reason": "r", "detail": "d", "fix": "f"},
+                "error": {
+                    "code": 0,
+                    "reason": "not_authorized",
+                    "detail": "d",
+                    "fix": "f",
+                },
             },
             {  # an undocumented code
                 "v": 1,
                 "kind": "x",
                 "data": None,
-                "error": {"code": 7, "reason": "r", "detail": "d", "fix": "f"},
+                "error": {
+                    "code": 7,
+                    "reason": "not_authorized",
+                    "detail": "d",
+                    "fix": "f",
+                },
             },
             {  # a non-string field
                 "v": 1,
                 "kind": "x",
                 "data": None,
                 "error": {"code": 3, "reason": None, "detail": "d", "fix": "f"},
+            },
+            {  # an undocumented reason
+                "v": 1,
+                "kind": "x",
+                "data": None,
+                "error": {"code": 3, "reason": "r", "detail": "d", "fix": "f"},
             },
         ],
     )
@@ -171,23 +193,17 @@ class TestTheEnvelope:
 
 
 class TestTheWindowGrammar:
-    NOW = __import__("datetime").datetime(
-        2026, 9, 16, 12, 0, 30, 123456, tzinfo=__import__("datetime").timezone.utc
-    )
+    NOW = dt.datetime(2026, 9, 16, 12, 0, 30, 123456, tzinfo=dt.timezone.utc)
 
     @pytest.mark.parametrize(
         "value, seconds",
         [("15m", 900), ("3h", 10800), ("2d", 172800), ("30d", 30 * 86400)],
     )
     def test_a_span_is_measured_from_now_without_microseconds(self, value, seconds):
-        import datetime as dt
-
         start = vocabulary.window_start(value, self.NOW)
         assert start == self.NOW.replace(microsecond=0) - dt.timedelta(seconds=seconds)
 
     def test_a_timestamp_with_any_zone_or_none_is_utc(self):
-        import datetime as dt
-
         want = dt.datetime(2026, 9, 15, 14, 50, tzinfo=dt.timezone.utc)
         for value in (
             "2026-09-15T14:50:00Z",
@@ -220,6 +236,165 @@ class TestTheWindowGrammar:
         with pytest.raises(ValueError) as caught:
             vocabulary.window_start(value, self.NOW)
         assert str(caught.value), value
+
+
+class TestTheWindowSlack:
+    """The CLI computes a span's start on ITS clock and the API judges it on
+    ITS OWN: a `30d` sent by a client one second behind, or a timestamp from
+    a clock one second ahead, is inside the grammar's slack — clamped to the
+    bound, never refused. Beyond the slack the bound holds."""
+
+    NOW = dt.datetime(2026, 9, 16, 12, 0, 30, 123456, tzinfo=dt.timezone.utc)
+
+    def test_a_widest_span_from_a_clock_slightly_behind_is_clamped(self):
+        anchor = self.NOW.replace(microsecond=0)
+        behind = (anchor - dt.timedelta(days=30, seconds=1)).isoformat()
+        assert vocabulary.window_start(behind, self.NOW) == anchor - dt.timedelta(
+            days=30
+        )
+
+    def test_a_timestamp_slightly_ahead_is_now(self):
+        anchor = self.NOW.replace(microsecond=0)
+        ahead = (anchor + dt.timedelta(seconds=2)).isoformat()
+        assert vocabulary.window_start(ahead, self.NOW) == anchor
+        same_second = (anchor + dt.timedelta(microseconds=500_000)).isoformat()
+        assert vocabulary.window_start(same_second, self.NOW) == anchor
+
+    def test_the_slack_is_bounded(self):
+        anchor = self.NOW.replace(microsecond=0)
+        with pytest.raises(ValueError):
+            vocabulary.window_start(
+                (anchor + dt.timedelta(minutes=10)).isoformat(), self.NOW
+            )
+        with pytest.raises(ValueError):
+            vocabulary.window_start(
+                (anchor - dt.timedelta(days=30, minutes=10)).isoformat(), self.NOW
+            )
+        with pytest.raises(ValueError):
+            vocabulary.window_start("31d", self.NOW)
+
+
+class TestTheClosedSetOfReasons:
+    """Every reason an envelope can carry is a member of one closed set — the
+    port's refusals and the CLI's own answers — so an agent can switch on it
+    and `check_envelope` refuses a reason nobody documented."""
+
+    def test_check_envelope_refuses_an_undocumented_reason(self):
+        document = vocabulary.error_envelope(
+            "whoami", code=vocabulary.EXIT_USAGE, reason="bogus", detail="x", fix="y"
+        )
+        with pytest.raises(ValueError):
+            vocabulary.check_envelope(document)
+
+    def test_every_sentence_and_fix_names_a_documented_reason(self):
+        from storydump_cli.main import FIXES
+
+        assert set(vocabulary.REASON_SENTENCES) <= set(vocabulary.CLI_REASONS)
+        assert set(FIXES) <= set(vocabulary.CLI_REASONS)
+
+    def test_the_clis_own_reasons_are_documented(self):
+        import re
+        from pathlib import Path
+
+        package = Path(__file__).resolve().parents[4] / "storydump_cli"
+        raised = set()
+        for path in package.rglob("*.py"):
+            raised |= set(re.findall(r'reason="([a-z_]+)"', path.read_text()))
+        assert raised <= set(vocabulary.CLI_REASONS), sorted(
+            raised - set(vocabulary.CLI_REASONS)
+        )
+
+
+class TestOneSpellingOfTheDeployment:
+    """The names the API, the worker and the CLI read from the environment,
+    and the deployment's identities, are spelled ONCE — in this module — and
+    read from it by reference. A literal elsewhere is a second spelling that
+    drifts (the API read `TARGET_TELEGRAM_*` as literals in seven places while
+    the vocabulary's constants had no API reader at all)."""
+
+    ROOT = __import__("pathlib").Path(__file__).resolve().parents[4]
+    #: Variables spelled in their own module by design: not the webhook's.
+    OWN_SPELLINGS = {
+        "src/channels/telegram_webhook_registration.py": {
+            "TARGET_TELEGRAM_WEBHOOK_AUTOREGISTER"
+        },
+        "src/channels/telegram_transport.py": {"TARGET_TELEGRAM_API_BASE"},
+    }
+
+    def test_no_telegram_variable_is_read_by_a_literal_outside_the_vocabulary(self):
+        import re
+
+        offenders = []
+        for path in (self.ROOT / "src").rglob("*.py"):
+            rel = str(path.relative_to(self.ROOT))
+            if rel == "src/services/target/vocabulary.py":
+                continue
+            for match in re.finditer(r'"(TARGET_TELEGRAM_[A-Z_]+)"', path.read_text()):
+                if match.group(1) not in self.OWN_SPELLINGS.get(rel, set()):
+                    offenders.append(f"{rel}: {match.group(1)}")
+        assert offenders == [], offenders
+
+    def test_the_settings_fields_are_the_vocabularys_names(self):
+        from src.config.settings import Settings
+
+        assert vocabulary.TELEGRAM_SECRET_VAR in Settings.model_fields
+        assert vocabulary.TELEGRAM_BOT_VAR in Settings.model_fields
+
+    def test_the_railway_project_and_the_api_host_are_spelled_once(self):
+        from storydump_cli import config, railway
+
+        assert railway.PROJECT_ID is vocabulary.RAILWAY_PROJECT_ID
+        assert railway.PROJECT_NAME is vocabulary.RAILWAY_PROJECT_NAME
+        assert config.DEFAULT_API_URL is vocabulary.API_URL
+        assert vocabulary.DEFAULT_WEBHOOK_URL.startswith(vocabulary.API_URL)
+        twice = [
+            str(p.relative_to(self.ROOT))
+            for p in list((self.ROOT / "src").rglob("*.py"))
+            + list((self.ROOT / "scripts").rglob("*.py"))
+            + list((self.ROOT / "storydump_cli").rglob("*.py"))
+            if p.name != "vocabulary.py"
+            and vocabulary.RAILWAY_PROJECT_ID in p.read_text()
+        ]
+        assert twice == [], twice
+
+
+class TestTheBoundsEveryAdapterEnforces:
+    def test_the_token_bounds_are_read_by_reference(self):
+        """`is` cannot tell a copied small integer from a reference (CPython
+        interns them), so the pin reads the SOURCE: the assignment names the
+        vocabulary's constant, and no literal number stands in for it."""
+        from src.services.target import service_tokens
+
+        source = Path(service_tokens.__file__).read_text()
+        assert "NAME_MAX = vocabulary.TOKEN_NAME_MAX" in source
+        assert "MAX_EXPIRY_DAYS = vocabulary.TOKEN_EXPIRY_DAYS_MAX" in source
+        assert "DEFAULT_EXPIRY_DAYS = vocabulary.TOKEN_EXPIRY_DAYS_DEFAULT" in source
+        assert service_tokens.NAME_MAX == vocabulary.TOKEN_NAME_MAX
+        assert vocabulary.TOKEN_EXPIRY_DAYS_MIN == 1
+
+    def test_the_floating_limits_are_read_by_reference(self):
+        from src.services.target import ops_views
+
+        source = Path(ops_views.__file__).read_text()
+        assert "import FLOATING_LIMIT, FLOATING_LIMIT_MAX" in source
+        assert not re.search(r"^FLOATING_LIMIT(?:_MAX)? = ", source, re.M), (
+            "a literal limit beside the vocabulary's"
+        )
+        assert ops_views.FLOATING_LIMIT == vocabulary.FLOATING_LIMIT
+
+
+class TestTheAnswersAddedByTheAudit:
+    def test_a_rate_limited_answer_is_unreachable_not_refused(self):
+        assert (
+            vocabulary.exit_code_for(429, "pool_saturated")
+            == vocabulary.EXIT_API_UNREACHABLE
+        )
+        assert vocabulary.exit_code_for(429) == vocabulary.EXIT_API_UNREACHABLE
+
+    def test_the_role_floor_and_the_rate_limit_have_sentences(self):
+        for reason in ("insufficient_role", "pool_saturated"):
+            sentence = vocabulary.REASON_SENTENCES[reason]
+            assert sentence and "login" not in sentence, reason
 
 
 class TestTheWriteSentences:

@@ -253,6 +253,29 @@ class TestStatus:
         assert all(set(c) == {"check", "state", "detail"} for c in checks.values())
         assert checks["api_door"]["state"] == "ok"
 
+    def test_a_registered_url_that_is_not_the_expected_one_is_a_failed_check(
+        self, tmp_path, http
+    ):
+        """The bot pointing at another host is the one misregistration a
+        status check exists to catch — a failed `url` check, exit 4."""
+        http.answers["getWebhookInfo"][1]["result"]["url"] = (
+            "https://old-host.example/webhooks/telegram"
+        )
+        code, text, result = _run(tmp_path, ENV, "status", json_mode=True)
+        assert code == EXIT_API_UNREACHABLE, text
+        document = one_envelope(result)
+        checks = {c["check"]: c for c in document["data"]["checks"]}
+        assert checks["url"]["state"] == "failed"
+        assert URL in checks["url"]["detail"]
+
+    def test_json_before_the_group_is_honoured(self, tmp_path, http):
+        """`storydump --json webhook status` and `storydump webhook --json status`
+        are the same command — the package promises the flag in any position."""
+        rt = runtime(tmp_path, Api({}), env=dict(ENV))
+        result = run(rt, "webhook", "--json", "status")
+        assert result.exit_code == EXIT_OK, result.output
+        assert one_envelope(result)["kind"] == "webhook"
+
     def test_a_403_from_the_api_means_the_secret_does_not_match(self, tmp_path, http):
         http.answers["telegram"] = (403, {"detail": "forbidden"})
         code, text, _ = _run(tmp_path, ENV, "status")

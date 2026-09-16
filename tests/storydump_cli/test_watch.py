@@ -18,6 +18,7 @@ import httpx
 import pytest
 
 from src.services.target.vocabulary import (
+    EXIT_API_UNREACHABLE,
     EXIT_NOT_AUTHORIZED,
     EXIT_OK,
     EXIT_WATCH_FAILED,
@@ -287,6 +288,135 @@ def test_a_failed_group_that_grows_is_a_change_that_ends_the_watch(tmp_path):
     ]
 
 
+def test_a_failed_group_that_shrinks_is_a_change_that_does_not_end_the_watch(tmp_path):
+    """The runbook's rule: exit 6 when a failed group APPEARS or GROWS. Two
+    failed jobs becoming one is a repair in progress — still printed, never
+    the failure."""
+    api = script(
+        "jobs",
+        [
+            [jobs_row(WS_A, state="failed", count=2)],
+            [jobs_row(WS_A, state="failed", count=1)],
+            [jobs_row(WS_A, state="failed", count=1)],
+        ],
+    )
+    sleeper = Sleeper(interrupt_after=3)
+    result = run(
+        watch_runtime(tmp_path, api, sleeper), "jobs", "--watch", "--workspace", WS_A
+    )
+    assert result.exit_code == EXIT_OK, result.output
+    assert [line.split()[1] for line in result.stdout.splitlines()] == [
+        "added",
+        "changed",
+    ]
+    api = script(
+        "outbox",
+        [
+            [outbox_row(WS_A, state="failed", count=3)],
+            [outbox_row(WS_A, state="failed", count=2)],
+        ],
+    )
+    result = run(
+        watch_runtime(tmp_path, api, Sleeper(interrupt_after=2)),
+        "outbox",
+        "--watch",
+        "--workspace",
+        WS_A,
+    )
+    assert result.exit_code == EXIT_OK, result.output
+
+
+def test_a_retry_that_fails_again_is_a_new_failure_but_a_shuffled_failed_row_is_not(
+    tmp_path,
+):
+    """The failure `floating --watch` exits on is a job BECOMING failed, or a
+    failed job failing AGAIN (its attempts counted up) — the ladder's common
+    shape between two polls. A failed row that merely changes otherwise (its
+    run time moved) is the same failure, already printed at the baseline."""
+    api = script(
+        "floating",
+        [
+            [floating_row(WS_A, job_state="failed", job_attempts=1)],
+            [floating_row(WS_A, job_state="failed", job_attempts=2)],
+        ],
+    )
+    result = run(
+        watch_runtime(tmp_path, api, Sleeper()),
+        "floating",
+        "--watch",
+        "--workspace",
+        WS_A,
+    )
+    assert result.exit_code == EXIT_WATCH_FAILED, result.output
+    api = script(
+        "floating",
+        [
+            [floating_row(WS_A, job_state="failed", job_attempts=1)],
+            [
+                floating_row(
+                    WS_A,
+                    job_state="failed",
+                    job_attempts=1,
+                    job_run_at="2026-09-15T15:30:00Z",
+                )
+            ],
+            [
+                floating_row(
+                    WS_A,
+                    job_state="failed",
+                    job_attempts=1,
+                    job_run_at="2026-09-15T15:30:00Z",
+                )
+            ],
+        ],
+    )
+    result = run(
+        watch_runtime(tmp_path, api, Sleeper(interrupt_after=3)),
+        "floating",
+        "--watch",
+        "--workspace",
+        WS_A,
+    )
+    assert result.exit_code == EXIT_OK, result.output
+    # and a row whose job BECOMES failed is
+    api = script(
+        "floating",
+        [
+            [floating_row(WS_A, job_state="ready")],
+            [floating_row(WS_A, job_state="failed")],
+        ],
+    )
+    result = run(
+        watch_runtime(tmp_path, api, Sleeper()),
+        "floating",
+        "--watch",
+        "--workspace",
+        WS_A,
+    )
+    assert result.exit_code == EXIT_WATCH_FAILED, result.output
+
+
+def test_a_floating_story_whose_job_recovers_is_not_the_failure(tmp_path):
+    """A floating row changing from a failed job to a ready one is the retry
+    landing; only a row whose job BECOMES failed ends the watch."""
+    api = script(
+        "floating",
+        [
+            [floating_row(WS_A, job_state="failed")],
+            [floating_row(WS_A, job_state="ready")],
+            [floating_row(WS_A, job_state="ready")],
+        ],
+    )
+    result = run(
+        watch_runtime(tmp_path, api, Sleeper(interrupt_after=3)),
+        "floating",
+        "--watch",
+        "--workspace",
+        WS_A,
+    )
+    assert result.exit_code == EXIT_OK, result.output
+
+
 def test_burst_keys_tell_two_permits_and_two_siblings_apart():
     key = WATCHED["burst"].key
     first = burst_row(WS_A, "permit", generation=1, state="failed", url_variant=0)
@@ -324,6 +454,25 @@ def test_burst_watch_ends_when_no_row_is_mid_flight(tmp_path):
     assert kinds == ["added", "added", "changed", "added", "removed"], (
         "the permit changed; in the census, posted appeared and publishing went"
     )
+
+
+def test_burst_watch_keeps_watching_a_lost_answer(tmp_path):
+    """`publishing_ambiguous` is a story whose publish answer was lost — still
+    on its way as far as the ledger knows. Ending the watch on it would exit 0
+    on exactly the case the post-deploy read exists to catch."""
+    ambiguous = burst_row(
+        WS_A, "outcome", at=None, intent_id=None, state="publishing_ambiguous", count=1
+    )
+    posted = burst_row(
+        WS_A, "outcome", at=None, intent_id=None, state="posted", count=1
+    )
+    api = script("burst", [[ambiguous], [ambiguous], [posted]])
+    sleeper = Sleeper()
+    result = run(
+        watch_runtime(tmp_path, api, sleeper), "burst", "--watch", "--workspace", WS_A
+    )
+    assert result.exit_code == EXIT_OK, result.output
+    assert len(sleeper.calls) == 2, "two reads with the lost answer unresolved"
 
 
 def test_burst_watch_with_nothing_in_flight_ends_after_one_read(tmp_path):
@@ -507,6 +656,67 @@ def test_an_api_error_mid_watch_is_the_usual_answer(tmp_path):
     documents = envelopes(result)
     assert len(documents) == 2
     assert documents[1]["error"]["reason"] == "not_a_member"
+
+
+def test_a_transient_failure_mid_watch_is_retried_before_it_ends_the_watch(tmp_path):
+    """A 503 (the pool saturated, a deploy in flight) or a dropped connection
+    is not the answer a watch was waiting for: it re-reads up to three times
+    in a row before giving the usual exit 4. A definitive answer (a 404, a
+    403) still ends the watch at once — pinned above."""
+    row = floating_row(WS_A)
+    api = Script(reads_api().routes)
+    api.routes[("GET", path("floating", WS_A))] = [
+        view("floating", WS_A, [row]),
+        (503, {"detail": "busy — try again", "reason": "pool_saturated"}),
+        httpx.ConnectError("dropped"),
+        view("floating", WS_A, [floating_row(WS_A, job_state="leased")]),
+        view("floating", WS_A, []),
+        view("floating", WS_A, []),
+    ]
+    sleeper = Sleeper()
+    result = run(
+        watch_runtime(tmp_path, api, sleeper),
+        "--json",
+        "floating",
+        "--watch",
+        "--workspace",
+        WS_A,
+    )
+    assert result.exit_code == EXIT_OK, result.output
+    documents = envelopes(result)
+    assert [d["error"] for d in documents] == [None] * len(documents), (
+        "a retried failure prints nothing"
+    )
+    assert changes_of(documents[1], WS_A) == [
+        ("changed", floating_row(WS_A, job_state="leased"))
+    ]
+    assert len(sleeper.calls) == 5, "it slept through the two failed reads"
+
+
+def test_a_failure_that_persists_ends_the_watch_with_the_usual_answer(tmp_path):
+    api = script(
+        "floating",
+        [
+            [floating_row(WS_A)],
+            (503, {"detail": "busy", "reason": "pool_saturated"}),
+            (503, {"detail": "busy", "reason": "pool_saturated"}),
+            (503, {"detail": "busy", "reason": "pool_saturated"}),
+            (503, {"detail": "busy", "reason": "pool_saturated"}),
+        ],
+    )
+    result = run(
+        watch_runtime(tmp_path, api, Sleeper()),
+        "--json",
+        "floating",
+        "--watch",
+        "--workspace",
+        WS_A,
+    )
+    assert result.exit_code == EXIT_API_UNREACHABLE, result.output
+    documents = envelopes(result)
+    # the API's own reason rides the answer: the pool, not "unreachable"
+    assert documents[-1]["error"]["reason"] == "pool_saturated"
+    assert documents[-1]["error"]["code"] == EXIT_API_UNREACHABLE
 
 
 def test_watch_lines_are_redacted_in_both_modes(tmp_path):

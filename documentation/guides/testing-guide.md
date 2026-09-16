@@ -117,11 +117,8 @@ Key design decisions:
 ```
 tests/
 ├── conftest.py              # Pytest configuration & fixtures
-├── cli/                     # CLI command tests (4 files)
-│   ├── test_media_commands.py
-│   ├── test_queue_commands.py
-│   ├── test_user_commands.py
-│   └── test_health_commands.py
+├── storydump_cli/           # the `storydump` console, against a scripted API (no network)
+├── scripts/                 # the DB gates: the views, tokens and the CLI against the replayed schema
 ├── src/
 │   ├── repositories/        # Repository layer tests (8 files)
 │   │   ├── test_user_repository.py
@@ -332,8 +329,8 @@ services:
       --health-cmd pg_isready
       --health-interval 10s
 
-- name: Run tests
-  run: make test
+- name: Run tests with coverage
+  run: pytest tests/ -v --cov=src --cov=storydump_cli   # against a Postgres service, REQUIRE_TEST_DATABASE=1
 ```
 
 ## Troubleshooting

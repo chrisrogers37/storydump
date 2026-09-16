@@ -32,10 +32,16 @@ from src.services.target.vocabulary import (  # noqa: E402
     max_connections_from,
 )
 from src.services.target.vocabulary import WEBHOOK_URL_VAR as URL_VAR  # noqa: E402
+from src.services.target.vocabulary import TELEGRAM_BOT_VAR as BOT_VAR  # noqa: E402
+from src.services.target.vocabulary import TELEGRAM_SECRET_VAR as SECRET_VAR  # noqa: E402
+from src.services.target.vocabulary import TELEGRAM_TOKEN_VAR as TOKEN_VAR  # noqa: E402
 
 __all__ = [
     "ALLOWED_UPDATES",
     "AUTOREGISTER_VAR",
+    "BOT_VAR",
+    "SECRET_VAR",
+    "TOKEN_VAR",
     "DEFAULT_MAX_CONNECTIONS",
     "DEFAULT_WEBHOOK_URL",
     "ENVIRONMENT_VAR",

@@ -409,8 +409,8 @@ async def _register_webhook(app: FastAPI, env: Mapping[str, str]) -> None:
     """
     from src.channels import telegram_webhook_registration as reg
 
-    token = env.get("TARGET_TELEGRAM_BOT_TOKEN")
-    secret = env.get("TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN")
+    token = env.get(reg.TOKEN_VAR)
+    secret = env.get(reg.SECRET_VAR)
     if not reg.autoregister_enabled(
         env.get(reg.AUTOREGISTER_VAR), environment=env.get(reg.ENVIRONMENT_VAR)
     ):
@@ -443,7 +443,7 @@ async def _register_webhook(app: FastAPI, env: Mapping[str, str]) -> None:
             transport,
             url=env.get(reg.URL_VAR) or reg.DEFAULT_WEBHOOK_URL,
             secret=secret,
-            expected_bot=env.get("TARGET_TELEGRAM_BOT_USERNAME"),
+            expected_bot=env.get(reg.BOT_VAR),
             max_connections=max_connections,
         )
     except reg.BadMaxConnections as exc:
@@ -471,7 +471,9 @@ async def _sample_webhook_live(app: FastAPI, env: Mapping[str, str]) -> None:
     that tells "Telegram is not delivering" from "our route is failing": the
     former shows as a growing backlog with no error, the latter as
     `last_error_message` naming our response code."""
-    if not env.get("TARGET_TELEGRAM_BOT_TOKEN"):
+    from src.channels import telegram_webhook_registration as reg
+
+    if not env.get(reg.TOKEN_VAR):
         return
     transport = _telegram_transport(env)
     try:
@@ -528,7 +530,9 @@ def _telegram_transport(env: Mapping[str, str]):
     acknowledgement and a tap's answer (the card's edit is the outbox's) — or None
     without the bot token (the same variable the worker sends with, so the API
     never holds a second credential for the one bot)."""
-    token = env.get("TARGET_TELEGRAM_BOT_TOKEN")
+    from src.channels import telegram_webhook_registration as reg
+
+    token = env.get(reg.TOKEN_VAR)
     if not token:
         return None
     from src.channels.telegram_transport import transport_from_env

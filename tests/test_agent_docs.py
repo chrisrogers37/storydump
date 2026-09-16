@@ -42,15 +42,29 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 DOCS = ("CLAUDE.md", "AGENTS.md")
+#: The other files an agent is handed as context that carry their own copy of
+#: the never-run list. A copy that omits an entry is a guard with a hole in it
+#: (both did — `resolve <story> retry` and `webhook register` were missing),
+#: so each must name every `storydump` entry of the canonical block.
+SATELLITES = (".claude/QUICK_REFERENCE.md", ".claude/PROJECT_CONTEXT.md")
+#: Where a never-run list may live. A new file that spells "never run" over
+#: `storydump` invocations anywhere else is a copy nobody pins.
+_NEVER_RUN_WORDS = re.compile(r"never\s+(?:run|suggest running)", re.I)
+_UNPINNED_ROOTS = (".claude", "documentation/operations", "documentation/guides")
 
 #: `storydump [--global options] <verb> [<sub>]` inside code: a verb is Click's
 #: convention (lowercase, hyphens); a placeholder (`<story>`) or a comment ends it,
 #: and a global option before the verb (`--json`, `--api URL`) is stepped over.
 _INVOCATION = re.compile(
     r"(?<![\w-])storydump(?:\s+--?[\w-]+(?:[= ]\S+)?)*\s+([a-z][a-z0-9-]*)"
-    r"(?:\s+([a-z][a-z0-9-]*))?"
+    r"(?:\s+<[^>\n]+>)?(?:\s+([a-z][a-z0-9-]*))?"
 )
 _FENCE = re.compile(r"(?:```|~~~)[^\n]*\n(.*?)(?:```|~~~)", re.S)
+#: A word after a placeholder (`storydump story <id> shows`) is prose, not a
+#: subcommand; a group's subcommand never follows a placeholder.
+_AFTER_PLACEHOLDER = re.compile(
+    r"storydump\s+([a-z][a-z0-9-]*)\s+<[^>\n]+>\s+([a-z][a-z0-9-]*)"
+)
 _SPAN = re.compile(r"`([^`\n]+)`")
 
 
@@ -107,11 +121,19 @@ def test_every_command_the_doc_names_actually_exists(doc):
         f"{doc} names no storydump verbs in code — the regex or the doc changed"
     )
     registry = _registry()
+    prose = {
+        (v, s) for code in _code(_doc(doc)) for v, s in _AFTER_PLACEHOLDER.findall(code)
+    }
     ghosts = []
     for verb, sub in sorted(named, key=str):
         if verb not in registry:
             ghosts.append(f"storydump {verb}")
-        elif sub and registry[verb] is not None and sub not in registry[verb]:
+        elif (
+            sub
+            and registry[verb] is not None
+            and sub not in registry[verb]
+            and (verb, sub) not in prose
+        ):
             ghosts.append(f"storydump {verb} {sub}")
     assert not ghosts, (
         f"{doc} names storydump command(s) that do not exist: {ghosts}."
@@ -157,3 +179,94 @@ def test_a_never_run_entry_under_a_group_names_the_subcommand():
                 f"{line!r} forbids a whole group; name the destructive"
                 f" subcommand ({', '.join(sorted(registry[verb]))})"
             )
+
+
+def _canonical_entries() -> set[tuple[str, str | None]]:
+    """The canonical block's `storydump` entries as (verb, subcommand)."""
+    entries = set()
+    for line in _never_run_block(_doc("AGENTS.md")):
+        for verb, sub in _INVOCATION.findall(line):
+            entries.add((verb, sub or None))
+    return entries
+
+
+_NEVER_BULLETS = re.compile(r"\*\*NEVER[^\n]*\n((?:- .*\n)+)")
+
+
+def _never_bullets(text: str) -> str:
+    """The satellite's own never-run list: the bullet block under its
+    `**NEVER …**` line, and nothing else — a command named in its SAFE list
+    or its prose must not count as forbidden."""
+    m = _NEVER_BULLETS.search(text)
+    assert m, "no '**NEVER …**' bullet block found — the satellite's list moved"
+    return m.group(1)
+
+
+def _forbidden_by(text: str) -> set[tuple[str, str | None]]:
+    """The commands a satellite forbids: those in its never-run bullets."""
+    return _named_invocations(_never_bullets(text))
+
+
+def test_a_command_named_only_in_a_safe_list_does_not_count():
+    """The scan reads the never-run bullets, not the whole page: a satellite
+    that lists `webhook register` as SAFE and omits it from NEVER is
+    incomplete, and a whole-page scan would wave it through."""
+    satellite = (
+        "**NEVER run these commands**\n"
+        "- `storydump approve <story>`\n"
+        "\n"
+        "**SAFE commands**\n"
+        "- `storydump webhook register` / `storydump health`\n"
+    )
+    forbidden = _forbidden_by(satellite)
+    assert ("approve", None) in forbidden
+    assert ("webhook", "register") not in forbidden
+    assert ("health", None) not in forbidden
+
+
+@pytest.mark.parametrize("doc", SATELLITES)
+def test_every_satellite_copy_of_the_list_is_complete(doc):
+    """`.claude/*` context files repeat the list in their own words; each must
+    name every destructive `storydump` command the canonical block names —
+    IN its never-run bullets, not anywhere on the page."""
+    named = _forbidden_by(_doc(doc))
+    missing = sorted(
+        f"storydump {verb}" + (f" {sub}" if sub else "")
+        for verb, sub in _canonical_entries()
+        if (verb, sub) not in named
+    )
+    assert not missing, (
+        f"{doc}'s never-run list omits {missing} — an agent reading only that"
+        " file is not told those commands are destructive"
+    )
+
+
+@pytest.mark.parametrize("doc", SATELLITES)
+def test_every_satellite_names_only_real_commands(doc):
+    registry = _registry()
+    ghosts = [
+        f"storydump {verb}" + (f" {sub}" if sub else "")
+        for verb, sub in sorted(_named_invocations(_doc(doc)), key=str)
+        if verb not in registry
+        or (sub and registry[verb] is not None and sub not in registry[verb])
+    ]
+    assert not ghosts, f"{doc} names storydump command(s) that do not exist: {ghosts}"
+
+
+def test_no_other_file_carries_an_unpinned_never_run_list():
+    """A never-run list that this module does not check is a list that will
+    drift. Any `.md` under the agent-context and runbook roots that says
+    "never run" over `storydump` invocations must be one of DOCS or SATELLITES."""
+    pinned = {ROOT / d for d in DOCS + SATELLITES}
+    strays = []
+    for root in _UNPINNED_ROOTS:
+        for path in (ROOT / root).rglob("*.md"):
+            if path in pinned or "archive" in path.parts:
+                continue
+            text = path.read_text()
+            if _NEVER_RUN_WORDS.search(text) and _named_invocations(text):
+                strays.append(str(path.relative_to(ROOT)))
+    assert not strays, (
+        f"{strays} carry a never-run list over storydump commands that nothing"
+        " pins — add them to SATELLITES or point them at CLAUDE.md"
+    )
