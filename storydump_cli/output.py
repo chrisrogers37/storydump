@@ -28,10 +28,16 @@ from rich.console import Console
 from rich.padding import Padding
 from rich.table import Table
 
+from src.services.target.vocabulary import write_sentence
+
 #: The three secret shapes the spec names (§6, redaction at the client).
 TOKEN_PATTERN = re.compile(r"sdt_[A-Za-z0-9_-]{8,}")
 DATABASE_URL_PATTERN = re.compile(r"postgres(?:ql)?://\S+")
 WEBHOOK_SECRET_PATTERN = re.compile(r"(secret_token|token)=\S+")
+#: A Telegram bot token (`<bot id>:<35 chars>`), which a Bot API URL carries.
+# ... not preceded by a word character or a hyphen: the digit run inside a
+# uuid (`…-0d8fd9165054:5a5a…` in a sync key) is not a token.
+TELEGRAM_TOKEN_PATTERN = re.compile(r"(?<![\w-])(?:bot)?\d{5,}:[A-Za-z0-9_-]{20,}\b")
 
 #: Wide enough that a table of ids never folds when the output is a pipe or
 #: a test; a real terminal keeps its own width.
@@ -43,6 +49,7 @@ def redact(text: str) -> str:
     text = TOKEN_PATTERN.sub("sdt_…", text)
     text = DATABASE_URL_PATTERN.sub("postgres://<redacted>", text)
     text = WEBHOOK_SECRET_PATTERN.sub(r"\1=<redacted>", text)
+    text = TELEGRAM_TOKEN_PATTERN.sub("<bot token>", text)
     return text
 
 
@@ -564,7 +571,167 @@ def _render_posture(console: Console, data: Any) -> None:
     _section(console, "doors", posture.get("doors"), DOOR_COLUMNS, indent=0)
 
 
+# --- the write verbs and the environment (phase 03) ---------------------------
+
+
+def _render_write(console: Console, data: Any) -> None:
+    """One line: the CLI's sentence for the port's answer, the subject, and
+    the state the story is now in when the port said."""
+    write = data if isinstance(data, dict) else {}
+    args = write.get("args") if isinstance(write.get("args"), dict) else {}
+    result = write.get("result") if isinstance(write.get("result"), dict) else {}
+    outcome = str(write.get("outcome"))
+    line = write_sentence(str(write.get("command")), outcome)
+    if args.get("intent_id"):
+        line += f" — story {args['intent_id']}"
+    elif args.get("source_id"):
+        line += f" — source {args['source_id']}"
+    state = result.get("state") or result.get("to_state")
+    if isinstance(state, str) and outcome != "replayed":
+        line += f" (now {state})"
+    console.print(line)
+
+
+def _facts(payload: Any, *keys: str) -> str:
+    source = payload if isinstance(payload, dict) else {}
+    return " · ".join(
+        f"{key} {_cell(source.get(key))}" for key in keys if key in source
+    )
+
+
+def _render_health(console: Console, data: Any) -> None:
+    health = data if isinstance(data, dict) else {}
+    api = health.get("api") if isinstance(health.get("api"), dict) else {}
+    scheduling = (
+        health.get("scheduling") if isinstance(health.get("scheduling"), dict) else {}
+    )
+    posting = health.get("posting") if isinstance(health.get("posting"), dict) else {}
+    verdicts = (
+        health.get("verdicts") if isinstance(health.get("verdicts"), dict) else {}
+    )
+
+    def _verdict(name: str) -> str:
+        entry = verdicts.get(name) if isinstance(verdicts.get(name), dict) else {}
+        return _text(entry.get("state"), "reported")
+
+    console.print("health ok" if health.get("ok") else "health NOT OK")
+    table = _table("surface", "verdict", "facts")
+    pool = api.get("pool") if isinstance(api.get("pool"), dict) else {}
+    webhook = api.get("webhook") if isinstance(api.get("webhook"), dict) else {}
+    live = api.get("webhook_live") if isinstance(api.get("webhook_live"), dict) else {}
+    table.add_row(
+        "api",
+        _verdict("api"),
+        " · ".join(
+            part
+            for part in (
+                _facts(api, "version", "db_role", "uptime_seconds", "ingress_workers"),
+                _facts(pool, "size", "in_use", "peak"),
+                _facts(api.get("taps"), "executed", "replayed", "answer_failed"),
+                f"webhook {_cell(webhook.get('bot'))} {_cell(webhook.get('ok'))}"
+                if webhook
+                else "",
+                f"live pending {_cell(live.get('pending_update_count'))}"
+                if live
+                else "",
+            )
+            if part
+        ),
+    )
+    worker = (
+        scheduling.get("worker") if isinstance(scheduling.get("worker"), dict) else {}
+    )
+    table.add_row(
+        "scheduling",
+        _verdict("scheduling"),
+        " · ".join(
+            part
+            for part in (
+                _facts(scheduling, "stalled", "accounts_active", "max_lag_seconds"),
+                f"worker {_facts(worker, *sorted(worker))}" if worker else "",
+                f"backpressure {_cell(scheduling.get('backpressure'))}"
+                if "backpressure" in scheduling
+                else "",
+            )
+            if part
+        ),
+    )
+    table.add_row(
+        "posting",
+        _verdict("posting"),
+        _facts(posting, *[k for k in posting if k != "status"]),
+    )
+    console.print(table)
+
+
+DEPLOY_COLUMNS: tuple[Column, ...] = (
+    ("id", "id"),
+    ("status", "status"),
+    ("created at", "created_at"),
+    ("commit", "commit"),
+    ("branch", "branch"),
+    ("message", "message"),
+)
+
+
+def _render_deploys(console: Console, data: Any) -> None:
+    deploys = data if isinstance(data, dict) else {}
+    project = deploys.get("project") if isinstance(deploys.get("project"), dict) else {}
+    console.print(
+        f"railway {_text(deploys.get('railway_version'), '?')}"
+        f"  project {_text(project.get('name'), '?')}"
+        f"  environment {_text(deploys.get('environment'), '?')}"
+    )
+    for entry in _dicts(deploys.get("services")):
+        console.print(f"service {_text(entry.get('service'), '?')}")
+        rows = _dicts(entry.get("rows"))
+        if rows:
+            console.print(_indented(_rows_table(rows, DEPLOY_COLUMNS), 2))
+        else:
+            console.print("  no deployments")
+
+
+def _render_webhook(console: Console, data: Any) -> None:
+    report = data if isinstance(data, dict) else {}
+    for check in _dicts(report.get("checks")):
+        console.print(
+            f"{_text(check.get('check'), '?')}: {_text(check.get('detail'), '')}"
+        )
+    console.print(
+        f"webhook {_text(report.get('action'), '?')}:"
+        f" {'ok' if report.get('ok') else 'FAILED'}"
+    )
+
+
+def _render_doctor(console: Console, data: Any) -> None:
+    doctor = data if isinstance(data, dict) else {}
+    table = _table("check", "state", "value", "fix")
+    for check in _dicts(doctor.get("checks")):
+        state = _text(check.get("state"), "?")
+        table.add_row(
+            _text(check.get("check"), "?"),
+            state,
+            _text(check.get("value"), "-"),
+            _text(check.get("fix"), "") if state != "ok" else "",
+        )
+    console.print(table)
+    console.print("doctor: ok" if doctor.get("ok") else "doctor: something is wrong")
+
+
 RENDERERS: Mapping[str, Callable[[Console, Any], None]] = {
+    "approve": _render_write,
+    "skip": _render_write,
+    "reject": _render_write,
+    "posted": _render_write,
+    "cancel": _render_write,
+    "resolve": _render_write,
+    "pause": _render_write,
+    "resume": _render_write,
+    "sync": _render_write,
+    "health": _render_health,
+    "deploys": _render_deploys,
+    "webhook": _render_webhook,
+    "doctor": _render_doctor,
     "login": _render_login,
     "whoami": _render_whoami,
     "tokens": _render_tokens,

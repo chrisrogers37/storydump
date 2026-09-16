@@ -1,7 +1,7 @@
 ---
 title: "CLI v2 — phase 03: the command verbs, health, deploys, webhook, doctor, and the legacy CLI's deletion (PR 3)"
 type: plan
-status: draft
+status: completed
 owner: chris
 created: 2026-09-15
 tags: [plan, cli, api, devx, legacy-retirement]
@@ -122,16 +122,22 @@ Written red first; one named mutation per behaviour in `tests/mutations/cli_v2_0
 
 ## Verification Checklist
 
-- [ ] `storydump skip <story>` with a person-bound `operator` token skips a real story; the card
-      reads "⏭️ Skipped by <you>"; the intent's audit row reads `channel = 'cli'`; the
-      `cli_command` row names the token and the same `external_ref`; running it again prints
-      "already done" and exits 0.
-- [ ] `storydump deploys --watch` follows a real deploy to both services live.
-- [ ] `storydump doctor` on a fresh clone reports the missing token and the missing Railway login
-      as `missing` with their fixes, and the storage backend in use.
-- [ ] `storydump-cli` is not on `PATH` after `pip install -e '.[cli]'`; `cli/` is absent;
-      `grep -r storydump-cli` outside the CHANGELOG is empty; `CLAUDE.md`, `AGENTS.md` and
-      `tests/test_agent_docs.py` agree; CI green.
+- [x] `storydump skip <story>` with a person-bound `operator` token skips a real story; the
+      intent's audit row reads `channel = 'cli'`; the `cli_command` row names the token and the
+      same `external_ref`; running it again prints "already done" and exits 0 — the gate
+      `tests/scripts/test_cli_writes_gate.py` and the live sample (`RUN_LOG.md` §5). The card's
+      "⏭️ Skipped by <you>" on a bound Telegram group and the run against production are the
+      owner's (queued, §7).
+- [ ] `storydump deploys --watch` follows a real deploy to both services live — `deploys` read
+      the real production deployments live (§5); the watch of a real deploy is run at PR 3's own
+      merge (`--commit <sha>`) and recorded in §5, else queued (§7).
+- [x] `storydump doctor` reports the missing token as `missing` with its fix, and the storage
+      backend in use — run from a throwaway venv with no token (§5); the missing Railway login
+      is `missing` by unit test (this machine is logged in).
+- [x] `storydump-cli` is not on `PATH` after `pip install -e '.[cli]'` (the throwaway venv, §5);
+      `cli/` is absent; `grep -r storydump-cli` is empty outside the history files
+      (`tests/test_legacy_cli_gone.py`); `CLAUDE.md`, `AGENTS.md` and `tests/test_agent_docs.py`
+      agree; CI green on the PR.
 
 ## What NOT To Do
 
@@ -146,3 +152,75 @@ Written red first; one named mutation per behaviour in `tests/mutations/cli_v2_0
 
 area: CLI, API client, docs and safety rules, legacy retirement · effort: M · risk: medium
 (the never-run list is a safety rule; the deletion is broad but mechanical) · priority: P1
+
+## Build notes (2026-09-15, PR 3)
+
+- The verbs and their commands: `posted` → `mark_posted`, `resolve` → `resolve_review`,
+  `sync <source_id>` → `sync_now` (the executor needs the source), `pause`/`resume` →
+  `pause_workspace`/`resume_workspace`. Keys are the web's (`landing/src/lib/commands.ts`), not the plan's
+  `<command>:<workspace>:<date>` — step 1 mis-cited the web's intent-command convention as a
+  workspace one, and a day (or minute) bucket answered "already done" to a second pause after a
+  resume while the workspace stayed resumed (both review lenses): a story verb is
+  `<command>:<story>`; a resolution is `resolve_review:<story>:<resolution>[:<verdict>]:<episode>`
+  with the episode the story's `entered_state_at` (one read of the story view first; no such
+  story is the answer before anything is sent), so a later review of the same story is new and a
+  refused retry then `--not-posted` are two keys — the verdict segment is the CLI's addition to
+  the web's identity, and an empty episode is omitted as the web omits it; `pause`, `resume` and
+  `sync` mint a fresh key per invocation (`fresh_key`, the web's submission id) because their
+  effects are idempotent.
+  The ingress's `admission_conflict` (the same key, a different command) has a sentence and a
+  fix naming `--idempotency-key`. `--workspace` names ONE workspace for a write: a name two workspaces share
+  is a usage error (the reads read both). The answer's `data` is `{workspace_id, command, args,
+  idempotency_key, outcome, result}` — `args` is what was sent, so the human line names the
+  story the port acted on.
+- `health` judges `/health` by its `status` and the two dependency surfaces — which carry
+  aggregates, no `status` — by the fleet monitors' OWN verdicts: `commands/env.py` imports
+  `scripts/scheduling_monitor.py` and `scripts/posting_monitor.py` (stdlib-only, so the CLI
+  stays a pure client) and calls their `classify` with their defaults; a surface is not well
+  exactly when the monitor would page (stalled, worker down, silent, never-posted past its
+  grace, unreachable — including a mistyped payload), and a quiet estate (`no-signal`, a first
+  post inside its grace) is well; a `worker-unknown` estate (no destination, no system job yet)
+  is a notice, not a page, and well. Two bounds against the pollers: the CLI has no watch clock
+  (`watched_s=0`), so a first post is judged overdue by the estate's own ages alone and a poller
+  that has watched longer pages sooner; and one unreachable reading is not well here where the
+  pollers wait for a second consecutive one. The verdicts ride the report (`data.verdicts`). A surface
+  answering 503 is reported as its error and is not well; exit 4 with the report still printed.
+  (The round's first cut re-derived the signals with its own thresholds and diverged both ways
+  from the monitors — the re-verify caught it; reusing the monitors is the one spelling.)
+- `deploys` calls `railway whoami` → `railway status --json` (the name AND the id must be this
+  repository's project, pinned in `railway.py`) → `railway deployment list --service <svc>
+  --environment production --json` (the binary defaults to the LINKED environment; production is
+  named) for `storydump` and `worker`, sorted newest first by the verb itself, five rows each;
+  under `--watch` one row per service, a failure at the FIRST read is the answer
+  (`Watched.failed_on_baseline`), SLEEPING and SKIPPED count as done, and `--commit <sha>` makes
+  the watch wait for that commit's rows instead of ending on the previous SUCCESS (a watch
+  started right after a push). A notice the binary prints before its JSON is skipped; a hung
+  binary is exit 5. The fixture is the binary's real answers (`status` whole; the two newest
+  deployments per service, whole objects).
+- `webhook`: httpx instead of urllib, `follow_redirects=False`; the report is `{action, ok,
+  checks: [{check, state, detail}]}` and the exit code its verdict — 4 for a failed check (the
+  spec's "API unreachable or failed"), 64 for a missing or refused variable (the script's 1/2
+  mapped). The spellings (the variables, `ALLOWED_UPDATES`, the cap, `bot_matches`) moved into
+  the vocabulary module — the CLI's one `src` import (invariant I3) — and
+  `telegram_webhook_registration.py` re-exports them; a bot token is a redacted shape now.
+- `doctor`'s exit code is the first non-ok check's own code in report order (token 3 · api 4 ·
+  storage 3 · config 64 · railway 5 · ledger 4); `skipped` never fails it; a missing binary or a
+  missing login is `missing`, another project `wrong`; the API check reads `/health` alone; the
+  railway value never carries the account line. The ledger comparison reads `scripts/migrations/`
+  relative to the package, reports a checkout behind the deployment as well as ahead, and is
+  skipped outside a checkout.
+- Deviations from the steps: `approve` joins the never-run list (it posts — the STOP rule)
+  beside the four the plan named; `make check-health` is re-pointed to `storydump health` rather
+  than deleted (`make dev` calls it) — the other five targets are gone; `tests/test_legacy_cli_gone.py`
+  exempts the archive, the dated updates, this plan and the owner's `.claude/settings*.json`
+  (queued to the owner, not the repository's to edit); its `import cli` check pins the ORIGIN,
+  because a sibling checkout installed editable can still answer. The SYSTEM_SCOPE census pin
+  (`test_f1_fail_closed.py`) moved 49 → 40 with `cli/`'s nine sites. The seams module for
+  `v1._open_tenant`/`_member` is not built (five call sites in `tokens.py`, two in `ops.py`, and
+  both earlier batteries anchor on the names) — a recorded follow-up.
+- Tests: `tests/storydump_cli/test_writes.py`, `test_env.py`, `test_webhook.py` (the script's
+  tests ported to the verb) and `test_help.py`; `tests/test_agent_docs.py` rewritten (an
+  invocation is code — a backtick span or a fence — and a group's subcommand is pinned);
+  `tests/test_legacy_cli_gone.py`; the gate `tests/scripts/test_cli_writes_gate.py` drives the
+  real CLI over an ASGI bridge against the app as `svc_ingress`; the battery
+  `tests/mutations/cli_v2_03.sh`.

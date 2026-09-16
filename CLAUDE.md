@@ -27,10 +27,13 @@ does not have. Nothing else here is shared, and nothing else needs guarding.
 
 ```bash
 python -m src.main                   # Starts the posting scheduler + Telegram bot
-storydump-cli reset-queue            # Mutates the posting queue
-storydump-cli instagram-auth         # Mutates stored authentication
-storydump-cli revoke-tokens          # Destroys stored OAuth tokens for a service
-storydump-cli rotate-keys            # Re-encrypts every stored token row
+storydump approve <story>            # Posts a story to Instagram — the user's decision, never an agent's
+storydump cancel <story>             # Cancels a story: refunds its debit, destroys its upload
+storydump resolve <story> cancel     # Gives up on a story parked for review; its debit is retained
+storydump resolve <story> retry      # Posts the story again; --not-posted overrides the lost-answer guard
+storydump tokens revoke <id>         # Revokes an API token; it stops working at once
+storydump webhook register           # Re-points the production bot's webhook; --drop-pending discards queued taps
+storydump webhook deregister         # Detaches the bot's webhook — Telegram delivers nothing until it is registered again
 ```
 
 ### Before ANY posting-related action

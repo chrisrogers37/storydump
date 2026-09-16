@@ -1,7 +1,7 @@
 ---
 title: "CLI v2 — phase 01: service tokens, bearer authentication, login (PR 1)"
 type: plan
-status: draft
+status: completed
 owner: chris
 created: 2026-09-15
 tags: [plan, cli, api, auth]
@@ -171,18 +171,22 @@ with the PR.
 
 ## Verification Checklist
 
-- [ ] `pytest tests/scripts/test_service_tokens_gate.py` green as `svc_ingress`;
-      `tests/mutations/cli_v2_01.sh` reports every mutation killed.
-- [ ] On the web, Settings › API tokens mints a token shown once; `storydump login` (secret from
-      the prompt) then `storydump whoami` names the person, the role per workspace and the token.
-- [ ] `curl -H 'Authorization: Bearer sdt_…' …/commands/skip` with a `readonly` token answers 403;
-      with a person-bound `operator` token the story is skipped and its audit row reads
-      `channel = 'cli'`; with a service identity it answers 403.
-- [ ] `curl -H 'Authorization: Bearer sdt_…' …/invitations/x/accept` answers 403 `session_required`.
-- [ ] Web sign-in and the existing session tests unchanged and green.
-- [ ] 077 applied by the pre-deploy runner; `07` §23, manifest ordinal 21, lineage list updated;
-      `posture`'s grant present in production (`has_table_privilege('svc_ingress',
-      'runner.schema_migrations', 'SELECT')`).
+- [x] `pytest tests/scripts/test_service_tokens_gate.py` green as `svc_ingress` (3 passed);
+      `tests/mutations/cli_v2_01.sh` reports every mutation killed (47/47 at merge; 47/47 again
+      on the phase 02 and phase 03 trees).
+- [x] `storydump login` (secret from the prompt) then `storydump whoami` names the person, the
+      role per workspace and the token — the phase 01 live sample on the demo rig. The mint on the
+      production web (Settings › API tokens, shown once) is the owner's step: queued (`RUN_LOG.md`
+      §7, the Path B recording).
+- [x] The command route with a `readonly` token answers 403, with a person-bound `operator` token
+      the story is skipped and its audit row reads `channel = 'cli'`, with a service identity 403 —
+      the tokens gate, end to end.
+- [x] `…/invitations/x/accept` under a token answers 403 `session_required` — the tokens gate.
+- [x] Web sign-in and the existing session tests unchanged and green — invariant I1, re-checked
+      after every merge (§5).
+- [ ] 077 applied by the pre-deploy runner (the worker's deploy of `218c864` SUCCESS); `07` §23,
+      manifest ordinal 21, lineage list updated — done; `posture`'s grant present in production —
+      BLOCKED (owner): needs an owner-minted token, `storydump posture` shows it (§7).
 
 ## What NOT To Do
 

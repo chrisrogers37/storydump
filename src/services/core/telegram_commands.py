@@ -576,7 +576,7 @@ class TelegramCommandHandlers:
             "/locks": "Lock count is shown in /status. Full list in the dashboard.",
             "/reset": "The JIT scheduler manages the queue automatically.",
             "/dryrun": "Use /settings to toggle dry-run mode.",
-            "/backfill": "Use the CLI: storydump-cli backfill-instagram",
+            "/backfill": "Backfill was retired with the legacy CLI; connect the account on the web.",
             "/connect": "Use /start to open the setup wizard and connect Instagram.",
             "/queue": "View your queue in the dashboard. Use /start to open it.",
             "/pause": "Use Quick Controls in the dashboard. Use /start to open it.",

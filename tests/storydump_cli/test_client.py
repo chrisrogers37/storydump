@@ -76,7 +76,7 @@ def test_sends_the_bearer_the_user_agent_and_accept():
     assert request.method == "GET"
     assert str(request.url) == "https://api.test/api/v1/me/principal"
     assert request.headers["authorization"] == f"Bearer {SECRET}"
-    assert request.headers["user-agent"] == f"storydump-cli/{__version__}"
+    assert request.headers["user-agent"] == f"storydump/{__version__}"
     assert request.headers["accept"] == "application/json"
 
 

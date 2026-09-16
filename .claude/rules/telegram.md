@@ -51,5 +51,6 @@ Rules: the executors read `FOR UPDATE` and a card past `awaiting_approval` ANSWE
 with its state, never errors; every flip supersedes the card in every binding;
 `_tap` never raises for anything but a database error (a poisoned update is the
 named outcome `tap_failed`); nothing speaks to Telegram inside the transaction. The
-registration must ask for `callback_query` (`scripts/telegram_webhook.py`).
+registration must ask for `callback_query` (`storydump webhook register`; the one
+spelling of the update kinds is `src/services/target/vocabulary.py`).
 

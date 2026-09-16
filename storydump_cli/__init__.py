@@ -4,8 +4,7 @@ A separate package from the server on purpose. It reaches ``src`` through
 exactly one module, ``src.services.target.vocabulary`` (the import-boundary
 test pins that), speaks to the API over HTTPS with a bearer token, and never
 opens a database. Its console script is ``storydump``; the legacy
-``storydump-cli`` (the ``cli/`` package) stays beside it until phase 03
-deletes it.
+``cli/`` package it replaced was deleted in phase 03.
 """
 
 from __future__ import annotations

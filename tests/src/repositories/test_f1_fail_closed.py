@@ -297,7 +297,8 @@ class TestObligation4TheFailOpenSignatureIsExtinct:
 
     def test_system_scope_inventory_is_pinned_exactly(self):
         """The #841 burn-down census: SYSTEM_SCOPE passed as a call argument
-        in src/ + cli/ — the one shape that grants cross-tenant access.
+        in src/ (and, until the v2 CLI plan's phase 03 deleted it, cli/) — the
+        one shape that grants cross-tenant access.
 
         Counted by AST (call arguments only), never by substring: imports,
         docstrings and comments are not access sites, and a raw text count
@@ -337,13 +338,19 @@ class TestObligation4TheFailOpenSignatureIsExtinct:
         read, and it is marked rather than hidden. This is the pin moving UP by
         exactly the one site that admits it, which is what the paragraph above
         asks for.
+
+        49 → 40 (the v2 CLI plan, phase 03, 2026-09-15). The legacy `cli/`
+        package is deleted — the `storydump` CLI is an HTTP client of the
+        target API and holds no scope at all — and its nine sites go with it:
+        the pin moving DOWN in the diff that earns it. `src/services/core`
+        (#1216) is the remaining census.
         """
         import ast as _ast
 
-        pinned = 49
+        pinned = 40
         count = 0
         offenders = {}
-        for d in ("src", "cli"):
+        for d in ("src",):
             for path in (REPO_ROOT / d).rglob("*.py"):
                 if path.name == "tenant_scope.py":
                     continue

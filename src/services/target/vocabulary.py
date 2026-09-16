@@ -266,6 +266,10 @@ REASON_SENTENCES: Mapping[str, str] = {
     "wrong_workspace": "this token belongs to another workspace",
     "not_authorized": "not authorized — run storydump login with a valid token",
     "not_a_member": "no such workspace for this token",
+    # the ingress's own refusal: the same idempotency key, a different command
+    "admission_conflict": (
+        "a different command was already sent under this idempotency key"
+    ),
 }
 
 #: The port's outcomes as the CLI reports them.
@@ -273,10 +277,100 @@ OUTCOME_SENTENCES: Mapping[str, str] = {
     "executed": "done",
     "enqueued": "queued",
     "replayed": "already done",
+    # a command on a story past awaiting_approval answers with the story's
+    # state (F2 (a) of the tap plan) — nothing changed
+    "answered": "nothing changed — the story had already answered",
 }
 
 #: Words that belong to the Telegram adapter and never to a terminal.
 TAP_WORDS: tuple[str, ...] = ("tap", "button", "card", "keyboard")
+
+#: What the CLI says when a write lands, by the port's command and outcome;
+#: anything else falls back to :data:`OUTCOME_SENTENCES` (phase 03).
+WRITE_SENTENCES: Mapping[tuple[str, str], str] = {
+    ("approve", "enqueued"): "approved — posting shortly",
+    ("approve", "executed"): "approved",
+    ("skip", "executed"): "skipped",
+    ("reject", "executed"): "rejected",
+    ("mark_posted", "executed"): "marked as posted by hand",
+    ("cancel", "executed"): "cancel requested",
+    ("resolve_review", "executed"): "resolved",
+    ("resolve_review", "enqueued"): "resolved — posting again shortly",
+    ("pause_workspace", "executed"): "posting paused for the workspace",
+    ("resume_workspace", "executed"): "posting resumed for the workspace",
+    ("sync_now", "enqueued"): "sync queued",
+    ("sync_now", "executed"): "synced",
+}
+
+
+def write_sentence(command: str, outcome: str) -> str:
+    """The CLI's sentence for a write's answer: the verb's own when it has
+    one, else the outcome's."""
+    return WRITE_SENTENCES.get((command, outcome)) or OUTCOME_SENTENCES.get(
+        outcome, outcome
+    )
+
+
+#: The command port's idempotency reference: required on every command under
+#: this header and bounded; the CLI refuses a longer key as usage.
+IDEMPOTENCY_HEADER = "Idempotency-Key"
+IDEMPOTENCY_KEY_MAX = 200
+
+#: The review card's resolutions (`02` §4's `review_required` exits a member
+#: may take; `failed` — a refund — stays the operator's) and the one verdict a
+#: resolution may carry: the member looked, and the story is not on Instagram.
+RESOLUTIONS: tuple[str, ...] = ("retry", "posted", "cancel")
+NOT_POSTED = "not_posted"
+
+
+# --- the Telegram webhook's spellings --------------------------------------------
+# One spelling of the deployment's names, shared by the API's startup
+# self-registration (`src/channels/telegram_webhook_registration.py`) and the
+# CLI's `webhook` verb — the CLI reaches `src` only through this module.
+
+TELEGRAM_TOKEN_VAR = "TARGET_TELEGRAM_BOT_TOKEN"
+TELEGRAM_SECRET_VAR = "TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN"
+TELEGRAM_BOT_VAR = "TARGET_TELEGRAM_BOT_USERNAME"
+WEBHOOK_URL_VAR = "TARGET_TELEGRAM_WEBHOOK_URL"
+DEFAULT_WEBHOOK_URL = "https://api.storydump.app/webhooks/telegram"
+WEBHOOK_SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token"
+#: The update kinds the target ingress serves: `/start` taps and group messages
+#: ride `message`; a button tap on an approval card is a `callback_query`.
+#: Telegram delivers ONLY what is asked for — with `message` alone every tap
+#: was dropped before it reached the route (the 2026-09-09 plan's first blocker).
+ALLOWED_UPDATES: list[str] = ["message", "callback_query"]
+#: `setWebhook`'s `max_connections`: how many simultaneous deliveries Telegram
+#: opens against the route (default 40, at most 100) — set to the ingress's
+#: connection budget: one process × `POOL_SIZE_SEAM` (10) today.
+MAX_CONNECTIONS_VAR = "TARGET_TELEGRAM_WEBHOOK_MAX_CONNECTIONS"
+DEFAULT_MAX_CONNECTIONS = 10
+
+
+class BadMaxConnections(ValueError):
+    """The connection cap is outside Telegram's 1..100."""
+
+
+def max_connections_from(raw: Optional[str]) -> int:
+    """The connection cap, from an environment value, within Telegram's 1..100."""
+    if raw is None or not raw.strip():
+        return DEFAULT_MAX_CONNECTIONS
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        value = 0
+    if not 1 <= value <= 100:
+        raise BadMaxConnections(
+            f"{MAX_CONNECTIONS_VAR} must be an integer from 1 to 100 (got {raw!r})"
+        )
+    return value
+
+
+def bot_matches(username: str, expected: Optional[str]) -> bool:
+    """The configured bot, if any, must be the token's bot — registering the
+    door on the wrong bot is the one mistake this refuses by construction."""
+    if not expected:
+        return True
+    return username.lstrip("@").lower() == expected.lstrip("@").lower()
 
 
 # --- the read views' windows ------------------------------------------------

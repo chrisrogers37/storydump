@@ -21,7 +21,6 @@ ISO-8601 timestamp, and reaches the API as ISO-8601 UTC either way.
 
 from __future__ import annotations
 
-import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
@@ -34,7 +33,7 @@ from src.services.target.vocabulary import (
     window_start,
 )
 from storydump_cli.client import Client, Unreachable
-from storydump_cli.commands import begin, global_options
+from storydump_cli.commands import as_uuid, begin, global_options, uuid_argument
 from storydump_cli.commands.auth import signed_in_client
 from storydump_cli.output import Failure, emit
 from storydump_cli.watch import DEFAULT_EVERY, WATCHED, Reading, watch
@@ -73,26 +72,11 @@ def _since(ctx: click.Context, runtime: Any, value: str) -> str:
 # --- the workspaces to read ---------------------------------------------------
 
 
-def _as_uuid(value: str) -> Optional[str]:
-    try:
-        return str(uuid.UUID(value))
-    except ValueError:
-        return None
-
-
-def _uuid_argument(ctx: click.Context, param: click.Parameter, value: str) -> str:
-    """A story id is a UUID; the probes' eight-character habit is a usage
-    error here, not a 422 from the API."""
-    if _as_uuid(value) is None:
-        raise click.BadParameter("a story id is a full UUID", ctx=ctx, param=param)
-    return str(uuid.UUID(value))
-
-
-def _targets(client: Client, workspace: Optional[str]) -> list[str]:
+def workspace_targets(client: Client, workspace: Optional[str]) -> list[str]:
     """The workspace ids to read: the one named (an id as given, a name
     through the principal), or every one the principal lists."""
     if workspace is not None:
-        as_id = _as_uuid(workspace)
+        as_id = as_uuid(workspace)
         if as_id is not None:
             return [as_id]
     principal = client.principal()
@@ -146,7 +130,7 @@ def _run_view(
     if every is not None and not watch_mode:
         raise click.UsageError("--every only means something with --watch", ctx=ctx)
     client = signed_in_client(runtime)
-    targets = _targets(client, workspace)
+    targets = workspace_targets(client, workspace)
 
     def read() -> Reading:
         return [_unwrap(call(client, target), target) for target in targets]
@@ -211,7 +195,7 @@ def since_option(command: Callable[..., Any]) -> Callable[..., Any]:
 
 @click.command()
 @view_options
-@click.argument("intent_id", callback=_uuid_argument)
+@click.argument("intent_id", callback=uuid_argument)
 @click.pass_context
 def story(
     ctx: click.Context,
@@ -244,7 +228,7 @@ def story(
 
 @click.command()
 @view_options
-@click.argument("intent_id", callback=_uuid_argument)
+@click.argument("intent_id", callback=uuid_argument)
 @click.pass_context
 def cards(
     ctx: click.Context,
