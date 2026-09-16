@@ -59,6 +59,7 @@ from src.api.routes.retired import router as retired_router
 from src.api.routes.v1 import IDEMPOTENCY_HEADER
 from src.api.routes.v1 import router as v1_router
 from src.api.routes.tokens import router as tokens_router
+from src.api.routes.ops import router as ops_router
 from src.api.routes import webhooks
 from src.api.routes.meta import router as meta_router
 from src.api.routes.webhooks import router as webhooks_router
@@ -661,6 +662,9 @@ def create_app(
     # The token routes and `/me/principal` (phase 01 of the v2 CLI) share the
     # v1 prefix and the v1 seams; their own file keeps the allowlist readable.
     app.include_router(tokens_router, prefix="/api/v1")
+    # The read views (phase 02 of the v2 CLI, fork F6): one file for the
+    # operator surface, tenant-scoped, admitted to tokens.
+    app.include_router(ops_router, prefix="/api/v1")
     app.include_router(webhooks_router, prefix="/webhooks")
     # Meta's policy callbacks (#410). Under the same prefix as the other
     # provider-called doors; the URLs are not registered with Meta yet.

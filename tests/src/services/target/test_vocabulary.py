@@ -168,3 +168,55 @@ class TestTheEnvelope:
     def test_every_malformed_document_is_refused(self, document):
         with pytest.raises(ValueError):
             vocabulary.check_envelope(document)
+
+
+class TestTheWindowGrammar:
+    NOW = __import__("datetime").datetime(
+        2026, 9, 16, 12, 0, 30, 123456, tzinfo=__import__("datetime").timezone.utc
+    )
+
+    @pytest.mark.parametrize(
+        "value, seconds",
+        [("15m", 900), ("3h", 10800), ("2d", 172800), ("30d", 30 * 86400)],
+    )
+    def test_a_span_is_measured_from_now_without_microseconds(self, value, seconds):
+        import datetime as dt
+
+        start = vocabulary.window_start(value, self.NOW)
+        assert start == self.NOW.replace(microsecond=0) - dt.timedelta(seconds=seconds)
+
+    def test_a_timestamp_with_any_zone_or_none_is_utc(self):
+        import datetime as dt
+
+        want = dt.datetime(2026, 9, 15, 14, 50, tzinfo=dt.timezone.utc)
+        for value in (
+            "2026-09-15T14:50:00Z",
+            "2026-09-15T14:50:00+00:00",
+            "2026-09-15T10:50:00-04:00",
+            "2026-09-15T14:50:00",
+        ):
+            assert vocabulary.window_start(value, self.NOW) == want, value
+        assert vocabulary.window_start("2026-09-15", self.NOW) == dt.datetime(
+            2026, 9, 15, tzinfo=dt.timezone.utc
+        ), "a bare date is its midnight UTC"
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "",
+            "x",
+            "3",
+            "-3h",
+            "3w",
+            "999999d",
+            "9999999d",
+            "31d",
+            "0001-01-01T00:00:00+14:00",
+            "9999-12-31T23:59:59-05:00",
+            "2026-09-17T00:00:00Z",
+        ],
+    )
+    def test_everything_else_is_refused_with_a_sentence(self, value):
+        with pytest.raises(ValueError) as caught:
+            vocabulary.window_start(value, self.NOW)
+        assert str(caught.value), value

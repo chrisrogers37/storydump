@@ -12,7 +12,7 @@ and a client closed deterministically is one that never warns at exit.
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 from urllib.parse import quote, urlparse
 
 import httpx
@@ -94,7 +94,9 @@ class Client:
             headers["Authorization"] = f"Bearer {self.token}"
         return headers
 
-    def _request(self, method: str, path: str) -> Any:
+    def _request(
+        self, method: str, path: str, params: Optional[Mapping[str, Any]] = None
+    ) -> Any:
         try:
             with httpx.Client(
                 base_url=self.base_url,
@@ -102,7 +104,7 @@ class Client:
                 transport=self.transport,
                 timeout=self.timeout,
             ) as http:
-                response = http.request(method, path)
+                response = http.request(method, path, params=params)
         except httpx.TransportError as exc:
             raise Unreachable(0, None, f"{type(exc).__name__}: {exc}") from exc
         try:
@@ -143,3 +145,49 @@ class Client:
             "DELETE",
             f"/workspaces/{_segment(workspace_id)}/tokens/{_segment(token_id)}",
         )
+
+    # --- the read views (phase 02) ------------------------------------------
+    #
+    # Each answers for ONE workspace under ``/ops/workspaces/{ws}/…`` with the
+    # phase-01 envelope; the CLI loops the principal's workspaces. ``since`` is
+    # already an ISO-8601 UTC timestamp — the verb decides the window, the
+    # client only carries it.
+
+    def _ops(
+        self,
+        workspace_id: str,
+        view: str,
+        key: Optional[str] = None,
+        params: Optional[Mapping[str, Any]] = None,
+    ) -> dict[str, Any]:
+        path = f"/ops/workspaces/{_segment(workspace_id)}/{view}"
+        if key is not None:
+            path += f"/{_segment(key)}"
+        return self._request("GET", path, params=params)
+
+    def ops_story(self, workspace_id: str, intent_id: str) -> dict[str, Any]:
+        return self._ops(workspace_id, "story", intent_id)
+
+    def ops_cards(self, workspace_id: str, intent_id: str) -> dict[str, Any]:
+        return self._ops(workspace_id, "cards", intent_id)
+
+    def ops_floating(
+        self, workspace_id: str, limit: Optional[int] = None
+    ) -> dict[str, Any]:
+        params = {"limit": limit} if limit is not None else None
+        return self._ops(workspace_id, "floating", params=params)
+
+    def ops_account(self, workspace_id: str, key: str) -> dict[str, Any]:
+        return self._ops(workspace_id, "account", key)
+
+    def ops_jobs(self, workspace_id: str, since: str) -> dict[str, Any]:
+        return self._ops(workspace_id, "jobs", params={"since": since})
+
+    def ops_outbox(self, workspace_id: str, since: str) -> dict[str, Any]:
+        return self._ops(workspace_id, "outbox", params={"since": since})
+
+    def ops_burst(self, workspace_id: str, since: str) -> dict[str, Any]:
+        return self._ops(workspace_id, "burst", params={"since": since})
+
+    def ops_posture(self) -> dict[str, Any]:
+        return self._request("GET", "/ops/posture")

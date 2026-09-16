@@ -137,8 +137,20 @@ HTTP client, never a database connection
 3. `storydump whoami`, `storydump tokens list`, `storydump tokens revoke <id>`,
    `storydump logout`. `--json` on any verb prints one envelope
    `{"v": 1, "kind", "data", "error"}`. Exit codes: 0 ok · 1 not found ·
-   2 refused · 3 not authorized · 4 API unreachable · 64 usage.
-   `STORYDUMP_API` overrides the API URL (default `https://api.storydump.app`).
+   2 refused · 3 not authorized · 4 API unreachable · 6 a watched condition
+   ended in failure · 64 usage. `STORYDUMP_API` overrides the API URL
+   (default `https://api.storydump.app`).
+4. Read the ledger (every workspace you belong to, or `--workspace <id or name>`;
+   `--json`; `--watch [--every 30]` prints only changes):
+   `storydump story <intent_id>` (the timeline: audit rows, provider
+   operations, cards) · `storydump cards <intent_id>` · `storydump floating`
+   (approved stories waiting between attempts, with their retry job) ·
+   `storydump account <handle>` (cap, zone, next slot, today's bucket, recent
+   outcomes) · `storydump jobs --since 3h` · `storydump outbox --since 3h` ·
+   `storydump burst --since 2026-09-15T14:50:00Z` (taps, permits, float
+   waits, siblings, review cards, outcomes) · `storydump posture` (the
+   migration ledger, the role, RLS, the doors). The guide:
+   `documentation/operations/reading-the-ledger.md`.
 
 `storydump --help` is the authoritative list. The legacy `storydump-cli`
 (above) stays until the plan's phase 03 deletes it.

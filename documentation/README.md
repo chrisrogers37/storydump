@@ -163,6 +163,11 @@ a guide walking a reader through it contradicted a fixed constraint.
 - Moving the API and worker off the owner login onto `svc_ingress` / `svc_worker`, one service at a time
 - Verified through `/health`'s `db_role` field and the worker's boot log line; rollback per step
 
+### Reading the Ledger
+**[operations/reading-the-ledger.md](operations/reading-the-ledger.md)**
+- The eight `storydump` read verbs (story, cards, floating, account, jobs, outbox, burst, posture) that replaced the one-off SQL probes: what each answers, `--since`, `--watch`, and what they never read
+- `psql` through Railway as the read-only escape hatch
+
 ### Troubleshooting
 **[operations/troubleshooting.md](operations/troubleshooting.md)**
 - Service won't start (common causes, log inspection)
