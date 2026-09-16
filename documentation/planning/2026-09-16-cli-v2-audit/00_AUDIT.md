@@ -226,11 +226,35 @@ admin squash. The ledger of that run is below.
   `/health` is a wrong API, not a missing one. The access-path lane's one
   CLI-side finding (the story view's four current-state fields) folded; its
   four port-side findings queued. Units 949 passed, the gates 120, the
-  battery 56 mutations.
+  battery 56 mutations. The batteries on `cda31a2`: 01 47/47, 02 33/33, 03
+  57/57, audit 56/56 — 193 mutations, none surviving, none unapplied (five
+  audit anchors re-cut for round 3's edits; one equivalent mutant — the
+  satellites' whole-page scan — made distinguishable by a negative case).
 - The one-off `ERROR` in `tests/src/api/test_token_principal.py` seen twice
   under the combined unit run (a different test each time; the file passes
   alone every time) is the harness's unraisable-warning class already in the
-  owner queue; it is not the surface's.
+  owner queue; it is not the surface's. CI then failed `cda31a2` twice on the
+  same victim (`test_dashboard_reads_gate.py::TestTheMediaPool::…`, 1 failed /
+  5803 passed both times): one `ResourceWarning: unclosed event loop` and two
+  for its AF_UNIX self-pipe sockets, collected inside that test. Root cause,
+  read in pytest-asyncio 1.3.0's `_temporary_event_loop_policy`: it calls
+  `asyncio.get_event_loop()` before every runner it opens, which on a policy
+  nothing has ever `set_event_loop` on MINTS a loop (3.10–3.13) and makes it
+  current; the plugin restores that stray loop after each test, and the first
+  `asyncio.run()` in a sync test drops it unclosed — whichever test the
+  collector runs in fails. `tests/scripts/test_cli_writes_gate.py:40-50` had
+  already met the class and ignored it module-wide. Fixed at the root in
+  `tests/conftest.py::pytest_sessionstart` — `asyncio.set_event_loop(None)`
+  marks the policy as set, so `get_event_loop()` raises instead of minting,
+  which the fresh-loop helpers under `tests/scripts` already assume. Not
+  reproducible on the local 3.12 (139 tests of the CI prefix clean under
+  `-X tracemalloc -W error::ResourceWarning`); the proof is CI on 3.10.
+- Process exception, stated: the fresh re-verify agent for this fold was
+  killed by the session rate limit while running the DB gates and was NOT
+  re-dispatched (the owner asked to continue with the closed subagents only).
+  The evidence for the fold is therefore the two lens rounds, the 193
+  mutations on `cda31a2`, and CI — not an independent read. The owner decides
+  whether that is enough to merge or whether the re-verify runs first.
 
 ## Owner queue
 
