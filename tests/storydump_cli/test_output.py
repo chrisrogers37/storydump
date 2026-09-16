@@ -153,3 +153,29 @@ def test_the_cli_never_uses_the_tap_words():
     tap = re.compile(r"\b(" + "|".join(TAP_WORDS) + r")s?\b", re.IGNORECASE)
     for sentence in [*REASON_SENTENCES.values(), *OUTCOME_SENTENCES.values()]:
         assert not tap.search(sentence), sentence
+
+
+class TestTheBotTokenShape:
+    """A Telegram bot token (`<bot id>:<35 chars>`) is struck wherever it
+    appears — in a Bot API URL, bare, or after `token=` — but a uuid's digit
+    run inside a sync key is not a token (phase 03 review)."""
+
+    def test_a_bot_api_url_and_a_bare_token_are_struck(self):
+        from storydump_cli.output import redact
+
+        token = "123456789:AAH-abcdefghijklmnopqrstuvwxyz012345"
+        assert token not in redact(
+            f"https://api.telegram.org/bot{token}/getMe answered 401"
+        )
+        assert token not in redact(f"{token} was refused")
+        assert token not in redact(f"token={token}")
+
+    def test_a_sync_key_survives(self):
+        from storydump_cli.output import redact
+
+        key = (
+            "sync_now:33d1ccca-353c-4236-8d39-0d8fd9165054"
+            ":5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a:9d9d9d9d"
+        )
+        assert redact(key) == key
+        assert redact("idempotency_key=" + key) == "idempotency_key=" + key

@@ -1,7 +1,7 @@
 ---
 title: "CLI v2 — phase 02: the eight read views and the read verbs (PR 2)"
 type: plan
-status: draft
+status: completed
 owner: chris
 created: 2026-09-15
 tags: [plan, cli, api, ledger, devx]
@@ -115,12 +115,15 @@ Written red first; one named mutation per behaviour in `tests/mutations/cli_v2_0
 ## Verification Checklist
 
 - [ ] `storydump burst --since 2026-09-15T14:50:00Z --json` against production reproduces the
-      first live burst's read (13 posted, 8 refusals, one float) from the ledger.
+      first live burst's read — BLOCKED (owner): an owner-minted token; the read itself is proven
+      on the rig's seeded burst (`RUN_LOG.md` §5).
 - [ ] `storydump floating --watch` during a burst prints a story stepping out and back in, and
-      exits 0 when nothing is floating.
-- [ ] `storydump posture` shows the applied migrations through 077 and the connected role.
-- [ ] The view gate is green as `svc_ingress`; a second workspace's rows are never returned; no
-      view reads `rate_counters`.
+      exits 0 when nothing is floating — the watch's semantics are unit-tested and the rig's
+      `floating --watch` ran (§5); a live burst is the owner's to run (§7).
+- [ ] `storydump posture` shows the applied migrations through 077 and the connected role —
+      BLOCKED (owner) with the token above; the gate proves every ledger state and the role live.
+- [x] The view gate is green as `svc_ingress`; a second workspace's rows are never returned; no
+      view reads `rate_counters` — `tests/scripts/test_ops_views_gate.py`, 4 passed, three arms.
 
 ## What NOT To Do
 

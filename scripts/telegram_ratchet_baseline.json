@@ -1,7 +1,5 @@
 {
   "chat_id_functions_outside_adapters": [
-    "cli/commands/backfill.py::backfill_instagram",
-    "cli/commands/tokens.py::revoke_tokens",
     "src/repositories/chat_settings_repository.py::_new_chat_settings",
     "src/repositories/chat_settings_repository.py::get_by_chat_id",
     "src/repositories/chat_settings_repository.py::get_or_create",

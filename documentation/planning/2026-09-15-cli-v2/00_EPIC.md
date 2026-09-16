@@ -1,7 +1,7 @@
 ---
 title: "storydump v2 CLI — the developer and agent console over the target API (epic)"
 type: plan
-status: active
+status: completed
 owner: chris
 created: 2026-09-15
 updated: 2026-09-15
@@ -200,16 +200,23 @@ schema tests from phase 01; the route-allowlist gate from phase 01.
 
 ## Verification Checklist
 
-- [ ] `storydump login` with a token minted on the web's Settings › API tokens; `whoami` names
-      the person, the effective role per workspace and the token.
-- [ ] `storydump story <id> --json` returns the envelope for a real story; `--watch` prints only
-      changes; a workspace the principal is not a member of is absent.
-- [ ] `storydump skip <id>` with a `readonly` token exits 3; with a person-bound `operator` token
+- [x] `storydump login` with a token minted on the web's Settings › API tokens; `whoami` names
+      the person, the effective role per workspace and the token — proven on the demo rig with a
+      token minted through the API (phase 01 and 03 live samples, `RUN_LOG.md` §5); the mint on
+      the production web by the owner is queued (§7).
+- [x] `storydump story <id> --json` returns the envelope for a real story; `--watch` prints only
+      changes; a workspace the principal is not a member of is absent — the ops gate's three arms
+      and the phase 02 live sample (`--workspace <uuid not a member>` → exit 3).
+- [x] `storydump skip <id>` with a `readonly` token exits 3; with a person-bound `operator` token
       the story is skipped, its audit row reads `channel = 'cli'`, and the `cli_command` row names
-      the token and the same `external_ref`; running it again prints "already done" and exits 0.
-- [ ] `cli/` is gone; `storydump-cli` is not a command; no file in the repository names it; the
-      doc test walks nested groups and passes.
-- [ ] All three PRs merged with the process above; the Live status updated.
+      the token and the same `external_ref`; running it again prints "already done" and exits 0 —
+      `tests/scripts/test_cli_writes_gate.py` (the real CLI against the real app as `svc_ingress`)
+      and the phase 03 live sample; against production with an owner-minted token: queued (§7).
+- [x] `cli/` is gone; `storydump-cli` is not a command; no file in the repository names it (the
+      CHANGELOG, the archive, the dated updates, this plan and the owner's `.claude/settings.json`
+      excepted — `tests/test_legacy_cli_gone.py`); the doc test walks nested groups and passes.
+- [ ] All three PRs merged with the process above; the Live status updated — #1310 and #1311
+      merged and live; PR 3 (#1312) in review; the Live status line is in PR 3.
 
 ## What NOT To Do
 

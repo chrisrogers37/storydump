@@ -67,27 +67,13 @@ psql -U postgres -d storydump -f scripts/setup_database.sql
 python scripts/init_db.py
 ```
 
-### 4. Index Your Media
+### 4. Connect media and set the schedule on the web
 
-```bash
-# Index media files
-storydump-cli index-media /path/to/media/stories
+Media comes from a connected Google Drive folder (Settings › Integrations) and
+the schedule from the schedule card under Settings › General; the worker mints each day's slots and
+asks for approval on the bound Telegram group or the web Queue.
 
-# List indexed media
-storydump-cli list-media --limit 20
-```
-
-### 5. Create Schedule
-
-```bash
-# Create 7-day posting schedule
-storydump-cli create-schedule --days 7
-
-# View queue
-storydump-cli list-queue
-```
-
-### 6. Run the Application
+### 5. Run the Application
 
 ```bash
 # Run in foreground (for testing)
@@ -96,69 +82,25 @@ python -m src.main
 # Or run as background service (see documentation)
 ```
 
-## CLI Commands
+## The `storydump` CLI
 
-### Media Management
-
-```bash
-# Index media from directory
-storydump-cli index-media /path/to/media
-
-# List all media items
-storydump-cli list-media --limit 50 --active-only
-
-# Validate image
-storydump-cli validate-image /path/to/image.jpg
-```
-
-### Queue Management
+`pip install -e '.[cli]'`, mint a token under Settings › API tokens, then:
 
 ```bash
-# Create posting schedule (uses category ratios)
-storydump-cli create-schedule --days 7
-
-# Process pending posts
-storydump-cli process-queue
-
-# Force process next post (development testing)
-storydump-cli process-queue --force
-
-# View queue
-storydump-cli list-queue
-
-# Reset queue (clear all pending posts)
-storydump-cli reset-queue
+storydump login                        # the token from the prompt or stdin
+storydump whoami
+storydump floating --watch             # approved stories waiting to post
+storydump story <intent_id>            # one story's whole timeline
+storydump burst --since 3h             # what the last burst did
+storydump skip <story> --workspace <ws>
+storydump health
+storydump deploys --watch
+storydump doctor
 ```
 
-### Category Management
-
-```bash
-# List categories and their posting ratios
-storydump-cli list-categories
-
-# Update category posting ratios (interactive prompts)
-storydump-cli update-category-mix
-
-# View ratio history (Type 2 SCD)
-storydump-cli category-mix-history --limit 10
-```
-
-### User Management
-
-```bash
-# List users
-storydump-cli list-users
-
-# Promote user to admin
-storydump-cli promote-user <telegram_user_id> --role admin
-```
-
-### Health Check
-
-```bash
-# Check system health
-storydump-cli check-health
-```
+`storydump --help` lists every verb by section (auth, reads, writes,
+environment); `documentation/operations/reading-the-ledger.md` is the guide.
+Everything goes through the API — the CLI never opens a database.
 
 ## Telegram Bot Commands
 
@@ -245,8 +187,6 @@ pytest -m unit
 # Run only integration tests
 pytest -m integration
 
-# Force process next post (development testing)
-storydump-cli process-queue --force
 ```
 
 ### Project Structure

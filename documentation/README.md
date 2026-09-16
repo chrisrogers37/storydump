@@ -156,7 +156,7 @@ a guide walking a reader through it contradicted a fixed constraint.
 
 ### Telegram Webhook
 **[operations/telegram-webhook.md](operations/telegram-webhook.md)**
-- Which bot, the two-act arming (secret on the API, then `setWebhook`), and `scripts/telegram_webhook.py` — status / register / deregister without a secret ever being pasted
+- Which bot, the two-act arming (secret on the API, then `setWebhook`), and `storydump webhook` — status / register / deregister without a secret ever being pasted
 
 ### Runtime Database Roles (F.4 rollout)
 **[operations/runtime-database-roles.md](operations/runtime-database-roles.md)**

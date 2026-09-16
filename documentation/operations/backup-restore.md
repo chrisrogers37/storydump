@@ -156,7 +156,7 @@ psql "$DATABASE_URL" -c \
    ```
 6. **Verify**:
    ```bash
-   railway shell --service worker -c "storydump-cli check-health"
+   storydump health
    ```
 7. **Re-connect OAuth** (if tokens expired):
    - Instagram: Re-authorize via /settings in Telegram

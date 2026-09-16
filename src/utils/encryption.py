@@ -29,7 +29,8 @@ class TokenEncryption:
         1. Generate new key: TokenEncryption.generate_key()
         2. Prepend to ENCRYPTION_KEYS: NEW_KEY,OLD_KEY
         3. Deploy — new tokens encrypt with NEW_KEY, old tokens still decrypt
-        4. Run `storydump-cli rotate-keys` to re-encrypt all tokens with NEW_KEY
+        4. Enqueue the `reencrypt_credentials` system job (registered; its executor is
+           not yet built) to re-encrypt every row with NEW_KEY
         5. Remove OLD_KEY from ENCRYPTION_KEYS
 
     Usage:
