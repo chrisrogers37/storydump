@@ -1,7 +1,7 @@
 ---
 title: "storydump v2 CLI — sprint run log (build-all)"
 type: plan
-status: active
+status: completed
 owner: chris
 created: 2026-09-15
 tags: [cli, api, auth, devx, legacy-retirement, run-log]
@@ -17,6 +17,16 @@ needs 01's principal, allowlist and envelope; 03 needs both; the legacy `cli/` g
 new verbs exist before the old are deleted). Goal condition: the epic's verification checklist —
 three PRs merged under the repository's process, `cli/` gone, the consolidated plan's Live status
 updated, the epic `completed`.
+
+**Answered 2026-09-16: met.** #1310 (`218c864`), #1311 (`0b0badc`) and #1312 (`4bce602`) merged
+under the process — tests red first, two lenses per phase, folds as class sweeps, fresh
+re-verifies (three rounds for phase 03), a named mutation per behaviour (47, 33 and 57 killed on
+the committed trees, each battery re-run on every later tree), CI green, an admin squash of one
+accurate commit each; `cli/` deleted with every live mention outside the owner's own tool
+configuration (`tests/test_legacy_cli_gone.py`); the consolidated plan's Live status updated and
+the epic and its three phase docs `completed` in #1312; every merge live on Railway (§5). Not
+met inside the sprint, by design and queued (§7): the verifications that need an owner-minted
+production token or the bot's secrets, and the owner's `.claude/settings.json` rules.
 
 ## 1. Kickoff gates
 
@@ -66,7 +76,7 @@ only phase 03's files before the first push. Nothing of phase 03 is pushed befor
 |---|---|---|---|---|---|
 | 01 Tokens | `01_tokens.md` | DONE — merged 2026-09-15 23:01 UTC | #1310 | green (9/9 on `29b20d7`) | Railway deploys of `218c864` watched (§5) |
 | 02 Reads | `02_reads.md` | DONE — merged 2026-09-16 02:15 UTC (re-verify: Merge) | #1311 | green (9/9 on `43bd8c2`) | Railway deploys of `0b0badc` watched (§5) |
-| 03 Writes, environment, deletion | `03_writes-and-deletion.md` | in review — two lenses + one re-verify folded (§6), battery 57/57, the whole scripts suite green, awaiting CI + the final re-verify | #1312 (draft) | running | — |
+| 03 Writes, environment, deletion | `03_writes-and-deletion.md` | DONE — merged 2026-09-16 03:18 UTC (three review rounds, §6) | #1312 | green (9/9 on `89b7904`) | Railway deploys of `4bce602` watched with the real `storydump deploys --watch --commit 4bce602` (§5) |
 
 ## 5. Per-phase entries
 
@@ -274,6 +284,25 @@ only phase 03's files before the first push. Nothing of phase 03 is pushed befor
 - Deploy reachability: merged = live for the API and the worker (Railway auto-deploys `main`;
   nothing in this phase needs a migration); the CLI itself is installed from the checkout
   (`pip install -e '.[cli]'`), so "live" for the CLI is the merge.
+- **Merged 2026-09-16 03:18 UTC as `4bce602` (#1312, admin squash; CI 9/9 green on `89b7904`;
+  three review rounds folded, §6).** Final evidence on `89b7904`: units `4113 passed, 83
+  skipped, 39 deselected`; the whole DB-gated `tests/scripts` suite `1398 passed, 1 skipped`;
+  battery `tests/mutations/cli_v2_03.sh` 57/57; the phase 01 and 02 batteries 47/47 and 33/33.
+  Railway deploys of `4bce602` followed with the merged CLI itself — `storydump deploys --watch
+  --commit 4bce602 --every 30` from the linked checkout (`pip install -e '.[cli]'` into the
+  main venv first; the console script had never been installed there): `03:19:34 added
+  storydump … WAITING`, `added worker … BUILDING`, `03:20:06 changed worker … SUCCESS`,
+  `03:26:46 changed storydump … BUILDING`, `03:27:50 changed storydump … SUCCESS`, exit 0 —
+  the plan's "`deploys --watch` follows a real deploy to both services live" item, done. Phase
+  03 is LIVE; the epic is complete (the goal condition above).
+  Invariants I1–I8 re-checked on `main` at `4bce602`: I1 the sessions diff empty and the
+  session/API/CLI units `439 passed`; I2 advertised DDL + lineage, I4 the tap gate, I7 the
+  tokens gate and the implicit-admin-fallback gate `88 passed` together; the tenancy lane and
+  the FC-2 ratchet clean (I8: the baseline shrank by two, never grew); I3 the import boundary
+  and I5 the agent docs green; I6 `sdt_` appears in `src/`/`storydump_cli/` only as the prefix
+  constant, the redaction pattern and docstrings. One local-only red: `tests/test_legacy_cli_gone.py`
+  saw `cli/` still present in the runner's checkout — ignored `__pycache__` leftovers of the
+  deleted package, not files git tracks (a fresh checkout has none; removed, 4 passed).
 
 ## 6. Review rounds
 
