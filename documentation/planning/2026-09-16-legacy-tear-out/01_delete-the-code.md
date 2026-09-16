@@ -37,6 +37,12 @@ and the target suite is green with nothing skipped. The reversible half of the r
   interpreters and needs the three legacy settings variables today (it failed without them on
   2026-09-16 because `src.main` imports `src.services.core.loops.lifecycle`, which loads settings).
 - `tests/src/test_worker_impl_gate.py` pins the dispatch in `src/main.py`.
+- `src/exceptions/__init__.py:4-21` imports the `backfill`, `google_drive` and `instagram`
+  exception modules, so every `from src.exceptions.tenancy import …` in the target tier
+  (`principal.py:46`, `v1.py:52`, `command_executors.py:63`, `service_tokens.py:39`, …) executes
+  the legacy exception modules' imports — the architecture lane of the 2026-09-16 audit found the
+  package absent from #1216's inventory. `src/utils/logger.py:7` loads `settings`, which is how
+  the API inherits the legacy Telegram requirement (phase 02).
 
 ## Implementation Plan
 
@@ -52,7 +58,10 @@ Phase 02 (the settings' readers must be gone first); the F.6 segment's emptiness
    base; `scripts/target_reachability.py` output (with the dummy variables); the ratchet's three
    counts; `pytest --collect-only -q | tail -1` for the whole suite.
 2. **Delete the packages**: `git rm -r src/services/core src/services/integrations
-   src/repositories src/services/base_service.py`; the non-target models `src/models/{api_token,
+   src/repositories src/services/base_service.py`; in `src/exceptions/` the modules only the
+   deleted code raised (`backfill`, `google_drive`, `instagram` — measure each: a class the target
+   tier catches or raises stays, moved into `tenancy.py` or its own kept module) and their lines
+   in `src/exceptions/__init__.py`; the non-target models `src/models/{api_token,
    audit_log,category_mix,chat_settings,enums,instagram_account,media_item,media_lock,
    onboarding_session,posting_history,posting_queue,service_run,user_chat_membership,
    user_interaction,user}.py` (verify `enums.py` has no target importer first — `grep -rn

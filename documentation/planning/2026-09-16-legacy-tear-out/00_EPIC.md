@@ -40,7 +40,9 @@ stand-down for the owner's hand, then bring the documentation to the end state. 
   `src.utils.datetime_utils`, `src.utils.validators` (6), `src.utils.file_hash` (3),
   `src.utils.encryption`, `src.utils.media_kind`, `src.utils.resilience`; `image_processing` and
   `webapp_auth` have no non-legacy importer. `src/services/base_service.py` imports the
-  repositories and has no target consumer.
+  repositories and has no target consumer. `src/exceptions/__init__.py:4-21` imports the legacy
+  `backfill`, `google_drive` and `instagram` exception modules on every tenancy import (the
+  2026-09-16 audit's architecture lane); `src/utils/logger.py:7` loads `settings`.
 - `src/config/settings.py:186-189` — the three Telegram variables are REQUIRED fields; the class
   comment says the legacy variable "survives only until #1222 retires it". `AGENTS.md` tells every
   entry point to set dummy values.
