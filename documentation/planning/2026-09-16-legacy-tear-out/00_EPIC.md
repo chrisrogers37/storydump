@@ -1,7 +1,7 @@
 ---
 title: "Retire the legacy tier — delete the code, snapshot and drop the schema, retire the settings (epic, #1216)"
 type: plan
-status: draft
+status: ratified
 owner: chris
 created: 2026-09-16
 tags: [plan, legacy-retirement, migrations, worker, api, docs, epic]
@@ -189,7 +189,7 @@ no deployed consumer either way. Options: (a) delete the code first (phases 01�
 each earlier phase is reversible and the irreversible one is last; nothing deployed runs the
 legacy code (a `search_path` override could point it at `legacy`; nothing does), so keeping it
 "for the demo videos" (#1202) buys nothing — the videos are recorded on the target tier.
-Ratifier: owner. Status: open.
+Ratifier: owner. Status: locked (chris, 2026-09-16, in chat: (a) — code first, the drop last).
 
 **F2 — What `src/main.py` becomes.** Context: the Procfile runs `python -m src.main`, which
 dispatches to `src.worker`; the never-run lists name `python -m src.main`. Options: (a) keep
@@ -197,14 +197,14 @@ dispatches to `src.worker`; the never-run lists name `python -m src.main`. Optio
 never-run lists unchanged; `WORKER_IMPL` retired); (b) change the Procfile to `python -m
 src.worker` and delete `src/main.py` (a Railway start-command change, the never-run lists renamed).
 Lean: (a) — no deploy-time change in a deletion PR; the module's docstring says what it is.
-Ratifier: owner. Status: open.
+Ratifier: owner. Status: locked (chris, 2026-09-16, in chat: (a) — `src/main.py` stays a thin dispatcher).
 
 **F3 — `src/api/routes/retired.py`.** Context: it answers the Mini App's baked buttons with a
 redirect to the web sign-in (410 without a front-end origin); #1216 lists it for deletion; the
 buttons were minted until 2026-08-24 01:16 and real people hold them. Options: (a) keep it (it is
 target-tier code with no legacy import; a bounded courtesy); (b) delete it and let the old URL
 404. Lean: (a) until the owner says the buttons have aged out; it costs nothing and imports
-nothing legacy. Ratifier: owner. Status: open.
+nothing legacy. Ratifier: owner. Status: locked (chris, 2026-09-16, in chat: (a) — `retired.py` stays until the owner says the buttons have aged out).
 
 **F4 — The fifteenth and sixteenth tables.** Context: `posting_history_dedup_archive` (#941)
 exists in production with no disposition, and `schema_version` — the legacy lineage's own ledger
@@ -213,14 +213,14 @@ like the other fourteen (sixteen `archive` tables; `schema_version` is the recor
 legacy migrations ran, worth one small table); (b) snapshot the fifteen and let `schema_version`
 die (the runner's ledger already records the adoption of 001–050); (c) leave the fifteenth out
 of 3f and let 3g take it undocumented. Lean: (a) — the snapshot obligation is "every legacy
-table", and a disposition is one row in the phase-03 table. Ratifier: owner. Status: open.
+table", and a disposition is one row in the phase-03 table. Ratifier: owner. Status: locked (chris, 2026-09-16, in chat: (a) — all sixteen tables are snapshotted).
 
 **F5 — The settings requirement (#1222).** Context: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHANNEL_ID`,
 `ADMIN_TELEGRAM_CHAT_ID` are required by `Settings`; the target tier reads `TARGET_TELEGRAM_*`.
 Options: (a) make the three optional in phase 02 and remove their readers with the code; (b)
 delete the fields outright. Lean: (b) once phase 01 has removed every reader — a required field
 nothing reads is a lie in the environment; CI, the Makefile and every doc that sets dummy values
-lose the lines. Ratifier: owner. Status: open.
+lose the lines. Ratifier: owner. Status: locked (chris, 2026-09-16, in chat: (b) — the three fields are deleted in phase 02).
 
 **F6 — How 3g and the stand-down are gated (#1202).** Context: the runner applies every pending
 file before every deploy; a merged 3g would run on the next push. Options: (a) a `-- runner:manual`
@@ -231,14 +231,14 @@ unknown `runner:` marker is a hard error (a misspelt `manaul` is otherwise an or
 applied at the next deploy); (b) keep the files out of `main` until the window and merge them
 that day; (c) a gate row the file checks, raising when absent (a failed deploy is the "guard").
 Lean: (a) — mechanical, testable in the gate, and the ledger still records the application; (b)
-is a process rule, (c) breaks deploys. Ratifier: owner. Status: open.
+is a process rule, (c) breaks deploys. Ratifier: owner. Status: locked (chris, 2026-09-16, in chat: (a) — the `-- runner:manual` directive, exempt from the below-head rule; unknown markers a hard error).
 
 **F7 — Who runs the window.** Context: 3g and step 8 are one-shot, irreversible, and gated on
 #410's videos existing or the target being able to record them (#1202). Options: (a) the owner
 runs the window from the runbook (`railway run --service worker -- python -m scripts.migration_
 runner apply --manual 079`, then `apply --manual 080` — both as `DATABASE_URL`'s owner login,
 which is what the runner connects as), after the M.2 rehearsal on a Neon branch; (b) an agent
-runs it under explicit instruction. Lean: (a). Ratifier: owner. Status: open.
+runs it under explicit instruction. Lean: (a). Ratifier: owner. Status: locked (chris, 2026-09-16, in chat: (a) — the owner runs the window from the runbook after the Neon-branch rehearsal).
 
 **F8 — What the stand-down revokes.** Context: `04:213-240`'s success variant revokes the four
 `svc_*` memberships from `svc_migration` and `svc_migration` from the owner login; but door files
@@ -258,7 +258,7 @@ alone and leave the stand-down to the F.4 posture increment (#751), whose end st
 `legacy` absent, no `svc_*` role a member of anything, the owner's memberships as measured
 before and asserted after); (b) taxes every future migration to keep a shape nothing enforces;
 (c) leaves the door standing. Whichever is chosen, the rehearsal applies ONE door-replacing file
-after the stand-down as the positive control. Ratifier: owner. Status: open.
+after the stand-down as the positive control. Ratifier: owner. Status: locked (chris, 2026-09-16, in chat: (a) — the partial stand-down with a D40 amendment; the rehearsal applies a door file after it).
 
 **F9 — The snapshots' lifetime.** Context: `05-operational-numbers.md:90` gives `archive`
 snapshot tables the `archive_snapshots` class — 90 days, then `DROP TABLE` — and `059:440-441`
@@ -269,7 +269,7 @@ backstop for the drop, not an archive; 078's header, the backup page and the run
 date they become eligible and the owner's export option before it (`pg_dump -n archive` to cold
 storage); (b) indefinite — exempt `*_pre_cutover_*` from the class (a `059` amendment and a `05`
 row) and say so. Lean: (a) — this plan does not silently extend a ratified retention; the owner
-picks (b) knowing its cost is a door change. Ratifier: owner. Status: open.
+picks (b) knowing its cost is a door change. Ratifier: owner. Status: locked (chris, 2026-09-16, in chat: (a) — 90 days as ratified; the date and the export option stated).
 
 ## Companion Plans
 
@@ -322,9 +322,10 @@ stand-down — and renumbered above the head at merge; 079 reads the date from 0
 ## Implementation Plan
 
 ### Dependencies
-The owner ratifies F1–F9 (each phase's own Dependencies name the forks it needs) and, before
-phase 04, rules #1202 closed on its "or" leg (the target tier is armed and serving; the owner
-confirms a connected destination exists on it). PR #1314 (the audit fold) merged, so the audit
+F1–F9 locked by the owner (2026-09-16, in chat; each phase's own Dependencies name the forks it
+needs); #1202 ruled closed on its "or" leg the same day (the target tier is armed and serving,
+and the owner confirmed a connected destination exists on it) — phase 04 quotes the ruling on
+the issue. PR #1314 (the audit fold) merged, so the audit
 document the last phase reads exists on `main`. #751 (the F.4 posture) is independent by
 #1216's own words and does not gate this plan; the gates run both arms already.
 
@@ -333,7 +334,9 @@ document the last phase reads exists on `main`. #751 (the F.4 posture) is indepe
 `legacy`-schema instruments).
 
 ### Steps
-0. The owner ratifies the nine forks in this document (`Status: locked`, ratifier and date).
+0. The nine forks are locked (chris, 2026-09-16, in chat, each on the plan's lean); #1202 is
+   ruled closed on its "or" leg (the target tier is armed and serving, with a connected
+   destination) — the ruling is quoted on the issue when phase 04 opens.
 1. Phase 01 — `01_delete-the-code.md` (one PR).
 2. Phase 02 — `02_settings-and-entry-points.md` (one PR, after 01).
 3. Phase 03 — `03_snapshot-migrations.md` (one PR: the snapshot file, the ratchet's file rule and
