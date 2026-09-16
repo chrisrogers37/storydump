@@ -85,19 +85,23 @@ check "a port answer without an outcome is executed" $WR '    if not isinstance(
         outcome = "executed"' "$UNIT" "$TW -k without_an_outcome_is_exit_4"
 
 # --- health: the webhook verdict ------------------------------------------------------
-check "a failed registration is well" $EN '        why = registration.get("error") or "not registered"
-        return False, {"state": "unregistered", "detail": f"not registered: {why}"}' '        why = registration.get("error") or "not registered"
-        return True, {"state": "unregistered", "detail": f"not registered: {why}"}' "$UNIT" "$TE -k failed_to_register_as_not_well"
+check "a failed registration is well" $EN '            why = registration.get("error") or "not registered"
+            return False, {"state": "unregistered", "detail": f"not registered: {why}"}' '            why = registration.get("error") or "not registered"
+            return True, {"state": "unregistered", "detail": f"not registered: {why}"}' "$UNIT" "$TE -k failed_to_register_as_not_well"
 check "a backlog behind an error is well" $EN '        if error and isinstance(pending, int) and pending > 0:
             return False, {' '        if error and isinstance(pending, int) and pending > 0:
             return True, {' "$UNIT" "$TE -k undelivered_backlog"
 check "the webhook verdict never rides the report" $EN '    verdicts["webhook"] = webhook_verdict(surfaces.get("api"))' '    pass' "$UNIT" "$TE -k one_envelope_with_the_three_payloads"
 
 # --- deploys: the commit, the statuses, the deadline -------------------------------------
-check "a full hash never matches" $EN '    have = str(row.get("commit_hash") or row.get("commit") or "").lower()' '    have = str(row.get("commit") or "").lower()' "$UNIT" "$TE -k matches_a_commit_by_its_full_hash"
+check "a full hash never matches" $EN '    have = str(row.get("commit_hash") or "").lower()' '    have = str(row.get("commit") or "").lower()' "$UNIT" "$TE -k matches_a_commit_by_its_full_hash"
 check "the row forgets its full hash" $RW '        "commit_hash": full if isinstance(full, str) and full else None,' '        "commit_hash": full[:7] if isinstance(full, str) and full else None,' "$UNIT" "$TE -k matches_a_commit_by_its_full_hash"
 check "a removed deployment is not a failure" $RW 'FAILED_STATUSES: tuple[str, ...] = ("FAILED", "CRASHED", "REMOVED")' 'FAILED_STATUSES: tuple[str, ...] = ("FAILED", "CRASHED")' "$UNIT" "$TE -k removed_deployment_as_failed"
-check "the deadline never fires" $WA '                and (runtime.now_fn() - started).total_seconds() >= deadline' '                and False' "$UNIT" "$TE -k exceeds_its_timeout"
+check "the deadline never fires" $WA '                and (runtime.now_fn() - started).total_seconds() >= deadline
+            ):
+                raise Failure(' '                and False
+            ):
+                raise Failure(' "$UNIT" "$TE -k exceeds_its_timeout"
 
 # --- doctor: whose fault -----------------------------------------------------------------
 check "a 5xx on the principal blames the token" $EN '            except Unreachable as exc:
@@ -111,9 +115,9 @@ check "a 5xx on the principal blames the token" $EN '            except Unreacha
 check "--json after a bad value is prose" $MA '    if "--json" in argv:
         runtime.json_mode = True' '    pass' "$UNIT" "$TM -k usage_error_after_json"
 check "a closed pipe is a failure" $MA '    except BrokenPipeError:' '    except MemoryError:' "$UNIT" "$TM -k closed_pipe"
-check "a config directory error is a traceback" $MA '    except OSError as exc:
-        # the config directory' '    except MemoryError as exc:
-        # the config directory' "$UNIT" "$TM -k cannot_be_written_is_usage"
+check "a config directory error is a traceback" storydump_cli/storage.py '        except OSError as exc:
+            # a file where the config directory should be' '        except MemoryError as exc:
+            # a file where the config directory should be' "$UNIT" "$TM -k cannot_be_written_is_usage"
 check "a bare 403 is a login problem" $MA '    if exc.status == 403:
         # a reason-less 403 is the role floor' '    if False:
         # a reason-less 403 is the role floor' "$UNIT" "$TW -k reason_less_403"
@@ -170,13 +174,12 @@ check "a verb loses its renderer" $OU '    "doctor": _render_doctor,' '' "$UNIT"
 # --- round 3: the two review lenses ---------------------------------------------------------
 TG=tests/test_agent_docs.py
 check "a saturated pool loses its sentence" $MA '        if exc.reason and exc.reason in vocabulary.REASON_SENTENCES:' '        if False:' "$UNIT" "$TM -k saturated_pool"
-check "the timeout is checked after the login" $EN '    if timeout is not None and not watching:
-        raise click.UsageError("--timeout only means something with --watch", ctx=ctx)
-    rail = Railway(runtime.run_process)' '    rail = Railway(runtime.run_process)' "$UNIT" "$TE -k timeout_without_watch"
+check "the timeout is never checked" $EN '    if timeout is not None and not watching:
+        raise click.UsageError("--timeout only means something with --watch", ctx=ctx)' '    pass' "$UNIT" "$TE -k timeout_without_watch"
 check "the sampler failing is well" $EN '            return False, {
                 "state": "sampler_failed",' '            return True, {
                 "state": "sampler_failed",' "$UNIT" "$TE -k failed_webhook_sampler"
-check "a satellite may name a command anywhere" $TG '    named = _named_invocations(_never_bullets(_doc(doc)))' '    named = _named_invocations(_doc(doc))' "$UNIT" "$TG -k satellite_copy_of_the_list_is_complete"
+check "a satellite may name a command anywhere" $TG '    return _named_invocations(_never_bullets(text))' '    return _named_invocations(text)' "$UNIT" "$TG -k named_only_in_a_safe_list"
 check "a retry that fails again is not a new failure" $WA '    return int(new.get("job_attempts") or 0) > int(old.get("job_attempts") or 0)' '    return False' "$UNIT" "$TA -k retry_that_fails_again"
 check "a shuffled failed row ends the watch" $WA '        "floating", _by_id, _failed_floating, _empty_twice, worse=_job_died' '        "floating", _by_id, _failed_floating, _empty_twice' "$UNIT" "$TA -k retry_that_fails_again"
 check "a dropped principal call leaves the API ok" $EN '                checks["api"] = (

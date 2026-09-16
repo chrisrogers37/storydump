@@ -202,12 +202,34 @@ def _never_bullets(text: str) -> str:
     return m.group(1)
 
 
+def _forbidden_by(text: str) -> set[tuple[str, str | None]]:
+    """The commands a satellite forbids: those in its never-run bullets."""
+    return _named_invocations(_never_bullets(text))
+
+
+def test_a_command_named_only_in_a_safe_list_does_not_count():
+    """The scan reads the never-run bullets, not the whole page: a satellite
+    that lists `webhook register` as SAFE and omits it from NEVER is
+    incomplete, and a whole-page scan would wave it through."""
+    satellite = (
+        "**NEVER run these commands**\n"
+        "- `storydump approve <story>`\n"
+        "\n"
+        "**SAFE commands**\n"
+        "- `storydump webhook register` / `storydump health`\n"
+    )
+    forbidden = _forbidden_by(satellite)
+    assert ("approve", None) in forbidden
+    assert ("webhook", "register") not in forbidden
+    assert ("health", None) not in forbidden
+
+
 @pytest.mark.parametrize("doc", SATELLITES)
 def test_every_satellite_copy_of_the_list_is_complete(doc):
     """`.claude/*` context files repeat the list in their own words; each must
     name every destructive `storydump` command the canonical block names —
     IN its never-run bullets, not anywhere on the page."""
-    named = _named_invocations(_never_bullets(_doc(doc)))
+    named = _forbidden_by(_doc(doc))
     missing = sorted(
         f"storydump {verb}" + (f" {sub}" if sub else "")
         for verb, sub in _canonical_entries()
