@@ -111,10 +111,6 @@ def surface_verdict(name: str, payload: Any) -> tuple[bool, dict[str, str]]:
     return True, {"state": "reported", "detail": ""}
 
 
-def surface_is_well(name: str, payload: Any) -> bool:
-    return surface_verdict(name, payload)[0]
-
-
 def webhook_verdict(health: Any) -> tuple[bool, dict[str, str]]:
     """The bot's webhook, judged from `/health`'s two reports: `webhook` is
     the API's own registration at startup (`ok: false` with the reason is a

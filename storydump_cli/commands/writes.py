@@ -86,11 +86,14 @@ def deterministic_key(
 
 
 def fresh_key(command: str, *, workspace_id: str, identity: str) -> str:
-    """The workspace verbs mint a fresh key per invocation — the web mints a
-    submission id per click — because their effects are idempotent (pause
-    and resume set a flag; a sync coalesces with a pending one): a retry is
-    harmless and a later action always executes. (A day or a minute bucket
-    answered "already done" to a second pause after a resume.)"""
+    """The workspace verbs are keyed per ATTEMPT, as the web's submission id
+    is: a fresh identity per invocation, because an invocation IS an attempt
+    and a re-run is a new one by design — their effects are idempotent (pause
+    and resume set a flag; a sync coalesces with a pending one), so a retry
+    is harmless and a later action always executes. (A day or a minute bucket
+    answered "already done" to a second pause after a resume.) The next
+    entity-less verb follows the same rule; the identities both doors derive
+    are pinned in `tests/fixtures/idempotency_keys.json`."""
     return f"{command}:{workspace_id}:{identity}"
 
 

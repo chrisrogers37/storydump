@@ -74,6 +74,17 @@ DOCUMENTS = [
 ]
 
 
+def test_every_verb_kind_has_a_renderer():
+    """A verb whose kind has no renderer silently prints its JSON as prose;
+    the registry is pinned total over the verbs, groups included."""
+    from storydump_cli.main import cli
+    from storydump_cli.output import RENDERERS
+
+    kinds = set(cli.commands)  # a group's subcommands emit under the group's kind
+    missing = sorted(kinds - set(RENDERERS))
+    assert missing == [], missing
+
+
 def test_redacts_a_token():
     assert redact(f"token {SECRET} here") == "token sdt_… here"
 

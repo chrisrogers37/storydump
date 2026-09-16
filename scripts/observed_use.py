@@ -77,8 +77,8 @@ OK, ERROR = 0, 2
 # sufficient here and a substring match would not be.
 EXPECTED_HOST = "ep-hidden-shadow-aify76h5.c-4.us-east-1.aws.neon.tech"
 
-# storydump's Railway project (personal workspace).
-RAILWAY_PROJECT_ID = "33d1ccca-353c-4236-8d39-0d8fd916f054"
+# storydump's Railway project (personal workspace) — spelled once, in the vocabulary.
+from src.services.target.vocabulary import RAILWAY_PROJECT_ID  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # The dispatch surface is DERIVED FROM SOURCE, never listed here.

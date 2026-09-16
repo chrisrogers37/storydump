@@ -47,7 +47,7 @@ state, not attributed to the surface: two `test_egress_floor.py` tests need
 | Correctness at rest | done | 0/2/9/10 | `findings-correctness.md` |
 | Reliability & operations | done | 0/3/11/11 | `findings-reliability.md` |
 | Test quality | PARTIAL — killed by the session rate limit after its mutants ran (9 of 10 hand-picked mutants SURVIVED; results salvaged) | — | `repros/tests-lane/` |
-| Architecture & maintainability | PENDING — killed by the session rate limit; re-dispatched after the reset | — | — |
+| Architecture & maintainability | done (re-dispatched after the reset) | 0/2/7/8 | `findings-architecture.md` |
 | Access-path consistency | PENDING — killed by the session rate limit; re-dispatched after the reset | — | — |
 
 The maps corrected the intake brief twice (the exit-code contract; the env
@@ -69,6 +69,16 @@ the tear-out's), **accepted** (by design, documented).
 | R-H1 | `.claude/QUICK_REFERENCE.md` and `.claude/PROJECT_CONTEXT.md` carry never-run lists missing `resolve <story> retry` and `webhook register`; the parity test polices only CLAUDE.md/AGENTS.md | reliability | net-new | folded: the lists completed; `test_agent_docs.py` pins every satellite and refuses an unpinned one |
 | R-H2 | `monitoring.md` is the legacy tier (`--service web`, `posting_queue`, a `health_check.sh` that cannot run) — a tier nothing deployed runs since 2026-08-24 | reliability | net-new | folded: rewritten onto the v2 surface |
 | R-H3 | `troubleshooting.md`: `railway shell … -c` does not exist; legacy tables; the emergency stop is a legacy UPDATE | reliability | net-new | folded: rewritten; the emergency stop is `storydump pause --workspace` |
+| A-H1 | The Telegram variable names are "one spelling" for the CLI only: the vocabulary's `TELEGRAM_*_VAR` had no API reader — `app.py` read the literals in five places, `worker.py` in two — so the pin test pinned the constants to themselves | architecture | net-new (RUN_LOG §7 had queued it) | folded: the API and the worker read them from the re-export; a ratchet test forbids a literal `TARGET_TELEGRAM_` read outside the vocabulary; the settings' field names are pinned to the constants |
+| A-H2 | Six wire spellings copied into the web with no contract test (token roles, the secret prefix, the name/expiry bounds, the key bound, the resolutions, the verdict) — a prefix drift would 502 over a minted-but-never-shown token | architecture | net-new | folded: `landing/src/lib/wire-contract.test.ts` reads them from `vocabulary.py`; the bounds moved into the vocabulary and `service_tokens.py` reads them by reference |
+| A-M1 | Invariant I3 is import-time only, with the two `scripts` monitors and the third-party set unpinned | architecture | net-new | folded: the exact closure is pinned (the two monitors, stdlib-only, and four third-party packages at any depth); the distribution question goes to the tear-out |
+| A-M2 | The vocabulary's tests-only mirrors and the bounds it lacks; a five-section module under a three-kinds docstring | architecture | net-new | partly folded (the bounds and the floating limits are in, read by reference); the mirrors-as-sources and the split are queued (tech-debt; the batteries anchor on the module) |
+| A-M3 | The CLI's `error.reason` had no closed set: two tables in two modules, seven reasons raised inline, `check_envelope` validating the code only | architecture | net-new | folded: `CLI_REASONS` (the port's refusals plus the CLI's eight own), `check_envelope` refuses the rest, both tables pinned as subsets; the one-table refactor is queued |
+| A-M4 | The idempotency keys are a second derivation of the web's with no pin; the workspace verbs' docstring said "per click" where the web says per attempt | architecture | net-new | folded: `tests/fixtures/idempotency_keys.json` read by pytest and vitest, the two deliberate differences stated; the docstring says per attempt |
+| A-M5 | `output.py` is four modules; the renderer registry is unpinned against the verb set | architecture | net-new | folded (the totality test); the split is queued |
+| A-M6 | `doctor` is one function of six try-ladders; the check order is spelled twice | architecture | net-new | queued (tech-debt) |
+| A-M7 | The batteries anchor on verbatim source text; every structural fix re-cuts anchors | architecture | net-new | queued (process): `# mut:` markers |
+| A-L1..L8 | the webhook seam bypassing `Runtime.transport`; the `Watched` bag; deployment identities in three modules and a second project id in `scripts/observed_use.py`; misleading names; dead names; magic literals; verb modules chained for helpers; the API's legacy reach through `src.utils.logger` and `src/exceptions/__init__.py` | architecture | net-new | folded: the deployment identities (`API_URL`, `RAILWAY_PROJECT_*`) spelled once and pinned; `surface_is_well` and `PRINCIPAL_KINDS` deleted; the floating limits by reference. Queued: the seams, the bag, the names, the helpers. The legacy reach went into the tear-out plan (#1315: `src/exceptions`, the logger's settings load) |
 | T-1 | Nine hand-picked mutants survived the suites: `dispatch` returning 0 on Ctrl-C, a non-JSON 2xx read as `{}`, a failed `railway deployment list` read as no deployments, `webhook status` ignoring a URL mismatch, `revoke` ignoring the owner (unit AND gate), `doctor` reading a 4xx `/health` as ok, `deploys --watch` ending on one service, a non-object health payload read as well, a port answer without an outcome read as executed | tests | net-new | folded: a test per mutant (the revoke one in the tokens gate: a stranger's revoke is 404 and the row stays live); the battery carries them |
 
 ### MEDIUM
@@ -174,8 +184,15 @@ admin squash. The ledger of that run is below.
   (one anchor re-cut for the commit match), `cli_v2_audit.sh` 35/35 after two
   equivalent mutants exposed a dead clause in `_of_commit` (removed). 172
   mutations, none surviving, none unapplied.
-- CI on #1314: lint, ratchet, security, front-end, changelog green; the test
-  job pending at the time of writing.
+- CI on #1314: green on the head `458932a` (all eight jobs).
+- 16:15 — the rate limit lifted early; the architecture lane returned (2 HIGH,
+  7 MEDIUM, 8 LOW); the access-path lane and the two review lenses dispatched.
+- Round 2 (the architecture lane): eleven red tests (the ratchet on
+  `TARGET_TELEGRAM_` literals, the closed set of reasons, the bounds and
+  identities by reference, the exact import closure, the shared idempotency
+  fixture on both sides, the renderer totality), then the fixes; units green,
+  the DB gates 120 passed, the web's 47 vitest cases green, tsc and eslint
+  clean. Ten mutations added to the battery (45).
 
 ## Owner queue
 

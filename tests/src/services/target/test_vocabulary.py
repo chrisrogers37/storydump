@@ -266,6 +266,108 @@ class TestTheWindowSlack:
             vocabulary.window_start("31d", self.NOW)
 
 
+class TestTheClosedSetOfReasons:
+    """Every reason an envelope can carry is a member of one closed set — the
+    port's refusals and the CLI's own answers — so an agent can switch on it
+    and `check_envelope` refuses a reason nobody documented."""
+
+    def test_check_envelope_refuses_an_undocumented_reason(self):
+        document = vocabulary.error_envelope(
+            "whoami", code=vocabulary.EXIT_USAGE, reason="bogus", detail="x", fix="y"
+        )
+        with pytest.raises(ValueError):
+            vocabulary.check_envelope(document)
+
+    def test_every_sentence_and_fix_names_a_documented_reason(self):
+        from storydump_cli.main import FIXES
+
+        assert set(vocabulary.REASON_SENTENCES) <= set(vocabulary.CLI_REASONS)
+        assert set(FIXES) <= set(vocabulary.CLI_REASONS)
+
+    def test_the_clis_own_reasons_are_documented(self):
+        import re
+        from pathlib import Path
+
+        package = Path(__file__).resolve().parents[4] / "storydump_cli"
+        raised = set()
+        for path in package.rglob("*.py"):
+            raised |= set(re.findall(r'reason="([a-z_]+)"', path.read_text()))
+        assert raised <= set(vocabulary.CLI_REASONS), sorted(
+            raised - set(vocabulary.CLI_REASONS)
+        )
+
+
+class TestOneSpellingOfTheDeployment:
+    """The names the API, the worker and the CLI read from the environment,
+    and the deployment's identities, are spelled ONCE — in this module — and
+    read from it by reference. A literal elsewhere is a second spelling that
+    drifts (the API read `TARGET_TELEGRAM_*` as literals in seven places while
+    the vocabulary's constants had no API reader at all)."""
+
+    ROOT = __import__("pathlib").Path(__file__).resolve().parents[4]
+    #: Variables spelled in their own module by design: not the webhook's.
+    OWN_SPELLINGS = {
+        "src/channels/telegram_webhook_registration.py": {
+            "TARGET_TELEGRAM_WEBHOOK_AUTOREGISTER"
+        },
+        "src/channels/telegram_transport.py": {"TARGET_TELEGRAM_API_BASE"},
+    }
+
+    def test_no_telegram_variable_is_read_by_a_literal_outside_the_vocabulary(self):
+        import re
+
+        offenders = []
+        for path in (self.ROOT / "src").rglob("*.py"):
+            rel = str(path.relative_to(self.ROOT))
+            if rel == "src/services/target/vocabulary.py":
+                continue
+            for match in re.finditer(r'"(TARGET_TELEGRAM_[A-Z_]+)"', path.read_text()):
+                if match.group(1) not in self.OWN_SPELLINGS.get(rel, set()):
+                    offenders.append(f"{rel}: {match.group(1)}")
+        assert offenders == [], offenders
+
+    def test_the_settings_fields_are_the_vocabularys_names(self):
+        from src.config.settings import Settings
+
+        assert vocabulary.TELEGRAM_SECRET_VAR in Settings.model_fields
+        assert vocabulary.TELEGRAM_BOT_VAR in Settings.model_fields
+
+    def test_the_railway_project_and_the_api_host_are_spelled_once(self):
+        from storydump_cli import config, railway
+
+        assert railway.PROJECT_ID is vocabulary.RAILWAY_PROJECT_ID
+        assert railway.PROJECT_NAME is vocabulary.RAILWAY_PROJECT_NAME
+        assert config.DEFAULT_API_URL is vocabulary.API_URL
+        assert vocabulary.DEFAULT_WEBHOOK_URL.startswith(vocabulary.API_URL)
+        twice = [
+            str(p.relative_to(self.ROOT))
+            for p in list((self.ROOT / "src").rglob("*.py"))
+            + list((self.ROOT / "scripts").rglob("*.py"))
+            + list((self.ROOT / "storydump_cli").rglob("*.py"))
+            if p.name != "vocabulary.py"
+            and vocabulary.RAILWAY_PROJECT_ID in p.read_text()
+        ]
+        assert twice == [], twice
+
+
+class TestTheBoundsEveryAdapterEnforces:
+    def test_the_token_bounds_are_read_by_reference(self):
+        from src.services.target import service_tokens
+
+        assert service_tokens.NAME_MAX is vocabulary.TOKEN_NAME_MAX
+        assert service_tokens.MAX_EXPIRY_DAYS is vocabulary.TOKEN_EXPIRY_DAYS_MAX
+        assert (
+            service_tokens.DEFAULT_EXPIRY_DAYS is vocabulary.TOKEN_EXPIRY_DAYS_DEFAULT
+        )
+        assert vocabulary.TOKEN_EXPIRY_DAYS_MIN == 1
+
+    def test_the_floating_limits_are_read_by_reference(self):
+        from src.services.target import ops_views
+
+        assert ops_views.FLOATING_LIMIT is vocabulary.FLOATING_LIMIT
+        assert ops_views.FLOATING_LIMIT_MAX is vocabulary.FLOATING_LIMIT_MAX
+
+
 class TestTheAnswersAddedByTheAudit:
     def test_a_rate_limited_answer_is_unreachable_not_refused(self):
         assert (

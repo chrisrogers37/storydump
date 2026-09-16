@@ -19,7 +19,11 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any, Callable, Optional, Sequence
 
-from src.services.target.vocabulary import EXIT_RAILWAY_UNREACHABLE
+from src.services.target.vocabulary import (
+    EXIT_RAILWAY_UNREACHABLE,
+    RAILWAY_PROJECT_ID,
+    RAILWAY_PROJECT_NAME,
+)
 from storydump_cli.output import Failure
 
 #: The `railway` version the parsers were written against; the fixture
@@ -28,8 +32,8 @@ from storydump_cli.output import Failure
 TESTED_VERSION = "4.30.3"
 #: The repository's project on Railway. A link to any other project is refused
 #: before a deployment is read.
-PROJECT_NAME = "storydump"
-PROJECT_ID = "33d1ccca-353c-4236-8d39-0d8fd916f054"
+PROJECT_NAME = RAILWAY_PROJECT_NAME
+PROJECT_ID = RAILWAY_PROJECT_ID
 #: The services `main` deploys — the API and the worker — in display order.
 SERVICES: tuple[str, ...] = ("storydump", "worker")
 #: How many deployments per service a read lists.

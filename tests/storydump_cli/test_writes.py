@@ -140,6 +140,37 @@ def test_each_story_verb_posts_its_command_with_the_deterministic_key(
     assert body_of(request) == {"intent_id": INTENT}
 
 
+def test_the_keys_match_the_shared_fixture_both_doors_read():
+    """`tests/fixtures/idempotency_keys.json` is read by this test and by the
+    web's `idempotency-fixture.test.ts`: one statement of each door's rule,
+    the deliberate differences included."""
+    import json
+    from pathlib import Path
+
+    fixture = json.loads(
+        (
+            Path(__file__).resolve().parents[1] / "fixtures" / "idempotency_keys.json"
+        ).read_text()
+    )
+    for case in fixture["cases"]:
+        body, command = case["body"], case["command"]
+        if "submission_id" in body:
+            key = writes.fresh_key(
+                command,
+                workspace_id=fixture["workspace"],
+                identity=body["submission_id"],
+            )
+        else:
+            key = writes.deterministic_key(
+                command,
+                intent_id=body["intent_id"],
+                resolution=body.get("resolution"),
+                verdict=body.get("verdict"),
+                episode=body.get("episode"),
+            )
+        assert key == case["cli"], (command, body)
+
+
 def test_the_deterministic_key_is_a_function_of_command_and_story():
     assert writes.deterministic_key("skip", intent_id=INTENT) == f"skip:{INTENT}"
     assert (

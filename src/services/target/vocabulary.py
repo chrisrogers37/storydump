@@ -116,8 +116,13 @@ AUDIT_CHANNELS: tuple[str, ...] = ("telegram", "web", "cli", "system")
 #: `service_tokens.role` (060 ``ck_service_token_role``).
 TOKEN_ROLES: tuple[str, ...] = ("operator", "readonly")
 
-#: How a principal reached the API: a browser session, or a bearer token.
-PRINCIPAL_KINDS: tuple[str, ...] = ("session", "token")
+#: The bounds every adapter enforces before the table does: a token's name
+#: (`service_tokens.name`), and its expiry in whole days — the API's default
+#: and ceiling, the web form's range, the CLI's `tokens` verbs' words.
+TOKEN_NAME_MAX = 80
+TOKEN_EXPIRY_DAYS_MIN = 1
+TOKEN_EXPIRY_DAYS_DEFAULT = 90
+TOKEN_EXPIRY_DAYS_MAX = 365
 
 #: Every API token starts with this; the resolver routes on it and secret
 #: scanners recognise it. The rest is 32 url-safe random bytes (43 chars).
@@ -239,9 +244,30 @@ def check_envelope(document: Any) -> None:
         for key in ("reason", "detail", "fix"):
             if not isinstance(error[key], str):
                 raise ValueError(f"error {key} is not a string")
+        if error["reason"] not in CLI_REASONS:
+            raise ValueError(
+                f"error reason {error['reason']!r} is not a documented reason"
+            )
 
 
 # --- the CLI's own sentences -----------------------------------------------
+
+#: The CLI's OWN reasons — the answers no port refusal names: a usage error,
+#: a thing not found, an API that did not answer, a watch's failure, a store
+#: or Railway that cannot be used, an interrupt, and the bare refusal a
+#: reason-less 4xx maps to. Every other reason an envelope carries is the
+#: port's (:data:`REASON_SENTENCES`); :data:`CLI_REASONS` below is the closed
+#: set an agent may switch on, and :func:`check_envelope` refuses the rest.
+CLI_OWN_REASONS: tuple[str, ...] = (
+    "usage",
+    "not_found",
+    "api_unreachable",
+    "watch_failed",
+    "storage_unavailable",
+    "railway_unreachable",
+    "interrupted",
+    "refused",
+)
 
 #: One sentence per refusal reason, in the CLI's words, naming the fixing verb
 #: where one exists. Never the Telegram adapter's wording.
@@ -279,6 +305,10 @@ REASON_SENTENCES: Mapping[str, str] = {
         "a different command was already sent under this idempotency key"
     ),
 }
+
+#: Every reason an error envelope may carry: the port's refusals (each with
+#: a sentence above) and the CLI's own.
+CLI_REASONS: tuple[str, ...] = tuple(REASON_SENTENCES) + CLI_OWN_REASONS
 
 #: The port's outcomes as the CLI reports them.
 OUTCOME_SENTENCES: Mapping[str, str] = {
@@ -331,6 +361,13 @@ RESOLUTIONS: tuple[str, ...] = ("retry", "posted", "cancel")
 NOT_POSTED = "not_posted"
 
 
+# --- the deployment's identities -----------------------------------------------
+# Spelled once: the API's public host (the CLI's default, the webhook's door)
+# and the Railway project the `deploys` seam refuses to read past.
+API_URL = "https://api.storydump.app"
+RAILWAY_PROJECT_NAME = "storydump"
+RAILWAY_PROJECT_ID = "33d1ccca-353c-4236-8d39-0d8fd916f054"
+
 # --- the Telegram webhook's spellings --------------------------------------------
 # One spelling of the deployment's names, shared by the API's startup
 # self-registration (`src/channels/telegram_webhook_registration.py`) and the
@@ -340,7 +377,7 @@ TELEGRAM_TOKEN_VAR = "TARGET_TELEGRAM_BOT_TOKEN"
 TELEGRAM_SECRET_VAR = "TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN"
 TELEGRAM_BOT_VAR = "TARGET_TELEGRAM_BOT_USERNAME"
 WEBHOOK_URL_VAR = "TARGET_TELEGRAM_WEBHOOK_URL"
-DEFAULT_WEBHOOK_URL = "https://api.storydump.app/webhooks/telegram"
+DEFAULT_WEBHOOK_URL = f"{API_URL}/webhooks/telegram"
 WEBHOOK_SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token"
 #: The update kinds the target ingress serves: `/start` taps and group messages
 #: ride `message`; a button tap on an approval card is a `callback_query`.
@@ -392,6 +429,10 @@ WINDOW_UNITS: Mapping[str, str] = {"m": "minutes", "h": "hours", "d": "days"}
 MAX_WINDOW_DAYS = 30
 #: `jobs`, `outbox` and `burst` look back this far by default.
 DEFAULT_WINDOW = "3h"
+#: `floating`'s default and ceiling (`ops_views.floating`, the route's 422 and
+#: the CLI's `--limit`); every other list is windowed by `since`.
+FLOATING_LIMIT = 100
+FLOATING_LIMIT_MAX = 500
 #: Two clocks judge one window — the CLI computes a span's start, the API
 #: measures it against its own now — so a start this close to a bound is
 #: clamped to the bound rather than refused (a `30d` from a client one second

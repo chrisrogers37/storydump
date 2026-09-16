@@ -1,0 +1,90 @@
+{
+  "_comment": "The idempotency identities both doors derive, pinned once and read by tests/storydump_cli/test_writes.py (the CLI's deterministic_key/fresh_key) and landing/src/lib/idempotency-fixture.test.ts (the web's parseCommand + idempotencyKeyFor). Where the two doors differ on purpose, both keys are stated: the CLI adds the verdict segment a resolution carries, and its workspace verbs carry the workspace id before the per-invocation identity. Dedup is per channel and principal, so the doors never replay each other; this fixture pins each door's own rule.",
+  "intent": "0395b173-9c3e-4a6b-8f2e-6d1c2b3a4f50",
+  "episode": "2026-09-15T14:00:00+00:00",
+  "submission": "9d9d9d9d-9d9d-4d9d-8d9d-9d9d9d9d9d9d",
+  "workspace": "11111111-1111-4111-8111-111111111111",
+  "cases": [
+    {
+      "command": "skip",
+      "body": {
+        "intent_id": "0395b173-9c3e-4a6b-8f2e-6d1c2b3a4f50"
+      },
+      "web": "skip:0395b173-9c3e-4a6b-8f2e-6d1c2b3a4f50",
+      "cli": "skip:0395b173-9c3e-4a6b-8f2e-6d1c2b3a4f50"
+    },
+    {
+      "command": "approve",
+      "body": {
+        "intent_id": "0395b173-9c3e-4a6b-8f2e-6d1c2b3a4f50"
+      },
+      "web": "approve:0395b173-9c3e-4a6b-8f2e-6d1c2b3a4f50",
+      "cli": "approve:0395b173-9c3e-4a6b-8f2e-6d1c2b3a4f50"
+    },
+    {
+      "command": "reject",
+      "body": {
+        "intent_id": "0395b173-9c3e-4a6b-8f2e-6d1c2b3a4f50"
+      },
+      "web": "reject:0395b173-9c3e-4a6b-8f2e-6d1c2b3a4f50",
+      "cli": "reject:0395b173-9c3e-4a6b-8f2e-6d1c2b3a4f50"
+    },
+    {
+      "command": "mark_posted",
+      "body": {
+        "intent_id": "0395b173-9c3e-4a6b-8f2e-6d1c2b3a4f50"
+      },
+      "web": "mark_posted:0395b173-9c3e-4a6b-8f2e-6d1c2b3a4f50",
+      "cli": "mark_posted:0395b173-9c3e-4a6b-8f2e-6d1c2b3a4f50"
+    },
+    {
+      "command": "cancel",
+      "body": {
+        "intent_id": "0395b173-9c3e-4a6b-8f2e-6d1c2b3a4f50"
+      },
+      "web": null,
+      "cli": "cancel:0395b173-9c3e-4a6b-8f2e-6d1c2b3a4f50",
+      "note": "the web offers no cancel (the dashboard has no control for it); the CLI does"
+    },
+    {
+      "command": "resolve_review",
+      "body": {
+        "intent_id": "0395b173-9c3e-4a6b-8f2e-6d1c2b3a4f50",
+        "resolution": "cancel"
+      },
+      "web": "resolve_review:0395b173-9c3e-4a6b-8f2e-6d1c2b3a4f50:cancel",
+      "cli": "resolve_review:0395b173-9c3e-4a6b-8f2e-6d1c2b3a4f50:cancel"
+    },
+    {
+      "command": "resolve_review",
+      "body": {
+        "intent_id": "0395b173-9c3e-4a6b-8f2e-6d1c2b3a4f50",
+        "resolution": "posted",
+        "episode": "2026-09-15T14:00:00+00:00"
+      },
+      "web": "resolve_review:0395b173-9c3e-4a6b-8f2e-6d1c2b3a4f50:posted:2026-09-15T14:00:00+00:00",
+      "cli": "resolve_review:0395b173-9c3e-4a6b-8f2e-6d1c2b3a4f50:posted:2026-09-15T14:00:00+00:00"
+    },
+    {
+      "command": "resolve_review",
+      "body": {
+        "intent_id": "0395b173-9c3e-4a6b-8f2e-6d1c2b3a4f50",
+        "resolution": "retry",
+        "verdict": "not_posted",
+        "episode": "2026-09-15T14:00:00+00:00"
+      },
+      "web": "resolve_review:0395b173-9c3e-4a6b-8f2e-6d1c2b3a4f50:retry:2026-09-15T14:00:00+00:00",
+      "cli": "resolve_review:0395b173-9c3e-4a6b-8f2e-6d1c2b3a4f50:retry:not_posted:2026-09-15T14:00:00+00:00",
+      "note": "the CLI's verdict segment: a refused retry and its --not-posted retry are two keys; the web's retry always carries the verdict and never keys on it"
+    },
+    {
+      "command": "pause_workspace",
+      "body": {
+        "submission_id": "9d9d9d9d-9d9d-4d9d-8d9d-9d9d9d9d9d9d"
+      },
+      "web": "pause_workspace:9d9d9d9d-9d9d-4d9d-8d9d-9d9d9d9d9d9d",
+      "cli": "pause_workspace:11111111-1111-4111-8111-111111111111:9d9d9d9d-9d9d-4d9d-8d9d-9d9d9d9d9d9d",
+      "note": "an entity-less command is keyed per ATTEMPT: the web's submission id per submission, the CLI's uuid per invocation (an invocation is an attempt; a re-run is a new attempt by design)"
+    }
+  ]
+}

@@ -39,7 +39,7 @@
  * per-click would be the bug.
  */
 
-/** The port refuses a key longer than this (`v1.py:64`). */
+/** The port refuses a key longer than this — the vocabulary's `IDEMPOTENCY_KEY_MAX` (`wire-contract.test.ts` pins them equal). */
 export const IDEMPOTENCY_KEY_MAX = 200;
 
 export type CommandParse =
@@ -118,7 +118,10 @@ function submissionCommand(
  * Adding a row makes the route *capable* of a command. It does not wire a
  * control; that is the epic's P3/P4.
  */
-const RESOLUTIONS = ["retry", "posted", "cancel"] as const;
+/** The port's three resolutions — the vocabulary's `RESOLUTIONS` (`wire-contract.test.ts` pins them equal). */
+export const RESOLUTIONS = ["retry", "posted", "cancel"] as const;
+/** The one verdict a resolution may carry — the vocabulary's `NOT_POSTED`. */
+export const NOT_POSTED = "not_posted";
 
 /**
  * The review card's one command (2026-09-12): the intent and which of the
@@ -143,7 +146,7 @@ function resolveReviewCommand(): CommandSpec {
         typeof raw.episode === "string" && raw.episode.length > 0 ? raw.episode : "";
       // The one verdict the port knows: the member looked, the story is not
       // there. Anything else is not forwarded — the port would refuse it.
-      const verdict = raw.verdict === "not_posted" ? { verdict: "not_posted" } : {};
+      const verdict = raw.verdict === NOT_POSTED ? { verdict: NOT_POSTED } : {};
       return {
         ok: true,
         body: { intent_id: intentId, resolution, ...verdict },

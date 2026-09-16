@@ -149,3 +149,28 @@ check "the webhook group has no --json" $EN '@click.group()
 @global_options
 def webhook() -> None:' '@click.group()
 def webhook() -> None:' "$UNIT" "$TH -k json_before_the_group"
+
+# --- round 2: the architecture lane (one spelling, the closed set of reasons, the boundary) -----
+TV2=tests/src/services/target/test_vocabulary.py
+TI=tests/storydump_cli/test_import_boundary.py
+AP=src/api/app.py
+ST=src/services/target/service_tokens.py
+OV=src/services/target/ops_views.py
+check "the API reads a Telegram variable by a literal" $AP '    token = env.get(reg.TOKEN_VAR)
+    secret = env.get(reg.SECRET_VAR)' '    token = env.get("TARGET_TELEGRAM_BOT_TOKEN")
+    secret = env.get(reg.SECRET_VAR)' "$UNIT" "$TV2 -k literal_outside_the_vocabulary"
+check "an undocumented reason passes the envelope check" $VO '        if error["reason"] not in CLI_REASONS:' '        if False:' "$UNIT" "$TV2 -k refuses_an_undocumented_reason"
+check "a CLI reason leaves the closed set" $VO '    "interrupted",
+    "refused",
+)' '    "refused",
+)' "$UNIT" "$TV2 -k own_reasons_are_documented"
+check "the token bounds are spelled twice" $ST 'NAME_MAX = vocabulary.TOKEN_NAME_MAX' 'NAME_MAX = 80' "$UNIT" "$TV2 -k token_bounds_are_read_by_reference"
+check "the floating limits are spelled twice" $OV 'from src.services.target.vocabulary import FLOATING_LIMIT, FLOATING_LIMIT_MAX' 'from src.services.target.vocabulary import FLOATING_LIMIT_MAX
+FLOATING_LIMIT = 100' "$UNIT" "$TV2 -k floating_limits_are_read_by_reference"
+check "the project id is spelled twice" $RW 'PROJECT_ID = RAILWAY_PROJECT_ID' 'PROJECT_ID = "33d1ccca-353c-4236-8d39-0d8fd916f054"' "$UNIT" "$TV2 -k spelled_once"
+check "a third-party package joins the CLI" $CL 'import httpx' 'import httpx
+import pydantic' "$UNIT" "$TI -k on_the_allowlist"
+check "a monitor stops being stdlib-only" scripts/posting_monitor.py 'import urllib.request' 'import urllib.request
+import httpx' "$UNIT" "$TI -k standard_library_only"
+check "the workspace key drops the workspace" $WR '    return f"{command}:{workspace_id}:{identity}"' '    return f"{command}:{identity}"' "$UNIT" "$TW -k shared_fixture_both_doors_read"
+check "a verb loses its renderer" $OU '    "doctor": _render_doctor,' '' "$UNIT" "$TO -k every_verb_kind_has_a_renderer"

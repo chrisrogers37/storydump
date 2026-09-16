@@ -23,10 +23,8 @@ import datetime as dt
 from typing import Any
 
 from src.services.target import readers
+from src.services.target.vocabulary import FLOATING_LIMIT, FLOATING_LIMIT_MAX
 
-#: `floating`'s default and ceiling; every other list is windowed by `since`.
-FLOATING_LIMIT = 100
-FLOATING_LIMIT_MAX = 500
 #: The bound inside a story's own timeline (audit rows) and per-section lists.
 #: A list past its bound keeps its NEWEST rows — an operator reads the current
 #: state, not how it started — and is still returned oldest first; a story

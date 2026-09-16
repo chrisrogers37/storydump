@@ -14,10 +14,12 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
+
+from src.services.target.vocabulary import API_URL
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
-DEFAULT_API_URL = "https://api.storydump.app"
+DEFAULT_API_URL = API_URL
 CONFIG_DIR_ENV = "STORYDUMP_CONFIG_DIR"
 API_URL_ENV = "STORYDUMP_API"
 CONFIG_FILE = "config.json"
