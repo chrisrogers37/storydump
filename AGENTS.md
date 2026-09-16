@@ -110,9 +110,11 @@ The repo's `Makefile` targets assume `./venv/`. (`.venv/` is also gitignored, so
 a local one will not be committed, but the Makefile will not find it.)
 
 `src/config/settings.py` requires `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHANNEL_ID`
-and `ADMIN_TELEGRAM_CHAT_ID` **even for the web service, the CLI and the tests**
-— every entry point loads settings. Dummy values are sufficient for anything
-that is not the worker. Tests additionally need `ENCRYPTION_KEY`, a Fernet key.
+and `ADMIN_TELEGRAM_CHAT_ID` **even for the web service and the tests** —
+those entry points load settings (#1222). The `storydump` CLI does not: it
+imports only `src/services/target/vocabulary.py` and needs no variable but its
+token. Dummy values are sufficient for anything that is not the worker. Tests
+additionally need `ENCRYPTION_KEY`, a Fernet key.
 
 `.env`, `.env.test` and `landing/.env.local` are gitignored and never committed.
 
@@ -177,11 +179,15 @@ HTTP client, never a database connection
 6. The environment: `storydump health` (the API's three health surfaces,
    judged by the fleet monitors' own verdicts — the `classify` of
    `scripts/scheduling_monitor.py` and `scripts/posting_monitor.py`, imported:
-   not well when a monitor would page; exit 4 then, the report and each verdict
-   still printed) · `storydump deploys
-   [--watch]` (the latest deployments on Railway through your own `railway`
-   login, with the linked project checked first; exit 5 with the fix when
-   Railway cannot be read; `--watch` ends 0 on both SUCCESS, 6 on a failure)
+   not well when a monitor would page; plus the bot's webhook from `/health`;
+   exit 4 then, the report and each verdict still printed. Two bounds against
+   the pollers: one reading has no watch clock, and one unreachable reading
+   is reported where the pollers wait for two) · `storydump deploys
+   [--watch --commit <sha> --timeout <s>]` (the latest deployments on Railway
+   through your own `railway` login, with the linked project checked first;
+   exit 5 with the fix when Railway cannot be read; `--watch` ends 0 on both
+   SUCCESS, 6 on FAILED, CRASHED or REMOVED, or when `--timeout` runs out;
+   `--commit` takes any prefix of the hash, the whole one included)
    · `storydump webhook status|register|deregister` (the bot's Telegram
    webhook, the deployment's variables read from this shell, no secret ever
    printed; exit 4 when a check fails) · `storydump doctor` (the token, the

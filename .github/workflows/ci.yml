@@ -104,7 +104,9 @@ jobs:
           pip install pytest-cov
 
       - name: Install package
-        run: pip install -e .
+        # the CLI extra too: `storydump_cli` is tested here, with its real
+        # credential-store dependency rather than whatever is around
+        run: pip install -e '.[cli]'
 
       - name: Generate test encryption key
         id: gen-key
@@ -136,7 +138,7 @@ jobs:
           LOG_LEVEL: DEBUG
           MEDIA_DIR: /tmp/test-media
         run: |
-          pytest tests/ -v --cov=src --cov-report=xml --cov-report=term-missing
+          pytest tests/ -v --cov=src --cov=storydump_cli --cov-report=xml --cov-report=term-missing
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
@@ -164,7 +166,7 @@ jobs:
         continue-on-error: true
 
       - name: Run bandit security scan
-        run: bandit -r src/ -ll -ii --format json --output bandit-report.json || true
+        run: bandit -r src/ storydump_cli/ -ll -ii --format json --output bandit-report.json || true
         continue-on-error: true
 
       - name: Upload bandit report

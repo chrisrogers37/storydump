@@ -934,3 +934,18 @@ def test_every_json_document_is_an_envelope(tmp_path):
         result = run(rt, "--json", *args)
         for line in result.stdout.splitlines():
             check_envelope(json.loads(line))
+
+
+def test_a_story_at_the_views_bound_says_its_older_rows_are_omitted(tmp_path):
+    """The API keeps a list's NEWEST rows at the bound and names the list; the
+    terminal says so, so an operator never reads a timeline that quietly ends."""
+    row = story_row(WS_A)
+    row["truncated"] = ["audit"]
+    api = reads_api({("GET", path("story", WS_A, INTENT)): view("story", WS_A, [row])})
+    result = run(read_runtime(tmp_path, api), "story", INTENT, "--workspace", WS_A)
+    assert result.exit_code == EXIT_OK, result.output
+    assert "older ones are omitted" in result.stdout and "audit" in result.stdout
+    row["truncated"] = []
+    api = reads_api({("GET", path("story", WS_A, INTENT)): view("story", WS_A, [row])})
+    result = run(read_runtime(tmp_path, api), "story", INTENT, "--workspace", WS_A)
+    assert "omitted" not in result.stdout

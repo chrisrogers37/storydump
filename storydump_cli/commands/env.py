@@ -111,8 +111,47 @@ def surface_verdict(name: str, payload: Any) -> tuple[bool, dict[str, str]]:
     return True, {"state": "reported", "detail": ""}
 
 
-def surface_is_well(name: str, payload: Any) -> bool:
-    return surface_verdict(name, payload)[0]
+def webhook_verdict(health: Any) -> tuple[bool, dict[str, str]]:
+    """The bot's webhook, judged from `/health`'s two reports: `webhook` is
+    the API's own registration at startup (`ok: false` with the reason is a
+    bot nobody delivers to), `webhook_live` is what Telegram holds right now
+    (a backlog behind a delivery error is our door failing). An API that
+    reports neither is not judged on it."""
+    payload = health if isinstance(health, dict) else {}
+    registration = payload.get("webhook")
+    live = payload.get("webhook_live")
+    if not isinstance(registration, dict) and not isinstance(live, dict):
+        return True, {"state": "unsampled", "detail": "the API reports no webhook"}
+    if isinstance(registration, dict) and registration.get("ok") is False:
+        if registration.get("skipped") and not isinstance(live, dict):
+            # the API chose not to register (not the production environment,
+            # autoregister off) and holds no live sample: a fact for the
+            # report, not an outage. With a live sample the sample decides —
+            # autoregister off in production still has a bot to deliver to
+            return True, {"state": "skipped", "detail": str(registration["skipped"])}
+        if not registration.get("skipped"):
+            why = registration.get("error") or "not registered"
+            return False, {"state": "unregistered", "detail": f"not registered: {why}"}
+    if isinstance(live, dict):
+        pending = live.get("pending_update_count")
+        error = live.get("last_error_message")
+        if error and isinstance(pending, int) and pending > 0:
+            return False, {
+                "state": "undelivered",
+                "detail": f"{pending} updates pending behind: {error}",
+            }
+        if "error" in live:
+            # the API's own minute-sampler could not ask Telegram: our probe
+            # is blind, which is its own not-well state
+            return False, {
+                "state": "sampler_failed",
+                "detail": f"Telegram could not be asked: {live['error']}",
+            }
+        return True, {
+            "state": "registered",
+            "detail": f"{pending if isinstance(pending, int) else 0} pending",
+        }
+    return True, {"state": "registered", "detail": "registered at startup"}
 
 
 @click.command()
@@ -123,9 +162,15 @@ def health(ctx: click.Context) -> int:
     the API reports them, judged by the fleet monitors' own verdicts (the same
     `classify` the pollers run): not well when a monitor would page — a cursor
     stalled past 10 minutes, the worker down, 48 hours of silence, a first post
-    overdue past its grace, or a surface unreachable. Exit 0 when every surface
-    is well, 4 otherwise — the report is still printed with each verdict; a
-    surface that answers 503 is reported as its error.
+    overdue past its grace, or a surface unreachable — and the bot's webhook
+    from the liveness report: unregistered, or a backlog behind a delivery
+    error. Exit 0 when every surface is well, 4 otherwise — the report is still
+    printed with each verdict; a surface that answers 503 is reported as its
+    error.
+
+    Two bounds against the pollers: this is one reading, so there is no watch
+    clock (the posting monitor's watched time is zero here), and one
+    unreachable reading is reported as such where the pollers wait for two.
 
     \b
     Example:
@@ -137,6 +182,7 @@ def health(ctx: click.Context) -> int:
     verdicts = {
         name: surface_verdict(name, payload) for name, payload in surfaces.items()
     }
+    verdicts["webhook"] = webhook_verdict(surfaces.get("api"))
     ok = all(well for well, _ in verdicts.values())
     data = {"ok": ok, **surfaces, "verdicts": {k: v for k, (_, v) in verdicts.items()}}
     emit(envelope("health", data), json_mode=runtime.json_mode)
@@ -147,7 +193,13 @@ def health(ctx: click.Context) -> int:
 
 
 def _of_commit(row: dict[str, Any], commit: Optional[str]) -> bool:
-    return commit is None or str(row.get("commit") or "").startswith(commit)
+    """Whether *row* deploys *commit*: a prefix of the row's full hash, in
+    either case — the seven characters shown or the forty a push printed."""
+    if commit is None:
+        return True
+    given = commit.strip().lower()
+    have = str(row.get("commit_hash") or "").lower()
+    return have.startswith(given)
 
 
 def deploys_watched(commit: Optional[str]) -> Watched:
@@ -225,29 +277,48 @@ def _read_deploys(rail: Railway, *, limit: int) -> list[dict[str, Any]]:
     default=None,
     metavar="SHA",
     help=(
-        "Under --watch, wait for the deployments of this commit (a prefix of the"
-        " hash); without it the latest rows decide, whatever they deploy."
+        "Under --watch, wait for the deployments of this commit (any prefix of"
+        " the hash, the whole hash included); without it the latest rows decide,"
+        " whatever they deploy."
     ),
+)
+@click.option(
+    "--timeout",
+    "timeout",
+    type=click.FloatRange(min=1),
+    default=None,
+    metavar="SECONDS",
+    help="Under --watch, give up after this long: exit 6, naming the wait.",
 )
 @click.pass_context
 def deploys(
-    ctx: click.Context, watching: bool, every: float, commit: Optional[str]
+    ctx: click.Context,
+    watching: bool,
+    every: float,
+    commit: Optional[str],
+    timeout: Optional[float],
 ) -> int:
     """The latest deployments of the API and the worker on Railway's
     production environment, with their commits — through your own `railway`
     login, checked first along with the linked project. --watch ends 0 when
     both latest deploys are SUCCESS (a sleeping or skipped deployment counts)
-    and 6 when one FAILED or CRASHED; pass --commit <sha> right after a push
-    so the watch waits for that commit's deployments instead of ending on the
-    previous ones. A service with no live deployment keeps the watch running
-    (Ctrl-C ends it, exit 0).
+    and 6 when one FAILED, CRASHED or was REMOVED; pass --commit <sha> right
+    after a push so the watch waits for that commit's deployments instead of
+    ending on the previous ones. A service with no live deployment keeps the
+    watch running (Ctrl-C ends it, exit 0; --timeout ends it with 6).
 
     \b
     Examples:
       storydump deploys
-      storydump deploys --watch --commit 0b0badc
+      storydump deploys --watch --commit 0b0badc --timeout 1800
     """
     runtime = begin(ctx, "deploys")
+    if timeout is not None and not watching:
+        raise click.UsageError("--timeout only means something with --watch", ctx=ctx)
+    if commit is not None and not commit.strip():
+        raise click.BadParameter(
+            "a commit is a prefix of its hash", ctx=ctx, param_hint="--commit"
+        )
     rail = Railway(runtime.run_process)
     rail.whoami()
     project = rail.linked_project()
@@ -257,6 +328,7 @@ def deploys(
             deploys_watched(commit),
             lambda: _read_deploys(rail, limit=1),
             every=every,
+            deadline=timeout,
         )
     data = {
         "railway_version": rail.version(),
@@ -284,6 +356,7 @@ def _url_option(command):
 
 
 @click.group()
+@global_options
 def webhook() -> None:
     """Check, register or remove the bot's Telegram webhook — the variables the
     deployment uses, read from this shell; no secret is ever printed.
@@ -433,11 +506,19 @@ def doctor(ctx: click.Context) -> int:
             "",
         )
     except Unreachable as exc:
-        checks["api"] = (
-            "missing",
-            f"unreachable: {exc.detail}",
-            "check STORYDUMP_API and the network",
-        )
+        if exc.status:
+            # it answered, badly: a 5xx from /health is a wrong API, not a missing one
+            checks["api"] = (
+                "wrong",
+                f"{runtime.api_url} answered {exc.status}: {exc.detail}",
+                "the API is degraded — wait, then run storydump doctor again",
+            )
+        else:
+            checks["api"] = (
+                "missing",
+                f"unreachable: {exc.detail}",
+                "check STORYDUMP_API and the network",
+            )
     except ApiError as exc:
         checks["api"] = (
             "wrong",
@@ -474,14 +555,30 @@ def doctor(ctx: click.Context) -> int:
         else:
             try:
                 principal = runtime.client(token).principal()
+            except Unreachable as exc:
+                # before ApiError, its base class: a 5xx or a dropped
+                # connection on /me/principal is the API's failure, never
+                # "the API refuses this token"
+                checks["token"] = ("skipped", f"could not be checked: {exc.detail}", "")
+                # /health answered and /me/principal did not: the API is
+                # what is wrong, whether it answered 5xx or dropped the line —
+                # a doctor that says "ok" over an unchecked token is lying
+                answered = (
+                    f"answered {exc.status} on /me/principal"
+                    if exc.status
+                    else "did not answer /me/principal"
+                )
+                checks["api"] = (
+                    "wrong",
+                    f"{runtime.api_url} {answered}: {exc.detail}",
+                    "the API is degraded — wait, then run storydump doctor again",
+                )
             except ApiError as exc:
                 checks["token"] = (
                     "wrong",
                     f"the API refuses it ({exc.reason or exc.status})",
                     "run storydump login with a token minted on the web under Settings › API tokens",
                 )
-            except Unreachable as exc:
-                checks["token"] = ("skipped", f"could not be checked: {exc.detail}", "")
             else:
                 facts = (
                     principal.get("token")

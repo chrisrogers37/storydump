@@ -96,7 +96,9 @@ check "a logged-out account is read anyway" $RW '            raise RailwayUnavai
 check "a missing binary is not said" $RW '            raise RailwayUnavailable("the railway binary is not installed", INSTALL_FIX)' '            raise RailwayUnavailable("railway failed", INSTALL_FIX)' "$UNIT" "$TE -k missing_railway_binary"
 check "the version is the whole line" $RW '    return match.group(1) if match else (text or "").strip()' '    return (text or "").strip()' "$UNIT" "$TE -k reads_the_fixtures_version"
 check "the watch ends before both succeed" $EN '            str(row.get("status")) in DONE_STATUSES and _of_commit(row, commit)' '            True' "$UNIT" "$TE -k ends_0_when_both_latest_deploys_succeed"
-check "the commit is ignored" $EN '    return commit is None or str(row.get("commit") or "").startswith(commit)' '    return True' "$UNIT" "$TE -k commit_waits_for_that_commits_deploys"
+check "the commit is ignored" $EN '    if commit is None:
+        return True' '    if True:
+        return True' "$UNIT" "$TE -k commit_waits_for_that_commits_deploys"
 check "rows are read in the binary's order" $RW '        rows.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)' '        pass' "$UNIT" "$TE -k sorts_newest_first"
 check "another environment is read" $RW '            ENVIRONMENT,' '            "staging",' "$UNIT" "$TE -k sorts_newest_first"
 check "a hung binary is a traceback" $RW '        except subprocess.TimeoutExpired:' '        except MemoryError:' "$UNIT" "$TE -k hung_binary"

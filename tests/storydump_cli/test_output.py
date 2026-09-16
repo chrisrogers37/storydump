@@ -74,6 +74,17 @@ DOCUMENTS = [
 ]
 
 
+def test_every_verb_kind_has_a_renderer():
+    """A verb whose kind has no renderer silently prints its JSON as prose;
+    the registry is pinned total over the verbs, groups included."""
+    from storydump_cli.main import cli
+    from storydump_cli.output import RENDERERS
+
+    kinds = set(cli.commands)  # a group's subcommands emit under the group's kind
+    missing = sorted(kinds - set(RENDERERS))
+    assert missing == [], missing
+
+
 def test_redacts_a_token():
     assert redact(f"token {SECRET} here") == "token sdt_… here"
 
@@ -85,6 +96,27 @@ def test_leaves_the_bare_prefix_alone():
 def test_redacts_database_urls():
     assert redact("db postgres://u:p@h:5432/db now") == "db postgres://<redacted> now"
     assert redact("db postgresql://u:p@h/db") == "db postgres://<redacted>"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "postgresql+asyncpg://user:pw@host:5432/db",
+        "postgresql+psycopg2://user:pw@host/db",
+        "postgres://user:pw@host/db?sslmode=require",
+    ],
+)
+def test_redacts_every_dialect_of_a_database_url(url):
+    """The one URL shape this deployment uses carries a driver suffix; the
+    backstop must strike it too."""
+    assert "pw" not in redact(f"dsn {url} end")
+    assert "<redacted>" in redact(f"dsn {url} end")
+
+
+def test_the_tokens_renderer_survives_a_row_that_is_not_an_object(capsys):
+    emit(envelope("tokens", {"tokens": ["garbage", None, 7]}), json_mode=False)
+    out = capsys.readouterr().out
+    assert "Traceback" not in out
 
 
 def test_redacts_webhook_secrets():

@@ -2,7 +2,17 @@
 
 ## Overview
 
-Storydump runs on Railway with a Neon PostgreSQL database. This guide covers monitoring the service health and common metrics.
+Storydump runs on Railway (two services from one repository: `storydump`, the
+API, and `worker`) with a Neon PostgreSQL database. The operator's instruments
+are the `storydump` CLI (`pip install -e '.[cli]'`, a token minted on the web
+under Settings › API tokens), the fleet monitors under `scripts/`, and Railway's
+own dashboard and logs. Nothing here reads the database directly: every
+question below has a read verb, and the verbs are the same ones an agent runs.
+
+This page is the target tier's — the only tier deployed: the worker dispatches
+to the target composition root (`WORKER_IMPL=target`, since 2026-08-24). The
+legacy code and the `legacy` schema survive undeployed until #1216 snapshots,
+drops and deletes them; nothing here reads them.
 
 ---
 
@@ -11,121 +21,96 @@ Storydump runs on Railway with a Neon PostgreSQL database. This guide covers mon
 ### Check Service Health
 
 ```bash
-# Check Railway service status via dashboard
-# https://railway.app/dashboard → Select project → View service logs
-
-# Or via Railway CLI
-railway logs --service worker
-railway logs --service web
-
-# Run health check via Railway shell
+# The API's three health surfaces, judged by the fleet monitors' own verdicts
+# (exit 0 when every surface is well, 4 otherwise; the report is printed either way)
 storydump health
+storydump health --json
+
+# The latest deployment of each service, with its commit — through your own
+# `railway` login, the linked project checked first
+storydump deploys
+storydump deploys --watch --commit <sha> --timeout 1800   # right after a push
+
+# Logs (the API service is `storydump`, not `web`)
+railway logs --service worker
+railway logs --service storydump
 ```
+
+`storydump doctor` checks the token, the API, the token store, the local
+configuration, the Railway login and link, and the migration ledger against the
+checkout — the first thing to run on a laptop that cannot reach anything.
 
 ### Common Status Indicators
 
-| Status | Meaning | Action |
-|--------|---------|--------|
-| `Active` | Service is healthy | None |
-| `Deploying` | New deployment in progress | Wait for completion |
-| `Crashed` | Service crashed | Check logs for error |
-| `Sleeping` | Service scaled to zero | Check Railway settings |
+| `storydump deploys` status | Meaning | Action |
+|---|---|---|
+| `SUCCESS` | The deployment is live | None |
+| `SLEEPING` | Live, scaled to zero | None (Railway wakes it on traffic) |
+| `SKIPPED` | Nothing to build for that service | None |
+| `BUILDING` / `DEPLOYING` | In progress | Wait; `--watch` ends when it lands |
+| `FAILED` / `CRASHED` | The deployment did not come up | `railway logs --service <svc>` |
+| `REMOVED` | Taken down; it will not become live | Redeploy |
 
 ---
 
 ## Key Metrics to Monitor
 
-### 1. Queue Health
-
-```sql
--- Pending posts count
-SELECT COUNT(*) FROM posting_queue WHERE status = 'pending';
-
--- Stuck posts (scheduled but not processed)
-SELECT COUNT(*) FROM posting_queue
-WHERE status = 'pending'
-AND scheduled_for < NOW() - INTERVAL '1 hour';
-
--- Failed posts
-SELECT COUNT(*) FROM posting_queue WHERE status = 'failed';
-```
-
-### 2. Posting Rate
-
-```sql
--- Posts per day (last 7 days)
-SELECT
-    DATE(posted_at) as date,
-    COUNT(*) as posts
-FROM posting_history
-WHERE posted_at > NOW() - INTERVAL '7 days'
-GROUP BY DATE(posted_at)
-ORDER BY date DESC;
-```
-
-### 3. Token Health
-
-```sql
--- Check token expiry
-SELECT
-    service_name,
-    ia.display_name,
-    expires_at,
-    CASE
-        WHEN expires_at < NOW() THEN 'EXPIRED'
-        WHEN expires_at < NOW() + INTERVAL '7 days' THEN 'EXPIRING SOON'
-        ELSE 'OK'
-    END as status
-FROM api_tokens t
-LEFT JOIN instagram_accounts ia ON t.instagram_account_id::uuid = ia.id;
-```
-
-### 4. Error Rate
+### 1. The float (stories approved and waiting)
 
 ```bash
-# Check errors in Railway logs
+storydump floating                 # every workspace the token can read
+storydump floating --watch         # ends 0 when nothing floats twice running; 6 when a job dies
+storydump story <id>               # one story's whole timeline
+```
+
+### 2. Jobs and the outbox
+
+```bash
+storydump jobs --since 3h          # counts by kind × lane × state, the oldest due, failed samples
+storydump outbox --since 3h        # pending, sending, ambiguous and failed rows by binding
+storydump jobs --watch             # ends 6 when a failed group appears or grows
+```
+
+### 3. A posting burst
+
+```bash
+storydump burst --since 2026-09-15T14:50:00Z   # taps, permits, waits, siblings, reviews, outcomes
+storydump burst --watch                        # ends 0 when nothing is mid-flight, 6 on a review
+storydump account <handle>                     # the cap, today's count, the next slot
+```
+
+### 4. The deployment's posture
+
+```bash
+storydump posture                  # the migration ledger, the connected role, RLS per table, the doors
+```
+
+### 5. Error Rate
+
+```bash
 railway logs --service worker | grep -c ERROR
-
-# Or view errors directly in Railway dashboard log viewer
-# Filter by "ERROR" in the search bar
+railway logs --service storydump | grep -c ERROR
+# Or the Railway dashboard's log viewer, filtered on "ERROR"
 ```
 
 ---
 
-## Alerting Thresholds
+## Alerting
 
-| Metric | Warning | Critical |
-|--------|---------|----------|
-| Queue stuck posts | > 1 | > 5 |
-| Token expires in | < 14 days | < 3 days |
-| Error rate (per hour) | > 5 | > 20 |
-| Service restarts (per day) | > 1 | > 3 |
+The fleet monitors are stdlib-only scripts that poll the API's health surfaces
+and page on the same verdicts `storydump health` prints:
 
----
+| Monitor | Surface | Pages on |
+|---|---|---|
+| `scripts/scheduling_monitor.py` | `/health/scheduling` | a cursor stalled past 10 min, the worker down, the API unreachable |
+| `scripts/posting_monitor.py` | `/health/posting` | 48 h of silence, a first post overdue past its grace, unreachable |
 
-## Health Check Script
-
-Run a health check via the Railway shell or schedule via external monitoring:
-
-```bash
-#!/bin/bash
-# health_check.sh - Run via Railway shell or external cron
-
-# Check for stuck posts
-STUCK=$(psql "$DATABASE_URL" -t -c \
-    "SELECT COUNT(*) FROM posting_queue WHERE status='pending' AND scheduled_for < NOW() - INTERVAL '1 hour'")
-
-if [ "$STUCK" -gt 5 ]; then
-    echo "CRITICAL: $STUCK stuck posts in queue"
-    exit 2
-elif [ "$STUCK" -gt 1 ]; then
-    echo "WARNING: $STUCK stuck posts in queue"
-    exit 1
-fi
-
-echo "OK: Service healthy"
-exit 0
-```
+See `scheduling-monitor.md` and `posting-monitor.md` beside this page for the
+thresholds and the pollers' two extra rules (a watch clock; two unreachable
+readings before paging) that a single `storydump health` reading does not have.
+`storydump health` also judges the bot's webhook from `/health` (unregistered,
+or a backlog behind a delivery error); `storydump webhook status` asks Telegram
+directly.
 
 ---
 
@@ -134,8 +119,8 @@ exit 0
 | Log | Location |
 |-----|----------|
 | Worker logs | Railway dashboard or `railway logs --service worker` |
-| Web/API logs | Railway dashboard or `railway logs --service web` |
-| Application logs | Configured via `LOG_LEVEL` env var (stdout, captured by Railway) |
+| API logs | Railway dashboard or `railway logs --service storydump` |
+| Application logs | `LOG_LEVEL` env var (stdout, captured by Railway) |
 | PostgreSQL logs | Neon dashboard |
 
 ---
@@ -143,12 +128,9 @@ exit 0
 ## Restart Procedures
 
 ```bash
-# Restart via Railway CLI
 railway restart --service worker
+railway restart --service storydump
 
-# Or restart via Railway dashboard:
-# Project → Service → Settings → Restart
-
-# Redeploy (pulls latest code and restarts)
-railway up --service worker
+# Or via the Railway dashboard: Project → Service → Settings → Restart.
+# A redeploy is a push to main; `storydump deploys --watch --commit <sha>` follows it.
 ```

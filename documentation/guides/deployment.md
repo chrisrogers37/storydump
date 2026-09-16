@@ -76,14 +76,11 @@ ADMIN_TELEGRAM_CHAT_ID=123456789
 # Set your Neon connection string
 export DATABASE_URL="postgresql://user:pass@ep-xxx.neon.tech/storydump?sslmode=require"
 
-# Run base schema
-psql "$DATABASE_URL" -f scripts/setup_database.sql
-
-# Run all migrations
-for f in scripts/migrations/0{01,02,03,04,05,06,07,08,09,10,11,12,13,14,15,16,17,18,19,20,21}_*.sql; do
-  echo "Running $f..."
-  psql "$DATABASE_URL" -f "$f"
-done
+# Apply the migrations through the runner — the same command the worker's
+# pre-deploy step runs (`railway.toml`); it keeps the ledger the API's
+# `storydump posture` and `storydump doctor` read. Never a psql loop.
+python -m scripts.migration_runner status
+python -m scripts.migration_runner apply
 ```
 
 ### Verify Setup
@@ -147,11 +144,11 @@ MEDIA_DIR=/tmp/media
 
 Railway requires two services from the same repo:
 
-**Service 1: Worker**
+**Service 1: `worker`**
 - Start command: `python -m src.main`
 - Build command: `pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media`
 
-**Service 2: Web**
+**Service 2: `storydump` (the API)**
 - Start command: `uvicorn src.api.app:app --host 0.0.0.0 --port ${PORT:-8000}`
 - Build command: `pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media`
 

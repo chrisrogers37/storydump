@@ -114,3 +114,67 @@ def test_the_package_reaches_src_only_through_the_vocabulary():
     loaded = _modules_loaded_by_importing_the_package()
     from_src = {name for name in loaded if name == "src" or name.startswith("src.")}
     assert from_src == ALLOWED_SRC
+
+
+#: The two fleet monitors `health` reuses — stdlib-only modules, the one
+#: import from `scripts/` the boundary admits (plan 03 §Build notes).
+ALLOWED_SCRIPTS = {"scripts", "scripts.posting_monitor", "scripts.scheduling_monitor"}
+#: The third-party packages the CLI may import at any depth; `keyring` lazily.
+ALLOWED_THIRD_PARTY = {"click", "httpx", "rich", "keyring"}
+
+
+def test_the_package_reaches_scripts_only_for_the_two_monitors():
+    loaded = _modules_loaded_by_importing_the_package()
+    from_scripts = {n for n in loaded if n == "scripts" or n.startswith("scripts.")}
+    assert from_scripts == ALLOWED_SCRIPTS
+
+
+def test_the_two_monitors_import_the_standard_library_only():
+    """The boundary lets them in because they are stdlib-only; this is what
+    keeps them so."""
+    import ast
+    from pathlib import Path
+
+    scripts = Path(__file__).resolve().parents[2] / "scripts"
+    for name in ("posting_monitor.py", "scheduling_monitor.py"):
+        tree = ast.parse((scripts / name).read_text())
+        for node in ast.walk(tree):
+            names = []
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                names = [node.module]
+            for imported in names:
+                top = imported.split(".")[0]
+                assert top in sys.stdlib_module_names, f"{name} imports {imported}"
+
+
+def test_every_direct_import_of_the_package_is_on_the_allowlist():
+    """The exact boundary, at every depth: the standard library, the package
+    itself, the vocabulary, the two monitors, and four third-party packages."""
+    import ast
+    from pathlib import Path
+
+    package = Path(__file__).resolve().parents[2] / "storydump_cli"
+    offenders = []
+    for path in sorted(package.rglob("*.py")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            names = []
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                names = [f"{node.module}.{alias.name}" for alias in node.names]
+            for imported in names:
+                top = imported.split(".")[0]
+                ok = (
+                    top in sys.stdlib_module_names
+                    or top == "storydump_cli"
+                    or imported == "src.services.target.vocabulary"
+                    or imported.startswith("src.services.target.vocabulary.")
+                    or imported in ALLOWED_SCRIPTS
+                    or top in ALLOWED_THIRD_PARTY
+                )
+                if not ok:
+                    offenders.append(f"{path.name}:{node.lineno} {imported}")
+    assert offenders == [], offenders

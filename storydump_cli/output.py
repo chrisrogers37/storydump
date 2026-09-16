@@ -32,7 +32,7 @@ from src.services.target.vocabulary import write_sentence
 
 #: The three secret shapes the spec names (§6, redaction at the client).
 TOKEN_PATTERN = re.compile(r"sdt_[A-Za-z0-9_-]{8,}")
-DATABASE_URL_PATTERN = re.compile(r"postgres(?:ql)?://\S+")
+DATABASE_URL_PATTERN = re.compile(r"postgres(?:ql)?(?:\+\w+)?://\S+")
 WEBHOOK_SECRET_PATTERN = re.compile(r"(secret_token|token)=\S+")
 #: A Telegram bot token (`<bot id>:<35 chars>`), which a Bot API URL carries.
 # ... not preceded by a word character or a hyphen: the digit run inside a
@@ -183,6 +183,9 @@ def _render_tokens(console: Console, data: Any) -> None:
         return
     table = _table("id", "name", "role", "expires", "last used", "revoked")
     for row in rows:
+        if not isinstance(row, dict):
+            table.add_row(_text(row, "?"), "?", "?", "?", "?", "?")
+            continue
         table.add_row(
             _text(row.get("id"), "?"),
             _text(row.get("name"), "?"),
@@ -244,6 +247,10 @@ STORY_FIELDS: Sequence[Column] = (
     ("attempts", "attempts_by_step"),
     ("account", "ig_account_id"),
     ("media", "media_item_id"),
+    ("via", "published_via"),
+    ("cancel", "cancel_requested"),
+    ("approval", "approval_mode"),
+    ("permalink", "ig_permalink"),
     ("error", "last_error"),
 )
 AUDIT_COLUMNS: Sequence[Column] = (
@@ -298,7 +305,7 @@ def _job_of(row: Mapping[str, Any]) -> Any:
 
 
 def _wait_of(row: Mapping[str, Any]) -> Any:
-    """``container_not_ready/2``: the last wait's class and rung."""
+    """``container/2``: the last wait's class (``fetch`` or ``container``) and rung."""
     klass = row.get("last_wait_class")
     if klass is None:
         return None
@@ -516,6 +523,12 @@ def _render_story_rows(console: Console, rows: list[dict[str, Any]]) -> None:
         _section(console, "audit", row.get("audit"), AUDIT_COLUMNS)
         _section(console, "operations", row.get("operations"), OPERATION_COLUMNS)
         _section(console, "outbox", row.get("cards"), SENT_COLUMNS)
+        cut = [str(name) for name in row.get("truncated") or [] if name]
+        if cut:
+            console.print(
+                f"    (at the view's bound: {', '.join(cut)} show the newest rows;"
+                " older ones are omitted)"
+            )
 
 
 def _render_account_rows(console: Console, rows: list[dict[str, Any]]) -> None:

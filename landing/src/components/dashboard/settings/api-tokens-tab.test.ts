@@ -3,6 +3,7 @@ import type { ReactElement, ReactNode } from "react";
 import { CopyButton } from "@/components/setup/copy-button";
 import type { MintedToken } from "@/lib/tokens";
 import {
+  DEFAULT_MINT_ROLE,
   MintedSecretBlock,
   SERVICE_ROLE_NOTE,
   mintFormValid,
@@ -138,5 +139,13 @@ describe("the mint form's submit gate", () => {
     expect(mintFormValid({ name: "laptop", days: "366" })).toBe(false);
     expect(mintFormValid({ name: "laptop", days: "1.5" })).toBe(false);
     expect(mintFormValid({ name: "laptop", days: "ninety" })).toBe(false);
+  });
+});
+
+describe("the mint form's default role", () => {
+  it("is readonly — write access is chosen, never handed out by default", () => {
+    // A person minting a token for a read-only agent must not get one that
+    // can approve, pause and resolve because they never touched the dropdown.
+    expect(DEFAULT_MINT_ROLE).toBe("readonly");
   });
 });

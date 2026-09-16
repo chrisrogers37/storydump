@@ -22,6 +22,7 @@ configured, and skipping is honest. A server that answered and then failed is a
 real failure and propagates.
 """
 
+import asyncio
 import hashlib
 import os
 import re
@@ -122,6 +123,31 @@ def skip_ceiling_breach(skipped: int, ceiling: int, required: bool):
         " run passed without executing the tests it claims to cover. Raise"
         " MAX_EXPECTED_SKIPS deliberately if the new skips are legitimate."
     )
+
+
+def pytest_sessionstart(session):
+    """No implicit event loop, ever — the harness's unraisable-warning flake.
+
+    ``asyncio.get_event_loop()`` on a policy nothing has ever called
+    ``set_event_loop`` on MINTS a loop in the main thread (3.10–3.13; a
+    ``RuntimeError`` from 3.14) and makes it current. pytest-asyncio 1.3.0's
+    ``_temporary_event_loop_policy`` calls exactly that before every runner
+    it opens and restores what it got afterwards, so one stray loop rides
+    along as "current" until the first ``asyncio.run()`` in a sync test
+    replaces it. Dropped unclosed, its ``__del__`` raises ``ResourceWarning:
+    unclosed event loop`` plus one for each of its two self-pipe sockets, and
+    under ``filterwarnings = error`` pytest's unraisable hook fails WHICHEVER
+    test the collector happens to be running — ``test_token_principal``,
+    ``test_gdrive_oauth_gate`` and ``test_dashboard_reads_gate`` were three
+    different victims across three CI runs on 2026-09-16, each passing alone.
+    Marking the policy as set before any test makes ``get_event_loop()`` raise
+    instead of mint, which is what every fresh-loop helper under
+    ``tests/scripts`` already assumes ("``get_event_loop()`` RAISES on 3.10").
+    Nothing in ``src``, ``scripts``, ``storydump_cli`` or ``tests`` relies on
+    an implicitly minted loop (grep, 2026-09-16: the one ``get_event_loop()``
+    call is inside ``src/main.py``'s legacy ``main_async``).
+    """
+    asyncio.set_event_loop(None)
 
 
 def pytest_sessionfinish(session, exitstatus):

@@ -380,7 +380,7 @@ def test_health_through_the_real_cli_reports_the_three_surfaces(
             assert data["api"]["status"] == "ok"
             assert "db_role" in data["api"] and "taps" in data["api"]
             assert set(data) == {"ok", "api", "scheduling", "posting", "verdicts"}
-            assert set(data["verdicts"]) == {"api", "scheduling", "posting"}
+            assert set(data["verdicts"]) == {"api", "scheduling", "posting", "webhook"}
             # no worker heartbeat on a replayed database: the verdict is the
             # exit code, the report is still the answer
             assert code == (EXIT_OK if data["ok"] else EXIT_API_UNREACHABLE)

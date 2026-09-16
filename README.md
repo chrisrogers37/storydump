@@ -151,7 +151,7 @@ The bot responds to these commands in Telegram:
 - ✅ Type 2 SCD tracking for ratio history
 - ✅ Interactive ratio configuration during indexing
 - ✅ Scheduler integration with category-aware slot allocation
-- ✅ 488 comprehensive tests
+- ✅ A test suite of several thousand tests (unit, and DB gates against the replayed schema)
 
 **Phase 2** (Instagram API Automation) - ✅ COMPLETE (v1.5.0):
 - ✅ Instagram Graph API integration with rate limiting
@@ -169,13 +169,13 @@ The bot responds to these commands in Telegram:
 - ✅ Message tracking (100-message cache) for efficient cleanup
 - ✅ TelegramService refactored from 3,500-line monolith into 5 handler modules
 - ✅ Verbose settings expansion (controls more message types)
-- ✅ 488 comprehensive tests
+- ✅ A test suite of several thousand tests (unit, and DB gates against the replayed schema)
 
 ## Development
 
 ### Running Tests
 
-The project includes 488 comprehensive tests with automatic test database setup:
+The project's tests run against a local PostgreSQL (the DB gates need it; unit tests do not):
 
 ```bash
 # Run all tests with coverage
@@ -200,7 +200,7 @@ storydump/
 │   ├── services/          # Business logic
 │   ├── utils/             # Utility functions
 │   └── main.py            # Application entry point
-├── cli/                   # CLI commands
+├── storydump_cli/         # the `storydump` console (a client of the API)
 ├── tests/                 # Test suite
 ├── scripts/               # Database scripts
 └── media/                 # Media storage

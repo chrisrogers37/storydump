@@ -45,17 +45,9 @@ BYPASS="$GT -k without_row_level_security"
 
 # --- the tenant predicates (killed by the BYPASSRLS arm) --------------------
 check "story reads any workspace's intent" $OV '    " FROM post_intents i WHERE i.workspace_id = :ws AND i.id = :id"' '    " FROM post_intents i WHERE i.id = :id"' "$GATE" "$BYPASS"
-check "cards forgets the workspace" $OV '    " WHERE o.workspace_id = :ws AND o.intent_id = :id"
-    f" ORDER BY o.created_at LIMIT {STORY_ROWS}"
-)
-
-
-async def cards(' '    " WHERE o.intent_id = :id"
-    f" ORDER BY o.created_at LIMIT {STORY_ROWS}"
-)
-
-
-async def cards(' "$GATE" "$BYPASS"
+check "cards forgets the workspace" $OV '    " WHERE o.workspace_id = :ws AND o.intent_id = :id",
+    order="created_at, id",' '    " WHERE o.intent_id = :id",
+    order="created_at, id",' "$GATE" "$BYPASS"
 check "floating lists every workspace" $OV '    " WHERE i.workspace_id = :ws AND i.state = '"'"'approved'"'"' AND i.cap_consumed_on IS NOT NULL"' '    " WHERE i.state = '"'"'approved'"'"' AND i.cap_consumed_on IS NOT NULL"' "$GATE" "$BYPASS"
 check "account answers for another workspace's handle" $OV '    " WHERE a.workspace_id = :ws"
     "   AND (a.id::text = :key"' '    " WHERE true"
@@ -95,8 +87,8 @@ check "a bad window is a 500" $OR '    except ValueError as exc:
 check "floating's limit is unbounded" $OR '    limit: int = Query(ops_views.FLOATING_LIMIT, ge=1, le=ops_views.FLOATING_LIMIT_MAX),' '    limit: int = Query(ops_views.FLOATING_LIMIT, ge=1),' "$UNIT" "$TU -k clamps_its_limit"
 
 # --- the fold ------------------------------------------------------------------
-check "a window may be wider than thirty days" $VO '    if anchor - start > dt.timedelta(days=MAX_WINDOW_DAYS):' '    if False:' "$UNIT" "tests/src/services/target/test_vocabulary.py -k everything_else_is_refused"
-check "a window may start in the future" $VO '    if start > anchor:' '    if False:' "$UNIT" "tests/src/services/target/test_vocabulary.py -k everything_else_is_refused"
+check "a window may be wider than thirty days" $VO '    if start < widest - WINDOW_SLACK:' '    if False:' "$UNIT" "tests/src/services/target/test_vocabulary.py -k everything_else_is_refused"
+check "a window may start in the future" $VO '    if start > anchor + WINDOW_SLACK:' '    if False:' "$UNIT" "tests/src/services/target/test_vocabulary.py -k everything_else_is_refused"
 check "an overflow escapes the grammar" $VO '    except (ValueError, OverflowError):' '    except ValueError:' "$UNIT" "tests/src/api/test_ops_routes.py -k overflowing_window"
 check "burst stamps the caller's workspace on its rows" $OV '            rows.append({"section": section, **row})' '            rows.append({"section": section, **row, "workspace_id": workspace_id})' "$UNIT" "tests/src/services/target/test_ops_views.py -k merged_in_time_order"
 # the NAME lookup must come first: `AND` short-circuits, and a name lookup behind a false

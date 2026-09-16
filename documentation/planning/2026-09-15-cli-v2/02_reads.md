@@ -84,8 +84,8 @@ Phase 03 (`doctor` reads `posture`; `burst --watch` is the post-deploy read).
    `{"workspaces": [{"workspace_id", "rows"}]}` — one shape whether one workspace or several;
    `posture`'s `data` is the view's object. Human output is a `rich` table per workspace.
 4. **`--watch [--every 30]`** in `storydump_cli/watch.py`: re-read; key rows by their id column
-   (intent, job, outbox id); print added and changed rows only; `--json` emits one envelope per
-   read with `data.changes`; exit 0 on the verb's terminal condition (`floating`: empty for two
+   (intent, job, outbox id); print added, changed and removed rows only; `--json` emits one
+   envelope per read with `data.workspaces[].changes`; exit 0 on the verb's terminal condition (`floating`: empty for two
    consecutive reads; `burst`: no story mid-flight), exit 6 on a failure condition the verb
    defines, and Ctrl-C ends with exit 0.
 5. **Exit codes**: `1` when a `story`/`cards`/`account` key resolves to nothing; `3` on 401/403

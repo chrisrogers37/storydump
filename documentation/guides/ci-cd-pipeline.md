@@ -31,23 +31,14 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
-          pip install -e .
-
-      - name: Lint
-        run: |
-          ruff check src/ tests/ cli/
-          ruff format --check src/ tests/ cli/
-
-      - name: Test
-        run: pytest
-
-      - name: Security scan
-        run: |
-          pip-audit
-          bandit -r src/ -c pyproject.toml
+      # (abridged — the real file is `.github/workflows/ci.yml`: five jobs)
+      # lint:      ruff check . && ruff format . --check
+      # ratchet:   python scripts/telegram_ratchet.py
+      # test:      pip install -e '.[cli]'; pytest tests/ -v --cov=src --cov=storydump_cli
+      #            against a postgres service, REQUIRE_TEST_DATABASE=1
+      # security:  pip-audit and bandit -r src/ storydump_cli/ (both advisory)
+      # front-end: npm ci, npm test, npx tsc --noEmit, npm run lint (in landing/)
+      # changelog-check: CHANGELOG.md must change in a PR
 ```
 
 ### What CI Checks
@@ -83,7 +74,7 @@ Railway automatically deploys when changes are pushed to `main`:
 ```bash
 # Check deployment status
 railway logs --service worker
-railway logs --service web
+railway logs --service storydump
 
 # Verify health after deploy
 storydump health
@@ -112,7 +103,7 @@ Go to: `https://github.com/chrisrogers37/storydump/settings/secrets/actions`
 
 | Secret | Purpose | Notes |
 |--------|---------|-------|
-| None required | CI uses no secrets | Tests use mocked dependencies |
+| None required | CI uses no secrets | The test job runs a PostgreSQL service and sets `REQUIRE_TEST_DATABASE=1`, so the DB gates must run |
 
 ### Railway Secrets (for CD)
 
@@ -138,8 +129,8 @@ All production secrets are configured in the Railway dashboard:
 ```bash
 # Run checks locally before pushing
 source venv/bin/activate
-ruff check src/ tests/ cli/
-ruff format --check src/ tests/ cli/
+ruff check .
+ruff format --check .
 pytest
 ```
 

@@ -43,9 +43,10 @@ from src.services.target import vocabulary
 #: The prefix every secret carries; the resolver routes on it.
 TOKEN_PREFIX = vocabulary.TOKEN_PREFIX
 #: A token expires unless the minter says otherwise; the ceiling is a year.
-DEFAULT_EXPIRY_DAYS = 90
-MAX_EXPIRY_DAYS = 365
-NAME_MAX = 80
+#: The numbers are the vocabulary's — the web form and the CLI read the same.
+DEFAULT_EXPIRY_DAYS = vocabulary.TOKEN_EXPIRY_DAYS_DEFAULT
+MAX_EXPIRY_DAYS = vocabulary.TOKEN_EXPIRY_DAYS_MAX
+NAME_MAX = vocabulary.TOKEN_NAME_MAX
 #: `last_used_at` is stamped at most this often (the session slide's throttle).
 STAMP_THROTTLE_SECONDS = 60
 

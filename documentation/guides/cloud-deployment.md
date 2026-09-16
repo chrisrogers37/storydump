@@ -58,11 +58,9 @@ Run the base schema and all migrations in order:
 # Base schema
 psql "$DATABASE_URL" -f scripts/setup_database.sql
 
-# All migrations (run in order)
-for f in scripts/migrations/0{01,02,03,04,05,06,07,08,09,10,11,12,13,14,15,16,17,18,19,20,21}_*.sql; do
-  echo "Running $f..."
-  psql "$DATABASE_URL" -f "$f"
-done
+# All migrations, through the runner (never a psql loop): the worker's
+# pre-deploy step runs the same command and keeps the ledger
+python -m scripts.migration_runner apply
 ```
 
 ### Verify Schema
@@ -223,7 +221,7 @@ help - Show available commands
 
 ### Polling vs Webhooks
 
-The app uses **polling mode** by default, which works well for cloud deployment (no webhook URL needed). If you want to switch to webhooks later, set the webhook URL to your Railway domain.
+The target-tier bot is **webhook-fed**: the API registers the webhook itself at startup in production (`documentation/operations/telegram-webhook.md`), and `storydump webhook status` checks it. Polling is the legacy worker's mode only (retired with #1216). If you want to switch to webhooks later, set the webhook URL to your Railway domain.
 
 ---
 
@@ -307,9 +305,10 @@ Railway provides log streaming in the dashboard. The app logs to stdout via the 
 
 ### Health Monitoring
 
-Use the Telegram bot itself as a health indicator:
-- `/status` shows system health, queue state, and recent activity
-- `/check-health` (via CLI in Railway shell) runs comprehensive health check
+From a laptop with a token minted under Settings › API tokens:
+- `storydump health` — the API's three health surfaces and the bot's webhook, judged (exit 4 when not well)
+- `storydump deploys` — the latest deployment of each service; `storydump doctor` for the local setup
+- see `documentation/operations/monitoring.md`
 
 ### Service Management
 
@@ -366,8 +365,8 @@ Use the Telegram bot itself as a health indicator:
 
 ## Quick Start Checklist
 
-1. [ ] Create Neon database and run schema + all 16 migrations
-2. [ ] Create Railway project with two services (worker + web)
+1. [ ] Create the Neon database and apply the migrations with `python -m scripts.migration_runner apply`
+2. [ ] Create the Railway project with two services (`worker` + `storydump`, the API)
 3. [ ] Set all required environment variables
 4. [ ] Create Telegram bot via BotFather, get token
 5. [ ] Add bot to your channel/group as admin

@@ -35,6 +35,7 @@ from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from src.channels import telegram_webhook_registration as reg
 from src.channels.telegram_webhook_registration import bot_matches
 from src.services.target import (
     credential_lifecycle,
@@ -340,8 +341,7 @@ def compose(
         registry=registry,
         loops=loops,
         recurring=recurring,
-        expected_bot=(env.get("TARGET_TELEGRAM_BOT_USERNAME") or "").lstrip("@")
-        or None,
+        expected_bot=(env.get(reg.BOT_VAR) or "").lstrip("@") or None,
         heartbeat=heartbeat,
         heartbeat_lease_seconds=config.lease_seconds,
         heartbeat_interval_seconds=config.heartbeat_interval_seconds,
@@ -804,7 +804,7 @@ def main() -> None:
     )
     engine = unit_of_work.create_engine(unit_of_work.engine_url_from_env(env))
     transport = None
-    token = env.get("TARGET_TELEGRAM_BOT_TOKEN")
+    token = env.get(reg.TOKEN_VAR)
     # The Drive read leg (#982). Armed unconditionally: it needs no env of its
     # own (the engine carries the credential lookup, the token is the workspace's grant since 069),
     # so an env gate here would be a switch with nothing to switch on.

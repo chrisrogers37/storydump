@@ -44,12 +44,12 @@ storydump webhook status
 storydump webhook register --drop-pending   # first arming of a bot
 ```
 
-`status` answers four questions and exits 4 if any fails (64 for a missing variable):
+`status` answers three questions and exits 4 if any check fails (64 for a missing variable):
 
 1. **Who is the bot** — `getMe`; and that it IS `TARGET_TELEGRAM_BOT_USERNAME`.
 2. **Is a webhook registered, where, with what backlog** — `getWebhookInfo`.
-   A `LAST ERROR` line is Telegram's own complaint about the last delivery;
-   a `NOTE: registered URL differs` line means the webhook points somewhere
+   A `LAST ERROR` line is Telegram's own complaint about the last delivery
+   (a failed check); a failed `url` check means the webhook points somewhere
    other than `--url` (default `https://api.storydump.app/webhooks/telegram`,
    override with `--url` or `TARGET_TELEGRAM_WEBHOOK_URL` for a preview).
 3. **Does the API accept the secret** — a POST to the door with the secret
@@ -63,8 +63,8 @@ storydump webhook register --drop-pending   # first arming of a bot
 `_register_webhook`, idempotent on every deploy; `/health` reports the result under `webhook` as a startup
 snapshot; on by default only in Railway's `production` environment — `RAILWAY_ENVIRONMENT_NAME` —
 so a laptop or a preview holding the token never re-points production's webhook;
-`TARGET_TELEGRAM_WEBHOOK_AUTOREGISTER=1` forces it on, `0` off). This tool remains for `verify`,
-`deregister` and a manual `register`. `register` calls `setWebhook` with the door URL, the secret, the served update kinds — `message` and, since the 2026-09-09 tap (W4), `callback_query`: Telegram delivers ONLY what is asked for, so a registration without it drops every button tap silently — and `max_connections` from `TARGET_TELEGRAM_WEBHOOK_MAX_CONNECTIONS` (default 10, the ingress's connection budget; 1..100). **Re-run `register` after a deploy that changes the served kinds** (the W4 deploy is one); `verify` prints `allowed_updates` so the omission is visible. It also sends
+`TARGET_TELEGRAM_WEBHOOK_AUTOREGISTER=1` forces it on, `0` off). This tool remains for `status`,
+`deregister` and a manual `register`. `register` calls `setWebhook` with the door URL, the secret, the served update kinds — `message` and, since the 2026-09-09 tap (W4), `callback_query`: Telegram delivers ONLY what is asked for, so a registration without it drops every button tap silently — and `max_connections` from `TARGET_TELEGRAM_WEBHOOK_MAX_CONNECTIONS` (default 10, the ingress's connection budget; 1..100). **Re-run `register` after a deploy that changes the served kinds** (the W4 deploy is one); `status` prints `allowed_updates` so the omission is visible. It also sends
 (the ingress serves `/start` taps and group messages; chat-inbound commands are
 still #854), then runs
 `status`. `--drop-pending` discards updates Telegram queued before now: use

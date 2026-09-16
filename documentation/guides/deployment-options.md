@@ -49,7 +49,7 @@ Railway deploys automatically when CI passes and changes land on `main`. No manu
 ```bash
 # Force a redeploy via Railway CLI
 railway up --service worker
-railway up --service web
+railway up --service storydump
 
 # Or trigger via Railway dashboard
 ```
@@ -91,7 +91,7 @@ deploys".
 |------|---------|
 | **Check deploy status** | Railway dashboard or `railway logs` |
 | **View worker logs** | `railway logs --service worker` |
-| **View web logs** | `railway logs --service web` |
+| **View web logs** | `railway logs --service storydump` |
 | **Force redeploy** | `railway up` or push to `main` |
 | **Run health check** | `storydump health` |
 | **Run tests locally** | `pytest tests/ -v` |

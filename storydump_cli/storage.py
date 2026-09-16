@@ -22,7 +22,7 @@ import stat
 from pathlib import Path
 from typing import Any, Mapping, Optional, Protocol
 
-from storydump_cli.config import ensure_dir, write_private
+from storydump_cli.config import ConfigDirectoryUnusable, ensure_dir, write_private
 
 TOKEN_ENV = "STORYDUMP_TOKEN"
 TOKEN_FILE = "token"
@@ -185,6 +185,10 @@ class FileBackend:
             self.path.unlink()
         except FileNotFoundError:
             pass
+        except OSError as exc:
+            # a file where the config directory should be, no permission: the
+            # local configuration's fault, answered as such (never a traceback)
+            raise ConfigDirectoryUnusable(self.path.parent, exc) from exc
 
 
 class EnvBackend:
