@@ -215,8 +215,9 @@ schema tests from phase 01; the route-allowlist gate from phase 01.
 - [x] `cli/` is gone; `storydump-cli` is not a command; no file in the repository names it (the
       CHANGELOG, the archive, the dated updates, this plan and the owner's `.claude/settings.json`
       excepted — `tests/test_legacy_cli_gone.py`); the doc test walks nested groups and passes.
-- [ ] All three PRs merged with the process above; the Live status updated — #1310 and #1311
-      merged and live; PR 3 (#1312) in review; the Live status line is in PR 3.
+- [x] All three PRs merged with the process above; the Live status updated — #1310 (`218c864`),
+      #1311 (`0b0badc`) and #1312 (`4bce602`), each live on Railway; the Live status line landed
+      in #1312 (`RUN_LOG.md` §4–§5).
 
 ## What NOT To Do
 

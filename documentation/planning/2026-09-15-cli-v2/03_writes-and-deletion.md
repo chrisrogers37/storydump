@@ -128,9 +128,10 @@ Written red first; one named mutation per behaviour in `tests/mutations/cli_v2_0
       `tests/scripts/test_cli_writes_gate.py` and the live sample (`RUN_LOG.md` §5). The card's
       "⏭️ Skipped by <you>" on a bound Telegram group and the run against production are the
       owner's (queued, §7).
-- [ ] `storydump deploys --watch` follows a real deploy to both services live — `deploys` read
-      the real production deployments live (§5); the watch of a real deploy is run at PR 3's own
-      merge (`--commit <sha>`) and recorded in §5, else queued (§7).
+- [x] `storydump deploys --watch` follows a real deploy to both services live — run at PR 3's
+      own merge with the merged CLI: `storydump deploys --watch --commit 4bce602` printed the
+      worker WAITING → BUILDING → SUCCESS and the API WAITING → BUILDING → SUCCESS, exit 0
+      (`RUN_LOG.md` §5).
 - [x] `storydump doctor` reports the missing token as `missing` with its fix, and the storage
       backend in use — run from a throwaway venv with no token (§5); the missing Railway login
       is `missing` by unit test (this machine is logged in).
