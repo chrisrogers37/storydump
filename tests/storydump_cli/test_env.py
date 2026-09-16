@@ -27,6 +27,7 @@ from src.services.target.vocabulary import (
     EXIT_NOT_AUTHORIZED,
     EXIT_OK,
     EXIT_RAILWAY_UNREACHABLE,
+    EXIT_USAGE,
     EXIT_WATCH_FAILED,
     check_envelope,
 )
@@ -347,7 +348,8 @@ def test_health_reads_a_webhook_that_failed_to_register_as_not_well(tmp_path):
     api = health_api({("GET", "/health"): (200, skipped)})
     result = run(env_runtime(tmp_path, api), "--json", "health")
     assert result.exit_code == EXIT_OK, result.output
-    assert one_envelope(result)["data"]["verdicts"]["webhook"]["state"] == "skipped"
+    # the live sample (healthy, in HEALTH) decides when there is one: registered
+    assert one_envelope(result)["data"]["verdicts"]["webhook"]["state"] == "registered"
 
 
 def test_health_reads_an_undelivered_backlog_as_not_well(tmp_path):
@@ -387,6 +389,35 @@ def test_health_reads_an_undelivered_backlog_as_not_well(tmp_path):
     result = run(env_runtime(tmp_path, api), "--json", "health")
     assert result.exit_code == EXIT_OK, result.output
     assert one_envelope(result)["data"]["verdicts"]["webhook"]["state"] == "unsampled"
+
+
+def test_a_skipped_registration_with_a_live_backlog_is_still_undelivered(tmp_path):
+    """Autoregister off in production (`TARGET_TELEGRAM_WEBHOOK_AUTOREGISTER=0`,
+    an operator driving the bot by hand) still has a bot to deliver to: with a
+    live sample the sample decides, and a backlog behind an error is not well.
+    Without a live sample, skipped is a fact, not an outage."""
+    skipped = {"ok": False, "skipped": "autoregister switched off"}
+    stuck = {
+        **HEALTH["webhook_live"],
+        "pending_update_count": 4123,
+        "last_error_message": "Wrong response from the webhook: 500 Internal Server Error",
+    }
+    api = health_api(
+        {
+            ("GET", "/health"): (
+                200,
+                {**HEALTH, "webhook": skipped, "webhook_live": stuck},
+            )
+        }
+    )
+    result = run(env_runtime(tmp_path, api), "--json", "health")
+    assert result.exit_code == EXIT_API_UNREACHABLE, result.output
+    assert one_envelope(result)["data"]["verdicts"]["webhook"]["state"] == "undelivered"
+    quiet = {k: v for k, v in HEALTH.items() if k != "webhook_live"}
+    api = health_api({("GET", "/health"): (200, {**quiet, "webhook": skipped})})
+    result = run(env_runtime(tmp_path, api), "--json", "health")
+    assert result.exit_code == EXIT_OK, result.output
+    assert one_envelope(result)["data"]["verdicts"]["webhook"]["state"] == "skipped"
 
 
 def test_health_reads_a_surface_that_is_not_an_object_as_not_well(tmp_path):
@@ -772,6 +803,61 @@ def test_deploys_watch_ends_6_when_the_wait_exceeds_its_timeout(tmp_path):
     assert "25" in documents[-1]["error"]["detail"]
 
 
+def test_deploys_watch_rides_out_a_railway_blip(tmp_path):
+    """One `railway deployment list` answering 502 mid-watch is not the
+    answer an unattended watch waits for: re-read, like an API 503."""
+    building = [{**NEWEST, "status": "BUILDING"}]
+    rail = ScriptedRailway(
+        railway_answers(
+            {
+                LIST_WORKER: [
+                    ok_json(building),
+                    (1, "", "502 Bad Gateway\n"),
+                    ok_json(FIXTURE["deployments"]["worker"]),
+                ]
+            }
+        )
+    )
+    rt = env_runtime(tmp_path, health_api(), rail)
+    slept: list[float] = []
+    rt.sleep_fn = bounded_sleeper(slept, limit=5)
+    result = run(rt, "deploys", "--watch", "--every", "5")
+    assert result.exit_code == EXIT_OK, result.output
+    assert slept == [5.0, 5.0], "it slept through the blip and read again"
+
+
+def test_an_empty_commit_is_usage(tmp_path):
+    rail = ScriptedRailway(railway_answers())
+    rt = env_runtime(tmp_path, health_api(), rail)
+    result = run(rt, "--json", "deploys", "--watch", "--commit", "  ")
+    assert result.exit_code == EXIT_USAGE, result.output
+    assert rail.calls == []
+
+
+def test_deploys_timeout_without_watch_is_usage_before_any_railway_call(tmp_path):
+    rail = ScriptedRailway(railway_answers())
+    rt = env_runtime(tmp_path, health_api(), rail)
+    result = run(rt, "--json", "deploys", "--timeout", "30")
+    assert result.exit_code == EXIT_USAGE, result.output
+    assert one_envelope(result)["error"]["reason"] == "usage"
+    assert rail.calls == [], "refused before the login and the link were checked"
+
+
+def test_health_reads_a_failed_webhook_sampler_as_not_well(tmp_path):
+    """`webhook_live` carrying `error` is the API's own minute-sampler failing
+    to ask Telegram (`_sample_webhook_live`): not the same as no report, and
+    not well — the one reading that says our probe is blind."""
+    blind = {
+        **HEALTH,
+        "webhook_live": {"at": "2026-09-15T14:59:30+00:00", "error": "ConnectError"},
+    }
+    api = health_api({("GET", "/health"): (200, blind)})
+    result = run(env_runtime(tmp_path, api), "--json", "health")
+    assert result.exit_code == EXIT_API_UNREACHABLE, result.output
+    verdict = one_envelope(result)["data"]["verdicts"]["webhook"]
+    assert verdict["state"] == "sampler_failed" and "ConnectError" in verdict["detail"]
+
+
 def test_a_failed_deployment_list_is_exit_5_not_an_empty_service(tmp_path):
     rail = ScriptedRailway(
         railway_answers(
@@ -927,6 +1013,34 @@ def test_doctor_blames_the_api_not_the_token_for_a_5xx(tmp_path):
     checks = checks_of(one_envelope(result))
     assert checks["token"]["state"] == "skipped", checks["token"]
     assert "mint" not in checks["token"]["fix"]
+    assert checks["api"]["state"] == "wrong" and "503" in checks["api"]["value"]
+
+
+def test_doctor_never_says_ok_over_an_unchecked_token(tmp_path):
+    """`/health` answers, then the connection drops on `/me/principal`: the
+    token is skipped, the API is WRONG (it stopped answering), `ok` is false
+    and the exit is 4 — never "everything ok" with the token unchecked."""
+    api = health_api({("GET", "/api/v1/me/principal"): httpx.ConnectError("dropped")})
+    rt = env_runtime(tmp_path, api)
+    rt.migrations_dir = repo_migrations(tmp_path, *range(1, 78))
+    result = run(rt, "--json", "doctor")
+    assert result.exit_code == EXIT_API_UNREACHABLE, result.output
+    document = one_envelope(result)
+    assert document["data"]["ok"] is False
+    checks = checks_of(document)
+    assert checks["token"]["state"] == "skipped"
+    assert (
+        checks["api"]["state"] == "wrong" and "/me/principal" in checks["api"]["value"]
+    )
+
+
+def test_doctor_reads_a_5xx_health_as_wrong_not_missing(tmp_path):
+    api = health_api({("GET", "/health"): (503, {"detail": "no engine"})})
+    rt = env_runtime(tmp_path, api)
+    rt.migrations_dir = repo_migrations(tmp_path, *range(1, 78))
+    result = run(rt, "--json", "doctor")
+    assert result.exit_code == EXIT_API_UNREACHABLE, result.output
+    checks = checks_of(one_envelope(result))
     assert checks["api"]["state"] == "wrong" and "503" in checks["api"]["value"]
 
 

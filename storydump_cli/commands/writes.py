@@ -124,7 +124,7 @@ def _check_key(idempotency_key: Optional[str]) -> Optional[str]:
         # it travels as a header: ASCII by construction, and a newline in one
         # is a request the transport refuses with a traceback
         raise click.BadParameter(
-            "an idempotency key is printable ASCII (letters, digits, - _ : .)",
+            "an idempotency key is printable ASCII on one line",
             param_hint="--idempotency-key",
         )
     return key

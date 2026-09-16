@@ -227,15 +227,28 @@ def test_an_interrupt_outside_a_watch_is_exit_64_with_an_envelope(
 def test_a_closed_pipe_is_not_a_failure(tmp_path, monkeypatch):
     """`storydump … | head` closes stdout early; the CLI ends quietly with 0
     rather than a traceback and Click's exit 1 (the contract's "not found")."""
+    import errno
+
     rt = runtime(tmp_path, person_api())
 
     def closed(document, *, json_mode):
-        raise BrokenPipeError
+        # the real shape: Click's own `main` would catch this EPIPE and
+        # `sys.exit(1)` before any arm of ours saw it
+        raise BrokenPipeError(errno.EPIPE, "Broken pipe")
 
     monkeypatch.setattr("storydump_cli.commands.auth.emit", closed)
     result = run(rt, "--json", "whoami")
     assert result.exit_code == EXIT_OK, result.output
     assert "Traceback" not in result.output
+
+
+def test_help_and_version_still_exit_0_through_the_dispatcher(tmp_path):
+    """`dispatch` runs Click's context itself now; Click's own clean exits
+    (`--help`, `--version`) must still be 0."""
+    rt = runtime(tmp_path, person_api())
+    assert run(rt, "--help").exit_code == EXIT_OK
+    assert run(rt, "--version").exit_code == EXIT_OK
+    assert run(rt, "whoami", "--help").exit_code == EXIT_OK
 
 
 def test_a_config_directory_that_cannot_be_written_is_usage_not_a_traceback(tmp_path):
@@ -250,10 +263,13 @@ def test_a_config_directory_that_cannot_be_written_is_usage_not_a_traceback(tmp_
     assert SECRET not in result.output
 
 
-def test_a_rate_limited_answer_is_exit_4_with_its_own_sentence(tmp_path):
+def test_a_saturated_pool_answer_is_exit_4_with_its_own_sentence(tmp_path):
+    """The API sheds load with a 503 whose body names `pool_saturated`
+    (`src/api/app.py`): a 5xx, so exit 4 — but the reason's own sentence and
+    fix, not "check STORYDUMP_API and the network"."""
     api = person_api()
     api.routes[("GET", "/api/v1/me/principal")] = (
-        429,
+        503,
         {"detail": "busy — try again", "reason": "pool_saturated"},
     )
     result = run(runtime(tmp_path, api), "--json", "whoami")
@@ -262,7 +278,11 @@ def test_a_rate_limited_answer_is_exit_4_with_its_own_sentence(tmp_path):
     assert document["error"]["code"] == EXIT_API_UNREACHABLE
     assert document["error"]["reason"] == "pool_saturated"
     assert "try again" in document["error"]["detail"].lower()
-    assert "--help" not in document["error"]["fix"]
+    assert "network" not in document["error"]["fix"]
+    # a 5xx with no reason keeps the unreachable answer
+    api.routes[("GET", "/api/v1/me/principal")] = (502, {"detail": "bad gateway"})
+    result = run(runtime(tmp_path, api), "--json", "whoami")
+    assert one_envelope(result)["error"]["reason"] == "api_unreachable"
 
 
 def test_no_verb_is_usage(tmp_path, monkeypatch, capsys):

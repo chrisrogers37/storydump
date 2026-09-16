@@ -60,6 +60,11 @@ _INVOCATION = re.compile(
     r"(?:\s+<[^>\n]+>)?(?:\s+([a-z][a-z0-9-]*))?"
 )
 _FENCE = re.compile(r"(?:```|~~~)[^\n]*\n(.*?)(?:```|~~~)", re.S)
+#: A word after a placeholder (`storydump story <id> shows`) is prose, not a
+#: subcommand; a group's subcommand never follows a placeholder.
+_AFTER_PLACEHOLDER = re.compile(
+    r"storydump\s+([a-z][a-z0-9-]*)\s+<[^>\n]+>\s+([a-z][a-z0-9-]*)"
+)
 _SPAN = re.compile(r"`([^`\n]+)`")
 
 
@@ -116,11 +121,19 @@ def test_every_command_the_doc_names_actually_exists(doc):
         f"{doc} names no storydump verbs in code — the regex or the doc changed"
     )
     registry = _registry()
+    prose = {
+        (v, s) for code in _code(_doc(doc)) for v, s in _AFTER_PLACEHOLDER.findall(code)
+    }
     ghosts = []
     for verb, sub in sorted(named, key=str):
         if verb not in registry:
             ghosts.append(f"storydump {verb}")
-        elif sub and registry[verb] is not None and sub not in registry[verb]:
+        elif (
+            sub
+            and registry[verb] is not None
+            and sub not in registry[verb]
+            and (verb, sub) not in prose
+        ):
             ghosts.append(f"storydump {verb} {sub}")
     assert not ghosts, (
         f"{doc} names storydump command(s) that do not exist: {ghosts}."
@@ -177,11 +190,24 @@ def _canonical_entries() -> set[tuple[str, str | None]]:
     return entries
 
 
+_NEVER_BULLETS = re.compile(r"\*\*NEVER[^\n]*\n((?:- .*\n)+)")
+
+
+def _never_bullets(text: str) -> str:
+    """The satellite's own never-run list: the bullet block under its
+    `**NEVER …**` line, and nothing else — a command named in its SAFE list
+    or its prose must not count as forbidden."""
+    m = _NEVER_BULLETS.search(text)
+    assert m, "no '**NEVER …**' bullet block found — the satellite's list moved"
+    return m.group(1)
+
+
 @pytest.mark.parametrize("doc", SATELLITES)
 def test_every_satellite_copy_of_the_list_is_complete(doc):
     """`.claude/*` context files repeat the list in their own words; each must
-    name every destructive `storydump` command the canonical block names."""
-    named = _named_invocations(_doc(doc))
+    name every destructive `storydump` command the canonical block names —
+    IN its never-run bullets, not anywhere on the page."""
+    named = _named_invocations(_never_bullets(_doc(doc)))
     missing = sorted(
         f"storydump {verb}" + (f" {sub}" if sub else "")
         for verb, sub in _canonical_entries()

@@ -123,12 +123,15 @@ def webhook_verdict(health: Any) -> tuple[bool, dict[str, str]]:
     if not isinstance(registration, dict) and not isinstance(live, dict):
         return True, {"state": "unsampled", "detail": "the API reports no webhook"}
     if isinstance(registration, dict) and registration.get("ok") is False:
-        if registration.get("skipped"):
+        if registration.get("skipped") and not isinstance(live, dict):
             # the API chose not to register (not the production environment,
-            # autoregister off): a fact for the report, not an outage
+            # autoregister off) and holds no live sample: a fact for the
+            # report, not an outage. With a live sample the sample decides —
+            # autoregister off in production still has a bot to deliver to
             return True, {"state": "skipped", "detail": str(registration["skipped"])}
-        why = registration.get("error") or "not registered"
-        return False, {"state": "unregistered", "detail": f"not registered: {why}"}
+        if not registration.get("skipped"):
+            why = registration.get("error") or "not registered"
+            return False, {"state": "unregistered", "detail": f"not registered: {why}"}
     if isinstance(live, dict):
         pending = live.get("pending_update_count")
         error = live.get("last_error_message")
@@ -138,8 +141,10 @@ def webhook_verdict(health: Any) -> tuple[bool, dict[str, str]]:
                 "detail": f"{pending} updates pending behind: {error}",
             }
         if "error" in live:
+            # the API's own minute-sampler could not ask Telegram: our probe
+            # is blind, which is its own not-well state
             return False, {
-                "state": "unsampled",
+                "state": "sampler_failed",
                 "detail": f"Telegram could not be asked: {live['error']}",
             }
         return True, {
@@ -193,8 +198,8 @@ def _of_commit(row: dict[str, Any], commit: Optional[str]) -> bool:
     if commit is None:
         return True
     given = commit.strip().lower()
-    have = str(row.get("commit_hash") or row.get("commit") or "").lower()
-    return bool(given) and have.startswith(given)
+    have = str(row.get("commit_hash") or "").lower()
+    return have.startswith(given)
 
 
 def deploys_watched(commit: Optional[str]) -> Watched:
@@ -308,6 +313,12 @@ def deploys(
       storydump deploys --watch --commit 0b0badc --timeout 1800
     """
     runtime = begin(ctx, "deploys")
+    if timeout is not None and not watching:
+        raise click.UsageError("--timeout only means something with --watch", ctx=ctx)
+    if commit is not None and not commit.strip():
+        raise click.BadParameter(
+            "a commit is a prefix of its hash", ctx=ctx, param_hint="--commit"
+        )
     rail = Railway(runtime.run_process)
     rail.whoami()
     project = rail.linked_project()
@@ -319,8 +330,6 @@ def deploys(
             every=every,
             deadline=timeout,
         )
-    if timeout is not None:
-        raise click.UsageError("--timeout only means something with --watch", ctx=ctx)
     data = {
         "railway_version": rail.version(),
         "project": project,
@@ -497,11 +506,19 @@ def doctor(ctx: click.Context) -> int:
             "",
         )
     except Unreachable as exc:
-        checks["api"] = (
-            "missing",
-            f"unreachable: {exc.detail}",
-            "check STORYDUMP_API and the network",
-        )
+        if exc.status:
+            # it answered, badly: a 5xx from /health is a wrong API, not a missing one
+            checks["api"] = (
+                "wrong",
+                f"{runtime.api_url} answered {exc.status}: {exc.detail}",
+                "the API is degraded — wait, then run storydump doctor again",
+            )
+        else:
+            checks["api"] = (
+                "missing",
+                f"unreachable: {exc.detail}",
+                "check STORYDUMP_API and the network",
+            )
     except ApiError as exc:
         checks["api"] = (
             "wrong",
@@ -543,13 +560,19 @@ def doctor(ctx: click.Context) -> int:
                 # connection on /me/principal is the API's failure, never
                 # "the API refuses this token"
                 checks["token"] = ("skipped", f"could not be checked: {exc.detail}", "")
-                if exc.status:
-                    checks["api"] = (
-                        "wrong",
-                        f"{runtime.api_url} answered {exc.status} on /me/principal:"
-                        f" {exc.detail}",
-                        "the API is degraded — wait, then run storydump doctor again",
-                    )
+                # /health answered and /me/principal did not: the API is
+                # what is wrong, whether it answered 5xx or dropped the line —
+                # a doctor that says "ok" over an unchecked token is lying
+                answered = (
+                    f"answered {exc.status} on /me/principal"
+                    if exc.status
+                    else "did not answer /me/principal"
+                )
+                checks["api"] = (
+                    "wrong",
+                    f"{runtime.api_url} {answered}: {exc.detail}",
+                    "the API is degraded — wait, then run storydump doctor again",
+                )
             except ApiError as exc:
                 checks["token"] = (
                     "wrong",

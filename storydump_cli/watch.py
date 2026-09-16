@@ -27,6 +27,7 @@ from typing import Any, Callable, Hashable, Mapping, Optional
 from src.services.target.vocabulary import EXIT_OK, EXIT_WATCH_FAILED, envelope
 from storydump_cli.client import Unreachable
 from storydump_cli.output import Failure, emit, redact
+from storydump_cli.railway import RailwayUnavailable
 
 Row = dict[str, Any]
 #: What one read returns: ``[{"workspace_id": …, "rows": [Row, …]}, …]``.
@@ -149,7 +150,14 @@ def _count_grew(old: Row, new: Row) -> bool:
 
 
 def _job_died(old: Row, new: Row) -> bool:
-    return new.get("job_state") == "failed" and old.get("job_state") != "failed"
+    """A row whose job BECAME failed, or whose failed job failed AGAIN (a
+    retry counted): a new failure either way. A failed row changing in any
+    other way (its run time, its wait) is the same failure, already printed."""
+    if new.get("job_state") != "failed":
+        return False
+    if old.get("job_state") != "failed":
+        return True
+    return int(new.get("job_attempts") or 0) > int(old.get("job_attempts") or 0)
 
 
 def _empty_twice(previous: Optional[list[Row]], current: list[Row]) -> bool:
@@ -337,11 +345,18 @@ def watch(
         while True:
             try:
                 current = read()
-            except Unreachable:
+            except (Unreachable, RailwayUnavailable):
                 # no answer is not the answer a watch waits for: re-read a
-                # bounded number of times before the usual exit 4
+                # bounded number of times before the usual exit (4, or 5 for
+                # a `railway` blip — the login and the link were checked
+                # before the watch began)
                 unanswered += 1
                 if unanswered > TRANSIENT_RETRIES:
+                    raise
+                if (
+                    deadline is not None
+                    and (runtime.now_fn() - started).total_seconds() >= deadline
+                ):
                     raise
                 runtime.sleep_fn(every)
                 continue

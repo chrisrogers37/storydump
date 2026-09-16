@@ -326,6 +326,76 @@ def test_a_failed_group_that_shrinks_is_a_change_that_does_not_end_the_watch(tmp
     assert result.exit_code == EXIT_OK, result.output
 
 
+def test_a_retry_that_fails_again_is_a_new_failure_but_a_shuffled_failed_row_is_not(
+    tmp_path,
+):
+    """The failure `floating --watch` exits on is a job BECOMING failed, or a
+    failed job failing AGAIN (its attempts counted up) — the ladder's common
+    shape between two polls. A failed row that merely changes otherwise (its
+    run time moved) is the same failure, already printed at the baseline."""
+    api = script(
+        "floating",
+        [
+            [floating_row(WS_A, job_state="failed", job_attempts=1)],
+            [floating_row(WS_A, job_state="failed", job_attempts=2)],
+        ],
+    )
+    result = run(
+        watch_runtime(tmp_path, api, Sleeper()),
+        "floating",
+        "--watch",
+        "--workspace",
+        WS_A,
+    )
+    assert result.exit_code == EXIT_WATCH_FAILED, result.output
+    api = script(
+        "floating",
+        [
+            [floating_row(WS_A, job_state="failed", job_attempts=1)],
+            [
+                floating_row(
+                    WS_A,
+                    job_state="failed",
+                    job_attempts=1,
+                    job_run_at="2026-09-15T15:30:00Z",
+                )
+            ],
+            [
+                floating_row(
+                    WS_A,
+                    job_state="failed",
+                    job_attempts=1,
+                    job_run_at="2026-09-15T15:30:00Z",
+                )
+            ],
+        ],
+    )
+    result = run(
+        watch_runtime(tmp_path, api, Sleeper(interrupt_after=3)),
+        "floating",
+        "--watch",
+        "--workspace",
+        WS_A,
+    )
+    assert result.exit_code == EXIT_OK, result.output
+    # and a row whose job BECOMES failed is
+    api = script(
+        "floating",
+        [
+            [floating_row(WS_A, job_state="ready")],
+            [floating_row(WS_A, job_state="failed")],
+        ],
+    )
+    result = run(
+        watch_runtime(tmp_path, api, Sleeper()),
+        "floating",
+        "--watch",
+        "--workspace",
+        WS_A,
+    )
+    assert result.exit_code == EXIT_WATCH_FAILED, result.output
+
+
 def test_a_floating_story_whose_job_recovers_is_not_the_failure(tmp_path):
     """A floating row changing from a failed job to a ready one is the retry
     landing; only a row whose job BECOMES failed ends the watch."""
@@ -644,8 +714,9 @@ def test_a_failure_that_persists_ends_the_watch_with_the_usual_answer(tmp_path):
     )
     assert result.exit_code == EXIT_API_UNREACHABLE, result.output
     documents = envelopes(result)
-    assert documents[-1]["error"]["reason"] == "api_unreachable"
-    assert "503" in documents[-1]["error"]["detail"]
+    # the API's own reason rides the answer: the pool, not "unreachable"
+    assert documents[-1]["error"]["reason"] == "pool_saturated"
+    assert documents[-1]["error"]["code"] == EXIT_API_UNREACHABLE
 
 
 def test_watch_lines_are_redacted_in_both_modes(tmp_path):

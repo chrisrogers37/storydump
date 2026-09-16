@@ -46,9 +46,9 @@ state, not attributed to the surface: two `test_egress_floor.py` tests need
 | Security & secrets | done | 0/0/2/8 | `findings-security.md` |
 | Correctness at rest | done | 0/2/9/10 | `findings-correctness.md` |
 | Reliability & operations | done | 0/3/11/11 | `findings-reliability.md` |
-| Test quality | PARTIAL — killed by the session rate limit after its mutants ran (9 of 10 hand-picked mutants SURVIVED; results salvaged) | — | `repros/tests-lane/` |
+| Test quality | partial — killed by the session rate limit after its ten hand-picked mutants had run (nine SURVIVED; the results were salvaged and each mutant now has a test) | — | `repros/tests-lane/` |
 | Architecture & maintainability | done (re-dispatched after the reset) | 0/2/7/8 | `findings-architecture.md` |
-| Access-path consistency | PENDING — killed by the session rate limit; re-dispatched after the reset | — | — |
+| Access-path consistency | done (re-dispatched after the reset) | 0/0/5/3 + 16 appropriate differences | `findings-access-path.md` |
 
 The maps corrected the intake brief twice (the exit-code contract; the env
 variable names) — the brief was written from memory and the maps from source,
@@ -79,6 +79,12 @@ the tear-out's), **accepted** (by design, documented).
 | A-M6 | `doctor` is one function of six try-ladders; the check order is spelled twice | architecture | net-new | queued (tech-debt) |
 | A-M7 | The batteries anchor on verbatim source text; every structural fix re-cuts anchors | architecture | net-new | queued (process): `# mut:` markers |
 | A-L1..L8 | the webhook seam bypassing `Runtime.transport`; the `Watched` bag; deployment identities in three modules and a second project id in `scripts/observed_use.py`; misleading names; dead names; magic literals; verb modules chained for helpers; the API's legacy reach through `src.utils.logger` and `src/exceptions/__init__.py` | architecture | net-new | folded: the deployment identities (`API_URL`, `RAILWAY_PROJECT_*`) spelled once and pinned; `surface_is_well` and `PRINCIPAL_KINDS` deleted; the floating limits by reference. Queued: the seams, the bag, the names, the helpers. The legacy reach went into the tear-out plan (#1315: `src/exceptions`, the logger's settings load) |
+| AP-M1 | The review episode is a dedup key at the web's and the CLI's edge, never a port precondition: a stale web "Post again" against a re-parked story can re-permit a publish beside a lost answer | access-path (A) | net-new | queued (port): forward `episode` and refuse a stale one in `resolve_review` — a command-port change with its own gate, not a CLI fold |
+| AP-M2 | The per-workspace admission ceiling (S.2, 120/min) is Telegram-adapter code; the web, the CLI and a bare token have none | access-path (A+B) | net-new (`05-operational-numbers.md:51` says "not yet built") | queued (port) |
+| AP-M3 | A disabled person (`users.state`) is refused by the session and token resolvers but not by a Telegram tap (latent: nothing sets the flag yet) | access-path (A) | net-new | queued (port) |
+| AP-M4 | The port validates ids as non-empty strings; a direct caller's malformed id is an unhandled DataError → 500; the three edges' uuid checks disagree | access-path (A+D) | net-new | queued (port): one `_uuid_arg` in the executors |
+| AP-M5 | The CLI's story view lacked `published_via`, `cancel_requested`, `approval_mode` and `ig_permalink` — a dry-run post read as posted; the `cancelling` fix pointed at a view that could not show it | access-path (A) | net-new | folded (round 3): the four columns in `_INTENT` and the timeline's fields |
+| AP-L1..L3 | the CLI-only provenance audit row (web and Telegram commands leave none); the own-workspace fence repeated in four routes; the dashboard proxy's 25-path legacy allowlist (3 live) | access-path (B, D, D) | net-new | queued: the provenance row and the fence to the port's next pass; the proxy to the tear-out (#1315) |
 | T-1 | Nine hand-picked mutants survived the suites: `dispatch` returning 0 on Ctrl-C, a non-JSON 2xx read as `{}`, a failed `railway deployment list` read as no deployments, `webhook status` ignoring a URL mismatch, `revoke` ignoring the owner (unit AND gate), `doctor` reading a 4xx `/health` as ok, `deploys --watch` ending on one service, a non-object health payload read as well, a port answer without an outcome read as executed | tests | net-new | folded: a test per mutant (the revoke one in the tokens gate: a stranger's revoke is 404 and the row stays live); the battery carries them |
 
 ### MEDIUM
@@ -192,7 +198,39 @@ admin squash. The ledger of that run is below.
   identities by reference, the exact import closure, the shared idempotency
   fixture on both sides, the renderer totality), then the fixes; units green,
   the DB gates 120 passed, the web's 47 vitest cases green, tsc and eslint
-  clean. Ten mutations added to the battery (45).
+  clean. Ten mutations added to the battery (45). The batteries on `68a19d1`:
+  01 46/47, 02 33/33, 03 57/57, audit 43/45 — the three survivors were the
+  audit's own making: the envelope's new reason check made a phase-01 mutant
+  equivalent (the malformed document carried an undocumented reason — fixed
+  by giving it a documented one), and `is` on a small integer cannot tell a
+  copied bound from a reference (the two pins now read the source).
+- Round 3 (the two review lenses on #1314 and the access-path lane). The
+  structural lens: `pool_saturated` is a 503 the unreachable arm never
+  rendered (the arm now consults the reason's sentence and fix; the test
+  scripts a 503); a wait class the runbook named does not exist (`fetch` and
+  `container` are the two); the config-directory answer belongs to
+  `config.py` (a `ConfigError` with its fix, the dispatcher's blanket arm
+  gone); `--timeout` refused before any Railway call; a dead fallback in the
+  commit match; the exact truncation marker (one row past the bound); a
+  fourth verdict state for a failed sampler; the satellites' list parsed from
+  their never-run bullets only. The adversarial lens: Click's own `main`
+  swallows a closed pipe with `sys.exit(1)` whatever `standalone_mode` says
+  (the dispatcher now runs the context itself, so every arm sees its
+  exception; the test raises a real EPIPE); `doctor` said `ok: true` when the
+  principal call dropped (any failure to answer `/me/principal` is the API's);
+  a retry that failed again was no longer a new failure for `floating
+  --watch` (a failed job's attempts counting up is); a skipped registration
+  answered before the live sample (with a live sample, the sample decides);
+  a Railway blip inside `deploys --watch` is retried like an API 503; a
+  body-less 429 reads as busy; an empty `--commit` is usage; a 5xx from
+  `/health` is a wrong API, not a missing one. The access-path lane's one
+  CLI-side finding (the story view's four current-state fields) folded; its
+  four port-side findings queued. Units 949 passed, the gates 120, the
+  battery 56 mutations.
+- The one-off `ERROR` in `tests/src/api/test_token_principal.py` seen twice
+  under the combined unit run (a different test each time; the file passes
+  alone every time) is the harness's unraisable-warning class already in the
+  owner queue; it is not the surface's.
 
 ## Owner queue
 

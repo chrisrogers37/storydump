@@ -76,7 +76,8 @@ FIXES: Mapping[str, str] = {
     "invalid_args": "see storydump <verb> --help",
     "workspace_required": "pass --workspace <id or name>",
     "admission_conflict": "pass --idempotency-key <a new key> to send a different command",
-    # the audit fold (2026-09-16): a bare 403 is the role floor, a 429 is load
+    # the audit fold (2026-09-16): a bare 403 is the role floor; a 503 naming
+    # `pool_saturated` is the API shedding load
     "insufficient_role": "ask a workspace admin or owner to raise your role, or do it as one",
     "pool_saturated": "wait a moment and run it again — a write's key makes a re-run safe",
 }
@@ -222,13 +223,19 @@ def _reason_of(exc: ApiError) -> str:
         # a reason-less 403 is the role floor (`insufficient_role`): the token
         # is live, the membership is below the verb — not a login problem
         return "insufficient_role"
+    if exc.status == 429:
+        # an edge rate-limiting with no body: busy, try again — never a
+        # refusal of what was asked
+        return "pool_saturated"
     if exc.status == 404:
         return "not_a_member"
     return "refused"
 
 
 def _config_error(runtime: Runtime, exc: ConfigError) -> int:
-    fix = "fix the config file, or delete it and run storydump login again"
+    fix = getattr(exc, "fix", None) or (
+        "fix the config file, or delete it and run storydump login again"
+    )
     if isinstance(exc, InsecureApiUrl):
         fix = (
             "use an https URL for --api / STORYDUMP_API, or set"
@@ -255,16 +262,20 @@ def dispatch(
         except ConfigError as exc:
             return _config_error(Runtime(config_dir(os.environ), DEFAULT_API_URL), exc)
         extra["obj"] = runtime
+    # not `click.Group.main`: it swallows a closed pipe (EPIPE) with its own
+    # `sys.exit(1)` whatever `standalone_mode` says, and turns Ctrl-C into
+    # `Abort` after printing; running the context here means every exception
+    # reaches the arm below that owns its exit code
+    argv = list(args) if args is not None else sys.argv[1:]
+    extra.pop("complete_var", None)
     try:
-        rv = click.Group.main(
-            group,
-            args=args,
-            prog_name=prog_name or PROG,
-            standalone_mode=False,
-            **extra,
-        )
+        with group.make_context(prog_name or PROG, argv, **extra) as ctx:
+            rv = group.invoke(ctx)
         return rv if isinstance(rv, int) else vocabulary.EXIT_OK
-    except click.Abort:
+    except click.exceptions.Exit as exc:
+        # `--help`, `--version`, `ctx.exit()`: Click's own clean exit
+        return int(exc.exit_code)
+    except (KeyboardInterrupt, EOFError, click.Abort):
         # Ctrl-C before the verb answered (inside a watch it is the way to
         # stop, and 0 — `watch` catches it first): the usage code, said
         return _report(
@@ -292,22 +303,22 @@ def dispatch(
             except OSError:
                 pass
         return vocabulary.EXIT_OK
-    except OSError as exc:
-        # the config directory (a file in its place, no permission): the
-        # local configuration is wrong, and the path is the whole diagnosis
-        return _report(
-            runtime,
-            code=vocabulary.EXIT_USAGE,
-            reason="usage",
-            detail=f"the config directory {runtime.config_dir} cannot be used"
-            f" ({type(exc).__name__})",
-            fix=f"point STORYDUMP_CONFIG_DIR at a writable directory, or fix {runtime.config_dir}",
-        )
     except Failure as exc:
         return _report(
             runtime, code=exc.code, reason=exc.reason, detail=exc.detail, fix=exc.fix
         )
     except Unreachable as exc:
+        # a 5xx that names its reason (`pool_saturated`: the API shedding
+        # load, 503 with Retry-After) gets that reason's sentence and fix;
+        # no answer, or an unnamed one, is "unreachable"
+        if exc.reason and exc.reason in vocabulary.REASON_SENTENCES:
+            return _report(
+                runtime,
+                code=vocabulary.EXIT_API_UNREACHABLE,
+                reason=exc.reason,
+                detail=vocabulary.REASON_SENTENCES[exc.reason],
+                fix=FIXES.get(exc.reason, UNREACHABLE_FIX),
+            )
         if exc.status == 0:
             detail = f"could not reach {runtime.api_url}: {exc.detail}"
         else:

@@ -247,6 +247,10 @@ STORY_FIELDS: Sequence[Column] = (
     ("attempts", "attempts_by_step"),
     ("account", "ig_account_id"),
     ("media", "media_item_id"),
+    ("via", "published_via"),
+    ("cancel", "cancel_requested"),
+    ("approval", "approval_mode"),
+    ("permalink", "ig_permalink"),
     ("error", "last_error"),
 )
 AUDIT_COLUMNS: Sequence[Column] = (
@@ -301,7 +305,7 @@ def _job_of(row: Mapping[str, Any]) -> Any:
 
 
 def _wait_of(row: Mapping[str, Any]) -> Any:
-    """``container_not_ready/2``: the last wait's class and rung."""
+    """``container/2``: the last wait's class (``fetch`` or ``container``) and rung."""
     klass = row.get("last_wait_class")
     if klass is None:
         return None

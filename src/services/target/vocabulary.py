@@ -185,8 +185,9 @@ def exit_code_for(status: int, reason: Optional[str] = None) -> int:
     if status == 404:
         return EXIT_NOT_FOUND if reason == "not_found" else EXIT_NOT_AUTHORIZED
     if status == 429:
-        # the API is shedding load (`pool_saturated`, Retry-After): a
-        # transient failure to answer, not a refusal of what was asked
+        # an edge in front of the API rate-limiting: a transient failure to
+        # answer, not a refusal of what was asked (the API's own shedding is
+        # a 503 naming `pool_saturated`, already "unreachable" as a 5xx)
         return EXIT_API_UNREACHABLE
     if 400 <= status < 500:
         return EXIT_REFUSED

@@ -45,14 +45,6 @@ WA=storydump_cli/watch.py
 OU=storydump_cli/output.py
 MA=storydump_cli/main.py
 CL=storydump_cli/client.py
-WR=storydump_cli/commands/writes.py
-EN=storydump_cli/commands/env.py
-WH=storydump_cli/webhook.py
-RW=storydump_cli/railway.py
-WA=storydump_cli/watch.py
-OU=storydump_cli/output.py
-MA=storydump_cli/main.py
-CL=storydump_cli/client.py
 VO=src/services/target/vocabulary.py
 TW=tests/storydump_cli/test_writes.py
 TE=tests/storydump_cli/test_env.py
@@ -103,7 +95,7 @@ check "the webhook verdict never rides the report" $EN '    verdicts["webhook"] 
 
 # --- deploys: the commit, the statuses, the deadline -------------------------------------
 check "a full hash never matches" $EN '    have = str(row.get("commit_hash") or row.get("commit") or "").lower()' '    have = str(row.get("commit") or "").lower()' "$UNIT" "$TE -k matches_a_commit_by_its_full_hash"
-check "the row forgets its full hash" $RW '        "commit_hash": full if isinstance(full, str) and full else None,' '        "commit_hash": None,' "$UNIT" "$TE -k matches_a_commit_by_its_full_hash"
+check "the row forgets its full hash" $RW '        "commit_hash": full if isinstance(full, str) and full else None,' '        "commit_hash": full[:7] if isinstance(full, str) and full else None,' "$UNIT" "$TE -k matches_a_commit_by_its_full_hash"
 check "a removed deployment is not a failure" $RW 'FAILED_STATUSES: tuple[str, ...] = ("FAILED", "CRASHED", "REMOVED")' 'FAILED_STATUSES: tuple[str, ...] = ("FAILED", "CRASHED")' "$UNIT" "$TE -k removed_deployment_as_failed"
 check "the deadline never fires" $WA '                and (runtime.now_fn() - started).total_seconds() >= deadline' '                and False' "$UNIT" "$TE -k exceeds_its_timeout"
 
@@ -174,3 +166,29 @@ check "a monitor stops being stdlib-only" scripts/posting_monitor.py 'import url
 import httpx' "$UNIT" "$TI -k standard_library_only"
 check "the workspace key drops the workspace" $WR '    return f"{command}:{workspace_id}:{identity}"' '    return f"{command}:{identity}"' "$UNIT" "$TW -k shared_fixture_both_doors_read"
 check "a verb loses its renderer" $OU '    "doctor": _render_doctor,' '' "$UNIT" "$TO -k every_verb_kind_has_a_renderer"
+
+# --- round 3: the two review lenses ---------------------------------------------------------
+TG=tests/test_agent_docs.py
+check "a saturated pool loses its sentence" $MA '        if exc.reason and exc.reason in vocabulary.REASON_SENTENCES:' '        if False:' "$UNIT" "$TM -k saturated_pool"
+check "the timeout is checked after the login" $EN '    if timeout is not None and not watching:
+        raise click.UsageError("--timeout only means something with --watch", ctx=ctx)
+    rail = Railway(runtime.run_process)' '    rail = Railway(runtime.run_process)' "$UNIT" "$TE -k timeout_without_watch"
+check "the sampler failing is well" $EN '            return False, {
+                "state": "sampler_failed",' '            return True, {
+                "state": "sampler_failed",' "$UNIT" "$TE -k failed_webhook_sampler"
+check "a satellite may name a command anywhere" $TG '    named = _named_invocations(_never_bullets(_doc(doc)))' '    named = _named_invocations(_doc(doc))' "$UNIT" "$TG -k satellite_copy_of_the_list_is_complete"
+check "a retry that fails again is not a new failure" $WA '    return int(new.get("job_attempts") or 0) > int(old.get("job_attempts") or 0)' '    return False' "$UNIT" "$TA -k retry_that_fails_again"
+check "a shuffled failed row ends the watch" $WA '        "floating", _by_id, _failed_floating, _empty_twice, worse=_job_died' '        "floating", _by_id, _failed_floating, _empty_twice' "$UNIT" "$TA -k retry_that_fails_again"
+check "a dropped principal call leaves the API ok" $EN '                checks["api"] = (
+                    "wrong",
+                    f"{runtime.api_url} {answered}: {exc.detail}",' '                checks["api"] = (
+                    "ok",
+                    f"{runtime.api_url} {answered}: {exc.detail}",' "$UNIT" "$TE -k never_says_ok_over_an_unchecked_token"
+check "a skipped registration ignores the live sample" $EN '        if registration.get("skipped") and not isinstance(live, dict):' '        if registration.get("skipped"):' "$UNIT" "$TE -k skipped_registration_with_a_live_backlog"
+check "a railway blip ends the watch" $WA '            except (Unreachable, RailwayUnavailable):' '            except Unreachable:' "$UNIT" "$TE -k rides_out_a_railway_blip"
+check "an empty commit matches nothing forever" $EN '    if commit is not None and not commit.strip():' '    if False:' "$UNIT" "$TE -k empty_commit_is_usage"
+check "a 5xx health is missing" $EN '            # it answered, badly: a 5xx from /health is a wrong API, not a missing one
+            checks["api"] = (
+                "wrong",' '            # it answered, badly: a 5xx from /health is a wrong API, not a missing one
+            checks["api"] = (
+                "missing",' "$UNIT" "$TE -k 5xx_health_as_wrong_not_missing"

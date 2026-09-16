@@ -49,12 +49,26 @@ def config_dir(env: Mapping[str, str]) -> Path:
     return Path.home() / ".config" / "storydump"
 
 
+class ConfigDirectoryUnusable(ConfigError):
+    """The config directory cannot be created or written (a file in its place,
+    no permission): a usage answer naming the path, never a traceback."""
+
+    def __init__(self, directory: Path, exc: OSError) -> None:
+        super().__init__(
+            f"the config directory {directory} cannot be used ({type(exc).__name__})"
+        )
+        self.fix = f"point {CONFIG_DIR_ENV} at a writable directory, or fix {directory}"
+
+
 def ensure_dir(directory: Path) -> Path:
     """Create *directory* as 0700 — asserted after creation too, because
     ``mkdir``'s mode is subject to the umask and an existing directory
     keeps whatever mode it had."""
-    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-    os.chmod(directory, 0o700)
+    try:
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(directory, 0o700)
+    except OSError as exc:
+        raise ConfigDirectoryUnusable(directory, exc) from exc
     return directory
 
 
@@ -62,7 +76,10 @@ def write_private(path: Path, text: str) -> None:
     """Create or overwrite *path* as 0600. The mode is passed to ``open`` so
     a new file never exists with a wider one, and asserted before the write
     because an existing file keeps its mode across ``O_TRUNC``."""
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    except OSError as exc:
+        raise ConfigDirectoryUnusable(path.parent, exc) from exc
     try:
         os.chmod(path, 0o600)
         os.write(fd, text.encode("utf-8"))

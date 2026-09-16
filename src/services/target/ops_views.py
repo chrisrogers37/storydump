@@ -56,7 +56,7 @@ _AUDIT = _newest(
     " a.actor_user_id, a.channel, a.detail, a.id AS row_id"
     " FROM audit_events a WHERE a.workspace_id = :ws AND a.entity_id = :id",
     order="at, row_id",
-    limit=STORY_ROWS,
+    limit=STORY_ROWS + 1,
     columns="at, from_state, to_state, actor_kind, actor_user_id, channel, detail",
 )
 
@@ -68,7 +68,7 @@ _OPERATIONS = _newest(
     " NULLIF(o.response_ref->>'elapsed_ms', '')::int AS elapsed_ms"
     " FROM provider_operations o WHERE o.workspace_id = :ws AND o.intent_id = :id",
     order="at, generation",
-    limit=STORY_ROWS,
+    limit=STORY_ROWS + 1,
     columns="at, op_kind, generation, state, url_variant, error, subcode, elapsed_ms",
 )
 
@@ -78,7 +78,7 @@ _STORY_CARDS = _newest(
     " o.payload->>'supersedes_ref' AS supersedes_ref, o.id AS row_id"
     " FROM channel_outbox o WHERE o.workspace_id = :ws AND o.intent_id = :id",
     order="at, row_id",
-    limit=STORY_ROWS,
+    limit=STORY_ROWS + 1,
     columns="at, binding_id, kind, state, external_message_ref, attempts,"
     " outcome_text, supersedes_ref",
 )
@@ -93,20 +93,21 @@ async def story(conn, *, workspace_id: str, intent_id: str) -> list[dict[str, An
     if intent is None:
         return []
     params = {"ws": workspace_id, "id": intent_id}
-    lists = {
+    fetched = {
         "audit": await readers.rows(conn, _AUDIT, **params),
         "operations": await readers.rows(conn, _OPERATIONS, **params),
         "cards": await readers.rows(conn, _STORY_CARDS, **params),
     }
+    # each statement fetches one row past the bound, so a list at the bound
+    # was cut exactly when that extra (oldest) row came back — said, rather
+    # than a timeline that quietly ends early
     return [
         {
             "workspace_id": workspace_id,
             "intent": intent,
-            **lists,
-            # the lists at their bound: the newest rows are here, older ones
-            # were cut — said, rather than a timeline that quietly ends early
+            **{name: rows[-STORY_ROWS:] for name, rows in fetched.items()},
             "truncated": [
-                name for name, rows in lists.items() if len(rows) >= STORY_ROWS
+                name for name, rows in fetched.items() if len(rows) > STORY_ROWS
             ],
         }
     ]

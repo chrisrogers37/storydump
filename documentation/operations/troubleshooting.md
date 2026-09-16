@@ -16,7 +16,7 @@ railway logs --service storydump | grep -i error | tail -20
 
 The API service on Railway is `storydump` (the worker is `worker`). `railway
 shell` has no `-c`; to read a variable on a service, use
-`railway run --service worker -- sh -c 'echo "$NAME"'` — and never print a
+`railway run --service worker --environment production -- sh -c 'echo "$NAME"'` — and never print a
 secret's value.
 
 This page is the target tier's — the only tier deployed: the worker dispatches
@@ -70,7 +70,7 @@ storydump account <handle>              # the cap, today's count, the next slot
 | Posting paused for the workspace | `storydump story <id>` shows no permits since the pause | `storydump resume --workspace <ws>` (an operator token) |
 | Instagram API posting off | the port refuses `approve` with `manual_mode` | Settings › General on the web |
 | The account's cap reached | `storydump account <handle>`: today's count at the cap | Wait for the next slot, or raise the cap on the web |
-| Container not ready / rate limited | `floating` shows `container_not_ready` or a wait rung climbing | Let the ladder run; `burst --watch` follows it |
+| The frame not ready, or the container not ready | `floating` shows `fetch/<rung>` or `container/<rung>`, the rung climbing | Let the ladder run; `burst --watch` follows it |
 | A publish answer was lost | the story is `publishing_ambiguous`; `resolve` refuses with `may_have_posted` | Look at Instagram, then `storydump resolve <story> retry --not-posted` or `resolve <story> posted` (never-run list: ask the user) |
 | The worker is down | `storydump health`: scheduling `worker-down` | `railway logs --service worker`, restart |
 
@@ -152,7 +152,7 @@ railway logs --service storydump | grep -iE 'pool|connect'
 | Cause | Fix |
 |-------|-----|
 | Neon endpoint sleeping | The first connection wakes it (cold start ~1-2 s) |
-| The pool saturated (`pool_saturated`, 429/503 with Retry-After) | Wait; a watch retries three times before giving up |
+| The pool saturated (a 503 naming `pool_saturated`, with Retry-After) | Wait; a watch retries three times before giving up |
 | Wrong credentials | Check the database variables in the Railway dashboard |
 | Neon free-tier limit | Neon dashboard, compute hours |
 
