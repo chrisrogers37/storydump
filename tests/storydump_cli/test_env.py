@@ -49,7 +49,15 @@ HEALTH = {
     "ingress_workers": 1,
     "taps": {"executed": 12, "replayed": 1, "answer_failed": 0},
     "webhook": {"ok": True, "bot": "storydump_app_bot", "url": "https://api/x"},
-    "webhook_live": {"ok": True, "pending_update_count": 0, "last_error": None},
+    "webhook_live": {
+        "at": "2026-09-15T14:59:30+00:00",
+        "url": "https://api/x",
+        "pending_update_count": 0,
+        "last_error_date": None,
+        "last_error_message": None,
+        "max_connections": 40,
+        "allowed_updates": ["message", "callback_query"],
+    },
 }
 #: The real shapes (`src/api/app.py`'s three routes): the two dependency
 #: surfaces carry aggregates, never a `status` — `health` hands them to the
@@ -219,8 +227,12 @@ def test_health_json_is_one_envelope_with_the_three_payloads(tmp_path):
                 "detail": verdicts["scheduling"]["detail"],
             },
             "posting": {"state": "posting", "detail": verdicts["posting"]["detail"]},
+            "webhook": {
+                "state": "registered",
+                "detail": verdicts["webhook"]["detail"],
+            },
         },
-    }, "the monitors' own states ride the report"
+    }, "the monitors' own states ride the report; the webhook is judged too"
 
 
 def test_health_exits_4_when_a_surface_is_not_well_but_still_prints(tmp_path):
@@ -310,6 +322,84 @@ def test_health_reads_a_mistyped_surface_as_not_well(tmp_path):
     assert (
         one_envelope(result)["data"]["verdicts"]["scheduling"]["state"] == "unreachable"
     )
+
+
+def test_health_reads_a_webhook_that_failed_to_register_as_not_well(tmp_path):
+    """`/health.webhook` is the API's own registration report (a snapshot from
+    startup): `ok: false` with the error is a bot nobody is delivering to."""
+    broken = {**HEALTH, "webhook": {"ok": False, "error": "BotApiError"}}
+    api = health_api({("GET", "/health"): (200, broken)})
+    result = run(env_runtime(tmp_path, api), "--json", "health")
+    assert result.exit_code == EXIT_API_UNREACHABLE, result.output
+    document = one_envelope(result)
+    assert document["data"]["ok"] is False
+    verdict = document["data"]["verdicts"]["webhook"]
+    assert verdict["state"] == "unregistered" and "BotApiError" in verdict["detail"]
+    # a registration the API chose to skip (not production, autoregister off)
+    # is a fact in the report, not an outage
+    skipped = {
+        **HEALTH,
+        "webhook": {
+            "ok": False,
+            "skipped": "autoregister off (not the production environment)",
+        },
+    }
+    api = health_api({("GET", "/health"): (200, skipped)})
+    result = run(env_runtime(tmp_path, api), "--json", "health")
+    assert result.exit_code == EXIT_OK, result.output
+    assert one_envelope(result)["data"]["verdicts"]["webhook"]["state"] == "skipped"
+
+
+def test_health_reads_an_undelivered_backlog_as_not_well(tmp_path):
+    """`/health.webhook_live` is what Telegram holds right now: a backlog with a
+    last delivery error names our route failing — the signal the API samples
+    every minute for exactly this reading (`_sample_webhook_live`)."""
+    stuck = {
+        **HEALTH,
+        "webhook_live": {
+            **HEALTH["webhook_live"],
+            "pending_update_count": 4123,
+            "last_error_date": 1758000000,
+            "last_error_message": "Wrong response from the webhook: 500 Internal Server Error",
+        },
+    }
+    api = health_api({("GET", "/health"): (200, stuck)})
+    result = run(env_runtime(tmp_path, api), "--json", "health")
+    assert result.exit_code == EXIT_API_UNREACHABLE, result.output
+    verdict = one_envelope(result)["data"]["verdicts"]["webhook"]
+    assert verdict["state"] == "undelivered"
+    assert "4123" in verdict["detail"] and "500" in verdict["detail"]
+    # an old error with nothing pending is history, not an outage
+    drained = {
+        **HEALTH,
+        "webhook_live": {
+            **HEALTH["webhook_live"],
+            "pending_update_count": 0,
+            "last_error_date": 1758000000,
+            "last_error_message": "Wrong response from the webhook: 500 Internal Server Error",
+        },
+    }
+    api = health_api({("GET", "/health"): (200, drained)})
+    assert run(env_runtime(tmp_path, api), "health").exit_code == EXIT_OK
+    # an API too old to report the webhook at all is not judged on it
+    silent = {k: v for k, v in HEALTH.items() if k not in ("webhook", "webhook_live")}
+    api = health_api({("GET", "/health"): (200, silent)})
+    result = run(env_runtime(tmp_path, api), "--json", "health")
+    assert result.exit_code == EXIT_OK, result.output
+    assert one_envelope(result)["data"]["verdicts"]["webhook"]["state"] == "unsampled"
+
+
+def test_health_reads_a_surface_that_is_not_an_object_as_not_well(tmp_path):
+    """A 200 whose JSON is not the surface's object (a string, a list) is no
+    answer — never well."""
+    for payload in ("nope", [], 7):
+        api = health_api({("GET", "/health/posting"): (200, payload)})
+        result = run(env_runtime(tmp_path, api), "--json", "health")
+        assert result.exit_code == EXIT_API_UNREACHABLE, (payload, result.output)
+        assert (
+            one_envelope(result)["data"]["verdicts"]["posting"]["state"]
+            == "unreachable"
+        )
 
 
 def test_health_reads_a_silence_as_not_well_whatever_the_destinations(tmp_path):
@@ -442,6 +532,7 @@ def test_deploys_json_carries_the_railway_version_and_the_project(tmp_path):
         "status": NEWEST["status"],
         "created_at": NEWEST["createdAt"],
         "commit": NEWEST_COMMIT,
+        "commit_hash": NEWEST["meta"]["commitHash"],
         "branch": NEWEST["meta"]["branch"],
         "message": NEWEST["meta"]["commitMessage"].splitlines()[0],
     }, "the message is its first line; the commit its short hash"
@@ -606,6 +697,93 @@ def test_deploys_watch_with_a_commit_waits_for_that_commits_deploys(tmp_path):
     )
 
 
+@pytest.mark.parametrize(
+    "given",
+    [
+        NEWEST["meta"]["commitHash"],  # the full hash a push prints
+        NEWEST["meta"]["commitHash"].upper(),
+        NEWEST["meta"]["commitHash"][:12],
+    ],
+)
+def test_deploys_watch_matches_a_commit_by_its_full_hash_too(tmp_path, given):
+    """Railway lists the full hash; the CLI shows seven characters. A watch
+    started with the hash a push printed (40 characters, any case) must match
+    the row — a prefix comparison against the SHORT hash never does, and the
+    watch would run until Ctrl-C."""
+    rail = ScriptedRailway(railway_answers())
+    rt = env_runtime(tmp_path, health_api(), rail)
+    slept: list[float] = []
+    rt.sleep_fn = bounded_sleeper(slept, limit=1)
+    result = run(rt, "deploys", "--watch", "--commit", given)
+    assert result.exit_code == EXIT_OK, result.output
+    assert slept == [], (
+        "the fixture's latest rows ARE that commit: done on the first read"
+    )
+
+
+def test_deploys_watch_reports_the_watched_commits_failure_under_a_full_hash(tmp_path):
+    failed = [{**FIXTURE["deployments"]["storydump"][0], "status": "FAILED"}]
+    rail = ScriptedRailway(railway_answers({LIST_API: ok_json(failed)}))
+    rt = env_runtime(tmp_path, health_api(), rail)
+    rt.sleep_fn = bounded_sleeper()
+    full = FIXTURE["deployments"]["storydump"][0]["meta"]["commitHash"]
+    result = run(rt, "deploys", "--watch", "--commit", full)
+    assert result.exit_code == EXIT_WATCH_FAILED, result.output
+    assert "FAILED" in result.stderr
+
+
+def test_deploys_watch_reads_a_removed_deployment_as_failed(tmp_path):
+    """A REMOVED latest deployment will never become SUCCESS: waiting on it is
+    waiting forever."""
+    removed = [{**FIXTURE["deployments"]["storydump"][0], "status": "REMOVED"}]
+    rail = ScriptedRailway(railway_answers({LIST_API: ok_json(removed)}))
+    rt = env_runtime(tmp_path, health_api(), rail)
+    rt.sleep_fn = bounded_sleeper()
+    result = run(rt, "deploys", "--watch")
+    assert result.exit_code == EXIT_WATCH_FAILED, result.output
+    assert "REMOVED" in result.stderr
+
+
+def test_deploys_watch_waits_for_a_service_with_no_rows(tmp_path):
+    """Done means BOTH services' latest rows are terminal — a service that has
+    not deployed yet is not one that succeeded."""
+    rail = ScriptedRailway(railway_answers({LIST_API: ok_json([])}))
+    rt = env_runtime(tmp_path, health_api(), rail)
+    slept: list[float] = []
+    rt.sleep_fn = bounded_sleeper(slept, limit=2)
+    result = run(rt, "deploys", "--watch", "--every", "5")
+    assert result.exit_code == EXIT_OK, result.output
+    assert slept == [5.0, 5.0, 5.0], "it kept waiting until Ctrl-C ended it"
+
+
+def test_deploys_watch_ends_6_when_the_wait_exceeds_its_timeout(tmp_path):
+    """An agent cannot press Ctrl-C: --timeout bounds the wait, and running
+    out of it is the watch's failure (6), named."""
+    building = [{**NEWEST, "status": "BUILDING"}]
+    rail = ScriptedRailway(railway_answers({LIST_WORKER: ok_json(building)}))
+    rt = env_runtime(tmp_path, health_api(), rail)
+    ticks = iter(range(0, 10_000, 10))
+    rt.now_fn = lambda: NOW + __import__("datetime").timedelta(seconds=next(ticks))
+    rt.sleep_fn = bounded_sleeper(limit=50)
+    result = run(rt, "--json", "deploys", "--watch", "--every", "5", "--timeout", "25")
+    assert result.exit_code == EXIT_WATCH_FAILED, result.output
+    documents = [json.loads(line) for line in result.stdout.splitlines()]
+    assert documents[-1]["error"]["reason"] == "watch_failed"
+    assert "25" in documents[-1]["error"]["detail"]
+
+
+def test_a_failed_deployment_list_is_exit_5_not_an_empty_service(tmp_path):
+    rail = ScriptedRailway(
+        railway_answers(
+            {LIST_API: (1, "", "Unauthorized. Please login with `railway login`\n")}
+        )
+    )
+    rt = env_runtime(tmp_path, health_api(), rail)
+    result = run(rt, "--json", "deploys")
+    assert result.exit_code == EXIT_RAILWAY_UNREACHABLE, result.output
+    assert "storydump" in one_envelope(result)["error"]["detail"]
+
+
 def test_deploys_watch_with_a_commit_ignores_another_commits_failure(tmp_path):
     old_failed = [{**FIXTURE["deployments"]["storydump"][0], "status": "FAILED"}]
     rail = ScriptedRailway(railway_answers({LIST_API: ok_json(old_failed)}))
@@ -733,6 +911,33 @@ def test_doctor_with_a_token_the_api_refuses_says_wrong(tmp_path):
     assert checks["api"]["state"] == "ok", (
         "the API answered; the token is what is wrong"
     )
+
+
+def test_doctor_blames_the_api_not_the_token_for_a_5xx(tmp_path):
+    """`/health` answers but `/me/principal` 503s: the token could not be
+    checked (skipped), the API is what is wrong, and the exit is 4 — not
+    "the API refuses this token" with a mint-a-token fix and exit 3."""
+    api = health_api(
+        {("GET", "/api/v1/me/principal"): (503, {"detail": "busy — try again"})}
+    )
+    rt = env_runtime(tmp_path, api)
+    rt.migrations_dir = repo_migrations(tmp_path, *range(1, 78))
+    result = run(rt, "--json", "doctor")
+    assert result.exit_code == EXIT_API_UNREACHABLE, result.output
+    checks = checks_of(one_envelope(result))
+    assert checks["token"]["state"] == "skipped", checks["token"]
+    assert "mint" not in checks["token"]["fix"]
+    assert checks["api"]["state"] == "wrong" and "503" in checks["api"]["value"]
+
+
+def test_doctor_reads_a_4xx_health_as_wrong(tmp_path):
+    api = health_api({("GET", "/health"): (404, {"detail": "not found"})})
+    rt = env_runtime(tmp_path, api)
+    rt.migrations_dir = repo_migrations(tmp_path, *range(1, 78))
+    result = run(rt, "--json", "doctor")
+    assert result.exit_code == EXIT_API_UNREACHABLE, result.output
+    checks = checks_of(one_envelope(result))
+    assert checks["api"]["state"] == "wrong" and "404" in checks["api"]["value"]
 
 
 def test_doctor_with_an_unreachable_api_says_so_and_exits_4(tmp_path):

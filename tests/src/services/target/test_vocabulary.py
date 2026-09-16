@@ -222,6 +222,64 @@ class TestTheWindowGrammar:
         assert str(caught.value), value
 
 
+class TestTheWindowSlack:
+    """The CLI computes a span's start on ITS clock and the API judges it on
+    ITS OWN: a `30d` sent by a client one second behind, or a timestamp from
+    a clock one second ahead, is inside the grammar's slack — clamped to the
+    bound, never refused. Beyond the slack the bound holds."""
+
+    NOW = __import__("datetime").datetime(
+        2026, 9, 16, 12, 0, 30, 123456, tzinfo=__import__("datetime").timezone.utc
+    )
+
+    def test_a_widest_span_from_a_clock_slightly_behind_is_clamped(self):
+        import datetime as dt
+
+        anchor = self.NOW.replace(microsecond=0)
+        behind = (anchor - dt.timedelta(days=30, seconds=1)).isoformat()
+        assert vocabulary.window_start(behind, self.NOW) == anchor - dt.timedelta(
+            days=30
+        )
+
+    def test_a_timestamp_slightly_ahead_is_now(self):
+        import datetime as dt
+
+        anchor = self.NOW.replace(microsecond=0)
+        ahead = (anchor + dt.timedelta(seconds=2)).isoformat()
+        assert vocabulary.window_start(ahead, self.NOW) == anchor
+        same_second = (anchor + dt.timedelta(microseconds=500_000)).isoformat()
+        assert vocabulary.window_start(same_second, self.NOW) == anchor
+
+    def test_the_slack_is_bounded(self):
+        import datetime as dt
+
+        anchor = self.NOW.replace(microsecond=0)
+        with pytest.raises(ValueError):
+            vocabulary.window_start(
+                (anchor + dt.timedelta(minutes=10)).isoformat(), self.NOW
+            )
+        with pytest.raises(ValueError):
+            vocabulary.window_start(
+                (anchor - dt.timedelta(days=30, minutes=10)).isoformat(), self.NOW
+            )
+        with pytest.raises(ValueError):
+            vocabulary.window_start("31d", self.NOW)
+
+
+class TestTheAnswersAddedByTheAudit:
+    def test_a_rate_limited_answer_is_unreachable_not_refused(self):
+        assert (
+            vocabulary.exit_code_for(429, "pool_saturated")
+            == vocabulary.EXIT_API_UNREACHABLE
+        )
+        assert vocabulary.exit_code_for(429) == vocabulary.EXIT_API_UNREACHABLE
+
+    def test_the_role_floor_and_the_rate_limit_have_sentences(self):
+        for reason in ("insufficient_role", "pool_saturated"):
+            sentence = vocabulary.REASON_SENTENCES[reason]
+            assert sentence and "login" not in sentence, reason
+
+
 class TestTheWriteSentences:
     def test_every_write_sentence_names_a_port_command_and_an_outcome(self):
         for (command, outcome), sentence in vocabulary.WRITE_SENTENCES.items():

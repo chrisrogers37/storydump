@@ -179,6 +179,10 @@ def exit_code_for(status: int, reason: Optional[str] = None) -> int:
         return EXIT_NOT_AUTHORIZED
     if status == 404:
         return EXIT_NOT_FOUND if reason == "not_found" else EXIT_NOT_AUTHORIZED
+    if status == 429:
+        # the API is shedding load (`pool_saturated`, Retry-After): a
+        # transient failure to answer, not a refusal of what was asked
+        return EXIT_API_UNREACHABLE
     if 400 <= status < 500:
         return EXIT_REFUSED
     return EXIT_API_UNREACHABLE
@@ -266,6 +270,10 @@ REASON_SENTENCES: Mapping[str, str] = {
     "wrong_workspace": "this token belongs to another workspace",
     "not_authorized": "not authorized — run storydump login with a valid token",
     "not_a_member": "no such workspace for this token",
+    # a member below the verb's floor: the API's bare 403 (the token is fine)
+    "insufficient_role": "your role in this workspace does not allow this",
+    # the API shedding load (a 429 with Retry-After): try again, not a refusal
+    "pool_saturated": "the API is busy — try again in a moment",
     # the ingress's own refusal: the same idempotency key, a different command
     "admission_conflict": (
         "a different command was already sent under this idempotency key"
@@ -384,6 +392,11 @@ WINDOW_UNITS: Mapping[str, str] = {"m": "minutes", "h": "hours", "d": "days"}
 MAX_WINDOW_DAYS = 30
 #: `jobs`, `outbox` and `burst` look back this far by default.
 DEFAULT_WINDOW = "3h"
+#: Two clocks judge one window — the CLI computes a span's start, the API
+#: measures it against its own now — so a start this close to a bound is
+#: clamped to the bound rather than refused (a `30d` from a client one second
+#: behind, a timestamp from a clock one second ahead).
+WINDOW_SLACK = dt.timedelta(minutes=5)
 
 
 def window_start(value: str, now: dt.datetime) -> dt.datetime:
@@ -414,8 +427,9 @@ def window_start(value: str, now: dt.datetime) -> dt.datetime:
             f"not a window: {text!r} — give a span back from now (15m, 3h, 1d)"
             " or an ISO-8601 timestamp"
         ) from None
-    if anchor - start > dt.timedelta(days=MAX_WINDOW_DAYS):
+    widest = anchor - dt.timedelta(days=MAX_WINDOW_DAYS)
+    if start < widest - WINDOW_SLACK:
         raise ValueError(f"a window is at most {MAX_WINDOW_DAYS} days: {text!r}")
-    if start > anchor:
+    if start > anchor + WINDOW_SLACK:
         raise ValueError(f"a window cannot start in the future: {text!r}")
-    return start
+    return min(max(start, widest), anchor)

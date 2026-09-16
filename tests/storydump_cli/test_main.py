@@ -185,6 +185,86 @@ def test_a_bad_option_is_usage_on_stderr_and_exit_64(tmp_path, monkeypatch, caps
     assert "--bogus" in err
 
 
+def test_a_usage_error_after_json_is_still_an_envelope(tmp_path):
+    """`--json` is honoured wherever it stands: a bad value parsed BEFORE the
+    flag's callback ran is still one envelope on stdout, exit 64 — an agent
+    reads one stream whatever went wrong."""
+    api = person_api()
+    result = run(runtime(tmp_path, api), "floating", "--limit", "abc", "--json")
+    assert result.exit_code == EXIT_USAGE, result.output
+    document = one_envelope(result)
+    assert document["kind"] == "floating" and document["error"]["reason"] == "usage"
+    assert "abc" in document["error"]["detail"]
+    result = run(runtime(tmp_path, api), "--bogus", "--json")
+    assert result.exit_code == EXIT_USAGE
+    assert one_envelope(result)["error"]["reason"] == "usage"
+
+
+def test_an_interrupt_outside_a_watch_is_exit_64_with_an_envelope(
+    tmp_path, monkeypatch
+):
+    """Ctrl-C before a verb answered: the documented usage code, and a document
+    that says so — not Click's bare `Aborted!` and no envelope. (Inside a
+    watch, Ctrl-C is the way to stop watching: 0, pinned in test_watch.)"""
+    rt = runtime(tmp_path, person_api())
+
+    def interrupted():
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(rt.token_backend, "get", interrupted)
+    result = run(rt, "--json", "whoami")
+    assert result.exit_code == EXIT_USAGE, result.output
+    document = one_envelope(result)
+    assert document["kind"] == "whoami" and document["error"]["reason"] == "interrupted"
+    assert "idempotency" in document["error"]["fix"]
+    rt = runtime(tmp_path, person_api())
+    monkeypatch.setattr(rt.token_backend, "get", interrupted)
+    result = run(rt, "whoami")
+    assert result.exit_code == EXIT_USAGE
+    assert "interrupted" in result.stderr
+
+
+def test_a_closed_pipe_is_not_a_failure(tmp_path, monkeypatch):
+    """`storydump … | head` closes stdout early; the CLI ends quietly with 0
+    rather than a traceback and Click's exit 1 (the contract's "not found")."""
+    rt = runtime(tmp_path, person_api())
+
+    def closed(document, *, json_mode):
+        raise BrokenPipeError
+
+    monkeypatch.setattr("storydump_cli.commands.auth.emit", closed)
+    result = run(rt, "--json", "whoami")
+    assert result.exit_code == EXIT_OK, result.output
+    assert "Traceback" not in result.output
+
+
+def test_a_config_directory_that_cannot_be_written_is_usage_not_a_traceback(tmp_path):
+    blocker = tmp_path / "config"
+    blocker.write_text("a file where the directory should be")
+    rt = runtime(tmp_path / "config", person_api(), token=None)
+    result = run(rt, "--json", "login", input=SECRET + "\n")
+    assert result.exit_code == EXIT_USAGE, result.output
+    document = one_envelope(result)
+    assert document["error"]["reason"] == "usage"
+    assert str(blocker) in document["error"]["detail"]
+    assert SECRET not in result.output
+
+
+def test_a_rate_limited_answer_is_exit_4_with_its_own_sentence(tmp_path):
+    api = person_api()
+    api.routes[("GET", "/api/v1/me/principal")] = (
+        429,
+        {"detail": "busy — try again", "reason": "pool_saturated"},
+    )
+    result = run(runtime(tmp_path, api), "--json", "whoami")
+    assert result.exit_code == EXIT_API_UNREACHABLE, result.output
+    document = one_envelope(result)
+    assert document["error"]["code"] == EXIT_API_UNREACHABLE
+    assert document["error"]["reason"] == "pool_saturated"
+    assert "try again" in document["error"]["detail"].lower()
+    assert "--help" not in document["error"]["fix"]
+
+
 def test_no_verb_is_usage(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("STORYDUMP_CONFIG_DIR", str(tmp_path))
     assert main([]) == EXIT_USAGE

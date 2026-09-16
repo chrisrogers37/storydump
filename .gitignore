@@ -84,6 +84,8 @@ Thumbs.db
 
 # Landing site (Next.js)
 landing/node_modules/
+# a vitest run from the repository root leaves its cache here too
+node_modules/
 landing/.next/
 landing/.env.local
 !landing/src/lib/

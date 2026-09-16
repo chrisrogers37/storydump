@@ -87,6 +87,27 @@ def test_redacts_database_urls():
     assert redact("db postgresql://u:p@h/db") == "db postgres://<redacted>"
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "postgresql+asyncpg://user:pw@host:5432/db",
+        "postgresql+psycopg2://user:pw@host/db",
+        "postgres://user:pw@host/db?sslmode=require",
+    ],
+)
+def test_redacts_every_dialect_of_a_database_url(url):
+    """The one URL shape this deployment uses carries a driver suffix; the
+    backstop must strike it too."""
+    assert "pw" not in redact(f"dsn {url} end")
+    assert "<redacted>" in redact(f"dsn {url} end")
+
+
+def test_the_tokens_renderer_survives_a_row_that_is_not_an_object(capsys):
+    emit(envelope("tokens", {"tokens": ["garbage", None, 7]}), json_mode=False)
+    out = capsys.readouterr().out
+    assert "Traceback" not in out
+
+
 def test_redacts_webhook_secrets():
     assert redact("secret_token=abc123 ok") == "secret_token=<redacted> ok"
     assert redact("?token=abc123&x=1") == "?token=<redacted>"

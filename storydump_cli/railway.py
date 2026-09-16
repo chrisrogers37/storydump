@@ -49,7 +49,9 @@ ENVIRONMENT = "production"
 #: A deployment's terminal statuses, as Railway spells them: a SLEEPING
 #: deployment is a successful one asleep, a SKIPPED one had nothing to build.
 DONE_STATUSES: tuple[str, ...] = ("SUCCESS", "SLEEPING", "SKIPPED")
-FAILED_STATUSES: tuple[str, ...] = ("FAILED", "CRASHED")
+#: ... and a REMOVED one was taken down: waiting for it to succeed is waiting
+#: forever, so a watch reads it as that deployment failing.
+FAILED_STATUSES: tuple[str, ...] = ("FAILED", "CRASHED", "REMOVED")
 
 ProcessResult = tuple[int, str, str]
 RunProcess = Callable[[Sequence[str]], ProcessResult]
@@ -108,12 +110,16 @@ def first_line(value: Any) -> Optional[str]:
 def deployment_row(service: str, deployment: dict[str, Any]) -> dict[str, Any]:
     """One deployment as the CLI shows it: status, when, which commit."""
     meta = deployment.get("meta") if isinstance(deployment.get("meta"), dict) else {}
+    full = meta.get("commitHash")
     return {
         "id": deployment.get("id"),
         "service": service,
         "status": deployment.get("status"),
         "created_at": deployment.get("createdAt"),
-        "commit": short_hash(meta.get("commitHash")),
+        "commit": short_hash(full),
+        # the whole hash too: `--commit` is matched against it, so the 40
+        # characters a push prints match as well as the seven shown
+        "commit_hash": full if isinstance(full, str) and full else None,
         "branch": meta.get("branch"),
         "message": first_line(meta.get("commitMessage")),
     }

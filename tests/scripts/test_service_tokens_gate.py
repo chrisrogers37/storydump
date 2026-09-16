@@ -394,6 +394,35 @@ def test_tokens_end_to_end_as_svc_ingress(world, google_configured, monkeypatch)
             )
             assert theirs.status_code == 404
 
+            # --- and cannot revoke the person's token: not by session, not by
+            # a token of their own — the row stays live and keeps working
+            victim = await client.post(
+                "/api/v1/me/tokens",
+                json={"name": "victim", "role": "readonly"},
+                headers=owner,
+            )
+            assert victim.status_code == 201, victim.text
+            strangers_token = await client.post(
+                "/api/v1/me/tokens",
+                json={"name": "stranger-op", "role": "operator"},
+                headers=stranger,
+            )
+            for headers in (stranger, _bearer(strangers_token.json()["secret"])):
+                theirs = await client.delete(
+                    f"/api/v1/me/tokens/{victim.json()['id']}", headers=headers
+                )
+                assert theirs.status_code == 404, theirs.text
+            ((live,),) = _sql(
+                world["stream"],
+                "SELECT revoked_at IS NULL FROM service_tokens WHERE id = %s",
+                (victim.json()["id"],),
+            )
+            assert live, "somebody else's revoke touched the row"
+            alive = await client.get(
+                "/api/v1/me/principal", headers=_bearer(victim.json()["secret"])
+            )
+            assert alive.status_code == 200
+
     _run(main())
 
 

@@ -469,6 +469,51 @@ def test_a_token_that_may_not_write_exits_3(tmp_path, reason):
     assert REASON_SENTENCES[reason] in result.stderr
 
 
+def test_a_reason_less_403_is_the_role_floor_not_a_bad_token(tmp_path):
+    """A member below a verb's floor gets the API's bare `forbidden` (no
+    reason); the CLI must not send them to `storydump login` — the token is
+    fine, the role is not."""
+    api = write_api({route(WS, "pause_workspace"): (403, {"detail": "forbidden"})})
+    result = run(write_runtime(tmp_path, api), "--json", "pause", "--workspace", WS)
+    assert result.exit_code == EXIT_NOT_AUTHORIZED, result.output
+    document = one_envelope(result)
+    assert document["error"]["reason"] == "insufficient_role"
+    assert "role" in document["error"]["detail"]
+    assert "login" not in document["error"]["detail"]
+    assert "login" not in document["error"]["fix"]
+
+
+def test_a_port_answer_without_an_outcome_is_exit_4(tmp_path):
+    """A 200 that is not the port's shape (an edge, a proxy) is no answer —
+    never reported as executed."""
+    api = write_api({route(WS, "skip"): (200, {"hello": "world"})})
+    result = run(
+        write_runtime(tmp_path, api), "--json", "skip", INTENT, "--workspace", WS
+    )
+    assert result.exit_code == EXIT_API_UNREACHABLE, result.output
+    assert one_envelope(result)["error"]["reason"] == "api_unreachable"
+
+
+@pytest.mark.parametrize("key", ["caf\u00e9", "a\nb", "a\rb", "x\u00a0y"])
+def test_an_idempotency_key_that_is_not_printable_ascii_is_usage(tmp_path, key):
+    """The header is ASCII by construction; a key that is not is a usage
+    error with the sentence, never a traceback from the transport."""
+    api = write_api({route(WS, "skip"): (200, {"outcome": "executed"})})
+    result = run(
+        write_runtime(tmp_path, api),
+        "--json",
+        "skip",
+        INTENT,
+        "--workspace",
+        WS,
+        "--idempotency-key",
+        key,
+    )
+    assert result.exit_code == EXIT_USAGE, result.output
+    assert "idempotency-key" in one_envelope(result)["error"]["detail"]
+    assert posts(api) == []
+
+
 def test_a_workspace_the_token_cannot_see_is_exit_3(tmp_path):
     api = write_api()  # the route is unscripted → the real API's 404
     result = run(write_runtime(tmp_path, api), "skip", INTENT, "--workspace", WS_B)

@@ -140,7 +140,7 @@ def _seed_world(dsn: str, ws: str, tag: str) -> dict:
                             "event": "float_wait",
                             "class": "fetch",
                             "rung": 1,
-                            "seconds": 30,
+                            "seconds": 30.0,
                             "next_run_at": (
                                 dt.datetime.now(dt.timezone.utc)
                                 + dt.timedelta(seconds=60)
@@ -245,11 +245,33 @@ def _seed_world(dsn: str, ws: str, tag: str) -> dict:
             )
             cur.execute(
                 "INSERT INTO jobs (kind, workspace_id, lane, serialization_key, run_at,"
-                " state, attempts, max_attempts, payload, created_at)"
+                " state, attempts, max_attempts, payload, created_at, updated_at)"
                 " VALUES ('sync_media_source', %s, 'bulk', %s,"
                 " now() - interval '2 days', 'failed', 4, 4,"
-                " '{\"v\": 1}'::jsonb, now() - interval '2 days')",
+                " '{\"v\": 1}'::jsonb, now() - interval '2 days', now() - interval '2 days')",
                 (ws, f"sync:{tag}:old"),
+            )
+            # minted two days ago, failed just now: `reschedule_job` reuses a
+            # row across retries, so a long float's retry that dies is an OLD
+            # row with a NEW failure — the window must see it
+            cur.execute(
+                "INSERT INTO jobs (kind, workspace_id, lane, serialization_key, run_at,"
+                " state, attempts, max_attempts, payload, created_at)"
+                " VALUES ('deliver_outbox', %s, 'bulk', %s,"
+                " now() - interval '1 minute', 'failed', 3, 3,"
+                " '{\"v\": 1}'::jsonb, now() - interval '2 days')",
+                (ws, f"deliver:{tag}:long-float"),
+            )
+            # a timeline longer than the view's bound: the NEWEST rows must be
+            # the ones kept (an operator reads the current state, not the start)
+            cur.execute(
+                "INSERT INTO audit_events (workspace_id, entity_kind, entity_id,"
+                " from_state, to_state, actor_kind, channel, detail, created_at)"
+                " SELECT %s, 'post_intent', %s, 'approved', 'approved', 'system',"
+                " 'system', jsonb_build_object('v', 1, 'event', 'note', 'n', g),"
+                " now() - interval '2 hours' + (g * interval '1 second')"
+                " FROM generate_series(1, 520) AS g",
+                (ws, str(floating["intent"])),
             )
             open_story = seed_intent_chain(
                 cur, ws, f"{tag}-open", state="awaiting_approval"
@@ -401,6 +423,18 @@ def test_every_view_returns_only_this_workspaces_rows_as_svc_ingress(
             assert row["operations"][0]["subcode"] == "2207052"
             assert [c["external_message_ref"] for c in row["cards"]] == ["7587"]
             assert any(e["detail"].get("event") == "float_wait" for e in row["audit"])
+            notes = [
+                e["detail"]["n"]
+                for e in row["audit"]
+                if e["detail"].get("event") == "note"
+            ]
+            assert len(row["audit"]) == 500 and 520 in notes and 1 not in notes, (
+                "a timeline past the bound keeps its NEWEST rows"
+            )
+            assert row["audit"] == sorted(row["audit"], key=lambda e: e["at"]), (
+                "and still reads oldest to newest"
+            )
+            assert row["truncated"] == ["audit"], "and says which list was cut"
             missing = await _view(client, a["ws"], f"story/{b['floating']}", token)
             assert missing.status_code == 200 and missing.json()["data"]["rows"] == []
 
@@ -450,6 +484,10 @@ def test_every_view_returns_only_this_workspaces_rows_as_svc_ingress(
             assert ("sync_media_source", "bulk", "failed") not in groups, (
                 "outside the 3-hour window"
             )
+            recent = groups[("deliver_outbox", "bulk", "failed")]
+            assert recent["count"] == 1 and recent["samples"][0]["attempts"] == 3, (
+                "an old row that failed inside the window is inside the window"
+            )
             old = await _view(client, a["ws"], "jobs", token, "?since=72h")
             failed = {
                 (r["kind"], r["lane"], r["state"]): r
@@ -491,6 +529,7 @@ def test_every_view_returns_only_this_workspaces_rows_as_svc_ingress(
                 "fetch",
                 1,
             )
+            assert wait["seconds"] == 30, "the ladder's float reads as its seconds"
             (sibling,) = [r for r in rows if r["section"] == "sibling"]
             assert (
                 sibling["posted_id"],

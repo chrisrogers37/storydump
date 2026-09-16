@@ -3,7 +3,7 @@
 **Last Updated**: 2026-03-28
 **Total Tests**: 1,417
 **Test Files**: 77
-**Test Framework**: pytest 7.4.3
+**Test Framework**: pytest (the version pinned in `requirements.txt`)
 **Coverage Target**: Core business logic and critical paths
 **Status**: ✅ Current through v1.6.0 + race condition handling
 
@@ -365,8 +365,8 @@ make test
 # Terminal output with line numbers
 pytest --cov=src --cov-report=term-missing
 
-# Specific coverage threshold
-pytest --cov=src --cov-fail-under=80
+# CI measures coverage of `src` and `storydump_cli` (no threshold is enforced)
+pytest --cov=src --cov=storydump_cli
 ```
 
 ### Makefile Targets

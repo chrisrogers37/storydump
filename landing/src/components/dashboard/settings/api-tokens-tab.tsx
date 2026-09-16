@@ -186,6 +186,13 @@ export function secretSlot(
 type MintInput = { name: string; role: TokenRole; expiresInDays: number };
 
 /**
+ * The role a person's mint form starts on. Read-only: a token that can
+ * approve, pause and resolve is chosen on purpose, never handed out because
+ * the dropdown was left alone (the audit of 2026-09-16).
+ */
+export const DEFAULT_MINT_ROLE: TokenRole = "readonly";
+
+/**
  * The mint form, in a dialog (the `accounts-tab` pattern). The fields reset
  * on open, so a second mint does not start with the first one's name. The
  * dialog closes on submit either way: the banner that reports a refusal
@@ -210,14 +217,14 @@ function MintDialog({
   const ids = useId();
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
-  const [role, setRole] = useState<TokenRole>("operator");
+  const [role, setRole] = useState<TokenRole>(DEFAULT_MINT_ROLE);
   const [days, setDays] = useState(String(EXPIRY_DAYS_DEFAULT));
   const valid = mintFormValid({ name, days });
 
   function onOpenChange(next: boolean) {
     if (next) {
       setName("");
-      setRole("operator");
+      setRole(DEFAULT_MINT_ROLE);
       setDays(String(EXPIRY_DAYS_DEFAULT));
     }
     setOpen(next);

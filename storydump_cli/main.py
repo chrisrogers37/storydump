@@ -76,7 +76,14 @@ FIXES: Mapping[str, str] = {
     "invalid_args": "see storydump <verb> --help",
     "workspace_required": "pass --workspace <id or name>",
     "admission_conflict": "pass --idempotency-key <a new key> to send a different command",
+    # the audit fold (2026-09-16): a bare 403 is the role floor, a 429 is load
+    "insufficient_role": "ask a workspace admin or owner to raise your role, or do it as one",
+    "pool_saturated": "wait a moment and run it again — a write's key makes a re-run safe",
 }
+INTERRUPTED_FIX = (
+    "run it again — a read has no effect, and a write's idempotency key makes"
+    " a re-run safe"
+)
 #: The repository's migration files `doctor` compares the ledger against.
 REPO_MIGRATIONS = Path(__file__).resolve().parents[1] / "scripts" / "migrations"
 INSECURE_HTTP_ENV = "STORYDUMP_INSECURE_HTTP"
@@ -172,9 +179,22 @@ def _report(runtime: Runtime, *, code: int, reason: str, detail: str, fix: str) 
     return code
 
 
-def _usage(runtime: Runtime, exc: click.ClickException) -> int:
+def _usage(
+    runtime: Runtime,
+    exc: click.ClickException,
+    args: Any = None,
+    group: Optional[click.Group] = None,
+) -> int:
     """A usage error: Click's own text on stderr — redacted, in case a bad
-    value is echoed — or, once ``--json`` has been seen, an envelope."""
+    value is echoed — or an envelope when ``--json`` was asked for anywhere
+    on the line (Click raises on a bad value before a later flag's callback
+    has run, so the flag is read from the arguments, not the runtime), under
+    the verb the line named when it can be told."""
+    argv = [str(a) for a in args] if args is not None else sys.argv[1:]
+    if "--json" in argv:
+        runtime.json_mode = True
+    if runtime.kind is None and group is not None:
+        runtime.kind = next((a for a in argv if a in group.commands), None)
     if runtime.json_mode:
         return _report(
             runtime,
@@ -196,8 +216,12 @@ def _reason_of(exc: ApiError) -> str:
     principal cannot see — an authorization answer)."""
     if exc.reason:
         return exc.reason
-    if exc.status in (401, 403):
+    if exc.status == 401:
         return "not_authorized"
+    if exc.status == 403:
+        # a reason-less 403 is the role floor (`insufficient_role`): the token
+        # is live, the membership is below the verb — not a login problem
+        return "insufficient_role"
     if exc.status == 404:
         return "not_a_member"
     return "refused"
@@ -241,11 +265,44 @@ def dispatch(
         )
         return rv if isinstance(rv, int) else vocabulary.EXIT_OK
     except click.Abort:
-        return vocabulary.EXIT_USAGE
+        # Ctrl-C before the verb answered (inside a watch it is the way to
+        # stop, and 0 — `watch` catches it first): the usage code, said
+        return _report(
+            runtime,
+            code=vocabulary.EXIT_USAGE,
+            reason="interrupted",
+            detail="interrupted before the verb answered",
+            fix=INTERRUPTED_FIX,
+        )
     except click.ClickException as exc:
-        return _usage(runtime, exc)
+        return _usage(runtime, exc, args, group)
     except ConfigError as exc:
         return _config_error(runtime, exc)
+    except BrokenPipeError:
+        # the reader closed the pipe (`… | head`): nothing left to say, and
+        # not a failure of ours — Python would otherwise print a traceback
+        # and exit 1, the contract's "not found"
+        if sys.stdout is sys.__stdout__:
+            # the real stdout (not a harness's stand-in): point its descriptor
+            # at /dev/null so the interpreter's exit flush has somewhere to go
+            try:
+                devnull = os.open(os.devnull, os.O_WRONLY)
+                os.dup2(devnull, sys.__stdout__.fileno())
+                os.close(devnull)
+            except OSError:
+                pass
+        return vocabulary.EXIT_OK
+    except OSError as exc:
+        # the config directory (a file in its place, no permission): the
+        # local configuration is wrong, and the path is the whole diagnosis
+        return _report(
+            runtime,
+            code=vocabulary.EXIT_USAGE,
+            reason="usage",
+            detail=f"the config directory {runtime.config_dir} cannot be used"
+            f" ({type(exc).__name__})",
+            fix=f"point STORYDUMP_CONFIG_DIR at a writable directory, or fix {runtime.config_dir}",
+        )
     except Failure as exc:
         return _report(
             runtime, code=exc.code, reason=exc.reason, detail=exc.detail, fix=exc.fix

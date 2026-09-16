@@ -46,10 +46,9 @@ brew services start postgresql
 createdb storydump
 psql -d storydump -f scripts/setup_database.sql
 
-# Run migrations
-for f in scripts/migrations/0{01,02,03,04,05,06,07,08,09,10,11,12,13,14,15,16,17,18,19,20,21}_*.sql; do
-  psql -d storydump -f "$f"
-done
+# Apply the migrations through the runner (never a psql loop): it keeps the
+# ledger `storydump doctor` compares the checkout against
+python -m scripts.migration_runner apply
 ```
 
 **Option B: Connect to Neon (Shared Dev/Staging)**
@@ -81,16 +80,16 @@ alias sl='cd ~/Projects/storydump && source venv/bin/activate'
 
 # Quick checks
 alias sl-test='cd ~/Projects/storydump && source venv/bin/activate && pytest'
-alias sl-lint='cd ~/Projects/storydump && source venv/bin/activate && ruff check src/ tests/ cli/'
-alias sl-format='cd ~/Projects/storydump && source venv/bin/activate && ruff format src/ tests/ cli/'
-alias sl-precommit='cd ~/Projects/storydump && source venv/bin/activate && ruff check src/ tests/ cli/ && ruff format --check src/ tests/ cli/ && pytest'
+alias sl-lint='cd ~/Projects/storydump && source venv/bin/activate && ruff check .'
+alias sl-format='cd ~/Projects/storydump && source venv/bin/activate && ruff format .'
+alias sl-precommit='cd ~/Projects/storydump && source venv/bin/activate && ruff check . && ruff format --check . && pytest'
 
 # Database shortcuts (local PostgreSQL)
 alias sl-db-reset='cd ~/Projects/storydump && make reset-db'
 
 # Railway operations
 alias sl-logs='railway logs --service worker'
-alias sl-logs-web='railway logs --service web'
+alias sl-logs-web='railway logs --service storydump'
 alias sl-health='storydump health'
 alias sl-restart='railway restart --service worker'
 
@@ -132,7 +131,7 @@ gh pr merge --merge
 ```bash
 # Trigger a manual redeploy on Railway
 railway up --service worker
-railway up --service web
+railway up --service storydump
 ```
 
 ---

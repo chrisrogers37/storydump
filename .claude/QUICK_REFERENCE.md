@@ -4,9 +4,14 @@
 
 **NEVER run these commands** (they post to Instagram or modify production):
 - `storydump approve <story>` (posts to Instagram)
+- `storydump resolve <story> retry` (posts it again)
 - `storydump cancel <story>` / `storydump resolve <story> cancel`
-- `storydump tokens revoke <id>` / `storydump webhook deregister`
+- `storydump tokens revoke <id>`
+- `storydump webhook register` / `storydump webhook deregister` (the production bot's webhook)
 - `python -m src.main`
+
+The canonical list, with what each command does, is the safety block in
+`CLAUDE.md`; this copy is pinned to it by `tests/test_agent_docs.py`.
 
 **SAFE commands** (read-only):
 - `storydump floating` / `storydump story <id>` / `storydump cards <id>` / `storydump jobs`

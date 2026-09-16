@@ -69,3 +69,14 @@ def test_groups_list_their_subcommands(tmp_path, group, subcommands):
         result = run(runtime(tmp_path, Api({})), group, sub, "--help")
         assert result.exit_code == EXIT_OK, result.output
         assert re.search(rf"^\s{{2,}}storydump {group} {sub}\b", result.stdout, re.M)
+
+
+def test_health_help_states_the_two_bounds_it_has_against_the_pollers(tmp_path):
+    """`health` reuses the fleet monitors' verdicts but reads once: no watch
+    clock, and one unreachable reading where the pollers wait for two. The
+    help says so, because an agent reading exit 4 will otherwise call the
+    monitors' page."""
+    result = run(runtime(tmp_path, Api({})), "health", "--help")
+    assert result.exit_code == 0, result.output
+    text = " ".join(result.output.split())
+    assert "one reading" in text and "watch" in text.lower(), text

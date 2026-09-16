@@ -70,7 +70,7 @@ pg_restore -d "$DATABASE_URL" ~/backups/storydump_YYYYMMDD.dump
 
 # Restart Railway services after restore
 railway restart --service worker
-railway restart --service web
+railway restart --service storydump
 ```
 
 ### Partial Restore (specific tables)
@@ -106,7 +106,10 @@ rclone sync gdrive:storydump-media/ ~/backups/storydump-media/
 Keep a manifest of media files for verification:
 
 ```sql
--- Generate manifest from database
+-- Generate manifest from database (LEGACY tier, undeployed: `media_items`
+-- lives in the `legacy` schema until #1216 snapshots and drops it; the target
+-- tier's media rows sit under the workspace's row-level security and are read
+-- through the API, not psql)
 SELECT file_name, file_hash, category, created_at
 FROM media_items
 WHERE is_active = true
@@ -122,7 +125,7 @@ ORDER BY file_name;
 ```bash
 # Export Railway env vars (requires Railway CLI)
 railway variables --service worker > ~/backups/railway_worker_env_$(date +%Y%m%d).txt
-railway variables --service web > ~/backups/railway_web_env_$(date +%Y%m%d).txt
+railway variables --service storydump > ~/backups/railway_web_env_$(date +%Y%m%d).txt
 
 # Store securely - these contain secrets!
 chmod 600 ~/backups/railway_*_env_*.txt
@@ -130,7 +133,9 @@ chmod 600 ~/backups/railway_*_env_*.txt
 
 ### Token Backup
 
-Tokens are encrypted in the database. For extra safety:
+LEGACY tier (undeployed; dropped by #1216): the `legacy.api_tokens` rows are
+encrypted values. The target tier stores API tokens as hashes (`service_tokens`) — there
+is nothing to back up; a lost token is minted again on the web.
 
 ```bash
 # Export tokens (encrypted values)

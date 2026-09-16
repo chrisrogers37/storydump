@@ -117,6 +117,13 @@ def _check_key(idempotency_key: Optional[str]) -> Optional[str]:
             f"an idempotency key is 1 to {IDEMPOTENCY_KEY_MAX} characters",
             param_hint="--idempotency-key",
         )
+    if not key.isascii() or not key.isprintable():
+        # it travels as a header: ASCII by construction, and a newline in one
+        # is a request the transport refuses with a traceback
+        raise click.BadParameter(
+            "an idempotency key is printable ASCII (letters, digits, - _ : .)",
+            param_hint="--idempotency-key",
+        )
     return key
 
 

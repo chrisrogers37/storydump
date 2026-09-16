@@ -145,6 +145,37 @@ def test_a_body_that_is_not_json_still_becomes_an_api_error():
     assert caught.value.detail
 
 
+def test_a_2xx_that_is_not_json_is_unreachable_never_an_empty_answer():
+    """An edge answering 200 with HTML (a captive portal, a misrouted host) is
+    no answer at all — reading it as `{}` would let a verb print "no tokens"
+    or "nothing floating" about a page that was never the API."""
+
+    def handler(request):
+        return httpx.Response(200, text="<html>welcome</html>")
+
+    with pytest.raises(Unreachable) as caught:
+        _client(handler).principal()
+    assert caught.value.status == 200
+    assert "not the API" in caught.value.detail
+
+
+def test_a_422_keeps_fastapis_message_list_as_the_detail():
+    handler, _ = _recording(
+        422,
+        {
+            "detail": [
+                {"loc": ["query", "limit"], "msg": "ensure this value is <= 500"},
+                {"loc": ["query", "since"], "msg": "not a window: 'x'"},
+            ]
+        },
+    )
+    with pytest.raises(ApiError) as caught:
+        _client(handler).principal()
+    assert caught.value.status == 422
+    assert "limit" in caught.value.detail and "since" in caught.value.detail
+    assert "<= 500" in caught.value.detail
+
+
 def test_a_connect_error_is_unreachable_with_status_0():
     def handler(request):
         raise httpx.ConnectError("connection refused", request=request)
