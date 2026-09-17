@@ -43,6 +43,7 @@ import re
 import pytest
 
 from scripts.migration_runner import (
+    MIGRATIONS_DIR,
     SCHEMA_MOVE_MARKER,
     MigrationRunnerError,
     apply_pending,
@@ -62,7 +63,6 @@ from scripts.tenancy_gate import (
     tenancy_violations,
     tenant_keyed_tables,
 )
-from src.utils.validators import MIGRATIONS_DIR
 from tests.scripts.conftest import (
     advertised_stream,
     as_user,
@@ -76,6 +76,7 @@ from tests.scripts.conftest import (
     table_exists,
     write_migration,
 )
+from tests.scripts.legacy_inventory import LINEAGE_TABLES
 
 
 def run_lane(dsn):
@@ -202,14 +203,6 @@ def functions_in(dsn, schema):
         {"schema": schema},
     )
     return list(row[0])
-
-
-def legacy_declared_tables():
-    """The inventory the running application declares, read off the models."""
-    import src.models  # noqa: F401 - registers every legacy model on Base
-    from src.config.database import Base
-
-    return set(Base.metadata.tables)
 
 
 class TestTheBoundaryIsDerivedAndLoud:
@@ -423,14 +416,18 @@ class TestTheLaneReplaysAcrossTheBoundary:
             " declare at this point"
         )
 
-    def test_legacy_holds_the_inventory_the_running_application_declares(
+    def test_legacy_holds_the_inventory_the_lineage_literal_names(
         self, bootstrapped_db
     ):
         """THE TEETH the migration's own postconditions deliberately decline to
         grow. `ALTER SCHEMA … RENAME` moves the namespace and not the objects
         in it, so an in-file before/after inventory comparison cannot fail; the
         assertion that CAN fail is against an independent source of truth, and
-        the models are one — derived, so there is no list to drift.
+        the inventory literal is one (`tests/scripts/legacy_inventory.py`, the
+        one home with phase 03's snapshot gate; the hand-made production table
+        is kept out of the lineage subset because no file creates it) —
+        written down once, and checked against production by the tear-out's
+        read-only probe on 2026-09-17: exactly the sixteen.
 
         THE PUBLIC-SIDE HALF IS SCOPED TO NAMES THE TARGET DOES NOT REUSE, and
         that scoping is forced rather than convenient. The target schema
@@ -444,11 +441,15 @@ class TestTheLaneReplaysAcrossTheBoundary:
         rather than name in the parity gate, which compares their columns.
         """
         run_lane(bootstrapped_db)
-        declared = legacy_declared_tables()
+        declared = set(LINEAGE_TABLES)
 
-        assert declared, "positive control: the legacy models registered nothing"
-        missing = sorted(declared - set(tables_in(bootstrapped_db, "legacy")))
-        assert missing == [], f"legacy is missing declared tables: {missing}"
+        assert declared, "positive control: the lineage inventory is empty"
+        replayed = set(tables_in(bootstrapped_db, "legacy"))
+        assert replayed == declared, (
+            "the replayed `legacy` schema and the inventory literal disagree —"
+            f" missing: {sorted(declared - replayed)}, unlisted: {sorted(replayed - declared)}"
+            " (a name dropped from `LINEAGE_TABLES` is a snapshot phase 03 never takes)"
+        )
 
         legacy_only = declared - implied_target_tables()
         assert legacy_only, (
@@ -524,7 +525,7 @@ class TestTheLaneReplaysAcrossTheBoundary:
         # from 053 the unbounded arm's `public` is populated — by the target
         # schema — so "public is empty" no longer separates the two arms, while
         # "the legacy schema is in public" still separates them exactly.
-        legacy_only = legacy_declared_tables() - implied_target_tables()
+        legacy_only = set(LINEAGE_TABLES) - implied_target_tables()
         assert legacy_only, "no legacy-only name left to draw the contrast on"
 
         assert legacy_only & set(tables_in(owner_db, "public")), (
@@ -889,14 +890,3 @@ class TestTheLaneReplaysAcrossTheBoundary:
 
         psql_apply(scratch_db, [move.path])
         assert reads_applied(scratch_db), "the probe fails to see a real move"
-
-    def test_the_target_base_is_a_separate_metadata_from_the_legacy_one(self):
-        """Fork (a)'s mechanism, asserted rather than assumed: if the two bases
-        ever shared `MetaData`, `create_all` on the target would emit the
-        legacy schema and lane parity would compare a lineage against itself —
-        green, and meaningless."""
-        from src.config.database import Base
-        from src.models.target import TargetBase
-
-        assert TargetBase.metadata is not Base.metadata
-        assert legacy_declared_tables(), "positive control: legacy base is loaded"

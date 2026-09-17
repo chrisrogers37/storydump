@@ -12,16 +12,18 @@ paths:
 Every new feature must include:
 
 1. **Unit Tests** (`tests/src/`) — Test each service method in isolation, mock all dependencies, fast execution (< 1s per test)
-2. **Integration Tests** (`tests/integration/`) — Test service interactions with real database
+2. **DB gates** (`tests/scripts/`) — run against the replayed schema in the Docker test PostgreSQL (the lineage lane, the ops views, the command port); `tests/integration/` went with the legacy tier (#1216)
 
 Test structure mirrors `src/`:
 ```
 tests/
 ├── src/
-│   ├── services/
-│   ├── repositories/
+│   ├── api/
+│   ├── services/target/
 │   └── utils/
-└── integration/
+├── scripts/          # the DB gates
+├── storydump_cli/
+└── mutations/        # the per-phase batteries
 ```
 
 ## Test Template
@@ -29,7 +31,7 @@ tests/
 ```python
 import pytest
 from unittest.mock import Mock, patch
-from src.services.core.example_service import ExampleService
+from src.services.target.example_service import ExampleService
 
 @pytest.fixture
 def example_service():

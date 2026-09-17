@@ -19,8 +19,8 @@ from sqlalchemy.dialects.postgresql import UUID
 #: compares `information_schema` data types, and a naive `DateTime` renders
 #: ``timestamp without time zone`` — so getting this wrong is a silent
 #: divergence on every timestamp column in the schema rather than a loud one on
-#: the first. The legacy models use naive `DateTime` at 19 sites; do not copy
-#: them here.
+#: the first. The legacy models used naive `DateTime` at 19 sites (deleted in
+#: #1216); do not copy that here.
 TZ = TIMESTAMP(timezone=True)
 
 #: The server-side clock. `trg_touch_updated_at` (migration 052) owns

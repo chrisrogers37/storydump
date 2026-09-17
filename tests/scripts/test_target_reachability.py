@@ -533,11 +533,12 @@ class TestTheHitsAreDifferentialNotCumulative:
     #: assertion would have STAYED GREEN: measured after `src.worker`, every
     #: target module is already in `sys.modules`, so the differential reads
     #: empty either way. A test whose docstring goes false while its assert
-    #: stays green is pinned to nothing. The specimen is now a legacy loop
-    #: module that genuinely imports no target code and adds a large novel
-    #: closure of its own (~300 modules), so the discrimination being tested
-    #: is exercised over real breadth.
-    SPECIMEN = "src.services.core.loops.scheduler_loop"
+    #: stays green is pinned to nothing. The specimen was a legacy loop module
+    #: until the tear-out deleted the legacy tier (phase 01); it is now the
+    #: migration runner — stdlib plus psycopg2, which nothing in the target
+    #: tier imports, so it adds a novel closure of its own and reaches no
+    #: target module.
+    SPECIMEN = "scripts.migration_runner"
 
     PROBE = textwrap.dedent(
         """
@@ -689,10 +690,10 @@ class TestTheDeployedLabelCannotOutliveItsOwnPremise:
         assert "THE CLEARING ENTRYPOINT HAS MOVED" in out
         assert "CANNOT confirm the blocker is cleared" in out
         assert "WORKER_IMPL=target" in out
-        assert "IMPORTABLE-NOT-SERVING until armed" in out
+        assert "runs the target root UNCONDITIONALLY" in out
         # The schema half rides the SAME banner (rajan, #1005 review): the
         # operator arming this acts on what THIS text says, not on a PR body.
-        assert "ARMING PRESUPPOSES" in out
+        assert "SERVING PRESUPPOSES" in out
         assert "target schema" in out
         assert "by hand" not in out
 
@@ -744,9 +745,12 @@ class TestGateLabel:
 
     def test_text_labels_the_moved_axis_with_the_gate(self):
         out = self._run()
-        assert "IMPORTABLE-NOT-SERVING until armed" in out
-        assert "WORKER_IMPL=target" in out
-        assert "ARMING PRESUPPOSES" in out
+        assert "runs the target root UNCONDITIONALLY" in out
+        assert "WORKER_IMPL is still read, only to refuse" in out
+        assert "SERVING PRESUPPOSES" in out
+        assert "IMPORTABLE-NOT-SERVING" not in out, (
+            "the label still claims a gate the legacy tier's deletion removed"
+        )
 
     def test_the_facts_are_silent_when_there_is_nothing_to_label(self):
         """Zero worker hits (a pre-gate commit) must print exactly as before —

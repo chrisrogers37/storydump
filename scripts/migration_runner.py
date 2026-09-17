@@ -69,6 +69,10 @@ import psycopg2
 # serialize and the loser finds the versions applied and no-ops.
 RUNNER_LOCK_KEY = 712_050_2026
 
+#: The corpus, relative to this file — the home for the path the suites import
+#: (the legacy `src.utils.validators.MIGRATIONS_DIR` went with the legacy tier).
+MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
+
 NO_TRANSACTION_MARKER = "-- runner:no-transaction"
 POSTCONDITION_MARKER = "-- runner:postcondition"
 REAPPLY_SAFE_MARKER = "-- runner:reapply-safe"
@@ -759,7 +763,7 @@ def main(argv=None) -> int:
     )
     parser.add_argument(
         "--migrations-dir",
-        default=str(Path(__file__).parent / "migrations"),
+        default=str(MIGRATIONS_DIR),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("apply", help="apply every pending migration")

@@ -32,15 +32,12 @@ from typing import NoReturn
 
 import pytest
 from dotenv import load_dotenv
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 import psycopg2
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 
 # Load test environment variables before importing any application code
 load_dotenv(".env.test", override=True)
 
-from src.config.database import Base  # noqa: E402
 from src.config.settings import settings  # noqa: E402
 
 #: One database name per session (#758), mirroring the ``runner_test_{uuid}``
@@ -88,11 +85,10 @@ REQUIRE_DB_ENV = "REQUIRE_TEST_DATABASE"
 #: Skipping on pull requests is the designed behaviour, not a gap:
 #: production legitimately lags `main` between merge and deploy, so a
 #: PR-time assertion would be red as its normal state.
-MAX_EXPECTED_SKIPS = 11
+MAX_EXPECTED_SKIPS = 1
 
 # Global flag to track if database is available
 _database_available = None
-_test_engine = None
 
 
 def database_is_required() -> bool:
@@ -144,8 +140,8 @@ def pytest_sessionstart(session):
     instead of mint, which is what every fresh-loop helper under
     ``tests/scripts`` already assumes ("``get_event_loop()`` RAISES on 3.10").
     Nothing in ``src``, ``scripts``, ``storydump_cli`` or ``tests`` relies on
-    an implicitly minted loop (grep, 2026-09-16: the one ``get_event_loop()``
-    call is inside ``src/main.py``'s legacy ``main_async``).
+    an implicitly minted loop (grep, 2026-09-17: no ``get_event_loop()`` call
+    remains — the one there was went with the legacy loops, #1216).
     """
     asyncio.set_event_loop(None)
 
@@ -715,10 +711,13 @@ def setup_test_database():
 
     1. Probes whether a PostgreSQL answers at all (`server_answered`) — the
        skip-or-fail discriminator.
-    2. Creates this session's uniquely-named database and builds the schema
-       from the SQLAlchemy models.
-    3. Yields the engine to tests.
-    4. Drops the schema and the database after all tests complete.
+    2. Creates this session's uniquely-named database. Nothing builds a
+       schema in it here: the legacy models this fixture used to `create_all`
+       went with the legacy tier (the tear-out, phase 01), and the target
+       suites build what they need inside it (the runner's replay, the app).
+    3. Yields the database's URL (its one consumer, `test_unit_of_work.py`,
+       reads only "not None"; the target suites connect on their own).
+    4. Drops the database after all tests complete.
 
     THREE outcomes rather than two, and the third is the point:
 
@@ -733,7 +732,7 @@ def setup_test_database():
     Nothing after the probe is swallowed: a database that answered and then
     failed is a real failure and propagates.
     """
-    global _database_available, _test_engine
+    global _database_available
 
     verdict = integration_verdict(server_answered(), database_is_required())
 
@@ -749,7 +748,6 @@ def setup_test_database():
     if verdict == "skip":
         print("   Pure unit tests will still run. Integration tests will be skipped.")
         _database_available = False
-        _test_engine = None
         yield None
         return
 
@@ -768,120 +766,18 @@ def setup_test_database():
     scan_and_reap_strays(ownership_conn, settings.TEST_DB_NAME)
 
     create_test_database()
-    engine = create_engine(settings.test_database_url)
-    Base.metadata.create_all(engine)
-    print("✓ Created all tables in test database")
+    print("✓ Created the test database")
 
     _database_available = True
-    _test_engine = engine
 
-    yield engine
+    yield settings.test_database_url
 
     # Teardown sits OUTSIDE any except-and-yield path deliberately: the old
     # shape yielded a SECOND time when teardown raised, which pytest reports as
     # an unreadable fixture error instead of the cleanup failure it is.
-    Base.metadata.drop_all(engine)
-    engine.dispose()
     drop_test_database()
 
     # Release the ownership lock LAST — while it is held, no other session's
     # reaper can consider this database unowned, and the drop above is the point
     # after which there is nothing left to protect.
     ownership_conn.close()
-
-
-@pytest.fixture(scope="function")
-def test_db(setup_test_database):
-    """
-    Function-scoped fixture providing a clean database session for each test.
-
-    Each test gets a fresh transaction that is rolled back after the test completes,
-    ensuring test isolation without recreating tables.
-
-    If database is not available, skips the test.
-    """
-    if setup_test_database is None:
-        pytest.skip("Database not available - skipping integration test")
-
-    TestSessionLocal = sessionmaker(bind=setup_test_database)
-    session = TestSessionLocal()
-
-    # Begin a nested transaction
-    session.begin_nested()
-
-    yield session
-
-    # Rollback everything from the test
-    session.rollback()
-    session.close()
-
-
-@pytest.fixture
-def sample_media_item():
-    """Sample media item for testing."""
-    return {
-        "file_path": "/test/media/image.jpg",
-        "file_name": "image.jpg",
-        "file_hash": "abc123def456",
-        "file_size_bytes": 1024000,
-        "mime_type": "image/jpeg",
-    }
-
-
-@pytest.fixture()
-def route_repos_to_test_db(setup_test_database, monkeypatch):
-    """Route the production session factory at the test DB (shared home —
-    the per-file copies of this fixture predate it and can migrate here)."""
-    if setup_test_database is None:
-        pytest.skip("Database not available - skipping integration test")
-
-    from sqlalchemy.orm import sessionmaker
-
-    import src.config.database as db_module
-
-    monkeypatch.setattr(
-        db_module,
-        "SessionLocal",
-        sessionmaker(
-            autocommit=False,
-            autoflush=False,
-            bind=setup_test_database,
-            expire_on_commit=False,
-        ),
-    )
-    yield
-
-
-def make_tenant():
-    """Create a real chat_settings row — chat_settings_id is a live FK.
-
-    Returns (chat_settings_id, telegram_chat_id); caller cleans up via
-    delete_tenants().
-    """
-    import random
-
-    from src.repositories.chat_settings_repository import ChatSettingsRepository
-
-    telegram_chat_id = -random.randint(10**11, 10**12)
-    repo = ChatSettingsRepository()
-    try:
-        settings = repo.get_or_create(telegram_chat_id)
-        return str(settings.id), telegram_chat_id
-    finally:
-        repo.close()
-
-
-def delete_tenants(tenant_ids):
-    from sqlalchemy import text
-
-    from src.repositories.chat_settings_repository import ChatSettingsRepository
-
-    repo = ChatSettingsRepository()
-    try:
-        for tid in tenant_ids:
-            repo.db.execute(
-                text("DELETE FROM chat_settings WHERE id = :tid"), {"tid": tid}
-            )
-        repo.db.commit()
-    finally:
-        repo.close()

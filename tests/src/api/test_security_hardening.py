@@ -1,7 +1,7 @@
-"""Tests for security hardening: headers, startup secrets, X-Forwarded-For attribution."""
+"""Tests for security hardening: headers and X-Forwarded-For attribution (the
+startup-secret check went with the legacy tier's `ConfigValidator`, #1216)."""
 
 import pytest
-from unittest.mock import patch
 
 
 # =============================================================================
@@ -37,58 +37,6 @@ class TestSecurityHeaders:
             assert resp.headers["X-Frame-Options"] == "DENY", path
             assert "frame-ancestors 'none'" in resp.headers["Content-Security-Policy"]
             assert "telegram.org" not in resp.headers["Content-Security-Policy"]
-
-
-# =============================================================================
-# Startup validation (#385)
-# =============================================================================
-
-
-@pytest.mark.unit
-class TestStartupSecretValidation:
-    """Verify startup validation catches missing encryption keys."""
-
-    def _run_validation(self, **overrides):
-        """Run ConfigValidator.validate_all with mocked settings."""
-        from src.utils.validators import ConfigValidator
-
-        defaults = {
-            "TELEGRAM_BOT_TOKEN": "test_token",
-            "TELEGRAM_CHANNEL_ID": -1001234567890,
-            "ADMIN_TELEGRAM_CHAT_ID": -1001234567890,
-            "DB_NAME": "testdb",
-            "ENCRYPTION_KEY": "some-key",
-            "ENCRYPTION_KEYS": None,
-            "DATABASE_URL": None,
-            "DB_PASSWORD": "pass",
-            "MEDIA_DIR": "/tmp/test-media",
-        }
-        defaults.update(overrides)
-
-        with (
-            patch("src.utils.validators.settings") as mock_settings,
-            patch.object(ConfigValidator, "_check_telegram_token", return_value=None),
-        ):
-            for k, v in defaults.items():
-                setattr(mock_settings, k, v)
-            return ConfigValidator.validate_all()
-
-    def test_missing_encryption_keys_fails(self):
-        is_valid, errors = self._run_validation(
-            ENCRYPTION_KEY=None, ENCRYPTION_KEYS=None
-        )
-        assert not is_valid
-        assert any("ENCRYPTION_KEY" in e for e in errors)
-
-    def test_encryption_key_set_passes(self):
-        is_valid, errors = self._run_validation(ENCRYPTION_KEY="some-key")
-        assert is_valid
-
-    def test_encryption_keys_plural_set_passes(self):
-        is_valid, errors = self._run_validation(
-            ENCRYPTION_KEY=None, ENCRYPTION_KEYS="key1,key2"
-        )
-        assert is_valid
 
 
 class TestForwardedForAttribution:

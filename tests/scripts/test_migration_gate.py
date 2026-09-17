@@ -43,14 +43,14 @@ import psycopg2
 import pytest
 
 from scripts.migration_runner import (
+    MIGRATIONS_DIR,
     MigrationRunnerError,
     _load_manifest,
     adopt,
     apply_pending,
     discover_migrations,
 )
-from scripts.schema_parity import schema_diff, schema_signature
-from src.utils.validators import MIGRATIONS_DIR
+from scripts.schema_parity import schema_diff
 from tests.scripts.conftest import (
     LEGACY_LINEAGE_MAX,
     LEGACY_STANDUP,
@@ -336,31 +336,12 @@ class TestAdoptProductionShaped:
 
 
 class TestSchemaParity:
-    def test_replayed_schema_equals_models_schema(self, replayed_db, second_scratch_db):
-        """The §0.2 parity gate: what the runner builds from SQL equals what
-        SQLAlchemy builds from the models — DB-only drift (types, missing
-        constraints) fails a test instead of surfacing in production. The
-        replayed side is the owner-actor runner replay (session template);
-        parity is actor-independent by construction (the comparator reads
-        structure, not ownership)."""
-
-        from sqlalchemy import create_engine
-
-        import src.models  # noqa: F401 - registers every model on Base
-        from src.config.database import Base
-
-        engine = create_engine(second_scratch_db)
-        Base.metadata.create_all(engine)
-        engine.dispose()
-
-        diffs = schema_diff(
-            schema_signature(replayed_db), schema_signature(second_scratch_db)
-        )
-        assert diffs == [], "replayed vs models drift:\n" + "\n".join(diffs)
-
     def test_parity_comparator_can_fail(self):
         """A comparator that cannot fail proves nothing. Pure-dict check —
-        the catalog-extraction path is exercised by the test above."""
+        the catalog-extraction path (`schema_signature` on a live catalog) is
+        exercised by `test_lineage_lane.py` and `test_schema_drift_live.py`;
+        the replayed-vs-models parity test that lived above went with the
+        legacy models (the tear-out, phase 01)."""
         base = {
             "t": {
                 "columns": {"id": ("integer", "NO")},

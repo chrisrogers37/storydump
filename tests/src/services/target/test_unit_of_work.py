@@ -86,7 +86,7 @@ class TestTheEngineConfigAssertsTheSeam:
         assert POOL_TIMEOUT_SEAM < min(TIMEOUT_CLASSES.values())
 
     def test_pool_recycle_is_carried_across_from_the_legacy_engine(self):
-        """`src/config/database.py` sets 300 explicitly ALONGSIDE pre-ping.
+        """The legacy `src/config/database.py` set 300 explicitly ALONGSIDE pre-ping.
         Dropping to -1 (never) in the target engine would be a regression
         nobody chose."""
         engine = create_engine("postgresql+asyncpg://u:p@localhost:5432/none")

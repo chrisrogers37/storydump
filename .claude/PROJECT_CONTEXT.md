@@ -22,35 +22,32 @@ Storydump is a hosted, multi-tenant Instagram Story scheduling service with Tele
 ┌─────────────────────────────────────┐
 │  Interface Layer                    │
 │  • storydump_cli/ - the storydump CLI│
-│  • TelegramService - Bot handlers   │
+│  • src/api/ - the API (FastAPI)     │
+│  • src/channels/ - Telegram transport│
 └───────────────┬─────────────────────┘
                 │
 ┌───────────────▼─────────────────────┐
-│  Service Layer (Business Logic)     │
-│  • src/services/core/               │
-│    - TelegramService + handlers     │
-│    - PostingService, SchedulerService│
-│    - MediaIngestionService          │
-│    - DashboardService, OAuthService │
-│    - SettingsService, MediaSyncSvc  │
-│  • src/services/integrations/       │
-│    - InstagramAPIService            │
-│    - GoogleDriveService + OAuth     │
-│    - CloudStorageService            │
-│  • src/services/media_sources/      │
-│    - MediaSourceFactory (pluggable) │
-│    - GoogleDriveProvider, LocalProv │
+│  Service Layer (the target tier)    │
+│  • src/services/target/             │
+│    - work_loop, jobs, scheduler     │
+│    - publish_pipeline, media_sync   │
+│    - command_executors, ops_views   │
+│    - telegram_dispatch, *_adapter   │
+│  • src/worker.py - composition root │
 └───────────────┬─────────────────────┘
                 │
 ┌───────────────▼─────────────────────┐
 │  Data Layer                         │
-│  • src/repositories/ - CRUD only    │
-│  • src/models/ - SQLAlchemy models  │
+│  • SQL in the target services       │
+│    (readers, executors, unit_of_work)│
+│  • src/models/target/ - declarative │
+│    models, for schema parity        │
+│  • scripts/migrations/ + the runner │
 │  • Neon PostgreSQL (cloud)          │
 └─────────────────────────────────────┘
 ```
 
-**STRICT RULE**: Never violate layer boundaries. Services call Repositories, never Models directly.
+**RULE**: the CLI never imports `src` except `src/services/target/vocabulary.py`; SQL lives in the target services under the unit of work; the API's routes call the services, never the database directly. (The legacy tier — `src/services/core`, `src/repositories`, the legacy models — was deleted in the tear-out, phase 01; #1216.)
 
 ---
 
@@ -80,16 +77,18 @@ Storydump is a hosted, multi-tenant Instagram Story scheduling service with Tele
 
 | File | Purpose |
 |------|---------|
-| `src/services/core/telegram_service.py` | Telegram bot lifecycle + coordination |
-| `src/services/core/telegram_commands.py` | /command handlers |
-| `src/services/core/telegram_callbacks.py` | Button callback handlers |
-| `src/services/core/posting.py` | Orchestrates posting workflow |
-| `src/services/core/scheduler.py` | Creates posting schedules |
-| `src/services/integrations/instagram_api.py` | Instagram Graph API wrapper |
-| `src/services/integrations/google_drive.py` | Google Drive operations |
-| `src/services/media_sources/factory.py` | Media source provider routing |
-| `src/api/routes/onboarding/` | Mini App API (dashboard, settings) |
-| `src/models/chat_settings.py` | Per-chat settings model |
+| `src/worker.py` | The worker's composition root (lanes, the clock, the publish pipeline) |
+| `src/api/app.py` | The API (FastAPI): the command port, the ops views, health |
+| `src/services/target/work_loop.py` | The lanes and the job registry |
+| `src/services/target/publish_pipeline.py` | Publishing a story to Instagram |
+| `src/services/target/scheduler.py` | The clock and the slots |
+| `src/services/target/media_sync.py` | Drive sync into the media pool |
+| `src/services/target/command_executors.py` | The command port's verbs |
+| `src/services/target/ops_views.py` | The ledger read views the CLI shows |
+| `src/services/target/telegram_dispatch.py` | The Telegram channel (cards, taps) |
+| `src/channels/telegram_transport.py` | The Telegram HTTP transport |
+| `storydump_cli/main.py` | The `storydump` CLI |
+| `scripts/migration_runner.py` | The migration runner (every deploy's predeploy) |
 
 ---
 
@@ -139,5 +138,5 @@ it by `tests/test_agent_docs.py`.
 
 **Testing:**
 - All services should have unit tests in `tests/src/services/`
-- Mock repositories, never hit real database
+- Unit tests mock the seams; the DB gates under `tests/scripts/` run against the replayed schema
 - Run with `pytest tests/ -v`

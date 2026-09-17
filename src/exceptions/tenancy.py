@@ -1,11 +1,10 @@
 """Tenant-resolution refusal — the shared contract of the two resolution tiers.
 
-One type, one closed vocabulary, two raisers that never call each other
-(`04` F.3, #842): the target resolver (``src.services.target.tenant_resolution``)
-and the legacy settings-service door (``SettingsService.resolve_chat_settings_id``).
-Sharing the TYPE is what lets every edge map a refusal once and survive the M.3
-swap of the legacy door's internals; sharing code between the tiers stays
-forbidden — the tiers agree on the contract, not the implementation.
+One type, one closed vocabulary. It had two raisers that never called each
+other (`04` F.3, #842): the target resolver (``src.services.target.tenant_resolution``)
+and the legacy settings-service door (``SettingsService.resolve_chat_settings_id``,
+deleted with the legacy tier, #1216). Sharing the TYPE is what let every edge
+map a refusal once and survive the swap; the contract outlived the second raiser.
 """
 
 from src.exceptions.base import RefusalError

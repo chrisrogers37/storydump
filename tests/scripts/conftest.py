@@ -31,16 +31,32 @@ from pathlib import Path
 import psycopg2
 import pytest
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
-from psycopg2.extras import RealDictCursor
+from psycopg2.extras import RealDictCursor, UUID_adapter
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
-from scripts.migration_runner import legacy_lineage_max
+from scripts.migration_runner import MIGRATIONS_DIR, legacy_lineage_max
+
 from src.config.settings import settings
 from src.services.target.unit_of_work import asyncpg_url, unit_of_work
-from src.utils.validators import MIGRATIONS_DIR
 from tests.conftest import SESSION_DB_SUFFIX as SESSION_TOKEN
+
+
+# psycopg2 adapts a `uuid.UUID` parameter (and asyncpg's subclass of it, which
+# every gate's asyncpg fetch hands back) only once an adapter is registered.
+# Until the tear-out (phase 01) that happened as a SIDE EFFECT of the legacy
+# SQLAlchemy engine connecting at session start — `register_uuid(conn)` in its
+# dialect, whose ADAPTER half is process-global — an import-time dependency
+# nobody had written down, found when `test_l3_permit_rail.py` failed with
+# "can't adapt type 'asyncpg.pgproto.pgproto.UUID'" the moment the engine was
+# gone. The adapter alone is registered here, deliberately NOT `register_uuid()`
+# whole: its typecaster half would make every gate's psycopg2 connection return
+# `uuid.UUID` for uuid columns where the gates read `str` (23 of them compare
+# ids as text, and on CI they did the moment the typecaster was registered).
+# pytest imports this conftest before any gate connects, which is the one
+# ordering fact the registration relies on.
+psycopg2.extensions.register_adapter(uuid.UUID, UUID_adapter)
 
 
 def pytest_configure(config):

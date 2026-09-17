@@ -1,33 +1,7 @@
-"""SQLAlchemy models."""
+"""The models package.
 
-from src.models.user import User
-from src.models.media_item import MediaItem
-from src.models.posting_queue import PostingQueue
-from src.models.posting_history import PostingHistory
-from src.models.media_lock import MediaPostingLock
-from src.models.service_run import ServiceRun
-from src.models.user_interaction import UserInteraction
-from src.models.category_mix import CategoryPostCaseMix
-from src.models.instagram_account import InstagramAccount
-from src.models.api_token import ApiToken
-from src.models.chat_settings import ChatSettings
-from src.models.user_chat_membership import UserChatMembership
-from src.models.onboarding_session import OnboardingSession
-from src.models.audit_log import AuditLog
-
-__all__ = [
-    "User",
-    "MediaItem",
-    "PostingQueue",
-    "PostingHistory",
-    "MediaPostingLock",
-    "ServiceRun",
-    "UserInteraction",
-    "CategoryPostCaseMix",
-    "InstagramAccount",
-    "ApiToken",
-    "ChatSettings",
-    "UserChatMembership",
-    "OnboardingSession",
-    "AuditLog",
-]
+The fourteen legacy SQLAlchemy models this module re-exported went with the
+legacy tier (the tear-out, phase 01; #1216). The target schema's declarative
+models live in `src.models.target` and are imported by that path; nothing is
+exported here, on purpose — `tests/src/test_legacy_tier_gone.py` pins it.
+"""
