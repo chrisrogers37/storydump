@@ -1,9 +1,7 @@
 ---
 paths:
   - "src/models/**"
-  - "src/repositories/**"
   - "scripts/migrations/**"
-  - "src/config/database.py"
 ---
 
 # Database Architecture

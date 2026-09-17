@@ -27,10 +27,9 @@ that has one.
 
 **Names are unprefixed on purpose.** At the M.3 cutover the application is
 flipped to this base, and a `Target` prefix would make that a rename of every
-call site rather than a change of import. The legacy `User` in
-``src.models.user`` and this one coexist on separate ``MetaData`` — the
-separation is asserted by
-``test_lineage_lane.py::test_the_target_base_is_a_separate_metadata_from_the_legacy_one``.
+call site rather than a change of import. (The legacy `User` in
+``src.models.user`` coexisted with this one on a separate ``MetaData`` until
+the tear-out deleted it, phase 01; #1216.)
 """
 
 from sqlalchemy import (

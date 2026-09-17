@@ -71,7 +71,7 @@ import pytest
 
 from scripts.advertised_ddl import target_lineage_files
 from scripts.schema_parity import schema_diff, schema_signature
-from src.utils.validators import MIGRATIONS_DIR
+from scripts.migration_runner import MIGRATIONS_DIR
 from tests.scripts.conftest import psql_apply
 
 #: Read-only connection string for the database to audit. Absent on pull

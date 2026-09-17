@@ -9,11 +9,12 @@ the secret on the API, then register the webhook on the bot with that secret.
 ## Precondition: the worker is on the target tier
 
 A Telegram bot cannot be polled and webhooked at once. The legacy scheduler
-(`python -m src.main` without `WORKER_IMPL=target`) polls `TELEGRAM_BOT_TOKEN`'s
-bot with `getUpdates`, and python-telegram-bot's polling start **deletes any
-webhook** on that bot. So before registering on `storydump_app_bot`, confirm
-the worker service has `WORKER_IMPL=target` (it has since 2026-08-24). If the
-legacy scheduler is ever started again, it clears the webhook — that is the
+polled `TELEGRAM_BOT_TOKEN`'s bot with `getUpdates`, and python-telegram-bot's
+polling start **deleted any webhook** on that bot; it was armed off on
+2026-08-24 and deleted with the legacy tier (#1216) — `python -m src.main` now
+runs the target worker under every value of `WORKER_IMPL`, and nothing in the
+tree polls. If a webhook ever goes missing again, a poller started elsewhere
+(another checkout of an older commit, a second bot token holder) is the
 failure to suspect if `status` suddenly reports no webhook.
 
 ## Which bot

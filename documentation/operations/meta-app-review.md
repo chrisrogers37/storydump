@@ -33,7 +33,7 @@ As of this draft **exactly one section is WALKED** — *Why App Review is requir
 
 **Read this if you are working on migrations, not just if you are working on App Review.**
 
-Track 3 requires **demo videos of a real Instagram publish**, recorded against a running system. Today that system is the **legacy** tier: `src/worker_impl.py` gates the worker on `WORKER_IMPL`, which runs the legacy scheduler unless an operator has set `WORKER_IMPL=target` on the service (a config fact, not visible from this repo — check Railway before assuming either way).
+Track 3 requires **demo videos of a real Instagram publish**, recorded against a running system. That system is the **target** tier: the worker was armed on 2026-08-24, the API cut over on 2026-08-31, and the legacy tier's code was deleted in the tear-out (#1216) — there is no other runnable system. The owner ruled #1202's "or" leg met on 2026-09-16.
 
 The M.3 cutover's last step is **3g `DROP SCHEMA legacy CASCADE`** (`documentation/planning/2026-08-02-consolidated-design-plan/04-execution-sequence.md:194`). Running it before the videos exist removes the only tier that can produce them.
 
@@ -62,7 +62,7 @@ The gate is keyed off the app's **use case** in the Meta Developer Portal — *"
 
 | Permission | Declared at | Used for |
 |---|---|---|
-| `instagram_business_basic` | `src/services/target/ig_login_oauth.py:72`, `src/services/integrations/instagram_login_oauth.py:47` | Reading the connected account's own profile and its own media |
+| `instagram_business_basic` | `src/services/target/ig_login_oauth.py:72` | Reading the connected account's own profile and its own media |
 | `instagram_business_content_publish` | same | Creating and publishing media containers to the connected account |
 
 Nothing else is requested. There is no messaging permission anywhere in the tree.
@@ -170,7 +170,7 @@ This is the longest track and the one that gates everything else, so its inputs 
 
 > Publishing is the product. A user points Storydump at a folder of their own media and sets a posting schedule; at each scheduled slot the app publishes one item to that user's own Instagram Business account as a Story. We use the standard two-step container flow: `POST /{ig-user-id}/media` with `media_type=STORIES` and an `image_url` or `video_url` pointing at the user's own media, then `POST /{ig-user-id}/media_publish` with the returned `creation_id`, polling `GET /{container_id}?fields=status_code,status` in between until the container is ready. Every publish is initiated by a schedule the account owner configured and can pause or cancel at any time; the app never publishes to an account other than the one whose owner connected it, and never publishes content the user did not place in their own connected media source.
 
-*(Both are written against what the code actually calls — see `src/services/integrations/instagram_api.py`. If the API usage changes, change these; a justification that describes a call the app no longer makes is a rejection waiting to happen.)*
+*(Both are written against what the code actually calls — see `src/services/target/meta_adapter.py` and `publish_pipeline.py` (the legacy `src/services/integrations/instagram_api.py` went with the legacy tier, #1216). If the API usage changes, change these; a justification that describes a call the app no longer makes is a rejection waiting to happen.)*
 
 ### Demo video script
 
@@ -247,7 +247,7 @@ Meta has the equivalent of Google's test-user list: accounts added under **App D
 
 - [`google-oauth-verification.md`](google-oauth-verification.md) — sibling runbook for Google Drive's `drive.readonly`. Same shape; the scope-justification section there is the model for Track 3 here.
 - [`documentation/archive/2026-03-31-meta-app-launch-design.md`](../archive/2026-03-31-meta-app-launch-design.md) — the original Meta/Instagram OAuth design.
-- `src/services/integrations/instagram_api.py` — every Graph call the justification copy describes.
+- `src/services/target/meta_adapter.py`, `src/services/target/publish_pipeline.py` — every Graph call the justification copy describes.
 
 ## Related issues
 

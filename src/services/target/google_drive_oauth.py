@@ -13,8 +13,8 @@ kept, the payload shape, and the INSERT.
 
 ## What is taken from the legacy flow, and how
 
-`src/services/integrations/google_drive_oauth.py` is a complete, working Drive
-OAuth flow — and it is CITED here, not lifted. It imports `telegram.Bot`,
+`src/services/integrations/google_drive_oauth.py` was a complete, working Drive
+OAuth flow (deleted in #1216) — CITED here, never lifted. It imported `telegram.Bot`,
 `TokenRepository`, `ChatSettingsRepository` and `BaseService`, and a port would
 drag all four across the tier boundary the target architecture exists to draw
 (#982 set the convention for the sibling read leg: reference, not import; the

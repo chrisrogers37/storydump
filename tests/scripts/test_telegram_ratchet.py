@@ -63,9 +63,9 @@ class TestItCountsTheThingNotTheString:
     def test_a_telegram_module_that_never_says_telegram_IS_counted(self, tmp_path):
         """The mirror image, and the more dangerous direction.
 
-        `src/services/core/telegram_operation_state.py` is a real module on the
-        tree whose text contains no literal "telegram" — a substring predicate
-        misses it entirely. Over-counting reads as protection; under-counting
+        `src/services/core/telegram_operation_state.py` was a real module on the
+        tree (until the legacy tier's deletion, #1216) whose text contained no
+        literal "telegram" — a substring predicate misses that shape entirely. Over-counting reads as protection; under-counting
         is a hole.
         """
         _tree(tmp_path, {"src/services/core/telegram_state.py": "STATES = {'a'}\n"})
@@ -307,18 +307,18 @@ class TestTheRealBaselineIsHonest:
             " docstring edit requires --write-baseline in the same PR."
         )
 
-    def test_the_real_tree_has_modules_on_every_ratcheted_axis(self):
-        """Positive control. Three of the four axes passing with an empty set
-        would mean the gate found nothing, not that the tree is clean."""
+    def test_the_real_tree_has_modules_on_the_axis_that_is_not_burned_down(self):
+        """Positive control, the real-tree half. `telegram_modules` names the
+        target tier's adapters and stays populated; the two burn-down axes
+        reached their FC-2 end state — empty — with the tear-out (phase 01;
+        #1216), so "empty" no longer distinguishes a clean tree from a gate
+        that found nothing. The planted-tree controls above are what do:
+        `test_a_telegram_module_that_never_says_telegram_IS_counted`,
+        `test_a_new_core_telegram_module_reddens_the_core_axis`,
+        `test_a_chat_id_parameter_outside_an_adapter_reddens_it` and the
+        adapter-exemption class each light an axis the real tree keeps empty."""
         import pathlib
 
         repo = pathlib.Path(__file__).resolve().parents[2]
         out = measure(repo)
-        # Floors, not equalities — the committed baseline is what pins exact
-        # membership. They moved with #868 (27->16, 22->15, 89->114) because
-        # eleven modules stopped being wrongly exempt; the slack below each is
-        # deliberately kept wide enough that "the gate found nothing" still
-        # trips it.
-        assert len(out["telegram_modules"]) > 10
-        assert len(out["core_telegram_modules"]) > 5
-        assert len(out["chat_id_functions_outside_adapters"]) > 50
+        assert len(out["telegram_modules"]) >= 4, out["telegram_modules"]

@@ -1,13 +1,11 @@
-"""The TARGET schema's declarative models — the second `Base` (#746, fork (a)).
+"""The TARGET schema's declarative models — `TargetBase` (#746, fork (a)).
 
-Two declarative bases coexist until the M.3 cutover, deliberately:
-
-- ``src.config.database.Base`` carries the LEGACY models. The running
-  application — services, repositories, the CLI — is built on them and keeps
-  running on them, untouched, until cutover. They describe the schema that
-  lives in ``legacy`` from migration 051 on.
-- ``TargetBase`` carries the models for the schema the F.2 migration files
-  create into the empty ``public`` that 051 leaves behind.
+One declarative base, since the tear-out (phase 01; #1216) deleted the legacy
+models and their ``src.config.database.Base``; until then two coexisted, the
+legacy one describing the schema that lives in ``legacy`` from migration 051
+on. ``TargetBase`` carries the models for the schema the F.2 migration files
+create into the ``public`` that 051 leaves behind — for schema parity, not for
+an ORM: the target tier's SQL is written by hand under the unit of work.
 
 **Why two bases rather than one base plus a list of target tables.** The lane
 parity check compares ``create_all`` output against the replayed schema, and it

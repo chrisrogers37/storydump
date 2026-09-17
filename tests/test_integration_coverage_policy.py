@@ -286,8 +286,15 @@ class TestTheSkipCeiling:
 
         Raised 10 -> 11 for #1195's live-drift audit, which skips on pull
         requests by design and runs only on the schedule.
+
+        Lowered 11 -> 1 by the legacy tear-out (phase 01; #1216): eight of the
+        eleven were legacy tests (`test_media_repository`, `test_telegram_service`)
+        deleted with the tier, two more went with them, and CI measured exactly
+        one skip on the deletion (run 35285172203: the live-drift audit). A
+        clock-of-day skip in `test_l5_pipeline_gate.py` (23:55–23:59 local) can
+        still breach any ceiling set to the baseline — queued for its own fix.
         """
-        assert MAX_EXPECTED_SKIPS == 11
+        assert MAX_EXPECTED_SKIPS == 1
 
 
 class TestTheRequirementSwitch:
