@@ -86,7 +86,7 @@ REQUIRE_DB_ENV = "REQUIRE_TEST_DATABASE"
 #: Skipping on pull requests is the designed behaviour, not a gap:
 #: production legitimately lags `main` between merge and deploy, so a
 #: PR-time assertion would be red as its normal state.
-MAX_EXPECTED_SKIPS = 11
+MAX_EXPECTED_SKIPS = 1
 
 # Global flag to track if database is available
 _database_available = None
