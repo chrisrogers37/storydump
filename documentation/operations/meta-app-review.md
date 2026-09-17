@@ -33,7 +33,7 @@ As of this draft **exactly one section is WALKED** — *Why App Review is requir
 
 **Read this if you are working on migrations, not just if you are working on App Review.**
 
-Track 3 requires **demo videos of a real Instagram publish**, recorded against a running system. Today that system is the **legacy** tier: `src/worker_impl.py` gates the worker on `WORKER_IMPL`, which runs the legacy scheduler unless an operator has set `WORKER_IMPL=target` on the service (a config fact, not visible from this repo — check Railway before assuming either way).
+Track 3 requires **demo videos of a real Instagram publish**, recorded against a running system. That system is the **target** tier: the worker was armed on 2026-08-24, the API cut over on 2026-08-31, and the legacy tier's code was deleted in the tear-out (#1216) — there is no other runnable system. The owner ruled #1202's "or" leg met on 2026-09-16.
 
 The M.3 cutover's last step is **3g `DROP SCHEMA legacy CASCADE`** (`documentation/planning/2026-08-02-consolidated-design-plan/04-execution-sequence.md:194`). Running it before the videos exist removes the only tier that can produce them.
 

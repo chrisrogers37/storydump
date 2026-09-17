@@ -1,8 +1,9 @@
 """L.6 — Instagram Login OAuth, target-side (`07` §§2-3, issue #863).
 
-**This is a PORT, not a design.** A working Instagram Login flow already runs in
-production (`src/services/integrations/instagram_login_oauth.py`, PRs #341/#378,
-a real account connected). What follows moves that proven flow onto the target
+**This is a PORT, not a design.** A working Instagram Login flow ran in
+production before the cutover (`src/services/integrations/instagram_login_oauth.py`,
+PRs #341/#378, a real account connected; deleted in #1216). What follows moved
+that proven flow onto the target
 tables — `oauth_states` and `oauth_credentials` — rather than re-deriving it.
 Where the target differs, it differs deliberately, and each divergence is named
 below so a reader can tell a decision from a drift.

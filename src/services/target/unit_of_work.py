@@ -19,10 +19,10 @@ nothing. The invariant it protects:
 **This is deliberately NOT read from `settings.DB_MAX_OVERFLOW`.** That setting
 is `20` on this repo today, which is exactly R4's finding: it silently makes
 the true ceiling (10+20)×5 = 150 rather than 50. The legacy sync engine in
-`src/config/database.py` still reads it and is **left alone** — retiring it is
-M.3's, not L.0's. Pinning the async engine to the seam constant is what keeps
-the target substrate correct while the legacy one is still running, and the
-gate asserts the constant rather than trusting the config.
+`src/config/database.py` read it too, until the tear-out deleted that engine
+(phase 01; #1216). Pinning the async engine to the seam constant is what keeps
+the target substrate correct whatever the config says, and the gate asserts
+the constant rather than trusting the config.
 
 ## The UoW is unconstructible without a tenant
 
@@ -117,8 +117,8 @@ POOL_TIMEOUT_SEAM = 3.0
 #: wants the tap answered within 2 s end to end, redelivery included.
 INGRESS_POOL_TIMEOUT_SEAM = 1.0
 
-#: Carried across from the legacy sync engine (`src/config/database.py`), which
-#: sets it explicitly to 300 alongside pre-ping. `pool_pre_ping` catches a dead
+#: Carried across from the legacy sync engine (`src/config/database.py`, deleted
+#: in #1216), which set it explicitly to 300 alongside pre-ping. `pool_pre_ping` catches a dead
 #: connection, but the legacy author judged recycling necessary IN ADDITION,
 #: and silently dropping to -1 (never) in the target engine would be a
 #: regression nobody chose.

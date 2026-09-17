@@ -205,15 +205,6 @@ def functions_in(dsn, schema):
     return list(row[0])
 
 
-def legacy_declared_tables():
-    """The legacy lineage's inventory — a literal since the tear-out (phase
-    01) deleted the models it was read off; `tests/scripts/legacy_inventory.py`
-    is the one home, shared with phase 03's snapshot gate. The hand-made
-    production table is kept out of this subset on purpose: no file creates
-    it, so no replay can hold it."""
-    return set(LINEAGE_TABLES)
-
-
 class TestTheBoundaryIsDerivedAndLoud:
     """The boundary is located by the move file's own marker. No suite, fixture
     or constant names a version — see `legacy_lineage_max`'s docstring for why
@@ -425,15 +416,18 @@ class TestTheLaneReplaysAcrossTheBoundary:
             " declare at this point"
         )
 
-    def test_legacy_holds_the_inventory_the_running_application_declares(
+    def test_legacy_holds_the_inventory_the_lineage_literal_names(
         self, bootstrapped_db
     ):
         """THE TEETH the migration's own postconditions deliberately decline to
         grow. `ALTER SCHEMA … RENAME` moves the namespace and not the objects
         in it, so an in-file before/after inventory comparison cannot fail; the
         assertion that CAN fail is against an independent source of truth, and
-        the inventory literal is one — written down once, checked against
-        production by the tear-out's read-only probe.
+        the inventory literal is one (`tests/scripts/legacy_inventory.py`, the
+        one home with phase 03's snapshot gate; the hand-made production table
+        is kept out of the lineage subset because no file creates it) —
+        written down once, and checked against production by the tear-out's
+        read-only probe on 2026-09-17: exactly the sixteen.
 
         THE PUBLIC-SIDE HALF IS SCOPED TO NAMES THE TARGET DOES NOT REUSE, and
         that scoping is forced rather than convenient. The target schema
@@ -447,7 +441,7 @@ class TestTheLaneReplaysAcrossTheBoundary:
         rather than name in the parity gate, which compares their columns.
         """
         run_lane(bootstrapped_db)
-        declared = legacy_declared_tables()
+        declared = set(LINEAGE_TABLES)
 
         assert declared, "positive control: the lineage inventory is empty"
         replayed = set(tables_in(bootstrapped_db, "legacy"))
@@ -531,7 +525,7 @@ class TestTheLaneReplaysAcrossTheBoundary:
         # from 053 the unbounded arm's `public` is populated — by the target
         # schema — so "public is empty" no longer separates the two arms, while
         # "the legacy schema is in public" still separates them exactly.
-        legacy_only = legacy_declared_tables() - implied_target_tables()
+        legacy_only = set(LINEAGE_TABLES) - implied_target_tables()
         assert legacy_only, "no legacy-only name left to draw the contrast on"
 
         assert legacy_only & set(tables_in(owner_db, "public")), (

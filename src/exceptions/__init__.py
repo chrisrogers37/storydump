@@ -6,7 +6,7 @@ the tenancy refusal the target tier raises; `identity` and `telegram` are
 imported by their own path.
 """
 
-from src.exceptions.base import RefusalError, StorydumpError
+from src.exceptions.base import StorydumpError
 from src.exceptions.tenancy import TenantResolutionError
 
-__all__ = ["RefusalError", "StorydumpError", "TenantResolutionError"]
+__all__ = ["StorydumpError", "TenantResolutionError"]

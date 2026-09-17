@@ -32,7 +32,7 @@ Storydump is a hosted, multi-tenant Instagram Story scheduling service with Tele
 │    - work_loop, jobs, scheduler     │
 │    - publish_pipeline, media_sync   │
 │    - command_executors, ops_views   │
-│    - telegram_dispatch, adapters    │
+│    - telegram_dispatch, *_adapter   │
 │  • src/worker.py - composition root │
 └───────────────┬─────────────────────┘
                 │
@@ -138,5 +138,5 @@ it by `tests/test_agent_docs.py`.
 
 **Testing:**
 - All services should have unit tests in `tests/src/services/`
-- Mock repositories, never hit real database
+- Unit tests mock the seams; the DB gates under `tests/scripts/` run against the replayed schema
 - Run with `pytest tests/ -v`

@@ -111,10 +111,99 @@ outside the deleted packages in `src`, `scripts`, `storydump_cli`, `tests`).
 - The skip ceiling: `MAX_EXPECTED_SKIPS` stays 11 until CI reports this branch's count (8 of the
   11 baseline skips were legacy tests); the pin is set to the measured number in the fold.
 - PR #1316 (draft). Review lenses dispatched on the detached snapshot at `2533475`.
+- CI on `2533475`: **red** — `23 failed, 3657 passed, 1 skipped`. The local gate subset had
+  passed with the UUID fix because it never ran the 23: `register_uuid()` registers psycopg2's
+  TYPECASTER as well as its adapter, so every gate's raw fetch of a uuid column returned
+  `uuid.UUID` where 23 gates compare `str` or JSON-serialise. Fixed at `954217a` — the adapter
+  alone (`register_adapter(uuid.UUID, UUID_adapter)`), which is exactly the half the legacy
+  engine's `on_connect` had registered process-wide. CI on `954217a`: green. The skip ceiling
+  pinned at `9bd29cf` (11 → 1, CI's measured count); CI on `9bd29cf`: `3680 passed, 1 skipped`.
+
+**Review round 1** (two lenses on `2533475`; folded at the commit after `9bd29cf`):
+
+- Lens 1 (structural + simplify): no blockers; 2 risks, 15 gaps, 12 simplifications. Lens 2
+  (adversarial): 1 blocker (the typecaster — already fixed on the branch before the report
+  landed), 3 risks, 7 gaps, 6 surviving mutants. Every claim was verified against the tree
+  before folding; two were declined with reasons (below).
+- Closed — the predicate: the bare `src.models` arm dropped (it flagged the kept package and the
+  legitimate `from src.models import target`); one walker instead of two; relative imports
+  resolved against the file's package; literal names handed to `importlib.import_module` and
+  `__import__` read; the closure answer a sentinel line, not "the last line"; the entrypoints
+  DERIVED from the Procfile, `railway.toml` and the console script (`scripts.migration_runner`
+  and `storydump_cli.main` joined `src.main`, `src.api.app`, `src.worker`); the planted control
+  is one file importing every prefix, asserted equal to the set; per-root scan floors; the
+  ratchet assertion a shape check (every Telegram-named module under the target tier's homes)
+  instead of a second copy of the baseline; the dependency check on PEP 503 names (the
+  `pillow`/`python_telegram_bot` respellings were surviving mutants).
+- Closed — the survivors: `tests/integration/` deleted whole (its one fixture had zero consumers
+  after its four leak tests went; `test_instagram_posting.py` held no test) and the second
+  zero-test tombstone `tests/src/services/test_posting_delivery_reschedule.py` — class sweep:
+  `find tests -name 'test_*.py'` with zero `def test_` → exactly those two; the lane's
+  `legacy_declared_tables()` inlined and its test renamed for what it checks; the ratchet's
+  planted-tree test dropped (the file already had the planted controls — cited instead);
+  `setup_test_database` yields the database URL (its one consumer reads "not None"; the engine it
+  built never connected); `tests/scripts/conftest.py` imports `UUID_adapter` on one line and says
+  the one ordering fact it relies on; the mirrors file's imports at module level and its
+  docstring honest about being a new file; a new `tests/scripts/test_legacy_inventory.py` pins
+  `LEGACY_TABLES` (a surviving mutant: the sixteenth name had no consumer until phase 03).
+- Closed — the label an operator acts on: `scripts/target_reachability.py`'s gate text said
+  "IMPORTABLE-NOT-SERVING until armed" and its two tests pinned it; it now says the root runs
+  unconditionally and `WORKER_IMPL` only refuses an unknown value (the spelling
+  `WORKER_IMPL=target` kept, as the operator-facing literal); `src/worker_impl.py`'s "unset
+  selects legacy — byte-identical deploys" docstring corrected the same way.
+- Closed — the class "a present-tense claim about a deleted path" (sweep: the deleted module
+  paths and names over `src`, `scripts`, `storydump_cli`, `tests`, `.claude`, the config files;
+  18 hits outside the guard and the ratchet's own planted fixtures, all fixed): `src/worker.py`,
+  `src/models/target/{__init__,identity_and_tenancy,columns}.py`, `src/services/target/
+  {unit_of_work,web_sessions,drive_adapter,google_drive_oauth,ig_login_oauth}.py`,
+  `src/api/instagram_client.py`, `src/utils/logger.py` (the `telegram`/`telegram.ext` logger
+  routing for an SDK no longer installed), `requirements.txt`'s two comments, the three
+  `.claude/rules` files whose `paths:` globs named deleted directories (`database.md` loses two
+  globs; `scheduler.md` and `telegram.md` are re-pointed at the target modules and their legacy
+  sections — commands, callbacks, the `TelegramService` composition — cut, the target-tier
+  sections kept), `.claude/rules/testing.md`'s example import, the QUICK_REFERENCE diagram and
+  two PROJECT_CONTEXT lines, `tests/conftest.py`'s hook note, `test_security_hardening.py`'s
+  docstring and orphan banner, `test_unit_of_work.py:89`, `test_worker_impl_gate.py`'s "legacy
+  boot" rationale, and one operator-facing sentence in `meta-app-review.md` (it said the legacy
+  tier was the running system).
+- Closed — `src/exceptions/__init__.py` exports what it exported before (`RefusalError` was
+  creep); `scripts/migration_runner.py`'s "one home" claim softened (the capabilities probe
+  spells the path independently, pre-existing).
+- Battery: 20 mutations now (the three predicate arms, the relative-import resolution, the
+  literal-name arm, the forbidden set's completeness, the entrypoint derivation, the ratchet's
+  core segment and the stray-home check, the stub package against the closure test AND the
+  standing guard AND the package-gone test, the garbage refusal, the target root, the models
+  package, a respelt dependency, the sixteenth table, a dropped lineage name, `HAND_MADE`
+  emptied, and the UUID registration deleted — that last one and the two lane mutations run
+  under the DB gate). The reachability-specimen mutation was dropped (it mutated the test's own
+  fixture choice, not a behaviour).
+- Declined, with reasons: (a) rewriting the predicate as "every `src.*` import resolves to a
+  file" (a design the lens itself did not ask for; the hand-kept lists are compared to each
+  other and to git's deleted set); (b) `TenantResolutionError`'s package export dropped as a
+  surviving mutant — it is the package's prior public name and removing it is a change with no
+  behaviour behind it either way; (c) the README quickstart (`psql -f scripts/setup_database.sql`
+  then `make run`), which now builds the legacy schema and boots the target worker against it —
+  the Makefile and the quickstart are phase 02's by plan, queued below with the settings-built
+  URL fallback the lens traced (`unit_of_work.async_database_url()` builds from the legacy
+  `DB_*` fields when `TARGET_DATABASE_URL` is unset).
+- The plan's step-6 table, measured (importers under `src`, `scripts`, `storydump_cli`, `tests`):
+  `google-api-python-client` 0, `google-auth` 0, `google-auth-oauthlib` 0, `python-dateutil` 0,
+  `alembic` 0, `tenacity` 0, `httpx2` 0, `anthropic` 0 — kept here (the plan lets the uncertain
+  stay; a removal is phase 02's, with the settings they served), `python-multipart` 0 direct
+  importers but REQUIRED (FastAPI's `Form` in `src/api/routes/meta.py`), `cloudinary` 2,
+  `keyring` 1 (the CLI extra).
 
 ## Owner-decision queue
 
 - **The API service's skipped deploys.** Railway marked `53ca6d6` and `4f2b36b` `SKIPPED` on the `storydump` (API) service while the worker deployed; the fold's API-side fixes (`ops_views.py`, the doctor/health paths) are not live until an API deploy lands. Phase 01's merge triggers one; sooner, by hand: `railway redeploy --service storydump`. Not run by the agent.
 - **A latent CI flake: the skip ceiling meets a clock-of-day skip.** `tests/scripts/test_l5_pipeline_gate.py::TestTheFirstFetch::test_a_local_cap_wait_on_a_slot_today_promises_tomorrow` skips when the account's local time is 23:55–23:59; any CI run starting in that window breaches `MAX_EXPECTED_SKIPS`. A fix that removes the skip: set the fixture account's `tz` to a zone where the local hour is not 23 at test time (the test already reads `tz` from the row). Target-tier test hygiene, outside this plan's scope.
 - **A startup secret check for the target tier?** The legacy `ConfigValidator` (deleted with phase 01) checked `ENCRYPTION_KEY` at boot; nothing in the target tier does the same at import. A decision, not a regression.
+- **Phase 02 premise findings from round 1:** `unit_of_work.async_database_url()` falls back to the
+  legacy `DB_*` fields when `TARGET_DATABASE_URL` is unset — with the legacy loops gone, a boot
+  without the variable (a local `make run`, a preview service) runs the target worker against the
+  legacy-configured database; phase 02 makes `TARGET_DATABASE_URL` mandatory at boot and retires
+  the fallback with the fields. The README quickstart (`psql -f scripts/setup_database.sql` then
+  `make run`) and the Makefile's `run`/`dev`/`init-db` describe the legacy tier (phase 02).
+  `railway.toml`'s `drainingSeconds` rationale (Telegram polling) is stale (F2 forbids touching
+  it here; phase 02). Eight requirements with zero importers (the table above).
 - The tear-out's own gates as they arise (phase 03's probe lines and the 078 rehearsal; phase 04's window).

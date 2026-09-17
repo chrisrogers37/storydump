@@ -47,39 +47,48 @@ GONE=tests/src/test_legacy_tier_gone.py
 MAIN=src/main.py
 MODELS=src/models/__init__.py
 BASE=scripts/telegram_ratchet_baseline.json
-REACH=tests/scripts/test_target_reachability.py
 INV=tests/scripts/legacy_inventory.py
+TINV=tests/scripts/test_legacy_inventory.py
 WGATE=tests/src/test_worker_impl_gate.py
 LANE=tests/scripts/test_lineage_lane.py
+SCONF=tests/scripts/conftest.py
+L3=tests/scripts/test_l3_permit_rail.py
 
 # --- the predicate (the standing guard) ---------------------------------------------------
-check "the AST scan walks into function bodies" $GONE '            for node in ast.walk(tree):
-                names = (' '            for node in tree.body:
-                names = (' "$UNIT" "$GONE -k a_planted_importer_is_found"
+check "the AST scan walks into function bodies" $GONE '    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):' '    for node in tree.body:
+        if isinstance(node, ast.Import):' "$UNIT" "$GONE -k every_forbidden_prefix_planted_at_function_depth_is_found"
 check "a from-import of a deleted submodule counts" $GONE '            for alias in node.names:
-                yield f"{node.module}.{alias.name}"' '            for alias in node.names:
+                yield node.lineno, f"{base}.{alias.name}" if base else alias.name' '            for alias in node.names:
                 pass' "$UNIT" "$GONE -k a_from_import_of_a_deleted_submodule_is_found"
 check "the prefix arm catches a deeper import" $GONE '    return any(name == p or name.startswith(p + ".") for p in FORBIDDEN_PREFIXES)' '    return any(name == p for p in FORBIDDEN_PREFIXES)' "$UNIT" "$GONE -k a_deeper_import_under_a_deleted_package_is_found"
-check "bare src.models is forbidden" $GONE '    if name == "src.models" or (' '    if False or (' "$UNIT" "$GONE -k a_planted_importer_is_found"
+check "a relative import is resolved against its package" $GONE '                anchor = package[: len(package) - (node.level - 1)]' '                anchor = []' "$UNIT" "$GONE -k a_relative_import_is_resolved_against_its_package"
+check "a literal module name handed to the import machinery counts" $GONE '    if target not in ("import_module", "__import__"):
+        return' '    if True:
+        return' "$UNIT" "$GONE -k a_literal_module_name_handed_to_the_import_machinery_is_found"
 check "the forbidden set names every deleted module" $GONE '    "src.services.core",
     "src.services.integrations",' '    "src.services.integrations",' "$UNIT" "$GONE -k the_forbidden_set_names_every_deleted_module"
+check "the entrypoints are read from the deploy files" $GONE '    found.update(_CONSOLE.findall((root / "setup.py").read_text()))' '    pass' "$UNIT" "$GONE -k the_entrypoints_are_read_from_where_a_deploy_reads_them"
 
 # --- the ratchet, the closure, the entrypoint ----------------------------------------------
 check "the ratchet's core segment must read empty" $BASE '  "core_telegram_modules": [],' '  "core_telegram_modules": [
     "src/services/core/x.py"
   ],' "$UNIT" "$GONE -k the_fc2_ratchet_reads_the_target_tier_only"
+check "a Telegram-named module outside the target tier is a stray" $BASE '    "src/channels/telegram_transport.py",' '    "src/legacy/telegram_transport.py",' "$UNIT" "$GONE -k the_fc2_ratchet_reads_the_target_tier_only"
 
-m_closure() {  # a two-file mutation: a stub of a deleted package, imported by the entrypoint
-  local name="a legacy module in the deployed closure is refused"
+m_stub() {  # a two-file mutation: a stub of a deleted package, imported by the entrypoint
+  local name=$1 sel=$2
   if [ -n "${ONLY:-}" ] && ! [[ "$name" =~ $ONLY ]]; then return; fi
   mkdir -p src/services/core && echo '"""mutant: a stub of the deleted package."""' > src/services/core/__init__.py
   printf '\nimport src.services.core  # mutant\n' >> $MAIN
   rm -rf src/__pycache__
-  eval "$UNIT $GONE -k the_deployed_entrypoints_pull_no_legacy_module" > /tmp/claude/mut.log 2>&1; local rc=$?
+  eval "$UNIT $sel" > /tmp/claude/mut.log 2>&1; local rc=$?
   verdict "$name" $rc
   cd "$ROOT" && rm -rf src/services/core && git checkout -- $MAIN
 }
-m_closure
+m_stub "a legacy module in the deployed closure is refused" "$GONE -k the_deployed_entrypoints_pull_no_legacy_module"
+m_stub "an importer of a deleted module anywhere in the tree is refused" "$GONE -k nothing_in_the_tree_imports_a_deleted_module"
+m_stub "a re-created legacy package is refused" "$GONE -k the_legacy_package_is_gone"
 
 check "the entrypoint refuses a garbage WORKER_IMPL before the root runs" $MAIN '    impl = resolve_worker_impl(os.environ)' '    impl = WORKER_IMPL_TARGET' "$UNIT" "$WGATE -k garbage_refuses"
 check "the entrypoint runs the target root" $MAIN '    target_worker.main()
@@ -96,12 +105,17 @@ check "the models package exports nothing" $MODELS 'exported here, on purpose â€
 
 from src.models.target import TargetBase  # mutant
 ' "$UNIT" "$GONE -k the_models_package_exports_nothing"
-check "a dependency only the legacy tier used stays gone" requirements.txt 'click==8.3.3
+check "a dependency only the legacy tier used stays gone, whatever its spelling" requirements.txt 'click==8.3.3
 ' 'click==8.3.3
-Pillow==12.3.0
+pillow==12.3.0
 ' "$UNIT" "$GONE -k a_dependency_only_the_legacy_tier_used_is_gone"
-check "the reachability specimen reaches no target module" $REACH '    SPECIMEN = "scripts.migration_runner"' '    SPECIMEN = "src.worker"' "$UNIT" "$REACH -k a_module_that_imports_no_target_reports_none_after_one_that_does"
 
-# --- the lane's inventory literal (a DB gate) ------------------------------------------------
+# --- the inventory literal (a unit pin and a DB gate) ---------------------------------------
+check "the sixteenth table is in the inventory (F4)" $INV '    "posting_history_dedup_archive",
+    "posting_queue",' '    "posting_queue",' "$UNIT" "$TINV"
 check "a name dropped from the lineage inventory is a missing snapshot" $INV '    "users",
 ' '' "$GATE" "$LANE -k legacy_holds_the_inventory"
+check "the hand-made table is kept out of the lineage subset" $INV 'HAND_MADE = ("posting_history_dedup_archive",)' 'HAND_MADE = ()' "$GATE" "$LANE -k legacy_holds_the_inventory"
+
+# --- the implicit dependency made explicit (a DB gate) --------------------------------------
+check "psycopg2 adapts a uuid parameter because the gates register the adapter" $SCONF 'psycopg2.extensions.register_adapter(uuid.UUID, UUID_adapter)' 'pass' "$GATE" "$L3 -k container_create_resumes_by_bumping_generation"

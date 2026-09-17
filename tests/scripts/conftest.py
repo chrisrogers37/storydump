@@ -29,10 +29,9 @@ import uuid
 from pathlib import Path
 
 import psycopg2
-import psycopg2.extras
 import pytest
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
-from psycopg2.extras import RealDictCursor
+from psycopg2.extras import RealDictCursor, UUID_adapter
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
@@ -55,7 +54,9 @@ from tests.conftest import SESSION_DB_SUFFIX as SESSION_TOKEN
 # whole: its typecaster half would make every gate's psycopg2 connection return
 # `uuid.UUID` for uuid columns where the gates read `str` (23 of them compare
 # ids as text, and on CI they did the moment the typecaster was registered).
-psycopg2.extensions.register_adapter(uuid.UUID, psycopg2.extras.UUID_adapter)
+# pytest imports this conftest before any gate connects, which is the one
+# ordering fact the registration relies on.
+psycopg2.extensions.register_adapter(uuid.UUID, UUID_adapter)
 
 
 def pytest_configure(config):

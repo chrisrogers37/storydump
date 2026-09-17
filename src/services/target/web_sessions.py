@@ -19,8 +19,10 @@ There are two hops and each has its own credential. This module is the FIRST:
 
 - **browser ↔ web front end** — this. The session cookie `07` §1 rules:
   opaque, server-side, revocable, sliding.
-- **web front end ↔ backend API** — `src/utils/webapp_auth.py`'s
-  `sd1b`/`sd1u`, an HMAC-signed BFF credential.
+- **web front end ↔ backend API** — the session cookie forwarded by the
+  front end's proxy route and the API tokens of `service_tokens` (the legacy
+  `src/utils/webapp_auth.py` `sd1b`/`sd1u` HMAC credential went with the
+  legacy tier, #1216).
 
 **A correction worth carrying, because the opposite is written down
 elsewhere.** The front-end surface doc states that the BFF credential "cannot

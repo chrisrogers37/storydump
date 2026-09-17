@@ -29,7 +29,7 @@ tests/
 ```python
 import pytest
 from unittest.mock import Mock, patch
-from src.services.core.example_service import ExampleService
+from src.services.target.example_service import ExampleService
 
 @pytest.fixture
 def example_service():

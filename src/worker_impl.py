@@ -29,9 +29,11 @@ WORKER_IMPLS = (WORKER_IMPL_LEGACY, WORKER_IMPL_TARGET)
 def resolve_worker_impl(env) -> str:
     """Decide which root serves, from a mapping of env vars.
 
-    Unset selects legacy — the default must keep every existing deploy
-    byte-identical in behavior. Present-but-empty is NOT unset: it is a
-    half-typed arm, and it refuses like any other unknown value.
+    Unset resolves to the legacy LABEL. Since the tear-out (phase 01; #1216)
+    `src.main` runs the target root under either label — the legacy loops are
+    gone — and this resolver's one remaining job is to refuse an unknown value
+    (phase 02 retires the variable and this module). Present-but-empty is NOT
+    unset: it is a half-typed arm, and it refuses like any other unknown value.
     """
     raw = env.get(WORKER_IMPL_VAR)
     if raw is None:

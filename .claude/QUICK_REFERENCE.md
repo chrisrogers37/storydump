@@ -23,7 +23,9 @@ The canonical list, with what each command does, is the safety block in
 ## Architecture (3-Layer)
 
 ```
-CLI/Telegram → Services → Repositories → Models/DB
+storydump CLI ─HTTP→ API (src/api) ─┐
+Telegram ─webhook→ API             ├→ target services (src/services/target) ─SQL→ Neon
+worker (src/worker.py) ────────────┘
 ```
 
 **NEVER violate layer boundaries:**

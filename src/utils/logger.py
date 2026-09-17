@@ -90,9 +90,10 @@ def get_logger(name: str = "storydump") -> logging.Logger:
 # Default logger instance
 logger = setup_logger()
 
-# Route python-telegram-bot and httpx logs through our logger's handlers
-# so they appear in Railway logs (otherwise they go to root logger / stderr)
-for _lib_logger_name in ("telegram", "telegram.ext", "httpx"):
+# Route httpx's logs through our logger's handlers so they appear in Railway
+# logs (otherwise they go to the root logger / stderr). python-telegram-bot's
+# loggers were routed here too until the tear-out uninstalled it (#1216).
+for _lib_logger_name in ("httpx",):
     _lib_logger = logging.getLogger(_lib_logger_name)
     _lib_logger.setLevel(logging.WARNING)
     for _handler in logger.handlers:

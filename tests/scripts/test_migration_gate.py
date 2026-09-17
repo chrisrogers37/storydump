@@ -338,7 +338,10 @@ class TestAdoptProductionShaped:
 class TestSchemaParity:
     def test_parity_comparator_can_fail(self):
         """A comparator that cannot fail proves nothing. Pure-dict check —
-        the catalog-extraction path is exercised by the test above."""
+        the catalog-extraction path (`schema_signature` on a live catalog) is
+        exercised by `test_lineage_lane.py` and `test_schema_drift_live.py`;
+        the replayed-vs-models parity test that lived above went with the
+        legacy models (the tear-out, phase 01)."""
         base = {
             "t": {
                 "columns": {"id": ("integer", "NO")},

@@ -1,4 +1,5 @@
-"""Tests for security hardening: headers, startup secrets, X-Forwarded-For attribution."""
+"""Tests for security hardening: headers and X-Forwarded-For attribution (the
+startup-secret check went with the legacy tier's `ConfigValidator`, #1216)."""
 
 import pytest
 
@@ -36,11 +37,6 @@ class TestSecurityHeaders:
             assert resp.headers["X-Frame-Options"] == "DENY", path
             assert "frame-ancestors 'none'" in resp.headers["Content-Security-Policy"]
             assert "telegram.org" not in resp.headers["Content-Security-Policy"]
-
-
-# =============================================================================
-# Startup validation (#385)
-# =============================================================================
 
 
 class TestForwardedForAttribution:

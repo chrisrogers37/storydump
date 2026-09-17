@@ -509,11 +509,13 @@ def _label_deployed(deployed: dict, gate: dict | None = None) -> None:
     Silent when every entrypoint reads zero: there is nothing to misread yet,
     and a banner that always fires is one nobody reads.
 
-    When the clearing entrypoint's movement is the `src.main` GATE (#942),
-    `gate` carries its terms and the by-hand instruction is replaced with the
-    precise answer — the call site is known, dispatch on `WORKER_IMPL`,
-    serving nothing until armed. The by-hand text remains for a movement the
-    gate contract cannot account for, where hunting is the honest advice.
+    When the clearing entrypoint's movement is the `src.main` dispatch (#942),
+    `gate` carries the contract's terms and the by-hand instruction is
+    replaced with the precise answer — the call site is known, and since the
+    legacy tier's deletion (#1216) it runs the target root under either
+    label, reading `WORKER_IMPL` only to refuse an unknown value. The by-hand
+    text remains for a movement the contract cannot account for, where
+    hunting is the honest advice.
     """
     nonzero = [p for p, d in deployed.items() if d["target_hits"]]
     if not nonzero:
@@ -537,20 +539,20 @@ def _label_deployed(deployed: dict, gate: dict | None = None) -> None:
                 "  target code, never that any call path runs it. The call site is the"
             )
             print(
-                f"  GATE in src.main: it serves target ONLY when "
-                f"{gate['var']}={gate['armed_value']}\n"
-                f"  (default when unset: {gate['default']}; this run's env "
-                f"selects: {gate['this_run_selects']}).\n"
-                "  IMPORTABLE-NOT-SERVING until armed. Arming is the M.3 "
-                "step-4 decision, made\n"
-                "  by an operator setting the variable on the service -- "
-                "never by this number\n"
-                "  moving.\n"
-                "  ARMING PRESUPPOSES the other half: the target schema "
+                "  dispatch in src.main, which runs the target root "
+                "UNCONDITIONALLY since the\n"
+                "  legacy tier's deletion (#1216). "
+                f"{gate['var']} is still read, only to refuse an unknown\n"
+                f"  value (the armed spelling {gate['var']}={gate['armed_value']}; unset resolves "
+                f"to the {gate['default']!r} label;\n"
+                f"  this run's env selects: {gate['this_run_selects']}) -- "
+                "either label serves.\n"
+                "  SERVING PRESUPPOSES the other half: the target schema "
                 "applied (the migration\n"
-                "  runner ships unarmed -- railway.toml) and TARGET_* config "
-                "set. Without them\n"
-                "  the armed worker fails loudly at boot rather than serving."
+                "  runner runs at every predeploy -- railway.toml) and "
+                "TARGET_* config set.\n"
+                "  Without them the worker fails loudly at boot rather than "
+                "serving."
             )
         else:
             print(

@@ -5,7 +5,7 @@ A leaf, like `google_client`: the connect route and the callback both import
 it and it imports neither, so the two cannot disagree on the redirect URI.
 
 The callback path is the LEGACY flow's, byte for byte
-(`src/services/integrations/instagram_login_oauth.py`): it is the URI already
+(`src/services/integrations/instagram_login_oauth.py`, deleted in #1216): it is the URI already
 registered on the Meta app, so the target tier needs no console change to
 take the flow over (#1220).
 """

@@ -10,8 +10,8 @@ deliberately NOT here: building it now creates an untestable-until-M.3 path that
 reads as coverage.
 
 Two workstreams need the same door, which is why it is once-owned rather than
-built twice. `src/services/media_sources/google_drive_provider.py` is the legacy
-reference for request shapes; the target tier imports nothing legacy.
+built twice. `src/services/media_sources/google_drive_provider.py` was the legacy
+reference for request shapes (deleted in #1216); the target tier imports nothing legacy.
 
 ## A BOUND MUST BE DETECTABLE BY THE CALLER
 

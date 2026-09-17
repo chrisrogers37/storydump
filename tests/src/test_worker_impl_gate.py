@@ -124,9 +124,9 @@ class TestDeployedClosure:
     entrypoint pulls the root and the target tier — red if anyone lazifies
     the import, which would silently unwind the deployed-axis movement
     (#979's blindness relied on in reverse); and (2) NO NEW ENV AT IMPORT:
-    legacy's own env floor imports the gated module unchanged — the one
-    regression this PR must not admit is the eager import breaking a legacy
-    boot in an environment where legacy boots today.
+    the settings' own env floor imports the module unchanged — a boot must
+    not need the `TARGET_*` family at IMPORT time (they are read at run time
+    inside `src.worker.main`).
     """
 
     def test_the_entrypoint_pulls_the_root_under_legacys_own_env_floor(self):

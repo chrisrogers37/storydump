@@ -32,7 +32,6 @@ from typing import NoReturn
 
 import pytest
 from dotenv import load_dotenv
-from sqlalchemy import create_engine
 import psycopg2
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 
@@ -90,7 +89,6 @@ MAX_EXPECTED_SKIPS = 1
 
 # Global flag to track if database is available
 _database_available = None
-_test_engine = None
 
 
 def database_is_required() -> bool:
@@ -142,8 +140,8 @@ def pytest_sessionstart(session):
     instead of mint, which is what every fresh-loop helper under
     ``tests/scripts`` already assumes ("``get_event_loop()`` RAISES on 3.10").
     Nothing in ``src``, ``scripts``, ``storydump_cli`` or ``tests`` relies on
-    an implicitly minted loop (grep, 2026-09-16: the one ``get_event_loop()``
-    call is inside ``src/main.py``'s legacy ``main_async``).
+    an implicitly minted loop (grep, 2026-09-17: no ``get_event_loop()`` call
+    remains — the one there was went with the legacy loops, #1216).
     """
     asyncio.set_event_loop(None)
 
@@ -717,7 +715,8 @@ def setup_test_database():
        schema in it here: the legacy models this fixture used to `create_all`
        went with the legacy tier (the tear-out, phase 01), and the target
        suites build what they need inside it (the runner's replay, the app).
-    3. Yields the engine to tests.
+    3. Yields the database's URL (its one consumer, `test_unit_of_work.py`,
+       reads only "not None"; the target suites connect on their own).
     4. Drops the database after all tests complete.
 
     THREE outcomes rather than two, and the third is the point:
@@ -733,7 +732,7 @@ def setup_test_database():
     Nothing after the probe is swallowed: a database that answered and then
     failed is a real failure and propagates.
     """
-    global _database_available, _test_engine
+    global _database_available
 
     verdict = integration_verdict(server_answered(), database_is_required())
 
@@ -749,7 +748,6 @@ def setup_test_database():
     if verdict == "skip":
         print("   Pure unit tests will still run. Integration tests will be skipped.")
         _database_available = False
-        _test_engine = None
         yield None
         return
 
@@ -768,18 +766,15 @@ def setup_test_database():
     scan_and_reap_strays(ownership_conn, settings.TEST_DB_NAME)
 
     create_test_database()
-    engine = create_engine(settings.test_database_url)
     print("✓ Created the test database")
 
     _database_available = True
-    _test_engine = engine
 
-    yield engine
+    yield settings.test_database_url
 
     # Teardown sits OUTSIDE any except-and-yield path deliberately: the old
     # shape yielded a SECOND time when teardown raised, which pytest reports as
     # an unreadable fixture error instead of the cleanup failure it is.
-    engine.dispose()
     drop_test_database()
 
     # Release the ownership lock LAST — while it is held, no other session's
