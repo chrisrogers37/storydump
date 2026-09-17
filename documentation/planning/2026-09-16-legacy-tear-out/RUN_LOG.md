@@ -86,7 +86,31 @@ API service skipped the two kickoff commits — see the gate above).
 `python-telegram-bot` and `Pillow` removed from `requirements.txt` and `setup.py` (no importer
 outside the deleted packages in `src`, `scripts`, `storydump_cli`, `tests`).
 
-**Verification** — filled as the runs land (see the entries below).
+**Verification** (2026-09-17, the worktree at `2533475`):
+
+- Units without a database (sandbox off): `2251 passed, 27 skipped`, 4 failed — the four are
+  `test_egress_floor.py`'s two loopback-binding tests (they fail on `main` locally too: the
+  environment cannot bind `127.0.0.2`) and, before its fix, the closure test reading a log line
+  as its answer. The whole suite against the Docker test database (sandbox off):
+  `3670 passed, 2 skipped` plus the two loopback tests. Skips: `test_schema_drift_live` (no
+  DSN, by design) and the loopback port skip (local only).
+- Two implicit dependencies surfaced by the deletion, made explicit: psycopg2's UUID adapter
+  had been registered by the legacy SQLAlchemy engine connecting at session start
+  (`test_l3_permit_rail.py` failed with `can't adapt type 'asyncpg.pgproto.pgproto.UUID'`);
+  `tests/scripts/conftest.py` now calls `register_uuid()` itself. The ratchet's positive
+  control assumed the burn-down axes were populated; a planted tree lights them now.
+- The #909 naive-column population gate found 0 columns and 0 sites on the tree that remained
+  (its subjects were the legacy models and repositories): retired with them, the helpers'
+  mirror tests kept in `tests/src/utils/test_datetime_utils_mirrors.py`.
+- `ruff check .` and `ruff format --check .`: clean.
+- Battery `tests/mutations/legacy_tear_out_01.sh` on the committed tree: 13 mutations, 13
+  killed, none unapplied, none by error (the AST walk, the from-import arm, the prefix arm, bare
+  `src.models`, the forbidden set's completeness, the ratchet's core segment, a stub package in
+  the closure, the garbage-`WORKER_IMPL` refusal, the target root, the models package's exports,
+  a re-added dependency, the reachability specimen, a name dropped from the lineage inventory).
+- The skip ceiling: `MAX_EXPECTED_SKIPS` stays 11 until CI reports this branch's count (8 of the
+  11 baseline skips were legacy tests); the pin is set to the measured number in the fold.
+- PR #1316 (draft). Review lenses dispatched on the detached snapshot at `2533475`.
 
 ## Owner-decision queue
 
