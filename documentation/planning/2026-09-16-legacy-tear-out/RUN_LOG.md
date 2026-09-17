@@ -193,6 +193,10 @@ outside the deleted packages in `src`, `scripts`, `storydump_cli`, `tests`).
   importers but REQUIRED (FastAPI's `Form` in `src/api/routes/meta.py`), `cloudinary` 2,
   `keyring` 1 (the CLI extra).
 
+**After the fold** (`e7aa4f9`): CI green — `3653 passed, 1 skipped`, all nine checks; the battery on
+the committed tree 20/20 killed (three under the DB gate); a fresh re-verify read dispatched on
+the detached snapshot at `e7aa4f9`.
+
 ## Owner-decision queue
 
 - **The API service's skipped deploys.** Railway marked `53ca6d6` and `4f2b36b` `SKIPPED` on the `storydump` (API) service while the worker deployed; the fold's API-side fixes (`ops_views.py`, the doctor/health paths) are not live until an API deploy lands. Phase 01's merge triggers one; sooner, by hand: `railway redeploy --service storydump`. Not run by the agent.
