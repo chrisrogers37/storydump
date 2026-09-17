@@ -63,8 +63,6 @@ createdb storydump
 # Run schema setup
 psql -U postgres -d storydump -f scripts/setup_database.sql
 
-# Or use Python script
-python scripts/init_db.py
 ```
 
 ### 4. Connect media and set the schedule on the web

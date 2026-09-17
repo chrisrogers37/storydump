@@ -307,18 +307,31 @@ class TestTheRealBaselineIsHonest:
             " docstring edit requires --write-baseline in the same PR."
         )
 
-    def test_the_real_tree_has_modules_on_every_ratcheted_axis(self):
-        """Positive control. Three of the four axes passing with an empty set
-        would mean the gate found nothing, not that the tree is clean."""
+    def test_the_real_tree_has_modules_on_the_axis_that_is_not_burned_down(self):
+        """Positive control, half of it. `telegram_modules` names the target
+        tier's adapters and stays populated; the two burn-down axes reached
+        their FC-2 end state — empty — with the tear-out (phase 01; #1216), so
+        "empty" no longer distinguishes a clean tree from a gate that found
+        nothing. The planted tree below is what distinguishes them now."""
         import pathlib
 
         repo = pathlib.Path(__file__).resolve().parents[2]
         out = measure(repo)
-        # Floors, not equalities — the committed baseline is what pins exact
-        # membership. They moved with #868 (27->16, 22->15, 89->114) because
-        # eleven modules stopped being wrongly exempt; the slack below each is
-        # deliberately kept wide enough that "the gate found nothing" still
-        # trips it.
-        assert len(out["telegram_modules"]) > 10
-        assert len(out["core_telegram_modules"]) > 5
-        assert len(out["chat_id_functions_outside_adapters"]) > 50
+        assert len(out["telegram_modules"]) >= 4, out["telegram_modules"]
+
+    def test_a_planted_tree_lights_every_ratcheted_axis(self, tmp_path):
+        """Positive control, the other half: a core-shaped Telegram module and a
+        non-adapter function taking a chat id are reported on the axes the real
+        tree keeps empty — the gate reads the shape, not the emptiness."""
+        core = tmp_path / "src" / "services" / "core"
+        core.mkdir(parents=True)
+        (core / "telegram_probe.py").write_text("def f(chat_id):\n    return chat_id\n")
+        target = tmp_path / "src" / "services" / "target"
+        target.mkdir(parents=True)
+        (target / "plain.py").write_text("def g(chat_id):\n    return chat_id\n")
+        out = measure(tmp_path)
+        assert out["core_telegram_modules"] == ["src/services/core/telegram_probe.py"]
+        assert "src/services/core/telegram_probe.py" in out["telegram_modules"]
+        assert out["chat_id_functions_outside_adapters"] == [
+            "src/services/target/plain.py::g"
+        ]

@@ -5,9 +5,10 @@ gate, no deployed process could import one line of target code (#942's
 founding measurement, re-confirmed at `1ae62bb` by two independent methods:
 the closure instrument and a repo-wide literal-text sweep). The gate makes
 the deployed worker ARTIFACT contain the target root while the deployed
-worker BEHAVIOR stays legacy until an operator sets `WORKER_IMPL=target` —
-arming is the M.3 step-4 decision, a config flip, never a side effect of a
-deploy.
+worker BEHAVIOR stayed legacy until an operator set `WORKER_IMPL=target`
+(2026-08-24). The legacy tier is gone (the tear-out, phase 01; #1216): the
+artifact IS the root now, and what this gate still pins is the eager import
+and the refusal of a garbage value.
 
 The contract (constants + resolver) lives in `src.worker_impl`, a
 stdlib-only leaf, so its second consumer — the reachability instrument's
@@ -69,36 +70,38 @@ class TestResolveWorkerImpl:
 
 
 class TestDispatch:
-    """main() routes to exactly one root, decided before either does work."""
+    """main() runs exactly one root — the target's — and refuses garbage
+    before it does. The legacy arm went with the legacy tier (the tear-out,
+    phase 01): `legacy` and unset now mean "nothing else to run" and are
+    logged as such, never refused — production has been armed since
+    2026-08-24, and a boot must not fail on a variable phase 02 retires."""
 
     def _instrument(self, monkeypatch):
         ran = []
         monkeypatch.setattr(
             main_mod.target_worker, "main", lambda: ran.append("target")
         )
-
-        def fake_run(coro):
-            # filterwarnings=error: an unclosed coroutine is a test failure
-            # for the wrong reason, so the legacy recorder closes it.
-            coro.close()
-            ran.append("legacy")
-
-        monkeypatch.setattr(main_mod.asyncio, "run", fake_run)
         return ran
 
-    def test_default_runs_legacy(self, monkeypatch):
+    def test_unset_runs_the_target_root(self, monkeypatch):
         ran = self._instrument(monkeypatch)
         monkeypatch.delenv(impl.WORKER_IMPL_VAR, raising=False)
         main_mod.main()
-        assert ran == ["legacy"]
+        assert ran == ["target"]
 
-    def test_armed_runs_target_root_and_never_legacy(self, monkeypatch):
+    def test_legacy_runs_the_target_root_too(self, monkeypatch):
+        ran = self._instrument(monkeypatch)
+        monkeypatch.setenv(impl.WORKER_IMPL_VAR, impl.WORKER_IMPL_LEGACY)
+        main_mod.main()
+        assert ran == ["target"]
+
+    def test_armed_runs_the_target_root(self, monkeypatch):
         ran = self._instrument(monkeypatch)
         monkeypatch.setenv(impl.WORKER_IMPL_VAR, impl.WORKER_IMPL_TARGET)
         main_mod.main()
         assert ran == ["target"]
 
-    def test_garbage_refuses_before_any_root_runs(self, monkeypatch, capsys):
+    def test_garbage_refuses_before_the_root_runs(self, monkeypatch, capsys):
         ran = self._instrument(monkeypatch)
         monkeypatch.setenv(impl.WORKER_IMPL_VAR, "targit")
         with pytest.raises(SystemExit) as exc:

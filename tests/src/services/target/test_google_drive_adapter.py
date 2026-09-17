@@ -32,7 +32,10 @@ from src.services.target.google_drive_adapter import (
     _listing_query,
 )
 from src.services.target.media_sync import DriveCredentialDead, DriveSourceGone
-from src.utils.media_kind import INSTAGRAM_VIDEO_SUFFIXES
+
+#: The suffixes the fixtures below use for a video — the test's own data (the
+#: legacy `media_kind` module that held them went with the tear-out).
+INSTAGRAM_VIDEO_SUFFIXES = (".mp4", ".mov")
 
 CONFIG = {"v": 1, "folder_ref": "FOLDER123"}
 WS = "11111111-1111-1111-1111-111111111111"

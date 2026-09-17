@@ -27,9 +27,9 @@ CLI/Telegram → Services → Repositories → Models/DB
 ```
 
 **NEVER violate layer boundaries:**
-- CLI/API calls Services only
-- Services call Repositories only
-- Repositories return Models
+- The CLI (`storydump_cli/`) is an HTTP client of the API; its one `src` import is the vocabulary
+- The API and the worker call the target services (`src/services/target/`)
+- The services own the SQL, under the unit of work; `src/models/target/` exists for schema parity
 
 ---
 
@@ -37,12 +37,13 @@ CLI/Telegram → Services → Repositories → Models/DB
 
 | Path | Purpose |
 |------|---------|
-| `src/services/core/` | Business logic (Phase 1) |
-| `src/services/integrations/` | Instagram API, external services |
-| `src/repositories/` | Database access (CRUD only) |
-| `src/models/` | SQLAlchemy models |
+| `src/services/target/` | The target tier: lanes, jobs, the publish pipeline, views, executors |
+| `src/api/` | The API (FastAPI): routes, auth, the command port |
+| `src/channels/` | Telegram transport and webhook registration |
+| `src/models/target/` | Declarative models (schema parity with the migrations) |
+| `scripts/migrations/` | The migration corpus; `scripts/migration_runner.py` applies it |
 | `storydump_cli/` | The `storydump` CLI (an HTTP client of the API) |
-| `tests/` | Mirrors src/ structure |
+| `tests/` | Mirrors src/ structure; `tests/scripts/` holds the DB gates |
 
 ---
 
@@ -77,11 +78,11 @@ psql "$DATABASE_URL" -c "SELECT * FROM instagram_accounts WHERE is_active = true
 
 | File | Contains |
 |------|----------|
-| `src/services/core/telegram_service.py` | Telegram bot handlers |
-| `src/services/core/posting_service.py` | Posting orchestration |
-| `src/services/core/scheduler.py` | Schedule creation |
-| `src/services/integrations/instagram_api.py` | Instagram Graph API |
-| `src/models/chat_settings.py` | Per-chat settings |
+| `src/worker.py` | The worker's composition root |
+| `src/api/app.py` | The API |
+| `src/services/target/work_loop.py` | Lanes and the job registry |
+| `src/services/target/publish_pipeline.py` | Publishing to Instagram |
+| `src/services/target/telegram_dispatch.py` | The Telegram channel |
 
 ---
 

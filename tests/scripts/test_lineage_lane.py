@@ -43,6 +43,7 @@ import re
 import pytest
 
 from scripts.migration_runner import (
+    MIGRATIONS_DIR,
     SCHEMA_MOVE_MARKER,
     MigrationRunnerError,
     apply_pending,
@@ -62,7 +63,6 @@ from scripts.tenancy_gate import (
     tenancy_violations,
     tenant_keyed_tables,
 )
-from src.utils.validators import MIGRATIONS_DIR
 from tests.scripts.conftest import (
     advertised_stream,
     as_user,
@@ -76,6 +76,7 @@ from tests.scripts.conftest import (
     table_exists,
     write_migration,
 )
+from tests.scripts.legacy_inventory import LINEAGE_TABLES
 
 
 def run_lane(dsn):
@@ -205,11 +206,12 @@ def functions_in(dsn, schema):
 
 
 def legacy_declared_tables():
-    """The inventory the running application declares, read off the models."""
-    import src.models  # noqa: F401 - registers every legacy model on Base
-    from src.config.database import Base
-
-    return set(Base.metadata.tables)
+    """The legacy lineage's inventory — a literal since the tear-out (phase
+    01) deleted the models it was read off; `tests/scripts/legacy_inventory.py`
+    is the one home, shared with phase 03's snapshot gate. The hand-made
+    production table is kept out of this subset on purpose: no file creates
+    it, so no replay can hold it."""
+    return set(LINEAGE_TABLES)
 
 
 class TestTheBoundaryIsDerivedAndLoud:
@@ -430,7 +432,8 @@ class TestTheLaneReplaysAcrossTheBoundary:
         grow. `ALTER SCHEMA … RENAME` moves the namespace and not the objects
         in it, so an in-file before/after inventory comparison cannot fail; the
         assertion that CAN fail is against an independent source of truth, and
-        the models are one — derived, so there is no list to drift.
+        the inventory literal is one — written down once, checked against
+        production by the tear-out's read-only probe.
 
         THE PUBLIC-SIDE HALF IS SCOPED TO NAMES THE TARGET DOES NOT REUSE, and
         that scoping is forced rather than convenient. The target schema
@@ -446,9 +449,13 @@ class TestTheLaneReplaysAcrossTheBoundary:
         run_lane(bootstrapped_db)
         declared = legacy_declared_tables()
 
-        assert declared, "positive control: the legacy models registered nothing"
-        missing = sorted(declared - set(tables_in(bootstrapped_db, "legacy")))
-        assert missing == [], f"legacy is missing declared tables: {missing}"
+        assert declared, "positive control: the lineage inventory is empty"
+        replayed = set(tables_in(bootstrapped_db, "legacy"))
+        assert replayed == declared, (
+            "the replayed `legacy` schema and the inventory literal disagree —"
+            f" missing: {sorted(declared - replayed)}, unlisted: {sorted(replayed - declared)}"
+            " (a name dropped from `LINEAGE_TABLES` is a snapshot phase 03 never takes)"
+        )
 
         legacy_only = declared - implied_target_tables()
         assert legacy_only, (
@@ -889,14 +896,3 @@ class TestTheLaneReplaysAcrossTheBoundary:
 
         psql_apply(scratch_db, [move.path])
         assert reads_applied(scratch_db), "the probe fails to see a real move"
-
-    def test_the_target_base_is_a_separate_metadata_from_the_legacy_one(self):
-        """Fork (a)'s mechanism, asserted rather than assumed: if the two bases
-        ever shared `MetaData`, `create_all` on the target would emit the
-        legacy schema and lane parity would compare a lineage against itself —
-        green, and meaningless."""
-        from src.config.database import Base
-        from src.models.target import TargetBase
-
-        assert TargetBase.metadata is not Base.metadata
-        assert legacy_declared_tables(), "positive control: legacy base is loaded"

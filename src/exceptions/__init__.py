@@ -1,45 +1,12 @@
-"""Storydump exception classes."""
+"""Storydump exception classes.
 
-from src.exceptions.base import StorydumpError
-from src.exceptions.google_drive import (
-    GoogleDriveError,
-    GoogleDriveAuthError,
-    GoogleDriveRateLimitError,
-    GoogleDriveFileNotFoundError,
-)
-from src.exceptions.instagram import (
-    InstagramAPIError,
-    RateLimitError,
-    TokenExpiredError,
-    TokenCorruptError,
-    TokenRevokedError,
-    MediaUploadError,
-    MediaUnsupportedError,
-    is_publish_definitively_failed,
-)
+The legacy tier's `backfill`, `google_drive` and `instagram` modules went with
+it (the tear-out, phase 01; #1216). This package exports the base classes and
+the tenancy refusal the target tier raises; `identity` and `telegram` are
+imported by their own path.
+"""
+
+from src.exceptions.base import RefusalError, StorydumpError
 from src.exceptions.tenancy import TenantResolutionError
-from src.exceptions.backfill import (
-    BackfillError,
-    BackfillMediaExpiredError,
-    BackfillMediaNotFoundError,
-)
 
-__all__ = [
-    "StorydumpError",
-    "GoogleDriveError",
-    "GoogleDriveAuthError",
-    "GoogleDriveRateLimitError",
-    "GoogleDriveFileNotFoundError",
-    "InstagramAPIError",
-    "RateLimitError",
-    "TokenExpiredError",
-    "TokenCorruptError",
-    "TokenRevokedError",
-    "MediaUploadError",
-    "MediaUnsupportedError",
-    "is_publish_definitively_failed",
-    "BackfillError",
-    "BackfillMediaExpiredError",
-    "BackfillMediaNotFoundError",
-    "TenantResolutionError",
-]
+__all__ = ["RefusalError", "StorydumpError", "TenantResolutionError"]

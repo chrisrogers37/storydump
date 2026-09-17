@@ -29,6 +29,7 @@ import uuid
 from pathlib import Path
 
 import psycopg2
+import psycopg2.extras
 import pytest
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 from psycopg2.extras import RealDictCursor
@@ -36,11 +37,21 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
-from scripts.migration_runner import legacy_lineage_max
+from scripts.migration_runner import MIGRATIONS_DIR, legacy_lineage_max
+
 from src.config.settings import settings
 from src.services.target.unit_of_work import asyncpg_url, unit_of_work
-from src.utils.validators import MIGRATIONS_DIR
 from tests.conftest import SESSION_DB_SUFFIX as SESSION_TOKEN
+
+
+# psycopg2 adapts `uuid.UUID` (and asyncpg's subclass of it, which every gate's
+# asyncpg fetch hands back) only once `register_uuid()` has run. Until the
+# tear-out (phase 01) that ran as a SIDE EFFECT of the legacy SQLAlchemy engine
+# connecting at session start — an import-time dependency nobody had written
+# down, found when `test_l3_permit_rail.py` failed with "can't adapt type
+# 'asyncpg.pgproto.pgproto.UUID'" the moment the legacy engine was gone. The
+# gates' psycopg2 connections all start here, so the registration lives here.
+psycopg2.extras.register_uuid()
 
 
 def pytest_configure(config):

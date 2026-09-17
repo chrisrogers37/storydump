@@ -11,13 +11,10 @@ psycopg2-binary==2.9.12
 asyncpg==0.31.0
 alembic==1.18.4
 
-# Telegram
-python-telegram-bot[rate-limiter]==22.7
 httpx==0.28.1
 httpx2==2.2.0
 
 # Image Processing
-Pillow==12.3.0
 
 # CLI
 click==8.3.3
