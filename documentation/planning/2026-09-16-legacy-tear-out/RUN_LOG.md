@@ -179,7 +179,8 @@ outside the deleted packages in `src`, `scripts`, `storydump_cli`, `tests`).
   fixture choice, not a behaviour).
 - Declined, with reasons: (a) rewriting the predicate as "every `src.*` import resolves to a
   file" (a design the lens itself did not ask for; the hand-kept lists are compared to each
-  other and to git's deleted set); (b) `TenantResolutionError`'s package export dropped as a
+  other; git's deleted set was compared by hand — 114 deleted modules, 114 forbidden — not by a
+  test); (b) `TenantResolutionError`'s package export dropped as a
   surviving mutant — it is the package's prior public name and removing it is a change with no
   behaviour behind it either way; (c) the README quickstart (`psql -f scripts/setup_database.sql`
   then `make run`), which now builds the legacy schema and boots the target worker against it —
@@ -196,6 +197,24 @@ outside the deleted packages in `src`, `scripts`, `storydump_cli`, `tests`).
 **After the fold** (`e7aa4f9`): CI green — `3653 passed, 1 skipped`, all nine checks; the battery on
 the committed tree 20/20 killed (three under the DB gate); a fresh re-verify read dispatched on
 the detached snapshot at `e7aa4f9`.
+
+**Re-verify** (a fresh read on the detached snapshot at `e7aa4f9`): **HOLDS** — every Closed
+item closed, every positive control tests a real arm, all 20 battery anchors occur exactly once,
+the recipe green (192 passed, 3 skipped, the sandbox's loopback denials aside). It found residue
+the class sweep had missed in the sweep's own roots, folded in the next commit: the
+`development-patterns.md` rule (its service, tracking, error and image sections taught
+`BaseService`, `track_execution` and `ImageProcessor` — deleted classes, loaded for every
+`src/**/*.py` edit; rewritten onto the target tier, and its `cli/**` glob re-pointed at
+`storydump_cli/**`), `testing.md`'s tree and its `tests/integration/` paragraph, three
+docstrings in `src` (`api/routes/retired.py`, `exceptions/tenancy.py`, `config/defaults.py`),
+`worker_impl.py`'s module docstring and refusal text, a ratchet test docstring, the README tree
+(phase 01 owned it and had only dropped one line), and — operator-facing, so not left to phase
+05 — `telegram-webhook.md`'s "the legacy scheduler clears the webhook" diagnosis, the three
+`meta-app-review.md` citations of the deleted Instagram modules and
+`google-oauth-verification.md`'s scope table (the target flow requests `drive.readonly` only).
+The checklist line "`grep … src.services.core … → 0 lines`" is unmet BY DESIGN: the survivors
+say "deleted in #1216", the ratchet's `CORE_SEGMENT` constant and its planted fixtures name the
+directory, and the guard lists the prefixes — the checklist is ticked with that note.
 
 ## Owner-decision queue
 

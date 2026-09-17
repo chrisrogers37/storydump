@@ -3,9 +3,10 @@
 The DB is the single source of truth at runtime — every per-chat setting
 lives on `chat_settings`. These constants are used in two places:
 
-1. **Bootstrap** (`ChatSettingsRepository.get_or_create`) — when a brand
-   new chat first interacts with the bot we need *some* starting values.
-   These are them.
+1. **Bootstrap** — when a brand new chat first interacts with the bot we
+   need *some* starting values; these are them (the legacy
+   `ChatSettingsRepository.get_or_create` that read them went with the legacy
+   tier, #1216; the target's provisioning reads the same constants).
 
 2. **Runtime fallback** — when an older chat_settings row predates a
    migration (column NULL), services read the per-chat value with these

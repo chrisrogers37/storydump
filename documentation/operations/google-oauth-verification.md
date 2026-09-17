@@ -10,8 +10,8 @@ Google flags **sensitive scopes** for verification before they can be used in Pr
 
 | Scope | File | Class |
 |---|---|---|
-| `https://www.googleapis.com/auth/drive.readonly` | `src/services/integrations/google_drive_oauth.py:58` | **Sensitive** |
-| `https://www.googleapis.com/auth/userinfo.email` | (same) | Standard |
+| `https://www.googleapis.com/auth/drive.readonly` | `src/services/target/google_drive_oauth.py:90` (`SCOPE`) | **Sensitive** |
+| `https://www.googleapis.com/auth/userinfo.email` | not requested by the target flow — the legacy flow's second scope was dropped with it (`google_drive_oauth.py:28`; the widget it served is #327) | Standard |
 
 The `drive.readonly` scope is what triggers the warning. Issue [#327](https://github.com/chrisrogers37/storydump/issues/327) audited the alternatives (`drive.file`, `drive.metadata.readonly`) and concluded that `drive.readonly` is the minimum viable scope — `drive.file` would break folder browsing (user media predates the app), and `drive.metadata.readonly` blocks file downloads (which we need to upload to Instagram). With scope-narrowing off the table, **verification submission is the only path to clear the warning** for non-developer users.
 

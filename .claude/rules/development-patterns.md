@@ -1,43 +1,22 @@
 ---
 paths:
   - "src/**/*.py"
-  - "cli/**/*.py"
+  - "storydump_cli/**/*.py"
 ---
 
 # Development Patterns
 
-## Service Layer Pattern
+## Service Layer (the target tier)
 
-Services orchestrate business logic and call repositories. They do NOT contain SQL queries or import models directly (except for type hints).
-
-```python
-class MyService(BaseService):
-    def __init__(self):
-        super().__init__()
-        self.repo = MyRepository()  # Dependency injection
-```
-
-## Service Execution Tracking
-
-All service methods should use `track_execution`:
-
-```python
-def my_method(self, param: str):
-    with self.track_execution("my_method", input_params={"param": param}) as run_id:
-        result = self._do_work(param)
-        self.set_result_summary(run_id, {"processed": 1, "success": True})
-        return result
-```
-
-## Error Handling
-
-Let BaseService handle logging — just raise exceptions:
-
-```python
-item = self.repo.get_by_id(item_id)
-if not item:
-    raise ValueError(f"Item {item_id} not found")
-```
+The legacy `BaseService`/repository layering (`src/services/base_service.py`,
+`src/repositories/`, `track_execution`) was deleted in the legacy tear-out
+(#1216). A target-tier service is a module under `src/services/target/` whose
+functions take the unit of work (`src/services/target/unit_of_work.py`) and
+write their SQL by hand under it; the models in `src/models/target/` exist for
+schema parity, never as an ORM. Follow the module you are extending — the
+executors (`command_executors.py`), the readers (`readers.py`, `ops_views.py`),
+the lanes (`work_loop.py`) — and raise `StorydumpError` subclasses
+(`src/exceptions/`) rather than logging and swallowing.
 
 ## Logging
 
@@ -50,10 +29,10 @@ logger.error(f"Failed: {error}", exc_info=True)
 # Levels: DEBUG, INFO, WARNING, ERROR, CRITICAL
 ```
 
-## Image Processing
+## Media
 
 Instagram Story specs: 9:16 aspect ratio (ideal), 1080x1920 resolution, max 100MB, JPG/PNG/GIF.
-Use `ImageProcessor.validate_image()` and `ImageProcessor.optimize_for_instagram()`.
+The media type is decided by suffix in the target's Drive adapter (`src/services/target/google_drive_adapter.py`); the legacy `ImageProcessor` went with the legacy tier (#1216).
 
 ## Security Patterns
 

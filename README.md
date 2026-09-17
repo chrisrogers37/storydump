@@ -192,12 +192,14 @@ pytest -m integration
 ```
 storydump/
 ├── src/                    # Main application code
+│   ├── api/               # The API (FastAPI): routes, auth, the command port
+│   ├── channels/          # Telegram transport and webhook registration
 │   ├── config/            # Configuration management
-│   ├── models/            # Database models
-│   ├── repositories/      # Data access layer
-│   ├── services/          # Business logic
+│   ├── models/target/     # Declarative models (schema parity with the migrations)
+│   ├── services/target/   # The target tier: lanes, jobs, the publish pipeline, views
 │   ├── utils/             # Utility functions
-│   └── main.py            # Application entry point
+│   ├── worker.py          # The worker's composition root
+│   └── main.py            # The worker entrypoint (dispatches to worker.py)
 ├── storydump_cli/         # the `storydump` console (a client of the API)
 ├── tests/                 # Test suite
 ├── scripts/               # Database scripts

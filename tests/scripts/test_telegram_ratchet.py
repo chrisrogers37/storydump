@@ -63,9 +63,9 @@ class TestItCountsTheThingNotTheString:
     def test_a_telegram_module_that_never_says_telegram_IS_counted(self, tmp_path):
         """The mirror image, and the more dangerous direction.
 
-        `src/services/core/telegram_operation_state.py` is a real module on the
-        tree whose text contains no literal "telegram" — a substring predicate
-        misses it entirely. Over-counting reads as protection; under-counting
+        `src/services/core/telegram_operation_state.py` was a real module on the
+        tree (until the legacy tier's deletion, #1216) whose text contained no
+        literal "telegram" — a substring predicate misses that shape entirely. Over-counting reads as protection; under-counting
         is a hole.
         """
         _tree(tmp_path, {"src/services/core/telegram_state.py": "STATES = {'a'}\n"})

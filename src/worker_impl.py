@@ -1,10 +1,11 @@
 """The worker-implementation gate contract (#942) — a side-effect-free leaf.
 
-Which composition root `python -m src.main` (the Procfile `worker` line) runs.
-The Procfile never changes; arming is the M.3 step-4 decision, made by an
-operator setting WORKER_IMPL=target on the service — a config flip with
-instant rollback, the same dormant-until-armed shape as the migration
-runner's preDeployCommand (railway.toml).
+Which composition root `python -m src.main` (the Procfile `worker` line) runs
+— historically: arming was the M.3 step-4 decision, an operator setting
+WORKER_IMPL=target on the service (2026-08-24). Since the legacy tier's
+deletion (#1216) there is one root and `src.main` runs it under either label;
+this contract survives only to refuse an unknown value, until phase 02 of the
+tear-out retires the variable and this module.
 
 This lives OUTSIDE `src.main` because the contract has two consumers with
 opposite import budgets: `src.main` enforces it (and imports the world
@@ -14,8 +15,8 @@ import-time settings floor, to read four strings. Stdlib-only on purpose;
 anything heavier added here re-couples the instrument to what it measures.
 
 Values are matched EXACTLY: any other spelling refuses at boot rather than
-guessing, because an operator who typo'd the arm must get a crash loop they
-notice, never a legacy worker they believe is the target.
+guessing, because an operator who typo'd the variable must get a crash loop
+they notice, never a worker booting under a value nobody meant.
 """
 
 import sys
@@ -43,8 +44,8 @@ def resolve_worker_impl(env) -> str:
     print(
         f"FATAL: {WORKER_IMPL_VAR}={raw!r} is not a worker implementation. "
         f"Valid values, matched exactly: {WORKER_IMPL_LEGACY!r} (the default "
-        f"when unset) or {WORKER_IMPL_TARGET!r}. Refusing to guess which "
-        f"worker should serve.",
+        f"when unset) or {WORKER_IMPL_TARGET!r}. Refusing to boot under a "
+        f"value nobody meant.",
         file=sys.stderr,
     )
     raise SystemExit(2)
