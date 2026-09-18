@@ -612,6 +612,37 @@ init-db` → `78 applied`; `legacy` 16 tables, `archive` 16 snapshots, every one
 tree, no variable of either tier set: `3661 passed, 1 skipped`. The battery and CI on the rebased commit
 are recorded in the PR.
 
+**The 078 rehearsal on a Neon PITR branch** (2026-09-18 17:11–17:14 UTC; agent-driven with the owner's
+production permission, granted in chat; the M.2 spec's discipline — provenance gate, structural
+isolation, settled-state measurements). Access: the machine's Neon login had to be re-authenticated by
+the owner into the account that owns the project (`ancient-grass-50759240`, `storyline-ai-db`,
+org `org-ancient-bush-46337162`); no Neon key exists on either Railway service or in the repo.
+P4 observed, not assumed: the project's `history_retention_seconds` is **86400** — a 24-hour PITR
+window, NOT the ≥ 7 days `05` §DR states (recorded for the owner; the branch was taken at head).
+
+- Branch `br-odd-cake-ai91lhcl` (`claude/078-rehearsal-20260918-1711`), parent = the production
+  branch `br-square-frog-ai37r0qg`, LSN `A/2CE04A20`, created 17:11:38Z; endpoint
+  `ep-fancy-surf-ai21idz6` (production's is `ep-hidden-shadow-aify76h5`; the gate refuses a
+  connection string whose host is production's or not a Neon endpoint). The harness holds ONLY the
+  branch's owner connection string, obtained from `neonctl connection-string <branch name>` — the
+  production endpoint appears nowhere in its inputs; nothing is printed unredacted.
+- Pre: PostgreSQL 17.11; `current_user = neondb_owner` with `pg_has_role(…,'svc_maintenance','SET')`
+  and `has_schema_privilege(…,'archive','CREATE')` both true; ledger head 077 (77 rows), 078 pending
+  `[wrapped]`; the 16 legacy tables at production's counts (posting_history 4,642, media_items 4,619,
+  service_runs 7,527, user_interactions 11,163, schema_version 46, the hand-made table 13); legacy
+  total 43,835,392 bytes; database 72,433,664 bytes; zero archive snapshots.
+- **`apply`: 078 applied, wall-clock 3.42 s** (the whole runner invocation, one transaction). Ledger
+  row 78 `applied_by = neondb_owner` at 17:13:07Z; head 78/78.
+- Post: 16 snapshots `archive.<t>_pre_cutover_20260917`, every one owned by `svc_maintenance`; every
+  row count equal to its source (all sixteen pairs); `svc_ingress` denied SELECT on all sixteen;
+  archive total 9,461,760 bytes; database 82,018,304 bytes — **storage delta 9,584,640 bytes (9.1 MB),
+  ≤ the 42 MB ceiling** (a copy carries rows only: no indexes, no toast of its own beyond the rows).
+- Second `apply`: `0 applied`; 16 snapshots unchanged.
+- Production, read-only through the sanctioned probe after the branch apply: ledger head 077,
+  zero archive snapshots, 16 legacy tables — untouched (pasted in the PR).
+- An independent read-only verification of the branch by the Neon analyst agent (its report in the
+  PR), then the branch deleted.
+
 ## Owner-decision queue
 
 - **The API service's skipped deploys.** Railway marked `53ca6d6`, `4f2b36b`, `2369a9b` and `deb29c2`
