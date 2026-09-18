@@ -55,32 +55,13 @@ TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN=<python -c "import secrets; print(secrets.t
 
 ### Initialize Schema
 
-```bash
-# The OWNER connection string — the runner applies DDL with it
-export DATABASE_URL="postgresql://owner:pass@ep-xxx.neon.tech/storydump?sslmode=require"
-
-# A FRESH database needs four files by hand first: step 0 (the service roles,
-# then the DDL door migration 050 calls), the by-hand base the legacy lineage
-# alters from 001 on, and the one table production made by hand, which
-# migration 078 snapshots by name. Without step 0 the runner stops at 050;
-# without the hand-made table, at 078.
-# (`make init-db` runs this same sequence locally — Makefile:105-113.)
-psql "$DATABASE_URL" -q -v ON_ERROR_STOP=1 \
-  -f scripts/window/step0_bootstrap.sql -f scripts/window/step0_legacy_ddl_door.sql \
-  -f scripts/setup_database.sql -f tests/scripts/fixtures/legacy_by_hand.sql
-
-# Apply the migrations through the runner — the same command each deploy's
-# pre-deploy step runs (`railway.toml`); it keeps the ledger that
-# `storydump posture` and `storydump doctor` read. Not a psql loop.
-python -m scripts.migration_runner status
-python -m scripts.migration_runner apply
-```
-
-`apply` lists `owed (manual) 079 …` and `owed (manual) 080 …` and exits 0:
-those two are gated files (they drop the `legacy` schema and stand the
-migration window down), a deploy owes them and does not apply them, and the
-operator's sequence for them is
-[`legacy-window-close.md`](../operations/legacy-window-close.md).
+A fresh database is built by four files applied by hand and then the migration runner — the same
+sequence `make init-db` runs locally (`Makefile:105-113`). The sequence, why each file is needed
+(without step 0 the runner stops at 050; without the hand-made table, at 078) and what `apply`
+prints for the two gated files (`owed (manual) 079 …`, `owed (manual) 080 …`) are written down
+ONCE, in [`cloud-deployment.md` › Build the schema on a fresh database](cloud-deployment.md#build-the-schema-on-a-fresh-database).
+Export the OWNER connection string as `DATABASE_URL` first: the runner applies DDL with it, and
+keeps the ledger `storydump posture` and `storydump doctor` read.
 
 ### Verify Setup
 

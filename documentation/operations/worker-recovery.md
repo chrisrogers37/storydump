@@ -123,9 +123,10 @@ Three bounds on those verbs. `storydump jobs` never shows the system singletons
 (`workspace_id IS NULL` — `reap_expired`, `reconcile_ambiguous` and the rest); the `worker` block
 of `/health/scheduling` is what reads them, and `storydump health` is how to see it.
 `storydump posture`'s `role` is the **API's** connection, not the worker's — the worker states its
-own in its boot line. And `storydump doctor`'s ledger check counts every file in the checkout, so
-until the owner's window has run it names 079 and 080 as not applied: they are gated
-(`migration-runner.md`), owed by design, and no deploy applies them.
+own in its boot line. And `storydump doctor`'s ledger check reports the gated 079 and 080 as
+"owed to the owner's window" on its `ok` line until that window has run
+(`storydump_cli/commands/env.py`, `_gated_in`; `migration-runner.md`) — only an ORDINARY file the
+ledger lacks is "not applied".
 
 In the logs:
 

@@ -1050,6 +1050,77 @@ the pin, the battery and the plans):
   directive now (four tests red first, two battery mutations; the battery `ran 37 of 37`; CI green,
   3,753 passed).
 
+**Verification** (2026-09-18, `c50e395`): the pin and the pins beside it green; `ruff` clean; every
+relative link on the 56 live and changed pages resolves; battery `tests/mutations/legacy_tear_out_05.sh`
+on the committed tree in its own worktree — `ran 15 of 15`, 15 killed; the whole suite against the test
+database — `3720 passed, 1 skipped`; CI on the draft (#1322, merged with `main`) — green, run
+35402026360, `3759 passed, 1 skipped`.
+
+**Review round 1** (two lenses on `c50e395`, read-only). The adversarial lens checked about 178 claims
+against the tree — 93 citations across the five rules, 70 across the runbooks, the safety surface by
+hand — and could not falsify ONE cited behavioural claim; the never-run fence is byte-identical in both
+documents and unchanged from the parent; both slash commands name read verbs only. "Every false
+sentence I found is a sentence written WITHOUT a `path:line`." The structural lens: the pin is the right
+shape, the scope is clean (no code outside `tests/`), the archive moves follow the convention. What they
+found, folded:
+
+- **RISK (adversarial): three pages documented a bug the parent commit had fixed.** `db-status.md`,
+  `troubleshooting.md` and `worker-recovery.md` told the reader `storydump doctor` calls 079/080 "not
+  applied — deploy main"; true when the agents wrote it, false since `29537a8`. Class sweep — every live
+  sentence about doctor and the gated files (`grep -rni doctor … | grep -i "gated|not applied|owed|079"`):
+  four hits; the three corrected with the code cited (`env.py`, `_gated_in`), the fourth
+  (`migration-runner.md`) already true.
+- **RISK (adversarial): a pasteable block ended in a never-run command.** `telegram-webhook.md`'s
+  diagnostic fence ended with `storydump webhook register --drop-pending`, guarded by a trailing comment
+  (it predates this phase). Lifted out: the pasteable block only reads; arming the bot is its own
+  block, named the owner's.
+- **GAP (both): the pin was narrower than its comment.** A table in capitals (`POSTING_HISTORY` in a SQL
+  example), a deleted module in its dotted spelling (`src.services.core`) and `documentation/*.md`
+  passed unseen; the deleted paths were a hand-copy of phase 01's lists, already missing
+  `src/services/domain` and every deleted FILE; one assertion could not fail, and the `archive` filter
+  read ABSOLUTE parts — a checkout under a directory named `archive` would have had no live pages and
+  a pin passing over nothing. Now: tables case-insensitive (variables NOT — `workspaces.dry_run_mode` is
+  a live column), paths matched with `[/.]`, `documentation/`'s own pages a root, the paths imported
+  from `tests/src/test_legacy_tier_gone.py` (its redundant twin test deleted here), the filter on
+  relative parts with a real test of both directions. No new offender under the wider predicate.
+- **GAP (adversarial): an exemption covered every future mention of its name on the page.** Each
+  exemption now pins the COUNT of mentions it was read for (3, 2, 2): one more — a stale line about the
+  worker's token hiding beside the pager's — or one fewer fails and the page is read again.
+- **GAP (adversarial): the backup page had traded a documented 30-day copy for a documented 24-hour
+  window without saying so.** The rewrite dropped the scheduled off-Neon dump and the partial-restore
+  commands because the old script's `BACKUP_DIR` is a dead APPLICATION variable — the pin matched an
+  operator's own shell variable. Restored with the script's own names, framed honestly (nothing in the
+  tree schedules it; whether the owner's host still does is not something the tree can say), and the
+  restore into a SCRATCH database only.
+- **GAP/observations (adversarial):** `database.md` cited a function as a manifest key; `testing.md`
+  said a warning fails the test without the three classes `pytest.ini` ignores; four citations off by
+  one; `resume` and `posted` offered as fixes without the owner's-decision caution their neighbour
+  `cancel` carried — all corrected.
+- **Simplify (structural) — one home each:** the production read recipe stood in four pages in two
+  spellings (`--service worker` and `--service storydump`, with and without `--environment
+  production`): it lives in `reading-the-ledger.md` › The escape hatch now, with links; the four-file
+  fresh-database sequence, duplicated across both deployment guides (the agents had fixed the same
+  omission in both), lives in `cloud-deployment.md`; the Docker gate recipe lives in `AGENTS.md` ›
+  Testing, as the repository's rule says shared guidance does. `.claude/rules/database.md` loaded 172
+  lines for every one of 64 service files: its migration rules are their own rule now
+  (`.claude/rules/migrations.md`, loaded for `scripts/migrations/**` only), and `CLAUDE.md`'s table
+  lists it. The documentation index's counts re-measured (archive 49) and its two rows for directories
+  this PR deleted removed.
+- **Battery**: rewritten for the pin's new shape — 21 mutations (the three arms, the boundary, the
+  case fold, the dotted spelling, a live column read as a dead variable, the derivation, both roots,
+  the exemptions honoured, an unused exemption, a stale mention beside an exempt one, the archive
+  filter in both directions, six legacy names planted back into live pages); an interrupt no longer
+  leaves a planted page behind.
+- **Declined, with reasons:** a required-substring form of exemption (the count does the same work
+  and is simpler to read); `.github/**`, `landing/**` and non-Markdown files as roots (code and config
+  comments are the owner queue's — a documentation pin that reads YAML comments is a different
+  instrument); `test_the_names_both_tiers_use_are_not_legacy_names` stays — it is the only test that
+  fires when the target grows a table with a legacy name.
+- **Queued for the owner, from the lenses:** `src/services/target/webhook_ingress.py`'s docstring
+  ("the legacy adapter already gets this right") beside the code comments already queued; the
+  post-window pass over about ten sentences ("is dropped by 079 in the owner's window", the three
+  doctor sentences, the never-run line's comment) belongs on the window's own checklist.
+
 **Window-dependent sentences, to update once the window has run** (each is true today and says so):
 the documentation index's tear-out row ("the owner's window has not run"), the consolidated plan's Live
 status and M.3 line, `meta-app-review.md`'s discharged-constraint section, the M.2 rehearsal spec's

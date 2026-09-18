@@ -84,6 +84,8 @@ owner's act; an agent does not run it.
    by hand: `storydump story <id>` shows the state it is back in; one still awaiting approval that
    did go out is recorded with `storydump posted`, one already `approved` is stopped with
    `storydump cancel` (never-run list: the user's decision). Only then `storydump resume`.
+   `posted` and `resume` write too — `resume` restarts posting — so during a restore every one
+   of these is the owner's decision, not an agent's.
 6. **Restart the worker** (`railway whoami && railway status` first — `redeploy` acts on the
    linked environment): `railway redeploy --service worker --yes`, then
    `storydump deploys --watch --timeout 900` and `storydump health`.
@@ -118,6 +120,39 @@ the connection string is never printed. `pg_dump` must be the server's major ver
 credentials: store it as a secret. Restoring such a dump into a fresh project has never been
 rehearsed here — the `svc_*` roles, their grants and their memberships are made by the window
 bootstrap and the migrations, not carried by one database's dump — so treat that path as unproven.
+
+**Scheduling it.** Nothing in the tree runs that dump on a schedule, and with Neon's history at
+24 hours (above) an owner who schedules nothing has no copy older than a day except a marker
+branch. A nightly copy is the same command under cron on the owner's machine, with its own
+retention. The variable names are the script's own, not the application's:
+
+```bash
+# ~/scripts/storydump_dump.sh — a nightly logical dump, thirty days kept
+DUMP_DIR="$HOME/backups/storydump"; KEEP_DAYS=30
+mkdir -p "$DUMP_DIR"
+railway run --service worker --environment production -- \
+  sh -c "pg_dump \"\$DATABASE_URL\" -F c -f '$DUMP_DIR/storydump_$(date -u +%Y%m%d).dump'"
+find "$DUMP_DIR" -name 'storydump_*.dump' -mtime +$KEEP_DAYS -delete
+```
+
+```
+0 3 * * * ~/scripts/storydump_dump.sh >> ~/logs/storydump_dump.log 2>&1
+```
+
+The page this one replaced documented that script for the legacy database; a dump takes the whole
+database, so a host that still runs it is still making a complete copy. Whether one does is not
+something the tree can say — check the host.
+
+**Reading a dump, and taking one table out of it.** Into a SCRATCH database (a Neon branch, or a
+local one), never into production:
+
+```bash
+pg_restore -l storydump_YYYYMMDD.dump                                   # what the dump holds
+pg_restore -d "$SCRATCH_URL" -t post_intents storydump_YYYYMMDD.dump    # one table
+```
+
+Rows wanted back in production are then copied deliberately, as the owner, with the worker
+stopped — there is no rehearsed procedure for that here, so write it down before doing it.
 
 `make db-backup` and `make db-restore` dump and load the **local** development database named by
 `DB_*`. They never touch production.
@@ -191,7 +226,7 @@ chmod 600 railway_*.json
   decrypted by any ring entry" — `src/services/target/ig_credentials.py:102-107`,
   `drive_credentials.py:136-145`), and the Instagram refresh path flips it `expired` and its
   account `reauth_required` and commits that before it raises
-  (`src/services/target/ig_login_oauth.py:436-463`); the Drive reader deliberately flips nothing.
+  (`src/services/target/ig_login_oauth.py:437-464`); the Drive reader deliberately flips nothing.
   Each workspace then reconnects: Instagram under Settings › Accounts, Google Drive under
   Settings › Integrations. A database restore is only as good as the ring that goes with it.
 

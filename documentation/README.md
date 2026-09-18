@@ -320,11 +320,9 @@ When adding new documentation:
 | Area | Status | Files | Notes |
 |------|--------|-------|-------|
 | **Planning** | Current | 41 Markdown files: the 10-file consolidated plan, 5 increment specs, the Telegram tap plan, the CLI plan with its spec and audit, the legacy tear-out plan, 3 investigations | Plan ratified and in execution (Phase X.3 current); each spec carries a status banner |
-| **Archive** | Historical | 48 Markdown files | Completed, superseded and abandoned plans and the legacy tier's pages, indexed in `archive/README.md` |
+| **Archive** | Historical | 49 Markdown files | Completed, superseded and abandoned plans and the legacy tier's pages, indexed in `archive/README.md` |
 | **Guides** | Live | 10 guides | Quick start, deployment, cloud deployment, testing, test coverage, Instagram Login, dev env, deployment options, CI/CD, landing deploy |
 | **Operations** | Live | 15 files | Monitoring, the two outage monitors, worker recovery, backup, the migration runner, the legacy window's close, the Telegram webhook, runtime database roles, reading the ledger, troubleshooting, Meta App Review + callbacks, Google OAuth verification, preview deployments |
-| **Updates** | Empty | 0 files | The three January 2026 notes moved to `archive/updates/` on 2026-09-18 |
-| **Security** | Historical | 1 file | The 2026-01/02 review of the legacy tier; the model the system is built to is the plan's `07` and `02` §7 |
 | **API Docs** | Served | — | `GET /openapi.json` on a running API |
 
 Counted on 2026-09-18 (`find documentation/<area> -name '*.md'`).

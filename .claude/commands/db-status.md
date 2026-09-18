@@ -56,10 +56,11 @@ grep -l "^-- runner:manual" scripts/migrations/*.sql
 A file the second command lists (079, 080) is GATED: the deploy owes it and does
 not apply it; the owner applies it in a window
 (`documentation/operations/legacy-window-close.md`). Its absence from the ledger
-is expected, not drift. `storydump doctor` does not know this — it reports those
-files as "not applied" with the fix "deploy main", which does not apply to them.
-Any OTHER file in the tree that the ledger lacks is a deploy that has not
-happened or a predeploy that failed: report it.
+is expected, not drift. `storydump doctor` reads the same directive
+(`storydump_cli/commands/env.py`, `_gated_in`): its ledger line stays `ok` and
+names those files as "owed to the owner's window". Any OTHER file in the tree
+that the ledger lacks is what doctor calls "not applied — deploy main": a deploy
+that has not happened or a predeploy that failed. Report it.
 
 ## 3. The job queue
 

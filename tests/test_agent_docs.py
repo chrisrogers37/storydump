@@ -286,7 +286,8 @@ def test_no_other_file_carries_an_unpinned_never_run_list():
 # could no longer reach. Each list below has ONE home: the tables are the
 # inventory literal minus the names the TARGET reuses, derived from the
 # target's own metadata; the variables are phase 02's dead list; the paths are
-# checked to BE gone, so the list cannot outlive a path somebody brings back.
+# phase 01's deleted packages and files, which its own test asserts are gone
+# (`tests/src/test_legacy_tier_gone.py`).
 # History keeps its names: `documentation/archive/`, `documentation/planning/`
 # and `CHANGELOG.md` are outside the live roots.
 # ---------------------------------------------------------------------------
@@ -301,30 +302,36 @@ LIVE_ROOTS = (
     "documentation/guides",
 )
 
-#: Module paths the tear-out deleted (phases 01 and 02).
-DELETED_PATHS = (
-    "src/services/core",
-    "src/services/integrations",
-    "src/services/media_sources",
-    "src/repositories",
-    "src/config/database",
-)
+#: Live too, but only the directory's OWN pages: `documentation/README.md`,
+#: `ROADMAP.md` — below them are the archive and the plans, which are history.
+LIVE_FLAT_ROOTS = ("documentation",)
 
 #: A live page ABOUT the legacy lineage that is still in the tree — the
 #: migration files 001-050, the lane that replays them, the snapshots 078 took
-#: — may name one of its tables. Each entry is a claim with its reason, and an
-#: entry the page no longer uses fails (no stale exemptions).
-LEGACY_NAME_EXEMPT: dict[str, dict[str, str]] = {
+#: — may name one of its tables. Each entry is a claim with its reason AND the
+#: number of times the page names it: an exemption is read for the mentions
+#: that were there, so one more (a stale line about the worker's token hiding
+#: beside the pager's) or one fewer fails, and the page is read again.
+LEGACY_NAME_EXEMPT: dict[str, dict[str, tuple[int, str]]] = {
     "documentation/operations/posting-monitor.md": {
-        "TELEGRAM_BOT_TOKEN": "the environment of `tg-post.sh`, the fleet host's"
-        " pager script OUTSIDE this repository (the monitor knows it only as its"
-        " --notify-command); the page says whose variable it is",
+        "TELEGRAM_BOT_TOKEN": (
+            3,
+            "the environment of `tg-post.sh`, the fleet host's pager script"
+            " OUTSIDE this repository (the monitor knows it only as its"
+            " --notify-command); the page says whose variable it is",
+        ),
     },
     "documentation/guides/landing-vercel-deployment.md": {
-        "TELEGRAM_BOT_TOKEN": "the LANDING app's own server variable on Vercel"
-        " (landing/src/lib/telegram.ts:1) — not the worker's or the API's",
-        "ADMIN_TELEGRAM_CHAT_ID": "the landing app's waitlist-notification chat"
-        " (landing/src/lib/telegram.ts:2)",
+        "TELEGRAM_BOT_TOKEN": (
+            2,
+            "the LANDING app's own server variable on Vercel"
+            " (landing/src/lib/telegram.ts:1) — not the worker's or the API's",
+        ),
+        "ADMIN_TELEGRAM_CHAT_ID": (
+            2,
+            "the landing app's waitlist-notification chat"
+            " (landing/src/lib/telegram.ts:2)",
+        ),
     },
 }
 
@@ -343,20 +350,41 @@ def _legacy_only_tables() -> tuple[str, ...]:
     return tuple(t for t in LEGACY_TABLES if t not in reused)
 
 
+def _deleted_paths() -> tuple[str, ...]:
+    """Every package and module the tear-out deleted: phase 01's own lists,
+    each asserted gone where they live. A module is matched without its
+    suffix, so `src/config/database` catches the dotted-path spelling and the
+    `.py` one alike."""
+    from tests.src.test_legacy_tier_gone import DELETED_FILES, DELETED_PACKAGES
+
+    return DELETED_PACKAGES + tuple(f.removesuffix(".py") for f in DELETED_FILES)
+
+
 def _retired_variables() -> tuple[str, ...]:
     from tests.src.test_legacy_settings_gone import DEAD_VARIABLES
 
     return DEAD_VARIABLES
 
 
+def _pattern(name: str) -> re.Pattern[str]:
+    """How one legacy name is recognised on a page. A table is a whole word in
+    any case (`POSTING_HISTORY` in a SQL example is the same table); a deleted
+    path in either spelling (`src/services/core`, `src.services.core`); a
+    dead variable a whole word as written — NOT case-folded, because
+    `workspaces.dry_run_mode` is a live target column and `DRY_RUN_MODE` a dead
+    variable. A snapshot's name (`archive.posting_history_pre_cutover_20260917`)
+    is not its table's: `_` is a word character, so no boundary falls there."""
+    if name in _legacy_only_tables():
+        return re.compile(rf"\b{name}\b", re.IGNORECASE)
+    if name in _deleted_paths():
+        return re.compile(re.escape(name).replace("/", "[/.]"))
+    return re.compile(rf"\b{name}\b")
+
+
 def _legacy_names_in(text: str) -> set[str]:
-    """Every legacy-only table, deleted path and dead variable `text` names.
-    A snapshot's name (`archive.posting_history_pre_cutover_20260917`) is not
-    its table's: `_` is a word character, so the boundary does not fall there."""
-    hits = {t for t in _legacy_only_tables() if re.search(rf"\b{t}\b", text)}
-    hits |= {p for p in DELETED_PATHS if p in text}
-    hits |= {v for v in _retired_variables() if re.search(rf"\b{v}\b", text)}
-    return hits
+    """Every legacy-only table, deleted path and dead variable `text` names."""
+    names = _legacy_only_tables() + _deleted_paths() + _retired_variables()
+    return {name for name in names if _pattern(name).search(text)}
 
 
 def _live_pages() -> list[Path]:
@@ -364,7 +392,11 @@ def _live_pages() -> list[Path]:
     for root in LIVE_ROOTS:
         path = ROOT / root
         pages += [path] if path.is_file() else sorted(path.rglob("*.md"))
-    return [p for p in pages if "archive" not in p.parts]
+    for root in LIVE_FLAT_ROOTS:
+        pages += sorted((ROOT / root).glob("*.md"))
+    # RELATIVE parts: an ancestor of the checkout named `archive` must not
+    # empty the list and let the pin pass over nothing
+    return [p for p in pages if "archive" not in p.relative_to(ROOT).parts]
 
 
 def test_the_live_roots_cover_the_pages_an_agent_and_an_operator_read():
@@ -379,10 +411,34 @@ def test_the_live_roots_cover_the_pages_an_agent_and_an_operator_read():
         ".claude/PROJECT_CONTEXT.md",
         "documentation/operations/worker-recovery.md",
         "documentation/guides/deployment.md",
+        "documentation/README.md",
+        "documentation/ROADMAP.md",
     } <= pages
-    assert not [
-        p for p in pages if "/archive/" in p or p.startswith("documentation/planning")
-    ]
+    assert not [p for p in pages if p.startswith("documentation/planning")], (
+        "the plans are history: only the directory's own pages are live"
+    )
+
+
+def test_an_archive_under_a_live_root_is_history_and_an_ancestor_named_archive_is_not(
+    tmp_path, monkeypatch
+):
+    """`_live_pages` leaves out an `archive/` directory UNDER a live root (none
+    exists today; the day one does, its pages are history) — and reads the
+    checkout's own path relatively, so a checkout that lives under a directory
+    named `archive` still has live pages."""
+    root = tmp_path / "archive" / "repo"
+    operations = root / "documentation" / "operations"
+    (operations / "archive").mkdir(parents=True)
+    (root / "documentation" / "guides").mkdir()
+    (root / ".claude").mkdir()
+    for name in ("CLAUDE.md", "AGENTS.md", "README.md"):
+        (root / name).write_text("x")
+    (operations / "live.md").write_text("x")
+    (operations / "archive" / "old.md").write_text("`posting_queue`")
+    monkeypatch.setattr("tests.test_agent_docs.ROOT", root)
+    pages = {str(p.relative_to(root)) for p in _live_pages()}
+    assert "documentation/operations/live.md" in pages
+    assert "documentation/operations/archive/old.md" not in pages
 
 
 def test_no_live_page_names_the_legacy_tier():
@@ -401,22 +457,20 @@ def test_no_live_page_names_the_legacy_tier():
     )
 
 
-def test_every_legacy_name_exemption_is_still_used():
-    stale = {}
+def test_every_legacy_name_exemption_is_exact():
+    """An exemption nothing uses any more goes; one whose page names the thing
+    MORE or FEWER times than when it was granted is read again."""
+    wrong = {}
     for rel, names in LEGACY_NAME_EXEMPT.items():
         page = ROOT / rel
-        present = _legacy_names_in(page.read_text()) if page.exists() else set()
-        unused = sorted(set(names) - present)
-        if unused:
-            stale[rel] = unused
-    assert not stale, f"exemptions nothing uses any more — remove them: {stale}"
-
-
-def test_the_deleted_paths_are_gone():
-    back = [
-        p for p in DELETED_PATHS if (ROOT / p).exists() or (ROOT / f"{p}.py").exists()
-    ]
-    assert not back, f"{back} exist again — they are not deleted paths any more"
+        text = page.read_text() if page.exists() else ""
+        for name, (count, _reason) in names.items():
+            found = len(_pattern(name).findall(text))
+            if found != count:
+                wrong[f"{rel}: {name}"] = (
+                    f"exempted for {count} mention(s), found {found}"
+                )
+    assert not wrong, f"exemptions to re-read (or remove): {wrong}"
 
 
 def test_the_names_both_tiers_use_are_not_legacy_names():
@@ -435,8 +489,9 @@ def test_the_names_both_tiers_use_are_not_legacy_names():
 
 
 def test_the_pin_sees_a_planted_legacy_name(tmp_path):
-    """Positive control: the predicate finds each kind of name, and passes
-    over a target name and a snapshot's name."""
+    """Positive control: the predicate finds each kind of name in the spellings
+    a page would use, and passes over a target name, a target COLUMN that
+    shares a dead variable's letters, and a snapshot's name."""
     page = tmp_path / "page.md"
     page.write_text(
         "Rows wait in `posting_queue`; the reader is `src/repositories/queue.py`;"
@@ -447,7 +502,17 @@ def test_the_pin_sees_a_planted_legacy_name(tmp_path):
         "src/repositories",
         "WORKER_IMPL",
     }
+    # a SQL example in capitals, and a module named the way Python imports it
+    assert _legacy_names_in("SELECT * FROM POSTING_HISTORY;") == {"posting_history"}
+    assert _legacy_names_in("`from src.services.core import x`") == {
+        "src/services/core"
+    }
+    assert _legacy_names_in("the module `src.config.database`") == {
+        "src/config/database"
+    }
     assert not _legacy_names_in(
         "`media_items` and `users` are target tables;"
-        " `archive.posting_history_pre_cutover_20260917` is a snapshot."
+        " `workspaces.dry_run_mode` is a live column;"
+        " `archive.posting_history_pre_cutover_20260917` is a snapshot;"
+        " `TARGET_TELEGRAM_BOT_TOKEN` is the target's own variable."
     )

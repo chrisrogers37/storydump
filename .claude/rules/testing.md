@@ -70,9 +70,12 @@ DB_NAME=storyline_ai TEST_DB_NAME=storyline_test REQUIRE_TEST_DATABASE=1 \
   fast path. CI runs `pytest tests/` on Python 3.10 with `postgres:15` and
   `REQUIRE_TEST_DATABASE=1`.
 - `asyncio_mode = auto`: an `async def test_…` needs no marker.
-- `filterwarnings = error`: a warning fails the test. An unclosed client or
+- `filterwarnings = error`: a warning fails the test — EXCEPT the three classes
+  `pytest.ini:30-32` ignores (`DeprecationWarning`, `PendingDeprecationWarning`,
+  `FutureWarning`), so a deprecated API does not fail CI. An unclosed client or
   event loop is a `ResourceWarning`, and it can fail whichever test happens to
-  be running when it is collected (`tests/conftest.py:124`). Close what you open.
+  be running when it is collected (`pytest_sessionstart`, `tests/conftest.py:125`).
+  Close what you open.
 - `tests/scripts/` refuses pytest-xdist (`tests/scripts/conftest.py:62`): the
   `svc_*` roles are cluster-scoped, so the directory serializes on one
   cluster-wide advisory lock.

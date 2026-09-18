@@ -59,17 +59,9 @@ result is going to be reported anywhere.
 The gates need a PostgreSQL 15, a login that is a superuser or holds
 `CREATEROLE` and `CREATEDB`, and a `psql` on your `PATH` — the fixtures apply
 SQL files through it (`tests/scripts/conftest.py:1093-1108`). A throwaway
-container shaped like CI's is enough (`AGENTS.md`, *Testing*):
-
-```bash
-docker run -d --name storydump-test-pg -p 65433:5432 \
-  -e POSTGRES_USER=test_user -e POSTGRES_PASSWORD=test_password \
-  -e POSTGRES_DB=storyline_test postgres:15
-PATH="/opt/homebrew/opt/postgresql@15/bin:$PATH" \
-DB_HOST=localhost DB_PORT=65433 DB_USER=test_user DB_PASSWORD=test_password \
-DB_NAME=storyline_ai TEST_DB_NAME=storyline_test REQUIRE_TEST_DATABASE=1 \
-  pytest tests/scripts/
-```
+container shaped like CI's is enough. The `docker run` line and the environment
+the gates read are written down once, in [`AGENTS.md` › Testing](../../AGENTS.md#testing),
+so the two pages cannot disagree about a port or a variable.
 
 ## The Test Databases
 
