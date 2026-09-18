@@ -21,20 +21,18 @@ class TestSettingsDefaults:
     def test_log_level_defaults_to_info(self):
         assert Settings.model_fields["LOG_LEVEL"].default == "INFO"
 
-    def test_instagram_publish_limit_fallback_defaults_to_100(self):
-        assert Settings.model_fields["INSTAGRAM_PUBLISH_LIMIT_FALLBACK"].default == 100
+    def test_tap_admission_defaults_to_120_per_minute(self):
+        assert Settings.model_fields["TARGET_TAP_ADMISSION_PER_MINUTE"].default == 120
 
-    def test_cloud_upload_retention_hours_defaults_to_24(self):
-        assert Settings.model_fields["CLOUD_UPLOAD_RETENTION_HOURS"].default == 24
-
-    def test_media_sync_interval_defaults_to_300(self):
-        assert Settings.model_fields["MEDIA_SYNC_INTERVAL_SECONDS"].default == 300
-
-    def test_cloud_storage_provider_defaults_to_cloudinary(self):
-        assert Settings.model_fields["CLOUD_STORAGE_PROVIDER"].default == "cloudinary"
+    def test_the_session_cookie_is_secure_by_default(self):
+        assert Settings.model_fields["SESSION_COOKIE_SECURE"].default is True
 
     def test_optional_fields_default_to_none(self):
-        assert Settings.model_fields["FACEBOOK_APP_ID"].default is None
+        assert (
+            Settings.model_fields["TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN"].default
+            is None
+        )
+        assert Settings.model_fields["TARGET_TELEGRAM_BOT_USERNAME"].default is None
         assert Settings.model_fields["FACEBOOK_APP_SECRET"].default is None
         assert Settings.model_fields["CLOUDINARY_CLOUD_NAME"].default is None
         assert Settings.model_fields["CLOUDINARY_API_KEY"].default is None
@@ -48,9 +46,6 @@ class TestSettingsDatabaseUrl:
 
     def _make_settings(self, **overrides):
         defaults = {
-            "TELEGRAM_BOT_TOKEN": "test-token-123",
-            "TELEGRAM_CHANNEL_ID": -1001234567,
-            "ADMIN_TELEGRAM_CHAT_ID": 12345,
             "DB_USER": "storydump_user",
             "DB_NAME": "storydump",
             "TEST_DB_NAME": "storydump_test",

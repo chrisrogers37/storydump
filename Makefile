@@ -1,4 +1,4 @@
-.PHONY: help install test clean create-db drop-db reset-db init-db setup-db check-health run dev
+.PHONY: help install install-dev test test-unit test-integration test-quick test-failed test-watch clean create-db drop-db reset-db init-db setup-db check-db check-health run dev logs db-shell db-backup db-restore env-example quickstart validate-env
 
 # Load environment variables from .env file
 ifneq (,$(wildcard ./.env))
@@ -44,16 +44,15 @@ help: ## Show this help message
 	@echo "  DB_NAME:     $(DB_NAME)"
 	@echo "  DB_USER:     $(DB_USER)"
 
-install: ## Install Python dependencies and CLI
+install: ## Install the dependencies, the package and the `storydump` CLI (the `cli` extra)
 	@echo "$(GREEN)Installing dependencies...$(NC)"
 	pip install -r requirements.txt
-	pip install -e .
+	pip install -e '.[cli]'
 	@echo "$(GREEN)✓ Installation complete$(NC)"
 
-install-dev: ## Install development dependencies
-	@echo "$(GREEN)Installing development dependencies...$(NC)"
-	pip install -r requirements.txt
-	pip install -e ".[dev]"
+install-dev: install ## `install`, plus the lint and scan tools CI runs (ruff, bandit, pip-audit)
+	@echo "$(GREEN)Installing the lint and scan tools...$(NC)"
+	pip install ruff bandit pip-audit
 	@echo "$(GREEN)✓ Development installation complete$(NC)"
 
 test: ## Run tests with pytest (auto-creates test database)
@@ -103,10 +102,13 @@ drop-db: ## Drop the database (WARNING: destructive)
 	@PGPASSWORD="$(DB_PASSWORD)" dropdb $(PG_OPTS) --if-exists $(DB_NAME) 2>/dev/null || true
 	@echo "$(GREEN)✓ Database dropped$(NC)"
 
-init-db: ## Initialize database schema (requires database to exist)
+init-db: ## Build the schema the way the lineage lane proves it: the by-hand base, then every runner file
 	@echo "$(GREEN)Initializing database schema...$(NC)"
-	@PGPASSWORD="$(DB_PASSWORD)" psql $(PG_OPTS) -d $(DB_NAME) -f scripts/setup_database.sql 2>&1 || \
-		(echo "$(RED)✗ Failed to initialize schema. Check database connection and permissions.$(NC)" && exit 1)
+	@PGPASSWORD="$(DB_PASSWORD)" psql $(PG_OPTS) -d $(DB_NAME) -v ON_ERROR_STOP=1 \
+		-f scripts/setup_database.sql -f tests/scripts/fixtures/legacy_by_hand.sql 2>&1 || \
+		(echo "$(RED)✗ Failed to build the by-hand base. Check database connection and permissions.$(NC)" && exit 1)
+	@DATABASE_URL="$(APP_DB_URL)" python -m scripts.migration_runner apply || \
+		(echo "$(RED)✗ The migration runner failed; see its output above.$(NC)" && exit 1)
 	@echo "$(GREEN)✓ Schema initialized$(NC)"
 
 setup-db: create-db init-db ## Create database and initialize schema
@@ -130,18 +132,17 @@ check-health: ## Health of the deployed API (storydump health)
 	@echo "$(GREEN)Running health checks...$(NC)"
 	storydump health
 
-run: ## Run the main application
-	@echo "$(GREEN)Starting Storydump...$(NC)"
+run: ## Run the worker (python -m src.main) — it posts to Instagram; see the safety rules
+	@echo "$(GREEN)Starting the worker...$(NC)"
 	python -m src.main
 
-dev: ## Run in development mode with environment validation
-	@echo "$(GREEN)Starting in development mode...$(NC)"
+dev: ## Run the worker against .env (no gate on production's health)
+	@echo "$(GREEN)Starting the worker in development mode...$(NC)"
 	@if [ ! -f .env ]; then \
 		echo "$(RED)✗ .env file not found. Copy .env.example to .env and configure it.$(NC)"; \
 		exit 1; \
 	fi
 	@echo "$(GREEN)✓ Environment file found$(NC)"
-	@make check-health
 	python -m src.main
 
 logs: ## View application logs (tail -f)
@@ -192,9 +193,9 @@ quickstart: env-example install setup-db ## Quick start: setup everything for fi
 	@echo "  4. Run: make run"
 	@echo ""
 
-validate-env: ## Validate environment configuration
+validate-env: ## Load the settings from the environment and .env, the way every process does
 	@echo "$(GREEN)Validating environment configuration...$(NC)"
-	@python -c "from src.config.settings import get_settings; get_settings()" && \
+	@python -c "from src.config.settings import settings" && \
 		echo "$(GREEN)✓ Configuration is valid$(NC)" || \
 		echo "$(RED)✗ Configuration validation failed$(NC)"
 

@@ -148,16 +148,16 @@ DB_NAME=storydump
 DB_USER=storydump_user
 DB_PASSWORD=your_local_password
 
-TELEGRAM_BOT_TOKEN=your_test_bot_token
-TELEGRAM_CHANNEL_ID=your_test_channel_id
-ADMIN_TELEGRAM_CHAT_ID=your_admin_chat_id
+# The runtime login (the API and the worker) and the owner login (the runner)
+TARGET_DATABASE_URL=postgresql://storydump_user:your_local_password@localhost:5432/storydump
+DATABASE_URL=postgresql://storydump_user:your_local_password@localhost:5432/storydump
 
-POSTS_PER_DAY=3
-POSTING_HOURS_START=14
-POSTING_HOURS_END=2
+# The bot the worker sends with (optional: without it the Telegram channel parks)
+TARGET_TELEGRAM_BOT_TOKEN=your_test_bot_token
+TARGET_TELEGRAM_BOT_USERNAME=your_test_bot
 
+ENCRYPTION_KEY=<a Fernet key>
 LOG_LEVEL=DEBUG
-DRY_RUN_MODE=true
 ```
 
 Production environment variables are stored in the Railway dashboard (never in files).

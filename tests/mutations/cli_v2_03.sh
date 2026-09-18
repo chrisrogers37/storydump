@@ -10,7 +10,7 @@ ROOT=${STORYDUMP_ROOT:-/Users/chris/Projects/storydump}
 PY=/Users/chris/Projects/storydump/.venv/bin/python
 cd "$ROOT" || exit 2
 KEY=$($PY -c "from cryptography.fernet import Fernet;print(Fernet.generate_key().decode())")
-UNIT="env -u DB_HOST -u DB_USER -u DB_PASSWORD -u DB_NAME -u TEST_DB_NAME -u REQUIRE_TEST_DATABASE PYTHONDONTWRITEBYTECODE=1 TELEGRAM_BOT_TOKEN=dummy TELEGRAM_CHANNEL_ID=1 ADMIN_TELEGRAM_CHAT_ID=1 DB_PORT=65432 ENCRYPTION_KEY=$KEY $PY -m pytest -q -p no:cacheprovider --no-cov -x"
+UNIT="env -u DB_HOST -u DB_USER -u DB_PASSWORD -u DB_NAME -u TEST_DB_NAME -u REQUIRE_TEST_DATABASE PYTHONDONTWRITEBYTECODE=1 DB_PORT=65432 ENCRYPTION_KEY=$KEY $PY -m pytest -q -p no:cacheprovider --no-cov -x"
 mkdir -p /tmp/claude
 
 check() {  # name file old new runner test-selector

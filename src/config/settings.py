@@ -107,12 +107,14 @@ class Settings(BaseSettings):
     def __init__(self, **kwargs):
         """Load settings, converting any validation failure into SettingsError.
 
-        WHY THIS EXISTS (#775). Fields here are bare-named -- TELEGRAM_BOT_TOKEN
-        and friends -- so pydantic reads whatever the ambient environment holds
-        under those names, from a process this project does not control. On a
-        validation failure its ValidationError renders ``input_value=`` with a
-        truncated copy of the input, which printed part of an unrelated real
-        credential for four different operators in one evening.
+        WHY THIS EXISTS (#775). Fields here are bare-named -- ENCRYPTION_KEY,
+        TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN and friends -- so pydantic reads
+        whatever the ambient environment holds under those names, from a
+        process this project does not control. On a validation failure its
+        ValidationError renders ``input_value=`` with a truncated copy of the
+        input, which printed part of an unrelated real credential for four
+        different operators in one evening (the field then was the legacy
+        tier's bot token, retired with that tier; the shape is any field's).
 
         WHY NOT SecretStr, which is the obvious tool and what the issue first
         suggested: measured, it does not fix this shape. The observed error is
@@ -150,8 +152,8 @@ class Settings(BaseSettings):
         the chain is therefore the load-bearing half here; redacting the message
         alone would accomplish nothing, since the value was never in it.
 
-        DORMANT AS DECLARED, and measured: 42 fields, zero complex-typed, zero
-        aliases. The trigger is a REQUIRED list/dict/nested-model field (an
+        DORMANT AS DECLARED, and measured: 29 fields, zero complex-typed, zero
+        aliases, none required. The trigger is a REQUIRED list/dict/nested-model field (an
         ``Optional``-wrapped one degrades safely to the redacted validation
         path), which is an ordinary thing to add and carries no warning that it
         opens a credential path -- so the boundary covers it now rather than
@@ -173,9 +175,6 @@ class Settings(BaseSettings):
         env_file=".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore"
     )
 
-    # Meta Graph API
-    META_GRAPH_API_VERSION: str = "v21.0"
-
     # Database Configuration
     DATABASE_URL: Optional[str] = None  # Full URL (overrides DB_* components if set)
     DB_HOST: str = "localhost"
@@ -188,22 +187,20 @@ class Settings(BaseSettings):
     DB_MAX_OVERFLOW: int = 20
     TEST_DB_NAME: str = "storydump_test"
 
-    # Telegram Configuration (REQUIRED)
-    TELEGRAM_BOT_TOKEN: str
-    TELEGRAM_CHANNEL_ID: int
-    ADMIN_TELEGRAM_CHAT_ID: int
-
-    # Target tier. Prefixed because these pair with TARGET_TELEGRAM_BOT_TOKEN,
-    # and because this class reads whatever the ambient environment holds under
-    # a bare name (see the note at the top of this class): an operator setting a
-    # bare TELEGRAM_ name gets no signal about which tier it belongs to.
+    # NO FIELD IS REQUIRED (the tear-out, phase 02; #1222). The legacy tier
+    # demanded three bare Telegram variables of every process — the web
+    # service, the tests, the CLI — for loops only the worker ran; they went
+    # with it. A process needs only what it reads: the worker refuses to boot
+    # without TARGET_DATABASE_URL (src/worker.py, exit 2) and the API answers
+    # 503 on every data route without it (src/api/app.py); neither is a
+    # Settings field, because both are read from the process environment at
+    # RUN time, never at import.
     #
-    # During the cutover the target bot HAD to be a different bot from
-    # TELEGRAM_BOT_TOKEN's, because the legacy scheduler polled that one and a
-    # bot cannot be polled and webhooked at once. With the worker on
-    # WORKER_IMPL=target nothing polls, and the product runs ONE bot
-    # (storydump_app_bot — documentation/operations/telegram-webhook.md); the
-    # legacy variable survives only until #1222 retires it.
+    # The Telegram fields are prefixed TARGET_ because they pair with
+    # TARGET_TELEGRAM_BOT_TOKEN (read by the worker and the API directly), and
+    # because this class reads whatever the ambient environment holds under a
+    # bare name (see the note at the top of this class). The product runs ONE
+    # bot (storydump_app_bot — documentation/operations/telegram-webhook.md).
     #
     # The value Telegram echoes in X-Telegram-Bot-Api-Secret-Token, set when the
     # target webhook is registered. Optional and absent by default, and the
@@ -224,36 +221,10 @@ class Settings(BaseSettings):
     # at a tap a second (`05`'s revision rule). The web route keeps S.2's 30.
     TARGET_TAP_ADMISSION_PER_MINUTE: int = 120
 
-    # Number of Telegram updates processed concurrently (PTB
-    # Application.concurrent_updates). Each concurrent callback runs in its own
-    # asyncio Task with its own per-task DB session (see BaseRepository), so this
-    # is the dominant multiplier on peak concurrent DB connections from button
-    # taps. Keep it comfortably within the connection pool
-    # (DB_POOL_SIZE + DB_MAX_OVERFLOW) alongside the background loops; unbounded
-    # concurrency would exhaust the pool.
-    TELEGRAM_MAX_CONCURRENT_UPDATES: int = 8
-
-    # Outbound Telegram API pacing (PTB AIORateLimiter, wired in
-    # TelegramService). The limiter's default buckets mirror Telegram's
-    # published budgets (30 msgs/s overall, 20 msgs/min per group); disabling
-    # it is the no-redeploy rollback lever — bursts then hit raw RetryAfter
-    # walls again. MAX_RETRIES bounds how many residual RetryAfter errors
-    # (budget consumed by senders the limiter cannot see, e.g. one-shot OAuth
-    # bots on the same token) the limiter absorbs before surfacing the error.
-    TELEGRAM_RATE_LIMITER_ENABLED: bool = True
-    TELEGRAM_RATE_LIMITER_MAX_RETRIES: int = 3
-
-    # Media Configuration
-    MEDIA_DIR: str = "/tmp/media"
-
-    # Backup Configuration
-    BACKUP_DIR: str = "/backup/storydump"
-    BACKUP_RETENTION_DAYS: int = 30
-
     # Meta app registration (deployment-level; one app, many tenants).
-    # Per-tenant account selection lives in `instagram_accounts` + `api_tokens`.
-    FACEBOOK_APP_ID: Optional[str] = None  # Facebook Login OAuth (legacy)
-    FACEBOOK_APP_SECRET: Optional[str] = None  # Facebook Login OAuth (legacy)
+    # Per-tenant account selection lives in the target tier's `ig_accounts`
+    # and `oauth_credentials`.
+    FACEBOOK_APP_SECRET: Optional[str] = None  # Facebook Login OAuth
     INSTAGRAM_APP_ID: Optional[str] = None  # Instagram Login OAuth (preferred)
     INSTAGRAM_APP_SECRET: Optional[str] = None  # Instagram Login OAuth (preferred)
     OAUTH_REDIRECT_BASE_URL: Optional[str] = None  # e.g., "https://api.storydump.app"
@@ -306,62 +277,26 @@ class Settings(BaseSettings):
         """`TRUSTED_PROXY_HOSTS` as the list uvicorn's middleware expects."""
         return [h.strip() for h in self.TRUSTED_PROXY_HOSTS.split(",") if h.strip()]
 
-    # Google Drive OAuth (Phase 05 Multi-Tenant)
+    # Google Drive OAuth: the client the workspace grant is minted and
+    # refreshed with (the worker warns at boot without both).
     GOOGLE_CLIENT_ID: Optional[str] = None
     GOOGLE_CLIENT_SECRET: Optional[str] = None
-    # In Testing mode, Google silently expires refresh tokens after 7 days.
-    # Set to 0 after moving to Production mode (refresh tokens don't expire).
-    GOOGLE_REFRESH_TOKEN_TTL_DAYS: int = 7
 
-    # Cloudinary Configuration (Phase 2 Only)
-    CLOUD_STORAGE_PROVIDER: str = "cloudinary"  # Currently only cloudinary supported
+    # Cloudinary: the transit store for a story's frame on its way to Meta.
+    # The worker reads the three from the environment at composition
+    # (`_transit_from_env`); absent means the publish kind parks by name.
     CLOUDINARY_CLOUD_NAME: Optional[str] = None
     CLOUDINARY_API_KEY: Optional[str] = None
     CLOUDINARY_API_SECRET: Optional[str] = None
-    CLOUD_UPLOAD_RETENTION_HOURS: int = 24  # Delete cloud uploads after this time
-    # Bound the Cloudinary upload HTTP call so a stalled upload cannot hold the
-    # autopost background task (and its per-item operation lock) open forever.
-    CLOUD_UPLOAD_TIMEOUT_SECONDS: int = 120
 
-    # Instagram API Rate Limiting (Phase 2)
-    # Fallback daily publishing limit, used ONLY when Meta's
-    # content_publishing_limit endpoint is unreachable. The authoritative
-    # limit is fetched live per-account (Meta has changed it 25→50→100 and it
-    # varies per account); Meta's current documented default is 100 API-published
-    # posts per rolling 24h.
-    INSTAGRAM_PUBLISH_LIMIT_FALLBACK: int = 100
-
-    # Security (Phase 2 - required for token encryption)
+    # Security: the Fernet key(s) the stored credentials are encrypted with.
     ENCRYPTION_KEY: Optional[str] = None  # Fernet key for encrypting tokens in DB
     ENCRYPTION_KEYS: Optional[str] = (
         None  # Comma-separated Fernet keys (newest first) for key rotation
     )
 
-    # Media Sync (loop cadence is system-wide; per-chat enable lives in chat_settings)
-    MEDIA_SYNC_INTERVAL_SECONDS: int = 300  # 5 minutes
-
     # Logging
     LOG_LEVEL: str = "INFO"
-
-    # AI Caption Generation
-    ANTHROPIC_API_KEY: Optional[str] = None
-    CAPTION_MODEL: str = "claude-haiku-4-5-20251001"
-
-    @property
-    def meta_graph_base(self) -> str:
-        """Base URL for Facebook Graph API calls (FB Login flow / legacy)."""
-        return f"https://graph.facebook.com/{self.META_GRAPH_API_VERSION}"
-
-    @property
-    def meta_ig_graph_base(self) -> str:
-        """Base URL for Instagram Graph API calls (IG Login flow).
-
-        Tokens issued by the Instagram Login OAuth flow are valid only against
-        graph.instagram.com, not graph.facebook.com. Use this for content
-        publishing and read endpoints when the account auth_method is
-        'instagram_login'.
-        """
-        return f"https://graph.instagram.com/{self.META_GRAPH_API_VERSION}"
 
     @property
     def database_url(self) -> str:

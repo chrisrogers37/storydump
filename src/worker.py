@@ -2,10 +2,11 @@
 
 `python -m src.worker` is the process the deployed `worker` entrypoint runs:
 `src.main` dispatches here unconditionally since the legacy tier's deletion
-(the tear-out, phase 01; #1216 — before it, only on `WORKER_IMPL=target`,
-#942, armed in production on 2026-08-24). It builds
-the engine, the per-lane claim connections, the clock election, the lease
-heartbeat and the injected seams, and dispatches over the `work_loop` registry.
+(the tear-out, phase 01; #1216 — before it, only once an operator had armed
+the target root, #942, in production on 2026-08-24; the switch itself retired
+in phase 02). It builds the engine, the per-lane claim connections, the clock
+election, the lease heartbeat and the injected seams, and dispatches over the
+`work_loop` registry.
 
 Composition is split from connection on purpose: :func:`compose` assembles the
 whole object graph without touching the network, so the graph's properties —
@@ -31,6 +32,7 @@ from src.config.settings import settings
 import os
 import signal
 import socket
+import sys
 from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -798,11 +800,24 @@ def main() -> None:
     from src.config.settings import settings as _settings
 
     env = dict(os.environ)
+    url = unit_of_work.engine_url_from_env(env)
+    if url is None:
+        # The settings-built fallback went with the legacy tier (the tear-out,
+        # phase 02): a worker booted without its database would otherwise run
+        # the target root against whatever the legacy `DB_*` fields pointed at.
+        # Refuse by name, loudly, the way the API's data routes do (503).
+        print(
+            f"FATAL: {unit_of_work.DATABASE_URL_VAR} is unset. The worker runs the"
+            " target tier only and has no database to run it against; set"
+            f" {unit_of_work.DATABASE_URL_VAR} on this service. Refusing to boot.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
     config = WorkerConfig(
         web_app_origin=_settings.web_app_origin,
         lane_concurrency=lane_concurrency_from_env(env),
     )
-    engine = unit_of_work.create_engine(unit_of_work.engine_url_from_env(env))
+    engine = unit_of_work.create_engine(url)
     transport = None
     token = env.get(reg.TOKEN_VAR)
     # The Drive read leg (#982). Armed unconditionally: it needs no env of its

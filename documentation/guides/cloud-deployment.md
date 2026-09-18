@@ -137,11 +137,11 @@ Configure these in the Railway dashboard for **both** services:
 
 | Variable | Description | Example |
 |---|---|---|
-| `DATABASE_URL` | Full Neon connection string (includes SSL) | `postgresql://user:pass@ep-xxx.neon.tech/storydump?sslmode=require` |
-| `TELEGRAM_BOT_TOKEN` | From BotFather | `123456:ABC-DEF1234ghIkl` |
-| `TELEGRAM_CHANNEL_ID` | Your Telegram channel (negative) | `-1001234567890` |
-| `ADMIN_TELEGRAM_CHAT_ID` | Your personal chat ID | `123456789` |
-| `MEDIA_DIR` | Local media path (can be dummy on cloud) | `/tmp/media` |
+| `DATABASE_URL` | The database-OWNER Neon connection string the migration runner applies with (includes SSL) | `postgresql://owner:pass@ep-xxx.neon.tech/storydump?sslmode=require` |
+| `TARGET_DATABASE_URL` | The runtime login the API and the worker run as (no DDL rights) | `postgresql://app:pass@ep-xxx.neon.tech/storydump?sslmode=require` |
+| `TARGET_TELEGRAM_BOT_TOKEN` | The bot the worker sends with, from BotFather | `123456:ABC-DEF1234ghIkl` |
+| `TARGET_TELEGRAM_BOT_USERNAME` | That bot's @username, without the @ | `storydump_app_bot` |
+| `TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN` | The secret the API expects Telegram to echo on every delivery | a long random string |
 | `ENCRYPTION_KEY` | Fernet key for token encryption | Generate with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
 
 ### Database (Alternative to DATABASE_URL)
@@ -352,7 +352,7 @@ From a laptop with a token minted under Settings › API tokens:
 |---------|----------|
 | Database connection fails | Check `DATABASE_URL` or `DB_*` vars. Ensure `DB_SSLMODE=require` for Neon. |
 | Neon connection limit exceeded | Reduce `DB_POOL_SIZE` to 3 and `DB_MAX_OVERFLOW` to 2. |
-| Telegram bot not responding | Verify `TELEGRAM_BOT_TOKEN` is correct. Check Railway worker logs. |
+| Telegram bot not responding | Verify `TARGET_TELEGRAM_BOT_TOKEN` is the bot named by `TARGET_TELEGRAM_BOT_USERNAME`; `storydump health` reports the webhook. Check Railway worker logs. |
 | `MEDIA_DIR does not exist` | Add `mkdir -p /tmp/media` to build command. |
 | `ENCRYPTION_KEY not configured` | Generate one: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
 | OAuth callback fails | Check `OAUTH_REDIRECT_BASE_URL` matches your Railway web domain. |

@@ -109,12 +109,14 @@ pip install -r requirements.txt && pip install -e .
 The repo's `Makefile` targets assume `./venv/`. (`.venv/` is also gitignored, so
 a local one will not be committed, but the Makefile will not find it.)
 
-`src/config/settings.py` requires `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHANNEL_ID`
-and `ADMIN_TELEGRAM_CHAT_ID` **even for the web service and the tests** —
-those entry points load settings (#1222). The `storydump` CLI does not: it
-imports only `src/services/target/vocabulary.py` and needs no variable but its
-token. Dummy values are sufficient for anything that is not the worker. Tests
-additionally need `ENCRYPTION_KEY`, a Fernet key.
+`src/config/settings.py` requires **no variable** (the tear-out's phase 02;
+#1222): every field has a default, so the web service, the tests and the
+`storydump` CLI load with an empty environment. A process needs what it reads:
+the worker refuses to boot without `TARGET_DATABASE_URL` (exit 2, naming it),
+the API answers 503 on every data route without it, and the CLI imports only
+`src/services/target/vocabulary.py` and needs no variable but its token. Tests
+additionally need `ENCRYPTION_KEY`, a Fernet key. `.env.example` names every
+variable something reads, and a test fails if it names one nothing does.
 
 `.env`, `.env.test` and `landing/.env.local` are gitignored and never committed.
 
@@ -233,9 +235,6 @@ DB_NAME=storyline_ai TEST_DB_NAME=storyline_test REQUIRE_TEST_DATABASE=1 \
 - **API:** `uvicorn src.api.app:app` → health at `GET /health`, schema at `/openapi.json`.
 - **Landing / dashboard:** `npm --prefix landing run dev` → http://localhost:3000;
   the BFF proxies to `BACKEND_URL`.
-
-Dashboard routes under `/api/onboarding/*` require Telegram WebApp `init_data`
-(HMAC-signed with `TELEGRAM_BOT_TOKEN`) plus an active membership for the chat.
 
 Environment variables are per-service in cloud deployment — set them on **both**
 the worker and the API.

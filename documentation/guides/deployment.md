@@ -35,29 +35,16 @@ This checklist covers everything you need to do **outside of code** to get Story
   4. Search for your bot username
   5. Give it "Post Messages" permission
 
-### Get Channel ID
-
-- [ ] Add **@userinfobot** to your channel
-- [ ] Forward any message from the channel to @userinfobot
-- [ ] **Save the channel ID** (negative number like `-1001234567890`)
-- [ ] Remove @userinfobot from channel
-
-### Get Your Admin Chat ID
-
-- [ ] Send any message to **@userinfobot**
-- [ ] **Save your user ID** (positive number like `123456789`)
-- [ ] This becomes your `ADMIN_TELEGRAM_CHAT_ID`
-
 ### Test Bot
 
 - [ ] Send `/start` to your bot
 - [ ] Verify it responds (if not, service isn't running yet - that's okay)
 
-**Deliverables:**
+**Deliverables** (the approval group is connected per workspace on the web, so
+there is no channel or admin chat to configure):
 ```
-TELEGRAM_BOT_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
-TELEGRAM_CHANNEL_ID=-1001234567890
-ADMIN_TELEGRAM_CHAT_ID=123456789
+TARGET_TELEGRAM_BOT_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
+TARGET_TELEGRAM_BOT_USERNAME=your_bot
 ```
 
 ---
@@ -118,19 +105,6 @@ Media is sourced from Google Drive when running on Railway:
 
 Google Drive OAuth will be configured during the onboarding wizard (`/start` command).
 
-### Local Development
-
-For local development, create a media directory:
-```bash
-mkdir -p /tmp/media
-```
-
-**Deliverable:**
-```
-MEDIA_SOURCE_TYPE=google_drive
-MEDIA_DIR=/tmp/media
-```
-
 ---
 
 ## 4. Railway Deployment (15 minutes)
@@ -162,26 +136,22 @@ Railway requires two services from the same repo:
 Set these on **both** services in the Railway dashboard:
 
 ```bash
-# Required
-DATABASE_URL=postgresql://user:pass@ep-xxx.neon.tech/storydump?sslmode=require
-TELEGRAM_BOT_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
-TELEGRAM_CHANNEL_ID=-1001234567890
-ADMIN_TELEGRAM_CHAT_ID=123456789
-MEDIA_DIR=/tmp/media
+# The database: the OWNER login the migration runner applies the schema with
+# (railway.toml's preDeployCommand), and the runtime login the services run as
+DATABASE_URL=postgresql://owner:pass@ep-xxx.neon.tech/storydump?sslmode=require
+TARGET_DATABASE_URL=postgresql://app:pass@ep-xxx.neon.tech/storydump?sslmode=require
+
+# The bot (documentation/operations/telegram-webhook.md for the webhook)
+TARGET_TELEGRAM_BOT_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
+TARGET_TELEGRAM_BOT_USERNAME=your_bot
+TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN=<a long random string>
+
 ENCRYPTION_KEY=<generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())">
-
-# Schedule
-POSTS_PER_DAY=3
-POSTING_HOURS_START=14
-POSTING_HOURS_END=2
-REPOST_TTL_DAYS=30
-
-# Safety (start with dry run!)
-DRY_RUN_MODE=true
 LOG_LEVEL=INFO
 
-# OAuth (Web service)
+# OAuth and the web front end (Web service)
 OAUTH_REDIRECT_BASE_URL=https://your-app.up.railway.app
+WEB_APP_URL=https://app.example.com
 ```
 
 ### Validate Deployment
@@ -426,8 +396,8 @@ railway logs --service worker | tail -50
 # Verify token with Telegram API
 curl https://api.telegram.org/bot<YOUR_TOKEN>/getMe
 
-# Check bot has admin rights in channel
-# Check TELEGRAM_CHANNEL_ID is negative
+# The webhook's verdict, from the API's health report
+storydump health
 ```
 
 ### Database Connection Failed
