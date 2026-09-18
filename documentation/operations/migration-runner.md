@@ -67,7 +67,10 @@ with the new checksum).
   too. Each once read as prose, which for a `manual` file is the whole hazard. A
   byte-order mark at the start of a file is dropped before the first line is
   read; a file that is not UTF-8, or that holds a NUL byte (UTF-16 without its
-  mark decodes as UTF-8 and its markers as prose), is refused by name.
+  mark decodes as UTF-8 and its markers as prose), is refused by name. The rule
+  binds prose too: a comment never OPENS with `runner` followed by a marker
+  word, in any spelling — write "the runner's manual door", not
+  `-- runner-manual files wait …`.
 - Any other `-- runner:<word>` — a hard failure at discovery, naming the file.
   Every door (`apply`, `adopt`, `status`, `parity`) and the test suite's
   collection refuse the corpus until it is fixed: a misspelt marker (a stray

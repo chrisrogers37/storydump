@@ -22,6 +22,9 @@
 -- on a legacy relation, row type or function (a view, a foreign key, a
 -- default, a function signature: what CASCADE would take with the schema,
 -- unseen), naming it; measured in production on 2026-09-18: nothing does.
+-- A function BODY that names `legacy.x` records no dependency: neither this
+-- check nor CASCADE sees it, and it would survive the drop broken — measured
+-- the same day: no function, view or default outside `legacy` names it.
 -- A refusal leaves `legacy` intact (one transaction: the file is `wrapped`).
 -- What it cannot see and the drop takes anyway: the legacy tables' own
 -- indexes (77 in production), constraints, defaults and sequence values — a
@@ -65,8 +68,9 @@ BEGIN
   END IF;
   -- what CASCADE would take from OUTSIDE the schema: any dependent of a legacy
   -- relation, row type or function whose own schema is not `legacy` (a view,
-  -- a foreign key, a default, a function signature); an object class this
-  -- CASE does not name counts too — a refusal to read, never a drop
+  -- a foreign key, a default, a function signature). The CASE places each
+  -- kind of dependent in its schema; a kind it does not name cannot be placed
+  -- and counts too — a refusal to read, never a drop
   SELECT count(DISTINCT (d.classid, d.objid)),
          string_agg(DISTINCT pg_describe_object(d.classid, d.objid, d.objsubid), '; ')
     INTO n, deps
@@ -84,9 +88,12 @@ BEGIN
            WHEN 'pg_attrdef'::regclass THEN (SELECT v.relnamespace FROM pg_attrdef x JOIN pg_class v ON v.oid = x.adrelid WHERE x.oid = d.objid)
            WHEN 'pg_type'::regclass THEN (SELECT x.typnamespace FROM pg_type x WHERE x.oid = d.objid)
            WHEN 'pg_proc'::regclass THEN (SELECT x.pronamespace FROM pg_proc x WHERE x.oid = d.objid)
+           WHEN 'pg_policy'::regclass THEN (SELECT v.relnamespace FROM pg_policy x JOIN pg_class v ON v.oid = x.polrelid WHERE x.oid = d.objid)
+           WHEN 'pg_statistic_ext'::regclass THEN (SELECT x.stxnamespace FROM pg_statistic_ext x WHERE x.oid = d.objid)
+           WHEN 'pg_publication_rel'::regclass THEN (SELECT v.relnamespace FROM pg_publication_rel x JOIN pg_class v ON v.oid = x.prrelid WHERE x.oid = d.objid)
          END, 0) <> rn.oid;
   IF n <> 0 THEN
-    RAISE EXCEPTION '3g refused: % object(s) outside legacy depend on it and CASCADE would take them unseen: %', n, deps;
+    RAISE EXCEPTION '3g refused: % object(s) outside legacy — or of a kind this check cannot place in a schema — depend on it, and CASCADE would take them unseen: %', n, deps;
   END IF;
   FOREACH t IN ARRAY ARRAY[
     'api_tokens', 'audit_log', 'category_post_case_mix', 'chat_settings',

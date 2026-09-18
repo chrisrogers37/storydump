@@ -35,7 +35,10 @@ transaction).
 A branch off production is a copy; nothing here touches production — with ONE way to get it
 wrong, closed below: `neonctl connection-string` with an EMPTY branch name resolves to the
 project's default branch, which is production. So the branch name is demanded (`${NAME:?}`)
-wherever it is used, and the host guard fails closed. The Neon CLI is signed in to the account
+wherever it is used, and the host guard fails closed. The guard's first arm is production's
+endpoint id as the repository records it (`scripts/observed_use.py`, `EXPECTED_HOST`; read
+2026-09-18) — if the Neon console shows another compute endpoint on the `production` branch,
+fix the arm before running. The Neon CLI is signed in to the account
 that owns the project (`npx --yes neonctl@latest me`); every call takes the organization and
 project ids. Save the block as `rehearse.sh` and run it with `bash -eu rehearse.sh`, top to
 bottom: under `-e` a failed substitution ends the script, and the connection string never
