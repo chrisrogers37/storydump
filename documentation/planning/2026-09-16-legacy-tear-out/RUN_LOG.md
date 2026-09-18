@@ -60,7 +60,7 @@ API service skipped the two kickoff commits — see the gate above).
 | 01 delete the legacy code and its tests | `01_delete-the-code.md` | **DONE** — merged `2369a9b` (2026-09-17 23:57 UTC); the worker deployed it (SUCCESS); the API service SKIPPED it behind a red `main` check (the midnight skip, below) | #1316 | green at `e6e854b` (3653 passed, 1 skipped) |
 | 02 retire the settings, the entry point and the config | `02_settings-and-entry-points.md` | **DONE** — merged `f59fe43` (2026-09-18 15:44 UTC); round 1 and a fresh re-verify folded; the deploys under the phase's entry | #1319 | green at `9d14304` (3680 passed, 1 skipped) |
 | 03 the 3f snapshot migration and the ratchet's file rule | `03_snapshot-migrations.md` | **DONE** — rehearsed on a Neon PITR branch, merged `3ffa750` (2026-09-18 17:23 UTC), 078 applied in production by the deploy at 17:24 UTC; the probe under the phase's entry | #1318 | green at `6da8d00` (3700 passed, 1 skipped) |
-| 04 the gated drop and stand-down | `04_drop-and-stand-down.md` | built (branch `tear-out/04-drop-and-stand-down`, `0db363b`); lenses dispatched on `0ff46e9`; the PR's MERGE needs #1202 closed by the owner; the window itself is the owner's (F7) | #1321 (draft) | the runs below |
+| 04 the gated drop and stand-down | `04_drop-and-stand-down.md` | **READY, merge owner-gated** — built `0ff46e9`; three review rounds folded through `6ab4253` (the entry below); the MERGE waits on #1202 closed by the owner (the plan's precondition); merging arms nothing — the deploy owes 079/080; the window itself is the owner's (F7) | #1321 | green at `6ab4253` (3749 passed, 1 skipped) |
 | 05 the documentation's end state | `05_docs-end-state.md` | pending | — | — |
 
 ## Phase 01 — delete the legacy code and its tests
@@ -786,6 +786,167 @@ ever does). What both found, folded in `9a94f04` and the commit after it:
   of the SET chain, and 080 keeps both. The epic's risk-table row "both services' predeploys fail on
   every push" was claimed covered by a test that did not exercise it — it does now.
 
+**Re-verify after the fold** (a fresh lens on `bb0175a`, read-only, no database — the sandbox refuses
+the port, so every database-backed claim was verified by reading, collection and static counts;
+`git diff 0ff46e9 bb0175a --stat`: 11 files, +494/−111). Round 1's eight claims, each measured:
+
+- **The near-miss rule — CLOSED.** The regex consulted only where `_MARKER_RE` fails; a synthetic
+  corpus, one file per spelling: the seven must-refuse spellings REFUSED, the BOM read, UTF-16 refused
+  "not UTF-8", four must-stay-prose lines silent; the REAL corpus — 82 files, 5,900 lines, 131 marker
+  lines — 0 would-refuse hits, `discover_migrations` → 80 files, manual = [79, 80]. Still silent, and
+  recorded: `-- runner-manual`, `-- runner=manual`, a bare `-- runner:`, `-- runners:manual`, a
+  zero-width space, an em dash, a full-width colon, a string literal — and a BOM-less UTF-16-LE file,
+  whose bytes are valid UTF-8 (ASCII with a NUL after every character): it discovered as an ordinary
+  marker-less file and failed loudly at apply (psycopg2 refuses a NUL), never silently.
+- **`apply_manual` over a wedged tree — CLOSED.** The below check sits behind the session advisory
+  lock, the ledger and the integrity check, so a concurrent `apply` cannot race it; the message names
+  the file and the way through.
+- **079's precondition — CLOSED.** The relkinds exclude indexes, sequences and TOAST (production's 16
+  tables + 77 indexes + uuid-ossp count 16); with equal counts, `legacy EXCEPT ALL archive = ∅` proves
+  equality (multiplicities ≤ everywhere and sums equal); `md5(row::text)` is never NULL and both sides
+  render in one session; every column type across `setup_database.sql` + 001–050 renders, no column is
+  named `x` or `y`, 078 copies with `CREATE TABLE … AS TABLE`; the two `%I` bind positionally. The four
+  arms are killed by TWO clauses (insert and delete by the count, update and column-added by the
+  content), which is why the battery's `-k '… and update'` kills two arms at once; the "not present to
+  compare" clause is reachable only with a stray relation compensating a missing table — defensive,
+  untested, fine.
+- **080's guard — CLOSED.** The ledger exists before the DO block runs (`_ensure_ledger` first, and the
+  below check needs 001–078 recorded); `adopted` is rightly excluded — `adopt` would record 079
+  wherever its postconditions already hold, the by-hand drop the guard exists to refuse; `repaired` is
+  an operator's status, not proof (`repair` flips any row the operator names).
+- **The roleid-side gate line — CLOSED, with a caveat.** On 15 the assertion is exact (five rows, all
+  exempt, and `_memberships_of` asserts they exist); on 17 the auto-grants are exempt by
+  `admin_option`. The caveat: an explicit `GRANT svc_x TO <owner> WITH ADMIN OPTION` was exempt too,
+  indistinguishable from the auto-grant. The battery's plain `GRANT svc_worker TO current_user` is a
+  real kill on both versions.
+- **The runbook — PARTLY.** The mechanism is fail-closed, measured in bash and zsh: `URL=$(…
+  "${NAME:?}" …)` with `NAME` unset kills the SUBSHELL and the parent continues with `URL` empty, which
+  the `case` guard's `""` arm refuses (unset, exit); the comment said `${NAME:?}` stops the shell — false
+  for that line — and `exit 1` closes an interactive shell. The host guard measured: a branch endpoint
+  passes, production's is refused (its id is the repository's own record, `scripts/observed_use.py`),
+  an `@` in a password fails closed, a non-Neon host is refused; no path to production constructible.
+  `railway redeploy`'s flags as claimed (`-s`, `--yes`, no `--environment`); the worker carries
+  `DATABASE_URL` by `railway.toml:14-16`; step 4's `TARGET_DATABASE_URL` is a harmless inconsistency.
+- **The battery — PARTLY at `bb0175a`.** Parsed by the shell with `check()` overridden: 31 checks,
+  every `-k` collects, 30 anchors exactly once — and mutation 25's anchor stale (old = 0) since the
+  079-row clause. No equivalent mutant: mutation 2's loop uses `applied_head`, defined before its
+  anchor; mutation 8's 8-space anchor cannot match the 12-space copy; the BOM mutation is real
+  (`str.strip` does not strip U+FEFF, `\s` does not match it). Already closed on the tree before the
+  report: `5e39a53` re-anchored it and `bc2cc4a` gave the legacy clause its own test; `ran 31 of 31`,
+  31 killed, on `bc2cc4a`.
+- **Regressions and prose — PARTLY.** 70 passed without a database (one error: a test that needs it).
+  Three counts were pre-fold: the CHANGELOG's "the drop and its two refusals, the stand-down and its
+  refusal", the gate test's docstring, and this ledger's "twelve" gate lines (080 prints eleven; the
+  runbook had it right).
+
+Nine findings: one gap (the anchor — closed before the report), one low gap (the ADMIN exemption),
+seven observations (the NUL file; `-- runner-manual` and `-- runner=manual` as prose; the runbook's
+explanation; `repaired` in 080's header; the prose; CASCADE's dependents OUTSIDE the schema — a
+`pg_depend` precheck suggested; a wrong `python` under `railway run` fails loudly, never dangerously).
+
+**Fold 3** (`2ade589`), every finding taken, with the class sweeps:
+
+- **079 refuses an outside dependent.** Any dependent of a legacy relation, row type or function whose
+  own schema is not `legacy` — a view, a foreign key, a default, a function signature: what CASCADE
+  would take with the schema, unseen — refuses the drop, naming it; an object class the query does not
+  know counts (a refusal to read, never a drop). Measured in production the same day with the query as
+  written: **0** outside dependents, **294** in-schema dependency rows excluded (the arms do real work);
+  the wider probe beside it: 16 tables + 77 indexes + uuid-ossp in `legacy`, 0 user triggers, 0 views
+  anywhere mentioning `legacy.`, 0 foreign keys into it, 0 row-type dependents. The test plants a
+  `public` view over a legacy table: "outside legacy … v_over_legacy", `legacy` and the view intact,
+  the ledger untouched. The mutation drops the clause; killed.
+- **The runner refuses a NUL-bearing file at discovery, by name**, beside the not-UTF-8 refusal (test:
+  UTF-16-LE without its mark → "NUL"; mutation: the check → `if False`, killed). **The near-miss rule
+  reads a dash or `=` for the colon** (`[:=\-]?`; two more parametrized spellings; the mutation narrows
+  it back to `:?`, killed). `sorted(KNOWN_MARKERS and _KNOWN_WORDS)` → `sorted(_KNOWN_WORDS)`.
+- **The gate line is exact on its grantor.** The auto-grant arm is `m.admin_option AND m.grantor = 10`
+  — the bootstrap superuser, oid 10 on every cluster; measured in production: oid 10 is `cloud_admin`,
+  every auto-grant row's grantor is `cloud_admin`, the bootstrap's explicit `svc_migration` grant is
+  `admin = f, grantor = neondb_owner`. Class sweep of the predicate: four copies (080's comment, the
+  test's assert, the runbook's rehearsal and production gates) — `grep -c "m.admin_option AND
+  m.grantor = 10"` → 1, 1, 2; all changed. The mutation plants `GRANT svc_worker TO <owner> WITH ADMIN
+  OPTION` in 080 (its grantor is the owner on 15 and 17); killed.
+- **080's header** says what `repaired` means to its guard: a status only `repair` writes, over a row
+  the operator names — a deliberate act.
+- **The runbook.** The rehearsal block is saved and run with `bash -eu rehearse.sh` (a failed
+  substitution ends the script; the connection string never enters an interactive shell); the comment
+  says what closes an unset name; the guard "ends the script". Class sweep of "stops the shell": one
+  hit, fixed (round 1's entry above keeps its wording as history).
+- **Prose.** Sweep of "two refusals" / "its refusal" / "twelve lines" / "admin or not" across the tree:
+  the CHANGELOG entry (both), the gate test's docstring (both), this ledger's build entry ("eleven"
+  now), the test's gate comment — four sites, all fixed; every other "twelve" in the tree is an older
+  entry's or an investigation's.
+- **Declined:** nothing this round.
+
+**Verification on `2ade589`** (2026-09-18, the worktree, no variable of either tier set):
+
+- The gate (20), the runner's suites (57), the lane (14), the ratchet (26), the doc pins (11) and the
+  deploy guardrails (3) under the Docker test database (PG 15): **131 passed**.
+- `ruff format --check` / `ruff check`: clean.
+- Battery `tests/mutations/legacy_tear_out_04.sh` on the committed tree, in its own worktree:
+  **`ran 35 of 35`, 35 killed** — no SURVIVED, NOT APPLIED, NO TEST SELECTED or KILLED BY ERROR.
+- The whole suite against the test database: **3710 passed, 1 skipped** (44 deselected: the local egress-floor deselect and CI's five).
+- CI: **green at `2ade589`** — run 35382101176, `3749 passed, 1 skipped, 5 deselected`; every check green (Lint, Test, Changelog Check, Security Scan, Front End, Vercel). (On `bc2cc4a`, before the fold, two attempts each failed ONE load-sensitive test the
+  phase does not touch — `test_w2_transport_gate.py::…delivered_by_the_live_worker` asserting
+  `'superseded' == 'sent'`, then `test_l8_webhook_admission.py::…200_distinct_updates…`, which had
+  failed on `main` at `53ca6d6` on 2026-09-16 — with 3,744 passed each time; the two commits after the
+  green run at `bb0175a` changed only the gate test and the battery.)
+
+**A third lens, scoped to the fold** (`git diff bc2cc4a 2ade589`; read-only, no database): all eight
+of round 2's findings CLOSED on the tree. What it executed: the near-miss regex over the real corpus —
+82 files, 131 matching lines, every one a real marker, **0 would-refuse** — and over a synthetic one
+(the two new spellings refuse; a bare `-- runner:`, `-- runners:manual`, a mid-sentence mention,
+`-- runner-side check` and the door's own command line stay prose); `discover_migrations` → 80 files,
+manual = [79, 80]; 15 no-database pins green; the battery parsed with `check()` overridden — 35 anchors
+exactly once, `EXPECTED` = 35, every `-k` collects (nine for the near-miss parametrization). What it
+proved by reading: the NUL guard sits after the only decode and before the only parse, split and
+`Migration(` construction; the gate predicate is byte-identical in its four copies; the creator
+auto-grant's grantor is `BOOTSTRAP_SUPERUSERID` by PostgreSQL's own source (`CreateRole()` →
+`AddRoleMems(…, BOOTSTRAP_SUPERUSERID, …)`, admin true, set false; `pg_authid.dat`, oid 10), so the arm
+is exact on 16+ and inert on 15, and the battery's `WITH ADMIN OPTION` plant lands with grantor = the
+owner on both; under `bash -eu` an unset `NAME` ends the script at the assignment (measured), and in a
+bare shell the `case` guard refuses the empty host; every prose count true (four drop-refusal tests,
+the second in four ways; three stand-down refusals; eleven gate lines printed and eleven asserted).
+The precheck class by class — defaults, constraints, indexes, triggers, rules, row types, array
+types, sequences: each placed by an arm or filtered by `deptype`; a comment records no dependency; a
+function BODY naming `legacy.x` records none either (CASCADE does not take it; the header scopes its
+claim to signatures). **Findings:** one gap — no arm for a policy, an extended-statistics object or a
+publication membership ON a legacy table, so an in-schema object of those kinds would be counted AND
+described as "outside legacy" (fail-closed; the lineage holds none) — and five observations: the new
+query never executed inside the lens; `-- runner-manual …` now refuses as the OPENING of a prose
+comment; `adopt`-then-`repair` turns an `adopted` 079 row into one 080's guard accepts (two deliberate
+acts, each with a written reason; no change proposed); the host guard hard-codes production's
+endpoint id; the function-body case. **Verdict: nothing is a blocker; ready to merge once CI's gate
+run is green.**
+
+**Fold 4** (`6ab4253`): three arms place a policy, a statistics object and a publication membership,
+and the refusal says "outside legacy — or of a kind this check cannot place in a schema"; 079's header
+states the function-body case; `migration-runner.md` binds prose to the near-miss rule (a comment
+never opens with `runner` and a marker word, in any spelling); the runbook names where the guard's
+endpoint id comes from (`scripts/observed_use.py`, `EXPECTED_HOST`) and when to fix the arm. The
+lens's "never executed" is answered by this session's runs: the precheck lifted VERBATIM from the
+file, read-only in production → **0** (before the fold: 0, with 294 in-schema rows excluded); measured
+beside it, every one 0: function bodies outside `legacy` naming `legacy.` or `uuid_generate`, view and
+materialized-view definitions naming it, policies / statistics / publication memberships on legacy
+tables, defaults outside it calling uuid-ossp, role or database `search_path` settings naming it.
+NOT re-lensed — the diff is three CASE arms, one message and two documentation sentences, and its
+verification is the gate, the battery and CI below. **Declined, with reasons:** a live endpoint
+comparison in the rehearsal (this `neonctl` shows a branch's host only through its connection string,
+and the rehearsal should never hold production's; the name guard and `bash -eu` stand in front of the
+host guard); a status check inside `repair` (pre-existing, every file's; two deliberate acts with
+written reasons).
+
+**Verification on `6ab4253`:** the gate (20), the runner's suites (57), the lane (14), the ratchet
+(26), the doc pins (11), the deploy guardrails (3) and the legacy-CLI pins (4) under the Docker test
+database: **135 passed**. Battery on the committed tree, in its own worktree: **`ran 35 of 35`, 35
+killed**. CI: **green at `6ab4253`** — run 35384235627, `3749 passed, 1 skipped, 5 deselected`; every check green.
+
+**Convergence:** round 1 — one blocker, four risks, five gaps; round 2 — one gap (closed before the
+report), one low gap, seven observations; round 3 — one gap on a fail-closed path, five observations,
+"ready to merge". Each round closed everything the one before it found; none reopened a closed
+finding.
+
+
 ## Owner-decision queue
 
 - **The PITR window is 24 hours, not 7 days.** The project's `history_retention_seconds` is 86400;
@@ -824,4 +985,27 @@ ever does). What both found, folded in `9a94f04` and the commit after it:
   session nothing holds. A comment-and-build-line edit, the owner's call on when.
 - **The Makefile's `APP_DB_URL` does not URL-encode `DB_PASSWORD`** (pre-existing): a password
   containing `@` mis-parses into the host. Local development only.
-- The tear-out's own gates as they arise: phase 04's window (F7 — the owner runs it; the PR ships the files, the runner's manual mode and the runbook).
+- **The epic's closure list (#1216's Blocks), measured 2026-09-18 — an agent closes none of them:**
+  #1205 and #1222 closed with phase 02. #941 (the sixteenth legacy table "with no disposition") has
+  one: `archive.posting_history_dedup_archive_pre_cutover_20260917` exists in production (078) and 079
+  refuses without it — closable once the window has run. #945 (a dashboard write path that "dies at
+  3g") and #1046 / #1113 (instruments that read the `legacy` schema) are to be read against the tier
+  phase 01 deleted and the schema the window drops. #739 (the Facebook Login credential path) is NOT
+  met by the tear-out: its own acceptance grep still finds five references on `main`, all in the
+  TARGET tier — `src/config/settings.py:226` (`FACEBOOK_APP_SECRET`), `src/services/target/egress.py:131`
+  (`graph.facebook.com` on the egress allow-list), `src/services/target/meta_callbacks.py:77,121,135`
+  (the callback signature accepts either app secret, the Facebook one annotated legacy) — a ruling on
+  those, not a close. #1216 itself closes with phase 05. Phase 04's PR body is worded so that no issue
+  closes by keyword at the merge (its first draft would have auto-closed #1202).
+- **Phase 04, in this order (the owner's):** (1) close #1202 on GitHub with the ruling of 2026-09-16
+  (its "or" leg: the target tier is armed and serving, with a connected destination) — the plan's
+  precondition for the merge, and the only thing between #1321 and `main`. (2) The merge (admin squash,
+  one commit) arms nothing: the next predeploy on BOTH services prints `owed (manual) 079
+  (079_drop_legacy_schema.sql)` and `owed (manual) 080 (080_window_stand_down.sql)` and exits 0 — read
+  it in the deploy logs, and `storydump deploys` for both services. (3) The window, from
+  `documentation/operations/legacy-window-close.md`: the rehearsal on a Neon PITR branch first
+  (the owner's too — its two `apply --manual` lines are the never-run door on ANY database; an agent
+  session can prepare `rehearse.sh` and read the branch before and after, no more), then production — the worker stopped, the marker branch, `apply --manual
+  79`, `apply --manual 80`, the gate, the worker redeployed. Never by an agent (F7; the never-run
+  list). (4) Phase 05 builds once 04 is merged; its dated lines — when `legacy` was dropped, the
+  gate's pasted output, the epic's `status: completed` — wait for the window.
