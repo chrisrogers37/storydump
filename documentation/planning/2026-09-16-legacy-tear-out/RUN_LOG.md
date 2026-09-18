@@ -60,7 +60,7 @@ API service skipped the two kickoff commits — see the gate above).
 | 01 delete the legacy code and its tests | `01_delete-the-code.md` | **DONE** — merged `2369a9b` (2026-09-17 23:57 UTC); the worker deployed it (SUCCESS); the API service SKIPPED it behind a red `main` check (the midnight skip, below) | #1316 | green at `e6e854b` (3653 passed, 1 skipped) |
 | 02 retire the settings, the entry point and the config | `02_settings-and-entry-points.md` | **DONE** — merged `f59fe43` (2026-09-18 15:44 UTC); round 1 and a fresh re-verify folded; the deploys under the phase's entry | #1319 | green at `9d14304` (3680 passed, 1 skipped) |
 | 03 the 3f snapshot migration and the ratchet's file rule | `03_snapshot-migrations.md` | **DONE** — rehearsed on a Neon PITR branch, merged `3ffa750` (2026-09-18 17:23 UTC), 078 applied in production by the deploy at 17:24 UTC; the probe under the phase's entry | #1318 | green at `6da8d00` (3700 passed, 1 skipped) |
-| 04 the gated drop and stand-down | `04_drop-and-stand-down.md` | pending (owner-gated window) | — | — |
+| 04 the gated drop and stand-down | `04_drop-and-stand-down.md` | built (branch `tear-out/04-drop-and-stand-down`, `0db363b`); lenses dispatched on `0ff46e9`; the PR's MERGE needs #1202 closed by the owner; the window itself is the owner's (F7) | #1321 (draft) | the runs below |
 | 05 the documentation's end state | `05_docs-end-state.md` | pending | — | — |
 
 ## Phase 01 — delete the legacy code and its tests
@@ -660,6 +660,64 @@ to its source (all sixteen pairs, the same counts the rehearsal saw); `svc_ingre
 all; archive 9,281,536 bytes against the 42 MB ceiling (legacy 43,835,392 bytes); database
 81,887,232 bytes; `storydump health` ok on every surface with the new processes up. Phase 04's
 dependency — "phase 03 merged and applied in production, every snapshot present" — is met.
+
+## Phase 04 — the gated drop and stand-down
+
+**Read before building** (main at `32d2d66`, 2026-09-18): the runner's marker grammar (phase 03's ONE
+dispatch on the word after `runner:`), `apply_pending`'s below-head loop, `ledger_discrepancies` (ledger
+rows vs files only — a pending file below the head is `apply`'s concern alone), `adopt`'s false-probe rule
+(a trailing pair of false probes stays pending; 079/080 are last), `split_statements`' dollar-quote
+handling (the DO blocks split correctly), the design plan's printed stand-down (`04:211-262`) and D40's
+amendment (`03:181`), the epic's F6/F7/F8, the M.2 spec's §3 probes, the CI cluster's version
+(**PostgreSQL 15**; production 17), the Railway and Neon commands the runbook prints (`railway down`,
+`railway redeploy`, `neonctl branches restore <target> <source> --preserve-under-name`).
+
+**Premise findings before writing:** (1) `uuid-ossp` rides into `legacy` with the 051 move and drops
+with the schema — no target file or module calls `uuid_generate*` (7 target files use
+`gen_random_uuid()`); the gate asserts the extension is gone and `gen_random_uuid()` still answers.
+(2) Every door file already brackets the SCHEMA half of `ALTER FUNCTION … OWNER TO svc_*` itself —
+`GRANT CREATE ON SCHEMA public TO svc_x; … REVOKE` (059:93/601, 062:49/168, 063:64/196, 064:54/73,
+068:34/149, 076:68/83); only the MEMBERSHIP half was ever the window's, and it is what F8 (a) keeps.
+(3) On PG16+ `OWNER TO` needs SET on the receiving role; the owner login's SET runs through
+`svc_migration`'s memberships (078's header measured it) — so 080 may revoke NEITHER `svc_migration`'s
+four memberships NOR the owner's membership of `svc_migration` (the printed stand-down revoked both;
+the plan's F8 (a) text named only the first). Recorded in the D40 amendment. (4) `public` in production
+is owned by the OWNER LOGIN, not `svc_migration` (phase 03's probe): the printed gate's "steady-state
+design fact" line is false there; 080's gate asserts the measured shape. (5) The plan's checklist line
+"`grep -rn WORKER_IMPL …`" has no phase-04 analogue; its "`storydump posture` shows 079/080 applied" is
+owner-run (the CLI needs a signed-in token).
+
+**Red first** (`tests/scripts/test_window_close.py` — 13 tests; `TestManual` and two marker tests in
+`test_migration_runner.py`; the lineage rule's manual case; the lane's two lists; the never-run pin): on
+the base the runner has no door — collection fails on `ImportError: cannot import name 'apply_manual'`,
+the honest red for a door that did not exist.
+
+**Built** (`0ff46e9`, the battery fix `0db363b`): `MANUAL_MARKER` in `KNOWN_MARKERS`; `Migration.manual`;
+`ApplyReport.owed`/`StatusReport.owed`; `apply_pending` owes manual files before the below-head loop;
+`apply_manual(dsn, dir, version)` — refuses a version not in the tree, one without the directive, one
+already recorded, then lock → ledger → integrity → `_apply_one`; `apply --manual VERSION` and the
+`owed (manual) NNN` lines in `apply` and `status`; `target_lineage_files` excludes manual files.
+`079_drop_legacy_schema.sql` (manual + unadvertised; the DO block over the sixteen names: snapshot
+present, source present, counts equal, else RAISE; two postconditions) and `080_window_stand_down.sql`
+(manual + unadvertised; the identity guard, `DROP SCHEMA IF EXISTS window_ddl CASCADE`, `REVOKE CREATE
+ON DATABASE … FROM svc_migration`; the gate's twelve lines as comments with their answers; two
+postconditions). The gate (three DB layers + the files' unit pins), the runbook
+`documentation/operations/legacy-window-close.md` (the rehearsal, production in order, the backout,
+what not to do), the D40 amendment beside `03:189`, `migration-runner.md`'s marker and door, the
+never-run lists in `CLAUDE.md`, `AGENTS.md` and both satellites, the CHANGELOG.
+
+**Verification** (2026-09-18, the worktree at `0ff46e9`/`0db363b`, no variable of either tier set):
+
+- The gate, the runner's three suites and the never-run pin under the Docker test database (PG 15):
+  67 passed. The gate is version-aware — SET on 16+, membership on 15 — because CI's cluster is 15 and
+  production 17; the first draft asserted 'SET' and failed on 15.
+- The whole suite against the test database: `3689 passed, 1 skipped`.
+- `ruff format --check .` / `ruff check .` clean.
+- Battery `tests/mutations/legacy_tear_out_04.sh` on the committed tree, in its own worktree: 24
+  mutations; on `0ff46e9` 23 killed and ONE SURVIVED — the "below-head rule sees a manual file again"
+  mutation edited the loop that no longer sees manual files (equivalent); the wedge the plan describes is
+  the NEXT deploy after an ordinary file lands above an owed one, so the test gained that scenario and
+  the mutation moves the split below the check — killed on `0db363b`. `ran 24 of 24`.
 
 ## Owner-decision queue
 

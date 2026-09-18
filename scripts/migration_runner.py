@@ -541,6 +541,19 @@ def _apply_one(conn, migration) -> None:
             raise
 
 
+def _apply_guarded(conn, migration) -> None:
+    """`_apply_one`, with a database failure named by the file — the one
+    wrap both doors share."""
+    try:
+        _apply_one(conn, migration)
+    except MigrationRunnerError:
+        raise
+    except Exception as exc:
+        raise MigrationRunnerError(
+            f"migration {migration.label} failed: {exc}"
+        ) from exc
+
+
 def apply_pending(
     dsn: str, migrations_dir, max_version: int | None = None
 ) -> ApplyReport:
@@ -578,14 +591,7 @@ def apply_pending(
                 )
 
         for migration in pending:
-            try:
-                _apply_one(conn, migration)
-            except MigrationRunnerError:
-                raise
-            except Exception as exc:
-                raise MigrationRunnerError(
-                    f"migration {migration.label} failed: {exc}"
-                ) from exc
+            _apply_guarded(conn, migration)
             report.applied.append(migration)
     finally:
         conn.close()
@@ -625,19 +631,11 @@ def apply_manual(dsn: str, migrations_dir, version: int) -> ApplyReport:
         ledger = _ledger_rows(conn)
         _verify_integrity(ledger, migrations)
         if version in ledger:
-            _checksum, row_status = ledger[version]
             raise MigrationRunnerError(
                 f"{migration.label} is already recorded in the ledger"
-                f" ({row_status}); a gated file runs once"
+                f" ({ledger[version][1]}); a gated file runs once"
             )
-        try:
-            _apply_one(conn, migration)
-        except MigrationRunnerError:
-            raise
-        except Exception as exc:
-            raise MigrationRunnerError(
-                f"migration {migration.label} failed: {exc}"
-            ) from exc
+        _apply_guarded(conn, migration)
         report.applied.append(migration)
     finally:
         conn.close()

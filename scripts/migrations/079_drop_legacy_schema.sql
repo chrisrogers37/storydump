@@ -12,11 +12,12 @@
 -- `archive` — and nothing written to `legacy` since (the tier that wrote there
 -- was deleted in phase 01; production measured n_tup_ins/upd/del = 0 on all
 -- sixteen on 2026-09-17). The DO block is the precondition, in-file: it
--- refuses the drop for a missing snapshot or a count that no longer matches
--- its source — an inventory error or a writer since 078 is data the drop
--- would destroy — and a refusal leaves `legacy` intact (one transaction: the
--- file is `wrapped`). The sixteen names are LEGACY_TABLES written out; the
--- date is 078's; tests/scripts/test_window_close.py pins both.
+-- refuses the drop for a missing snapshot, a legacy table that is not there
+-- to compare, or a count that no longer matches its source — an inventory
+-- error or a writer since 078 is data the drop would destroy — and a refusal
+-- leaves `legacy` intact (one transaction: the file is `wrapped`). The
+-- sixteen names are LEGACY_TABLES written out; the date is 078's;
+-- tests/scripts/test_window_close.py pins both.
 --
 -- WHAT GOES WITH THE SCHEMA: the sixteen tables (42 MB), their indexes and
 -- constraints, and the uuid-ossp extension that rode into `legacy` with the

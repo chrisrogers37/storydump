@@ -78,39 +78,13 @@ check "--manual applies an already-recorded version again" $RUNNER '        if v
             raise MigrationRunnerError(' '        if version in ledger and False:
             _checksum, row_status = ledger[version]
             raise MigrationRunnerError(' "$GATE" "$TRUN -k apply_manual_refuses_a_version_already_recorded"
-check "--manual applies below the head no more (the operator door meets the deploy's rule)" $RUNNER '        try:
-            _apply_one(conn, migration)
-        except MigrationRunnerError:
-            raise
-        except Exception as exc:
-            raise MigrationRunnerError(
-                f"migration {migration.label} failed: {exc}"
-            ) from exc
+check "--manual applies below the head no more (the operator door meets the deploy's rule)" $RUNNER '        _apply_guarded(conn, migration)
         report.applied.append(migration)
-    finally:
-        conn.close()
-    return report
-
-
-@dataclass
-class AdoptReport:' '        if version < max(ledger, default=0):
+    finally:' '        if version < max(ledger, default=0):
             raise MigrationRunnerError("below the head")
-        try:
-            _apply_one(conn, migration)
-        except MigrationRunnerError:
-            raise
-        except Exception as exc:
-            raise MigrationRunnerError(
-                f"migration {migration.label} failed: {exc}"
-            ) from exc
+        _apply_guarded(conn, migration)
         report.applied.append(migration)
-    finally:
-        conn.close()
-    return report
-
-
-@dataclass
-class AdoptReport:' "$GATE" "$TRUN -k apply_manual_applies_it_below_the_head"
+    finally:' "$GATE" "$TRUN -k apply_manual_applies_it_below_the_head"
 check "status lists a manual file as pending, not owed" $RUNNER '        report.pending = [m for m in unrecorded if not m.manual]
         report.owed = [m for m in unrecorded if m.manual]' '        report.pending = list(unrecorded)
         report.owed = []' "$GATE" "$TRUN -k status_lists_it_as_owed_not_pending"

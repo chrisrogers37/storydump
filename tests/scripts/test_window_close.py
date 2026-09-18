@@ -19,6 +19,8 @@ and F8's positive control — a door file's statement still lands afterwards.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from scripts.migration_runner import (
     MIGRATIONS_DIR,
@@ -121,8 +123,6 @@ class TestTheTwoFiles:
         assert m.postconditions, "a gated file carries its adoption evidence"
 
     def test_079_names_every_table_of_the_inventory_and_078s_date(self):
-        import re
-
         sql = self._file(DROP_VERSION).sql
         block = sql[sql.index("ARRAY[") : sql.index("] LOOP")]
         assert tuple(re.findall(r"'([a-z_]+)'", block)) == LEGACY_TABLES
@@ -136,10 +136,10 @@ class TestTheTwoFiles:
         assert "success variant refused" in body
         assert "DROP SCHEMA IF EXISTS window_ddl CASCADE" in body
         assert "REVOKE CREATE ON DATABASE" in body
-        assert "REVOKE svc_" not in body, "F8 (a): the memberships stay"
-        assert "FROM svc_migration" in body and "FROM %I" not in body.replace(
-            "REVOKE CREATE ON DATABASE %I FROM svc_migration", ""
-        )
+        # F8 (a): the ONE revoke is the database privilege; no membership goes
+        assert re.findall(r"\bREVOKE\b[^;']*", body) == [
+            "REVOKE CREATE ON DATABASE %I FROM svc_migration"
+        ]
 
 
 @pytest.mark.integration
@@ -218,6 +218,9 @@ class TestTheDropAsTheOwnerActor:
 
         with pytest.raises(MigrationRunnerError, match="079") as exc:
             apply_manual(as_owner, MIGRATIONS_DIR, DROP_VERSION)
+        # LOAD-BEARING: without the snapshot check the count query errors on
+        # the missing relation — still a refusal naming 079 — so the MESSAGE is
+        # what proves the guard fired, not the raise.
         assert "no snapshot for legacy.users" in str(exc.value)
         assert _schema_present(as_owner, "legacy")
         assert len(
@@ -257,6 +260,8 @@ class TestTheStandDownAsTheOwnerActor:
 
         with pytest.raises(MigrationRunnerError, match="080") as exc:
             apply_manual(as_owner, MIGRATIONS_DIR, STAND_DOWN_VERSION)
+        # LOAD-BEARING: without the guard the door drops and postcondition
+        # one fails — still a refusal naming 080 — so the MESSAGE proves it.
         assert "success variant refused" in str(exc.value)
         assert _schema_present(as_owner, "window_ddl")
         assert (

@@ -463,12 +463,15 @@ class TestManual:
         assert [m.version for m in report.owed] == [2]
         assert [row[0] for row in fetch_ledger(scratch_db)] == [1, 3]
         assert table_exists(scratch_db, "t_one"), "the manual file must not have run"
-        # THE NEXT DEPLOY: the head is now 003 and 002 is still owed BELOW it —
-        # the exact shape the old rule raised on, on every push, for both
-        # services. It owes it again and raises nothing.
+        # THE NEXT DEPLOY, in production's exact shape: an ordinary 004 lands
+        # while 002 is still owed BELOW the head — the state the old rule
+        # raised on, on every push, for both services. 004 applies, 002 is
+        # owed again, nothing raises.
+        write_migration(tmp_path, 4, "CREATE TABLE t_four (id INT);")
         again = apply_pending(scratch_db, tmp_path)
-        assert again.applied == []
+        assert [m.version for m in again.applied] == [4]
         assert [m.version for m in again.owed] == [2]
+        assert table_exists(scratch_db, "t_one"), "still owed, still not run"
 
     def test_apply_manual_applies_it_below_the_head_with_a_ledger_row(
         self, scratch_db, tmp_path

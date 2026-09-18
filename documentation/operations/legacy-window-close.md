@@ -24,8 +24,10 @@ transaction).
   deploy-time drop.
 - The Neon project's history retention is what the backout rests on. Measured on 2026-09-18:
   **24 hours** (`history_retention_seconds = 86400`), not the ≥ 7 days `05` §DR states. The
-  marker BRANCH below outlives retention — a branch is a durable copy — so the backout does not
-  depend on it; the retention matters only for a restore to an arbitrary timestamp.
+  marker BRANCH below is the backout, not the retention: by Neon's documented branch model a
+  child branch pins its parent's branch-point and is a durable copy (documented, not measured
+  here — measure it once by restoring from a rehearsal branch older than a day); the retention
+  matters only for a restore to an arbitrary timestamp.
 - The rehearsal below has run green on a fresh PITR branch, end to end, with wall-clock recorded.
 
 ## The rehearsal on a Neon PITR branch
@@ -44,8 +46,9 @@ npx --yes neonctl@latest branches create --project-id $P --org-id $O --parent $P
 # 2. the branch's OWNER connection string, into a variable — never echoed, never pasted
 URL=$(npx --yes neonctl@latest connection-string $NAME --project-id $P --org-id $O \
       --role-name neondb_owner --database-name neondb)
-# refuse unless the host is a Neon endpoint that is NOT production's
-printf %s "$URL" | sed -E 's#^[^@]*@##; s#[:/?].*##' | grep -E '^ep-' | grep -v ep-hidden-shadow-aify76h5
+# refuse — stop here — unless the host is a Neon endpoint that is NOT production's
+printf %s "$URL" | sed -E 's#^[^@]*@##; s#[:/?].*##' | grep -E '^ep-' | grep -v ep-hidden-shadow-aify76h5 \
+  || { echo "REFUSED: not a Neon branch endpoint, or production's"; unset URL; exit 1; }
 
 # 3. the branch's ledger: head 078, the pair owed
 DATABASE_URL="$URL" python -m scripts.migration_runner status | tail -4
@@ -56,7 +59,8 @@ time DATABASE_URL="$URL" python -m scripts.migration_runner apply --manual 79
 # 5. the stand-down, timed
 time DATABASE_URL="$URL" python -m scripts.migration_runner apply --manual 80
 
-# 6. the gate: every line 080 prints as a comment, run as printed, answers compared
+# 6. the gate: the load-bearing lines of the eleven 080 prints, run as printed (the gate test
+#    runs all eleven in CI); answers compared
 psql "$URL" -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM pg_namespace WHERE nspname = 'legacy'"   # 0
 psql "$URL" -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM pg_namespace WHERE nspname = 'window_ddl'"   # 0
 psql "$URL" -At -v ON_ERROR_STOP=1 -c "SELECT NOT has_database_privilege('svc_migration', current_database(), 'CREATE')"   # t
@@ -80,6 +84,13 @@ forward in the tree, rehearse again on a fresh branch. Never re-run in place.
 
 ## Production — in this order and no other
 
+0. **The Railway link.** `railway redeploy` acts on the LINKED environment (it takes no
+   `--environment`), and another session's `railway login` silently drops the link. Check it
+   before step 1 and again before step 8:
+   ```bash
+   railway whoami && railway status        # the storydump project, environment production
+   railway environment production          # re-link if it is not
+   ```
 1. **Stop the worker.** The backout restores to the marker; a running worker would keep writing
    past it.
    ```bash
@@ -95,9 +106,14 @@ forward in the tree, rehearse again on a fresh branch. Never re-run in place.
    MARKER=pre-3g-$(date -u +%Y%m%d-%H%M)
    npx --yes neonctl@latest branches create --project-id $P --org-id $O --parent $PROD --name $MARKER
    ```
-4. **The ledger before:** head 078, the pair owed.
+4. **Before:** head 078, the pair owed — and the two facts 080 changes, recorded so the window
+   shows before → after (phase 03's probes never read the database privilege).
    ```bash
    railway run --service worker --environment production -- python -m scripts.migration_runner status | tail -4
+   railway run --service worker --environment production -- sh -c 'psql "$TARGET_DATABASE_URL" -At -F " | " -f /dev/stdin' <<'SQL'
+   SELECT 'window_ddl_schemas', count(*) FROM pg_namespace WHERE nspname = 'window_ddl';
+   SELECT 'svc_migration_create_on_db', has_database_privilege('svc_migration', current_database(), 'CREATE');
+   SQL
    ```
 5. **3g.** The runner connects as `DATABASE_URL`'s login on the worker service — the database
    owner, the actor 078 measured. A refusal here is the guard working: read the message, do not
@@ -122,10 +138,15 @@ forward in the tree, rehearse again on a fresh branch. Never re-run in place.
    SELECT 'ledger_head', max(version), count(*) FROM runner.schema_migrations;                                    -- 80 | 80
    SQL
    ```
-   `storydump posture --json` (a signed-in CLI) shows 079 and 080 `applied` and no `window_ddl`
-   door under `doors`; its RLS list is `public`-only and says nothing about `legacy` — the
-   `pg_namespace` line above is that evidence.
-8. **Restart the worker.**
+   `storydump posture --json` (a signed-in CLI) shows 079 and 080 `applied`. Its `doors` and RLS
+   lists read `public` only — the step-0 door lived in its own schema precisely to stay out of
+   that census, and `legacy` never appeared in it — so they say nothing about the window; the
+   `pg_namespace` lines above are the evidence.
+8. **Restart the worker** — the link checked again (step 0). `redeploy` re-runs the latest
+   deployment; if Railway refuses because the latest is the REMOVED one, the fallback is the
+   dashboard's Redeploy on the worker's last SUCCESS deployment, or an empty commit to `main`
+   (`git commit --allow-empty -m "redeploy" && git push`), which deploys both services and runs
+   the predeploy — which now owes nothing.
    ```bash
    railway redeploy --service worker --yes
    storydump deploys --watch --timeout 900     # both services SUCCESS
@@ -142,11 +163,11 @@ still stopped (step 1), restore production to the marker; every write after the 
 discarded, the API's included, so announce before restoring.
 
 ```bash
-P=ancient-grass-50759240; O=org-ancient-bush-46337162
-npx --yes neonctl@latest branches restore production $MARKER --project-id $P --org-id $O \
+P=ancient-grass-50759240; O=org-ancient-bush-46337162; PROD=br-square-frog-ai37r0qg
+npx --yes neonctl@latest branches restore $PROD $MARKER --project-id $P --org-id $O \
   --preserve-under-name failed-3g-$(date -u +%Y%m%d-%H%M)
 railway run --service worker --environment production -- python -m scripts.migration_runner status | tail -4   # head 078, the pair owed again
-railway redeploy --service worker --yes
+railway environment production && railway redeploy --service worker --yes
 ```
 
 The preserved branch holds the failed state for forensics. Retire the marker branch a day after
