@@ -15,6 +15,13 @@ the shell environment.
 railway run --service storydump -- sh -c 'psql "$TARGET_DATABASE_URL" -v ON_ERROR_STOP=0 -f "$0"' /abs/path/to.sql
 ```
 
+The repository's canonical form of this command lives in
+`documentation/operations/reading-the-ledger.md` › *The escape hatch*: it names
+`--service worker --environment production` and pipes the output through a
+redaction. Both services carry `TARGET_DATABASE_URL` (measured 2026-09-18), so
+either spelling reaches the same database; prefer the canonical one in anything
+written down.
+
 Two gotchas, both of which fail in ways that look like something else:
 
 1. **Never `cd` out of `/Users/chris/Projects/storydump`.** Railway resolves the

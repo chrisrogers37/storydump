@@ -125,13 +125,10 @@ migration runner, not for queries. Production is read, in this order:
    ([`reading-the-ledger.md`](../operations/reading-the-ledger.md)).
 2. **The escape hatch**, for a question the verbs do not answer — the service's
    own runtime login, a file of `SELECT`s, and the connection string never
-   printed:
+   printed.
 
-```bash
-railway run --service worker --environment production -- \
-  sh -c 'psql "$TARGET_DATABASE_URL" -At -F " | " -f /dev/stdin' < probe.sql \
-  | sed -E "s#postgres(ql)?://[^ ]+#postgres://<redacted>#g"
-```
+   The command itself has one home, so it cannot drift between pages:
+   [`reading-the-ledger.md` › The escape hatch](../operations/reading-the-ledger.md#the-escape-hatch).
 
 `SELECT` only, inside `BEGIN TRANSACTION READ ONLY`. Nothing else enforces it:
 as measured on 2026-09-17 production's runtime login was still the database

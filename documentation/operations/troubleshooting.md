@@ -25,10 +25,12 @@ runs the target composition root, `src.worker`, and nothing else
 2026); its data survives as the `archive.*_pre_cutover_20260917` snapshots, and
 nothing here reads them.
 
-`storydump doctor`'s ledger check counts every migration file in the checkout.
-Until the owner's window has run (`legacy-window-close.md`) it names 079 and
-080 as not applied and suggests a deploy: they are gated (`runner:manual`),
-owed by design, and no deploy applies them (`migration-runner.md`).
+`storydump doctor`'s ledger check compares the checkout's migration files with
+the ledger. A GATED file (`runner:manual` — 079 and 080 until the owner's window
+has run, `legacy-window-close.md`) is reported on the `ok` line as "owed to the
+owner's window", never as missing (`storydump_cli/commands/env.py`, `_gated_in`);
+an ordinary file the ledger lacks is "not applied — deploy main", and that one
+is real (`migration-runner.md`).
 
 ---
 
@@ -75,7 +77,7 @@ storydump account <handle>              # the cap, today's count, the next slot
 
 | Cause | Check | Fix |
 |-------|-------|-----|
-| Posting paused for the workspace | `storydump story <id>` shows no permits since the pause | `storydump resume --workspace <ws>` (an operator token) |
+| Posting paused for the workspace | `storydump story <id>` shows no permits since the pause | `storydump resume --workspace <ws>` (an operator token) — it restarts POSTING: the owner's decision, an agent asks first |
 | Instagram API posting off | the port refuses `approve` with `manual_mode` | Settings › General on the web |
 | The account's cap reached | `storydump account <handle>`: today's count at the cap | Wait for the next slot, or raise the cap on the web |
 | The frame not ready, or the container not ready | `floating` shows `fetch/<rung>` or `container/<rung>`, the rung climbing | Let the ladder run; `burst --watch` follows it |
@@ -203,7 +205,8 @@ storydump pause --workspace <ws>          # per workspace, through the command p
 ```
 
 `pause` is a workspace verb: run it for each workspace that must stop. It is
-idempotent and safe to repeat; `storydump resume --workspace <ws>` lifts it.
+idempotent and safe to repeat; `storydump resume --workspace <ws>` lifts it — that
+restarts posting, so it is the owner's decision and an agent asks first.
 Restarting the worker does NOT stop posting — the ledger's jobs survive a
 restart by design.
 

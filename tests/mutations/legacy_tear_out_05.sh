@@ -14,6 +14,9 @@ UNIT="env -u DB_HOST -u DB_USER -u DB_PASSWORD -u DB_NAME -u TEST_DB_NAME -u REQ
 mkdir -p /tmp/claude
 RAN=0
 EXPECTED=$(grep -cE '^(check|append|plant) "' "$0")
+PLANTED=
+# an interrupt must not leave a planted legacy page or a mutated file behind
+trap '[ -n "$PLANTED" ] && rm -f "$PLANTED"; git -C "$ROOT" checkout -- . 2>/dev/null' INT TERM
 
 verdict() {  # name rc — reads /tmp/claude/mut.log
   local name=$1 rc=$2
@@ -61,7 +64,7 @@ plant() {  # name new-file content test-selector — a file that must NOT exist,
   if [ -n "${ONLY:-}" ] && ! [[ "$name" =~ $ONLY ]]; then return; fi
   RAN=$((RAN + 1))
   if [ -e "$file" ]; then echo "MUTATION NOT APPLIED (exists): $name"; return; fi
-  mkdir -p "$(dirname "$file")"; print -r -- "$content" > "$file"
+  mkdir -p "$(dirname "$file")"; PLANTED=$file; print -r -- "$content" > "$file"
   eval "$UNIT $sel" > /tmp/claude/mut.log 2>&1; local rc=$?
   verdict "$name" $rc
   rm -f "$file"; rmdir "$(dirname "$file")" 2>/dev/null
@@ -80,21 +83,27 @@ append "a legacy table returns to a guide" documentation/guides/deployment.md 'C
 plant "a new live page describes the legacy tier" documentation/operations/legacy-queue-howto.md '# How to read `posting_queue`' "$PIN"
 
 # --- the predicate weakened ----------------------------------------------------------------------------
-check "the pin stops reading table names" $TDOCS '    hits = {t for t in _legacy_only_tables() if re.search(rf"\b{t}\b", text)}' '    hits = set()' "$CONTROL"
-check "the pin stops reading deleted paths" $TDOCS '    hits |= {p for p in DELETED_PATHS if p in text}' '    hits |= set()' "$CONTROL"
-check "the pin stops reading dead variables" $TDOCS '    hits |= {v for v in _retired_variables() if re.search(rf"\b{v}\b", text)}' '    hits |= set()' "$CONTROL"
-check "a snapshot's name reads as its table's (the word boundary goes)" $TDOCS '    hits = {t for t in _legacy_only_tables() if re.search(rf"\b{t}\b", text)}' '    hits = {t for t in _legacy_only_tables() if t in text}' "$CONTROL"
+check "the pin stops reading table names" $TDOCS '    names = _legacy_only_tables() + _deleted_paths() + _retired_variables()' '    names = _deleted_paths() + _retired_variables()' "$CONTROL"
+check "the pin stops reading deleted paths" $TDOCS '    names = _legacy_only_tables() + _deleted_paths() + _retired_variables()' '    names = _legacy_only_tables() + _retired_variables()' "$CONTROL"
+check "the pin stops reading dead variables" $TDOCS '    names = _legacy_only_tables() + _deleted_paths() + _retired_variables()' '    names = _legacy_only_tables() + _deleted_paths()' "$CONTROL"
+check "a snapshot's name reads as its table's (the word boundary goes)" $TDOCS '        return re.compile(rf"\b{name}\b", re.IGNORECASE)' '        return re.compile(name, re.IGNORECASE)' "$CONTROL"
+check "a table in capitals passes (a SQL example names the legacy table unseen)" $TDOCS '        return re.compile(rf"\b{name}\b", re.IGNORECASE)' '        return re.compile(rf"\b{name}\b")' "$CONTROL"
+check "a deleted module in its dotted spelling passes" $TDOCS '        return re.compile(re.escape(name).replace("/", "[/.]"))' '        return re.compile(re.escape(name))' "$CONTROL"
+check "a live target column reads as a dead variable (the variables are case-folded)" $TDOCS '    return re.compile(rf"\b{name}\b")' '    return re.compile(rf"\b{name}\b", re.IGNORECASE)' "$CONTROL"
 check "the names both tiers use read as legacy names (the derivation ignores the target)" $TDOCS '    reused = _target_table_names()
     return tuple(t for t in LEGACY_TABLES if t not in reused)' '    return tuple(LEGACY_TABLES)' "$CONTROL"
 check "the agent pages leave the live roots" $TDOCS '    ".claude",
     "documentation/operations",' '    "documentation/operations",' "$TDOCS -k live_roots_cover"
+check "the documentation directory's own pages leave the live roots" $TDOCS 'LIVE_FLAT_ROOTS = ("documentation",)' 'LIVE_FLAT_ROOTS = ()' "$TDOCS -k live_roots_cover"
 check "the exemptions stop being honoured" $TDOCS '        found = _legacy_names_in(page.read_text()) - set(
             LEGACY_NAME_EXEMPT.get(rel, {})
         )' '        found = _legacy_names_in(page.read_text())' "$PIN"
-check "an exemption nothing uses stays" $TDOCS 'LEGACY_NAME_EXEMPT: dict[str, dict[str, str]] = {' 'LEGACY_NAME_EXEMPT: dict[str, dict[str, str]] = {
-    "README.md": {"posting_queue": "nothing on the page uses this"},' "$TDOCS -k exemption_is_still_used"
+check "an exemption nothing uses stays" $TDOCS 'LEGACY_NAME_EXEMPT: dict[str, dict[str, tuple[int, str]]] = {' 'LEGACY_NAME_EXEMPT: dict[str, dict[str, tuple[int, str]]] = {
+    "README.md": {"posting_queue": (1, "nothing on the page uses this")},' "$TDOCS -k exemption_is_exact"
+append "a stale mention hides beside an exempt one (the pager page gains a line about the worker's token)" documentation/operations/posting-monitor.md 'Set `TELEGRAM_BOT_TOKEN` on the worker service too.' "$TDOCS -k exemption_is_exact"
 
-# --- the deleted paths stay deleted ------------------------------------------------------------------------
-plant "a deleted package comes back" src/repositories/__init__.py '"""back"""' "$TDOCS -k deleted_paths_are_gone"
+# --- which pages are live -----------------------------------------------------------------------------
+check "an archived page under a live root reads as live" $TDOCS '    return [p for p in pages if "archive" not in p.relative_to(ROOT).parts]' '    return pages' "$TDOCS -k archive_under_a_live_root"
+check "a checkout under a directory named archive has no live pages (the pin passes over nothing)" $TDOCS '    return [p for p in pages if "archive" not in p.relative_to(ROOT).parts]' '    return [p for p in pages if "archive" not in p.parts]' "$TDOCS -k archive_under_a_live_root"
 
 echo "ran $RAN of $EXPECTED mutations${ONLY:+ (ONLY=$ONLY)}"

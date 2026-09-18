@@ -67,8 +67,9 @@ that write despite reading as inspection.
 | File | Covers |
 |---|---|
 | `changelog.md` | CHANGELOG conventions |
-| `database.md` | The target schema, RLS and tenancy, how queries are written, the migration runner |
+| `database.md` | The target schema: the ledger tables, RLS and the tenancy gate, SQL under the unit of work |
 | `development-patterns.md` | Repo-wide code conventions: layers, service modules, logging, security |
+| `migrations.md` | Writing a migration: the runner, its markers, advertised DDL, the bracketed hand-off |
 | `scheduler.md` | The worker: the clock, the jobs, the publish pipeline |
 | `telegram.md` | The Telegram adapter: the webhook, the outbox, the approval card |
 | `testing.md` | Test requirements, layout and markers |

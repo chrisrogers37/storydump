@@ -52,7 +52,15 @@ export TARGET_TELEGRAM_BOT_TOKEN='…'              # worker or API → Variable
 export TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN='…'   # API → Variables
 export TARGET_TELEGRAM_BOT_USERNAME='storydump_app_bot'
 storydump webhook status
-storydump webhook register --drop-pending   # first arming of a bot — never-run list: the user's decision
+```
+
+That block is safe to paste: `status` only reads. **Arming the bot is a separate act and the
+owner's**: `register` re-points the production bot's webhook and `--drop-pending` discards
+the taps Telegram has queued, so both are in `CLAUDE.md`'s safety block and an agent asks
+first. For the first arming of a bot, with the same three variables exported:
+
+```bash
+storydump webhook register --drop-pending
 ```
 
 `status` answers three questions and exits 4 if any check fails (64 for a missing variable):
@@ -87,8 +95,9 @@ real taps would be lost. `deregister` deletes the webhook.
 `/start link-…` attaches the tapping Telegram account to the user who minted
 the link; `/start bind-…` binds the group it was opened in (see *Groups*).
 Those are the two lanes served: `build_router` registers `link-` and `bind-`
-only (`src/services/target/telegram_dispatch.py:280-282`), so an `inv-` payload
-reaches no handler — an invitation is accepted on the web. **The bot answers a handled tap in the
+only (`src/services/target/telegram_dispatch.py:280-282` — the module's docstring
+still lists `inv-`; the registration is what runs), so an `inv-` payload reaches no
+handler — an invitation is accepted on the web. **The bot answers a handled tap in the
 chat** (since #1239) and stays silent on a refusal. A bare `/start` in a group
 is treated as speech (see *Members*), never a greeting. The person sees the
 result on the site after a reload.

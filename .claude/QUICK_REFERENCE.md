@@ -87,10 +87,9 @@ storydump posture                  # the migration ledger, the role, RLS, the do
 Production is the user's to open: ask first, SELECT only, and the connection
 string is never printed.
 
-```bash
-railway run --service worker -- sh -c 'psql "$TARGET_DATABASE_URL" -At -F " | " -f /dev/stdin' < probe.sql \
-  | sed -E "s#postgres(ql)?://[^ ]+#postgres://<redacted>#g"
-```
+The command is in ONE place — `documentation/operations/reading-the-ledger.md` › *The escape
+hatch* — so it cannot drift between pages: `railway run` against the worker service in the
+production environment, a file of SELECTs on stdin, the output through a redaction.
 
 ```sql
 -- probe.sql: target tables only
