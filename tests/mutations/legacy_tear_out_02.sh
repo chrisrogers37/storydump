@@ -147,7 +147,7 @@ check "create_engine takes no settings-built fallback" $UOW '    if not url:
         raise ValueError(' "$UNIT" "$GUARD -k create_engine_takes_no_settings_built_fallback"
 
 # --- the instrument's label ------------------------------------------------------------------
-check "the instrument'"'"'s JSON carries no gate axis" $REACH '                    "deployed": deployed,' '                    "deployed": deployed,
+check "the instrument's JSON carries no gate axis" $REACH '                    "deployed": deployed,' '                    "deployed": deployed,
                     "worker_gate": None,' "$UNIT" "$TREACH -k json_carries_the_movement_and_no_gate_axis"
 check "the label names the call site, not a hunt" $REACH '            "  dispatch in src.main, which runs the target root UNCONDITIONALLY.\n"' '            "  dispatch somewhere: find the call site by hand.\n"' "$UNIT" "$TREACH -k moved_axis_names_its_call_site"
 check "the label narrates no retired switch" $REACH '            "  dispatch in src.main, which runs the target root UNCONDITIONALLY.\n"' '            "  dispatch in src.main, which runs the target root UNCONDITIONALLY.\n"
@@ -177,7 +177,7 @@ check "validate-env can fail" $MAKEFILE '(echo "$(RED)✗ Configuration validati
 check "make install installs the CLI extra" $MAKEFILE "pip install -e '.[cli]'" "pip install -e ." "$UNIT" "$GUARD -k make_install_installs_the_cli_extra"
 check "every file the Makefile feeds psql exists" $MAKEFILE '-f scripts/setup_database.sql 2>&1' '-f scripts/setup_database.sql -f tests/scripts/fixtures/not_on_this_branch.sql 2>&1' "$UNIT" "$GUARD -k every_file_the_makefile_feeds_psql_exists"
 check "init-db stands step 0 up before the by-hand base" $MAKEFILE '-f scripts/window/step0_bootstrap.sql -f scripts/window/step0_legacy_ddl_door.sql ' '' "$UNIT" "$GUARD -k init_db_is_the_lanes_own_sequence"
-check "make dev does not gate a local worker on production'"'"'s health" $MAKEFILE '	@echo "$(GREEN)✓ Environment file found$(NC)"' '	@echo "$(GREEN)✓ Environment file found$(NC)"
+check "make dev does not gate a local worker on production's health" $MAKEFILE '	@echo "$(GREEN)✓ Environment file found$(NC)"' '	@echo "$(GREEN)✓ Environment file found$(NC)"
 	@make check-health' "$UNIT" "$GUARD -k make_dev_does_not_gate"
 
 # --- the redaction boundary, on its new specimen ----------------------------------------------

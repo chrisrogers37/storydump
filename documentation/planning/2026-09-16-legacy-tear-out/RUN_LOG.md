@@ -58,7 +58,7 @@ API service skipped the two kickoff commits — see the gate above).
 | Phase | Doc | Status | PR | CI |
 |---|---|---|---|---|
 | 01 delete the legacy code and its tests | `01_delete-the-code.md` | in progress (branch `tear-out/01-delete-the-code`) | — | — |
-| 02 retire the settings, the entry point and the config | `02_settings-and-entry-points.md` | in progress (branch `tear-out/02-settings-and-entry-points`; lenses dispatched on `177025b`) | #1319 (draft) | green at `177025b` (3665 passed, 1 skipped) |
+| 02 retire the settings, the entry point and the config | `02_settings-and-entry-points.md` | round 1 folded (`5816b1b`); the re-verify below | #1319 | green at `facee3d` (3666 passed, 1 skipped); the fold's run below |
 | 03 the 3f snapshot migration and the ratchet's file rule | `03_snapshot-migrations.md` | pending | — | — |
 | 04 the gated drop and stand-down | `04_drop-and-stand-down.md` | pending (owner-gated window) | — | — |
 | 05 the documentation's end state | `05_docs-end-state.md` | pending | — | — |
@@ -218,8 +218,12 @@ directory, and the guard lists the prefixes — the checklist is ticked with tha
 
 ## Phase 02 — retire the settings, the entry point and the config
 
-**Measured before deleting** (worktree at `deb29c2`, 2026-09-17; `grep -rnE '\bNAME\b' src scripts
-storydump_cli` excluding the settings module, plus `self.NAME` inside it):
+**Measured before deleting** (worktree at `deb29c2`, 2026-09-17/18). The first measure was a text
+match (`grep -rnE '\bNAME\b' src scripts storydump_cli`, plus `self.NAME` inside the module); round
+1 of the review showed it counting comments, docstrings and same-named environment reads as
+readers, so the table below is the SECOND measure — by AST: `settings.NAME`, `getattr(settings,
+"NAME")`, the OAuth clients' named-setting idiom, and properties that themselves have such a reader,
+over the code roots and the test harness (the settings' own unit tests excluded):
 
 | Field | Readers in the tree | In the module | Disposition |
 |---|---|---|---|
@@ -230,18 +234,29 @@ storydump_cli` excluding the settings module, plus `self.NAME` inside it):
 | `CLOUD_STORAGE_PROVIDER`, `CLOUD_UPLOAD_RETENTION_HOURS`, `CLOUD_UPLOAD_TIMEOUT_SECONDS` | 0 | 0 | deleted |
 | `INSTAGRAM_PUBLISH_LIMIT_FALLBACK`, `MEDIA_SYNC_INTERVAL_SECONDS`, `ANTHROPIC_API_KEY`, `CAPTION_MODEL` | 0 | 0 | deleted |
 | `META_GRAPH_API_VERSION` | 0 | 2 (the two `meta_*_graph_base` properties, 0 callers) | deleted with the properties |
-| `DB_SSLMODE` | 0 | 4 (`database_url`, `test_database_url`: 6 and 1 callers) | kept |
-| the other 28 | 1–10 each | — | kept |
+| `DB_POOL_SIZE`, `DB_MAX_OVERFLOW` | 0 (the only mentions were comments saying they are NOT read) | 0 | deleted in the fold: no engine reads them, the target pool is pinned in code |
+| `DATABASE_URL` (the field) | 0 | 1 (`database_url`, whose "6 callers" in this table's first draft were the runner's argparse `args.database_url`; real callers: 0) | deleted in the fold with the property; the runner still reads the VARIABLE |
+| `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET` | 0 (`src/worker.py` reads the environment under the same names) | 0 | deleted in the fold as FIELDS; the variables stay |
+| `DB_SSLMODE` | 0 | `test_database_url` (called by `tests/conftest.py`) | kept — the harness's |
+| `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `TEST_DB_NAME` | `unit_of_work.async_database_url` and the harness | — | kept — the harness's; no deployed process reads them |
+| the other 16 | 1–9 each, in deployed code | — | kept |
 
-48 fields → 29, none required. The rule is a test (`test_every_surviving_field_has_a_reader`), not this table.
+48 fields → 23, none required. The rule is a test (`test_every_surviving_field_has_a_reader`, with
+planted controls for what is and is not a read), not this table.
 Environment reads OUTSIDE `Settings`, measured the same day and pinned by equality
 (`ENV_READ_OUTSIDE_SETTINGS`, 28 names): the two database logins, the bot and its webhook (7),
 the worker's knobs (4), `PORT`/`WEB_CONCURRENCY`, the Cloudinary trio and `META_GRAPH_VERSION`, Resend's
 two, Railway's three, the CLI's four. `WORKER_IMPL` was the twenty-ninth and went with its module.
 
-**Red first** (`tests/src/test_legacy_settings_gone.py` on `deb29c2`): 42 tests, 34 failed — every
-retired field, the required set, the entrypoint import with no `TELEGRAM_*` variable, the switch, the
-worker's refusal, the engine's fallback, every setter. Green at `177025b`.
+**Red first** (the final guard, 58 tests, run against `deb29c2` in a throwaway worktree): **51 failed,
+7 passed**. The seven: the five planted-source controls of the reader rule (tree-independent by
+design) and two pure regression pins — `[Makefile]` (the base Makefile named no dead variable) and
+`every_file_the_makefile_feeds_psql_exists` (the base `init-db` named one file, which exists; the pin
+is for round 1's blocker). CORRECTION: this entry first said "42 tests, 34 failed" — a count read off
+truncated output, withdrawn. And a disclosure: that first red run executed the real `worker.main()`
+on the base, where the fallback was live; it died on a refused connection to a dead port (no
+database, no bot token, nothing sent), and it is why the refusal tests now stub everything past the
+refusal.
 
 **Built** (`177025b`): the 19 deletions; `src/main.py` reduced to the dispatch (the `WORKER_IMPL` read,
 `src/worker_impl.py` and the instrument's gate axis — `worker_gate_facts`, the `gate` parameter, the
@@ -258,10 +273,12 @@ retired); the README's configuration list and `make init-db`; the four guides' e
 guide's line; `tests/scripts/test_no_implicit_admin_fallback.py` retired; the redaction tests on a
 subclass with one required sibling and `TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN` as the sentinel field.
 
-**Class sweep — "a setter names a dead variable"** (`grep -rnE '^\s*#?\s*(WORKER_IMPL|TELEGRAM_BOT_TOKEN|
-TELEGRAM_CHANNEL_ID|ADMIN_TELEGRAM_CHAT_ID|MEDIA_DIR)\s*[=:]'` over `documentation README.md AGENTS.md
-CLAUDE.md .claude .github Makefile .env.example`, excluding `planning/` and `archive/`): 14 hits in three
-guides + the 6 workflow lines + `.env.example` + the 8 recipe lines — all fixed. Prose mentions
+**Class sweep — "a setter names a dead variable"**, first pass (`grep -rnE '^\s*#?\s*(WORKER_IMPL|
+TELEGRAM_BOT_TOKEN|TELEGRAM_CHANNEL_ID|ADMIN_TELEGRAM_CHAT_ID|MEDIA_DIR)\s*[=:]'` over `documentation
+README.md AGENTS.md CLAUDE.md .claude .github Makefile .env.example`, excluding `planning/` and
+`archive/`): 14 hits in three guides + the 6 workflow lines + `.env.example` + the 8 recipe lines — all
+fixed. Round 1 showed that pass too narrow twice over (four names, and an anchor that missed table
+rows and inline "Set `X=`"); the second pass is in the round's entry below. Prose mentions
 (`cloud-deployment.md`'s table and troubleshooting row, `ci-cd-pipeline.md`'s list, `README.md`'s
 list) fixed too. Left for phase 05, by the plan's rule ("only the lines that set the dead variables"):
 prose in `monitoring.md`, `troubleshooting.md`, `posting-monitor.md`, `telegram-webhook.md`,
@@ -307,6 +324,93 @@ any run):
   (`work_loop` in the closure), the JSON carries no `worker_gate`, the text names the dispatch and
   "no environment switch".
 
+**Review round 1** (two lenses on `049f8b5`; the first dispatch of both died on the session's rate
+limit and was re-run). The runtime core held under attack — nothing deployed names the switch,
+settings load with an empty environment, nothing reads settings or the network between the
+environment read and the refusal, the API keeps its 503 path. The surfaces and the guard did not.
+Both lenses converged on the first four; closed in `5816b1b`:
+
+- **BLOCKER (both lenses): `make init-db` could not run on this branch.** It named
+  `tests/scripts/fixtures/legacy_by_hand.sql`, which exists only on phase 03's branch (and is
+  gitignored here, so a local copy hid it), and it skipped step 0 — `step0_bootstrap.sql` (the seven
+  `svc_*` roles 131 later GRANTs name) and `step0_legacy_ddl_door.sql` (the `window_ddl` door
+  migration 050 calls) — which every lane run applies first. `setup-db`, `quickstart`, `reset-db`
+  (after dropping the database) and README step 3 failed with it, under a CHANGELOG line saying the
+  targets run. Rewritten onto the lane's real sequence and RUN: a throwaway `postgres:15` container
+  (never the shared test cluster — step 0 creates cluster-wide roles), `make create-db init-db` as
+  its superuser → 77 files applied, `legacy` 15 tables, `public` 26, ledger 77/77; container removed.
+  Class: "the Makefile names a file" — a test now checks every `-f` path exists, and another pins the
+  order. **For phase 03's rebase:** `init-db` must gain the by-hand fixture line there (078 needs the
+  hand-made table in a tree-built database); the `-f` test will hold it to the file's existence.
+- **RISK (both): `.env.example` could re-point the production webhook.** The sample webhook URL
+  named a path that does not exist (`/telegram/webhook`; the only ingress route is
+  `/webhooks/telegram`), and the file offered `TARGET_TELEGRAM_WEBHOOK_AUTOREGISTER=true` and
+  `RAILWAY_ENVIRONMENT_NAME=production` — the two switches that make a laptop holding the production
+  token register itself as production's webhook, the never-run `storydump webhook register` effect by
+  another door — with no warning, in a file the Makefile exports into `make run`. Also wrong: the
+  connection cap (40; the code's default is 10), the lane concurrency (1/1; the dataclass's is 3/2),
+  `PORT` (one description for two listeners with different fallbacks), the Railway tokens' reader
+  (`scripts/observed_use.py` only — the CLI reads neither), "`make init-db` uses `DATABASE_URL`" (it
+  builds its own), and a pool-sizing block for an engine that does not exist. All corrected against
+  the code; the two platform-set names carry "never by hand"; `DATABASE_URL` is commented so the
+  Makefile cannot export an ambient one into every target.
+- **RISK (both): the reader rule was unsound**, and the ledger's table with it. A text match took
+  the sentence "deliberately NOT read from `settings.DB_MAX_OVERFLOW`" for that field's reader, an
+  `env.get("CLOUDINARY_API_KEY")` for a read of the FIELD, and the runner's argparse
+  `args.database_url` for six callers of a property nothing calls. By AST now, with planted controls
+  for each of those shapes. Class swept on the real tree: six survivors had no reader — deleted (the
+  table above); `tests/src/config/test_settings.py` loses the property's tests and the pool tests,
+  `test_unit_of_work.py`'s "not read from settings" pin becomes "not sized by the environment"
+  (both names driven to 0/20/99, the pool and the overflow still the seams).
+- **RISK (both): the setter sweep was four names wide.** 37 dead names are pinned now (the 25
+  retired fields less the four still read from the environment, fifteen legacy `.env` names, the
+  switch), with a soundness check that the list names nothing the tree reads. Second pass, same
+  eleven files: 28 further mentions, 22 of them in `cloud-deployment.md` — fixed: the
+  `DRY_RUN_MODE` go-live steps in both deployment guides (a safety step that did nothing; the real
+  control is the workspace's Dry Run Mode, on the web), the pool-sizing blocks (three guides), the
+  `MEDIA_DIR` section and troubleshooting row, the `DB_*` "alternative to `DATABASE_URL`" table
+  (true at the base through the fallback; a boot refusal after this phase), the legacy schedule and
+  media-source table, `FACEBOOK_APP_ID`, the rate-limit row's fallback variable, and `AGENTS.md`'s
+  paragraph about a `chat_settings` column. `.env.example` agreement is asserted BOTH directions.
+- **RISK (adversarial): the refusal test would have booted a worker** under the regression it
+  guards — it called the real `worker.main()` with nothing stubbed (see the disclosure under "Red
+  first"). `create_engine`, `compose` and `asyncio.run` now fail the test instead of running.
+- **RISK (adversarial): the unverified precondition.** After this merge the worker exits 2 without
+  `TARGET_DATABASE_URL`. Checked BY NAME ONLY (`railway variables --json` piped through a filter that
+  prints keys, 2026-09-18): both services carry it. The same read gives the owner's removal list
+  exactly — `WORKER_IMPL` on the worker, the three Telegram variables on both; none of the other 33
+  dead names is set on either service.
+- **GAP (adversarial): a blank `TARGET_DATABASE_URL`** passed `is None` and died in `create_engine`
+  with a traceback (the API: at import). `engine_url_from_env` strips; blank is absent; tested.
+- **GAP (structural): `DATABASE_URL_VAR`** moved to the vocabulary beside its five siblings; the
+  API's 503 detail, its startup warning and the CLI's `webhook` verb read it from there.
+- **GAP (both): the README dead-ended at the new refusal** — `TARGET_DATABASE_URL` in `.env`, then a
+  bare `python -m src.main`, which does not read `.env` (only the settings fields load from it; the
+  base's fallback had hidden that). `make run` now, and `.env.example` says how it is read.
+  `pip install -e .` → `'.[cli]'` in the README and `AGENTS.md`.
+- **GAP (both): untested behaviours** — the entrypoint "reads nothing" is an AST fact now (it
+  imports `src.worker` and no other module); both spawns run from an empty directory with
+  `PYTHONPATH`, so a developer's `.env` cannot satisfy a re-added requirement; `validate-env` exits 1
+  when it fails (it echoed and exited 0); `make dev`'s missing health gate is pinned.
+- **Battery (adversarial):** the two required-field mutations died at collection, so their named
+  tests never gave a verdict — they run with the three variables re-armed now (one recipe, labelled),
+  and one collection kill stays as its own behaviour. 34 mutations.
+- **Simplify (structural):** the worker's stale W1-slice docstring, its double settings import, the
+  instrument's label narrating a switch that no longer exists and overstating what is fatal, an
+  assertion that could never fail (`"IMPORTABLE-NOT-SERVING"`; the instrument prints a comma), a no-op
+  `env=`, the redaction file's name collision and redundant `delenv`, a case-insensitive strip in its
+  fixture, field counts dropped from prose, the runner's docstring reason for standing alone.
+- **Declined, with reasons:** a `PYTHON ?=` variable for the Makefile (the README activates the venv
+  one step earlier; the test targets' `./venv/bin/` is a separate, older inconsistency); moving
+  `async_database_url` out of `src/` (it is the harness's door and one test file's; noted);
+  `railway.toml`'s residue (`mkdir -p /tmp/media`, the polling rationale of `drainingSeconds`) — F2
+  forbids touching the file here; queued.
+- **Premise findings the round added:** the plan's checklist line `grep -rn WORKER_IMPL src scripts
+  tests → 0` cannot be met — the guard and the battery must name the switch to refuse it (0 in `src`,
+  `scripts`, `storydump_cli`; 6 in those two test files). The prose mentions left for phase 05, by
+  name: `operations/troubleshooting.md:23`, `monitoring.md:13`, `telegram-webhook.md:15` (the switch),
+  `SECURITY_REVIEW.md:59` ("loaded via `settings.TELEGRAM_BOT_TOKEN`", now false).
+
 **Deploy reachability:** Railway deploys `main` on merge; the worker takes it (SUCCESS at every commit
 since the cutover). The API service (`storydump`) has SKIPPED every deploy since `d8f5c72`
 (2026-09-16): `53ca6d6`, `4f2b36b`, `2369a9b`, `deb29c2` — each behind a red `main` check at deploy
@@ -319,7 +423,7 @@ settings.
 ## Owner-decision queue
 
 - **The API service's skipped deploys.** Railway marked `53ca6d6` and `4f2b36b` `SKIPPED` on the `storydump` (API) service while the worker deployed; the fold's API-side fixes (`ops_views.py`, the doctor/health paths) are not live until an API deploy lands. Phase 01's merge triggers one; sooner, by hand: `railway redeploy --service storydump`. Not run by the agent.
-- **A latent CI flake: the skip ceiling meets a clock-of-day skip.** `tests/scripts/test_l5_pipeline_gate.py::TestTheFirstFetch::test_a_local_cap_wait_on_a_slot_today_promises_tomorrow` skips when the account's local time is 23:55–23:59; any CI run starting in that window breaches `MAX_EXPECTED_SKIPS`. A fix that removes the skip: set the fixture account's `tz` to a zone where the local hour is not 23 at test time (the test already reads `tz` from the row). Target-tier test hygiene, outside this plan's scope.
+- ~~**A latent CI flake: the skip ceiling meets a clock-of-day skip.**~~ CLOSED by #1317 (`deb29c2`): the test gives its account a noon timezone and no longer skips. The original entry: `tests/scripts/test_l5_pipeline_gate.py::TestTheFirstFetch::test_a_local_cap_wait_on_a_slot_today_promises_tomorrow` skips when the account's local time is 23:55–23:59; any CI run starting in that window breaches `MAX_EXPECTED_SKIPS`. A fix that removes the skip: set the fixture account's `tz` to a zone where the local hour is not 23 at test time (the test already reads `tz` from the row). Target-tier test hygiene, outside this plan's scope.
 - **A startup secret check for the target tier?** The legacy `ConfigValidator` (deleted with phase 01) checked `ENCRYPTION_KEY` at boot; nothing in the target tier does the same at import. A decision, not a regression.
 - **Phase 02 premise findings from round 1:** `unit_of_work.async_database_url()` falls back to the
   legacy `DB_*` fields when `TARGET_DATABASE_URL` is unset — with the legacy loops gone, a boot
@@ -329,9 +433,15 @@ settings.
   `make run`) and the Makefile's `run`/`dev`/`init-db` describe the legacy tier (phase 02).
   `railway.toml`'s `drainingSeconds` rationale (Telegram polling) is stale (F2 forbids touching
   it here; phase 02). Eight requirements with zero importers (the table above).
-- **After phase 02 deploys (owner-run):** remove `WORKER_IMPL`, `TELEGRAM_BOT_TOKEN`,
-  `TELEGRAM_CHANNEL_ID` and `ADMIN_TELEGRAM_CHAT_ID` from BOTH Railway services (nothing reads them; the
-  landing app's own two on Vercel stay); replace `.claude/settings.json:54-59`'s four deny rules that
+- **After phase 02 deploys (owner-run):** remove `WORKER_IMPL` from the worker service and
+  `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHANNEL_ID`, `ADMIN_TELEGRAM_CHAT_ID` from BOTH services — measured by
+  name on 2026-09-18, these are the only dead variables set on either (nothing reads them; the landing
+  app's own two on Vercel stay); replace `.claude/settings.json:54-59`'s four deny rules that
   name the deleted legacy CLI's commands (commands that no longer exist) — the `python -m src.main`
   rules stay.
+- **`railway.toml`'s residue** (F2: untouched here): the build command still runs `mkdir -p
+  /tmp/media` for a directory nothing reads, and `drainingSeconds`' comment explains a Telegram polling
+  session nothing holds. A comment-and-build-line edit, the owner's call on when.
+- **Phase 03's rebase owes the Makefile a line:** `init-db` must apply
+  `tests/scripts/fixtures/legacy_by_hand.sql` once that file lands with 078.
 - The tear-out's own gates as they arise (phase 03's probe lines and the 078 rehearsal; phase 04's window).
