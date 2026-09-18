@@ -14,10 +14,11 @@ which kinds are live, that the clock's recurring set stays inside them, that
 the lease numbers agree — are unit-testable facts rather than deploy-time
 surprises. :func:`run` binds connections and supervises.
 
-Seam posture for the W1 slice (build-path `2026-08-21`): no transport (W2), no
-media_fetch (W5b), no provider poll (W5a) — their kinds PARK loudly rather
-than run against fakes. The transit store goes live iff `CLOUDINARY_*` is
-configured. `fn_clock_tick`'s account/credential/source legs are the door's
+Seam posture: a seam this process cannot build PARKS its kinds loudly rather
+than running them against a fake — no `TARGET_TELEGRAM_BOT_TOKEN` parks the
+sender, no `CLOUDINARY_*` trio parks the publish kind (the transit store goes
+live iff all three are set), a dead or wrong-bot token parks the channel at the
+startup probe. `fn_clock_tick`'s account/credential/source legs are the door's
 own; this process only chooses the recurring singletons it can actually run.
 """
 
@@ -794,18 +795,12 @@ def main() -> None:
         level=os.environ.get("WORKER_LOG_LEVEL", "INFO"),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
-    # `05` numbers come from the dataclass defaults; the web origin is
-    # deployment config, so it is read from settings at the composition root
-    # rather than duplicated as a worker env var.
-    from src.config.settings import settings as _settings
-
     env = dict(os.environ)
     url = unit_of_work.engine_url_from_env(env)
     if url is None:
-        # The settings-built fallback went with the legacy tier (the tear-out,
-        # phase 02): a worker booted without its database would otherwise run
-        # the target root against whatever the legacy `DB_*` fields pointed at.
-        # Refuse by name, loudly, the way the API's data routes do (503).
+        # No fallback: a root that ran against a database nobody named is the
+        # plausible-wrong-value casualty this refusal exists to prevent. By
+        # name, loudly — the API's data routes refuse the same absence (503).
         print(
             f"FATAL: {unit_of_work.DATABASE_URL_VAR} is unset. The worker runs the"
             " target tier only and has no database to run it against; set"
@@ -813,8 +808,11 @@ def main() -> None:
             file=sys.stderr,
         )
         raise SystemExit(2)
+    # `05` numbers come from the dataclass defaults; the web origin is
+    # deployment config, so it is read from settings at the composition root
+    # rather than duplicated as a worker env var.
     config = WorkerConfig(
-        web_app_origin=_settings.web_app_origin,
+        web_app_origin=settings.web_app_origin,
         lane_concurrency=lane_concurrency_from_env(env),
     )
     engine = unit_of_work.create_engine(url)

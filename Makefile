@@ -102,11 +102,12 @@ drop-db: ## Drop the database (WARNING: destructive)
 	@PGPASSWORD="$(DB_PASSWORD)" dropdb $(PG_OPTS) --if-exists $(DB_NAME) 2>/dev/null || true
 	@echo "$(GREEN)✓ Database dropped$(NC)"
 
-init-db: ## Build the schema the way the lineage lane proves it: the by-hand base, then every runner file
+init-db: ## Build the schema on a FRESH database, the way the lineage lane proves it: step 0 (the service roles and the DDL door), the by-hand base, then every runner file. DB_USER needs CREATEROLE
 	@echo "$(GREEN)Initializing database schema...$(NC)"
-	@PGPASSWORD="$(DB_PASSWORD)" psql $(PG_OPTS) -d $(DB_NAME) -v ON_ERROR_STOP=1 \
-		-f scripts/setup_database.sql -f tests/scripts/fixtures/legacy_by_hand.sql 2>&1 || \
-		(echo "$(RED)✗ Failed to build the by-hand base. Check database connection and permissions.$(NC)" && exit 1)
+	@PGPASSWORD="$(DB_PASSWORD)" psql $(PG_OPTS) -d $(DB_NAME) -q -v ON_ERROR_STOP=1 \
+		-f scripts/window/step0_bootstrap.sql -f scripts/window/step0_legacy_ddl_door.sql \
+		-f scripts/setup_database.sql 2>&1 || \
+		(echo "$(RED)✗ Failed to build the by-hand base. Check database connection and permissions (step 0 creates the svc_* roles: DB_USER needs CREATEROLE).$(NC)" && exit 1)
 	@DATABASE_URL="$(APP_DB_URL)" python -m scripts.migration_runner apply || \
 		(echo "$(RED)✗ The migration runner failed; see its output above.$(NC)" && exit 1)
 	@echo "$(GREEN)✓ Schema initialized$(NC)"
@@ -197,6 +198,6 @@ validate-env: ## Load the settings from the environment and .env, the way every 
 	@echo "$(GREEN)Validating environment configuration...$(NC)"
 	@python -c "from src.config.settings import settings" && \
 		echo "$(GREEN)✓ Configuration is valid$(NC)" || \
-		echo "$(RED)✗ Configuration validation failed$(NC)"
+		(echo "$(RED)✗ Configuration validation failed$(NC)" && exit 1)
 
 .DEFAULT_GOAL := help

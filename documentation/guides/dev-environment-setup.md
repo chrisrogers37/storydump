@@ -64,8 +64,6 @@ DB_NAME=storydump
 DB_USER=storydump_user
 DB_PASSWORD=neon_password
 DB_SSLMODE=require
-DB_POOL_SIZE=3
-DB_MAX_OVERFLOW=2
 ```
 
 ---

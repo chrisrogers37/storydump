@@ -35,8 +35,8 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 # Install dependencies
 pip install -r requirements.txt
 
-# Install CLI tool
-pip install -e .
+# Install the package and the `storydump` CLI (the `cli` extra)
+pip install -e '.[cli]'
 ```
 
 ### 2. Configuration
@@ -46,7 +46,8 @@ pip install -e .
 nano .env
 ```
 
-Add the following required variables to your `.env` file:
+`.env.example` lists every variable the code reads, with what each one does; copy it
+and fill in what you run:
 
 Configuration (no variable is required to load settings; a process needs what it reads):
 - `TARGET_DATABASE_URL`: the database the API and the worker run against (the runtime login)
@@ -75,8 +76,10 @@ asks for approval on the bound Telegram group or the web Queue.
 ### 5. Run the Application
 
 ```bash
-# Run in foreground (for testing)
-python -m src.main
+# Run the worker in the foreground. `make run` exports `.env` into the process;
+# a bare `python -m src.main` does not read it and refuses to boot without
+# TARGET_DATABASE_URL in its environment.
+make run
 
 # Or run as background service (see documentation)
 ```

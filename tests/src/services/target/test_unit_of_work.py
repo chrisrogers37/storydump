@@ -42,31 +42,21 @@ class TestTheEngineConfigAssertsTheSeam:
         engine = create_engine("postgresql+asyncpg://u:p@localhost:5432/none")
         assert engine.pool._max_overflow == MAX_OVERFLOW_SEAM
 
-    def test_the_seam_is_NOT_read_from_settings(self, monkeypatch):
+    @pytest.mark.parametrize("value", ["0", "20", "99"])
+    def test_the_seam_is_NOT_sized_by_the_environment(self, monkeypatch, value):
         """R4's finding, pinned BEHAVIOURALLY rather than by proxy.
 
-        The first version asserted `settings.DB_MAX_OVERFLOW != SEAM`, which
-        inverts the day someone remediates R4's finding by setting the config
-        to 0 — the test went red at exactly the moment the config became
-        right, in an unrelated PR authored by someone with no L.0 context. A
-        check that fails when the defect it guards is fixed is not pinning it.
-
-        Driving the setting to an arbitrary value and asserting the engine
-        still shows the literal proves "not read from settings" for ANY value,
-        including 0, and can never invert."""
-        monkeypatch.setattr(settings, "DB_MAX_OVERFLOW", 99)
+        The legacy `DB_MAX_OVERFLOW` / `DB_POOL_SIZE` settings are gone (the
+        tear-out, phase 02: nothing read them) — and an operator may still
+        have them set on a service. Driving both NAMES to arbitrary values and
+        asserting the engine still shows the literals proves "not sized by
+        configuration" for ANY value, including 0 (the value that inverted
+        this test's first form), and can never invert."""
+        monkeypatch.setenv("DB_MAX_OVERFLOW", value)
+        monkeypatch.setenv("DB_POOL_SIZE", value)
         engine = create_engine("postgresql+asyncpg://u:p@localhost:5432/none")
         assert engine.pool._max_overflow == MAX_OVERFLOW_SEAM
-
-    @pytest.mark.parametrize("setting_value", [0, 20, 99])
-    def test_it_holds_for_every_setting_value_including_the_remediated_one(
-        self, monkeypatch, setting_value
-    ):
-        """0 is in the set deliberately — it is the value that broke the old
-        form, so it is the one worth pinning."""
-        monkeypatch.setattr(settings, "DB_MAX_OVERFLOW", setting_value)
-        engine = create_engine("postgresql+asyncpg://u:p@localhost:5432/none")
-        assert engine.pool._max_overflow == MAX_OVERFLOW_SEAM
+        assert engine.pool.size() == POOL_SIZE_SEAM
 
     def test_the_saturation_policy_is_pinned_not_left_to_the_default(self):
         """branden's finding. With `max_overflow=0` the pool cannot burst, so

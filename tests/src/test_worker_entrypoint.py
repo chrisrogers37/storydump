@@ -8,9 +8,11 @@ followed made the deployed worker ARTIFACT contain the target root while its
 BEHAVIOUR stayed legacy until an operator armed the target root (2026-08-24).
 The legacy tier is gone (the tear-out, phase 01; #1216) and so is the switch
 (phase 02): the artifact IS the root, `src.main` runs it and reads nothing,
-and what this file pins is the dispatch and the eager import.
+and what this file pins is the dispatch, the absence of any read, and the
+eager import.
 """
 
+import ast
 import os
 import pathlib
 import subprocess
@@ -19,6 +21,7 @@ import sys
 import src.main as main_mod
 
 REPO = pathlib.Path(__file__).resolve().parent.parent.parent
+MAIN = REPO / "src" / "main.py"
 
 
 class TestDispatch:
@@ -35,6 +38,20 @@ class TestDispatch:
         main_mod.main()
         assert ran == ["target"]
 
+    def test_the_entrypoint_imports_the_root_and_nothing_else(self):
+        """ "Reads nothing", as a fact about the file rather than a promise in a
+        docstring: `src.main` imports `src.worker` and no other module — no
+        `os`, no settings, no logger — so there is nothing in it that COULD
+        read the environment under any name, not only the retired one."""
+        tree = ast.parse(MAIN.read_text(encoding="utf-8"))
+        imported = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported += [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                imported.append(node.module)
+        assert imported == ["src.worker"], imported
+
 
 class TestDeployedClosure:
     """The reachability property itself, pinned in a fresh interpreter.
@@ -45,17 +62,18 @@ class TestDeployedClosure:
 
     ONE spawn carries two pinned properties, because the stricter env proves
     both. The probe strips the `TARGET_*` family (read at RUN time inside
-    `src.worker.main`, never at import), so a pass simultaneously establishes
-    (1) REACHABLE: importing the deployed entrypoint pulls the root and the
-    target tier — red if anyone lazifies the import, which would silently
-    unwind the deployed-axis movement (#979's blindness relied on in
-    reverse); and (2) NO ENV AT IMPORT: the module imports with nothing of
-    the tier's configuration set — a boot must not need the `TARGET_*` family
-    at IMPORT time.
+    `src.worker.main`, never at import) and runs from an empty directory, so
+    no `.env` stands in for the environment. A pass establishes (1) REACHABLE:
+    importing the deployed entrypoint pulls the root and the target tier — red
+    if anyone lazifies the import, which would silently unwind the
+    deployed-axis movement (#979's blindness relied on in reverse); and (2) NO
+    ENV AT IMPORT: a boot must not need the tier's configuration at IMPORT
+    time.
     """
 
-    def test_the_entrypoint_pulls_the_root_with_no_target_variable_set(self):
+    def test_the_entrypoint_pulls_the_root_with_no_target_variable_set(self, tmp_path):
         env = {k: v for k, v in os.environ.items() if not k.startswith("TARGET_")}
+        env["PYTHONPATH"] = str(REPO)
         code = (
             "import sys, pathlib\n"
             "import src.main\n"
@@ -72,7 +90,7 @@ class TestDeployedClosure:
             [sys.executable, "-c", code],
             capture_output=True,
             text=True,
-            cwd=REPO,
+            cwd=tmp_path,
             env=env,
         )
         assert proc.returncode == 0, proc.stderr[-800:]

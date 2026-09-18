@@ -42,7 +42,7 @@ def _redact_opaque(exc: ValueError) -> str:
 
     It is the same shape as the ``.doc`` leak and strictly worse on both axes:
     the payload is ``UnicodeDecodeError.object``, the ENTIRE .env file, and it
-    fires on the shipped 42-field configuration at import — no subclass and no
+    fires on the shipped configuration at import — no subclass and no
     complex field required. Measured on a 163-byte fixture: 163 bytes carried,
     three of three synthetic credentials present, and ZERO of them in ``str()``
     or the rendered traceback. A message-only redactor is blind to it.
@@ -102,7 +102,9 @@ def _redact(exc: ValidationError) -> str:
 
 
 class Settings(BaseSettings):
-    """Application configuration."""
+    """Application configuration. NO FIELD IS REQUIRED (#1222): a process needs
+    only what it reads, and a field survives only while something reads it
+    (`tests/src/test_legacy_settings_gone.py` measures both)."""
 
     def __init__(self, **kwargs):
         """Load settings, converting any validation failure into SettingsError.
@@ -113,8 +115,12 @@ class Settings(BaseSettings):
         process this project does not control. On a validation failure its
         ValidationError renders ``input_value=`` with a truncated copy of the
         input, which printed part of an unrelated real credential for four
-        different operators in one evening (the field then was the legacy
-        tier's bot token, retired with that tier; the shape is any field's).
+        different operators in one evening. That was a ``missing`` error on a
+        REQUIRED sibling of the legacy tier's bot token; no field is required
+        since that tier retired, so that exact shape is DORMANT as declared --
+        a field failing its own validation still reaches it, and the first
+        required field anyone adds re-arms it, which is why the boundary
+        stays.
 
         WHY NOT SecretStr, which is the obvious tool and what the issue first
         suggested: measured, it does not fix this shape. The observed error is
@@ -152,7 +158,7 @@ class Settings(BaseSettings):
         the chain is therefore the load-bearing half here; redacting the message
         alone would accomplish nothing, since the value was never in it.
 
-        DORMANT AS DECLARED, and measured: 29 fields, zero complex-typed, zero
+        DORMANT AS DECLARED, and measured: zero complex-typed fields, zero
         aliases, none required. The trigger is a REQUIRED list/dict/nested-model field (an
         ``Optional``-wrapped one degrades safely to the redacted validation
         path), which is an ordinary thing to add and carries no warning that it
@@ -175,32 +181,24 @@ class Settings(BaseSettings):
         env_file=".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore"
     )
 
-    # Database Configuration
-    DATABASE_URL: Optional[str] = None  # Full URL (overrides DB_* components if set)
+    # The TEST HARNESS's database, by component. No deployed root builds a URL
+    # from these: the worker and the API take TARGET_DATABASE_URL and the
+    # migration runner takes DATABASE_URL, both from the process environment at
+    # run time. `unit_of_work.async_database_url` and `test_database_url`
+    # below are the readers, and the suite is their caller.
     DB_HOST: str = "localhost"
     DB_PORT: int = 5432
     DB_NAME: str = "storydump"
     DB_USER: str = "storydump_user"
     DB_PASSWORD: Optional[str] = ""
     DB_SSLMODE: Optional[str] = None  # e.g., "require" for Neon
-    DB_POOL_SIZE: int = 10
-    DB_MAX_OVERFLOW: int = 20
     TEST_DB_NAME: str = "storydump_test"
 
-    # NO FIELD IS REQUIRED (the tear-out, phase 02; #1222). The legacy tier
-    # demanded three bare Telegram variables of every process — the web
-    # service, the tests, the CLI — for loops only the worker ran; they went
-    # with it. A process needs only what it reads: the worker refuses to boot
-    # without TARGET_DATABASE_URL (src/worker.py, exit 2) and the API answers
-    # 503 on every data route without it (src/api/app.py); neither is a
-    # Settings field, because both are read from the process environment at
-    # RUN time, never at import.
-    #
     # The Telegram fields are prefixed TARGET_ because they pair with
     # TARGET_TELEGRAM_BOT_TOKEN (read by the worker and the API directly), and
     # because this class reads whatever the ambient environment holds under a
-    # bare name (see the note at the top of this class). The product runs ONE
-    # bot (storydump_app_bot — documentation/operations/telegram-webhook.md).
+    # bare name (see `__init__`). The product runs ONE bot
+    # (documentation/operations/telegram-webhook.md).
     #
     # The value Telegram echoes in X-Telegram-Bot-Api-Secret-Token, set when the
     # target webhook is registered. Optional and absent by default, and the
@@ -282,13 +280,6 @@ class Settings(BaseSettings):
     GOOGLE_CLIENT_ID: Optional[str] = None
     GOOGLE_CLIENT_SECRET: Optional[str] = None
 
-    # Cloudinary: the transit store for a story's frame on its way to Meta.
-    # The worker reads the three from the environment at composition
-    # (`_transit_from_env`); absent means the publish kind parks by name.
-    CLOUDINARY_CLOUD_NAME: Optional[str] = None
-    CLOUDINARY_API_KEY: Optional[str] = None
-    CLOUDINARY_API_SECRET: Optional[str] = None
-
     # Security: the Fernet key(s) the stored credentials are encrypted with.
     ENCRYPTION_KEY: Optional[str] = None  # Fernet key for encrypting tokens in DB
     ENCRYPTION_KEYS: Optional[str] = (
@@ -297,26 +288,6 @@ class Settings(BaseSettings):
 
     # Logging
     LOG_LEVEL: str = "INFO"
-
-    @property
-    def database_url(self) -> str:
-        """Get database URL for SQLAlchemy.
-
-        If DATABASE_URL is set, use it directly (standard for PaaS platforms).
-        Otherwise, assemble from individual DB_* components.
-        Appends ?sslmode= if DB_SSLMODE is set (required for Neon).
-        """
-        if self.DATABASE_URL:
-            return self.DATABASE_URL
-
-        if self.DB_PASSWORD:
-            url = f"postgresql://{self.DB_USER}:{self.DB_PASSWORD}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
-        else:
-            url = f"postgresql://{self.DB_USER}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
-
-        if self.DB_SSLMODE:
-            url += f"?sslmode={self.DB_SSLMODE}"
-        return url
 
     @property
     def test_database_url(self) -> str:

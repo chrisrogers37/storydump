@@ -16,12 +16,13 @@ nothing. The invariant it protects:
 
     Σ(replica × (pool + overflow)) = 3×(10+0) + 2×(10+0) = 50  ≥  peak DB-active tasks
 
-**This is deliberately NOT read from `settings.DB_MAX_OVERFLOW`.** That setting
-is `20` on this repo today, which is exactly R4's finding: it silently makes
+**This was deliberately never read from the legacy `DB_MAX_OVERFLOW` setting.**
+That setting defaulted to `20`, which was exactly R4's finding: it silently made
 the true ceiling (10+20)×5 = 150 rather than 50. The legacy sync engine in
-`src/config/database.py` read it too, until the tear-out deleted that engine
-(phase 01; #1216). Pinning the async engine to the seam constant is what keeps
-the target substrate correct whatever the config says, and the gate asserts
+`src/config/database.py` read it, until the tear-out deleted that engine (phase
+01; #1216) and then the two pool settings nothing read (phase 02). Pinning the
+async engine to the seam constant is what keeps the target substrate correct
+whatever the environment says, and the gate asserts
 the constant rather than trusting the config.
 
 ## The UoW is unconstructible without a tenant
@@ -73,19 +74,20 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 from src.config.settings import settings
+from src.services.target.vocabulary import DATABASE_URL_VAR
 from src.utils.logger import logger
 from src.exceptions.base import StorydumpError
 
 #: `05` seam value. Pinned, not configurable, not read from settings — see the
-#: module docstring for why `settings.DB_MAX_OVERFLOW` is deliberately ignored.
+#: module docstring for why no overflow setting exists.
 MAX_OVERFLOW_SEAM = 0
 
 #: `05` seam value: 10 per replica, both lanes (`3×10 workers + 2×10 ingress`).
 #: Pinned for the same reason the overflow is. Leaving HALF the inequality
-#: configurable was the gap: with `pool_size` read from settings, a production
-#: `DB_POOL_SIZE` override silently breaks `Σ(replica × (pool + overflow)) = 50`
-#: and no gate can see it, because the test would read the same overridden
-#: value it is meant to be checking.
+#: configurable was the gap: with `pool_size` read from a setting, a production
+#: override silently breaks `Σ(replica × (pool + overflow)) = 50` and no gate
+#: can see it, because the test would read the same overridden value it is
+#: meant to be checking.
 POOL_SIZE_SEAM = 10
 
 #: How long a caller waits for a connection before being told there is none.
@@ -143,11 +145,6 @@ def in_transaction() -> bool:
     return _IN_TRANSACTION.get()
 
 
-#: The one variable the deployed roots take their database from. Read from the
-#: process environment at run time (never at import) by `engine_url_from_env`.
-DATABASE_URL_VAR = "TARGET_DATABASE_URL"
-
-
 def async_database_url(database: Optional[str] = None) -> str:
     """The asyncpg URL built from the `DB_*` settings — the TEST HARNESS's
     door, never a deployed root's.
@@ -191,8 +188,10 @@ def engine_url_from_env(env) -> Optional[str]:
     and None is the caller's to refuse: the worker exits 2 naming the variable
     (`src.worker.main`), the API runs with no engine and answers 503 on every
     data route (`src.api.app`). There is no settings-built fallback."""
-    url = env.get(DATABASE_URL_VAR)
+    url = (env.get(DATABASE_URL_VAR) or "").strip()
     if not url:
+        # Blank is absent: a dashboard row saved empty must meet the callers'
+        # named refusal, never a traceback out of `create_engine`.
         return None
     return asyncpg_url(url)
 

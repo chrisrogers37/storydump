@@ -28,6 +28,7 @@ mask anything. ``test_secretstr_alone_would_not_have_been_enough`` pins that
 finding so the fix is not "simplified" back to it later.
 """
 
+import os
 from typing import Optional
 
 import pytest
@@ -47,7 +48,7 @@ from src.config.settings import Settings, SettingsError, _redact_source
 SENTINEL = "1234567890:SYNTHETICsentinelTOKENvalueDoNotUseXYZ"
 
 # The shortest run of sentinel characters we treat as a leak. Pydantic's
-# truncated form keeps a leading char and a long tail, so a real disclosure
+# truncated form keeps the head and the tail of a repr, so a real disclosure
 # shows far more than this; 8 is short enough to catch a partial echo and long
 # enough not to fire on incidental substrings like "1234".
 MIN_LEAK_RUN = 8
@@ -136,11 +137,13 @@ def only_the_secret_in_the_environment(monkeypatch):
     exactly this environment — is pinned by
     ``test_the_raw_error_really_does_carry_the_value_in_this_shape``.
     """
-    for name in list(WithARequiredSibling.model_fields):
-        monkeypatch.delenv(name, raising=False)
-        monkeypatch.delenv(name.lower(), raising=False)
+    declared = {name.upper() for name in WithARequiredSibling.model_fields}
+    for name in list(os.environ):
+        # Case-insensitively, as the settings source reads them: `Db_Host`
+        # is `DB_HOST` to pydantic, and would sit in the repr all the same.
+        if name.upper() in declared:
+            monkeypatch.delenv(name)
     monkeypatch.setenv(SECRET_FIELD, SENTINEL)
-    monkeypatch.delenv("REQUIRED_SIBLING", raising=False)
 
 
 @pytest.mark.unit
@@ -586,13 +589,13 @@ class TestWhySecretStrIsNotTheFix:
         fix is a boundary catch, and a future reader will otherwise try
         SecretStr again and believe it worked.
         """
-        monkeypatch.setenv("SECRET_FIELD", SENTINEL)
-        monkeypatch.delenv("REQUIRED_SIBLING", raising=False)
+        monkeypatch.setenv("PROBE_SECRET", SENTINEL)
+        monkeypatch.delenv("PROBE_REQUIRED", raising=False)
 
         class Probe(BaseSettings):
             model_config = SettingsConfigDict(case_sensitive=False, extra="ignore")
-            SECRET_FIELD: SecretStr
-            REQUIRED_SIBLING: int
+            PROBE_SECRET: SecretStr
+            PROBE_REQUIRED: int
 
         with pytest.raises(ValidationError) as caught:
             Probe(_env_file=None)

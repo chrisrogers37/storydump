@@ -79,6 +79,7 @@ from src.services.target.unit_of_work import (
     INGRESS_POOL_TIMEOUT_SEAM,
     PoolWatch,
 )
+from src.services.target.vocabulary import DATABASE_URL_VAR
 from src.services.target.telegram_dispatch import TelegramDispatcher
 from src.services.target.webhook_ingress import AdmissionConflict, DeliveryReplayed
 from src.utils.logger import logger
@@ -377,7 +378,7 @@ def _engine_from_env(env: Mapping[str, str]) -> Optional[AsyncEngine]:
     url = engine_url_from_env(env)
     if url is None:
         logger.warning(
-            "TARGET_DATABASE_URL is unset: the API has no target engine and every "
+            f"{DATABASE_URL_VAR} is unset: the API has no target engine and every "
             "data route answers 503 until it is configured"
         )
         return None

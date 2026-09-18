@@ -121,9 +121,6 @@ jobs:
           DB_PASSWORD: test_password
           DB_NAME: storyline_ai
           TEST_DB_NAME: storyline_test
-          # No setting is REQUIRED (the tear-out, phase 02): the three
-          # bare Telegram variables the legacy tier demanded of every
-          # process are gone with it, and nothing else is set for nothing.
           # Security — generate a fresh Fernet key per run instead of
           # committing a static test key in the workflow file.
           ENCRYPTION_KEY: ${{ steps.gen-key.outputs.key }}

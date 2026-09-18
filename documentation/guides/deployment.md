@@ -79,11 +79,9 @@ psql "$DATABASE_URL" -c "\dt"
 
 ### Connection Pool Sizing
 
-Neon free tier allows 5 concurrent connections:
-```
-DB_POOL_SIZE=3
-DB_MAX_OVERFLOW=2
-```
+The pool is pinned in code — 10 connections per process, no overflow
+(`src/services/target/unit_of_work.py`) — and no variable sizes it. Count the
+processes (the API and the worker) against the plan's connection limit.
 
 **Deliverables:**
 ```
@@ -300,13 +298,13 @@ Phase 1 is **manual posting**, so prepare your workflow:
 ### Initial Testing Checklist
 
 - [ ] **Day 1 Morning:**
-  - Verify `DRY_RUN_MODE=true` in Railway env vars
+  - Verify the workspace's **Dry Run Mode** is ON (the web, Settings › General) — it is a per-workspace setting in the ledger, not a variable
   - Verify notifications arrive in Telegram
   - Test "Posted" and "Skip" buttons
   - Check the queue via `storydump floating` or the web's Queue
 
 - [ ] **Day 1 Afternoon:**
-  - Set `DRY_RUN_MODE=false` in Railway env vars
+  - Turn the workspace's **Dry Run Mode** OFF (the web, Settings › General)
   - Wait for first real notification
   - Post ONE story to Instagram manually
   - Click "Posted" button
@@ -342,8 +340,8 @@ Phase 1 is **manual posting**, so prepare your workflow:
 ### Go Live
 
 ```bash
-# Set DRY_RUN_MODE=false in Railway dashboard
-# Railway will restart the service automatically
+# Turn the workspace's Dry Run Mode off on the web (Settings › General);
+# it takes effect for posts approved from then on — no restart
 
 # Monitor first day
 railway logs --service worker
@@ -355,7 +353,7 @@ railway logs --service worker
 - [ ] Verify all posts going out
 - [ ] Monitor team feedback
 - [ ] Track any issues
-- [ ] Adjust schedule if needed (`POSTS_PER_DAY`, `POSTING_HOURS_START`, etc.)
+- [ ] Adjust the schedule if needed (the schedule card on the web, Settings › General)
 
 ---
 

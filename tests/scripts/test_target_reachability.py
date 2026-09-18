@@ -17,7 +17,6 @@ import pathlib
 
 import importlib
 import json
-import os
 import subprocess
 import sys
 import textwrap
@@ -671,24 +670,25 @@ class TestTheDeployedLabelCannotOutliveItsOwnPremise:
 
     def test_the_moved_axis_names_its_call_site_and_the_other_half(self, capsys):
         """The movement has ONE known call site — the dispatch in `src.main`,
-        unconditional since the legacy tier's deletion and switch-less since
-        the tear-out's phase 02 — so sending the reader hunting for it is the
-        wrong instruction; the label names it. The schema half rides the SAME
-        banner (rajan, #1005 review): the operator acts on what THIS text
-        says, not on a PR body."""
+        unconditional — so sending the reader hunting for it is the wrong
+        instruction; the label names it, and narrates no switch (a caveat
+        about a variable nothing reads would outlive its premise, the failure
+        this class exists for). The serving half rides the SAME banner (rajan,
+        #1005 review): the operator acts on what THIS text says, not on a PR
+        body — so it says what is fatal (no database URL) and what merely
+        parks (no bot token)."""
         out = self._render(
             {"worker": {"target_hits": ["x"]}, "web": {"target_hits": []}}, capsys
         )
         assert "THE CLEARING ENTRYPOINT HAS MOVED" in out
         assert "CANNOT confirm the blocker is cleared" in out
         assert "runs the target root UNCONDITIONALLY" in out
-        assert "no environment switch" in out
         assert "SERVING PRESUPPOSES" in out
         assert "target schema" in out
+        assert "TARGET_DATABASE_URL" in out
+        assert "parked" in out
         assert "by hand" not in out
-        assert "still read" not in out, (
-            "the label still describes the switch phase 02 retired"
-        )
+        assert "switch" not in out, "the label still narrates a retired switch"
 
 
 def _repo_root():
@@ -701,9 +701,9 @@ class TestTheMovedAxisLabel:
     Full-instrument runs, because the claim under test is the composed one:
     the real measurement moves the worker axis AND the printed figure carries
     the call site and the serving caveat. The gate axis the label once
-    carried (`worker_gate` in the JSON, the switch's terms in the text) went
-    with the switch in the tear-out's phase 02, and its absence is pinned so a
-    reader is never told to type a variable nothing reads.
+    carried (`worker_gate` in the JSON, a switch's terms in the text) retired
+    in the tear-out's phase 02, and its absence is pinned so a reader is never
+    told to type a variable nothing reads.
 
     The JSON test doubles as the instrument-level movement pin: non-empty
     `deployed.worker.target_hits` containing `work_loop` IS the deployed-axis
@@ -718,7 +718,6 @@ class TestTheMovedAxisLabel:
             capture_output=True,
             text=True,
             cwd=_repo_root(),
-            env=dict(os.environ),
         )
         assert proc.returncode == 0, proc.stderr[-800:]
         return proc.stdout
@@ -735,9 +734,10 @@ class TestTheMovedAxisLabel:
     def test_text_labels_the_moved_axis_without_a_switch(self):
         out = self._run()
         assert "runs the target root UNCONDITIONALLY" in out
-        assert "no environment switch" in out
         assert "SERVING PRESUPPOSES" in out
-        assert "still read" not in out
-        assert "IMPORTABLE-NOT-SERVING" not in out, (
-            "the label still claims a gate the legacy tier's deletion removed"
+        assert "switch" not in out
+        # The OTHER branch's headline, spelled as the instrument prints it (a
+        # hyphenated spelling was asserted here once, and could never fail).
+        assert "IMPORTABLE, NOT SERVING" not in out, (
+            "the moved axis printed the not-moved branch's denial"
         )

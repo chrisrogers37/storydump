@@ -103,7 +103,7 @@ Two consequences worth knowing before reasoning about reach:
 
 ```bash
 python3 -m venv venv && source venv/bin/activate
-pip install -r requirements.txt && pip install -e .
+pip install -r requirements.txt && pip install -e '.[cli]'
 ```
 
 The repo's `Makefile` targets assume `./venv/`. (`.venv/` is also gitignored, so
@@ -252,10 +252,9 @@ the row and its token are real, the message is never delivered.
 Do not describe email as working, and do not wire a provider without the owner
 acknowledgement the design calls for.
 
-`ENABLE_INSTAGRAM_API` is a **per-workspace database setting**
-(`chat_settings.enable_instagram_api`, default `false`), not an environment
-variable — `settings.py` does not read it. `.env.example` still lists it, which
-is stale.
+Publishing, dry run and pause are **per-workspace settings** in the ledger
+(`workspaces.dry_run_mode`, `is_paused`; the web's Settings › General), never
+environment variables.
 
 ## Pre-commit and CI
 

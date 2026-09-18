@@ -463,12 +463,10 @@ def _label_deployed(deployed: dict) -> None:
     and a banner that always fires is one nobody reads.
 
     The clearing entrypoint's movement IS the `src.main` dispatch (#942), and
-    the call site is known: since the legacy tier's deletion (#1216) it runs
-    the target root unconditionally, and since the tear-out's phase 02 there
-    is no environment switch to read — so the label names that call site
-    rather than sending a reader hunting for one. What it cannot say is that
-    the root SERVES: that presupposes the target schema applied and the
-    `TARGET_*` config set, and the banner says so.
+    the call site is known — it runs the target root unconditionally — so the
+    label names that call site rather than sending a reader hunting for one.
+    What it cannot say is that the root SERVES: that presupposes the target
+    schema applied and `TARGET_DATABASE_URL` set, and the banner says so.
     """
     nonzero = [p for p, d in deployed.items() if d["target_hits"]]
     if not nonzero:
@@ -489,17 +487,14 @@ def _label_deployed(deployed: dict) -> None:
         )
         print("  target code, never that any call path runs it. The call site is the")
         print(
-            "  dispatch in src.main, which runs the target root "
-            "UNCONDITIONALLY since the\n"
-            "  legacy tier's deletion (#1216); there is no environment switch "
-            "to read\n"
-            "  (the tear-out's phase 02 retired it).\n"
+            "  dispatch in src.main, which runs the target root UNCONDITIONALLY.\n"
             "  SERVING PRESUPPOSES the other half: the target schema "
             "applied (the migration\n"
             "  runner runs at every predeploy -- railway.toml) and "
-            "TARGET_* config set.\n"
-            "  Without them the worker fails loudly at boot rather than "
-            "serving."
+            "TARGET_DATABASE_URL set.\n"
+            "  Without the URL the worker refuses to boot (exit 2); without "
+            "a bot token it\n"
+            "  runs with its Telegram channel parked."
         )
     else:
         print("  IMPORTABLE, NOT SERVING. This is NOT the #942 blocker clearing.")

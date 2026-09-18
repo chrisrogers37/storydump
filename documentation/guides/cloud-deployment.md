@@ -77,14 +77,9 @@ SELECT extname FROM pg_extension WHERE extname = 'uuid-ossp';
 
 ### Connection Pool Sizing
 
-Neon free tier allows 5 concurrent connections. Set these env vars:
-
-```
-DB_POOL_SIZE=3
-DB_MAX_OVERFLOW=2
-```
-
-The defaults (pool_size=10, max_overflow=20) are too aggressive for Neon free tier.
+The pool is pinned in code — 10 connections per process, no overflow
+(`src/services/target/unit_of_work.py`) — and no variable sizes it. Count the
+processes (the API and the worker) against the plan's connection limit.
 
 ---
 
@@ -114,14 +109,6 @@ web: uvicorn src.api.app:app --host 0.0.0.0 --port ${PORT:-8000}
 4. **Generate a domain** for the web service (needed for OAuth callbacks)
 5. **Configure environment variables** (see Section 3 below)
 
-### MEDIA_DIR on Cloud
-
-The `ConfigValidator` checks that `MEDIA_DIR` exists on the filesystem. On Railway:
-
-- **Recommended**: Use Google Drive as media source (`MEDIA_SOURCE_TYPE=google_drive`). Set `MEDIA_DIR` to `/tmp/media` and create it at build time.
-- Add to build command: `pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media`
-- The local `MEDIA_DIR` is only used as fallback when Google Drive is not configured.
-
 ### Health Checks
 
 - **Worker**: Railway monitors the process — if it exits, it restarts automatically. The app has built-in SIGTERM handling for graceful shutdown.
@@ -144,53 +131,37 @@ Configure these in the Railway dashboard for **both** services:
 | `TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN` | The secret the API expects Telegram to echo on every delivery | a long random string |
 | `ENCRYPTION_KEY` | Fernet key for token encryption | Generate with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
 
-### Database (Alternative to DATABASE_URL)
+### Database (the components)
 
-If not using `DATABASE_URL`, set individual components:
-
-| Variable | Description | Example |
-|---|---|---|
-| `DB_HOST` | Neon endpoint | `ep-cool-morning-123456.us-east-2.aws.neon.tech` |
-| `DB_PORT` | Database port | `5432` |
-| `DB_NAME` | Database name | `storydump` |
-| `DB_USER` | Database user | `storydump_user` |
-| `DB_PASSWORD` | Database password | `neon_generated_password` |
-| `DB_SSLMODE` | SSL mode (required for Neon) | `require` |
-| `DB_POOL_SIZE` | Connection pool size | `3` (Neon free tier) |
-| `DB_MAX_OVERFLOW` | Max overflow connections | `2` (Neon free tier) |
+There is no `DB_*` alternative for a deployed service: the worker refuses to
+boot without `TARGET_DATABASE_URL` and the API answers 503 on every data route
+without it. The `DB_*` components serve the test harness and `make` only.
 
 ### OAuth & API (Web Service)
 
 | Variable | Description | Example |
 |---|---|---|
 | `OAUTH_REDIRECT_BASE_URL` | Railway web service URL | `https://your-app.up.railway.app` |
-| `FACEBOOK_APP_ID` | Meta Developer App ID | `1234567890123456` |
 | `FACEBOOK_APP_SECRET` | Meta Developer App Secret | `abc123...` |
 | `GOOGLE_CLIENT_ID` | Google OAuth Client ID | `xxx.apps.googleusercontent.com` |
 | `GOOGLE_CLIENT_SECRET` | Google OAuth Client Secret | `GOCSPX-...` |
 
-### Instagram API (Phase 2)
+### Cloudinary (the frame's transit to Meta)
 
 | Variable | Description | Example |
 |---|---|---|
-| `ENABLE_INSTAGRAM_API` | Enable Instagram posting | `true` |
-| `INSTAGRAM_ACCOUNT_ID` | Instagram Business Account ID | `17841405793087218` |
 | `CLOUDINARY_CLOUD_NAME` | Cloudinary cloud name | `dxyz123` |
 | `CLOUDINARY_API_KEY` | Cloudinary API key | `123456789012345` |
 | `CLOUDINARY_API_SECRET` | Cloudinary API secret | `abc_secret...` |
 
-### Media & Schedule
+### Media, schedule and dry run
 
-| Variable | Default | Description |
-|---|---|---|
-| `MEDIA_SOURCE_TYPE` | `local` | Set to `google_drive` for cloud |
-| `MEDIA_SOURCE_ROOT` | `""` | Google Drive folder ID |
-| `MEDIA_SYNC_ENABLED` | `false` | Enable Google Drive sync |
-| `MEDIA_SYNC_INTERVAL_SECONDS` | `300` | Sync interval |
-| `POSTS_PER_DAY` | `3` | Default posts per day |
-| `POSTING_HOURS_START` | `14` | Start hour (UTC) |
-| `POSTING_HOURS_END` | `2` | End hour (UTC) |
-| `DRY_RUN_MODE` | `false` | Prevent actual posting |
+Not variables: the media source (a connected Google Drive folder), the schedule
+and **Dry Run Mode** are per-workspace settings in the ledger, set on the web
+(Settings › Integrations and Settings › General).
+
+`.env.example` is the reference for every variable the code reads — a test
+keeps it in exact agreement with the tree.
 
 ---
 
@@ -237,7 +208,7 @@ Instagram account connection uses browser-based OAuth, which requires the web se
    (production: `https://api.storydump.app/auth/instagram-login/callback`; see
    [`instagram-login-setup.md`](instagram-login-setup.md) Step 3)
 4. Required permissions: `pages_show_list`, `pages_read_engagement`, `instagram_basic`, `instagram_content_publish`, `business_management`
-5. Set `FACEBOOK_APP_ID` and `FACEBOOK_APP_SECRET` env vars
+5. Set `INSTAGRAM_APP_ID` and `INSTAGRAM_APP_SECRET` (Instagram Login); set `FACEBOOK_APP_SECRET` too if Meta signs this app's callbacks with the Facebook app's secret (`src/services/target/meta_callbacks.py` tries both)
 
 ### How It Works (Post-Phase 04)
 
@@ -282,13 +253,13 @@ End users just need a Google account with a Drive folder containing their media.
 
 ## 7. Cloudinary Setup
 
-Required only when `ENABLE_INSTAGRAM_API=true` (Phase 2 posting).
+Required for publishing: without all three variables the worker parks the publish kind by name.
 
 1. Create account at [cloudinary.com](https://cloudinary.com) (free tier: 25 credits/month)
 2. Get credentials from Dashboard: Cloud Name, API Key, API Secret
 3. Set env vars: `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET`
 
-The `CloudStorageService` uploads media to Cloudinary with 9:16 transformations and auto-cleanup after `CLOUD_UPLOAD_RETENTION_HOURS` (default: 24).
+The worker's transit store (`src/services/target/transit.py`) uploads a story's frame for Meta to fetch, and the `reap_transit_assets` job removes it afterwards.
 
 ---
 
@@ -351,15 +322,14 @@ From a laptop with a token minted under Settings › API tokens:
 | Problem | Solution |
 |---------|----------|
 | Database connection fails | Check `DATABASE_URL` or `DB_*` vars. Ensure `DB_SSLMODE=require` for Neon. |
-| Neon connection limit exceeded | Reduce `DB_POOL_SIZE` to 3 and `DB_MAX_OVERFLOW` to 2. |
+| Neon connection limit exceeded | The pool is pinned in code (10 per process, no overflow); no variable sizes it. Count the processes against the plan's connection limit. |
 | Telegram bot not responding | Verify `TARGET_TELEGRAM_BOT_TOKEN` is the bot named by `TARGET_TELEGRAM_BOT_USERNAME`; `storydump health` reports the webhook. Check Railway worker logs. |
-| `MEDIA_DIR does not exist` | Add `mkdir -p /tmp/media` to build command. |
 | `ENCRYPTION_KEY not configured` | Generate one: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
 | OAuth callback fails | Check `OAUTH_REDIRECT_BASE_URL` matches your Railway web domain. |
 | Mini App won't load | Ensure web service is running and domain has HTTPS. Check `OAUTH_REDIRECT_BASE_URL`. |
 | Service restarts frequently | Check memory limits in Railway. Review logs for OOM or crash loops. |
 | "idle in transaction" | Built-in cleanup runs every 30 seconds. Reduce pool size if persistent. |
-| Instagram API rate limited | Meta caps API publishing per account over a rolling 24h window, and the app reads that account's live quota (`GET /{ig-user}/content_publishing_limit`) rather than assuming a number. Only if that read fails does it fall back to `INSTAGRAM_PUBLISH_LIMIT_FALLBACK` (default 100), so check that var and the credential behind the failed read. |
+| Instagram API rate limited | Meta caps API publishing per account over a rolling 24 h window; the limit is Meta's and no variable overrides it. The worker's advisory pre-check (`TARGET_USAGE_PRECHECK_ENABLED`, default off) reads the account's live quota (`GET /{ig-user}/content_publishing_limit`), and `storydump story <id>` shows what Meta answered for a refused publish. |
 
 ---
 
@@ -378,4 +348,4 @@ From a laptop with a token minted under Settings › API tokens:
 11. [ ] Test onboarding wizard opens from `/start`
 12. [ ] Test Instagram OAuth flow (via `/connect` or wizard)
 13. [ ] Test Google Drive OAuth flow (via onboarding wizard)
-14. [ ] Set `DRY_RUN_MODE=false` when ready for live posting
+14. [ ] Turn the workspace's **Dry Run Mode** off (the web, Settings › General) when ready for live posting
