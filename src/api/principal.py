@@ -46,6 +46,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from src.config.settings import settings
 from src.exceptions.tenancy import TenantResolutionError, TokenRefused
 from src.services.target import service_tokens, sessions
+from src.services.target.vocabulary import DATABASE_URL_VAR
 
 #: The session cookie. One name, imported by the auth routes and the tests.
 COOKIE = "sd_session"
@@ -129,7 +130,7 @@ def require_engine(request: Request) -> AsyncEngine:
     if engine is None:
         raise HTTPException(
             status_code=503,
-            detail="target database not configured: set TARGET_DATABASE_URL",
+            detail=f"target database not configured: set {DATABASE_URL_VAR}",
         )
     return engine
 

@@ -35,8 +35,8 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 # Install dependencies
 pip install -r requirements.txt
 
-# Install CLI tool
-pip install -e .
+# Install the package and the `storydump` CLI (the `cli` extra)
+pip install -e '.[cli]'
 ```
 
 ### 2. Configuration
@@ -46,12 +46,14 @@ pip install -e .
 nano .env
 ```
 
-Add the following required variables to your `.env` file:
+`.env.example` lists every variable the code reads, with what each one does; copy it
+and fill in what you run:
 
-Required configuration:
-- `TELEGRAM_BOT_TOKEN`: Get from @BotFather on Telegram
-- `TELEGRAM_CHANNEL_ID`: Your Telegram channel ID
-- `ADMIN_TELEGRAM_CHAT_ID`: Your personal chat ID for alerts
+Configuration (no variable is required to load settings; a process needs what it reads):
+- `TARGET_DATABASE_URL`: the database the API and the worker run against (the runtime login)
+- `DATABASE_URL`: the database-owner login the migration runner applies the schema with
+- `ENCRYPTION_KEY`: a Fernet key for the stored credentials
+- `TARGET_TELEGRAM_BOT_TOKEN` and `TARGET_TELEGRAM_BOT_USERNAME`: the bot the worker sends with (without them the worker runs with its Telegram channel parked)
 - `DB_PASSWORD`: PostgreSQL password (optional for local development)
 
 ### 3. Database Setup
@@ -60,8 +62,10 @@ Required configuration:
 # Create database
 createdb storydump
 
-# Run schema setup
-psql -U postgres -d storydump -f scripts/setup_database.sql
+# Build the schema on the fresh database: step 0 (the svc_* service roles — they are
+# cluster-wide, so your DB user needs CREATEROLE — and the DDL door), the by-hand base,
+# then every migration-runner file
+make init-db
 
 ```
 
@@ -74,8 +78,10 @@ asks for approval on the bound Telegram group or the web Queue.
 ### 5. Run the Application
 
 ```bash
-# Run in foreground (for testing)
-python -m src.main
+# Run the worker in the foreground. `make run` exports `.env` into the process;
+# a bare `python -m src.main` does not read it and refuses to boot without
+# TARGET_DATABASE_URL in its environment.
+make run
 
 # Or run as background service (see documentation)
 ```

@@ -7,8 +7,8 @@
 set -u
 cd /Users/chris/Projects/storydump || exit 2
 KEY=$(.venv/bin/python -c "from cryptography.fernet import Fernet;print(Fernet.generate_key().decode())")
-UNIT="env -u DB_HOST -u DB_USER -u DB_PASSWORD -u DB_NAME -u TEST_DB_NAME -u REQUIRE_TEST_DATABASE PYTHONDONTWRITEBYTECODE=1 TELEGRAM_BOT_TOKEN=dummy TELEGRAM_CHANNEL_ID=1 ADMIN_TELEGRAM_CHAT_ID=1 DB_PORT=65432 ENCRYPTION_KEY=$KEY .venv/bin/pytest -q -p no:cacheprovider --no-cov -x"
-GATE="env PYTHONDONTWRITEBYTECODE=1 PATH=/opt/homebrew/opt/postgresql@15/bin:$PATH DB_HOST=localhost DB_PORT=65433 DB_USER=test_user DB_PASSWORD=test_password DB_NAME=storyline_ai TEST_DB_NAME=storyline_test REQUIRE_TEST_DATABASE=1 TELEGRAM_BOT_TOKEN=dummy TELEGRAM_CHANNEL_ID=1 ADMIN_TELEGRAM_CHAT_ID=1 ENCRYPTION_KEY=$KEY .venv/bin/pytest -q -p no:cacheprovider --no-cov -x"
+UNIT="env -u DB_HOST -u DB_USER -u DB_PASSWORD -u DB_NAME -u TEST_DB_NAME -u REQUIRE_TEST_DATABASE PYTHONDONTWRITEBYTECODE=1 DB_PORT=65432 ENCRYPTION_KEY=$KEY .venv/bin/pytest -q -p no:cacheprovider --no-cov -x"
+GATE="env PYTHONDONTWRITEBYTECODE=1 PATH=/opt/homebrew/opt/postgresql@15/bin:$PATH DB_HOST=localhost DB_PORT=65433 DB_USER=test_user DB_PASSWORD=test_password DB_NAME=storyline_ai TEST_DB_NAME=storyline_test REQUIRE_TEST_DATABASE=1 ENCRYPTION_KEY=$KEY .venv/bin/pytest -q -p no:cacheprovider --no-cov -x"
 mkdir -p /tmp/claude
 
 check() {  # name file old new runner test-selector

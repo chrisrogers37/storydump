@@ -109,14 +109,9 @@ jobs:
           DB_PASSWORD: test_password
           DB_NAME: storyline_ai
           TEST_DB_NAME: storyline_test
-          TELEGRAM_BOT_TOKEN: test_token
-          TELEGRAM_CHANNEL_ID: -1001234567890
-          ADMIN_TELEGRAM_CHAT_ID: -1001234567890
           ENCRYPTION_KEY: ${{ steps.gen-key.outputs.key }}
           REQUIRE_TEST_DATABASE: "1"
-          DRY_RUN_MODE: "true"
           LOG_LEVEL: INFO
-          MEDIA_DIR: /tmp/test-media
         run: |
           set -o pipefail
           pytest tests/scripts/test_schema_drift_live.py \

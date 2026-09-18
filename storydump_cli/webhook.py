@@ -39,6 +39,7 @@ import httpx
 
 from src.services.target.vocabulary import (
     ALLOWED_UPDATES,
+    DATABASE_URL_VAR,
     DEFAULT_WEBHOOK_URL,
     EXIT_API_UNREACHABLE,
     EXIT_USAGE,
@@ -259,7 +260,7 @@ def _api_door(report: Report, url: str, secret: str) -> None:
         report.add(
             "api_door",
             "failed",
-            "the API has no ingress wired (503) — TARGET_DATABASE_URL absent?",
+            f"the API has no ingress wired (503) — {DATABASE_URL_VAR} absent?",
         )
     elif 300 <= status < 400:
         report.add(

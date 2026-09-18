@@ -9,8 +9,8 @@ ROOT=${STORYDUMP_ROOT:-/Users/chris/Projects/storydump}
 PY=/Users/chris/Projects/storydump/.venv/bin/python
 cd "$ROOT" || exit 2
 KEY=$($PY -c "from cryptography.fernet import Fernet;print(Fernet.generate_key().decode())")
-UNIT="env -u DB_HOST -u DB_USER -u DB_PASSWORD -u DB_NAME -u TEST_DB_NAME -u REQUIRE_TEST_DATABASE PYTHONDONTWRITEBYTECODE=1 TELEGRAM_BOT_TOKEN=dummy TELEGRAM_CHANNEL_ID=1 ADMIN_TELEGRAM_CHAT_ID=1 DB_PORT=65432 ENCRYPTION_KEY=$KEY $PY -m pytest -q -p no:cacheprovider --no-cov -x"
-GATE="env PATH=/opt/homebrew/opt/postgresql@15/bin:$PATH PYTHONDONTWRITEBYTECODE=1 DB_HOST=localhost DB_PORT=65433 DB_USER=test_user DB_PASSWORD=test_password DB_NAME=storyline_ai TEST_DB_NAME=storyline_test REQUIRE_TEST_DATABASE=1 TELEGRAM_BOT_TOKEN=dummy TELEGRAM_CHANNEL_ID=1 ADMIN_TELEGRAM_CHAT_ID=1 ENCRYPTION_KEY=$KEY $PY -m pytest -q -p no:cacheprovider --no-cov -x"
+UNIT="env -u DB_HOST -u DB_USER -u DB_PASSWORD -u DB_NAME -u TEST_DB_NAME -u REQUIRE_TEST_DATABASE PYTHONDONTWRITEBYTECODE=1 DB_PORT=65432 ENCRYPTION_KEY=$KEY $PY -m pytest -q -p no:cacheprovider --no-cov -x"
+GATE="env PATH=/opt/homebrew/opt/postgresql@15/bin:$PATH PYTHONDONTWRITEBYTECODE=1 DB_HOST=localhost DB_PORT=65433 DB_USER=test_user DB_PASSWORD=test_password DB_NAME=storyline_ai TEST_DB_NAME=storyline_test REQUIRE_TEST_DATABASE=1 ENCRYPTION_KEY=$KEY $PY -m pytest -q -p no:cacheprovider --no-cov -x"
 mkdir -p /tmp/claude
 
 verdict() {  # name rc — reads /tmp/claude/mut.log
@@ -49,7 +49,7 @@ MODELS=src/models/__init__.py
 BASE=scripts/telegram_ratchet_baseline.json
 INV=tests/scripts/legacy_inventory.py
 TINV=tests/scripts/test_legacy_inventory.py
-WGATE=tests/src/test_worker_impl_gate.py
+WGATE=tests/src/test_worker_entrypoint.py
 LANE=tests/scripts/test_lineage_lane.py
 SCONF=tests/scripts/conftest.py
 L3=tests/scripts/test_l3_permit_rail.py
@@ -90,14 +90,15 @@ m_stub "a legacy module in the deployed closure is refused" "$GONE -k the_deploy
 m_stub "an importer of a deleted module anywhere in the tree is refused" "$GONE -k nothing_in_the_tree_imports_a_deleted_module"
 m_stub "a re-created legacy package is refused" "$GONE -k the_legacy_package_is_gone"
 
-check "the entrypoint refuses a garbage WORKER_IMPL before the root runs" $MAIN '    impl = resolve_worker_impl(os.environ)' '    impl = WORKER_IMPL_TARGET' "$UNIT" "$WGATE -k garbage_refuses"
+# (The refusal of a garbage worker switch was pinned here until the tear-out's phase 02 retired
+# the switch, its contract module and the read; `legacy_tear_out_02.sh` pins that nothing reads it.)
 check "the entrypoint runs the target root" $MAIN '    target_worker.main()
 
 
 if __name__' '    return
 
 
-if __name__' "$UNIT" "$WGATE -k unset_runs_the_target_root"
+if __name__' "$UNIT" "$WGATE -k main_runs_the_target_root"
 check "the models package exports nothing" $MODELS 'exported here, on purpose — `tests/src/test_legacy_tier_gone.py` pins it.
 """
 ' 'exported here, on purpose — `tests/src/test_legacy_tier_gone.py` pins it.

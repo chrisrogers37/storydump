@@ -1,9 +1,9 @@
 """Numbered-SQL migration runner (plan §0.2, C6) — ledger, apply, adopt, repair.
 
 Standalone by design: a Railway predeploy step runs this before the app code
-boots, so it imports nothing from ``src`` (whose settings module requires the
-full runtime environment) and depends only on the standard library plus
-psycopg2. The database is addressed by ``DATABASE_URL`` or ``--database-url``.
+boots, so it imports nothing from ``src`` (a predeploy step must not depend on
+the application's import closure or its configuration) and depends only on the
+standard library plus psycopg2. The database is addressed by ``DATABASE_URL`` or ``--database-url``.
 
 The ledger lives in a dedicated ``runner`` schema — never ``public`` — because
 the M.3 cutover renames ``public`` wholesale, and a ledger living there would

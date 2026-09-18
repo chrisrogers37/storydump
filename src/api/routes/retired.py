@@ -1,10 +1,10 @@
 """Retired surfaces that live users can still reach — and where they land now.
 
 `/webapp/onboarding` was the Telegram Mini App. The PR that retired it deleted
-it, and the deployment fact that seemed to make that free — the legacy bot did
-not run under `WORKER_IMPL=target`, so it could not SEND a new Mini App button
-(and it is gone altogether since #1216) — does not cover the buttons it already
-sent. Its `build_webapp_button` (the deleted `src/services/core/telegram_utils.py`)
+it, and the deployment fact that seemed to make that free — the legacy bot had
+not run since the target root was armed (2026-08-24), so it could not SEND a
+new Mini App button (and it is gone altogether since #1216) — does not cover
+the buttons it already sent. Its `build_webapp_button` (the deleted `src/services/core/telegram_utils.py`)
 baked a static URL into the message
 at send time (a `WebAppInfo` in private chats, a plain URL button in groups),
 and tapping either is client-side navigation that never contacts the bot.

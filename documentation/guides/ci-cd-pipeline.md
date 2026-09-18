@@ -108,7 +108,7 @@ Go to: `https://github.com/chrisrogers37/storydump/settings/secrets/actions`
 ### Railway Secrets (for CD)
 
 All production secrets are configured in the Railway dashboard:
-- `DATABASE_URL`, `TELEGRAM_BOT_TOKEN`, `ENCRYPTION_KEY`, etc.
+- `DATABASE_URL`, `TARGET_DATABASE_URL`, `TARGET_TELEGRAM_BOT_TOKEN`, `ENCRYPTION_KEY`, etc.
 - See [cloud-deployment.md](cloud-deployment.md) for full env var reference
 
 ---

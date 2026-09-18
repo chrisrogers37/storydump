@@ -129,10 +129,16 @@ class TestEngineUrlFromEnv:
         assert "sslmode" not in url and "channel_binding" not in url
         assert url.endswith("?ssl=require")
 
-    def test_absent_env_returns_none_so_settings_decide(self):
+    def test_absent_env_returns_none_for_the_caller_to_refuse(self):
         from src.services.target.unit_of_work import engine_url_from_env
 
         assert engine_url_from_env({}) is None
+
+    def test_a_blank_value_is_absent(self):
+        from src.services.target.unit_of_work import engine_url_from_env
+
+        assert engine_url_from_env({"TARGET_DATABASE_URL": ""}) is None
+        assert engine_url_from_env({"TARGET_DATABASE_URL": "   "}) is None
 
 
 class TestStatusLine:

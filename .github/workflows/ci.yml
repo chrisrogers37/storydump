@@ -121,10 +121,6 @@ jobs:
           DB_PASSWORD: test_password
           DB_NAME: storyline_ai
           TEST_DB_NAME: storyline_test
-          # Required Telegram settings
-          TELEGRAM_BOT_TOKEN: test_token
-          TELEGRAM_CHANNEL_ID: -1001234567890
-          ADMIN_TELEGRAM_CHAT_ID: -1001234567890
           # Security — generate a fresh Fernet key per run instead of
           # committing a static test key in the workflow file.
           ENCRYPTION_KEY: ${{ steps.gen-key.outputs.key }}
@@ -133,10 +129,7 @@ jobs:
           # SKIP, and the run still exits 0 and shows a green tick — a pass
           # that never executed the tests it claims to cover.
           REQUIRE_TEST_DATABASE: "1"
-          # Development
-          DRY_RUN_MODE: "true"
           LOG_LEVEL: DEBUG
-          MEDIA_DIR: /tmp/test-media
         run: |
           pytest tests/ -v --cov=src --cov=storydump_cli --cov-report=xml --cov-report=term-missing
 
