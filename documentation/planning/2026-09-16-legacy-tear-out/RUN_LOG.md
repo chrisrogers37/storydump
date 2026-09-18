@@ -59,7 +59,7 @@ API service skipped the two kickoff commits — see the gate above).
 |---|---|---|---|---|
 | 01 delete the legacy code and its tests | `01_delete-the-code.md` | **DONE** — merged `2369a9b` (2026-09-17 23:57 UTC); the worker deployed it (SUCCESS); the API service SKIPPED it behind a red `main` check (the midnight skip, below) | #1316 | green at `e6e854b` (3653 passed, 1 skipped) |
 | 02 retire the settings, the entry point and the config | `02_settings-and-entry-points.md` | **DONE** — merged `f59fe43` (2026-09-18 15:44 UTC); round 1 and a fresh re-verify folded; the deploys under the phase's entry | #1319 | green at `9d14304` (3680 passed, 1 skipped) |
-| 03 the 3f snapshot migration and the ratchet's file rule | `03_snapshot-migrations.md` | folded, rebased onto `f59fe43` as one commit, **owner-gated**: the merge waits on the 078 rehearsal (a Neon PITR branch, wall-clock) | #1318 | the rebase's run below |
+| 03 the 3f snapshot migration and the ratchet's file rule | `03_snapshot-migrations.md` | **DONE** — rehearsed on a Neon PITR branch, merged `3ffa750` (2026-09-18 17:23 UTC), 078 applied in production by the deploy at 17:24 UTC; the probe under the phase's entry | #1318 | green at `6da8d00` (3700 passed, 1 skipped) |
 | 04 the gated drop and stand-down | `04_drop-and-stand-down.md` | pending (owner-gated window) | — | — |
 | 05 the documentation's end state | `05_docs-end-state.md` | pending | — | — |
 
@@ -643,7 +643,34 @@ window, NOT the ≥ 7 days `05` §DR states (recorded for the owner; the branch 
 - An independent read-only verification of the branch by the Neon analyst agent (its report in the
   PR), then the branch deleted.
 
+## Phase 03 — merged
+
+`3ffa750`, squash-merged with `--admin` on 2026-09-18 17:23 UTC after the rehearsal (above), its
+independent verification, and CI on `6da8d00` (`3700 passed, 1 skipped`, every check). Invariants re-run
+on `main` at `3ffa750`: I2 and the snapshot gates — 45 passed under the database; I3/I6/I7 and the
+guards — 138 passed with no variable of either tier set; I4 the ratchet 4 / 0 / 0 / 0; I8 — the runner's
+three suites, 58 passed under the database; I5 — the one pending file was the one the deploy was meant
+to apply.
+
+**Deploy reachability — applied in production.** Both services deployed `3ffa750` (`SUCCESS`; the API
+behind `main`'s green check, ~7 minutes after the worker). The predeploy applied 078: ledger row 78,
+`applied_by = neondb_owner`, 17:24:26 UTC. The read-only probe at 17:30 UTC: 16
+`archive.<t>_pre_cutover_20260917` tables, every one owned by `svc_maintenance`; every row count equal
+to its source (all sixteen pairs, the same counts the rehearsal saw); `svc_ingress` denied SELECT on
+all; archive 9,281,536 bytes against the 42 MB ceiling (legacy 43,835,392 bytes); database
+81,887,232 bytes; `storydump health` ok on every surface with the new processes up. Phase 04's
+dependency — "phase 03 merged and applied in production, every snapshot present" — is met.
+
 ## Owner-decision queue
+
+- **The PITR window is 24 hours, not 7 days.** The project's `history_retention_seconds` is 86400;
+  `05` §DR states a ≥ 7-day floor "verified at 0.2's gate". Phase 04's backout is PITR to the marker
+  taken before the window — a 24-hour window is enough for a same-day window with the worker stopped,
+  but the plan's stated floor is not the configured one. The owner's call: raise it in Neon before
+  phase 04's window, or amend `05` §DR to the measured value.
+- **Close #1202 on its "or" leg on GitHub** (ruled in chat, 2026-09-16, gate 2: the target tier is
+  armed and serving with a connected destination): phase 04's PR may not merge before the issue is
+  closed with that ruling. One comment and a close, the owner's.
 
 - **The API service's skipped deploys.** Railway marked `53ca6d6`, `4f2b36b`, `2369a9b` and `deb29c2`
   `SKIPPED` on the `storydump` (API) service while the worker deployed — each behind a red `main` check
@@ -672,4 +699,4 @@ window, NOT the ≥ 7 days `05` §DR states (recorded for the owner; the branch 
   session nothing holds. A comment-and-build-line edit, the owner's call on when.
 - **The Makefile's `APP_DB_URL` does not URL-encode `DB_PASSWORD`** (pre-existing): a password
   containing `@` mis-parses into the host. Local development only.
-- The tear-out's own gates as they arise (phase 03's probe lines and the 078 rehearsal; phase 04's window).
+- The tear-out's own gates as they arise: phase 04's window (F7 — the owner runs it; the PR ships the files, the runner's manual mode and the runbook).

@@ -1,6 +1,6 @@
 ---
 name: reference-prod-db-access
-description: How to reach the storydump production Postgres read-only via Railway (working as of 2026-09-11), the two invocation gotchas that silently break it, and why the local Neon account is the wrong one
+description: How to reach storydump's Postgres read-only — the Railway recipe and its two invocation gotchas, plus the neonctl path (org/project ids, sandbox and npx cache requirements) that reaches the same Neon database
 metadata:
   type: reference
 ---
@@ -46,14 +46,34 @@ Also: run these with the sandbox disabled — the sandbox blocks network egress.
   See `documentation/operations/runtime-database-roles.md` for the intended
   split, which the live variable does not currently reflect.
 
-## The local Neon account is the wrong one
+## The local Neon account — corrected 2026-09-18
 
-`npx neonctl me` authenticates as `chris@artemisanalytics.xyz`, whose single org
-holds only `artemis-quality-hub-prod` — a Dagster/DeFiLlama analytics schema
-containing **none** of storydump's tables. Do not mistake it for production.
-neonctl is not installed as a binary (use `npx neonctl@latest`), `npx` needs
-`npm_config_cache` redirected, and neonctl writes to `~/.config/neon/` so it too
-needs the sandbox off.
+**Superseded:** this section previously said `npx neonctl me` authenticates as
+`chris@artemisanalytics.xyz`, whose org holds only `artemis-quality-hub-prod`
+and **none** of storydump's tables. That is no longer true — do not act on it.
+
+Verified 2026-09-18: `npx neonctl@latest me` authenticates as
+**christophertrogers37@gmail.com** (login `christophertrogers37`) — the *same*
+account Railway uses, not the artemisanalytics address. Its org
+**`org-ancient-bush-46337162`** ("Christopher") contains project
+**`ancient-grass-50759240` / `storyline-ai-db`**, which *is* storydump's
+database: `legacy.posting_history`, `legacy.media_items`,
+`legacy.instagram_accounts`, `legacy.users`, plus `archive.*` and
+`runner.schema_migrations`. So neonctl is a genuine second path to this data —
+and, unlike Railway, the one that can create branches for rehearsals.
+
+Production branch is `br-square-frog-ai37r0qg`. **Its endpoint host is the one
+never to connect to during a branch rehearsal** — always derive the host from
+the branch's own connection string and assert it differs before running psql.
+
+Mechanics that still hold: neonctl is not installed as a binary (use
+`npx --yes neonctl@latest`), `npx` needs `npm_config_cache` redirected to a
+writable dir or it dies `EPERM` on `/Users/chris/.npm/_cacache`, and neonctl
+writes to `~/.config/neon/`. Both neonctl **and** psql need the sandbox off:
+`allowed_domains` does not help psql, because the sandbox's egress proxy is
+HTTP-only and raw Postgres TCP fails at DNS
+("could not translate host name … to address"). `neonctl projects list` with no
+`--org-id` blocks on an interactive org picker — always pass `--org-id`.
 
 **Why:** on 2026-09-06 and again earlier on 2026-09-11, a production
 investigation could not run at all for want of a credential, and the two
