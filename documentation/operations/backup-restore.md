@@ -1,185 +1,241 @@
 # Backup & Restore Procedures
 
-## Overview
+## Overview — what holds state, and what backs it up
 
-Critical data to backup:
-1. **PostgreSQL database** - All application state (hosted on Neon)
-2. **Media files** - Source images/videos (hosted on Google Drive)
-3. **Configuration** - Environment variables in Railway
-4. **Tokens** - Encrypted in database, but backup separately
+| State | Where it lives | Its backup |
+|---|---|---|
+| The ledger — every target table (`src/models/target/`), the runner's migration ledger (`runner.schema_migrations`) and the `archive` schema | one Neon Postgres database | Neon point-in-time restore (below). Nothing in the tree copies the database off Neon |
+| The legacy tier's data | sixteen `archive.<table>_pre_cutover_20260917` tables in that same database (migration 078) | the snapshots **are** the backup — rows only, with a lifetime (below) |
+| Media | each workspace's own Google Drive folders; the ledger holds references (`media_items`), never the files | the tenant's Drive. Storydump reads it under the workspace's grant and keeps no copy |
+| Transit copies | Cloudinary, between upload and publish | none wanted: destroyed after the publish commits (`src/services/target/publish_pipeline.py:2103`), and swept by `reap_transit_assets` |
+| Configuration and secrets | Railway variables, per service; Vercel for `landing/` | an export the owner holds (below) |
+| API tokens | `service_tokens`, as SHA-256 hashes (`src/services/target/service_tokens.py`) | nothing to back up — a lost token is minted again under Settings › API tokens |
 
----
-
-## Database Backup
-
-### Manual Backup
-
-```bash
-# Dump from Neon using DATABASE_URL
-pg_dump "$DATABASE_URL" -F c -f ~/backups/storydump_$(date +%Y%m%d_%H%M%S).dump
-
-# Or with explicit connection string
-pg_dump "postgresql://user:pass@ep-xxx.neon.tech/storydump_ai?sslmode=require" \
-    -F c -f ~/backups/storydump_$(date +%Y%m%d_%H%M%S).dump
-```
-
-### Automated Daily Backup
-
-Create a backup script on your local machine or a CI runner:
-
-```bash
-#!/bin/bash
-# backup_db.sh
-BACKUP_DIR="$HOME/backups/storydump"
-RETENTION_DAYS=30
-
-mkdir -p "$BACKUP_DIR"
-
-# Create backup from Neon
-pg_dump "$DATABASE_URL" -F c \
-    -f "$BACKUP_DIR/storydump_$(date +%Y%m%d).dump"
-
-# Remove old backups
-find "$BACKUP_DIR" -name "storydump_*.dump" -mtime +$RETENTION_DAYS -delete
-
-echo "Backup complete: storydump_$(date +%Y%m%d).dump"
-```
-
-Schedule via crontab on your local machine or a GitHub Actions workflow:
-```bash
-# Daily at 3am (local machine)
-0 3 * * * ~/scripts/backup_db.sh >> ~/logs/backup.log 2>&1
-```
-
-### Neon Built-in Backups
-
-Neon provides automatic point-in-time recovery on paid plans. Free tier has limited retention. Check the [Neon dashboard](https://console.neon.tech) for backup status.
+The legacy tier was retired in the tear-out (#1216, September 2026); its data survives as the
+`archive.*_pre_cutover_20260917` snapshots.
 
 ---
 
-## Database Restore
+## The database — Neon point-in-time restore
 
-### Full Restore
+The target tier's backup is the one the plan names (`05-operational-numbers.md`, §Backup / DR):
+Neon keeps the project's write-ahead history, and a restore is either a **branch** taken at a point
+in that history or the production branch **restored in place** to one.
 
-```bash
-# Drop and recreate database (via Neon dashboard or psql)
-psql "$DATABASE_URL" -c 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;'
+### What is measured, and what is the plan's
 
-# Restore from backup
-pg_restore -d "$DATABASE_URL" ~/backups/storydump_YYYYMMDD.dump
+| Concern | The plan's number (`05` §DR) | Measured |
+|---|---|---|
+| History retention (the PITR window) | ≥ 7 days, "verified at 0.2's gate" | **24 hours** — the project's `history_retention_seconds` is 86400 (read 2026-09-18; the tear-out's `RUN_LOG.md`, and `legacy-window-close.md`). Raising it in Neon or amending the plan is the owner's open decision |
+| RPO | Neon's continuous WAL, "~minutes", no additional mechanism | not measured here |
+| RTO target | 1 h — restore, repoint, smoke suite | not measured here |
+| Restore drill | quarterly: PITR branch → runner parity → smoke suite | none of that shape is recorded in the tree (`04`: M.2, which was to be the first, was not run). What is recorded on a branch of production is the 078 rehearsal at production's head (2026-09-18, `RUN_LOG.md`) |
+| Tenant-level recovery | a PITR branch, then a per-workspace copy keyed on `workspace_id` | no runbook or tool for it exists in the tree |
 
-# Restart Railway services after restore
-railway restart --service worker
-railway restart --service storydump
-```
+So: a restore to an **arbitrary** moment reaches back 24 hours and no further. A **marker branch**
+is the way past that bound — by Neon's documented branch model a child branch pins its parent's
+branch point and is a durable copy (documented, not measured here; `legacy-window-close.md` says
+the same and asks for it to be measured once).
 
-### Partial Restore (specific tables)
+### Before a risky change: take a marker
 
-```bash
-# List contents of backup
-pg_restore -l ~/backups/storydump_YYYYMMDD.dump
-
-# Restore specific table
-pg_restore -d "$DATABASE_URL" \
-    -t posting_history ~/backups/storydump_YYYYMMDD.dump
-```
-
----
-
-## Media Files Backup
-
-### Google Drive (Primary Media Source)
-
-When using Google Drive as the media source, files are already stored in the cloud. Ensure the Google Drive folder is shared or backed up according to your Google Workspace settings.
-
-### Sync to External Storage
+The commands are the ones `legacy-window-close.md` prints, against the same project
+(`npx --yes neonctl@latest me` must show the account that owns it):
 
 ```bash
-# Backup media from Google Drive to local storage using rclone
-rclone sync gdrive:storydump-media/ ~/backups/storydump-media/
-
-# Or download via the Google Drive web interface
+P=ancient-grass-50759240; O=org-ancient-bush-46337162; PROD=br-square-frog-ai37r0qg
+MARKER=pre-change-$(date -u +%Y%m%d-%H%M)
+npx --yes neonctl@latest branches create --project-id $P --org-id $O --parent $PROD --name $MARKER
 ```
 
-### Backup Manifest
+Retire it once the change is verified: `npx --yes neonctl@latest branches delete "${MARKER:?}" --project-id $P --org-id $O`.
+Never pass an empty branch name to `neonctl connection-string` — it resolves to the project's
+default branch, which is production (`legacy-window-close.md`, the rehearsal's guard).
 
-Keep a manifest of media files for verification:
+### Restoring production in place
 
-```sql
--- Generate manifest from database (LEGACY tier, undeployed: `media_items`
--- lives in the `legacy` schema, snapshotted by migration 078 into
--- `archive.media_items_pre_cutover_20260917` (the tear-out, phase 03) and
--- dropped by 079 (phase 04). The snapshots carry the `archive_snapshots`
--- retention class — 90 days from the date in their NAME, so eligible for
--- the sweep from 2026-12-16 whatever day the drop runs (fork F9); an owner
--- who wants them longer exports first: `pg_dump -n archive`. The target
--- tier's media rows sit under the workspace's row-level security and are read
--- through the API, not psql)
-SELECT file_name, file_hash, category, created_at
-FROM media_items
-WHERE is_active = true
-ORDER BY file_name;
-```
+Irreversible for every write after the restore point — the worker's **and** the API's. It is the
+owner's act; an agent does not run it.
 
----
-
-## Configuration Backup
-
-### Railway Environment Variables
-
-```bash
-# Export Railway env vars (requires Railway CLI)
-railway variables --service worker > ~/backups/railway_worker_env_$(date +%Y%m%d).txt
-railway variables --service storydump > ~/backups/railway_web_env_$(date +%Y%m%d).txt
-
-# Store securely - these contain secrets!
-chmod 600 ~/backups/railway_*_env_*.txt
-```
-
-### Token Backup
-
-LEGACY tier (undeployed; dropped by #1216): the `legacy.api_tokens` rows are
-encrypted values. The target tier stores API tokens as hashes (`service_tokens`) — there
-is nothing to back up; a lost token is minted again on the web.
-
-```bash
-# Export tokens (encrypted values)
-psql "$DATABASE_URL" -c \
-    "COPY (SELECT * FROM api_tokens) TO STDOUT WITH CSV HEADER" \
-    > ~/backups/tokens_$(date +%Y%m%d).csv
-```
-
----
-
-## Disaster Recovery
-
-### Complete System Recovery
-
-1. **Create new Railway project** with worker + web services
-2. **Create new Neon database** (or restore from Neon backup)
-3. **Restore database** from latest `pg_dump` backup
-4. **Configure environment variables** in Railway dashboard
-5. **Deploy application**:
+1. **Stop the worker**, so nothing keeps writing past the point:
+   `railway down --service worker --environment production --yes`, then `storydump deploys` shows
+   the worker's latest row `REMOVED`.
+2. **Announce it.** The API keeps serving; taps and web approvals landing now are lost.
+3. **Restore to the marker**, keeping the present state under a name for forensics:
    ```bash
-   # Connect Railway to GitHub repo
-   # Railway will auto-build and deploy
+   npx --yes neonctl@latest branches restore $PROD $MARKER --project-id $P --org-id $O \
+     --preserve-under-name before-restore-$(date -u +%Y%m%d-%H%M)
    ```
-6. **Verify**:
+   Neon also restores a branch to a timestamp inside the retention, rather than to a marker; this
+   page prints no spelling for that because nobody here has run one — read Neon's own
+   documentation at the time, and rehearse it on a branch first.
+4. **Read the ledger back** before anything runs against it:
    ```bash
-   storydump health
+   railway run --service worker --environment production -- python -m scripts.migration_runner status | tail -4
+   storydump posture            # the migration ledger as the API reads it
    ```
-7. **Re-connect OAuth** (if tokens expired):
-   - Instagram: Re-authorize via /settings in Telegram
-   - Google Drive: Re-authorize via /start onboarding wizard
+   A database restored to before a migration owes that migration again; the next deploy's
+   predeploy applies it (`migration-runner.md`).
+5. **Pause before the worker returns.** A restore rewinds the ledger, not Instagram or Telegram. A
+   story published after the restore point is back in the state it held at that point, and one
+   that was already `approved` then would be published a second time when the worker returns;
+   pause state is rewound too. With the worker still down, `storydump pause --workspace <ws>` for each
+   workspace that posted in the gap (the command port runs in the API), then reconcile each story
+   by hand: `storydump story <id>` shows the state it is back in; one still awaiting approval that
+   did go out is recorded with `storydump posted`, one already `approved` is stopped with
+   `storydump cancel` (never-run list: the user's decision). Only then `storydump resume`.
+6. **Restart the worker** (`railway whoami && railway status` first — `redeploy` acts on the
+   linked environment): `railway redeploy --service worker --yes`, then
+   `storydump deploys --watch --timeout 900` and `storydump health`.
+
+An in-place restore keeps the branch and its endpoint, so `DATABASE_URL` and `TARGET_DATABASE_URL`
+stay as they are. Cutting over to a *different* branch instead means repointing both variables on
+both services: the runner reads `DATABASE_URL` (the owner's connection), the worker and the API
+read `TARGET_DATABASE_URL` (`railway.toml`; `src/services/target/vocabulary.py:377`).
+
+### Reading a branch without touching production
+
+A branch is a copy; reading one is how a restore point is checked before it is used. Use the
+rehearsal block of `legacy-window-close.md` as the template — the demanded branch name and the
+host guard that refuses production's endpoint are the parts not to drop — then
+`python -m scripts.migration_runner status` and `parity --against <dsn>` answer whether the branch
+is the schema the tree expects.
+
+### An off-Neon copy (the owner's option)
+
+The plan adds no mechanism beyond Neon, and nothing in the tree schedules a dump. An owner who
+wants a copy that survives the loss of the Neon project takes a logical dump as the owner login —
+it owns the tables and bypasses row-level security, which a complete dump needs:
+
+```bash
+railway run --service worker --environment production -- \
+  sh -c 'pg_dump "$DATABASE_URL" -F c -f storydump_$(date -u +%Y%m%d).dump'
+```
+
+`railway run` executes on the laptop with the service's variables, so the file lands locally and
+the connection string is never printed. `pg_dump` must be the server's major version or newer
+(production is PostgreSQL 17 — the tear-out's `RUN_LOG.md`). The dump holds every tenant's rows and the encrypted provider
+credentials: store it as a secret. Restoring such a dump into a fresh project has never been
+rehearsed here — the `svc_*` roles, their grants and their memberships are made by the window
+bootstrap and the migrations, not carried by one database's dump — so treat that path as unproven.
+
+`make db-backup` and `make db-restore` dump and load the **local** development database named by
+`DB_*`. They never touch production.
 
 ---
 
-## Backup Verification
+## The legacy tier's backup — the `archive` snapshots
 
-Monthly verification checklist:
+Migration 078 (`scripts/migrations/078_legacy_snapshots_pre_cutover.sql`, applied in production by
+the deploy of 2026-09-18) copied every table of the `legacy` schema into
+`archive.<table>_pre_cutover_20260917`: sixteen tables, owned by `svc_maintenance`, readable by
+that role's members only, with no grant to anything else. Its postconditions compared each copy's
+row count to its source in the same transaction.
 
-- [ ] Restore backup to test database
-- [ ] Verify row counts match production
-- [ ] Check media file integrity (Google Drive)
-- [ ] Test token decryption works
-- [ ] Verify service starts with restored data
+- **Rows only.** `CREATE TABLE … AS` copies rows — not indexes, constraints, defaults or sequence
+  values. The `legacy` schema itself, with its 77 indexes, is dropped by 079 in the owner's window
+  (`legacy-window-close.md`); what that drop takes and no snapshot holds is exactly that list.
+- **For reading, not for running.** The code that read those tables was deleted in the tear-out's
+  phase 01. A snapshot answers a question about the past; nothing can be restored *into service*
+  from it.
+- **Lifetime (fork F9).** The snapshots carry the `archive_snapshots` retention class: 90 days
+  from the date in their names, so they are eligible from **2026-12-16**, whatever day 079 runs —
+  once the `retention_sweep` executor exists. It is unbuilt (`work_loop.UNBUILT_KINDS`), so
+  nothing drops them today; the door it will call reads the date from the table's name
+  (`fn_retention_batch`, `059_security_definer_doors.sql:440-456`).
+- **The owner's export, before then.** An owner who wants them longer exports first:
+  ```bash
+  railway run --service worker --environment production -- \
+    sh -c 'pg_dump "$DATABASE_URL" -n archive -F c -f archive_pre_cutover_20260917.dump'
+  ```
+  `pg_restore --no-owner -d <a database> <the file>` loads it anywhere `svc_maintenance` does not
+  exist.
+
+Reading one, read-only, as the owner login (the window's gate uses the same door):
+
+```bash
+railway run --service worker --environment production -- sh -c 'psql "$DATABASE_URL" -At -F " | " -f /dev/stdin' <<'SQL'
+SELECT count(*) FROM archive.posting_history_pre_cutover_20260917;
+SQL
+```
+
+Never drop `archive` or a snapshot by hand (`legacy-window-close.md`, *What NOT to do*).
+
+---
+
+## Media
+
+Media is the tenant's. A workspace connects Google Drive folders under Settings › Integrations;
+the worker lists them when it syncs and reads a file's bytes, under that workspace's grant, only to
+render a card or to publish (`src/worker.py:118-134`, `756-790`). The ledger stores references,
+not bytes. There is nothing of the
+tenant's media for the operator to back up or restore: what a tenant deletes in Drive is the
+tenant's to recover from Drive.
+
+---
+
+## Configuration and secrets
+
+```bash
+# The owner's act: this prints EVERY secret of the service. Never in a shared terminal, never by an agent.
+railway variables --service worker --environment production --json > railway_worker_$(date -u +%Y%m%d).json
+railway variables --service storydump --environment production --json > railway_api_$(date -u +%Y%m%d).json
+chmod 600 railway_*.json
+```
+
+`.env.example` names every variable something reads. One of them cannot be re-issued:
+
+- **`ENCRYPTION_KEYS` / `ENCRYPTION_KEY`** — the Fernet ring that encrypts every provider
+  credential in `oauth_credentials` (`src/utils/encryption.py`). Lose it and every stored grant is
+  unreadable. The code fails closed: the readers refuse the credential by name ("could not be
+  decrypted by any ring entry" — `src/services/target/ig_credentials.py:102-107`,
+  `drive_credentials.py:136-145`), and the Instagram refresh path flips it `expired` and its
+  account `reauth_required` and commits that before it raises
+  (`src/services/target/ig_login_oauth.py:436-463`); the Drive reader deliberately flips nothing.
+  Each workspace then reconnects: Instagram under Settings › Accounts, Google Drive under
+  Settings › Integrations. A database restore is only as good as the ring that goes with it.
+
+Everything else is re-issued at its source: the database connection strings (Neon), the bot token
+(BotFather; then `telegram-webhook.md`), the webhook secret (any new value on the API, whose
+startup registration re-registers the webhook with it in production), the Meta and Google app
+secrets (their consoles), the Cloudinary trio.
+
+---
+
+## Disaster recovery — the whole deployment
+
+1. **Database.** The Neon project survives: restore as above. The Neon project is lost: only an
+   off-Neon dump the owner chose to keep brings the ledger back, by a path nobody has rehearsed.
+2. **Services.** A Railway project with two services from this repository — `worker`
+   (`python -m src.main`) and the API, `storydump` (`uvicorn src.api.app:app`), per the
+   `Procfile` — with `railway.toml` as committed: its predeploy runs
+   `python -m scripts.migration_runner apply`. A *new* Railway project has a new id, and
+   `storydump deploys` and `doctor` refuse any project but the one the tree names
+   (`RAILWAY_PROJECT_ID`, `src/services/target/vocabulary.py:370`): that constant moves with it,
+   and `api.storydump.app` must point at the new API service.
+3. **Variables** from the owner's export, on **both** services: `DATABASE_URL` is the owner's
+   connection for the runner; `TARGET_DATABASE_URL` is the runtime login. Without the latter the
+   worker exits 2 and the API answers 503 on every data route.
+4. **Deploy**, then verify:
+   ```bash
+   storydump deploys --watch --timeout 900
+   storydump health          # the three surfaces and the webhook
+   storydump posture         # the ledger at the head the checkout expects
+   ```
+5. **The webhook.** The API registers it at startup in Railway's `production` environment;
+   `storydump webhook status` confirms (`telegram-webhook.md`).
+6. **Grants.** If the key ring did not survive, every workspace reconnects (above).
+
+---
+
+## Verification checklist
+
+Quarterly, or after any change to the Neon plan:
+
+- [ ] The project's history retention read from Neon, and this page's table corrected to it
+- [ ] A branch of production read back through the host guard: `migration_runner status` owes
+      nothing but the gated files
+- [ ] The sixteen snapshots still present until their export or their sweep:
+      `SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'archive' AND c.relkind = 'r' AND c.relname LIKE '%\_pre\_cutover\_%'` → 16
+- [ ] The owner's variable export is current, and the key ring is in it
+- [ ] The branch retired

@@ -94,7 +94,7 @@ Recommended review order: this index, `self-evaluation.md`, `epic.md`,
 - [`../per-request-session-isolation.md`](../per-request-session-isolation.md) is
   partly superseded: bounded Telegram concurrency and `ContextVar` session
   isolation have shipped, but explicit async unit-of-work scopes have not.
-- [`../../operations/2026-05-telegram-delivery-burst-postmortem.md`](../../operations/2026-05-telegram-delivery-burst-postmortem.md)
+- [`../2026-05-telegram-delivery-burst-postmortem.md`](../2026-05-telegram-delivery-burst-postmortem.md)
   records the operational cost of unbounded or opaque Telegram delivery failure.
 - The baseline implementation is pinned by `requirements.txt` to
   python-telegram-bot 22.7, SlowAPI 0.1.9, SQLAlchemy 2.0.49, and

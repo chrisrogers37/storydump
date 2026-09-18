@@ -274,3 +274,180 @@ def test_no_other_file_carries_an_unpinned_never_run_list():
         f"{strays} carry a never-run list over storydump commands that nothing"
         " pins — add them to SATELLITES or point them at CLAUDE.md"
     )
+
+
+# ---------------------------------------------------------------------------
+# The legacy tier's names (the legacy tear-out, phase 05; #1216).
+#
+# The tier is gone: its code (phase 01), its settings (phase 02), its schema
+# (the window of phase 04). A LIVE page that still names one of its tables,
+# modules or variables points an agent or an operator at something that is not
+# there — `.claude/rules/database.md` once described sixteen tables the code
+# could no longer reach. Each list below has ONE home: the tables are the
+# inventory literal minus the names the TARGET reuses, derived from the
+# target's own metadata; the variables are phase 02's dead list; the paths are
+# checked to BE gone, so the list cannot outlive a path somebody brings back.
+# History keeps its names: `documentation/archive/`, `documentation/planning/`
+# and `CHANGELOG.md` are outside the live roots.
+# ---------------------------------------------------------------------------
+
+#: Where a page is LIVE — read as a description of the system that exists.
+LIVE_ROOTS = (
+    "CLAUDE.md",
+    "AGENTS.md",
+    "README.md",
+    ".claude",
+    "documentation/operations",
+    "documentation/guides",
+)
+
+#: Module paths the tear-out deleted (phases 01 and 02).
+DELETED_PATHS = (
+    "src/services/core",
+    "src/services/integrations",
+    "src/services/media_sources",
+    "src/repositories",
+    "src/config/database",
+)
+
+#: A live page ABOUT the legacy lineage that is still in the tree — the
+#: migration files 001-050, the lane that replays them, the snapshots 078 took
+#: — may name one of its tables. Each entry is a claim with its reason, and an
+#: entry the page no longer uses fails (no stale exemptions).
+LEGACY_NAME_EXEMPT: dict[str, dict[str, str]] = {
+    "documentation/operations/posting-monitor.md": {
+        "TELEGRAM_BOT_TOKEN": "the environment of `tg-post.sh`, the fleet host's"
+        " pager script OUTSIDE this repository (the monitor knows it only as its"
+        " --notify-command); the page says whose variable it is",
+    },
+    "documentation/guides/landing-vercel-deployment.md": {
+        "TELEGRAM_BOT_TOKEN": "the LANDING app's own server variable on Vercel"
+        " (landing/src/lib/telegram.ts:1) — not the worker's or the API's",
+        "ADMIN_TELEGRAM_CHAT_ID": "the landing app's waitlist-notification chat"
+        " (landing/src/lib/telegram.ts:2)",
+    },
+}
+
+
+def _target_table_names() -> set[str]:
+    import src.models.target  # noqa: F401 — importing registers every model
+    from src.models.target.base import TargetBase
+
+    return {table.name for table in TargetBase.metadata.tables.values()}
+
+
+def _legacy_only_tables() -> tuple[str, ...]:
+    from tests.scripts.legacy_inventory import LEGACY_TABLES
+
+    reused = _target_table_names()
+    return tuple(t for t in LEGACY_TABLES if t not in reused)
+
+
+def _retired_variables() -> tuple[str, ...]:
+    from tests.src.test_legacy_settings_gone import DEAD_VARIABLES
+
+    return DEAD_VARIABLES
+
+
+def _legacy_names_in(text: str) -> set[str]:
+    """Every legacy-only table, deleted path and dead variable `text` names.
+    A snapshot's name (`archive.posting_history_pre_cutover_20260917`) is not
+    its table's: `_` is a word character, so the boundary does not fall there."""
+    hits = {t for t in _legacy_only_tables() if re.search(rf"\b{t}\b", text)}
+    hits |= {p for p in DELETED_PATHS if p in text}
+    hits |= {v for v in _retired_variables() if re.search(rf"\b{v}\b", text)}
+    return hits
+
+
+def _live_pages() -> list[Path]:
+    pages: list[Path] = []
+    for root in LIVE_ROOTS:
+        path = ROOT / root
+        pages += [path] if path.is_file() else sorted(path.rglob("*.md"))
+    return [p for p in pages if "archive" not in p.parts]
+
+
+def test_the_live_roots_cover_the_pages_an_agent_and_an_operator_read():
+    """The pin is only as wide as its roots: a root dropped from LIVE_ROOTS
+    turns every page under it into one nobody checks."""
+    pages = {str(p.relative_to(ROOT)) for p in _live_pages()}
+    assert {
+        "CLAUDE.md",
+        "AGENTS.md",
+        "README.md",
+        ".claude/rules/database.md",
+        ".claude/PROJECT_CONTEXT.md",
+        "documentation/operations/worker-recovery.md",
+        "documentation/guides/deployment.md",
+    } <= pages
+    assert not [
+        p for p in pages if "/archive/" in p or p.startswith("documentation/planning")
+    ]
+
+
+def test_no_live_page_names_the_legacy_tier():
+    offenders = {}
+    for page in _live_pages():
+        rel = str(page.relative_to(ROOT))
+        found = _legacy_names_in(page.read_text()) - set(
+            LEGACY_NAME_EXEMPT.get(rel, {})
+        )
+        if found:
+            offenders[rel] = sorted(found)
+    assert not offenders, (
+        "live pages still name the legacy tier — rewrite onto the target, move the"
+        " page to documentation/archive/, or add a reasoned LEGACY_NAME_EXEMPT"
+        f" entry: {offenders}"
+    )
+
+
+def test_every_legacy_name_exemption_is_still_used():
+    stale = {}
+    for rel, names in LEGACY_NAME_EXEMPT.items():
+        page = ROOT / rel
+        present = _legacy_names_in(page.read_text()) if page.exists() else set()
+        unused = sorted(set(names) - present)
+        if unused:
+            stale[rel] = unused
+    assert not stale, f"exemptions nothing uses any more — remove them: {stale}"
+
+
+def test_the_deleted_paths_are_gone():
+    back = [
+        p for p in DELETED_PATHS if (ROOT / p).exists() or (ROOT / f"{p}.py").exists()
+    ]
+    assert not back, f"{back} exist again — they are not deleted paths any more"
+
+
+def test_the_names_both_tiers_use_are_not_legacy_names():
+    """`media_items`, `users` and two more are TARGET tables too; the pin
+    derives them from the target's metadata rather than listing them, and this
+    is the derivation's value today — a fifth means the target grew a table
+    with a legacy name, which the docs may then name freely."""
+    from tests.scripts.legacy_inventory import LEGACY_TABLES
+
+    assert set(LEGACY_TABLES) & _target_table_names() == {
+        "category_post_case_mix",
+        "media_items",
+        "onboarding_sessions",
+        "users",
+    }
+
+
+def test_the_pin_sees_a_planted_legacy_name(tmp_path):
+    """Positive control: the predicate finds each kind of name, and passes
+    over a target name and a snapshot's name."""
+    page = tmp_path / "page.md"
+    page.write_text(
+        "Rows wait in `posting_queue`; the reader is `src/repositories/queue.py`;"
+        " set `WORKER_IMPL=target` first.\n"
+    )
+    assert _legacy_names_in(page.read_text()) == {
+        "posting_queue",
+        "src/repositories",
+        "WORKER_IMPL",
+    }
+    assert not _legacy_names_in(
+        "`media_items` and `users` are target tables;"
+        " `archive.posting_history_pre_cutover_20260917` is a snapshot."
+    )

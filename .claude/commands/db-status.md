@@ -1,114 +1,119 @@
 ---
-description: "Check database status and key metrics (safe, read-only)"
+description: "Check the database's posture, the job queue and the API's health through storydump (read-only)"
 ---
 
-Run these safe, read-only queries on the Neon production database. The user must provide the DATABASE_URL or it should be available as an environment variable.
+Report the state of the ledger through the `storydump` CLI. Every command below
+is a bounded read through the API under the user's token — there is no database
+connection and no SQL here. Add `--json` to any of them for one envelope
+`{"v": 1, "kind", "data", "error"}`; a workspace read's `data` is
+`{"workspaces": [{"workspace_id", "rows"}]}`.
 
-## 1. Queue Status
+Exit codes: 0 ok · 1 not found · 2 refused · 3 not authorized · 4 API
+unreachable or not well · 5 Railway unreachable · 64 usage.
 
-```bash
-psql "$DATABASE_URL" -c "
-SELECT
-    status,
-    COUNT(*) as count,
-    MIN(scheduled_for) as earliest,
-    MAX(scheduled_for) as latest
-FROM posting_queue
-GROUP BY status
-ORDER BY status;
-"
-```
-
-## 2. Recent Posting Activity
+## 0. Is there a token?
 
 ```bash
-psql "$DATABASE_URL" -c "
-SELECT
-    DATE(posted_at) as date,
-    posting_method,
-    COUNT(*) as posts
-FROM posting_history
-WHERE posted_at > NOW() - INTERVAL '7 days'
-GROUP BY DATE(posted_at), posting_method
-ORDER BY date DESC;
-"
+storydump whoami
 ```
 
-## 3. Instagram Accounts
+It prints the principal and the workspaces the token can read. Exit 3 means no
+usable token: stop and say so. Minting one is the user's (the web's Settings ›
+API tokens, then `storydump login`, or `STORYDUMP_TOKEN` in the environment) —
+do not ask for the secret in the conversation.
+
+## 1. The API and its database
 
 ```bash
-psql "$DATABASE_URL" -c "
-SELECT
-    display_name,
-    instagram_username,
-    is_active,
-    created_at
-FROM instagram_accounts
-ORDER BY created_at;
-"
+storydump health --json
 ```
 
-## 4. Media Library Stats
+Needs no token. From `data.api`: `target_database` (false means every data
+route answers 503), `db_role` (the login the API holds, and whether it bypasses
+RLS), `pool` (`size`, `checked_out`, `checked_out_peak`; read them from the
+JSON — the table view does not print the last two). `data.verdicts` judges `api`,
+`scheduling`, `posting` and `webhook` with the fleet monitors' own rules; exit 4
+when one is not well — the report is still printed, so read it.
+
+## 2. The database's posture
 
 ```bash
-psql "$DATABASE_URL" -c "
-SELECT
-    category,
-    COUNT(*) as total,
-    COUNT(*) FILTER (WHERE is_active) as active,
-    AVG(times_posted)::numeric(10,1) as avg_posts
-FROM media_items
-GROUP BY category
-ORDER BY total DESC;
-"
+storydump posture --json
 ```
 
-## 5. Token Health
+`data.ledger` is `present`, `absent` or `unreadable`; `data.migrations` is the
+runner's ledger (`version`, `status`, `applied_at`); `data.role` the connected
+login and `bypassrls`; `data.rls` every tenant table with `enabled`/`forced`;
+`data.doors` the `SECURITY DEFINER` functions and their owners.
+
+Compare the highest applied version with the tree:
 
 ```bash
-psql "$DATABASE_URL" -c "
-SELECT
-    service_name,
-    token_type,
-    ia.display_name as account,
-    t.expires_at,
-    CASE
-        WHEN t.expires_at IS NULL THEN 'No expiry'
-        WHEN t.expires_at < NOW() THEN 'EXPIRED'
-        WHEN t.expires_at < NOW() + INTERVAL '7 days' THEN 'Expiring soon'
-        ELSE 'OK'
-    END as status
-FROM api_tokens t
-LEFT JOIN instagram_accounts ia ON t.instagram_account_id::uuid = ia.id
-ORDER BY t.expires_at;
-"
+ls scripts/migrations/ | tail -5
+grep -l "^-- runner:manual" scripts/migrations/*.sql
 ```
+
+A file the second command lists (079, 080) is GATED: the deploy owes it and does
+not apply it; the owner applies it in a window
+(`documentation/operations/legacy-window-close.md`). Its absence from the ledger
+is expected, not drift. `storydump doctor` does not know this — it reports those
+files as "not applied" with the fix "deploy main", which does not apply to them.
+Any OTHER file in the tree that the ledger lacks is a deploy that has not
+happened or a predeploy that failed: report it.
+
+## 3. The job queue
+
+```bash
+storydump jobs --since 24h
+```
+
+One row per kind × lane × state, with the oldest runnable and failed samples
+(a publish job's sample carries its story's `last_error`). What is still owed
+(`ready`, `leased`) is listed at any age. Worth reporting: a `failed` or
+`review_required` group, and a `ready` group whose `oldest_run_at` is long past
+— nothing is claiming that lane. System jobs (no workspace) are not shown.
+
+## 4. Stories in flight
+
+```bash
+storydump floating
+```
+
+Approved stories carrying a debit, waiting between attempts: the step, the
+retry job and its next run, the last wait's class and rung. A row whose job is
+`failed` is a story nobody is retrying.
+
+If the user names an Instagram account, add `storydump account <handle>`: the
+cap per day, the zone, the next slot, today's count and the last twenty
+outcomes.
+
+## What no verb answers
+
+The media pool's totals and a credential's expiry have no read verb. If the user
+needs them, that is the read-only `psql` escape hatch in
+`documentation/operations/reading-the-ledger.md` — ask before opening
+production, SELECT only, and do not select `oauth_credentials.encrypted_payload`.
 
 ## Report Format
 
-Present as a dashboard:
 ```
-## Database Status
+## Ledger Status
 
-### Queue
-| Status | Count | Earliest | Latest |
-|--------|-------|----------|--------|
+### API
+| Surface | Verdict | Facts |
+|---------|---------|-------|
 
-### Recent Posts (7 days)
-| Date | Method | Count |
-|------|--------|-------|
+### Posture
+role … · bypassrls … · ledger … · applied through NNN · gated and owed: …
 
-### Accounts
-| Name | Username | Active |
-|------|----------|--------|
+### Jobs (24h)
+| Kind | Lane | State | Count | Oldest run_at |
+|------|------|-------|-------|---------------|
 
-### Media Library
-| Category | Active | Avg Posts |
-|----------|--------|-----------|
-
-### Token Health
-| Account | Expires | Status |
-|---------|---------|--------|
+### Floating
+| Story | Step | Job | Next run | Last wait |
+|-------|------|-----|----------|-----------|
 ```
 
-**REMINDER**: These are READ-ONLY queries. Never run INSERT/UPDATE/DELETE.
+**REMINDER**: every command here reads. Do not follow one with a write verb —
+`CLAUDE.md`'s safety block governs those, and the decision is the user's.

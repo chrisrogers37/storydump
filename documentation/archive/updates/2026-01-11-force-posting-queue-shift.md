@@ -1,3 +1,5 @@
+> **Archived 2026-09-18 — HISTORY of the legacy tier.** An analysis of the legacy queue's slot-shift on `/next`; the queue, the command and the service it describes were deleted in the legacy tear-out (#1216). The target tier has no queue to shift — a story is a `post_intents` row moved by the ledger's transitions. See [`documentation/archive/README.md`](../README.md) for the index.
+
 # Analysis: Force Posting and Queue Shift Behavior
 
 **Date**: 2026-01-11
