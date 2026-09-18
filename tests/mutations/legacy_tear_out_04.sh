@@ -137,7 +137,7 @@ BEGIN
   EXECUTE format('GRANT svc_worker TO %I', current_user);
 END \$\$;" "$GATE" "$TCLOSE -k 080_closes_the_window_and_the_gate_answers_as_printed"
 check "080's guard passes on a present legacy schema" $M080 "     OR EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'legacy')
-     OR NOT EXISTS (SELECT 1 FROM runner.schema_migrations" "     OR NOT EXISTS (SELECT 1 FROM runner.schema_migrations" "$GATE" "$TCLOSE -k 080_refuses_while_legacy_is_present"
+     OR NOT EXISTS (SELECT 1 FROM runner.schema_migrations" "     OR NOT EXISTS (SELECT 1 FROM runner.schema_migrations" "$GATE" "$TCLOSE -k 080_refuses_when_legacy_reappears_after_079"
 check "080 keeps the door schema" $M080 'DROP SCHEMA IF EXISTS window_ddl CASCADE;' '-- (the door stays)' "$GATE" "$TCLOSE -k 080_closes_the_window_and_the_gate_answers_as_printed"
 check "080 leaves CREATE ON DATABASE with svc_migration" $M080 "  EXECUTE format('REVOKE CREATE ON DATABASE %I FROM svc_migration', current_database());" "  PERFORM 1;" "$GATE" "$TCLOSE -k 080_closes_the_window_and_the_gate_answers_as_printed"
 check "080 revokes the owner's membership of svc_migration (the door chain breaks)" $M080 'DROP SCHEMA IF EXISTS window_ddl CASCADE;' 'DROP SCHEMA IF EXISTS window_ddl CASCADE;

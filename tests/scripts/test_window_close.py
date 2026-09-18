@@ -320,6 +320,22 @@ class TestTheStandDownAsTheOwnerActor:
         )
         assert [row[0] for row in fetch_ledger(as_owner)][-1] == SNAPSHOT_VERSION
 
+    def test_080_refuses_when_legacy_reappears_after_079(
+        self, admin_conn, owner_actor, owner_window_db
+    ):
+        """The other half-done shape: 079 recorded, but a `legacy` schema is
+        back — a half-restored database. The legacy clause alone must refuse
+        it (the ledger clause is satisfied here)."""
+        as_owner = _world_through_078(admin_conn, owner_actor, owner_window_db)
+        apply_manual(as_owner, MIGRATIONS_DIR, DROP_VERSION)
+        execute(as_owner, "CREATE SCHEMA legacy")
+
+        with pytest.raises(MigrationRunnerError, match="080") as exc:
+            apply_manual(as_owner, MIGRATIONS_DIR, STAND_DOWN_VERSION)
+        assert "legacy schema present: t" in str(exc.value)
+        assert "079 recorded: t" in str(exc.value)
+        assert _schema_present(as_owner, "window_ddl")
+
     def test_080_refuses_when_legacy_is_gone_but_079_was_never_recorded(
         self, admin_conn, owner_actor, owner_window_db
     ):
