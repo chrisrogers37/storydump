@@ -61,7 +61,7 @@ API service skipped the two kickoff commits — see the gate above).
 | 02 retire the settings, the entry point and the config | `02_settings-and-entry-points.md` | **DONE** — merged `f59fe43` (2026-09-18 15:44 UTC); round 1 and a fresh re-verify folded; the deploys under the phase's entry | #1319 | green at `9d14304` (3680 passed, 1 skipped) |
 | 03 the 3f snapshot migration and the ratchet's file rule | `03_snapshot-migrations.md` | **DONE** — rehearsed on a Neon PITR branch, merged `3ffa750` (2026-09-18 17:23 UTC), 078 applied in production by the deploy at 17:24 UTC; the probe under the phase's entry | #1318 | green at `6da8d00` (3700 passed, 1 skipped) |
 | 04 the gated drop and stand-down | `04_drop-and-stand-down.md` | **READY, merge owner-gated** — built `0ff46e9`; three review rounds folded through `6ab4253` (the entry below); the MERGE waits on #1202 closed by the owner (the plan's precondition); merging arms nothing — the deploy owes 079/080; the window itself is the owner's (F7) | #1321 | green at `6ab4253` (3749 passed, 1 skipped) |
-| 05 the documentation's end state | `05_docs-end-state.md` | building — stacked on phase 04's head with a planned rebase (the entry below); the pin red-first on 24 of 43 live pages | — (draft after the first push) | — |
+| 05 the documentation's end state | `05_docs-end-state.md` | **READY as a change, DRAFT as a PR** — built `b56b8ed`, two review rounds folded through `82c55b3`; stacked on phase 04's head by a declared deviation: rebase onto `main` when #1321 merges, then ready; its window-dependent sentences wait for the owner's window | #1322 (draft) | green at `82c55b3` (3760 passed, 1 skipped) |
 
 ## Phase 01 — delete the legacy code and its tests
 
@@ -1155,6 +1155,21 @@ commit after this entry:
   a dead link inside `CHANGELOG.md` (history) to a plan directory archived before this epic.
 - **Not re-lensed:** the fold is two guards, one lookahead, a shebang and a `cd`, three sentences and
   seven battery lines; its verification is the battery and CI below.
+
+**Verification on `82c55b3`** (the fold of the re-verify, and one commit after it): the battery on
+`99d7081` `ran 28 of 28` with **two SURVIVORS** — the two new guards of `_exemption_errors` (a name in
+no list; a count below one) could be removed and the new unit test still passed, because its
+scenarios failed the COUNT comparison anyway. The test was wrong, not the guard: the page now names
+the unknown name once, and the zero-count case uses a legacy name the page does not carry, so each
+guard is the only thing between its case and a pass. On `82c55b3`: **`ran 28 of 28`, 28 killed**; the
+pin and the pins beside it green (18 in `tests/test_agent_docs.py`); CI green — run 35404263398,
+`3760 passed, 1 skipped`.
+
+**Convergence:** round 1 — two risks, four gaps, a simplify list, observations; the re-verify — three
+gaps, five observations, "ready to merge"; each round closed everything the one before it found, none
+reopened a closed finding. **Status: READY as a change; a DRAFT as a pull request** until #1321 merges
+and this branch is rebased onto `main` (`git rebase --onto origin/main 29537a8`) — and its own merge,
+like #1321's, is refused to this session by the permission classifier: the owner's.
 
 **Window-dependent sentences, to update once the window has run** (each is true today and says so):
 the documentation index's tear-out row ("the owner's window has not run"), the consolidated plan's Live
