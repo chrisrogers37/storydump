@@ -9,11 +9,17 @@ Storydump production Postgres is **Neon, reached through Railway service
 variables** — not through any file in the repo. `.env` is empty; nothing is in
 the shell environment.
 
-## Working recipe (verified 2026-09-11 22:04 UTC)
+## Working recipe
 
-```
-railway run --service storydump -- sh -c 'psql "$TARGET_DATABASE_URL" -v ON_ERROR_STOP=0 -f "$0"' /abs/path/to.sql
-```
+The command has ONE home — `documentation/operations/reading-the-ledger.md` › *The
+escape hatch* — so it cannot drift between pages: `railway run` against the `worker`
+service in the `production` environment, `sh -c 'psql "$TARGET_DATABASE_URL" …'` reading a
+file of SELECTs on stdin (give the file by absolute path: `< /abs/path/to.sql`), the output
+through a redaction. That form ran every read-only probe of the legacy tear-out on
+2026-09-17 and 2026-09-18. (This page's first recipe, verified 2026-09-11, named
+`--service storydump` with `-f "$0"`; both services carry `TARGET_DATABASE_URL`, so it
+reached the same database — the canonical spelling replaced it here so that one is
+written down.)
 
 Two gotchas, both of which fail in ways that look like something else:
 
@@ -57,10 +63,9 @@ Verified 2026-09-18: `npx neonctl@latest me` authenticates as
 account Railway uses, not the artemisanalytics address. Its org
 **`org-ancient-bush-46337162`** ("Christopher") contains project
 **`ancient-grass-50759240` / `storyline-ai-db`**, which *is* storydump's
-database: `legacy.posting_history`, `legacy.media_items`,
-`legacy.instagram_accounts`, `legacy.users`, plus `archive.*` and
-`runner.schema_migrations`. So neonctl is a genuine second path to this data —
-and, unlike Railway, the one that can create branches for rehearsals.
+database. So neonctl is a genuine second path to this data — and, unlike
+Railway, the one that can create branches for rehearsals. What it holds is in
+"What is in the database" below.
 
 Production branch is `br-square-frog-ai37r0qg`. **Its endpoint host is the one
 never to connect to during a branch rehearsal** — always derive the host from
@@ -74,6 +79,48 @@ writes to `~/.config/neon/`. Both neonctl **and** psql need the sandbox off:
 HTTP-only and raw Postgres TCP fails at DNS
 ("could not translate host name … to address"). `neonctl projects list` with no
 `--org-id` blocks on an interactive org picker — always pass `--org-id`.
+
+## What is in the database
+
+Table names brought to the target schema on 2026-09-18 from the migrations in
+the tree (`scripts/migrations/052_*` onward) — not re-queried; confirm with
+`\dt public.*` before relying on one.
+
+- **`public` is the target ledger** — the only schema the code reads:
+  `workspaces` (the tenant), `ig_accounts`, `media_sources`, `media_items`,
+  `post_intents` (one story, for one account, at one slot), `audit_events`,
+  `jobs`, `channel_bindings`, `channel_outbox`, `provider_operations`,
+  `daily_post_counts`, and the rest of the twenty-six in
+  `.claude/rules/database.md`. Eighteen carry a `workspace_id` column
+  (`workspaces` is the tenant itself). Because the login bypasses RLS, a query
+  spans every tenant: select or group by `workspace_id` when the question is
+  about one.
+- **`archive.<table>_pre_cutover_20260917`** — sixteen snapshots of the retired
+  legacy tier's tables, rows only (migration 078), e.g.
+  `archive.posting_history_pre_cutover_20260917`. This is where pre-cutover
+  history lives. They carry the 90-day `archive_snapshots` retention class
+  (eligible from 2026-12-16; nothing drops them until the `retention_sweep`
+  executor exists).
+- **`legacy`** — the legacy tier's schema, dropped by the gated migration 079 in
+  the owner's window (`documentation/operations/legacy-window-close.md`).
+  Whether it still exists is a fact to check
+  (`SELECT 1 FROM pg_namespace WHERE nspname = 'legacy'`), not to assume. No
+  code reads it; for history, query the snapshots.
+- **`runner.schema_migrations`** — the migration ledger (`version`, `status`,
+  `applied_at`).
+
+Before `psql` at all: `storydump story|cards|floating|account|jobs|outbox|burst|posture`
+answer most ledger questions through the API with no database connection
+(`documentation/operations/reading-the-ledger.md`). A probe, when one is needed:
+
+```sql
+BEGIN TRANSACTION READ ONLY;
+SELECT workspace_id, state, count(*) FROM post_intents GROUP BY 1, 2 ORDER BY 1, 2;
+SELECT workspace_id, handle, state, next_slot_at, last_posted_at FROM ig_accounts ORDER BY created_at;
+SELECT kind, lane, state, count(*) FROM jobs GROUP BY 1, 2, 3 ORDER BY 1, 2, 3;
+SELECT count(*) FROM archive.posting_history_pre_cutover_20260917;
+COMMIT;
+```
 
 **Why:** on 2026-09-06 and again earlier on 2026-09-11, a production
 investigation could not run at all for want of a credential, and the two

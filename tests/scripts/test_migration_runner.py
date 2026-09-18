@@ -15,8 +15,11 @@ import pytest
 from scripts.migration_runner import (
     RUNNER_LOCK_KEY,
     MigrationRunnerError,
+    apply_manual,
     apply_pending,
     discover_migrations,
+    main,
+    status,
 )
 from src.config.settings import settings
 from tests.scripts.conftest import (
@@ -141,9 +144,9 @@ class TestMarkers:
     @pytest.mark.parametrize(
         "line",
         [
-            "-- runner: manual",  # a space after the colon
-            "-- Runner:manual",  # a capital R
-            "--runner:manual",  # no space after the dashes
+            "-- runner: gated",  # a space after the colon
+            "-- Runner:gated",  # a capital R
+            "--runner:gated",  # no space after the dashes
             "-- runner:MANUAL",  # a capital word: the words are exact
             "-- runner:unadvertised because it snapshots",  # a flag with an argument
         ],
@@ -151,9 +154,24 @@ class TestMarkers:
     def test_every_spelling_that_reads_as_a_marker_reaches_the_known_set(
         self, tmp_path, line
     ):
+        """An UNKNOWN word (`gated`, `MANUAL`) in every frame the regex
+        tolerates is refused at the known-set check — the frame is lenient,
+        the word is exact. (Phase 03 wrote these with `manual` as the unknown
+        word; phase 04 made it a known one.)"""
         write_migration(tmp_path, 1, f"{line}\nCREATE TABLE t_a (id INT);")
         with pytest.raises(MigrationRunnerError, match="001"):
             discover_migrations(tmp_path)
+
+    @pytest.mark.parametrize(
+        "line", ["-- runner: manual", "-- Runner:manual", "--runner:manual"]
+    )
+    def test_the_frame_is_lenient_where_the_word_is_known(self, tmp_path, line):
+        """The twin: the same slipped frames around a KNOWN word are read as
+        that marker, never as prose — a `manual` file with a stray space is
+        still gated."""
+        write_migration(tmp_path, 1, f"{line}\nDROP TABLE t_gone;")
+        [m] = discover_migrations(tmp_path)
+        assert m.manual is True
 
     def test_a_bare_postcondition_marker_is_refused(self, tmp_path):
         write_migration(
@@ -201,6 +219,79 @@ class TestMarkers:
         )
         apply_pending(scratch_db, tmp_path)
         assert [row[0] for row in fetch_ledger(scratch_db)] == [1]
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "--- runner:manual",  # three dashes
+            "-- -- runner:manual",  # an editor's "comment this line" on a comment
+            "/* runner:manual */",  # a block-comment frame
+            "# runner:manual",  # a shell-style frame
+            "-- runner manual",  # no colon
+            "DROP TABLE t_gone; -- runner:manual",  # after code on the same line
+            "-- RUNNER unadvertised",  # another word, upper case, no colon
+            "-- runner-manual",  # a dash for the colon
+            "-- runner=manual",  # an equals sign for the colon
+        ],
+    )
+    def test_a_near_miss_is_refused_never_read_as_prose(self, tmp_path, line):
+        """Each of these once read as prose — for a `manual` file the whole
+        hazard: an ordinary file the next predeploy applies. The frame the
+        grammar reads is `-- runner:<word>` alone at the start of its line;
+        anything that LOOKS like an attempt and is not that is refused."""
+        write_migration(tmp_path, 1, f"{line}\nCREATE TABLE t_a (id INT);")
+        with pytest.raises(MigrationRunnerError, match="001") as exc:
+            discover_migrations(tmp_path)
+        assert "near miss" in str(exc.value)
+
+    def test_a_mention_of_a_marker_in_a_sentence_is_still_prose(self, tmp_path):
+        """The near-miss rule keys on the opener being followed by `runner`,
+        so prose that names a marker mid-sentence stays prose."""
+        write_migration(
+            tmp_path,
+            1,
+            "-- The runner:schema-move marker is what makes the boundary derivable.\n"
+            "-- python -m scripts.migration_runner apply --manual 79 is the door.\n"
+            "CREATE TABLE t_a (id INT);",
+        )
+        [m] = discover_migrations(tmp_path)
+        assert m.manual is False and m.schema_move is False
+
+    def test_a_byte_order_mark_does_not_hide_a_marker_on_line_one(self, tmp_path):
+        path = tmp_path / "001_bom.sql"
+        path.write_bytes("\ufeff-- runner:manual\nDROP TABLE t_gone;".encode("utf-8"))
+        [m] = discover_migrations(tmp_path)
+        assert m.manual is True
+
+    def test_a_file_the_runner_cannot_decode_is_refused_naming_it(self, tmp_path):
+        path = tmp_path / "001_utf16.sql"
+        path.write_bytes("-- runner:manual\nDROP TABLE t_gone;".encode("utf-16"))
+        with pytest.raises(MigrationRunnerError, match="001") as exc:
+            discover_migrations(tmp_path)
+        assert "not UTF-8" in str(exc.value)
+
+    def test_a_file_with_nul_bytes_is_refused_naming_it(self, tmp_path):
+        """UTF-16 WITHOUT a byte-order mark is valid UTF-8 — ASCII with a NUL
+        after every character — so the decode passes and every marker in it
+        reads as prose. Refused at discovery, by name, like the undecodable
+        file; without this, psycopg2's NUL refusal at apply is the only guard."""
+        path = tmp_path / "001_utf16le.sql"
+        path.write_bytes("-- runner:manual\nDROP TABLE t_gone;".encode("utf-16-le"))
+        with pytest.raises(MigrationRunnerError, match="001") as exc:
+            discover_migrations(tmp_path)
+        assert "NUL" in str(exc.value)
+
+    def test_manual_is_read_off_the_file(self, tmp_path):
+        write_migration(tmp_path, 1, "-- runner:manual\nDROP TABLE t_gone;")
+        write_migration(tmp_path, 2, "CREATE TABLE t_b (id INT);")
+        a, b = discover_migrations(tmp_path)
+        assert a.manual is True
+        assert b.manual is False
+
+    def test_a_manual_marker_refuses_an_argument(self, tmp_path):
+        write_migration(tmp_path, 1, "-- runner:manual 079\nDROP TABLE t_gone;")
+        with pytest.raises(MigrationRunnerError, match="001"):
+            discover_migrations(tmp_path)
 
 
 class TestDiscovery:
@@ -396,3 +487,173 @@ class TestAdvisoryLock:
             assert cur.fetchone()[0] == 1
         conn.close()
         assert len(fetch_ledger(scratch_db)) == 1
+
+
+class TestManual:
+    """`-- runner:manual` (the tear-out, phase 04; fork F6): a file the deploy
+    must never run by itself. `apply` skips it where it stands and reports
+    it as OWED — exit 0, so a deploy is never failed by a file that is
+    waiting for an operator — and it is exempt from the below-head rule in
+    both doors: `apply` keeps applying ordinary files numbered ABOVE it, and
+    `apply --manual <version>` applies it below the head, by name, exactly
+    like any file (ledger row, postconditions, advisory lock)."""
+
+    def _corpus(self, tmp_path):
+        write_migration(tmp_path, 1, "CREATE TABLE t_one (id INT);")
+        write_migration(
+            tmp_path,
+            2,
+            "-- runner:manual\n"
+            "-- runner:postcondition SELECT to_regclass('t_one') IS NULL\n"
+            "DROP TABLE t_one;",
+            name="gated",
+        )
+        write_migration(tmp_path, 3, "CREATE TABLE t_three (id INT);")
+
+    def test_apply_owes_the_manual_file_and_applies_the_ordinary_ones_above_it(
+        self, scratch_db, tmp_path
+    ):
+        """THE LOAD-BEARING HALF: with the manual 002 pending, 003 — numbered
+        above it — applies and nothing raises. Without the exemption every
+        predeploy after the next ordinary file would raise on every push."""
+        self._corpus(tmp_path)
+
+        report = apply_pending(scratch_db, tmp_path)
+
+        assert [m.version for m in report.applied] == [1, 3]
+        assert [m.version for m in report.owed] == [2]
+        assert [row[0] for row in fetch_ledger(scratch_db)] == [1, 3]
+        assert table_exists(scratch_db, "t_one"), "the manual file must not have run"
+        # THE NEXT DEPLOY, in production's exact shape: an ordinary 004 lands
+        # while 002 is still owed BELOW the head — the state the old rule
+        # raised on, on every push, for both services. 004 applies, 002 is
+        # owed again, nothing raises.
+        write_migration(tmp_path, 4, "CREATE TABLE t_four (id INT);")
+        again = apply_pending(scratch_db, tmp_path)
+        assert [m.version for m in again.applied] == [4]
+        assert [m.version for m in again.owed] == [2]
+        assert table_exists(scratch_db, "t_one"), "still owed, still not run"
+
+    def test_apply_manual_applies_it_below_the_head_with_a_ledger_row(
+        self, scratch_db, tmp_path
+    ):
+        """THE OTHER HALF: after 003 is the head, `--manual 002` applies 002
+        below it — the below-head rule is for files inserted under history by
+        mistake, and a gated file is under it by design."""
+        self._corpus(tmp_path)
+        apply_pending(scratch_db, tmp_path)
+
+        report = apply_manual(scratch_db, tmp_path, 2)
+
+        assert [m.version for m in report.applied] == [2]
+        assert not table_exists(scratch_db, "t_one")
+        rows = fetch_ledger(scratch_db)
+        assert [(r[0], r[4]) for r in rows] == [
+            (1, "applied"),
+            (2, "applied"),
+            (3, "applied"),
+        ]
+        # and the next deploy owes nothing
+        after = apply_pending(scratch_db, tmp_path)
+        assert after.applied == [] and after.owed == []
+
+    def test_apply_manual_applies_exactly_that_file_and_no_other_pending_one(
+        self, scratch_db, tmp_path
+    ):
+        self._corpus(tmp_path)
+        write_migration(tmp_path, 4, "-- runner:manual\nCREATE TABLE t_four (id INT);")
+        apply_pending(scratch_db, tmp_path)
+
+        apply_manual(scratch_db, tmp_path, 2)
+
+        assert [row[0] for row in fetch_ledger(scratch_db)] == [1, 2, 3]
+        assert not table_exists(scratch_db, "t_four")
+
+    def test_status_lists_it_as_owed_not_pending(self, scratch_db, tmp_path):
+        self._corpus(tmp_path)
+        apply_pending(scratch_db, tmp_path)
+
+        report = status(scratch_db, tmp_path)
+
+        assert [m.version for m, _row_status in report.applied] == [1, 3]
+        assert report.pending == []
+        assert [m.version for m in report.owed] == [2]
+
+    def test_apply_manual_refuses_a_file_without_the_directive(
+        self, scratch_db, tmp_path
+    ):
+        """`--manual` is for gated files only: an ordinary pending file is
+        `apply`'s, and running it by name would bypass the order."""
+        self._corpus(tmp_path)
+        with pytest.raises(MigrationRunnerError, match="001") as exc:
+            apply_manual(scratch_db, tmp_path, 1)
+        assert "runner:manual" in str(exc.value)
+        assert not table_exists(scratch_db, "t_one"), "the refusal ran nothing"
+        # and after `apply` has recorded it, the directive check still fires first
+        apply_pending(scratch_db, tmp_path)
+        with pytest.raises(MigrationRunnerError, match="runner:manual"):
+            apply_manual(scratch_db, tmp_path, 1)
+
+    def test_apply_manual_refuses_to_run_over_a_pending_ordinary_file_below_it(
+        self, scratch_db, tmp_path
+    ):
+        """The tree a gated file was written against has everything before it
+        applied; with an ordinary 001 still pending the door refuses and names
+        it, and `apply` is the way through."""
+        self._corpus(tmp_path)
+        with pytest.raises(MigrationRunnerError, match="002") as exc:
+            apply_manual(scratch_db, tmp_path, 2)
+        assert "001" in str(exc.value) and "run `apply` first" in str(exc.value)
+        assert fetch_ledger(scratch_db) == []
+
+    def test_apply_manual_refuses_a_version_that_is_not_in_the_tree(
+        self, scratch_db, tmp_path
+    ):
+        self._corpus(tmp_path)
+        with pytest.raises(MigrationRunnerError, match="009"):
+            apply_manual(scratch_db, tmp_path, 9)
+
+    def test_apply_manual_refuses_a_version_already_recorded(
+        self, scratch_db, tmp_path
+    ):
+        self._corpus(tmp_path)
+        apply_pending(scratch_db, tmp_path)
+        apply_manual(scratch_db, tmp_path, 2)
+        with pytest.raises(MigrationRunnerError, match="002") as exc:
+            apply_manual(scratch_db, tmp_path, 2)
+        assert "already" in str(exc.value)
+
+    def test_a_false_postcondition_rolls_the_manual_file_back(
+        self, scratch_db, tmp_path
+    ):
+        write_migration(
+            tmp_path,
+            1,
+            "-- runner:manual\n"
+            "-- runner:postcondition SELECT false\n"
+            "CREATE TABLE t_never (id INT);",
+        )
+        with pytest.raises(MigrationRunnerError, match="001"):
+            apply_manual(scratch_db, tmp_path, 1)
+        assert not table_exists(scratch_db, "t_never")
+        assert fetch_ledger(scratch_db) == []
+
+    def test_the_cli_reports_owed_files_and_exits_zero(
+        self, scratch_db, tmp_path, capsys
+    ):
+        self._corpus(tmp_path)
+        argv = ["--database-url", scratch_db, "--migrations-dir", str(tmp_path)]
+
+        assert main(argv + ["apply"]) == 0
+        out = capsys.readouterr().out
+        assert "applied 001" in out and "applied 003" in out
+        assert "owed (manual) 002 (002_gated.sql)" in out
+
+        assert main(argv + ["status"]) == 0
+        assert "owed (manual) 002 (002_gated.sql)" in capsys.readouterr().out
+
+        assert main(argv + ["apply", "--manual", "2"]) == 0
+        assert "applied 002" in capsys.readouterr().out
+
+        assert main(argv + ["apply", "--manual", "3"]) == 1
+        assert "runner:manual" in capsys.readouterr().err

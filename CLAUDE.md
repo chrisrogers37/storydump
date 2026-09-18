@@ -27,6 +27,7 @@ does not have. Nothing else here is shared, and nothing else needs guarding.
 
 ```bash
 python -m src.main                   # Starts the posting scheduler + Telegram bot
+python -m scripts.migration_runner apply --manual <version>   # Applies a gated file: 079 DROPS the legacy schema — the owner runs the window (F7)
 storydump approve <story>            # Posts a story to Instagram — the user's decision, never an agent's
 storydump cancel <story>             # Cancels a story: refunds its debit, destroys its upload
 storydump resolve <story> cancel     # Gives up on a story parked for review; its debit is retained
@@ -49,8 +50,9 @@ storydump webhook deregister         # Detaches the bot's webhook — Telegram d
 
 ### Production
 
-Never run against production: the posting scheduler, or mutating SQL on
-`posting_history`.
+Never run against production: the posting scheduler, or mutating SQL against
+the ledger — `post_intents`, `jobs`, `channel_outbox` and every other table
+`src/models/target/` declares — or any `archive` snapshot.
 
 This list names what is unambiguously destructive; absence from it does not mean
 a command is read-only. See the same section in `AGENTS.md` for the commands
@@ -65,11 +67,12 @@ that write despite reading as inspection.
 | File | Covers |
 |---|---|
 | `changelog.md` | CHANGELOG conventions |
-| `database.md` | Schema, migrations, query patterns |
-| `development-patterns.md` | Repo-wide code conventions |
-| `scheduler.md` | Posting scheduler behaviour |
-| `telegram.md` | Telegram bot surface |
-| `testing.md` | Test layout and fixtures |
+| `database.md` | The target schema: the ledger tables, RLS and the tenancy gate, SQL under the unit of work |
+| `development-patterns.md` | Repo-wide code conventions: layers, service modules, logging, security |
+| `migrations.md` | Writing a migration: the runner, its markers, advertised DDL, the bracketed hand-off |
+| `scheduler.md` | The worker: the clock, the jobs, the publish pipeline |
+| `telegram.md` | The Telegram adapter: the webhook, the outbox, the approval card |
+| `testing.md` | Test requirements, layout and markers |
 
 ## Working here
 

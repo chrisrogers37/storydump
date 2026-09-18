@@ -7,7 +7,8 @@ Standalone: stdlib + psycopg2, zero `src` imports, addressed by
 ## Commands
 
 ```bash
-python -m scripts.migration_runner apply      # apply every pending migration
+python -m scripts.migration_runner apply      # apply every pending migration (a runner:manual file is owed, not applied)
+python -m scripts.migration_runner apply --manual N   # apply ONE gated file by version — the operator's door (NEVER-run for agents)
 python -m scripts.migration_runner adopt      # enter a pre-ledger DB into the ledger
 python -m scripts.migration_runner status     # read-only ledger vs tree report
 python -m scripts.migration_runner repair --version N --reason "…"
@@ -23,9 +24,13 @@ defaults to `scripts/migrations/adoption_manifest.json`.
 execution_ms, status ∈ {applied, repaired, adopted})`, created by the runner
 at first contact. It lives in the dedicated `runner` schema — never `public`
 — because the M.3 cutover renames `public` wholesale and the ledger must not
-ride into `legacy` mid-run. It supersedes the legacy `schema_version` table
-(which keeps its in-file self-stamps until it is archived at M.3, but is
-never read by the runner).
+ride into `legacy` mid-run. It supersedes the legacy lineage's own version
+table — the one the 001–050 files stamp themselves into, with known gaps; a
+replay still stamps it and the runner never reads it
+(`scripts/migration_runner.py:793`). In production that table rode into
+`legacy` with the rest at the 051 move, is snapshotted as
+`archive.schema_version_pre_cutover_20260917` (078), and is dropped with
+`legacy` by 079 in the owner's window (`legacy-window-close.md`).
 
 Checksums are SHA256 of the file bytes. An applied file that no longer
 matches its recorded checksum is a hard failure everywhere: fix forward with
@@ -48,6 +53,30 @@ with the new checksum).
   (a snapshot of `legacy` into `archive`, a drop, a stand-down): applied like
   any other, but left out of the F.2 prefix ratchet that diffs the lineage
   against the plan's stream (078 was the first; the tear-out, phase 03).
+- `-- runner:manual` — a file the deploy must not run by itself (the legacy
+  tear-out, phase 04; fork F6: 079 drops `legacy`, 080 stands the window
+  down). `apply` skips it where it stands and prints `owed (manual) NNN`, exit
+  0 — a deploy is never failed by a file that waits for an operator; `status`
+  lists it the same way. It is EXEMPT from the below-head rule in both doors:
+  ordinary files numbered above it keep applying, and `apply --manual NNN`
+  applies it below the head, by name, exactly like any file — the advisory
+  lock, the integrity check, one transaction with its postconditions and its
+  ledger row. `--manual` refuses a version without the directive, a version
+  not in the tree, and a version already recorded (a gated file runs once).
+  The operator's sequence is `documentation/operations/legacy-window-close.md`.
+  `storydump doctor` reads the directive as well: a gated file the ledger lacks is
+  reported as owed to the owner's window, not as a deployment behind the repository.
+- A NEAR MISS — a comment opener followed straight by `runner` and a known word
+  in a frame the grammar does not read (`--- runner:manual`, `-- -- runner:manual`,
+  `/* runner:manual */`, `# runner:manual`, `-- runner manual`, `-- runner-manual`,
+  `-- runner=manual`, a marker after code on its line) — is refused at discovery
+  too. Each once read as prose, which for a `manual` file is the whole hazard. A
+  byte-order mark at the start of a file is dropped before the first line is
+  read; a file that is not UTF-8, or that holds a NUL byte (UTF-16 without its
+  mark decodes as UTF-8 and its markers as prose), is refused by name. The rule
+  binds prose too: a comment never OPENS with `runner` followed by a marker
+  word, in any spelling — write "the runner's manual door", not
+  `-- runner-manual files wait …`.
 - Any other `-- runner:<word>` — a hard failure at discovery, naming the file.
   Every door (`apply`, `adopt`, `status`, `parity`) and the test suite's
   collection refuse the corpus until it is fixed: a misspelt marker (a stray
@@ -64,9 +93,9 @@ with the new checksum).
 ## Adoption — the 45-or-49 design
 
 Production predates the ledger, migrations were applied by hand, and as of
-2026-08-11 nobody can say whether 046–049 ever ran there. `runner adopt` is
-built for exactly that: every numbered file is paired with adoption
-evidence, one of three kinds —
+2026-08-11 nobody could say whether 046–049 ever ran there (answered at first
+contact, 2026-08-26 — below). `runner adopt` is built for exactly that: every
+numbered file is paired with adoption evidence, one of three kinds —
 
 - an explicit **probe** in the manifest (SQL returning bool);
 - an explicit **asserted** entry (data-only files with no structural delta:
@@ -113,6 +142,9 @@ database-owner connection (the app's `TARGET_DATABASE_URL` is a separate,
 runtime-only login), and `runner status` against production reports zero
 pending. Rollback is reverting the line; the ledger is untouched either way.
 
+The sequence as it was printed — a record of first contact, not a to-do:
+production is in the ledger and the deploy is armed.
+
 1. **Create the runner login** — as the database-owner actor (on Neon, the
    project's database owner), per the plan §0.2 login contract (the creator
    receives ADMIN on PG16+, which the M.3 bootstrap depends on):
@@ -121,9 +153,11 @@ pending. Rollback is reverting the line; the ledger is untouched either way.
    `GRANT ALL ON ALL TABLES IN SCHEMA public TO svc_migration;`
    `GRANT CREATE ON DATABASE <db> TO svc_migration;`
    (adopt probes read catalogs; apply executes DDL on public.)
-2. **Pre-050 confirmation** — `\d api_tokens` and `\d media_posting_locks`
-   against production to confirm the file-derived residue analysis
-   (plan §0.2 precondition; 050's DDL is defensive either way).
+2. **Pre-050 confirmation** — a `\d` of the two legacy tables 050's header
+   names for this checkbox (`scripts/migrations/050_chain_reconciliation.sql:45-47`),
+   against production, to confirm the file-derived residue analysis (plan
+   §0.2 precondition; 050's DDL is defensive either way). Those tables live in
+   `legacy` since the 051 move, so the step cannot be repeated as printed.
 3. **First contact** — `runner adopt` with `DATABASE_URL` set to production.
    Expect: 001–045 adopted; 046–049 adopted or pending depending on what the
    hand-applied history actually was; 050 pending. Any hard failure names the
@@ -143,7 +177,14 @@ pending. Rollback is reverting the line; the ledger is untouched either way.
 ## CI
 
 The migration gate runs inside the ordinary pytest suite
-(`tests/scripts/test_migration_gate.py`): full-corpus replay-from-empty
-through the runner, adopt against production-shaped fixtures at 45 and at
-49, the tamper refusal, and the schema-parity comparator
-(replayed == models, with `schema_version` as the one documented exclusion).
+(`tests/scripts/test_migration_gate.py`): the legacy lineage replayed from
+empty through the runner, up to the 051 move; adopt against
+production-shaped fixtures at 45 and at 49; the tamper refusal; and the
+schema-parity comparator's positive control. Its replayed-vs-models parity arm
+went with the legacy models (the tear-out, phase 01); the comparator's
+live-catalog path is exercised by `tests/scripts/test_lineage_lane.py`, which
+replays the corpus across the move, and by
+`tests/scripts/test_schema_drift_live.py`. The comparator still leaves one
+table out by name — the legacy lineage's own version table
+(`scripts/schema_parity.py`, `EXCLUDED_TABLES`) — which exists only on a
+migration-built legacy schema.
