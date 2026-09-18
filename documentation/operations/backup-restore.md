@@ -107,7 +107,12 @@ Keep a manifest of media files for verification:
 
 ```sql
 -- Generate manifest from database (LEGACY tier, undeployed: `media_items`
--- lives in the `legacy` schema until #1216 snapshots and drops it; the target
+-- lives in the `legacy` schema, snapshotted by migration 078 into
+-- `archive.media_items_pre_cutover_20260917` (the tear-out, phase 03) and
+-- dropped by 079 (phase 04). The snapshots carry the `archive_snapshots`
+-- retention class — 90 days from the date in their NAME, so eligible for
+-- the sweep from 2026-12-16 whatever day the drop runs (fork F9); an owner
+-- who wants them longer exports first: `pg_dump -n archive`. The target
 -- tier's media rows sit under the workspace's row-level security and are read
 -- through the API, not psql)
 SELECT file_name, file_hash, category, created_at

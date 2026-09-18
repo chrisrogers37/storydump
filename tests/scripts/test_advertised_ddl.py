@@ -312,6 +312,57 @@ from scripts.advertised_ddl import (  # noqa: E402
 )
 
 
+class TestTheLineageFileRule:
+    """`target_lineage_files` is every file above the 051 move EXCEPT one that
+    says it is not advertised DDL (`runner:unadvertised`): a snapshot of the
+    legacy schema, a drop, a stand-down cannot be a prefix of a stream that
+    replays from an empty database, and cannot be outside it without a rule.
+    One definition, both consumers — the prefix diff here and the lane's
+    tenancy slice derive from the same function (the tear-out, phase 03)."""
+
+    def _corpus(self, tmp_path):
+        from tests.scripts.conftest import write_migration
+
+        write_migration(tmp_path, 1, "CREATE TABLE legacy_a (id INT);")
+        write_migration(
+            tmp_path, 2, "-- runner:schema-move\nCREATE TABLE moved (id INT);"
+        )
+        write_migration(tmp_path, 3, "CREATE TABLE target_a (id INT);")
+        write_migration(
+            tmp_path,
+            4,
+            "-- runner:unadvertised\nCREATE TABLE archive_a AS TABLE legacy_a;",
+        )
+        write_migration(tmp_path, 5, "CREATE TABLE target_b (id INT);")
+
+    def test_an_unadvertised_file_above_the_move_is_not_in_the_lineage(self, tmp_path):
+        self._corpus(tmp_path)
+        names = [p.name for p in target_lineage_files(tmp_path)]
+        assert names == ["003_m.sql", "005_m.sql"]
+
+    def test_the_lineage_statements_skip_it_too(self, tmp_path):
+        from scripts.advertised_ddl import target_lineage_statements
+
+        self._corpus(tmp_path)
+        assert target_lineage_statements(tmp_path) == [
+            "CREATE TABLE target_a (id INT)",
+            "CREATE TABLE target_b (id INT)",
+        ]
+
+    def test_the_real_corpus_holds_the_snapshot_file_outside_the_lineage(self):
+        """The rule's first real subject: 078 is above the move and not in the
+        prefix — and the prefix pin in `test_real_stream_expands_the_fifteen_policies`
+        is unchanged by it."""
+        from scripts.migration_runner import discover_migrations
+
+        above = [m for m in discover_migrations(MIGRATIONS_DIR_PATH) if m.version >= 78]
+        assert [m.path.name for m in above][:1] == [
+            "078_legacy_snapshots_pre_cutover.sql"
+        ]
+        assert above[0].unadvertised is True
+        assert above[0].path not in target_lineage_files(MIGRATIONS_DIR_PATH)
+
+
 class TestNormalizeStatements:
     def test_splits_strips_comments_and_collapses_whitespace(self):
         sql = (
