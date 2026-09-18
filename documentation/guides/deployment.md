@@ -1,50 +1,46 @@
 # Deployment Checklist
 
-This checklist covers everything you need to do **outside of code** to get Storydump running in production on Railway + Neon.
+The operator's checklist for standing up the hosted deployment — or a second
+environment shaped like it (staging, a preview) — on Railway + Neon, and for
+taking the first workspace from sign-in to its first posted story. Storydump is
+one deployment that serves many workspaces: a new customer is a workspace on
+it, not another run through this page
+([`deployment-options.md`](deployment-options.md)). The reference behind each
+step is [`cloud-deployment.md`](cloud-deployment.md).
 
 ## Prerequisites
 
 - [ ] GitHub account (public repository)
 - [ ] Railway account ([railway.app](https://railway.app))
 - [ ] Neon account ([console.neon.tech](https://console.neon.tech))
-- [ ] Instagram account for your business
-- [ ] Telegram account
+- [ ] Vercel account, for the web front end ([`landing-vercel-deployment.md`](landing-vercel-deployment.md))
+- [ ] A Meta developer app, a Google Cloud project and a Cloudinary account
+- [ ] A Telegram account
 
 ---
 
-## 1. Telegram Bot Setup (15 minutes)
+## 1. Telegram Bot Setup (10 minutes)
 
-### Create Bot with BotFather
+The deployment runs **one** bot for every workspace.
+
+### Create the bot with BotFather
 
 - [ ] Open Telegram and search for **@BotFather**
-- [ ] Send `/newbot` to BotFather
-- [ ] Follow prompts:
-  - Choose bot name (e.g., "Storydump Bot")
-  - Choose bot username (e.g., "storydump_yourcompany_bot")
+- [ ] Send `/newbot` and follow the prompts (a name, then a username)
 - [ ] **Save the bot token** (looks like `123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11`)
+- [ ] `/setjoingroups` → the bot → *Enable* — a workspace adds the bot to its own group
+- [ ] `/setprivacy` → the bot → *Disable* (or plan to make the bot an admin of each group)
 
-### Create Telegram Channel
+No channel is created here and no command list is registered: each workspace
+binds its own group on the web (Section 5), and the bot serves `/start` links
+and the buttons on its cards, not typed commands
+([`telegram-webhook.md`](../operations/telegram-webhook.md)).
 
-- [ ] Create a new Telegram channel (not group)
-  - Name it (e.g., "Storydump Queue - Internal")
-  - Set to Private (only your team can see)
-- [ ] Add your bot as an administrator:
-  1. Go to channel info
-  2. Tap "Administrators"
-  3. Tap "Add Administrator"
-  4. Search for your bot username
-  5. Give it "Post Messages" permission
-
-### Test Bot
-
-- [ ] Send `/start` to your bot
-- [ ] Verify it responds (if not, service isn't running yet - that's okay)
-
-**Deliverables** (the approval group is connected per workspace on the web, so
-there is no channel or admin chat to configure):
+**Deliverables:**
 ```
 TARGET_TELEGRAM_BOT_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
 TARGET_TELEGRAM_BOT_USERNAME=your_bot
+TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN=<python -c "import secrets; print(secrets.token_urlsafe(48))">
 ```
 
 ---
@@ -55,34 +51,51 @@ TARGET_TELEGRAM_BOT_USERNAME=your_bot
 
 - [ ] Sign up at [console.neon.tech](https://console.neon.tech)
 - [ ] Create a new project (name: `storydump`)
-- [ ] Note your connection string from the dashboard
+- [ ] Note the owner connection string from the dashboard
 
 ### Initialize Schema
 
 ```bash
-# Set your Neon connection string
-export DATABASE_URL="postgresql://user:pass@ep-xxx.neon.tech/storydump?sslmode=require"
+# The OWNER connection string — the runner applies DDL with it
+export DATABASE_URL="postgresql://owner:pass@ep-xxx.neon.tech/storydump?sslmode=require"
 
-# A FRESH database needs step 0 and the by-hand base first — the service roles,
-# the DDL door migration 050 calls, then the legacy base; the runner stops at
-# 050 without them. (`make init-db` runs this same sequence locally.)
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
+# A FRESH database needs four files by hand first: step 0 (the service roles,
+# then the DDL door migration 050 calls), the by-hand base the legacy lineage
+# alters from 001 on, and the one table production made by hand, which
+# migration 078 snapshots by name. Without step 0 the runner stops at 050;
+# without the hand-made table, at 078.
+# (`make init-db` runs this same sequence locally — Makefile:105-113.)
+psql "$DATABASE_URL" -q -v ON_ERROR_STOP=1 \
   -f scripts/window/step0_bootstrap.sql -f scripts/window/step0_legacy_ddl_door.sql \
-  -f scripts/setup_database.sql
+  -f scripts/setup_database.sql -f tests/scripts/fixtures/legacy_by_hand.sql
 
-# Apply the migrations through the runner — the same command the worker's
-# pre-deploy step runs (`railway.toml`); it keeps the ledger the API's
-# `storydump posture` and `storydump doctor` read. Never a psql loop.
+# Apply the migrations through the runner — the same command each deploy's
+# pre-deploy step runs (`railway.toml`); it keeps the ledger that
+# `storydump posture` and `storydump doctor` read. Not a psql loop.
 python -m scripts.migration_runner status
 python -m scripts.migration_runner apply
 ```
 
+`apply` lists `owed (manual) 079 …` and `owed (manual) 080 …` and exits 0:
+those two are gated files (they drop the `legacy` schema and stand the
+migration window down), a deploy owes them and does not apply them, and the
+operator's sequence for them is
+[`legacy-window-close.md`](../operations/legacy-window-close.md).
+
 ### Verify Setup
 
 ```bash
-psql "$DATABASE_URL" -c "\dt"
-# Should show all tables
+python -m scripts.migration_runner status   # the ledger against this checkout
+psql "$DATABASE_URL" -c "\dt"               # the target tables, in `public`
 ```
+
+### The runtime login
+
+- [ ] Decide what `TARGET_DATABASE_URL` connects as. The design is `svc_ingress`
+  for the API and `svc_worker` for the worker, which step 0 created; giving
+  them passwords and switching the services is
+  [`runtime-database-roles.md`](../operations/runtime-database-roles.md).
+  `/health` reports the login a service actually holds (`db_role`).
 
 ### Connection Pool Sizing
 
@@ -92,23 +105,23 @@ processes (the API and the worker) against the plan's connection limit.
 
 **Deliverables:**
 ```
-DATABASE_URL=postgresql://user:pass@ep-xxx.neon.tech/storydump?sslmode=require
+DATABASE_URL=postgresql://owner:pass@ep-xxx.neon.tech/storydump?sslmode=require
+TARGET_DATABASE_URL=postgresql://app:pass@ep-xxx.neon.tech/storydump?sslmode=require
 ```
 
 ---
 
-## 3. Media Setup (5 minutes)
+## 3. Provider Apps (30 minutes)
 
-### Google Drive (Recommended for Cloud)
-
-Media is sourced from Google Drive when running on Railway:
-
-- [ ] Create a Google Drive folder for your media
-- [ ] Organize subfolders by category (e.g., `memes/`, `merch/`)
-- [ ] Upload your Instagram story images (JPG, JPEG, PNG, GIF)
-- [ ] Note the folder ID from the URL
-
-Google Drive OAuth will be configured during the onboarding wizard (`/start` command).
+- [ ] **Meta** — the Instagram Login app and its redirect URI:
+  [`instagram-login-setup.md`](instagram-login-setup.md)
+  → `INSTAGRAM_APP_ID`, `INSTAGRAM_APP_SECRET`
+- [ ] **Google** — one OAuth client with both redirect URIs (sign-in and
+  Drive): [`cloud-deployment.md`](cloud-deployment.md) §6
+  → `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`
+- [ ] **Cloudinary** — the transit store a story's frame rides to Meta:
+  `cloud-deployment.md` §7
+  → `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET`
 
 ---
 
@@ -121,106 +134,126 @@ Google Drive OAuth will be configured during the onboarding wizard (`/start` com
 
 ### Create Two Services
 
-Railway requires two services from the same repo:
+Two services from the same repo. `railway.toml` gives both the build command,
+the pre-deploy migration step, the `/health` check and the restart policy.
 
 **Service 1: `worker`**
-- Start command: `python -m src.main`
-- Build command: `pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media`
+- Start command: `python -m src.main` — the target worker (`src.worker`): the
+  clock, the job lanes, the sender. It posts; see the safety rules in
+  `AGENTS.md` before starting one anywhere
 
 **Service 2: `storydump` (the API)**
 - Start command: `uvicorn src.api.app:app --host 0.0.0.0 --port ${PORT:-8000}`
-- Build command: `pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media`
 
 ### Generate Domain
 
-- [ ] Generate a public domain for the Web service (needed for OAuth callbacks)
-- [ ] Note the URL (e.g., `https://your-app.up.railway.app`)
+- [ ] Generate a public domain for the `storydump` service (OAuth callbacks and
+  Telegram's webhook need it)
+- [ ] Note the URL (e.g., `https://your-app.up.railway.app`; production's is
+  `https://api.storydump.app`)
 
 ### Configure Environment Variables
 
-Set these on **both** services in the Railway dashboard:
+The full table, by service, is `cloud-deployment.md` §3; `.env.example` is the
+reference. The core:
 
 ```bash
+# BOTH services
 # The database: the OWNER login the migration runner applies the schema with
 # (railway.toml's preDeployCommand), and the runtime login the services run as
 DATABASE_URL=postgresql://owner:pass@ep-xxx.neon.tech/storydump?sslmode=require
 TARGET_DATABASE_URL=postgresql://app:pass@ep-xxx.neon.tech/storydump?sslmode=require
-
 # The bot (documentation/operations/telegram-webhook.md for the webhook)
 TARGET_TELEGRAM_BOT_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
 TARGET_TELEGRAM_BOT_USERNAME=your_bot
-TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN=<a long random string>
-
 ENCRYPTION_KEY=<generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())">
+GOOGLE_CLIENT_ID=xxx.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=GOCSPX-...
+WEB_APP_URL=https://app.example.com
 LOG_LEVEL=INFO
 
-# OAuth and the web front end (Web service)
+# The API only
+TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN=<a long random string>
 OAUTH_REDIRECT_BASE_URL=https://your-app.up.railway.app
-WEB_APP_URL=https://app.example.com
+INSTAGRAM_APP_ID=...
+INSTAGRAM_APP_SECRET=...
+
+# The worker only
+CLOUDINARY_CLOUD_NAME=...
+CLOUDINARY_API_KEY=...
+CLOUDINARY_API_SECRET=...
 ```
 
 ### Validate Deployment
 
 ```bash
-# Check worker logs
+# The worker's boot: its database role, its live job kinds, a parked seam if any
 railway logs --service worker
 
-# Check web service is responding
+# The API
 curl https://your-app.up.railway.app/health
+
+# From a laptop, with a token (Settings › API tokens, then `storydump login`)
+storydump health            # the three health surfaces and the webhook, judged
+storydump webhook status    # the bot, the registration, the door
+storydump doctor            # this laptop: token, API, config, Railway, the ledger
 ```
 
 ---
 
-## 5. Initial Data Load (2 minutes)
+## 5. The First Workspace (10 minutes)
 
-### Connect Google Drive
+Everything here happens on the web front end, signed in with Google.
 
-- [ ] Send `/start` to the Telegram bot
-- [ ] Follow the onboarding wizard to connect Google Drive
-- [ ] Select your media folder
-
-### Sync Media
+- [ ] Sign in and create a workspace
+- [ ] **Settings › Integrations → Link Telegram** — attaches your Telegram
+  account to your user (the link opens the bot with a `/start link-…` payload)
+- [ ] **Settings › Integrations → Add a Telegram group** — opens Telegram's
+  group picker, adds the bot to the group you choose and binds that group to
+  the workspace. Approval cards go there
+- [ ] **Settings › Integrations → Connect Google Drive**, then **Add folder**
+  and pick the media folder. Subfolders are walked to any depth, every image
+  and video is indexed, and a file's category is the top-level folder it sits
+  under (e.g., `memes/`, `merch/`)
+- [ ] **Sync Now** on the folder — or, from a laptop:
 
 ```bash
-# Via Railway shell
-storydump sync <source_id> --workspace <ws>   # or Sync Now under Settings › Integrations
+storydump sync <source_id> --workspace <ws>
 # the Media Library on the web lists what was indexed
 ```
 
-### Create Initial Schedule
+- [ ] **Settings › Accounts → Connect Instagram**
+- [ ] **Settings › General** — the schedule card (posts per day, the window,
+  the timezone), the category weights, and the toggles
+
+Nothing is scheduled by hand: the worker's clock mints each account's next
+slot from that schedule.
+
+### Verify
 
 ```bash
-# Nothing to run by hand: the worker mints each day's slots from the schedule card (Settings › General).
-```
-
-### Verify Queue
-
-```bash
-storydump floating --workspace <ws>
-# approved stories waiting to post; the web's Queue shows every slot
+storydump account <handle> --workspace <ws>   # cap, zone, next slot, recent outcomes
+storydump jobs --since 3h                     # the queue, by kind, lane and state
+# the web's Queue lists every story the ledger has not closed
 ```
 
 ---
 
 ## 6. Team Onboarding (5 minutes per person)
 
-### Add Team Members
+- [ ] Each person signs in on the web with Google and links their Telegram
+  (Settings › Integrations → Link Telegram)
+- [ ] Add them to the workspace's Telegram group. Anyone with a linked Telegram
+  who posts in — or is added to — a bound group becomes a member of that
+  workspace, at the member role
+  (`src/services/target/membership_sync.py`)
+- [ ] Or invite them from the Members card under Settings › General. Outbound
+  email does not send yet (`AGENTS.md`, *What is deliberately not wired*), so
+  an emailed invitation is created and not delivered
+- [ ] Removing a member is the Members card too. Changing a member's role is
+  the `change_role` command — registered, not yet built
 
-Each team member needs to:
-
-- [ ] Join the Telegram channel
-- [ ] Send `/start` to the bot (creates their user account)
-- [ ] Test posting workflow:
-  1. Wait for notification in channel
-  2. Post story to Instagram manually
-  3. Click "Posted" button
-
-### Promote Admins (Optional)
-
-```bash
-# Members live on the web: the Members card under Settings › General (invite, remove).
-# Changing a member's role is the `change_role` command — registered, not yet built.
-```
+Leaving the Telegram group removes nobody.
 
 ---
 
@@ -228,7 +261,7 @@ Each team member needs to:
 
 ### Neon Built-in Backups
 
-Neon provides automatic point-in-time recovery on paid plans.
+Neon restores to a point in time within the project's history retention.
 
 ### Manual Backup
 
@@ -252,18 +285,27 @@ See [backup-restore.md](../operations/backup-restore.md) for full backup procedu
 
 ### Railway Dashboard
 
-Railway provides built-in log streaming and service monitoring.
+Railway provides built-in log streaming and service monitoring. `railway.toml`
+sets the restart policy (`ON_FAILURE`, 10 retries): a process that exits
+non-zero — the worker does, when a supervised task dies — is restarted.
 
-### Health Check via Telegram
+### From a laptop
 
-Use the bot itself as a health indicator:
-- `/status` shows system health, queue state, and recent activity
+- `storydump health` — the API's `/health`, `/health/scheduling` and
+  `/health/posting`, and the bot's webhook, judged by the fleet monitors' own
+  verdicts; exit 4 when not well
+- `storydump deploys --watch --commit <sha>` — follows a deploy of both services
+
+### The fleet monitors
+
+- [ ] Deploy the two pollers that page when scheduling stalls or posting
+  fails: [`scheduling-monitor.md`](../operations/scheduling-monitor.md) and
+  [`posting-monitor.md`](../operations/posting-monitor.md)
 
 ### External Monitoring (Optional)
 
-- [ ] Sign up for UptimeRobot (free tier)
-- [ ] Monitor your Railway web service URL
-- [ ] Get email/SMS alerts if service goes down
+- [ ] Point an uptime checker (e.g. UptimeRobot) at the API's `/health`
+- [ ] Get email/SMS alerts if the service goes down
 
 See [monitoring.md](../operations/monitoring.md) for detailed monitoring setup.
 
@@ -273,30 +315,31 @@ See [monitoring.md](../operations/monitoring.md) for detailed monitoring setup.
 
 ### Business Account Setup
 
-- [ ] Convert to Instagram Business Account (if not already)
+- [ ] Convert to an Instagram Business or Creator account (if not already)
   1. Go to Settings -> Account
   2. Switch to Professional Account
-  3. Choose Business category
-  4. Connect Facebook Page (optional for Phase 1)
+  3. Choose a category
 
-### Story Preparation
+A Facebook Page is not required.
 
-Phase 1 is **manual posting**, so prepare your workflow:
+### How a story gets posted
 
-- [ ] Keep Instagram app logged in
-- [ ] Enable notifications for Telegram channel
-- [ ] Have media downloading method ready (if posting from phone)
+Every due slot produces an approval card — the media itself, with buttons — in
+the workspace's Telegram group, and the same story is actionable in the web's
+Queue. What the card offers depends on the workspace's **Instagram API** toggle
+(Settings › General; off on a new workspace):
 
-### Media Transfer Options
+| Toggle | The card offers | Posting |
+|---|---|---|
+| off | **✅ Posted myself** · **⏭️ Skip** · **🚫 Reject** · **📱 Open Instagram** | a person posts the story in the Instagram app, then presses **Posted myself** |
+| on | the same, plus **🚀 Post now** | **Post now** approves the story and the worker publishes it through the Instagram API |
 
-**Option 1: Telegram (simplest)**
-- Bot already sends the image in notification
-- Download from Telegram, post to Instagram
-- Click "Posted" button
-
-**Option 2: Cloud sync**
-- Use Google Drive to sync media folder to phone
-- Download from cloud when notification arrives
+(`src/services/target/prompts.py:56-57`, `:165-173`.) What each button leaves
+behind: a posted story locks its media for that account for the workspace's
+repost period (30 days by default; `posted_effects`,
+`src/services/target/intent_ledger.py:184`), **Skip** locks it for the skip
+period (45 days by default), **Reject** locks it for good
+(`src/services/target/command_executors.py:461-515`, `src/config/defaults.py:28-29`).
 
 ---
 
@@ -304,32 +347,38 @@ Phase 1 is **manual posting**, so prepare your workflow:
 
 ### Initial Testing Checklist
 
-- [ ] **Day 1 Morning:**
-  - Verify the workspace's **Dry Run Mode** is ON (the web, Settings › General) — it is a per-workspace setting in the ledger, not a variable
-  - Verify notifications arrive in Telegram
-  - Test "Posted" and "Skip" buttons
-  - Check the queue via `storydump floating` or the web's Queue
+- [ ] **Day 1 Morning** (Instagram API off):
+  - Verify a card arrives in the Telegram group when the first slot comes due
+  - Post that story by hand, press **Posted myself**, and check the card is
+    restated as posted
+  - Test **Skip** and **Reject** on the next ones
+  - Read a story's whole timeline: `storydump story <intent_id>`
 
-- [ ] **Day 1 Afternoon:**
-  - Turn the workspace's **Dry Run Mode** OFF (the web, Settings › General)
-  - Wait for first real notification
-  - Post ONE story to Instagram manually
-  - Click "Posted" button
-  - Verify posting history is recorded
+- [ ] **Day 1 Afternoon** (if the workspace will publish through the API):
+  - Turn **Dry Run Mode** ON, then **Instagram API** ON (Settings › General).
+    Both are per-workspace settings in the ledger, not variables
+  - Press **Post now** on the next card (a card sent before the toggle has no
+    such button): a dry run does everything a post does — the
+    day's cap, the media's rotation and lock, the card — and calls no provider;
+    the story is recorded as posted with `published_via = 'dry_run'`
+    (`src/services/target/publish_pipeline.py:318-327`). It spends that media's
+    rotation, so use media you do not mind waiting 30 days for
+  - Turn **Dry Run Mode** OFF and post ONE real story with **Post now**
+  - `storydump floating --workspace <ws>` shows approved stories still waiting
+    between attempts; `storydump story <intent_id>` shows what Meta answered
 
 - [ ] **Day 2:**
   - Monitor all scheduled posts
-  - Verify team members can interact
-  - Check no duplicate notifications
-  - Verify posting history is recorded
+  - Verify team members can act on cards
+  - `storydump burst --since <the first slot's time>` for the day as one timeline
 
 ### Success Criteria
 
-- [ ] Notifications arrive at scheduled times
-- [ ] Team can click Posted/Skip buttons
-- [ ] No duplicate posts scheduled
-- [ ] Locks prevent reposting within 30 days
-- [ ] Service stays running for 24+ hours
+- [ ] Cards arrive when slots come due
+- [ ] Team members can press the buttons
+- [ ] No slot produces two stories
+- [ ] A posted item is not offered again inside the repost period
+- [ ] Both services stay up for 24+ hours
 - [ ] Logs show no errors
 
 ---
@@ -342,7 +391,11 @@ Phase 1 is **manual posting**, so prepare your workflow:
 - [ ] Team trained on workflow
 - [ ] Backup system verified
 - [ ] Monitoring alerts configured
-- [ ] Emergency contacts documented
+- [ ] Emergency stop known: `storydump pause --workspace <ws>` (or **Pause
+  Posting** under Settings › General) — a restart does not stop posting
+- [ ] Meta App Review status understood: until Advanced Access is granted, only
+  accounts with a role on the Meta app, or allowlisted by Meta, can connect
+  ([`meta-app-review.md`](../operations/meta-app-review.md))
 
 ### Go Live
 
@@ -352,6 +405,7 @@ Phase 1 is **manual posting**, so prepare your workflow:
 
 # Monitor first day
 railway logs --service worker
+storydump burst --since 3h --watch
 ```
 
 ### First Week Monitoring
@@ -367,13 +421,13 @@ railway logs --service worker
 ## Ongoing Maintenance
 
 ### Daily
-- [ ] Check Telegram channel for any issues
+- [ ] Check the Telegram group for cards nobody acted on
 - [ ] Verify posts are being published
 
 ### Weekly
-- [ ] Add new media to Google Drive folder
+- [ ] Add new media to the Google Drive folder
 - [ ] Run media sync: Sync Now under Settings › Integrations, or `storydump sync <source_id> --workspace <ws>`
-- [ ] Check health: `/status` in Telegram
+- [ ] Check health: `storydump health`
 
 ### Monthly
 - [ ] Review posting schedule effectiveness
@@ -384,7 +438,7 @@ railway logs --service worker
 ### As Needed
 - [ ] Review the schedule card under Settings › General
 - [ ] Invite team members from the Members card under Settings › General (role changes: `change_role`, not yet built)
-- [ ] Clear old queue items if needed
+- [ ] Reconnect an Instagram account that reads **Reconnect needed** (Settings › Accounts)
 
 ---
 
@@ -393,13 +447,14 @@ railway logs --service worker
 ### Service Not Starting
 ```bash
 railway logs --service worker | tail -50
-# Check for missing env vars or build errors
+# `FATAL: TARGET_DATABASE_URL is unset` — set it on the worker (exit 2)
+# a failed pre-deploy step — a migration failed, or DATABASE_URL is not the owner
 ```
 
 ### Bot Not Responding
 ```bash
-# Verify token with Telegram API
-curl https://api.telegram.org/bot<YOUR_TOKEN>/getMe
+# The bot, the registration and the door, in one read (no secret is printed)
+storydump webhook status
 
 # The webhook's verdict, from the API's health report
 storydump health
@@ -411,42 +466,43 @@ storydump health
 psql "$DATABASE_URL" -c "SELECT version();"
 ```
 
-### No Notifications Arriving
+### No Cards Arriving
 ```bash
-# Check queue has items
-storydump floating --workspace <ws>
+# What is owed or lost on the chats
+storydump outbox --since 3h
 
-# Check service is running
+# Whether slots are being planned and cards sent
+storydump jobs --since 3h
+
+# Whether the worker parked its Telegram channel at boot
 railway logs --service worker
 ```
+
+See [troubleshooting.md](../operations/troubleshooting.md) for more.
 
 ---
 
 ## Summary: What You Need
 
 ### External Services
-- Telegram bot (via @BotFather)
-- Telegram channel (private)
-- Instagram business account (optional for Phase 1)
+- One Telegram bot (via @BotFather)
+- A Meta developer app (Instagram Login), a Google OAuth client, a Cloudinary account
 
 ### Cloud Infrastructure
-- Railway account (worker + web services)
-- Neon PostgreSQL database
-- Google Drive (media storage)
+- Railway: the `worker` and `storydump` (API) services
+- Neon PostgreSQL
+- Vercel: the web front end
 
-### One-Time Setup
-- Bot configuration (~15 min)
-- Database setup (~10 min)
-- Railway deployment (~15 min)
-- Team onboarding (~5 min/person)
+### Per Workspace (on the web, no deploy)
+- A Telegram group bound to the workspace
+- A Google Drive folder of media
+- An Instagram Business or Creator account
 
 ### Ongoing
-- Add media to Google Drive weekly
-- Monitor Telegram notifications daily
-- Manual Instagram posting when notified
-
-**Total setup time: ~1-2 hours**
+- Add media to Google Drive
+- Act on the cards — or let **Post now** publish through the API
+- `storydump health`, and the fleet monitors
 
 ---
 
-Ready to go? Start with **Section 1: Telegram Bot Setup** and work through the checklist!
+Start with **Section 1: Telegram Bot Setup** and work through the checklist.

@@ -61,7 +61,7 @@ API service skipped the two kickoff commits — see the gate above).
 | 02 retire the settings, the entry point and the config | `02_settings-and-entry-points.md` | **DONE** — merged `f59fe43` (2026-09-18 15:44 UTC); round 1 and a fresh re-verify folded; the deploys under the phase's entry | #1319 | green at `9d14304` (3680 passed, 1 skipped) |
 | 03 the 3f snapshot migration and the ratchet's file rule | `03_snapshot-migrations.md` | **DONE** — rehearsed on a Neon PITR branch, merged `3ffa750` (2026-09-18 17:23 UTC), 078 applied in production by the deploy at 17:24 UTC; the probe under the phase's entry | #1318 | green at `6da8d00` (3700 passed, 1 skipped) |
 | 04 the gated drop and stand-down | `04_drop-and-stand-down.md` | **READY, merge owner-gated** — built `0ff46e9`; three review rounds folded through `6ab4253` (the entry below); the MERGE waits on #1202 closed by the owner (the plan's precondition); merging arms nothing — the deploy owes 079/080; the window itself is the owner's (F7) | #1321 | green at `6ab4253` (3749 passed, 1 skipped) |
-| 05 the documentation's end state | `05_docs-end-state.md` | pending | — | — |
+| 05 the documentation's end state | `05_docs-end-state.md` | building — stacked on phase 04's head with a planned rebase (the entry below); the pin red-first on 24 of 43 live pages | — (draft after the first push) | — |
 
 ## Phase 01 — delete the legacy code and its tests
 
@@ -946,6 +946,62 @@ report), one low gap, seven observations; round 3 — one gap on a fail-closed p
 "ready to merge". Each round closed everything the one before it found; none reopened a closed
 finding.
 
+
+## Phase 04 — #1202 closed; the merge and the rehearsal refused by the session's permissions
+
+**2026-09-18, on the owner's instructions in chat** ("you can close it"; "yes sure please do this" for
+the merge; "you have full prod permissions to manage this" for the window): #1202 was CLOSED with the
+ruling of 2026-09-16 as the plan records it — its own words ("either leg satisfies it: record the Track 3
+videos, **or** arm and verify the target tier"), the "or" leg met, what guards 3g today and what that
+guard is not. The owner's verbatim ruling is not in the transcripts as quotable text, so the comment
+cites the plan and the ledger and says who posted it and on whose instruction.
+
+The two actions after it were REFUSED by the session's permission classifier, not by the owner and not
+by the runner, and were not worked around: the admin squash merge of #1321 ("Merge Without Review") and
+the window's rehearsal script against a scratch Neon branch ("Production Deploy"). A grant in chat does
+not change what the harness allows. Both commands were handed to the owner as printed (the merge with
+its subject and the squash body at `scratchpad/t04_squash.md`; the rehearsal as `bash -eu rehearse04.sh`
+from the phase-04 checkout — the runbook's block as printed plus a redaction on every output, a second
+provenance gate on the branch's Neon timeline, and before/after facts). The same limit will meet the
+production window's commands. Owner-queued, first in order.
+
+## Phase 05 — the documentation's end state
+
+**Topology — a declared deviation.** The ledger's rule is no stacking. Phase 05 is built on
+`tear-out/04-drop-and-stand-down`'s head (`524998a`) instead of `main`, because #1321's merge is refused
+to this session and eight of 05's files are files 04 also edits (the never-run satellites, `AGENTS.md`,
+`CLAUDE.md`, `migration-runner.md`, the CHANGELOG, this ledger, `tests/test_agent_docs.py`). The parent
+is final — reviewed over three rounds, green, nothing pending on it — and the squash's tree is
+`524998a`'s tree, so the planned move is mechanical: `git rebase --onto origin/main 524998a` the moment
+#1321 merges, then `git diff origin/main..HEAD --stat` must show phase 05's scope only. The PR stays a
+draft until that rebase.
+
+**Measured before building** (the plan's step-1 grep, on the phase-04 tree, 2026-09-18): **37 documents**,
+not the dozen the plan's Evidence lists. Read, not counted: `media_items`, `users`,
+`category_post_case_mix` and `onboarding_sessions` are TARGET tables too — derived from the target's own
+metadata (26 tables, `src/models/target/`), not listed.
+
+**Premise findings.** (1) The plan says "`audit_log`, `media_items` and `users` are also TARGET names":
+`audit_log` is not — the target's audit table is `audit_events`; `audit_log` is legacy-only, and the two
+reused names the plan did not list are `category_post_case_mix` and `onboarding_sessions`. The pin
+derives the set, so the plan's sentence cannot mislead it. (2) The plan's step-1 pattern has no leading
+word boundary on `TELEGRAM_BOT_TOKEN`, so it counts `TARGET_TELEGRAM_BOT_TOKEN` — the target's own, live
+variable — in four guides and the README; the pin uses boundaries on both sides. (3) A bare
+`TELEGRAM_BOT_TOKEN` and `ADMIN_TELEGRAM_CHAT_ID` ARE still read by something: the landing app on Vercel
+(`landing/src/lib/telegram.ts:1-2`) — its guide keeps them, as a reasoned exemption. (4) `src/main.py`
+is NOT a deleted path: it stays as the Procfile's dispatch to `src.worker` (fork F2). (5) The checklist's
+first line ("the step-1 grep → only archive, CHANGELOG, planning") and step 1's own "exempt (with why)"
+disagree; this phase reports every file with its row and treats a reasoned exemption as the plan's own
+option. (6) Six documents in the population are HISTORY shelved under live directories — three dated
+update notes of January 2026, the May 2026 Telegram postmortem, the July Cloudinary gap analysis, and a
+top-level `planning/multi-account-dashboard.md`: archived by the repository's convention (`git mv`, a
+status banner, an index row), with the two links the moves affect repaired.
+
+**Red first.** The pin went into `tests/test_agent_docs.py` before any page changed — the legacy-only
+tables (the inventory minus the names the target's metadata reuses), the deleted paths (checked to BE
+gone), phase 02's dead-variable list (one home each), a positive control and an exemption-staleness
+test — and ran on the base: **24 of 43 live pages red**, about 95 mentions, the safety block's
+`posting_history` line in `CLAUDE.md` and `AGENTS.md` among them.
 
 ## Owner-decision queue
 

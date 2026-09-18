@@ -1,3 +1,5 @@
+> **Archived 2026-09-18 — HISTORY of the legacy tier.** A postmortem of the legacy Telegram delivery path (`posting_history`, the legacy queue's retries), deleted in the legacy tear-out (#1216). The target tier delivers cards through `channel_outbox` and its sender jobs; this page is kept as the record of the incident, not as a runbook. See [`documentation/archive/README.md`](README.md) for the index.
+
 # Postmortem: Telegram Delivery Failure Burst (2026-05-17 → 2026-05-19)
 
 | | |

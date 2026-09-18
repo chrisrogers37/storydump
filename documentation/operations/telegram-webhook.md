@@ -6,24 +6,34 @@ on the API, authenticated by the secret Telegram echoes in
 sends. Arming delivery is two deliberate acts (`settings.py`'s own note): set
 the secret on the API, then register the webhook on the bot with that secret.
 
-## Precondition: the worker is on the target tier
+## Nothing polls this bot
 
-A Telegram bot cannot be polled and webhooked at once. The legacy scheduler
-polled `TELEGRAM_BOT_TOKEN`'s bot with `getUpdates`, and python-telegram-bot's
-polling start **deleted any webhook** on that bot; it was armed off on
-2026-08-24 and deleted with the legacy tier (#1216) — `python -m src.main` now
-runs the target worker under every value of `WORKER_IMPL`, and nothing in the
-tree polls. If a webhook ever goes missing again, a poller started elsewhere
-(another checkout of an older commit, a second bot token holder) is the
-failure to suspect if `status` suddenly reports no webhook.
+A Telegram bot cannot be polled and webhooked at once, and nothing in the tree
+polls: the worker only sends (`src/channels/telegram_transport.py`), the API
+receives at the door, and `python -m src.main` runs the target worker and
+nothing else (`src/main.py`). The legacy scheduler polled this same bot with
+`getUpdates`, and its poller **deleted any webhook** on the bot when it
+started; it was retired in the tear-out (#1216, September 2026). So if `status`
+suddenly reports no webhook, suspect a poller started somewhere else with this
+bot's token — a checkout of a commit from before the tear-out, or a second
+holder of the token — before suspecting the API.
 
 ## Which bot
 
 **`storydump_app_bot`** — the product's bot, the one the site links to
-(`NEXT_PUBLIC_TELEGRAM_BOT_NAME`) and the one already in the owner's chats. Its
-token is the worker's `TARGET_TELEGRAM_BOT_TOKEN`; its username is the API's
-`TARGET_TELEGRAM_BOT_USERNAME` (renders the `t.me/…?start=link-…` link). A
-second bot, `storydumpapp_bot`, was created for the target tier while the
+(`NEXT_PUBLIC_TELEGRAM_BOT_NAME`) and the one already in the owner's chats.
+
+Its token is `TARGET_TELEGRAM_BOT_TOKEN`, the same value on **both** services:
+the worker sends cards with it, and the API registers the webhook, samples it
+and answers taps with it (`src/api/app.py:401-449`, `529-541`) — the API never
+holds a second credential for the one bot. Its username is
+`TARGET_TELEGRAM_BOT_USERNAME`: on the API it renders the
+`t.me/…?start=link-…` link and is the bot a registration insists on; on the
+worker it is the bot the startup probe insists on — a token that is another
+bot's parks the sender rather than mint cards whose buttons nobody listens on
+(`src/worker.py:395-410`, the 2026-09-10 crosswire).
+
+A second bot, `storydumpapp_bot`, was created for the target tier while the
 legacy scheduler still polled the first; that reason is gone and it should be
 retired in BotFather once the webhook below is confirmed.
 
@@ -38,11 +48,11 @@ a laptop with the values exported, or via `railway run` against the service
 that holds them.
 
 ```bash
-export TARGET_TELEGRAM_BOT_TOKEN='…'              # worker → Variables
+export TARGET_TELEGRAM_BOT_TOKEN='…'              # worker or API → Variables (the same value)
 export TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN='…'   # API → Variables
 export TARGET_TELEGRAM_BOT_USERNAME='storydump_app_bot'
 storydump webhook status
-storydump webhook register --drop-pending   # first arming of a bot
+storydump webhook register --drop-pending   # first arming of a bot — never-run list: the user's decision
 ```
 
 `status` answers three questions and exits 4 if any check fails (64 for a missing variable):
@@ -75,17 +85,24 @@ real taps would be lost. `deregister` deletes the webhook.
 ## What a tap does today
 
 `/start link-…` attaches the tapping Telegram account to the user who minted
-the link; `/start bind-…` binds the group it was opened in (see *Groups*);
-`/start inv-…` accepts an invitation. **The bot answers a handled tap in the
+the link; `/start bind-…` binds the group it was opened in (see *Groups*).
+Those are the two lanes served: `build_router` registers `link-` and `bind-`
+only (`src/services/target/telegram_dispatch.py:280-282`), so an `inv-` payload
+reaches no handler — an invitation is accepted on the web. **The bot answers a handled tap in the
 chat** (since #1239) and stays silent on a refusal. A bare `/start` in a group
 is treated as speech (see *Members*), never a greeting. The person sees the
 result on the site after a reload.
 
 ## Order of operations
 
-1. `TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN` and `TARGET_TELEGRAM_BOT_USERNAME`
-   on the **API** service (redeploys).
-2. `storydump webhook register --drop-pending`.
+1. `TARGET_TELEGRAM_BOT_TOKEN`, `TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN` and
+   `TARGET_TELEGRAM_BOT_USERNAME` on the **API** service; the token and the
+   username on the **worker** too (each change redeploys its service).
+2. In production the API's startup registration has now registered the
+   webhook, keeping whatever Telegram had queued; `storydump webhook status`
+   confirms it. A first arming that must discard a stale backlog is
+   `storydump webhook register --drop-pending` — the user's decision
+   (`CLAUDE.md`'s never-run list).
 3. Settings › Integrations → Link Telegram → open in Telegram → Start →
    reload.
 
