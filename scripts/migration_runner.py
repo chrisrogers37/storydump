@@ -106,6 +106,20 @@ KNOWN_MARKERS = (
 #: instead of passing as prose. Only the word after the colon is looked up.
 _MARKER_RE = re.compile(r"^--\s*runner\s*:\s*(\S+)(.*)$", re.IGNORECASE)
 _KNOWN_WORDS = {m.split(":", 1)[1] for m in KNOWN_MARKERS}
+#: A NEAR MISS: a comment opener followed straight by `runner` and a known word
+#: in a frame the grammar does not read — three dashes, a doubled `-- --` (an
+#: editor's "comment this line" on a comment), a `/* */` or `#` frame, a
+#: missing colon, a marker after code on the same line. Each of these once
+#: read as PROSE, which for a `manual` file is the whole hazard: the next
+#: predeploy applies it. Refused at discovery instead. A mention mid-sentence
+#: (`-- the runner:schema-move marker is what …`) is not a near miss: the
+#: opener is followed by a word, not by `runner`.
+_NEAR_MISS_RE = re.compile(
+    r"(?:^|\s)(?:-{2,}|/\*|#)\s*runner\b\s*:?\s*("
+    + "|".join(re.escape(w) for w in sorted(KNOWN_MARKERS and _KNOWN_WORDS))
+    + r")\b",
+    re.IGNORECASE,
+)
 
 _FILENAME_RE = re.compile(r"^(\d+)_.+\.sql$")
 
@@ -176,6 +190,12 @@ def _parse_markers(text: str):
     for line in text.splitlines():
         match = _MARKER_RE.match(line.strip())
         if not match:
+            if _NEAR_MISS_RE.search(line):
+                raise MigrationRunnerError(
+                    f"{line.strip()!r} reads like a marker but is not one — a"
+                    " marker is `-- runner:<word>` alone at the start of its line;"
+                    " a near miss would silently make this an ordinary file"
+                )
             continue
         word, rest = match.group(1), match.group(2).strip()
         if word not in _KNOWN_WORDS:
@@ -249,7 +269,16 @@ def discover_migrations(migrations_dir, max_version: int | None = None) -> list:
                 f" {by_version[version].path.name} and {path.name}"
             )
         raw = path.read_bytes()
-        sql = raw.decode()
+        try:
+            # `utf-8-sig`: a byte-order mark at the start of the file is dropped,
+            # so a marker on line 1 is still at the start of its line; the
+            # checksum is of the raw bytes and does not change.
+            sql = raw.decode("utf-8-sig")
+        except UnicodeDecodeError as exc:
+            raise MigrationRunnerError(
+                f"{version:03d} ({path.name}): not UTF-8 ({exc.reason} at byte"
+                f" {exc.start}) — the runner reads nothing it cannot decode"
+            ) from None
         try:
             (
                 no_transaction,
@@ -609,7 +638,10 @@ def apply_manual(dsn: str, migrations_dir, version: int) -> ApplyReport:
     lock, after the integrity check, in one transaction with its
     postconditions and its ledger row; and it applies BELOW the head, because
     the below-head rule is for files inserted under history by mistake, and a
-    gated file is under it by design. No other pending file is touched.
+    gated file is under it by design. No other pending file is touched — and
+    an ORDINARY file still pending below it refuses the door: the tree the
+    gated file was written against is the one with everything before it
+    applied, so `apply` runs first.
     """
     migrations = discover_migrations(migrations_dir)
     by_version = {m.version: m for m in migrations}
@@ -634,6 +666,16 @@ def apply_manual(dsn: str, migrations_dir, version: int) -> ApplyReport:
             raise MigrationRunnerError(
                 f"{migration.label} is already recorded in the ledger"
                 f" ({ledger[version][1]}); a gated file runs once"
+            )
+        below = [
+            m.label
+            for m in migrations
+            if m.version < version and not m.manual and m.version not in ledger
+        ]
+        if below:
+            raise MigrationRunnerError(
+                f"{migration.label} cannot run over a pending ordinary file below"
+                f" it ({', '.join(below)}); run `apply` first"
             )
         _apply_guarded(conn, migration)
         report.applied.append(migration)

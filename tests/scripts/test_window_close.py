@@ -233,17 +233,64 @@ class TestTheDropAsTheOwnerActor:
         ) == len(LEGACY_TABLES)
         assert [row[0] for row in fetch_ledger(as_owner)][-1] == SNAPSHOT_VERSION
 
-    def test_079_refuses_when_a_snapshot_no_longer_matches_its_source(
-        self, admin_conn, owner_actor, owner_window_db
+    @pytest.mark.parametrize(
+        "writer, names",
+        [
+            (
+                # one more row than the snapshot holds
+                lambda dsn: _seed(dsn),
+                ("holds 2 rows but its snapshot holds 1",),
+            ),
+            (
+                # one fewer
+                lambda dsn: execute(dsn, f"DELETE FROM legacy.{HAND_MADE[0]}"),
+                ("holds 0 rows but its snapshot holds 1",),
+            ),
+            (
+                # the same count, different content: an update in place
+                lambda dsn: execute(
+                    dsn, f"UPDATE legacy.{HAND_MADE[0]} SET status = 'changed'"
+                ),
+                ("differs from its snapshot in 1 row",),
+            ),
+            (
+                # the same count, a column the snapshot never had
+                lambda dsn: execute(
+                    dsn, f"ALTER TABLE legacy.{HAND_MADE[0]} ADD COLUMN later int"
+                ),
+                ("differs from its snapshot",),
+            ),
+        ],
+        ids=["insert", "delete", "update-in-place", "column-added"],
+    )
+    def test_079_refuses_when_a_table_no_longer_matches_its_snapshot(
+        self, admin_conn, owner_actor, owner_window_db, writer, names
     ):
-        """A writer since 078 — a row the snapshot never saw — is data the
-        drop would destroy; 079 compares every count in-file and refuses."""
+        """A writer since 078 — in either direction, or in place — is data the
+        drop would destroy; 079 compares every count AND every row's hash
+        in-file and refuses, naming the table."""
         as_owner = _world_through_078(admin_conn, owner_actor, owner_window_db)
-        _seed(as_owner)  # one more hand-made row than the snapshot holds
+        writer(as_owner)
 
         with pytest.raises(MigrationRunnerError, match="079") as exc:
             apply_manual(as_owner, MIGRATIONS_DIR, DROP_VERSION)
         assert HAND_MADE[0] in str(exc.value)
+        for name in names:
+            assert name in str(exc.value)
+        assert _schema_present(as_owner, "legacy")
+        assert [row[0] for row in fetch_ledger(as_owner)][-1] == SNAPSHOT_VERSION
+
+    def test_079_refuses_a_relation_in_legacy_that_is_not_in_the_inventory(
+        self, admin_conn, owner_actor, owner_window_db
+    ):
+        """A table added to `legacy` after 078 has no snapshot and would go
+        with the schema unseen; the drop refuses on the count of relations."""
+        as_owner = _world_through_078(admin_conn, owner_actor, owner_window_db)
+        execute(as_owner, "CREATE TABLE legacy.stray (id int)")
+
+        with pytest.raises(MigrationRunnerError, match="079") as exc:
+            apply_manual(as_owner, MIGRATIONS_DIR, DROP_VERSION)
+        assert "17 relations" in str(exc.value)
         assert _schema_present(as_owner, "legacy")
 
 
@@ -272,6 +319,20 @@ class TestTheStandDownAsTheOwnerActor:
             is True
         )
         assert [row[0] for row in fetch_ledger(as_owner)][-1] == SNAPSHOT_VERSION
+
+    def test_080_refuses_when_legacy_is_gone_but_079_was_never_recorded(
+        self, admin_conn, owner_actor, owner_window_db
+    ):
+        """`public.jobs` present and `legacy` absent is also the shape of a
+        database that never held a legacy schema — and of one where the drop
+        was done by hand. The ledger row is what says 3g happened here."""
+        as_owner = _world_through_078(admin_conn, owner_actor, owner_window_db)
+        execute(as_owner, "DROP SCHEMA legacy CASCADE")
+
+        with pytest.raises(MigrationRunnerError, match="080") as exc:
+            apply_manual(as_owner, MIGRATIONS_DIR, STAND_DOWN_VERSION)
+        assert "079 recorded: f" in str(exc.value)
+        assert _schema_present(as_owner, "window_ddl")
 
     def test_080_closes_the_window_and_the_gate_answers_as_printed(
         self, admin_conn, owner_actor, owner_window_db
@@ -311,12 +372,16 @@ class TestTheStandDownAsTheOwnerActor:
             "SELECT pg_has_role(current_user, 'svc_maintenance',"
             f" '{_owner_to_privilege(as_owner)}')"
         )
-        # every roleid-side svc_% row is the creator's auto-grant, the
-        # owner's explicit svc_migration membership, or svc_migration's four
+        # every roleid-side svc_% row is the creator's auto-grant (ADMIN, 16+),
+        # the owner's explicit svc_migration membership, or svc_migration's
+        # four — an owner membership of any OTHER service role, admin or not,
+        # is a grant nobody made and fails here (on 15 the auto-grant clause
+        # matches nothing; the rest is exact)
         assert q(
             "SELECT count(*) = 0 FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.roleid"
             " WHERE r.rolname LIKE 'svc\\_%'"
-            "   AND NOT (m.member = current_user::regrole)"
+            "   AND NOT (m.member = current_user::regrole"
+            "            AND (r.rolname = 'svc_migration' OR m.admin_option))"
             "   AND NOT (m.member = 'svc_migration'::regrole"
             "            AND r.rolname IN ('svc_claim','svc_clock','svc_maintenance','svc_membership'))"
         )

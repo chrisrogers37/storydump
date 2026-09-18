@@ -5,11 +5,16 @@
 -- from documentation/operations/legacy-window-close.md.
 --
 -- WHAT IT DOES: the subject-identity guard first (04:213's R8 mirror — the
--- target's marker table present AND `legacy` absent, else RAISE: run early, a
--- stand-down would certify a half-done window); then DROP the #787 definer
--- door (`window_ddl` is not `legacy`, so 3g does not take it); then REVOKE
--- the window's CREATE ON DATABASE from svc_migration (the 3c re-create of
--- `public` needed it; nothing does now).
+-- target's marker table present AND `legacy` absent AND 079 recorded in the
+-- ledger, else RAISE: run early, a stand-down would certify a half-done
+-- window, and on a database that never held `legacy` — a fresh target-only
+-- one — the first two facts hold without any window; the ledger row is what
+-- says 3g happened HERE); then DROP the #787 definer door (`window_ddl` is
+-- not `legacy`, so 3g does not take it — in production the door was never
+-- created, measured 2026-09-18, so this is a no-op there and the gate world's
+-- exercise of it is CI's); then REVOKE the window's CREATE ON DATABASE from
+-- svc_migration (held in production, measured the same day; the 3c re-create
+-- of `public` needed it; nothing does now).
 --
 -- WHAT IT KEEPS, and why this is F8 (a) rather than the stand-down as
 -- printed (04:224-226 revoked the four svc_* memberships from svc_migration
@@ -48,7 +53,8 @@
 --   SELECT pg_has_role(current_user, 'svc_maintenance', 'SET');    -- t, the chain door files need (PG16+; on 15 read 'MEMBER')
 --   SELECT count(*) = 0 FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.roleid
 --    WHERE r.rolname LIKE 'svc\_%'
---      AND NOT (m.member = current_user::regrole)
+--      AND NOT (m.member = current_user::regrole
+--               AND (r.rolname = 'svc_migration' OR m.admin_option))   -- the bootstrap's explicit grant, or the creator auto-grant (16+)
 --      AND NOT (m.member = 'svc_migration'::regrole
 --               AND r.rolname IN ('svc_claim','svc_clock','svc_maintenance','svc_membership')); -- t
 --   SELECT bool_and(NOT has_schema_privilege(r, 'public', 'CREATE')) FROM unnest(ARRAY[
@@ -74,10 +80,13 @@ BEGIN
   -- COMPLETED window. Run early, its gate would certify "window closed" over
   -- a half-done window, and the door it drops might still be needed.
   IF to_regclass('public.jobs') IS NULL
-     OR EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'legacy') THEN
-    RAISE EXCEPTION 'success variant refused: the window has not completed 3g (target marker present: %, legacy schema present: %)',
+     OR EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'legacy')
+     OR NOT EXISTS (SELECT 1 FROM runner.schema_migrations
+                     WHERE version = 79 AND status IN ('applied', 'repaired')) THEN
+    RAISE EXCEPTION 'success variant refused: the window has not completed 3g (target marker present: %, legacy schema present: %, 079 recorded: %)',
       to_regclass('public.jobs') IS NOT NULL,
-      EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'legacy');
+      EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'legacy'),
+      EXISTS (SELECT 1 FROM runner.schema_migrations WHERE version = 79 AND status IN ('applied', 'repaired'));
   END IF;
 END $$;
 DROP SCHEMA IF EXISTS window_ddl CASCADE;

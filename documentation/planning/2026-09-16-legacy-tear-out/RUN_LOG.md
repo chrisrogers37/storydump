@@ -719,6 +719,73 @@ never-run lists in `CLAUDE.md`, `AGENTS.md` and both satellites, the CHANGELOG.
   the NEXT deploy after an ordinary file lands above an owed one, so the test gained that scenario and
   the mutation moves the split below the check — killed on `0db363b`. `ran 24 of 24`.
 
+**Review round 1** (two lenses on `0ff46e9`). The structural lens: no blocker — `apply_manual` is the
+smallest honest door (the same lock, ledger creation and integrity check in the same order; `_apply_one`
+has exactly two callers; `adopt` only records, `repair` only updates), both files correct as PL/pgSQL and
+single-transaction, the D40 amendment's two factual claims measured in-tree. The adversarial lens on the
+one property that matters — can any deploy drop `legacy`? — no, on the committed text, by construction
+(the pinned `preDeployCommand` carries no `--manual`; `tests/test_deploy_guardrails.py` fails CI if it
+ever does). What both found, folded in `9a94f04` and the commit after it:
+
+- **RISK (adversarial): a marker could be demoted to prose silently.** `--- runner:manual` (three dashes),
+  `-- -- runner:manual` (an editor's "comment this line" on a comment), `/* runner:manual */`,
+  `# runner:manual`, `-- runner manual`, a marker after code on its line, and a byte-order mark before a
+  line-1 marker all read as PROSE — after which 079 is an ordinary file the next predeploy applies, its
+  precondition passes in production by design, and the schema drops; the only guard was CI's unit pin.
+  Closed IN THE RUNNER: a near miss — a comment opener followed straight by `runner` and a known word in a
+  frame the grammar does not read — is refused at discovery (`_NEAR_MISS_RE`; a mention mid-sentence stays
+  prose, pinned); files decode as `utf-8-sig`; a file that is not UTF-8 is refused by name. Seven
+  near-miss spellings, the BOM and a UTF-16 file are tests.
+- **BLOCKER (adversarial): the runbook's rehearsal had a production-reaching path.** `neonctl
+  connection-string` with an EMPTY branch name resolves to the default branch — production — and the
+  host guard was an advisory `grep -v` that stopped nothing; with `$NAME` unset in a fresh shell, step 4
+  would have applied 079 to production as the owner. Closed: `${NAME:?}` wherever the name is used; a
+  `case`-based guard that unsets the URL and ends the shell for production's host, an empty host, or a
+  non-Neon host.
+- **GAP (both): the wedge scenario had no test and its battery mutation was inert** (the loop it edited
+  no longer saw manual files). The test now lands an ordinary 004 while 002 is owed below the head —
+  production's exact shape after phase 05's first file — and the mutation moves the split below the
+  check; killed.
+- **GAP (adversarial): `apply_manual` applied over a wedged tree** — an ordinary file still pending below
+  the gated one. Refused now, naming the file and the way through (`apply`); tested.
+- **RISK (adversarial): 079's precondition saw counts only.** An update in place, a delete-and-insert,
+  a column added since 078, or a relation added to `legacy` after 078 (dropped by CASCADE with no
+  snapshot) all passed. Closed: exactly sixteen relations of any kind in `legacy` (measured in
+  production the same day: 16 tables, 77 indexes, nothing else), and every row hashed
+  (`md5(row::text)`, the multiset difference) beside the count. Four refusal arms parametrized —
+  insert, delete, update in place, column added — and a stray-relation arm. Disclosed in the file and
+  the runbook: indexes, constraints, defaults and sequence values are what the drop takes unseen.
+- **GAP (adversarial): 080's guard could not tell a completed 3g from a database that never held
+  `legacy`** (a fresh target-only database passes "jobs present AND legacy absent"). Closed: the guard
+  also requires 079's ledger row; tested by dropping `legacy` by hand and expecting the refusal.
+  Measured in production for the file's header: `window_ddl` was never created there (the drop is a
+  no-op in production and CI's to exercise), and `svc_migration` DOES hold `CREATE ON DATABASE`, so the
+  revoke and its postcondition do real work.
+- **GAP (adversarial): the gate's roleid-side line exempted ANY owner membership.** Tightened to the
+  creator auto-grant (`admin_option`, 16+) or the bootstrap's explicit `svc_migration` grant; a stray
+  `GRANT svc_worker TO <owner>` fails it (the battery plants one). The runbook's rehearsal and production
+  gates gained that line and the `public`-owner line, which only the 17 rehearsal and production can
+  show (CI's cluster is 15).
+- **RISK (both): the runbook.** The backout restores by branch ID, not the name `production`; `railway
+  redeploy` takes no `--environment` and acts on the LINKED one (a link check before down and redeploy,
+  a fallback named); `railway run` executes the LOCAL checkout with production's owner login, so step 0
+  demands a clean checkout at the deployed commit and records the files' sha256; the gate runs as the
+  login 080's `current_user` lines are written for (`DATABASE_URL`, the owner), not the runtime one;
+  "every line 080 prints" → "the load-bearing lines (the gate test runs all eleven)"; the marker branch's
+  durability stated as Neon's documented model, unmeasured; the vacuous `posture … doors` claim
+  corrected in the runbook AND the plan's checklist (`doors` reads `public` only and never listed the
+  step-0 door).
+- **Simplify (structural):** one guarded apply shared by both doors (`_apply_guarded`); an unused name;
+  one clearer assertion on 080's revokes; comments on the two refusal tests whose kills hinge on their
+  MESSAGE asserts; 079's header names its third refusal.
+- **Declined, with reasons:** an ordering rule inside `apply_manual` (`--manual 80` before `79`) — the
+  files' own guards carry it (080's identity guard now includes 079's row); refusing a dotted file name
+  at discovery (`002.5_x.sql` is silently ignored — pre-existing, every lineage's, queued for the owner).
+- **Premise findings the round added:** the plan's F8 (a) text named only `svc_migration`'s four
+  memberships as what door files need; the owner's OWN membership of `svc_migration` is the other link
+  of the SET chain, and 080 keeps both. The epic's risk-table row "both services' predeploys fail on
+  every push" was claimed covered by a test that did not exercise it — it does now.
+
 ## Owner-decision queue
 
 - **The PITR window is 24 hours, not 7 days.** The project's `history_retention_seconds` is 86400;

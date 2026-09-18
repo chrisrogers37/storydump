@@ -220,6 +220,54 @@ class TestMarkers:
         apply_pending(scratch_db, tmp_path)
         assert [row[0] for row in fetch_ledger(scratch_db)] == [1]
 
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "--- runner:manual",  # three dashes
+            "-- -- runner:manual",  # an editor's "comment this line" on a comment
+            "/* runner:manual */",  # a block-comment frame
+            "# runner:manual",  # a shell-style frame
+            "-- runner manual",  # no colon
+            "DROP TABLE t_gone; -- runner:manual",  # after code on the same line
+            "-- RUNNER unadvertised",  # another word, upper case, no colon
+        ],
+    )
+    def test_a_near_miss_is_refused_never_read_as_prose(self, tmp_path, line):
+        """Each of these once read as prose — for a `manual` file the whole
+        hazard: an ordinary file the next predeploy applies. The frame the
+        grammar reads is `-- runner:<word>` alone at the start of its line;
+        anything that LOOKS like an attempt and is not that is refused."""
+        write_migration(tmp_path, 1, f"{line}\nCREATE TABLE t_a (id INT);")
+        with pytest.raises(MigrationRunnerError, match="001") as exc:
+            discover_migrations(tmp_path)
+        assert "near miss" in str(exc.value)
+
+    def test_a_mention_of_a_marker_in_a_sentence_is_still_prose(self, tmp_path):
+        """The near-miss rule keys on the opener being followed by `runner`,
+        so prose that names a marker mid-sentence stays prose."""
+        write_migration(
+            tmp_path,
+            1,
+            "-- The runner:schema-move marker is what makes the boundary derivable.\n"
+            "-- python -m scripts.migration_runner apply --manual 79 is the door.\n"
+            "CREATE TABLE t_a (id INT);",
+        )
+        [m] = discover_migrations(tmp_path)
+        assert m.manual is False and m.schema_move is False
+
+    def test_a_byte_order_mark_does_not_hide_a_marker_on_line_one(self, tmp_path):
+        path = tmp_path / "001_bom.sql"
+        path.write_bytes("\ufeff-- runner:manual\nDROP TABLE t_gone;".encode("utf-8"))
+        [m] = discover_migrations(tmp_path)
+        assert m.manual is True
+
+    def test_a_file_the_runner_cannot_decode_is_refused_naming_it(self, tmp_path):
+        path = tmp_path / "001_utf16.sql"
+        path.write_bytes("-- runner:manual\nDROP TABLE t_gone;".encode("utf-16"))
+        with pytest.raises(MigrationRunnerError, match="001") as exc:
+            discover_migrations(tmp_path)
+        assert "not UTF-8" in str(exc.value)
+
     def test_manual_is_read_off_the_file(self, tmp_path):
         write_migration(tmp_path, 1, "-- runner:manual\nDROP TABLE t_gone;")
         write_migration(tmp_path, 2, "CREATE TABLE t_b (id INT);")
@@ -532,6 +580,18 @@ class TestManual:
         apply_pending(scratch_db, tmp_path)
         with pytest.raises(MigrationRunnerError, match="runner:manual"):
             apply_manual(scratch_db, tmp_path, 1)
+
+    def test_apply_manual_refuses_to_run_over_a_pending_ordinary_file_below_it(
+        self, scratch_db, tmp_path
+    ):
+        """The tree a gated file was written against has everything before it
+        applied; with an ordinary 001 still pending the door refuses and names
+        it, and `apply` is the way through."""
+        self._corpus(tmp_path)
+        with pytest.raises(MigrationRunnerError, match="002") as exc:
+            apply_manual(scratch_db, tmp_path, 2)
+        assert "001" in str(exc.value) and "run `apply` first" in str(exc.value)
+        assert fetch_ledger(scratch_db) == []
 
     def test_apply_manual_refuses_a_version_that_is_not_in_the_tree(
         self, scratch_db, tmp_path

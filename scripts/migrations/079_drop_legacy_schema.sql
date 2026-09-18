@@ -11,13 +11,19 @@
 -- WHAT IT NEEDS: 078 applied — every one of the sixteen snapshots present in
 -- `archive` — and nothing written to `legacy` since (the tier that wrote there
 -- was deleted in phase 01; production measured n_tup_ins/upd/del = 0 on all
--- sixteen on 2026-09-17). The DO block is the precondition, in-file: it
--- refuses the drop for a missing snapshot, a legacy table that is not there
--- to compare, or a count that no longer matches its source — an inventory
--- error or a writer since 078 is data the drop would destroy — and a refusal
--- leaves `legacy` intact (one transaction: the file is `wrapped`). The
--- sixteen names are LEGACY_TABLES written out; the date is 078's;
--- tests/scripts/test_window_close.py pins both.
+-- sixteen on 2026-09-17). The DO block is the precondition, in-file, and it
+-- refuses the drop when `legacy` holds any relation but the sixteen (a table
+-- added since 078 has no snapshot and would go with the schema unseen), for
+-- a missing snapshot, for a legacy table that is not there to compare, for a
+-- row count that no longer matches its source, and for CONTENT that differs
+-- from its snapshot — every row hashed (`md5(row::text)`), the multiset
+-- difference taken, so an update in place, a delete-and-insert or a column
+-- added since 078 refuses too; a refusal leaves `legacy` intact (one
+-- transaction: the file is `wrapped`). What it cannot see and the drop takes
+-- anyway: indexes (77 in production), constraints, defaults and sequence
+-- values — a snapshot is rows only (078's header). The sixteen names are
+-- LEGACY_TABLES written out; the date is 078's;
+-- tests/scripts/test_window_close.py pins both and drives every refusal.
 --
 -- WHAT GOES WITH THE SCHEMA: the sixteen tables (42 MB), their indexes and
 -- constraints, and the uuid-ossp extension that rode into `legacy` with the
@@ -42,9 +48,16 @@
 DO $$
 DECLARE
   t text;
+  n bigint;
   src bigint;
   snap bigint;
+  diff bigint;
 BEGIN
+  SELECT count(*) INTO n FROM pg_class c JOIN pg_namespace ns ON ns.oid = c.relnamespace
+   WHERE ns.nspname = 'legacy' AND c.relkind IN ('r', 'p', 'v', 'm', 'f');
+  IF n <> 16 THEN
+    RAISE EXCEPTION '3g refused: legacy holds % relations, not the sixteen of the inventory — something has no snapshot', n;
+  END IF;
   FOREACH t IN ARRAY ARRAY[
     'api_tokens', 'audit_log', 'category_post_case_mix', 'chat_settings',
     'instagram_accounts', 'media_items', 'media_posting_locks',
@@ -62,6 +75,12 @@ BEGIN
     EXECUTE format('SELECT count(*) FROM archive.%I', t || '_pre_cutover_20260917') INTO snap;
     IF src <> snap THEN
       RAISE EXCEPTION '3g refused: legacy.% holds % rows but its snapshot holds % — a writer since 078; snapshot again before dropping', t, src, snap;
+    END IF;
+    EXECUTE format(
+      'SELECT count(*) FROM ((SELECT md5(x::text) FROM legacy.%I x) EXCEPT ALL (SELECT md5(y::text) FROM archive.%I y)) d',
+      t, t || '_pre_cutover_20260917') INTO diff;
+    IF diff <> 0 THEN
+      RAISE EXCEPTION '3g refused: legacy.% differs from its snapshot in % row(s) — content changed since 078; snapshot again before dropping', t, diff;
     END IF;
   END LOOP;
 END $$;

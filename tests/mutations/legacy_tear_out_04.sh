@@ -74,10 +74,15 @@ check "--manual refuses nothing: an ordinary file applies by name" $RUNNER '    
         raise MigrationRunnerError(' '    if False:
         raise MigrationRunnerError(' "$GATE" "$TRUN -k apply_manual_refuses_a_file_without_the_directive"
 check "--manual applies an already-recorded version again" $RUNNER '        if version in ledger:
-            _checksum, row_status = ledger[version]
             raise MigrationRunnerError(' '        if version in ledger and False:
-            _checksum, row_status = ledger[version]
             raise MigrationRunnerError(' "$GATE" "$TRUN -k apply_manual_refuses_a_version_already_recorded"
+check "--manual runs over a pending ordinary file below it" $RUNNER '        if below:
+            raise MigrationRunnerError(' '        if below and False:
+            raise MigrationRunnerError(' "$GATE" "$TRUN -k refuses_to_run_over_a_pending_ordinary_file_below_it"
+check "a near miss reads as prose again (three dashes make the drop an ordinary file)" $RUNNER '            if _NEAR_MISS_RE.search(line):
+                raise MigrationRunnerError(' '            if False:
+                raise MigrationRunnerError(' "$UNIT" "$TRUN -k near_miss_is_refused"
+check "a byte-order mark hides a marker on line one" $RUNNER '            sql = raw.decode("utf-8-sig")' '            sql = raw.decode("utf-8")' "$UNIT" "$TRUN -k byte_order_mark_does_not_hide"
 check "--manual applies below the head no more (the operator door meets the deploy's rule)" $RUNNER '        _apply_guarded(conn, migration)
         report.applied.append(migration)
     finally:' '        if version < max(ledger, default=0):
@@ -118,7 +123,19 @@ REVOKE svc_claim, svc_clock, svc_maintenance, svc_membership FROM svc_migration;
 check "079's precondition lets a missing snapshot through" $M079 "    IF to_regclass(format('archive.%I', t || '_pre_cutover_20260917')) IS NULL THEN
       RAISE EXCEPTION '3g refused: no snapshot for legacy.%', t;
     END IF;" "" "$GATE" "$TCLOSE -k 079_refuses_when_a_snapshot_is_missing"
-check "079's precondition ignores a count that no longer matches" $M079 "    IF src <> snap THEN" "    IF src <> snap AND false THEN" "$GATE" "$TCLOSE -k 079_refuses_when_a_snapshot_no_longer_matches"
+check "079's precondition ignores a count that no longer matches" $M079 "    IF src <> snap THEN" "    IF src <> snap AND false THEN" "$GATE" "$TCLOSE -k 'no_longer_matches_its_snapshot and insert'"
+check "079's precondition ignores content that changed in place" $M079 "    IF diff <> 0 THEN" "    IF diff <> 0 AND false THEN" "$GATE" "$TCLOSE -k 'no_longer_matches_its_snapshot and update'"
+check "079's precondition ignores a relation nobody snapshotted" $M079 "  IF n <> 16 THEN" "  IF n <> 16 AND false THEN" "$GATE" "$TCLOSE -k relation_in_legacy_that_is_not_in_the_inventory"
+check "080's guard cannot tell a completed 3g from a database that never held legacy" $M080 "     OR NOT EXISTS (SELECT 1 FROM runner.schema_migrations
+                     WHERE version = 79 AND status IN ('applied', 'repaired')) THEN" "     THEN" "$GATE" "$TCLOSE -k 080_refuses_when_legacy_is_gone_but_079_was_never_recorded"
+check "080 grants the owner a membership nobody asked for" $M080 "DO \$\$
+BEGIN
+  EXECUTE format('REVOKE CREATE ON DATABASE %I FROM svc_migration', current_database());
+END \$\$;" "DO \$\$
+BEGIN
+  EXECUTE format('REVOKE CREATE ON DATABASE %I FROM svc_migration', current_database());
+  EXECUTE format('GRANT svc_worker TO %I', current_user);
+END \$\$;" "$GATE" "$TCLOSE -k 080_closes_the_window_and_the_gate_answers_as_printed"
 check "080's guard passes on a present legacy schema" $M080 "  IF to_regclass('public.jobs') IS NULL
      OR EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'legacy') THEN" "  IF to_regclass('public.jobs') IS NULL THEN" "$GATE" "$TCLOSE -k 080_refuses_while_legacy_is_present"
 check "080 keeps the door schema" $M080 'DROP SCHEMA IF EXISTS window_ddl CASCADE;' '-- (the door stays)' "$GATE" "$TCLOSE -k 080_closes_the_window_and_the_gate_answers_as_printed"
