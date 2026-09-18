@@ -127,7 +127,10 @@ branch. A nightly copy is the same command under cron on the owner's machine, wi
 retention. The variable names are the script's own, not the application's:
 
 ```bash
+#!/bin/sh
 # ~/scripts/storydump_dump.sh — a nightly logical dump, thirty days kept
+# `railway run` resolves the linked project from the working directory, and cron starts in $HOME:
+cd /path/to/the/storydump/checkout || exit 1
 DUMP_DIR="$HOME/backups/storydump"; KEEP_DAYS=30
 mkdir -p "$DUMP_DIR"
 railway run --service worker --environment production -- \

@@ -1121,6 +1121,41 @@ found, folded:
   post-window pass over about ten sentences ("is dropped by 079 in the owner's window", the three
   doctor sentences, the never-run line's comment) belongs on the window's own checklist.
 
+**Verification on `63714e9`** (the fold of round 1): the pin and the pins beside it — 134 passed; links
+and anchors on every live and changed page — 0 dead; battery `ran 21 of 21`, 21 killed, on the committed
+tree; CI green — run 35403440369, `3759 passed, 1 skipped`.
+
+**Re-verify after the fold** (a fresh lens on `63714e9`, read-only): every claim it tried to falsify
+held — the three doctor sentences match `env.py`'s `missing` / `owed` split and the class is swept; the
+hardened pin has no false positive constructible from the target's metadata (zero target tables or
+COLUMNS collide case-insensitively with the twelve legacy-only tables) or from any tracked path (all 33
+path patterns against `git ls-files` and every tracked module's dotted spelling: zero hits); the `ROOT`
+monkeypatch does not leak (the exemption test runs after it and still reads 3/2/2 off the real tree);
+the battery is internally consistent (21 = 21, every anchor once, every selector collects); the rule
+split lost no migration rule and a migration author still gets the RLS line; nothing outside the
+phase's scope in the diff. **Verdict: ready to merge.** Three gaps and five observations, folded in the
+commit after this entry:
+
+- **GAP: the restored cron recipe could not run.** `railway run` resolves the linked project from the
+  working directory and cron starts in `$HOME` (the repository's own record of that gotcha is the
+  neon-analyst's reference); the script had no shebang. Both added. The `sh -c` quoting was checked and
+  is right: the inner shell expands `$DATABASE_URL`, the outer one `$DUMP_DIR` and the date.
+- **GAP: "one home" was not true.** The neon-analyst's reference kept its own spelling of the
+  production read recipe (`--service storydump`, `-f "$0"`) beside a pointer. Its fence is the pointer
+  now; the old spelling is one sentence of history on that page. (`backup-restore.md`'s read as the
+  OWNER login is a different door — the window's gate uses it — and stays.)
+- **GAP: a counted exemption could still rot** — a count of 0, or a name in no list, passed. The check
+  is a function now (`_exemption_errors`) with a unit test of every direction on a page of its own:
+  exact, one more, one fewer, zero, a name that is no legacy name, a page that is gone.
+- **Observations:** the deleted-path pattern gained a trailing boundary (`src/services/domain` is not
+  a future `src/services/domain_events.py`; zero false positives today either way); the `register`
+  fence got its in-fence warning back; `deployment.md` names `apply` on the page again; the pin's
+  unmutated behaviours the lens listed have mutations — the `.py` suffix, `rglob` on the nested roots,
+  `glob` on the flat one, the exemption's one-fewer direction and both guards. Pre-existing and left:
+  a dead link inside `CHANGELOG.md` (history) to a plan directory archived before this epic.
+- **Not re-lensed:** the fold is two guards, one lookahead, a shebang and a `cd`, three sentences and
+  seven battery lines; its verification is the battery and CI below.
+
 **Window-dependent sentences, to update once the window has run** (each is true today and says so):
 the documentation index's tear-out row ("the owner's window has not run"), the consolidated plan's Live
 status and M.3 line, `meta-app-review.md`'s discharged-constraint section, the M.2 rehearsal spec's

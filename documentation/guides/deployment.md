@@ -61,7 +61,8 @@ sequence `make init-db` runs locally (`Makefile:105-113`). The sequence, why eac
 prints for the two gated files (`owed (manual) 079 …`, `owed (manual) 080 …`) are written down
 ONCE, in [`cloud-deployment.md` › Build the schema on a fresh database](cloud-deployment.md#build-the-schema-on-a-fresh-database).
 Export the OWNER connection string as `DATABASE_URL` first: the runner applies DDL with it, and
-keeps the ledger `storydump posture` and `storydump doctor` read.
+keeps the ledger `storydump posture` and `storydump doctor` read. The sequence ends with
+`python -m scripts.migration_runner apply`; the check below reads what it wrote.
 
 ### Verify Setup
 

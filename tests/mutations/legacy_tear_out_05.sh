@@ -88,18 +88,25 @@ check "the pin stops reading deleted paths" $TDOCS '    names = _legacy_only_tab
 check "the pin stops reading dead variables" $TDOCS '    names = _legacy_only_tables() + _deleted_paths() + _retired_variables()' '    names = _legacy_only_tables() + _deleted_paths()' "$CONTROL"
 check "a snapshot's name reads as its table's (the word boundary goes)" $TDOCS '        return re.compile(rf"\b{name}\b", re.IGNORECASE)' '        return re.compile(name, re.IGNORECASE)' "$CONTROL"
 check "a table in capitals passes (a SQL example names the legacy table unseen)" $TDOCS '        return re.compile(rf"\b{name}\b", re.IGNORECASE)' '        return re.compile(rf"\b{name}\b")' "$CONTROL"
-check "a deleted module in its dotted spelling passes" $TDOCS '        return re.compile(re.escape(name).replace("/", "[/.]"))' '        return re.compile(re.escape(name))' "$CONTROL"
+check "a deleted module in its dotted spelling passes" $TDOCS '        return re.compile(re.escape(name).replace("/", "[/.]") + r"(?![\w-])")' '        return re.compile(re.escape(name) + r"(?![\w-])")' "$CONTROL"
+check "a live module that shares a deleted package's letters reads as deleted (the trailing boundary goes)" $TDOCS '        return re.compile(re.escape(name).replace("/", "[/.]") + r"(?![\w-])")' '        return re.compile(re.escape(name).replace("/", "[/.]"))' "$CONTROL"
+check "a deleted FILE is matched with its suffix only (the dotted module spelling passes)" $TDOCS '    return DELETED_PACKAGES + tuple(f.removesuffix(".py") for f in DELETED_FILES)' '    return DELETED_PACKAGES + tuple(DELETED_FILES)' "$CONTROL"
 check "a live target column reads as a dead variable (the variables are case-folded)" $TDOCS '    return re.compile(rf"\b{name}\b")' '    return re.compile(rf"\b{name}\b", re.IGNORECASE)' "$CONTROL"
 check "the names both tiers use read as legacy names (the derivation ignores the target)" $TDOCS '    reused = _target_table_names()
     return tuple(t for t in LEGACY_TABLES if t not in reused)' '    return tuple(LEGACY_TABLES)' "$CONTROL"
 check "the agent pages leave the live roots" $TDOCS '    ".claude",
     "documentation/operations",' '    "documentation/operations",' "$TDOCS -k live_roots_cover"
+check "the nested agent pages leave the live roots (the rules are under .claude/rules/)" $TDOCS '        pages += [path] if path.is_file() else sorted(path.rglob("*.md"))' '        pages += [path] if path.is_file() else sorted(path.glob("*.md"))' "$TDOCS -k live_roots_cover"
+check "the plans and the archive read as live pages" $TDOCS '        pages += sorted((ROOT / root).glob("*.md"))' '        pages += sorted((ROOT / root).rglob("*.md"))' "$TDOCS -k live_roots_cover"
 check "the documentation directory's own pages leave the live roots" $TDOCS 'LIVE_FLAT_ROOTS = ("documentation",)' 'LIVE_FLAT_ROOTS = ()' "$TDOCS -k live_roots_cover"
 check "the exemptions stop being honoured" $TDOCS '        found = _legacy_names_in(page.read_text()) - set(
             LEGACY_NAME_EXEMPT.get(rel, {})
         )' '        found = _legacy_names_in(page.read_text())' "$PIN"
 check "an exemption nothing uses stays" $TDOCS 'LEGACY_NAME_EXEMPT: dict[str, dict[str, tuple[int, str]]] = {' 'LEGACY_NAME_EXEMPT: dict[str, dict[str, tuple[int, str]]] = {
     "README.md": {"posting_queue": (1, "nothing on the page uses this")},' "$TDOCS -k exemption_is_exact"
+check "a page that names the thing FEWER times than its exemption was read for passes" $TDOCS '            elif (found := len(_pattern(name).findall(text))) != count:' '            elif (found := len(_pattern(name).findall(text))) > count:' "$TDOCS -k exemption_is_read_again"
+check "an exemption for a name that is no legacy name passes" $TDOCS '            if name not in known:' '            if False:' "$TDOCS -k exemption_is_read_again"
+check "an exemption for no mention at all passes" $TDOCS '            elif count < 1:' '            elif False:' "$TDOCS -k exemption_is_read_again"
 append "a stale mention hides beside an exempt one (the pager page gains a line about the worker's token)" documentation/operations/posting-monitor.md 'Set `TELEGRAM_BOT_TOKEN` on the worker service too.' "$TDOCS -k exemption_is_exact"
 
 # --- which pages are live -----------------------------------------------------------------------------
