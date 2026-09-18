@@ -463,6 +463,12 @@ class TestManual:
         assert [m.version for m in report.owed] == [2]
         assert [row[0] for row in fetch_ledger(scratch_db)] == [1, 3]
         assert table_exists(scratch_db, "t_one"), "the manual file must not have run"
+        # THE NEXT DEPLOY: the head is now 003 and 002 is still owed BELOW it —
+        # the exact shape the old rule raised on, on every push, for both
+        # services. It owes it again and raises nothing.
+        again = apply_pending(scratch_db, tmp_path)
+        assert again.applied == []
+        assert [m.version for m in again.owed] == [2]
 
     def test_apply_manual_applies_it_below_the_head_with_a_ledger_row(
         self, scratch_db, tmp_path

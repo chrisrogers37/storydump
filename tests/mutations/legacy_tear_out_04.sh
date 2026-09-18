@@ -60,7 +60,16 @@ TDOCS=tests/test_agent_docs.py
 # --- the runner's gated door (the synthetic corpus; DB-backed like every runner test) --------------
 check "apply applies a manual file instead of owing it" $RUNNER '        report.owed = [m for m in pending if m.manual]
         pending = [m for m in pending if not m.manual]' '        report.owed = []' "$GATE" "$TRUN -k owes_the_manual_file_and_applies_the_ordinary_ones_above_it"
-check "the below-head rule applies to a manual file again (the deploy wedges after the next ordinary file)" $RUNNER '            if migration.version < applied_head and not migration.reapply_safe:' '            if migration.version < applied_head and not migration.reapply_safe or migration.manual and migration.version < applied_head:' "$GATE" "$TRUN -k owes_the_manual_file_and_applies_the_ordinary_ones_above_it"
+check "the below-head rule sees a manual file again (the deploy wedges after the next ordinary file)" $RUNNER '        pending = [m for m in migrations if m.version not in ledger]
+        report.owed = [m for m in pending if m.manual]
+        pending = [m for m in pending if not m.manual]
+        for migration in pending:' '        pending = [m for m in migrations if m.version not in ledger]
+        for migration in pending:
+            if migration.version < applied_head and not migration.reapply_safe:
+                raise MigrationRunnerError("below the head")
+        report.owed = [m for m in pending if m.manual]
+        pending = [m for m in pending if not m.manual]
+        for migration in pending:' "$GATE" "$TRUN -k owes_the_manual_file_and_applies_the_ordinary_ones_above_it"
 check "--manual refuses nothing: an ordinary file applies by name" $RUNNER '    if not migration.manual:
         raise MigrationRunnerError(' '    if False:
         raise MigrationRunnerError(' "$GATE" "$TRUN -k apply_manual_refuses_a_file_without_the_directive"
