@@ -49,7 +49,7 @@ with the new checksum).
   (a snapshot of `legacy` into `archive`, a drop, a stand-down): applied like
   any other, but left out of the F.2 prefix ratchet that diffs the lineage
   against the plan's stream (078 was the first; the tear-out, phase 03).
-- `-- runner:manual` — a file the deploy must never run by itself (the legacy
+- `-- runner:manual` — a file the deploy must not run by itself (the legacy
   tear-out, phase 04; fork F6: 079 drops `legacy`, 080 stands the window
   down). `apply` skips it where it stands and prints `owed (manual) NNN`, exit
   0 — a deploy is never failed by a file that waits for an operator; `status`
@@ -60,6 +60,8 @@ with the new checksum).
   ledger row. `--manual` refuses a version without the directive, a version
   not in the tree, and a version already recorded (a gated file runs once).
   The operator's sequence is `documentation/operations/legacy-window-close.md`.
+  `storydump doctor` reads the directive as well: a gated file the ledger lacks is
+  reported as owed to the owner's window, not as a deployment behind the repository.
 - A NEAR MISS — a comment opener followed straight by `runner` and a known word
   in a frame the grammar does not read (`--- runner:manual`, `-- -- runner:manual`,
   `/* runner:manual */`, `# runner:manual`, `-- runner manual`, `-- runner-manual`,
