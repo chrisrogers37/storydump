@@ -1,2 +1,2 @@
-- [Production DB access](reference_prod_db_access.md) — Railway recipe that works, plus the two invocation gotchas (cwd, local var expansion) that silently break it
+- [Production DB access](reference_prod_db_access.md) — Railway recipe + gotchas, and the neonctl path (org/project ids, sandbox off, npx cache) to the same Neon DB
 - [Production read-only discipline](feedback_prod_readonly_discipline.md) — SELECT only; never print connection strings or token columns
