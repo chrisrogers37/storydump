@@ -127,6 +127,82 @@ class TestApply:
         assert not table_exists(scratch_db, "t_atomic")
 
 
+class TestMarkers:
+    """`runner:` lines are the file's contract with the runner, so a marker the
+    runner does not know is a hard failure at discovery — a misspelt
+    `runner:manaul` would otherwise be an ordinary file applied at the next
+    deploy (the tear-out, phase 03; fork F6)."""
+
+    def test_an_unknown_marker_is_refused_at_discovery_naming_the_file(self, tmp_path):
+        write_migration(tmp_path, 1, "-- runner:manaul\nCREATE TABLE t_a (id INT);")
+        with pytest.raises(MigrationRunnerError, match=r"001.*runner:manaul"):
+            discover_migrations(tmp_path)
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "-- runner: manual",  # a space after the colon
+            "-- Runner:manual",  # a capital R
+            "--runner:manual",  # no space after the dashes
+            "-- runner:MANUAL",  # a capital word: the words are exact
+            "-- runner:unadvertised because it snapshots",  # a flag with an argument
+        ],
+    )
+    def test_every_spelling_that_reads_as_a_marker_reaches_the_known_set(
+        self, tmp_path, line
+    ):
+        write_migration(tmp_path, 1, f"{line}\nCREATE TABLE t_a (id INT);")
+        with pytest.raises(MigrationRunnerError, match="001"):
+            discover_migrations(tmp_path)
+
+    def test_a_bare_postcondition_marker_is_refused(self, tmp_path):
+        write_migration(
+            tmp_path, 1, "-- runner:postcondition\nCREATE TABLE t_a (id INT);"
+        )
+        with pytest.raises(MigrationRunnerError, match="bare marker"):
+            discover_migrations(tmp_path)
+
+    def test_prose_that_merely_mentions_a_marker_is_not_one(self, tmp_path):
+        write_migration(
+            tmp_path,
+            1,
+            "-- The runner:schema-move marker is what makes the boundary derivable.\n"
+            "-- see runner:postcondition lines below\n"
+            "CREATE TABLE t_a (id INT);",
+        )
+        [m] = discover_migrations(tmp_path)
+        assert m.postconditions == ()
+
+    def test_a_known_marker_with_a_typo_in_its_argument_is_still_a_postcondition(
+        self, tmp_path
+    ):
+        """The postcondition marker carries SQL after it; the refusal is on the
+        marker word, never on what follows it."""
+        write_migration(
+            tmp_path,
+            1,
+            "-- runner:postcondition SELECT tru\nCREATE TABLE t_a (id INT);",
+        )
+        [m] = discover_migrations(tmp_path)
+        assert m.postconditions == ("SELECT tru",)
+
+    def test_unadvertised_is_read_off_the_file(self, tmp_path):
+        write_migration(
+            tmp_path, 1, "-- runner:unadvertised\nCREATE TABLE t_a (id INT);"
+        )
+        write_migration(tmp_path, 2, "CREATE TABLE t_b (id INT);")
+        a, b = discover_migrations(tmp_path)
+        assert a.unadvertised is True
+        assert b.unadvertised is False
+
+    def test_an_unadvertised_file_is_applied_like_any_other(self, scratch_db, tmp_path):
+        write_migration(
+            tmp_path, 1, "-- runner:unadvertised\nCREATE TABLE t_a (id INT);"
+        )
+        apply_pending(scratch_db, tmp_path)
+        assert [row[0] for row in fetch_ledger(scratch_db)] == [1]
+
+
 class TestDiscovery:
     def test_orders_numerically_and_ignores_non_migrations(self, tmp_path):
         write_migration(tmp_path, 2, "SELECT 2;")

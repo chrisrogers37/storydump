@@ -577,13 +577,16 @@ def test_every_file_the_makefile_feeds_psql_exists():
 
 def test_init_db_is_the_lanes_own_sequence():
     """Step 0 (the service roles, then the DDL door 050 calls), the by-hand
-    base, then the runner — the order `tests/scripts/conftest.py` stands a
-    world up in. Proven end to end on a throwaway PostgreSQL 15 (the ledger)."""
+    base with the one table production made by hand (078 snapshots it, so a
+    database built from the tree must hold it), then the runner — the order
+    `run_bootstrap` and `run_lane` stand a world up in. Proven end to end on a
+    throwaway PostgreSQL 15 (the ledger)."""
     recipe = _recipe("init-db")
     order = [
         recipe.index("scripts/window/step0_bootstrap.sql"),
         recipe.index("scripts/window/step0_legacy_ddl_door.sql"),
         recipe.index("scripts/setup_database.sql"),
+        recipe.index("tests/scripts/fixtures/legacy_by_hand.sql"),
         recipe.index("scripts.migration_runner apply"),
     ]
     assert order == sorted(order), "init-db applies its files out of order"

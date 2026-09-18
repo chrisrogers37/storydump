@@ -306,13 +306,20 @@ def f2_prefix_report(f2_statements, stream_statements) -> F2PrefixReport:
 
 def target_lineage_files(migrations_dir) -> list:
     """The F.2 migration files: numbered files ABOVE the 051 schema-move (the
-    target lineage). Uses the runner's own move-marker discovery so it cannot
-    drift from the boundary the runner enforces."""
+    target lineage) that are advertised DDL. Uses the runner's own move-marker
+    discovery so it cannot drift from the boundary the runner enforces, and
+    the runner's own `runner:unadvertised` marker for the files above the move
+    that are NOT a prefix of the stream — a snapshot of `legacy` into
+    `archive`, a drop, a stand-down act on schemas the stream's empty-database
+    replay never holds (the legacy tear-out, phase 03). ONE definition: the
+    prefix diff and the lane's tenancy slice both derive from this list."""
     from scripts.migration_runner import discover_migrations, schema_move_migration
 
     move = schema_move_migration(migrations_dir)
     return [
-        m.path for m in discover_migrations(migrations_dir) if m.version > move.version
+        m.path
+        for m in discover_migrations(migrations_dir)
+        if m.version > move.version and not m.unadvertised
     ]
 
 
@@ -323,10 +330,9 @@ def target_lineage_statements(migrations_dir) -> list:
     One definition because two callers depend on the SAME list meaning the same
     thing: `test_advertised_ddl` asserts this list is a positional prefix of the
     stream, and the lane's tenancy check slices `stream[: len(this)]` on the
-    strength of that fact. Derived twice, the list that was validated and the
-    list that drives the slice can diverge the first time the lineage needs any
-    filtering — a data-only file, a marker-only file — and only one site would
-    get it.
+    strength of that fact. The filtering this docstring once anticipated
+    arrived with the 3f snapshots (078, `runner:unadvertised`): it lives in
+    `target_lineage_files` above, and nowhere else.
     """
     return [
         stmt

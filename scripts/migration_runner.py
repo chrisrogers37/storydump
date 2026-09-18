@@ -77,6 +77,29 @@ NO_TRANSACTION_MARKER = "-- runner:no-transaction"
 POSTCONDITION_MARKER = "-- runner:postcondition"
 REAPPLY_SAFE_MARKER = "-- runner:reapply-safe"
 SCHEMA_MOVE_MARKER = "-- runner:schema-move"
+#: The file acts on `legacy`/`archive` and is NOT advertised DDL: the F.2 prefix
+#: ratchet (`scripts/advertised_ddl.py::target_lineage_files`) leaves it out of
+#: the lineage it diffs against the stream; the runner applies it like any other
+#: (the legacy tear-out, phase 03 — the 3f snapshots were the first such file).
+UNADVERTISED_MARKER = "-- runner:unadvertised"
+
+#: Every `-- runner:<word>` the runner knows. A line that looks like a marker
+#: and is not one of these is a HARD FAILURE at discovery: a misspelt marker
+#: would otherwise be an ordinary file, applied at the next deploy — for a
+#: file that was meant to wait for an operator, that is the whole hazard.
+KNOWN_MARKERS = (
+    NO_TRANSACTION_MARKER,
+    POSTCONDITION_MARKER,
+    REAPPLY_SAFE_MARKER,
+    SCHEMA_MOVE_MARKER,
+    UNADVERTISED_MARKER,
+)
+#: The marker grammar, matched ONCE per line and case-insensitively on the
+#: `runner` word so that `-- Runner:manual`, `--runner:manual` and
+#: `-- runner: manual` (a space after the colon) all reach the known-set check
+#: instead of passing as prose. Only the word after the colon is looked up.
+_MARKER_RE = re.compile(r"^--\s*runner\s*:\s*(\S+)(.*)$", re.IGNORECASE)
+_KNOWN_WORDS = {m.split(":", 1)[1] for m in KNOWN_MARKERS}
 
 _FILENAME_RE = re.compile(r"^(\d+)_.+\.sql$")
 
@@ -109,6 +132,7 @@ class Migration:
     postconditions: tuple
     execution_mode: str  # wrapped | self-managed | no-transaction
     schema_move: bool
+    unadvertised: bool
 
     @property
     def label(self) -> str:
@@ -121,23 +145,56 @@ class ApplyReport:
 
 
 def _parse_markers(text: str):
-    no_transaction = False
-    reapply_safe = False
-    schema_move = False
+    """The file's markers, and a refusal for a marker the runner does not know.
+
+    One grammar, one dispatch: any line that reads as `-- runner:<word>` is
+    looked up by its word in the known set and refused otherwise — a misspelt
+    word, a stray space after the colon, a capital R — because the failure
+    mode of a marker that quietly reads as prose is a file the next deploy
+    applies. A flag marker takes no argument; the postcondition marker takes
+    the SQL that follows it and refuses to be bare. Raises
+    ``MigrationRunnerError`` naming the offending line; ``discover_migrations``
+    adds the file.
+    """
+    flags = {
+        "no-transaction": False,
+        "reapply-safe": False,
+        "schema-move": False,
+        "unadvertised": False,
+    }
     postconditions = []
     for line in text.splitlines():
-        stripped = line.strip()
-        if stripped == NO_TRANSACTION_MARKER:
-            no_transaction = True
-        elif stripped == REAPPLY_SAFE_MARKER:
-            reapply_safe = True
-        elif stripped == SCHEMA_MOVE_MARKER:
-            schema_move = True
-        elif stripped.startswith(POSTCONDITION_MARKER):
-            sql = stripped[len(POSTCONDITION_MARKER) :].strip()
-            if sql:
-                postconditions.append(sql)
-    return no_transaction, reapply_safe, schema_move, tuple(postconditions)
+        match = _MARKER_RE.match(line.strip())
+        if not match:
+            continue
+        word, rest = match.group(1), match.group(2).strip()
+        if word not in _KNOWN_WORDS:
+            raise MigrationRunnerError(
+                f"unknown marker {line.strip()!r} — the runner knows"
+                f" {', '.join(sorted(_KNOWN_WORDS))}; a misspelt marker is an"
+                " ordinary file applied at the next deploy, so it is refused here"
+            )
+        if word == "postcondition":
+            if not rest:
+                raise MigrationRunnerError(
+                    f"bare marker {line.strip()!r} — a postcondition carries the"
+                    " SQL it asserts"
+                )
+            postconditions.append(rest)
+        elif rest:
+            raise MigrationRunnerError(
+                f"marker {line.strip()!r} carries text after the word; a flag"
+                " marker takes no argument"
+            )
+        else:
+            flags[word] = True
+    return (
+        flags["no-transaction"],
+        flags["reapply-safe"],
+        flags["schema-move"],
+        flags["unadvertised"],
+        tuple(postconditions),
+    )
 
 
 def _execution_mode(no_transaction: bool, statements) -> str:
@@ -182,7 +239,16 @@ def discover_migrations(migrations_dir, max_version: int | None = None) -> list:
             )
         raw = path.read_bytes()
         sql = raw.decode()
-        no_transaction, reapply_safe, schema_move, postconditions = _parse_markers(sql)
+        try:
+            (
+                no_transaction,
+                reapply_safe,
+                schema_move,
+                unadvertised,
+                postconditions,
+            ) = _parse_markers(sql)
+        except MigrationRunnerError as exc:
+            raise MigrationRunnerError(f"{version:03d} ({path.name}): {exc}") from None
         statements = tuple(split_statements(sql))
         by_version[version] = Migration(
             version=version,
@@ -195,6 +261,7 @@ def discover_migrations(migrations_dir, max_version: int | None = None) -> list:
             postconditions=postconditions,
             execution_mode=_execution_mode(no_transaction, statements),
             schema_move=schema_move,
+            unadvertised=unadvertised,
         )
     return _within([by_version[v] for v in sorted(by_version)], max_version)
 

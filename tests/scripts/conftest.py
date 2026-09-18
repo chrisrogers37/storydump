@@ -172,6 +172,14 @@ SCRATCH_LOCK_KEY = 785_2026
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SETUP_SQL = REPO_ROOT / "scripts" / "setup_database.sql"
 
+#: The one legacy table no migration creates: `posting_history_dedup_archive`,
+#: made by hand in production during #941 and measured there on 2026-09-17 by
+#: the tear-out's read-only probe. A world that will apply the 3f snapshot file
+#: (078) has to hold it, in `public` before the 051 move so it rides into
+#: `legacy` the way production's did — which is why the lane seeds it beside
+#: `SETUP_SQL`, and why phase 03's snapshot gate reads its DDL from here.
+BY_HAND_SQL = REPO_ROOT / "tests" / "scripts" / "fixtures" / "legacy_by_hand.sql"
+
 #: Advertised-stream boundaries for the F.2 increments (#806, ruling (a)), used
 #: by the derivation's unit tests. Held here because the stream is generated
 #: from `02`/`07` plan text — one inserted statement moves every boundary, and a

@@ -66,6 +66,7 @@ from scripts.tenancy_gate import (
 from tests.scripts.conftest import (
     advertised_stream,
     as_user,
+    BY_HAND_SQL,
     LEGACY_LINEAGE_MAX,
     LEGACY_STANDUP,
     SETUP_SQL,
@@ -76,7 +77,7 @@ from tests.scripts.conftest import (
     table_exists,
     write_migration,
 )
-from tests.scripts.legacy_inventory import LINEAGE_TABLES
+from tests.scripts.legacy_inventory import LEGACY_TABLES
 
 
 def run_lane(dsn):
@@ -88,8 +89,12 @@ def run_lane(dsn):
     for the one control that staged a future increment into a throwaway tree.
     053 landed that increment for real, so the control and the parameter went
     with it — the lane now replays the thing itself.
+
+    The hand-made table rides in beside the seed (`BY_HAND_SQL`): production's
+    `legacy` schema holds one table no migration creates, and the 3f snapshot
+    file (078) copies it by name, so a world without it cannot apply the corpus.
     """
-    psql_apply(dsn, [SETUP_SQL])
+    psql_apply(dsn, [SETUP_SQL, BY_HAND_SQL])
     return apply_pending(dsn, MIGRATIONS_DIR)
 
 
@@ -363,12 +368,30 @@ class TestTheBoundaryIsDerivedAndLoud:
             # ck_service_token_subject for person-bound tokens (07 §23, the
             # v2 CLI plan, phase 01).
             "077_service_token_subject.sql",
+            # 078: the M.3 step-3f snapshots — every legacy table copied into
+            # `archive`, owned by svc_maintenance (the tear-out, phase 03). Not
+            # advertised DDL: it carries `runner:unadvertised`, so it is above
+            # the move but outside the F.2 prefix.
+            "078_legacy_snapshots_pre_cutover.sql",
         ], (
-            f"the target lineage is {above}. If you are landing the next F.2"
-            " increment, add it here — deliberately, and at the end: arm (b)"
+            f"the files above the move are {above}. If you are landing the next"
+            " F.2 increment, add it here — deliberately, and at the end: arm (b)"
             " is an ordered prefix of the advertised stream, so a file may"
             " only ever be appended."
         )
+
+        # The two lists the rule splits them into (the tear-out, phase 03): the
+        # advertised lineage the prefix diff sees, and the files above the move
+        # that say they are not advertised DDL.
+        unadvertised = [
+            m.path.name
+            for m in discover_migrations(MIGRATIONS_DIR)
+            if m.version > move.version and m.unadvertised
+        ]
+        assert unadvertised == ["078_legacy_snapshots_pre_cutover.sql"]
+        assert [p.name for p in target_lineage_files(MIGRATIONS_DIR)] == [
+            name for name in above if name not in unadvertised
+        ]
 
         # The hole the list exists for, closed mechanically rather than by
         # enumeration: a lineage file contributing zero statements is invisible
@@ -425,9 +448,9 @@ class TestTheLaneReplaysAcrossTheBoundary:
         assertion that CAN fail is against an independent source of truth, and
         the inventory literal is one (`tests/scripts/legacy_inventory.py`, the
         one home with phase 03's snapshot gate; the hand-made production table
-        is kept out of the lineage subset because no file creates it) —
-        written down once, and checked against production by the tear-out's
-        read-only probe on 2026-09-17: exactly the sixteen.
+        is seeded from `BY_HAND_SQL` because no migration creates it) — written
+        down once, and checked against production by the tear-out's read-only
+        probe on 2026-09-17: exactly the sixteen.
 
         THE PUBLIC-SIDE HALF IS SCOPED TO NAMES THE TARGET DOES NOT REUSE, and
         that scoping is forced rather than convenient. The target schema
@@ -441,14 +464,14 @@ class TestTheLaneReplaysAcrossTheBoundary:
         rather than name in the parity gate, which compares their columns.
         """
         run_lane(bootstrapped_db)
-        declared = set(LINEAGE_TABLES)
+        declared = set(LEGACY_TABLES)
 
         assert declared, "positive control: the lineage inventory is empty"
         replayed = set(tables_in(bootstrapped_db, "legacy"))
         assert replayed == declared, (
             "the replayed `legacy` schema and the inventory literal disagree —"
             f" missing: {sorted(declared - replayed)}, unlisted: {sorted(replayed - declared)}"
-            " (a name dropped from `LINEAGE_TABLES` is a snapshot phase 03 never takes)"
+            " (a name dropped from `LEGACY_TABLES` is a snapshot 078 never takes)"
         )
 
         legacy_only = declared - implied_target_tables()
@@ -525,7 +548,7 @@ class TestTheLaneReplaysAcrossTheBoundary:
         # from 053 the unbounded arm's `public` is populated — by the target
         # schema — so "public is empty" no longer separates the two arms, while
         # "the legacy schema is in public" still separates them exactly.
-        legacy_only = set(LINEAGE_TABLES) - implied_target_tables()
+        legacy_only = set(LEGACY_TABLES) - implied_target_tables()
         assert legacy_only, "no legacy-only name left to draw the contrast on"
 
         assert legacy_only & set(tables_in(owner_db, "public")), (

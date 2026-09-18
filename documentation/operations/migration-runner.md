@@ -42,6 +42,19 @@ with the new checksum).
 - `-- runner:reapply-safe` — idempotent data migrations whose applied state
   is undecidable in place (048): adopt may leave them pending below an
   adopted head, and apply re-runs them there.
+- `-- runner:schema-move` — the one lineage-boundary file (051): everything
+  numbered below it is the legacy lineage, everything above the target's.
+- `-- runner:unadvertised` — a file above the move that is NOT advertised DDL
+  (a snapshot of `legacy` into `archive`, a drop, a stand-down): applied like
+  any other, but left out of the F.2 prefix ratchet that diffs the lineage
+  against the plan's stream (078 was the first; the tear-out, phase 03).
+- Any other `-- runner:<word>` — a hard failure at discovery, naming the file.
+  Every door (`apply`, `adopt`, `status`, `parity`) and the test suite's
+  collection refuse the corpus until it is fixed: a misspelt marker (a stray
+  space after the colon, a capital letter) would otherwise read as prose and
+  make the file an ordinary one, applied at the next deploy — for a file that
+  was meant to wait for an operator, that is the whole hazard. A flag marker
+  takes no argument; a postcondition marker refuses to be bare.
 - Legacy files that carry their own `BEGIN;`/`COMMIT;` run with psql
   semantics (statement-split), so post-commit `CREATE INDEX CONCURRENTLY`
   works exactly as it did by hand.

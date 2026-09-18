@@ -90,7 +90,13 @@ instruments, #1046 and #1113 close with it (#945 closes in phase 01 as stale).
    ones — with a manual 079 pending, `apply` applies an ordinary 081 (numbered ABOVE it) and
    exits 0, and `apply --manual 079` then applies 079 below the head. One PR with the files: the
    manual-skip path is observable only once a manual file exists, so a runner-only PR would
-   prove nothing these tests do not.
+   prove nothing these tests do not. Two obligations phase 03's grammar imposes, in the SAME
+   commit as the first manual file: `manual` joins `KNOWN_MARKERS` in `scripts/migration_runner.py`
+   (an unknown `runner:` word is refused at discovery — every door, and the test suite's
+   collection, would refuse the corpus until it does), and `target_lineage_files` learns to
+   exclude a manual file as it excludes an unadvertised one (else 079 enters the F.2 prefix
+   diff and the ratchet goes red) — or 079/080 carry `-- runner:unadvertised` beside
+   `-- runner:manual`, which is the same fact stated on the file.
 2. **`scripts/migrations/079_drop_legacy_schema.sql`** (`-- runner:manual`):
    ```sql
    -- precondition, in-file: every snapshot exists with its source's row count
