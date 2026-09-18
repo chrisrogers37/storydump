@@ -490,6 +490,7 @@ def test_an_exemption_is_read_again_when_its_page_or_its_claim_changes(tmp_path)
     """The counted exemption in every direction, on a page of its own."""
     (tmp_path / "p.md").write_text(
         "`TELEGRAM_BOT_TOKEN` is the pager's; so is `TELEGRAM_BOT_TOKEN` here."
+        " `NOT_A_LEGACY_NAME` appears once."
     )
 
     def errors(name, count, page="p.md"):
@@ -498,7 +499,10 @@ def test_an_exemption_is_read_again_when_its_page_or_its_claim_changes(tmp_path)
     assert not errors("TELEGRAM_BOT_TOKEN", 2)
     assert errors("TELEGRAM_BOT_TOKEN", 1), "one MORE mention than it was read for"
     assert errors("TELEGRAM_BOT_TOKEN", 3), "one FEWER"
-    assert errors("TELEGRAM_BOT_TOKEN", 0), "an exemption for no mention at all"
+    # LOAD-BEARING scenarios: each guard is the only thing between the case and
+    # a pass. `ADMIN_TELEGRAM_CHAT_ID` is not on the page, so a count of 0 would
+    # be "exact"; `NOT_A_LEGACY_NAME` is on it once, so a count of 1 would be.
+    assert errors("ADMIN_TELEGRAM_CHAT_ID", 0), "an exemption for no mention at all"
     assert errors("NOT_A_LEGACY_NAME", 1), "a name in no list exempts nothing"
     assert errors("TELEGRAM_BOT_TOKEN", 2, page="gone.md"), "the page is gone"
 
