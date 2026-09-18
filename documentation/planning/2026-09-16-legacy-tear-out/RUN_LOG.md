@@ -1176,6 +1176,55 @@ the documentation index's tear-out row ("the owner's window has not run"), the c
 status and M.3 line, `meta-app-review.md`'s discharged-constraint section, the M.2 rehearsal spec's
 status line, `00_EPIC.md`'s `status:` and its goal condition.
 
+## The sprint's state at the end of 2026-09-18
+
+**Phase rows.** 01, 02, 03 — DONE and live. 04 — READY; its merge is the owner's, because this session's
+admin merge was refused by its permission classifier. 05 — READY as a change, a DRAFT as a pull
+request until #1321 merges and the branch is rebased onto `main`. The window — the owner's (F7), its
+rehearsal prepared and refused to this session the same way.
+
+**The invariant registry, run PRE-MERGE on phase 05's head** (`82c55b3`, which holds phases 04 and 05; the
+registry's own rule is after every merge, so this run is to be repeated after each of the two): I1 —
+CI `3760 passed, 1 skipped`, the one skip the ceiling allows; I2 — `test_advertised_ddl.py` +
+`test_lineage_lane.py` 40 passed, the normative pin still 35; I3 — `test_legacy_tier_gone.py` 49
+passed; I4 — `telegram_ratchet.py` 4 / 0 / 0 / 0; I5 and I8 — the runner's suites, the window gate and
+the deploy guardrails 80 passed (a manual file is owed and wedges nothing; every marker known); I6 —
+`test_agent_docs.py` 18 passed; I7 — `test_worker_entrypoint.py` 3 passed, `target_reachability.py` ran.
+
+**The goal condition — #1216's acceptance list through the epic's checklist — is NOT met yet, and what
+is left is the owner's.** Agent-run clauses: (1) the import grep is unmet BY DESIGN, as phase 01's entry
+records — today's hits are four provenance docstrings in `src`, two scripts and the guards themselves;
+the AST predicate is the standing guard and is green; (2) the three entrypoints import with no
+`TELEGRAM_*` variable — measured today on this head; (3) the ratchet passes with its core segment empty;
+(4) the suite green at every phase, nothing newly skipped — CI's counts 3,653 → 3,680 → 3,700 → 3,753 →
+3,760; (5) **BLOCKED** — `status` owing 079/080 on a checkout at phase 04's merge, and a predeploy log
+naming them, need that merge: the smallest unblocking action is the owner's merge command below (the
+gate test and the CLI test assert the behaviour today); (6) the step-1 grep after phase 05 lists 18
+files, every hit a TARGET table, the target's own `TARGET_TELEGRAM_BOT_TOKEN`, a snapshot's name, one of
+two reasoned exemptions or `ROADMAP.md`'s dated migration FILE names — the clause as literally written
+cannot be met by a pattern that matches `media_items`; the pin is the bounded form of the same rule and
+is green. Owner-run clauses: the probes before phase 03 and the evidence after its deploy — DONE, in
+phase 03's entry; the rehearsal of 079/080 — **BLOCKED**, prepared (`scratchpad/rehearse04.sh`), refused
+to this session, the owner's to run; production — the owner's window.
+
+**The owner's queue, first things first:**
+
+1. Merge #1321 (admin squash; the subject and body are prepared, no closing keyword in either):
+   `gh pr merge 1321 --squash --admin --subject "<the PR's title> (#1321)" --body-file <scratchpad>/t04_squash.md`.
+   Then read `storydump deploys` for BOTH services and one predeploy log: `owed (manual) 079 …`, `owed
+   (manual) 080 …`, exit 0. The build session re-runs the invariants on `main` when it next runs.
+2. #1322 is rebased by the build session the moment #1321 is on `main` (`git rebase --onto origin/main
+   29537a8`; the diff must then show phase 05's scope only), marked ready, and merged by the owner the
+   same way. Every sentence in it is true before the window and after it.
+3. The rehearsal, from phase 04's checkout: `STATE=<file> bash -eu <scratchpad>/rehearse04.sh` — the
+   runbook's block as printed, plus a redaction on every output and a second provenance gate (the
+   branch's Neon timeline is not production's). Read the log; then the runbook's step 9 retires the
+   branch. Any red: retire the branch, fix forward, rehearse again.
+4. The window, from `documentation/operations/legacy-window-close.md`, in its order.
+5. After the window: the build session updates the window-dependent sentences listed above, the epic's
+   `status:` and its goal condition with the owner's pasted gate output — one small documentation PR —
+   and the epic's issue (#1216) and #941 close on the owner's word.
+
 ## Owner-decision queue
 
 - **The PITR window is 24 hours, not 7 days.** The project's `history_retention_seconds` is 86400;
