@@ -35,29 +35,16 @@ This checklist covers everything you need to do **outside of code** to get Story
   4. Search for your bot username
   5. Give it "Post Messages" permission
 
-### Get Channel ID
-
-- [ ] Add **@userinfobot** to your channel
-- [ ] Forward any message from the channel to @userinfobot
-- [ ] **Save the channel ID** (negative number like `-1001234567890`)
-- [ ] Remove @userinfobot from channel
-
-### Get Your Admin Chat ID
-
-- [ ] Send any message to **@userinfobot**
-- [ ] **Save your user ID** (positive number like `123456789`)
-- [ ] This becomes your `ADMIN_TELEGRAM_CHAT_ID`
-
 ### Test Bot
 
 - [ ] Send `/start` to your bot
 - [ ] Verify it responds (if not, service isn't running yet - that's okay)
 
-**Deliverables:**
+**Deliverables** (the approval group is connected per workspace on the web, so
+there is no channel or admin chat to configure):
 ```
-TELEGRAM_BOT_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
-TELEGRAM_CHANNEL_ID=-1001234567890
-ADMIN_TELEGRAM_CHAT_ID=123456789
+TARGET_TELEGRAM_BOT_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
+TARGET_TELEGRAM_BOT_USERNAME=your_bot
 ```
 
 ---
@@ -76,6 +63,13 @@ ADMIN_TELEGRAM_CHAT_ID=123456789
 # Set your Neon connection string
 export DATABASE_URL="postgresql://user:pass@ep-xxx.neon.tech/storydump?sslmode=require"
 
+# A FRESH database needs step 0 and the by-hand base first — the service roles,
+# the DDL door migration 050 calls, then the legacy base; the runner stops at
+# 050 without them. (`make init-db` runs this same sequence locally.)
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
+  -f scripts/window/step0_bootstrap.sql -f scripts/window/step0_legacy_ddl_door.sql \
+  -f scripts/setup_database.sql
+
 # Apply the migrations through the runner — the same command the worker's
 # pre-deploy step runs (`railway.toml`); it keeps the ledger the API's
 # `storydump posture` and `storydump doctor` read. Never a psql loop.
@@ -92,11 +86,9 @@ psql "$DATABASE_URL" -c "\dt"
 
 ### Connection Pool Sizing
 
-Neon free tier allows 5 concurrent connections:
-```
-DB_POOL_SIZE=3
-DB_MAX_OVERFLOW=2
-```
+The pool is pinned in code — 10 connections per process, no overflow
+(`src/services/target/unit_of_work.py`) — and no variable sizes it. Count the
+processes (the API and the worker) against the plan's connection limit.
 
 **Deliverables:**
 ```
@@ -117,19 +109,6 @@ Media is sourced from Google Drive when running on Railway:
 - [ ] Note the folder ID from the URL
 
 Google Drive OAuth will be configured during the onboarding wizard (`/start` command).
-
-### Local Development
-
-For local development, create a media directory:
-```bash
-mkdir -p /tmp/media
-```
-
-**Deliverable:**
-```
-MEDIA_SOURCE_TYPE=google_drive
-MEDIA_DIR=/tmp/media
-```
 
 ---
 
@@ -162,26 +141,22 @@ Railway requires two services from the same repo:
 Set these on **both** services in the Railway dashboard:
 
 ```bash
-# Required
-DATABASE_URL=postgresql://user:pass@ep-xxx.neon.tech/storydump?sslmode=require
-TELEGRAM_BOT_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
-TELEGRAM_CHANNEL_ID=-1001234567890
-ADMIN_TELEGRAM_CHAT_ID=123456789
-MEDIA_DIR=/tmp/media
+# The database: the OWNER login the migration runner applies the schema with
+# (railway.toml's preDeployCommand), and the runtime login the services run as
+DATABASE_URL=postgresql://owner:pass@ep-xxx.neon.tech/storydump?sslmode=require
+TARGET_DATABASE_URL=postgresql://app:pass@ep-xxx.neon.tech/storydump?sslmode=require
+
+# The bot (documentation/operations/telegram-webhook.md for the webhook)
+TARGET_TELEGRAM_BOT_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
+TARGET_TELEGRAM_BOT_USERNAME=your_bot
+TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN=<a long random string>
+
 ENCRYPTION_KEY=<generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())">
-
-# Schedule
-POSTS_PER_DAY=3
-POSTING_HOURS_START=14
-POSTING_HOURS_END=2
-REPOST_TTL_DAYS=30
-
-# Safety (start with dry run!)
-DRY_RUN_MODE=true
 LOG_LEVEL=INFO
 
-# OAuth (Web service)
+# OAuth and the web front end (Web service)
 OAUTH_REDIRECT_BASE_URL=https://your-app.up.railway.app
+WEB_APP_URL=https://app.example.com
 ```
 
 ### Validate Deployment
@@ -330,13 +305,13 @@ Phase 1 is **manual posting**, so prepare your workflow:
 ### Initial Testing Checklist
 
 - [ ] **Day 1 Morning:**
-  - Verify `DRY_RUN_MODE=true` in Railway env vars
+  - Verify the workspace's **Dry Run Mode** is ON (the web, Settings › General) — it is a per-workspace setting in the ledger, not a variable
   - Verify notifications arrive in Telegram
   - Test "Posted" and "Skip" buttons
   - Check the queue via `storydump floating` or the web's Queue
 
 - [ ] **Day 1 Afternoon:**
-  - Set `DRY_RUN_MODE=false` in Railway env vars
+  - Turn the workspace's **Dry Run Mode** OFF (the web, Settings › General)
   - Wait for first real notification
   - Post ONE story to Instagram manually
   - Click "Posted" button
@@ -372,8 +347,8 @@ Phase 1 is **manual posting**, so prepare your workflow:
 ### Go Live
 
 ```bash
-# Set DRY_RUN_MODE=false in Railway dashboard
-# Railway will restart the service automatically
+# Turn the workspace's Dry Run Mode off on the web (Settings › General);
+# it takes effect for posts approved from then on — no restart
 
 # Monitor first day
 railway logs --service worker
@@ -385,7 +360,7 @@ railway logs --service worker
 - [ ] Verify all posts going out
 - [ ] Monitor team feedback
 - [ ] Track any issues
-- [ ] Adjust schedule if needed (`POSTS_PER_DAY`, `POSTING_HOURS_START`, etc.)
+- [ ] Adjust the schedule if needed (the schedule card on the web, Settings › General)
 
 ---
 
@@ -426,8 +401,8 @@ railway logs --service worker | tail -50
 # Verify token with Telegram API
 curl https://api.telegram.org/bot<YOUR_TOKEN>/getMe
 
-# Check bot has admin rights in channel
-# Check TELEGRAM_CHANNEL_ID is negative
+# The webhook's verdict, from the API's health report
+storydump health
 ```
 
 ### Database Connection Failed

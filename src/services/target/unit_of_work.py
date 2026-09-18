@@ -16,12 +16,13 @@ nothing. The invariant it protects:
 
     Σ(replica × (pool + overflow)) = 3×(10+0) + 2×(10+0) = 50  ≥  peak DB-active tasks
 
-**This is deliberately NOT read from `settings.DB_MAX_OVERFLOW`.** That setting
-is `20` on this repo today, which is exactly R4's finding: it silently makes
+**This was deliberately never read from the legacy `DB_MAX_OVERFLOW` setting.**
+That setting defaulted to `20`, which was exactly R4's finding: it silently made
 the true ceiling (10+20)×5 = 150 rather than 50. The legacy sync engine in
-`src/config/database.py` read it too, until the tear-out deleted that engine
-(phase 01; #1216). Pinning the async engine to the seam constant is what keeps
-the target substrate correct whatever the config says, and the gate asserts
+`src/config/database.py` read it, until the tear-out deleted that engine (phase
+01; #1216) and then the two pool settings nothing read (phase 02). Pinning the
+async engine to the seam constant is what keeps the target substrate correct
+whatever the environment says, and the gate asserts
 the constant rather than trusting the config.
 
 ## The UoW is unconstructible without a tenant
@@ -73,19 +74,20 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 from src.config.settings import settings
+from src.services.target.vocabulary import DATABASE_URL_VAR
 from src.utils.logger import logger
 from src.exceptions.base import StorydumpError
 
 #: `05` seam value. Pinned, not configurable, not read from settings — see the
-#: module docstring for why `settings.DB_MAX_OVERFLOW` is deliberately ignored.
+#: module docstring for why no overflow setting exists.
 MAX_OVERFLOW_SEAM = 0
 
 #: `05` seam value: 10 per replica, both lanes (`3×10 workers + 2×10 ingress`).
 #: Pinned for the same reason the overflow is. Leaving HALF the inequality
-#: configurable was the gap: with `pool_size` read from settings, a production
-#: `DB_POOL_SIZE` override silently breaks `Σ(replica × (pool + overflow)) = 50`
-#: and no gate can see it, because the test would read the same overridden
-#: value it is meant to be checking.
+#: configurable was the gap: with `pool_size` read from a setting, a production
+#: override silently breaks `Σ(replica × (pool + overflow)) = 50` and no gate
+#: can see it, because the test would read the same overridden value it is
+#: meant to be checking.
 POOL_SIZE_SEAM = 10
 
 #: How long a caller waits for a connection before being told there is none.
@@ -144,13 +146,18 @@ def in_transaction() -> bool:
 
 
 def async_database_url(database: Optional[str] = None) -> str:
-    """The asyncpg URL, built from the same settings the sync engine uses.
+    """The asyncpg URL built from the `DB_*` settings — the TEST HARNESS's
+    door, never a deployed root's.
 
-    *database* overrides the database name only. It exists for the test
-    harness, which runs against the session-scoped test database rather than
-    `settings.DB_NAME` — CI provisions `TEST_DB_NAME` and has no `DB_NAME`
-    database at all, so a URL hardcoded to the latter passes locally (where a
-    dev database happens to exist) and fails there. Production passes nothing.
+    *database* overrides the database name only: the harness runs against the
+    session-scoped test database rather than `settings.DB_NAME` — CI
+    provisions `TEST_DB_NAME` and has no `DB_NAME` database at all, so a URL
+    hardcoded to the latter passes locally (where a dev database happens to
+    exist) and fails there. The deployed roots do not call this: they take
+    `TARGET_DATABASE_URL` through `engine_url_from_env` and refuse without it
+    (the tear-out, phase 02 — before it, `create_engine` fell back here, so a
+    worker booted without its variable ran against the legacy-configured
+    database).
     """
     return (
         f"postgresql+asyncpg://{settings.DB_USER}:{settings.DB_PASSWORD}"
@@ -177,26 +184,37 @@ def asyncpg_url(url: str) -> str:
 
 
 def engine_url_from_env(env) -> Optional[str]:
-    """`TARGET_DATABASE_URL` from *env*, asyncpg-safe, or None when unset so
-    :func:`create_engine` falls back to the settings-built URL."""
-    url = env.get("TARGET_DATABASE_URL")
+    """`TARGET_DATABASE_URL` from *env*, asyncpg-safe, or None when unset —
+    and None is the caller's to refuse: the worker exits 2 naming the variable
+    (`src.worker.main`), the API runs with no engine and answers 503 on every
+    data route (`src.api.app`). There is no settings-built fallback."""
+    url = (env.get(DATABASE_URL_VAR) or "").strip()
     if not url:
+        # Blank is absent: a dashboard row saved empty must meet the callers'
+        # named refusal, never a traceback out of `create_engine`.
         return None
     return asyncpg_url(url)
 
 
-def create_engine(
-    url: Optional[str] = None, *, pool_timeout: float = POOL_TIMEOUT_SEAM
-) -> AsyncEngine:
-    """The async engine, with `max_overflow` pinned to the `05` seam. The
-    worker takes the default wait; the API passes `INGRESS_POOL_TIMEOUT_SEAM`
-    (the only knob a caller may turn, and only to one of the two seams)."""
+def create_engine(url: str, *, pool_timeout: float = POOL_TIMEOUT_SEAM) -> AsyncEngine:
+    """The async engine for *url*, with `max_overflow` pinned to the `05`
+    seam. The worker takes the default wait; the API passes
+    `INGRESS_POOL_TIMEOUT_SEAM` (the only knob a caller may turn, and only to
+    one of the two seams). The URL is REQUIRED: the fallback to the
+    settings-built `DB_*` URL went with the legacy tier (the tear-out, phase
+    02), because a root that silently ran against a database nobody named was
+    the plausible-wrong-value casualty the refusal exists to prevent."""
+    if not url:
+        raise ValueError(
+            f"create_engine needs the target database URL ({DATABASE_URL_VAR});"
+            " there is no settings-built fallback"
+        )
     if pool_timeout not in (POOL_TIMEOUT_SEAM, INGRESS_POOL_TIMEOUT_SEAM):
         raise ValueError(
             "pool_timeout must be POOL_TIMEOUT_SEAM or INGRESS_POOL_TIMEOUT_SEAM"
         )
     return create_async_engine(
-        url or async_database_url(),
+        url,
         pool_size=POOL_SIZE_SEAM,
         max_overflow=MAX_OVERFLOW_SEAM,
         pool_timeout=pool_timeout,

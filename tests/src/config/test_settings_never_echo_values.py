@@ -1,13 +1,19 @@
 """Settings validation must never put a field's VALUE in its error (#775).
 
-`Settings` declares bare-named fields like ``TELEGRAM_BOT_TOKEN``. pydantic
-reads whatever is in the ambient environment under that name, and on a
-validation failure its ``ValidationError`` renders ``input_value=`` containing a
-truncated copy of the offending input. Where the ambient variable belongs to
-some *other* Telegram bot, that prints part of an unrelated real credential.
+`Settings` declares bare-named fields like ``TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN``
+and ``ENCRYPTION_KEY``. pydantic reads whatever is in the ambient environment
+under that name, and on a validation failure its ``ValidationError`` renders
+``input_value=`` containing a truncated copy of the offending input. Where the
+ambient variable belongs to some *other* deployment, that prints part of an
+unrelated real credential.
 
-This fired four times in one evening for four different operators, which is what
-makes it a property of the code rather than of anyone's shell.
+This fired four times in one evening for four different operators (the field
+then was the legacy tier's bot token, which every process REQUIRED; the tier
+and its three required fields retired in the tear-out's phase 02, and no field
+is required now). The shape outlived the field, so the tests reach it through a
+subclass of the real `Settings` that declares one required sibling — the
+boundary under test is inherited, never copied — and plant the sentinel in a
+real secret-bearing field.
 
 Every test here uses a SYNTHETIC sentinel. No real credential is involved, and
 no test prints the sentinel on failure — they assert on its absence and report
@@ -22,6 +28,7 @@ mask anything. ``test_secretstr_alone_would_not_have_been_enough`` pins that
 finding so the fix is not "simplified" back to it later.
 """
 
+import os
 from typing import Optional
 
 import pytest
@@ -41,7 +48,7 @@ from src.config.settings import Settings, SettingsError, _redact_source
 SENTINEL = "1234567890:SYNTHETICsentinelTOKENvalueDoNotUseXYZ"
 
 # The shortest run of sentinel characters we treat as a leak. Pydantic's
-# truncated form keeps a leading char and a long tail, so a real disclosure
+# truncated form keeps the head and the tail of a repr, so a real disclosure
 # shows far more than this; 8 is short enough to catch a partial echo and long
 # enough not to fire on incidental substrings like "1234".
 MIN_LEAK_RUN = 8
@@ -100,22 +107,81 @@ def _render(exc: BaseException) -> str:
     return "\n".join(parts)
 
 
+#: The secret-bearing field the sentinel is planted in. A real field of the
+#: shipped configuration, so the redaction is exercised on production code.
+SECRET_FIELD = "TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN"
+
+
+class WithARequiredSibling(Settings):
+    """The #775 shape needs a REQUIRED field beside the secret, and the shipped
+    `Settings` has none since the tear-out's phase 02 — so the required
+    sibling is declared here, on a subclass that inherits the real boundary."""
+
+    REQUIRED_SIBLING: int
+
+
+@pytest.fixture
+def only_the_secret_in_the_environment(monkeypatch):
+    """The secret is the ONLY declared field the environment holds.
+
+    WHY THIS IS LOAD-BEARING, measured while building the tear-out's phase
+    02: pydantic truncates a `missing` error's ``input_value`` — the raw input
+    dict — by keeping its HEAD and its TAIL. A sentinel planted in a field
+    that sits between two other declared fields the environment happens to
+    set (CI sets ``ENCRYPTION_KEY``, ``DB_PORT`` and ``LOG_LEVEL``) is cut out
+    of the repr entirely, and every leak assertion below passes against a
+    boundary that redacts nothing: the mutation ``error = str(exc)`` survived
+    the battery. The original specimen (the legacy bot token) had the same
+    blind spot in CI. So the environment is stripped of every declared field
+    first, and the premise — that the raw error DOES carry the value under
+    exactly this environment — is pinned by
+    ``test_the_raw_error_really_does_carry_the_value_in_this_shape``.
+    """
+    declared = {name.upper() for name in WithARequiredSibling.model_fields}
+    for name in list(os.environ):
+        # Case-insensitively, as the settings source reads them: `Db_Host`
+        # is `DB_HOST` to pydantic, and would sit in the repr all the same.
+        if name.upper() in declared:
+            monkeypatch.delenv(name)
+    monkeypatch.setenv(SECRET_FIELD, SENTINEL)
+
+
 @pytest.mark.unit
 class TestSettingsErrorCarriesNoValues:
     """A failed Settings load names fields; it never quotes their contents."""
 
-    def test_missing_required_field_does_not_echo_a_sibling_value(self, monkeypatch):
-        """The exact #775 shape: token present, a sibling required field absent.
+    def test_the_raw_error_really_does_carry_the_value_in_this_shape(
+        self, only_the_secret_in_the_environment
+    ):
+        """THE PREMISE, so the tests below cannot quietly become vacuous.
+
+        The boundary is bypassed — `BaseSettings.__init__` on an instance of
+        the same subclass, under the same environment — and the value must
+        STILL reach the rendered error. If this fails, the threat model
+        changed (or the environment fixture no longer leaves the secret where
+        the truncation shows it), and every leak assertion below is guarding
+        nothing.
+        """
+        probe = WithARequiredSibling.__new__(WithARequiredSibling)
+        with pytest.raises(ValidationError) as caught:
+            BaseSettings.__init__(probe, _env_file=None)
+
+        assert longest_leaked_run(_render(caught.value)) >= MIN_LEAK_RUN, (
+            "the raw validation error no longer carries the input, so the"
+            " leak assertions below are no longer proving anything"
+        )
+
+    def test_missing_required_field_does_not_echo_a_sibling_value(
+        self, only_the_secret_in_the_environment
+    ):
+        """The exact #775 shape: a secret present, a sibling required field
+        absent.
 
         Before the fix this raised ValidationError whose input_value held a
-        truncated copy of the token.
+        truncated copy of the secret.
         """
-        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", SENTINEL)
-        monkeypatch.delenv("TELEGRAM_CHANNEL_ID", raising=False)
-        monkeypatch.delenv("ADMIN_TELEGRAM_CHAT_ID", raising=False)
-
         with pytest.raises(SettingsError) as caught:
-            Settings(_env_file=None)
+            WithARequiredSibling(_env_file=None)
 
         leaked = longest_leaked_run(_render(caught.value))
         assert leaked == 0, f"{leaked} sentinel characters reached the error"
@@ -127,9 +193,7 @@ class TestSettingsErrorCarriesNoValues:
         pointed directly at the field, and a fix that only redacted other
         fields' input would pass the first test and fail this one.
         """
-        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", SENTINEL)
-        monkeypatch.setenv("TELEGRAM_CHANNEL_ID", SENTINEL)  # not an int
-        monkeypatch.setenv("ADMIN_TELEGRAM_CHAT_ID", "123")
+        monkeypatch.setenv("TARGET_TAP_ADMISSION_PER_MINUTE", SENTINEL)  # not an int
 
         with pytest.raises(SettingsError) as caught:
             Settings(_env_file=None)
@@ -137,7 +201,9 @@ class TestSettingsErrorCarriesNoValues:
         leaked = longest_leaked_run(_render(caught.value))
         assert leaked == 0, f"{leaked} sentinel characters reached the error"
 
-    def test_the_original_error_is_not_chained(self, monkeypatch):
+    def test_the_original_error_is_not_chained(
+        self, only_the_secret_in_the_environment
+    ):
         """`raise ... from exc` would re-expose the value in the traceback.
 
         Python prints __cause__ and __context__ for an uncaught exception, so
@@ -145,34 +211,28 @@ class TestSettingsErrorCarriesNoValues:
         under "The above exception was the direct cause" — a redaction that
         redacts nothing. This is the single most likely way to regress the fix.
         """
-        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", SENTINEL)
-        monkeypatch.delenv("TELEGRAM_CHANNEL_ID", raising=False)
-
         with pytest.raises(SettingsError) as caught:
-            Settings(_env_file=None)
+            WithARequiredSibling(_env_file=None)
 
         assert caught.value.__cause__ is None
         assert caught.value.__context__ is None or not isinstance(
             caught.value.__context__, ValidationError
         )
 
-    def test_field_names_survive_so_the_error_is_still_actionable(self, monkeypatch):
+    def test_field_names_survive_so_the_error_is_still_actionable(
+        self, only_the_secret_in_the_environment
+    ):
         """Redaction must not cost diagnosability.
 
         The point is to drop values, not to make a startup failure unreadable —
         an error that says only "settings failed" sends someone to add a print
         statement, which is how the value gets echoed again.
         """
-        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", SENTINEL)
-        monkeypatch.delenv("TELEGRAM_CHANNEL_ID", raising=False)
-        monkeypatch.delenv("ADMIN_TELEGRAM_CHAT_ID", raising=False)
-
         with pytest.raises(SettingsError) as caught:
-            Settings(_env_file=None)
+            WithARequiredSibling(_env_file=None)
 
         message = str(caught.value)
-        assert "TELEGRAM_CHANNEL_ID" in message
-        assert "ADMIN_TELEGRAM_CHAT_ID" in message
+        assert "REQUIRED_SIBLING" in message
         assert "missing" in message
 
     def test_a_valid_load_still_works(self, monkeypatch):
@@ -182,14 +242,13 @@ class TestSettingsErrorCarriesNoValues:
         above except by raising ValidationError, and a wrapper that always
         raised would look equally 'safe'.
         """
-        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", SENTINEL)
-        monkeypatch.setenv("TELEGRAM_CHANNEL_ID", "-1001234567")
-        monkeypatch.setenv("ADMIN_TELEGRAM_CHAT_ID", "12345")
+        monkeypatch.setenv(SECRET_FIELD, SENTINEL)
+        monkeypatch.setenv("REQUIRED_SIBLING", "12345")
 
-        loaded = Settings(_env_file=None)
+        loaded = WithARequiredSibling(_env_file=None)
 
-        assert loaded.TELEGRAM_CHANNEL_ID == -1001234567
-        assert loaded.TELEGRAM_BOT_TOKEN == SENTINEL
+        assert loaded.REQUIRED_SIBLING == 12345
+        assert loaded.TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN == SENTINEL
 
 
 @pytest.mark.unit
@@ -214,8 +273,8 @@ class TestTheSourceLayerIsRedactedToo:
     That is strictly worse than the #775 defect this file was opened for, where
     pydantic's own ~22-character truncation at least limited the disclosure.
 
-    DORMANT FOR `Settings` AS DECLARED, and measured rather than assumed: 42
-    fields, zero complex-typed, zero aliases, no env_prefix. The trigger is a
+    DORMANT FOR `Settings` AS DECLARED, and measured rather than assumed: 29
+    fields, zero complex-typed, zero aliases, no env_prefix, none required. The trigger is a
     REQUIRED list/dict/nested-model field — an `Optional`-wrapped one degrades
     safely to the redacted ValidationError path, which the positive control
     below pins. So these tests reach the path through a SUBCLASS of the real
@@ -239,10 +298,7 @@ class TestTheSourceLayerIsRedactedToo:
         return OptionalProbe
 
     def _ambient(self, monkeypatch, probe_value):
-        """Satisfy the three genuinely required fields, then plant the sentinel."""
-        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "unused-by-this-test")
-        monkeypatch.setenv("TELEGRAM_CHANNEL_ID", "-1001234567")
-        monkeypatch.setenv("ADMIN_TELEGRAM_CHAT_ID", "12345")
+        """Plant the sentinel in the probe field (no other field is required)."""
         monkeypatch.setenv("PROBE_FIELD", probe_value)
 
     def test_a_required_complex_field_does_not_escape_the_boundary(self, monkeypatch):
@@ -439,12 +495,13 @@ class TestTheBoundaryHasNoUnenumeratedExit:
     """
 
     def _dotenv_with_bad_byte(self, tmp_path):
-        """A .env carrying three sentinels and one undecodable byte."""
+        """A .env carrying three sentinel-bearing secrets and one undecodable
+        byte."""
         path = tmp_path / ".env"
         path.write_bytes(
-            f"TELEGRAM_BOT_TOKEN={SENTINEL}\n".encode()
-            + "TELEGRAM_CHANNEL_ID=-100123\n".encode()
-            + "ADMIN_TELEGRAM_CHAT_ID=456\n".encode()
+            f"{SECRET_FIELD}={SENTINEL}\n".encode()
+            + f"ENCRYPTION_KEY={SENTINEL}\n".encode()
+            + f"CLOUDINARY_API_SECRET={SENTINEL}\n".encode()
             + b"DB_PASSWORD=pass\xe9word\n"
         )
         return path
@@ -513,12 +570,7 @@ class TestTheBoundaryHasNoUnenumeratedExit:
             def boom(self):
                 raise TypeError("a real programming error")
 
-        loaded = Broken(
-            _env_file=None,
-            TELEGRAM_BOT_TOKEN="x",
-            TELEGRAM_CHANNEL_ID=1,
-            ADMIN_TELEGRAM_CHAT_ID=1,
-        )
+        loaded = Broken(_env_file=None)
 
         with pytest.raises(TypeError, match="a real programming error"):
             loaded.boom
@@ -537,13 +589,13 @@ class TestWhySecretStrIsNotTheFix:
         fix is a boundary catch, and a future reader will otherwise try
         SecretStr again and believe it worked.
         """
-        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", SENTINEL)
-        monkeypatch.delenv("TELEGRAM_CHANNEL_ID", raising=False)
+        monkeypatch.setenv("PROBE_SECRET", SENTINEL)
+        monkeypatch.delenv("PROBE_REQUIRED", raising=False)
 
         class Probe(BaseSettings):
             model_config = SettingsConfigDict(case_sensitive=False, extra="ignore")
-            TELEGRAM_BOT_TOKEN: SecretStr
-            TELEGRAM_CHANNEL_ID: int
+            PROBE_SECRET: SecretStr
+            PROBE_REQUIRED: int
 
         with pytest.raises(ValidationError) as caught:
             Probe(_env_file=None)

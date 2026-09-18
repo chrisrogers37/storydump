@@ -17,7 +17,6 @@ import pathlib
 
 import importlib
 import json
-import os
 import subprocess
 import sys
 import textwrap
@@ -669,48 +668,42 @@ class TestTheDeployedLabelCannotOutliveItsOwnPremise:
             "clearing branch is unreachable and the label can only ever deny"
         )
 
-    def test_with_gate_facts_the_by_hand_instruction_becomes_the_gated_answer(
-        self, capsys
-    ):
-        """#942 gate: when the movement has a known, gated call site, sending
-        the reader hunting is the wrong instruction — the label names the gate
-        instead. The by-hand text remains the fallback for a movement the gate
-        contract cannot account for (asserted by the sibling test above, which
-        passes no gate)."""
-        tr._label_deployed(
-            {"worker": {"target_hits": ["x"]}, "web": {"target_hits": []}},
-            gate={
-                "var": "WORKER_IMPL",
-                "default": "legacy",
-                "armed_value": "target",
-                "this_run_selects": "legacy",
-            },
+    def test_the_moved_axis_names_its_call_site_and_the_other_half(self, capsys):
+        """The movement has ONE known call site — the dispatch in `src.main`,
+        unconditional — so sending the reader hunting for it is the wrong
+        instruction; the label names it, and narrates no switch (a caveat
+        about a variable nothing reads would outlive its premise, the failure
+        this class exists for). The serving half rides the SAME banner (rajan,
+        #1005 review): the operator acts on what THIS text says, not on a PR
+        body — so it says what is fatal (no database URL) and what merely
+        parks (no bot token)."""
+        out = self._render(
+            {"worker": {"target_hits": ["x"]}, "web": {"target_hits": []}}, capsys
         )
-        out = capsys.readouterr().out
         assert "THE CLEARING ENTRYPOINT HAS MOVED" in out
         assert "CANNOT confirm the blocker is cleared" in out
-        assert "WORKER_IMPL=target" in out
         assert "runs the target root UNCONDITIONALLY" in out
-        # The schema half rides the SAME banner (rajan, #1005 review): the
-        # operator arming this acts on what THIS text says, not on a PR body.
         assert "SERVING PRESUPPOSES" in out
         assert "target schema" in out
+        assert "TARGET_DATABASE_URL" in out
+        assert "parked" in out
         assert "by hand" not in out
+        assert "switch" not in out, "the label still narrates a retired switch"
 
 
 def _repo_root():
     return pathlib.Path(__file__).resolve().parents[2]
 
 
-class TestGateLabel:
+class TestTheMovedAxisLabel:
     """The moved number carries its bound in the same output that prints it.
 
     Full-instrument runs, because the claim under test is the composed one:
     the real measurement moves the worker axis AND the printed figure carries
-    the gate's terms, sourced from `src.worker_impl` — never restated. The
-    terms are asserted as LITERALS on purpose: they are the operator-facing
-    contract (`WORKER_IMPL=target` typed into a service dashboard), and a
-    silent respelling in the leaf must redden something.
+    the call site and the serving caveat. The gate axis the label once
+    carried (`worker_gate` in the JSON, a switch's terms in the text) retired
+    in the tear-out's phase 02, and its absence is pinned so a reader is never
+    told to type a variable nothing reads.
 
     The JSON test doubles as the instrument-level movement pin: non-empty
     `deployed.worker.target_hits` containing `work_loop` IS the deployed-axis
@@ -720,41 +713,31 @@ class TestGateLabel:
     """
 
     def _run(self, *flags):
-        env = {k: v for k, v in os.environ.items() if k != "WORKER_IMPL"}
         proc = subprocess.run(
             [sys.executable, "-m", "scripts.target_reachability", *flags],
             capture_output=True,
             text=True,
             cwd=_repo_root(),
-            env=env,
         )
         assert proc.returncode == 0, proc.stderr[-800:]
         return proc.stdout
 
-    def test_json_carries_the_gate_facts_and_the_movement(self):
+    def test_json_carries_the_movement_and_no_gate_axis(self):
         out = json.loads(self._run("--json"))
-        assert out["worker_gate"] == {
-            "var": "WORKER_IMPL",
-            "default": "legacy",
-            "armed_value": "target",
-            "this_run_selects": "legacy",
-        }
         hits = out["deployed"]["worker"]["target_hits"]
         assert hits, "the deployed worker entrypoint no longer reaches the tier"
         assert "src.services.target.work_loop" in hits
-
-    def test_text_labels_the_moved_axis_with_the_gate(self):
-        out = self._run()
-        assert "runs the target root UNCONDITIONALLY" in out
-        assert "WORKER_IMPL is still read, only to refuse" in out
-        assert "SERVING PRESUPPOSES" in out
-        assert "IMPORTABLE-NOT-SERVING" not in out, (
-            "the label still claims a gate the legacy tier's deletion removed"
+        assert "worker_gate" not in out, (
+            "the instrument still reports a switch the tear-out's phase 02 retired"
         )
 
-    def test_the_facts_are_silent_when_there_is_nothing_to_label(self):
-        """Zero worker hits (a pre-gate commit) must print exactly as before —
-        the instrument runs across history, and a banner that always fires is
-        one nobody reads."""
-        assert tr.worker_gate_facts({}) is None
-        assert tr.worker_gate_facts({"worker": {"target_hits": []}}) is None
+    def test_text_labels_the_moved_axis_without_a_switch(self):
+        out = self._run()
+        assert "runs the target root UNCONDITIONALLY" in out
+        assert "SERVING PRESUPPOSES" in out
+        assert "switch" not in out
+        # The OTHER branch's headline, spelled as the instrument prints it (a
+        # hyphenated spelling was asserted here once, and could never fail).
+        assert "IMPORTABLE, NOT SERVING" not in out, (
+            "the moved axis printed the not-moved branch's denial"
+        )

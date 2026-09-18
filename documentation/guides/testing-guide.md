@@ -54,11 +54,8 @@ DB_USER=postgres              # Must have CREATE DATABASE permission
 DB_PASSWORD=postgres
 TEST_DB_NAME=storydump_test  # The database to auto-create
 
-# Test values for required settings
-TELEGRAM_BOT_TOKEN=test_bot_token
-TELEGRAM_CHANNEL_ID=-100123456789
-ADMIN_TELEGRAM_CHAT_ID=123456789
-DRY_RUN_MODE=true
+# No setting is required (the tear-out, phase 02); the suite needs a Fernet key
+ENCRYPTION_KEY=<python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())">
 LOG_LEVEL=DEBUG
 ```
 

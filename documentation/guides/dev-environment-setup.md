@@ -42,13 +42,12 @@ cp .env.example .env
 brew install postgresql
 brew services start postgresql
 
-# Create database
-createdb storydump
-psql -d storydump -f scripts/setup_database.sql
-
-# Apply the migrations through the runner (never a psql loop): it keeps the
-# ledger `storydump doctor` compares the checkout against
-python -m scripts.migration_runner apply
+# Create the database and build the schema. `make init-db` applies step 0
+# (the seven cluster-wide svc_* roles, then the DDL door migration 050 calls),
+# the by-hand base, then every file through the runner (never a psql loop; it
+# keeps the ledger `storydump doctor` compares the checkout against). DB_USER
+# needs CREATEROLE. `setup_database.sql` alone stops the runner at migration 050.
+make create-db init-db
 ```
 
 **Option B: Connect to Neon (Shared Dev/Staging)**
@@ -57,16 +56,13 @@ python -m scripts.migration_runner apply
 # Connect directly using DATABASE_URL
 psql "$DATABASE_URL"
 
-# Or set individual vars in .env
-DB_HOST=ep-xxx.neon.tech
-DB_PORT=5432
-DB_NAME=storydump
-DB_USER=storydump_user
-DB_PASSWORD=neon_password
-DB_SSLMODE=require
-DB_POOL_SIZE=3
-DB_MAX_OVERFLOW=2
+# Point the API and the worker at it: the run-time variable (see .env.example)
+TARGET_DATABASE_URL=postgresql://user:pass@ep-xxx.neon.tech/storydump?sslmode=require
 ```
+
+The `DB_*` components do NOT point the app anywhere: they steer only the test
+harness and `make` — `make reset-db` included, which DROPS `DB_NAME` on
+`DB_HOST`. Never aim them at a shared database.
 
 ---
 
@@ -148,16 +144,16 @@ DB_NAME=storydump
 DB_USER=storydump_user
 DB_PASSWORD=your_local_password
 
-TELEGRAM_BOT_TOKEN=your_test_bot_token
-TELEGRAM_CHANNEL_ID=your_test_channel_id
-ADMIN_TELEGRAM_CHAT_ID=your_admin_chat_id
+# The runtime login (the API and the worker) and the owner login (the runner)
+TARGET_DATABASE_URL=postgresql://storydump_user:your_local_password@localhost:5432/storydump
+DATABASE_URL=postgresql://storydump_user:your_local_password@localhost:5432/storydump
 
-POSTS_PER_DAY=3
-POSTING_HOURS_START=14
-POSTING_HOURS_END=2
+# The bot the worker sends with (optional: without it the Telegram channel parks)
+TARGET_TELEGRAM_BOT_TOKEN=your_test_bot_token
+TARGET_TELEGRAM_BOT_USERNAME=your_test_bot
 
+ENCRYPTION_KEY=<a Fernet key>
 LOG_LEVEL=DEBUG
-DRY_RUN_MODE=true
 ```
 
 Production environment variables are stored in the Railway dashboard (never in files).

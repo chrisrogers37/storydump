@@ -369,6 +369,13 @@ API_URL = "https://api.storydump.app"
 RAILWAY_PROJECT_NAME = "storydump"
 RAILWAY_PROJECT_ID = "33d1ccca-353c-4236-8d39-0d8fd916f054"
 
+# --- the deployed roots' database --------------------------------------------------
+#: The one variable the worker and the API take their database from, read
+#: from the process environment at RUN time (`unit_of_work.engine_url_from_env`).
+#: Absent, the worker refuses to boot (exit 2) and the API answers 503 on every
+#: data route; the CLI's `webhook` verb names it when it reads that 503.
+DATABASE_URL_VAR = "TARGET_DATABASE_URL"
+
 # --- the Telegram webhook's spellings --------------------------------------------
 # One spelling of the deployment's names, shared by the API's startup
 # self-registration (`src/channels/telegram_webhook_registration.py`) and the

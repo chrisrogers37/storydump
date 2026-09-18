@@ -2,10 +2,11 @@
 
 `python -m src.worker` is the process the deployed `worker` entrypoint runs:
 `src.main` dispatches here unconditionally since the legacy tier's deletion
-(the tear-out, phase 01; #1216 — before it, only on `WORKER_IMPL=target`,
-#942, armed in production on 2026-08-24). It builds
-the engine, the per-lane claim connections, the clock election, the lease
-heartbeat and the injected seams, and dispatches over the `work_loop` registry.
+(the tear-out, phase 01; #1216 — before it, only once an operator had armed
+the target root, #942, in production on 2026-08-24; the switch itself retired
+in phase 02). It builds the engine, the per-lane claim connections, the clock
+election, the lease heartbeat and the injected seams, and dispatches over the
+`work_loop` registry.
 
 Composition is split from connection on purpose: :func:`compose` assembles the
 whole object graph without touching the network, so the graph's properties —
@@ -13,10 +14,11 @@ which kinds are live, that the clock's recurring set stays inside them, that
 the lease numbers agree — are unit-testable facts rather than deploy-time
 surprises. :func:`run` binds connections and supervises.
 
-Seam posture for the W1 slice (build-path `2026-08-21`): no transport (W2), no
-media_fetch (W5b), no provider poll (W5a) — their kinds PARK loudly rather
-than run against fakes. The transit store goes live iff `CLOUDINARY_*` is
-configured. `fn_clock_tick`'s account/credential/source legs are the door's
+Seam posture: a seam this process cannot build PARKS its kinds loudly rather
+than running them against a fake — no `TARGET_TELEGRAM_BOT_TOKEN` parks the
+sender, no `CLOUDINARY_*` trio parks the publish kind (the transit store goes
+live iff all three are set), a dead or wrong-bot token parks the channel at the
+startup probe. `fn_clock_tick`'s account/credential/source legs are the door's
 own; this process only chooses the recurring singletons it can actually run.
 """
 
@@ -31,6 +33,7 @@ from src.config.settings import settings
 import os
 import signal
 import socket
+import sys
 from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -792,17 +795,27 @@ def main() -> None:
         level=os.environ.get("WORKER_LOG_LEVEL", "INFO"),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    env = dict(os.environ)
+    url = unit_of_work.engine_url_from_env(env)
+    if url is None:
+        # No fallback: a root that ran against a database nobody named is the
+        # plausible-wrong-value casualty this refusal exists to prevent. By
+        # name, loudly — the API's data routes refuse the same absence (503).
+        print(
+            f"FATAL: {unit_of_work.DATABASE_URL_VAR} is unset. The worker runs the"
+            " target tier only and has no database to run it against; set"
+            f" {unit_of_work.DATABASE_URL_VAR} on this service. Refusing to boot.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
     # `05` numbers come from the dataclass defaults; the web origin is
     # deployment config, so it is read from settings at the composition root
     # rather than duplicated as a worker env var.
-    from src.config.settings import settings as _settings
-
-    env = dict(os.environ)
     config = WorkerConfig(
-        web_app_origin=_settings.web_app_origin,
+        web_app_origin=settings.web_app_origin,
         lane_concurrency=lane_concurrency_from_env(env),
     )
-    engine = unit_of_work.create_engine(unit_of_work.engine_url_from_env(env))
+    engine = unit_of_work.create_engine(url)
     transport = None
     token = env.get(reg.TOKEN_VAR)
     # The Drive read leg (#982). Armed unconditionally: it needs no env of its
