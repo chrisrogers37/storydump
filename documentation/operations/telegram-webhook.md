@@ -60,7 +60,7 @@ the taps Telegram has queued, so both are in `CLAUDE.md`'s safety block and an a
 first. For the first arming of a bot, with the same three variables exported:
 
 ```bash
-storydump webhook register --drop-pending
+storydump webhook register --drop-pending   # CLAUDE.md's safety block: the owner's decision
 ```
 
 `status` answers three questions and exits 4 if any check fails (64 for a missing variable):

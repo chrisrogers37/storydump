@@ -377,7 +377,9 @@ def _pattern(name: str) -> re.Pattern[str]:
     if name in _legacy_only_tables():
         return re.compile(rf"\b{name}\b", re.IGNORECASE)
     if name in _deleted_paths():
-        return re.compile(re.escape(name).replace("/", "[/.]"))
+        # no letter, digit, `_` or `-` may follow: `src/services/domain` is not
+        # a live `src/services/domain_events.py`
+        return re.compile(re.escape(name).replace("/", "[/.]") + r"(?![\w-])")
     return re.compile(rf"\b{name}\b")
 
 
@@ -457,20 +459,48 @@ def test_no_live_page_names_the_legacy_tier():
     )
 
 
-def test_every_legacy_name_exemption_is_exact():
-    """An exemption nothing uses any more goes; one whose page names the thing
-    MORE or FEWER times than when it was granted is read again."""
+def _exemption_errors(exempt: dict, root: Path) -> dict[str, str]:
+    """What is wrong with a set of exemptions, read against the pages under
+    `root`: a name that is no legacy name (nothing to exempt), a count below
+    one, a page that names the thing MORE or FEWER times than the exemption
+    was read for — or not at all, or is gone."""
+    known = set(_legacy_only_tables() + _deleted_paths() + _retired_variables())
     wrong = {}
-    for rel, names in LEGACY_NAME_EXEMPT.items():
-        page = ROOT / rel
+    for rel, names in exempt.items():
+        page = root / rel
         text = page.read_text() if page.exists() else ""
         for name, (count, _reason) in names.items():
-            found = len(_pattern(name).findall(text))
-            if found != count:
+            if name not in known:
+                wrong[f"{rel}: {name}"] = "not a legacy name — nothing to exempt"
+            elif count < 1:
+                wrong[f"{rel}: {name}"] = "an exemption is for at least one mention"
+            elif (found := len(_pattern(name).findall(text))) != count:
                 wrong[f"{rel}: {name}"] = (
                     f"exempted for {count} mention(s), found {found}"
                 )
+    return wrong
+
+
+def test_every_legacy_name_exemption_is_exact():
+    wrong = _exemption_errors(LEGACY_NAME_EXEMPT, ROOT)
     assert not wrong, f"exemptions to re-read (or remove): {wrong}"
+
+
+def test_an_exemption_is_read_again_when_its_page_or_its_claim_changes(tmp_path):
+    """The counted exemption in every direction, on a page of its own."""
+    (tmp_path / "p.md").write_text(
+        "`TELEGRAM_BOT_TOKEN` is the pager's; so is `TELEGRAM_BOT_TOKEN` here."
+    )
+
+    def errors(name, count, page="p.md"):
+        return _exemption_errors({page: {name: (count, "a reason")}}, tmp_path)
+
+    assert not errors("TELEGRAM_BOT_TOKEN", 2)
+    assert errors("TELEGRAM_BOT_TOKEN", 1), "one MORE mention than it was read for"
+    assert errors("TELEGRAM_BOT_TOKEN", 3), "one FEWER"
+    assert errors("TELEGRAM_BOT_TOKEN", 0), "an exemption for no mention at all"
+    assert errors("NOT_A_LEGACY_NAME", 1), "a name in no list exempts nothing"
+    assert errors("TELEGRAM_BOT_TOKEN", 2, page="gone.md"), "the page is gone"
 
 
 def test_the_names_both_tiers_use_are_not_legacy_names():
@@ -510,6 +540,10 @@ def test_the_pin_sees_a_planted_legacy_name(tmp_path):
     assert _legacy_names_in("the module `src.config.database`") == {
         "src/config/database"
     }
+    assert not _legacy_names_in(
+        "a live module may share a deleted package's letters:"
+        " `src/services/domain_events.py`, `src.repositories_v2`."
+    )
     assert not _legacy_names_in(
         "`media_items` and `users` are target tables;"
         " `workspaces.dry_run_mode` is a live column;"

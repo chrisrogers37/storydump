@@ -9,18 +9,17 @@ Storydump production Postgres is **Neon, reached through Railway service
 variables** — not through any file in the repo. `.env` is empty; nothing is in
 the shell environment.
 
-## Working recipe (verified 2026-09-11 22:04 UTC)
+## Working recipe
 
-```
-railway run --service storydump -- sh -c 'psql "$TARGET_DATABASE_URL" -v ON_ERROR_STOP=0 -f "$0"' /abs/path/to.sql
-```
-
-The repository's canonical form of this command lives in
-`documentation/operations/reading-the-ledger.md` › *The escape hatch*: it names
-`--service worker --environment production` and pipes the output through a
-redaction. Both services carry `TARGET_DATABASE_URL` (measured 2026-09-18), so
-either spelling reaches the same database; prefer the canonical one in anything
-written down.
+The command has ONE home — `documentation/operations/reading-the-ledger.md` › *The
+escape hatch* — so it cannot drift between pages: `railway run` against the `worker`
+service in the `production` environment, `sh -c 'psql "$TARGET_DATABASE_URL" …'` reading a
+file of SELECTs on stdin (give the file by absolute path: `< /abs/path/to.sql`), the output
+through a redaction. That form ran every read-only probe of the legacy tear-out on
+2026-09-17 and 2026-09-18. (This page's first recipe, verified 2026-09-11, named
+`--service storydump` with `-f "$0"`; both services carry `TARGET_DATABASE_URL`, so it
+reached the same database — the canonical spelling replaced it here so that one is
+written down.)
 
 Two gotchas, both of which fail in ways that look like something else:
 
