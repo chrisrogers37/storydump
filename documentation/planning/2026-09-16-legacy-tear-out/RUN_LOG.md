@@ -58,7 +58,7 @@ API service skipped the two kickoff commits — see the gate above).
 | Phase | Doc | Status | PR | CI |
 |---|---|---|---|---|
 | 01 delete the legacy code and its tests | `01_delete-the-code.md` | in progress (branch `tear-out/01-delete-the-code`) | — | — |
-| 02 retire the settings, the entry point and the config | `02_settings-and-entry-points.md` | pending | — | — |
+| 02 retire the settings, the entry point and the config | `02_settings-and-entry-points.md` | in progress (branch `tear-out/02-settings-and-entry-points`; lenses dispatched on `177025b`) | #1319 (draft) | green at `177025b` (3665 passed, 1 skipped) |
 | 03 the 3f snapshot migration and the ratchet's file rule | `03_snapshot-migrations.md` | pending | — | — |
 | 04 the gated drop and stand-down | `04_drop-and-stand-down.md` | pending (owner-gated window) | — | — |
 | 05 the documentation's end state | `05_docs-end-state.md` | pending | — | — |
@@ -216,6 +216,106 @@ The checklist line "`grep … src.services.core … → 0 lines`" is unmet BY DE
 say "deleted in #1216", the ratchet's `CORE_SEGMENT` constant and its planted fixtures name the
 directory, and the guard lists the prefixes — the checklist is ticked with that note.
 
+## Phase 02 — retire the settings, the entry point and the config
+
+**Measured before deleting** (worktree at `deb29c2`, 2026-09-17; `grep -rnE '\bNAME\b' src scripts
+storydump_cli` excluding the settings module, plus `self.NAME` inside it):
+
+| Field | Readers in the tree | In the module | Disposition |
+|---|---|---|---|
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHANNEL_ID`, `ADMIN_TELEGRAM_CHAT_ID` | 0 | 0 | deleted (required by the deleted tier; #1222) |
+| `TELEGRAM_MAX_CONCURRENT_UPDATES`, `TELEGRAM_RATE_LIMITER_ENABLED`, `TELEGRAM_RATE_LIMITER_MAX_RETRIES` | 0 | 0 | deleted (PTB knobs; PTB went in phase 01) |
+| `MEDIA_DIR`, `BACKUP_DIR`, `BACKUP_RETENTION_DAYS` | 0 | 0 | deleted |
+| `FACEBOOK_APP_ID`, `GOOGLE_REFRESH_TOKEN_TTL_DAYS` | 0 | 0 | deleted |
+| `CLOUD_STORAGE_PROVIDER`, `CLOUD_UPLOAD_RETENTION_HOURS`, `CLOUD_UPLOAD_TIMEOUT_SECONDS` | 0 | 0 | deleted |
+| `INSTAGRAM_PUBLISH_LIMIT_FALLBACK`, `MEDIA_SYNC_INTERVAL_SECONDS`, `ANTHROPIC_API_KEY`, `CAPTION_MODEL` | 0 | 0 | deleted |
+| `META_GRAPH_API_VERSION` | 0 | 2 (the two `meta_*_graph_base` properties, 0 callers) | deleted with the properties |
+| `DB_SSLMODE` | 0 | 4 (`database_url`, `test_database_url`: 6 and 1 callers) | kept |
+| the other 28 | 1–10 each | — | kept |
+
+48 fields → 29, none required. The rule is a test (`test_every_surviving_field_has_a_reader`), not this table.
+Environment reads OUTSIDE `Settings`, measured the same day and pinned by equality
+(`ENV_READ_OUTSIDE_SETTINGS`, 28 names): the two database logins, the bot and its webhook (7),
+the worker's knobs (4), `PORT`/`WEB_CONCURRENCY`, the Cloudinary trio and `META_GRAPH_VERSION`, Resend's
+two, Railway's three, the CLI's four. `WORKER_IMPL` was the twenty-ninth and went with its module.
+
+**Red first** (`tests/src/test_legacy_settings_gone.py` on `deb29c2`): 42 tests, 34 failed — every
+retired field, the required set, the entrypoint import with no `TELEGRAM_*` variable, the switch, the
+worker's refusal, the engine's fallback, every setter. Green at `177025b`.
+
+**Built** (`177025b`): the 19 deletions; `src/main.py` reduced to the dispatch (the `WORKER_IMPL` read,
+`src/worker_impl.py` and the instrument's gate axis — `worker_gate_facts`, the `gate` parameter, the
+`worker_gate` JSON key — deleted; `tests/src/test_worker_impl_gate.py` → `test_worker_entrypoint.py`);
+`src/worker.py` refuses without `TARGET_DATABASE_URL` (exit 2, naming `unit_of_work.DATABASE_URL_VAR`)
+and `create_engine` requires a URL (`async_database_url` survives as the harness's door); `.env.example`
+rewritten (every `NAME=` line a field or a measured read; grouped by service; the CLI's four included);
+the Makefile (`install` → `.[cli]`; `install-dev` → ruff/bandit/pip-audit, the tools CI runs — there was
+never a `dev` extra; `init-db` → the by-hand base then the runner, the lane's own sequence; `dev` without
+the production health gate; `validate-env` → `from src.config.settings import settings`); the three
+variables plus `DRY_RUN_MODE` and `MEDIA_DIR` out of `ci.yml` and `schema-drift.yml`; the eight recipe
+lines of five batteries; `AGENTS.md` §Setup (and its stale `/api/onboarding/*` paragraph — the route is
+retired); the README's configuration list and `make init-db`; the four guides' env blocks and the CI
+guide's line; `tests/scripts/test_no_implicit_admin_fallback.py` retired; the redaction tests on a
+subclass with one required sibling and `TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN` as the sentinel field.
+
+**Class sweep — "a setter names a dead variable"** (`grep -rnE '^\s*#?\s*(WORKER_IMPL|TELEGRAM_BOT_TOKEN|
+TELEGRAM_CHANNEL_ID|ADMIN_TELEGRAM_CHAT_ID|MEDIA_DIR)\s*[=:]'` over `documentation README.md AGENTS.md
+CLAUDE.md .claude .github Makefile .env.example`, excluding `planning/` and `archive/`): 14 hits in three
+guides + the 6 workflow lines + `.env.example` + the 8 recipe lines — all fixed. Prose mentions
+(`cloud-deployment.md`'s table and troubleshooting row, `ci-cd-pipeline.md`'s list, `README.md`'s
+list) fixed too. Left for phase 05, by the plan's rule ("only the lines that set the dead variables"):
+prose in `monitoring.md`, `troubleshooting.md`, `posting-monitor.md`, `telegram-webhook.md`,
+`SECURITY_REVIEW.md`. `landing-vercel-deployment.md` names the landing app's OWN `TELEGRAM_BOT_TOKEN` /
+`ADMIN_TELEGRAM_CHAT_ID` (read from Vercel by `landing/src/lib/telegram.ts`) — a different consumer,
+correct as it stands.
+
+**Premise findings:**
+
+- The plan's `.env.example` allowlist ("`WORKER_LOG_LEVEL`, `PORT`, `DATABASE_URL`") was three names
+  short of the tree by twenty-five: the target tier reads 28 variables outside `Settings`. Measured
+  and pinned rather than allowlisted by hand.
+- The redaction tests' specimen was blind in CI BEFORE this phase: pydantic truncates a `missing`
+  error's `input_value` (the raw input dict) keeping its head and tail, so a sentinel in a field that
+  sits between two declared fields the environment sets (`DB_PORT`, `ENCRYPTION_KEY`, `LOG_LEVEL` in
+  CI) is cut out of the repr, and the leak assertions pass against a boundary that redacts nothing.
+  Found by the battery (the mutation `error = str(exc)` survived); closed in the fold by a fixture that
+  strips every declared field from the environment but the secret, and a premise test on the raw path.
+- A required field back in `Settings` kills at COLLECTION (`settings = Settings()` at module scope
+  refuses to import with no variable set) — the battery names that verdict rather than "error".
+- `install-dev` named a `dev` extra that never existed; `validate-env` called a `get_settings` that
+  never existed (the plan's evidence, confirmed).
+
+**Verification** (2026-09-18, the worktree at `177025b`, NO Telegram variable and no `WORKER_IMPL` in
+any run):
+
+- Units without a database (sandbox off, `tests --ignore=tests/scripts`, the two loopback tests
+  deselected): `2216 passed, 26 skipped`. (`tests/scripts`' fixtures error rather than skip without a
+  database — pre-existing; the gates run covers them.)
+- The whole suite against the Docker test database: `3626 passed, 1 skipped`.
+- CI on `177025b`: every check green; `3665 passed, 1 skipped, 5 deselected`.
+- `ruff format --check .` and `ruff check .` clean. `grep -rn WORKER_IMPL src scripts storydump_cli` → 0.
+- Battery `tests/mutations/legacy_tear_out_02.sh` on the committed tree `177025b`: 22 mutations —
+  15 killed, 2 killed at collection (the required-field ones, reclassified as above), 3 survived and
+  1 not applied, all four the battery's own defects: the refusal-message mutation left the variable
+  name in the message's second interpolation (mutation widened); the `.env.example` anchor
+  `LOG_LEVEL=INFO` matched twice (anchor moved); the redaction mutation survived through the
+  truncation blindness above (the tests fixed, not the mutation); removing the `ValidationError` arm
+  is EQUIVALENT for the leak property (the tail rung `except ValueError` catches pydantic's
+  `ValidationError`, a `ValueError`) — what it loses is the field NAME, so the field-name test is
+  the checker now. Re-run of the five: all killed; the whole battery re-runs on the fold commit.
+- The instrument: `python -m scripts.target_reachability` — the worker axis still reaches the tier
+  (`work_loop` in the closure), the JSON carries no `worker_gate`, the text names the dispatch and
+  "no environment switch".
+
+**Deploy reachability:** Railway deploys `main` on merge; the worker takes it (SUCCESS at every commit
+since the cutover). The API service (`storydump`) has SKIPPED every deploy since `d8f5c72`
+(2026-09-16): `53ca6d6`, `4f2b36b`, `2369a9b`, `deb29c2` — each behind a red `main` check at deploy
+time; `main`'s re-run going green did NOT trigger a redeploy (checked 2026-09-18 00:5x UTC with
+`storydump deploys`). This phase's merge is the next chance, provided `main`'s check is green at that
+moment; otherwise the owner's `railway redeploy --service storydump`. Until an API deploy lands, the
+API-side changes of five merges are not live — the fold's API fixes, phase 01's deletion, this phase's
+settings.
+
 ## Owner-decision queue
 
 - **The API service's skipped deploys.** Railway marked `53ca6d6` and `4f2b36b` `SKIPPED` on the `storydump` (API) service while the worker deployed; the fold's API-side fixes (`ops_views.py`, the doctor/health paths) are not live until an API deploy lands. Phase 01's merge triggers one; sooner, by hand: `railway redeploy --service storydump`. Not run by the agent.
@@ -229,4 +329,8 @@ directory, and the guard lists the prefixes — the checklist is ticked with tha
   `make run`) and the Makefile's `run`/`dev`/`init-db` describe the legacy tier (phase 02).
   `railway.toml`'s `drainingSeconds` rationale (Telegram polling) is stale (F2 forbids touching
   it here; phase 02). Eight requirements with zero importers (the table above).
+- **After phase 02 deploys (owner-run):** remove `WORKER_IMPL`, `TELEGRAM_BOT_TOKEN`,
+  `TELEGRAM_CHANNEL_ID` and `ADMIN_TELEGRAM_CHAT_ID` from BOTH Railway services (nothing reads them; the
+  landing app's own two on Vercel stay); replace `.claude/settings.json:54-59`'s four `storydump-cli`
+  deny rules (commands that no longer exist) — the `python -m src.main` rules stay.
 - The tear-out's own gates as they arise (phase 03's probe lines and the 078 rehearsal; phase 04's window).

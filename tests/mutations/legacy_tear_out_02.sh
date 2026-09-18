@@ -42,6 +42,27 @@ PY
   cd "$ROOT" && git checkout -- "$file"
 }
 
+collect() {  # like check, but the expected kill is a refusal to import the mutated module at collection
+  local name=$1 file=$2 old=$3 new=$4 runner=$5 sel=$6
+  if [ -n "${ONLY:-}" ] && ! [[ "$name" =~ $ONLY ]]; then return; fi
+  OLD="$old" NEW="$new" $PY - "$file" <<'PY'
+import os, sys, pathlib
+p = pathlib.Path(sys.argv[1]); s = p.read_text(); old = os.environ["OLD"]; new = os.environ["NEW"]
+if s.count(old) != 1:
+    print(f"MUTATION NOT APPLIED ({s.count(old)} matches)"); sys.exit(3)
+p.write_text(s.replace(old, new, 1))
+PY
+  if [ $? -ne 0 ]; then echo "MUTATION NOT APPLIED: $name"; git checkout -- "$file"; return; fi
+  rm -rf "$(dirname "$file")/__pycache__"
+  eval "$runner $sel" > /tmp/claude/mut.log 2>&1; local rc=$?
+  # pytest prints neither a verdict nor a `===` summary when the module refuses to import: the log
+  # ends at the SettingsError traceback, and that (with no test outcome at all) is the kill.
+  if [ $rc -ne 0 ] && grep -q "settings failed to load" /tmp/claude/mut.log && ! grep -qE '^=+ .*(passed|failed)' /tmp/claude/mut.log; then
+    echo "killed (at collection: the settings module refuses to import): $name"
+  else verdict "$name" $rc; fi
+  cd "$ROOT" && git checkout -- "$file"
+}
+
 plant() {  # name new-file content runner test-selector — a file that must NOT exist, re-created
   local name=$1 file=$2 content=$3 runner=$4 sel=$5
   if [ -n "${ONLY:-}" ] && ! [[ "$name" =~ $ONLY ]]; then return; fi
@@ -67,7 +88,10 @@ ECHO=tests/src/config/test_settings_never_echo_values.py
 TREACH=tests/scripts/test_target_reachability.py
 
 # --- the fields ------------------------------------------------------------------------------
-check "a required legacy field cannot come back" $SETTINGS '    # Security: the Fernet key(s) the stored credentials are encrypted with.' '    TELEGRAM_BOT_TOKEN: str
+# A required field back in `Settings` kills at COLLECTION — `settings = Settings()` at module scope
+# refuses to import with no variable set, which is the phase's claim seen from the other side; the
+# verdict names it so (pytest prints no `===` summary for an interrupted collection).
+collect "a required legacy field cannot come back" $SETTINGS '    # Security: the Fernet key(s) the stored credentials are encrypted with.' '    TELEGRAM_BOT_TOKEN: str
     # Security: the Fernet key(s) the stored credentials are encrypted with.' "$UNIT" "$GUARD -k 'no_field_is_required or retired_field_is_gone'"
 check "a field nothing reads cannot come back" $SETTINGS '    # Logging
     LOG_LEVEL: str = "INFO"' '    # Logging
@@ -77,7 +101,7 @@ check "a NEW field nothing reads is refused too (the rule, not the list)" $SETTI
     LOG_LEVEL: str = "INFO"' '    # Logging
     LOG_LEVEL: str = "INFO"
     SOMETHING_NOBODY_READS: int = 1' "$UNIT" "$GUARD -k surviving_field_has_a_reader"
-check "settings construct with no legacy variable" $SETTINGS '    ENCRYPTION_KEY: Optional[str] = None  # Fernet key for encrypting tokens in DB' '    ENCRYPTION_KEY: Optional[str] = None  # Fernet key for encrypting tokens in DB
+collect "settings construct with no legacy variable" $SETTINGS '    ENCRYPTION_KEY: Optional[str] = None  # Fernet key for encrypting tokens in DB' '    ENCRYPTION_KEY: Optional[str] = None  # Fernet key for encrypting tokens in DB
     ADMIN_TELEGRAM_CHAT_ID: int' "$UNIT" "$GUARD -k settings_construct_with_no_legacy_variable"
 
 # --- the entrypoint and the switch -------------------------------------------------------------
@@ -98,7 +122,11 @@ plant "the contract module cannot come back" src/worker_impl.py 'WORKER_IMPL_VAR
 check "the worker refuses to boot without its database URL" $WORKER '    if url is None:
         # The settings-built fallback' '    if False:
         # The settings-built fallback' "$UNIT" "$GUARD -k worker_refuses_to_boot_without_its_database_url"
-check "the refusal names the variable" $WORKER '            f"FATAL: {unit_of_work.DATABASE_URL_VAR} is unset. The worker runs the"' '            f"FATAL: the database URL is unset. The worker runs the"' "$UNIT" "$GUARD -k worker_refuses_to_boot_without_its_database_url"
+check "the refusal names the variable" $WORKER '            f"FATAL: {unit_of_work.DATABASE_URL_VAR} is unset. The worker runs the"
+            " target tier only and has no database to run it against; set"
+            f" {unit_of_work.DATABASE_URL_VAR} on this service. Refusing to boot.",' '            "FATAL: the database URL is unset. The worker runs the"
+            " target tier only and has no database to run it against; set"
+            " it on this service. Refusing to boot.",' "$UNIT" "$GUARD -k worker_refuses_to_boot_without_its_database_url"
 check "create_engine takes no settings-built fallback" $UOW '    if not url:
         raise ValueError(' '    if url is None and False:
         raise ValueError(' "$UNIT" "$GUARD -k create_engine_takes_no_settings_built_fallback"
@@ -111,7 +139,7 @@ check "the label names the call site, not a hunt" $REACH '            "  legacy 
             "\n"' "$UNIT" "$TREACH -k moved_axis_names_its_call_site"
 
 # --- the surfaces that set variables ---------------------------------------------------------
-check ".env.example may not name a variable nothing reads" $ENVX 'LOG_LEVEL=INFO' 'LOG_LEVEL=INFO
+check ".env.example may not name a variable nothing reads" $ENVX '# ENCRYPTION_KEYS=' '# ENCRYPTION_KEYS=
 DRY_RUN_MODE=false' "$UNIT" "$GUARD -k env_example_names_only_variables_the_tree_reads"
 check ".env.example must name the target tier's own variables" $ENVX 'TARGET_DATABASE_URL=postgresql://storydump_user@localhost:5432/storydump' '# (the runtime login)' "$UNIT" "$GUARD -k target_tiers_own_variables_are_documented"
 check "the pinned environment set sees a new run-time read" $WORKER 'USAGE_PRECHECK_ENV = "TARGET_USAGE_PRECHECK_ENABLED"' 'USAGE_PRECHECK_ENV = "TARGET_USAGE_PRECHECK_ENABLED"
@@ -126,6 +154,10 @@ check "make install installs the CLI extra" $MAKEFILE "	pip install -e '.[cli]'"
 check "the boundary still redacts on the new specimen (the value never reaches the error)" $SETTINGS '        except ValidationError as exc:
             error = _redact(exc)' '        except ValidationError as exc:
             error = str(exc)' "$UNIT" "$ECHO -k missing_required_field_does_not_echo_a_sibling_value"
-check "the boundary still catches the validation exit" $SETTINGS '        except ValidationError as exc:
+# Without the ValidationError arm the TAIL rung (`except ValueError`) still catches it — pydantic's
+# ValidationError is a ValueError — so no value leaks and the leak test cannot see the arm go; what
+# goes is the FIELD NAME in the message (the opaque rung names only the class), and that is the
+# test that sees it.
+check "the boundary still catches the validation exit by name (the tail rung would swallow the field)" $SETTINGS '        except ValidationError as exc:
             error = _redact(exc)
-' '' "$UNIT" "$ECHO -k missing_required_field_does_not_echo_a_sibling_value"
+' '' "$UNIT" "$ECHO -k field_names_survive_so_the_error_is_still_actionable"

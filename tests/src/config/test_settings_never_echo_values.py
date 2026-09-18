@@ -119,20 +119,64 @@ class WithARequiredSibling(Settings):
     REQUIRED_SIBLING: int
 
 
+@pytest.fixture
+def only_the_secret_in_the_environment(monkeypatch):
+    """The secret is the ONLY declared field the environment holds.
+
+    WHY THIS IS LOAD-BEARING, measured while building the tear-out's phase
+    02: pydantic truncates a `missing` error's ``input_value`` — the raw input
+    dict — by keeping its HEAD and its TAIL. A sentinel planted in a field
+    that sits between two other declared fields the environment happens to
+    set (CI sets ``ENCRYPTION_KEY``, ``DB_PORT`` and ``LOG_LEVEL``) is cut out
+    of the repr entirely, and every leak assertion below passes against a
+    boundary that redacts nothing: the mutation ``error = str(exc)`` survived
+    the battery. The original specimen (the legacy bot token) had the same
+    blind spot in CI. So the environment is stripped of every declared field
+    first, and the premise — that the raw error DOES carry the value under
+    exactly this environment — is pinned by
+    ``test_the_raw_error_really_does_carry_the_value_in_this_shape``.
+    """
+    for name in list(WithARequiredSibling.model_fields):
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(name.lower(), raising=False)
+    monkeypatch.setenv(SECRET_FIELD, SENTINEL)
+    monkeypatch.delenv("REQUIRED_SIBLING", raising=False)
+
+
 @pytest.mark.unit
 class TestSettingsErrorCarriesNoValues:
     """A failed Settings load names fields; it never quotes their contents."""
 
-    def test_missing_required_field_does_not_echo_a_sibling_value(self, monkeypatch):
+    def test_the_raw_error_really_does_carry_the_value_in_this_shape(
+        self, only_the_secret_in_the_environment
+    ):
+        """THE PREMISE, so the tests below cannot quietly become vacuous.
+
+        The boundary is bypassed — `BaseSettings.__init__` on an instance of
+        the same subclass, under the same environment — and the value must
+        STILL reach the rendered error. If this fails, the threat model
+        changed (or the environment fixture no longer leaves the secret where
+        the truncation shows it), and every leak assertion below is guarding
+        nothing.
+        """
+        probe = WithARequiredSibling.__new__(WithARequiredSibling)
+        with pytest.raises(ValidationError) as caught:
+            BaseSettings.__init__(probe, _env_file=None)
+
+        assert longest_leaked_run(_render(caught.value)) >= MIN_LEAK_RUN, (
+            "the raw validation error no longer carries the input, so the"
+            " leak assertions below are no longer proving anything"
+        )
+
+    def test_missing_required_field_does_not_echo_a_sibling_value(
+        self, only_the_secret_in_the_environment
+    ):
         """The exact #775 shape: a secret present, a sibling required field
         absent.
 
         Before the fix this raised ValidationError whose input_value held a
         truncated copy of the secret.
         """
-        monkeypatch.setenv(SECRET_FIELD, SENTINEL)
-        monkeypatch.delenv("REQUIRED_SIBLING", raising=False)
-
         with pytest.raises(SettingsError) as caught:
             WithARequiredSibling(_env_file=None)
 
@@ -154,7 +198,9 @@ class TestSettingsErrorCarriesNoValues:
         leaked = longest_leaked_run(_render(caught.value))
         assert leaked == 0, f"{leaked} sentinel characters reached the error"
 
-    def test_the_original_error_is_not_chained(self, monkeypatch):
+    def test_the_original_error_is_not_chained(
+        self, only_the_secret_in_the_environment
+    ):
         """`raise ... from exc` would re-expose the value in the traceback.
 
         Python prints __cause__ and __context__ for an uncaught exception, so
@@ -162,9 +208,6 @@ class TestSettingsErrorCarriesNoValues:
         under "The above exception was the direct cause" — a redaction that
         redacts nothing. This is the single most likely way to regress the fix.
         """
-        monkeypatch.setenv(SECRET_FIELD, SENTINEL)
-        monkeypatch.delenv("REQUIRED_SIBLING", raising=False)
-
         with pytest.raises(SettingsError) as caught:
             WithARequiredSibling(_env_file=None)
 
@@ -173,16 +216,15 @@ class TestSettingsErrorCarriesNoValues:
             caught.value.__context__, ValidationError
         )
 
-    def test_field_names_survive_so_the_error_is_still_actionable(self, monkeypatch):
+    def test_field_names_survive_so_the_error_is_still_actionable(
+        self, only_the_secret_in_the_environment
+    ):
         """Redaction must not cost diagnosability.
 
         The point is to drop values, not to make a startup failure unreadable —
         an error that says only "settings failed" sends someone to add a print
         statement, which is how the value gets echoed again.
         """
-        monkeypatch.setenv(SECRET_FIELD, SENTINEL)
-        monkeypatch.delenv("REQUIRED_SIBLING", raising=False)
-
         with pytest.raises(SettingsError) as caught:
             WithARequiredSibling(_env_file=None)
 
