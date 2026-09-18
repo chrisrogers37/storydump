@@ -52,6 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The suite's skip ceiling no longer trips at midnight.** `test_a_local_cap_wait_on_a_slot_today_promises_tomorrow` skipped whenever the account's local clock read 23:55–23:59, and the ceiling (the measured baseline) then failed every CI run that started in that window — three merges of the legacy tear-out landed in it, and Railway skipped the API service's deploys behind the red check while the worker deployed. The test now gives its account the `Etc/GMT±N` zone where it is noon right now; nothing skips.
 - **`storydump burst` no longer fails on a float wait.** The `float_wait` section cast the wait's `seconds` to int, but the ladder writes a float (`60.0`), and Postgres refuses `'60.0'::int` — every window holding a float wait answered 500 (the CLI's exit 4). Through numeric now; the gate seeds the float the pipeline writes.
 - **`storydump jobs` sees a failed retry of an old job.** The window was on `created_at`, and `reschedule_job` reuses a job's row across retries — a long-floating story's retry that died today was outside today's window. The window is on `updated_at` (the row's last change) for the finished states.
 - **`storydump doctor` no longer blames the token for a degraded API.** `except ApiError` shadowed `except Unreachable` (its subclass): a 503 on `/me/principal` read as "the API refuses this token", with a mint-a-token fix and exit 3. The token is `skipped`, the API is `wrong`, exit 4.

@@ -2373,16 +2373,29 @@ class TestTheFirstFetch:
         tomorrow", without a time the clock has not chosen yet."""
         from zoneinfo import ZoneInfo
 
-        tz = _exec(
+        # The account's LOCAL day must not end inside the slot's two-minute
+        # margin, or "later today" is tomorrow. This test used to SKIP at
+        # 23:55–23:59 local — and the suite's skip ceiling (`MAX_EXPECTED_SKIPS`,
+        # the measured baseline) then failed every CI run that started in that
+        # window: three merges of the legacy tear-out landed in it and Railway
+        # skipped the API's deploys behind the red check. So the account is
+        # given a zone where it is noon right now (`Etc/GMT±N` is IANA's
+        # fixed-offset family, sign inverted: `Etc/GMT-5` is UTC+5) — the
+        # cap's day is the account's day, whatever the wall clock says here.
+        utc_now = datetime.now(timezone.utc)
+        offset = 12 - utc_now.hour  # -11 … 12
+        tz = (
+            "Etc/GMT"
+            if offset == 0
+            else f"Etc/GMT{'-' if offset > 0 else '+'}{abs(offset)}"
+        )
+        _exec(
             pipe_db,
-            "SELECT COALESCE(a.tz, w.tz) FROM ig_accounts a"
-            " JOIN workspaces w ON w.id = a.workspace_id WHERE a.id = %s",
-            (pipe_db["iga"],),
-            fetch=True,
-        )[0][0]
-        local_now = datetime.now(ZoneInfo(tz or "UTC"))
-        if local_now.hour == 23 and local_now.minute >= 55:
-            pytest.skip("the local day ends inside the slot's margin")
+            "UPDATE ig_accounts SET tz = %s WHERE id = %s",
+            (tz, pipe_db["iga"]),
+        )
+        local_now = utc_now.astimezone(ZoneInfo(tz))
+        assert local_now.hour == 12, (tz, local_now)
         slot = local_now + timedelta(minutes=2)
         _exec(
             pipe_db,
