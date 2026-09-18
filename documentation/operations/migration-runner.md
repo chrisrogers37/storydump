@@ -7,7 +7,8 @@ Standalone: stdlib + psycopg2, zero `src` imports, addressed by
 ## Commands
 
 ```bash
-python -m scripts.migration_runner apply      # apply every pending migration
+python -m scripts.migration_runner apply      # apply every pending migration (a runner:manual file is owed, not applied)
+python -m scripts.migration_runner apply --manual N   # apply ONE gated file by version — the operator's door (NEVER-run for agents)
 python -m scripts.migration_runner adopt      # enter a pre-ledger DB into the ledger
 python -m scripts.migration_runner status     # read-only ledger vs tree report
 python -m scripts.migration_runner repair --version N --reason "…"
@@ -48,6 +49,17 @@ with the new checksum).
   (a snapshot of `legacy` into `archive`, a drop, a stand-down): applied like
   any other, but left out of the F.2 prefix ratchet that diffs the lineage
   against the plan's stream (078 was the first; the tear-out, phase 03).
+- `-- runner:manual` — a file the deploy must never run by itself (the legacy
+  tear-out, phase 04; fork F6: 079 drops `legacy`, 080 stands the window
+  down). `apply` skips it where it stands and prints `owed (manual) NNN`, exit
+  0 — a deploy is never failed by a file that waits for an operator; `status`
+  lists it the same way. It is EXEMPT from the below-head rule in both doors:
+  ordinary files numbered above it keep applying, and `apply --manual NNN`
+  applies it below the head, by name, exactly like any file — the advisory
+  lock, the integrity check, one transaction with its postconditions and its
+  ledger row. `--manual` refuses a version without the directive, a version
+  not in the tree, and a version already recorded (a gated file runs once).
+  The operator's sequence is `documentation/operations/legacy-window-close.md`.
 - Any other `-- runner:<word>` — a hard failure at discovery, naming the file.
   Every door (`apply`, `adopt`, `status`, `parity`) and the test suite's
   collection refuse the corpus until it is fixed: a misspelt marker (a stray

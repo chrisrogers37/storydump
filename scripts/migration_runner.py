@@ -82,6 +82,11 @@ SCHEMA_MOVE_MARKER = "-- runner:schema-move"
 #: the lineage it diffs against the stream; the runner applies it like any other
 #: (the legacy tear-out, phase 03 — the 3f snapshots were the first such file).
 UNADVERTISED_MARKER = "-- runner:unadvertised"
+#: A file the deploy must never run by itself (the legacy tear-out, phase
+#: 04; fork F6): `apply` skips it where it stands and reports it as OWED,
+#: exit 0; `apply --manual <version>` applies it by name, below the head
+#: if need be, exactly like any file — ledger row, postconditions, lock.
+MANUAL_MARKER = "-- runner:manual"
 
 #: Every `-- runner:<word>` the runner knows. A line that looks like a marker
 #: and is not one of these is a HARD FAILURE at discovery: a misspelt marker
@@ -93,6 +98,7 @@ KNOWN_MARKERS = (
     REAPPLY_SAFE_MARKER,
     SCHEMA_MOVE_MARKER,
     UNADVERTISED_MARKER,
+    MANUAL_MARKER,
 )
 #: The marker grammar, matched ONCE per line and case-insensitively on the
 #: `runner` word so that `-- Runner:manual`, `--runner:manual` and
@@ -133,6 +139,7 @@ class Migration:
     execution_mode: str  # wrapped | self-managed | no-transaction
     schema_move: bool
     unadvertised: bool
+    manual: bool
 
     @property
     def label(self) -> str:
@@ -142,6 +149,8 @@ class Migration:
 @dataclass
 class ApplyReport:
     applied: list = field(default_factory=list)
+    #: `runner:manual` files the run left where they stand, for an operator
+    owed: list = field(default_factory=list)
 
 
 def _parse_markers(text: str):
@@ -151,16 +160,17 @@ def _parse_markers(text: str):
     looked up by its word in the known set and refused otherwise — a misspelt
     word, a stray space after the colon, a capital R — because the failure
     mode of a marker that quietly reads as prose is a file the next deploy
-    applies. A flag marker takes no argument; the postcondition marker takes
-    the SQL that follows it and refuses to be bare. Raises
-    ``MigrationRunnerError`` naming the offending line; ``discover_migrations``
-    adds the file.
+    applies (for a `manual` file, the whole hazard). A flag marker takes no
+    argument; the postcondition marker takes the SQL that follows it and
+    refuses to be bare. Raises ``MigrationRunnerError`` naming the offending
+    line; ``discover_migrations`` adds the file.
     """
     flags = {
         "no-transaction": False,
         "reapply-safe": False,
         "schema-move": False,
         "unadvertised": False,
+        "manual": False,
     }
     postconditions = []
     for line in text.splitlines():
@@ -193,6 +203,7 @@ def _parse_markers(text: str):
         flags["reapply-safe"],
         flags["schema-move"],
         flags["unadvertised"],
+        flags["manual"],
         tuple(postconditions),
     )
 
@@ -245,6 +256,7 @@ def discover_migrations(migrations_dir, max_version: int | None = None) -> list:
                 reapply_safe,
                 schema_move,
                 unadvertised,
+                manual,
                 postconditions,
             ) = _parse_markers(sql)
         except MigrationRunnerError as exc:
@@ -262,6 +274,7 @@ def discover_migrations(migrations_dir, max_version: int | None = None) -> list:
             execution_mode=_execution_mode(no_transaction, statements),
             schema_move=schema_move,
             unadvertised=unadvertised,
+            manual=manual,
         )
     return _within([by_version[v] for v in sorted(by_version)], max_version)
 
@@ -536,6 +549,11 @@ def apply_pending(
     ``max_version`` replays one lineage out of the tree (``legacy_lineage_max``
     derives the legacy one). Production leaves it unset — the M.3 window is a
     single unbounded invocation in file order.
+
+    A pending ``runner:manual`` file is OWED, not applied: it is left where it
+    stands, reported on ``owed``, and exempt from the below-head rule — an
+    ordinary file numbered above it applies as if it were not there (the
+    tear-out, phase 04; fork F6). Its door is :func:`apply_manual`.
     """
     migrations = discover_migrations(migrations_dir, max_version)
     report = ApplyReport()
@@ -548,6 +566,8 @@ def apply_pending(
 
         applied_head = max(ledger, default=0)
         pending = [m for m in migrations if m.version not in ledger]
+        report.owed = [m for m in pending if m.manual]
+        pending = [m for m in pending if not m.manual]
         for migration in pending:
             if migration.version < applied_head and not migration.reapply_safe:
                 raise MigrationRunnerError(
@@ -567,6 +587,58 @@ def apply_pending(
                     f"migration {migration.label} failed: {exc}"
                 ) from exc
             report.applied.append(migration)
+    finally:
+        conn.close()
+    return report
+
+
+def apply_manual(dsn: str, migrations_dir, version: int) -> ApplyReport:
+    """Apply ONE gated file by version — the operator's door, never a deploy's
+    (the tear-out, phase 04; forks F6 and F7).
+
+    The file must carry ``runner:manual`` (an ordinary pending file is
+    ``apply``'s to run in order; running it by name would bypass that order),
+    must exist in the tree, and must not already be recorded — a gated file
+    runs once. It applies exactly like any other file: under the advisory
+    lock, after the integrity check, in one transaction with its
+    postconditions and its ledger row; and it applies BELOW the head, because
+    the below-head rule is for files inserted under history by mistake, and a
+    gated file is under it by design. No other pending file is touched.
+    """
+    migrations = discover_migrations(migrations_dir)
+    by_version = {m.version: m for m in migrations}
+    migration = by_version.get(version)
+    if migration is None:
+        raise MigrationRunnerError(
+            f"no migration {version:03d} in {Path(migrations_dir)}"
+        )
+    if not migration.manual:
+        raise MigrationRunnerError(
+            f"{migration.label} carries no runner:manual directive — it is"
+            " `apply`'s to run in order; --manual is the door for gated files only"
+        )
+    report = ApplyReport()
+    conn = _connect(dsn)
+    try:
+        _acquire_lock(conn)
+        _ensure_ledger(conn)
+        ledger = _ledger_rows(conn)
+        _verify_integrity(ledger, migrations)
+        if version in ledger:
+            _checksum, row_status = ledger[version]
+            raise MigrationRunnerError(
+                f"{migration.label} is already recorded in the ledger"
+                f" ({row_status}); a gated file runs once"
+            )
+        try:
+            _apply_one(conn, migration)
+        except MigrationRunnerError:
+            raise
+        except Exception as exc:
+            raise MigrationRunnerError(
+                f"migration {migration.label} failed: {exc}"
+            ) from exc
+        report.applied.append(migration)
     finally:
         conn.close()
     return report
@@ -785,6 +857,8 @@ class StatusReport:
     ledger_present: bool
     applied: list = field(default_factory=list)
     pending: list = field(default_factory=list)
+    #: `runner:manual` files not yet recorded — owed to an operator's hand
+    owed: list = field(default_factory=list)
     discrepancies: list = field(default_factory=list)  # (version, detail)
 
 
@@ -803,7 +877,11 @@ def status(dsn: str, migrations_dir) -> StatusReport:
             )
             ledger_present = cur.fetchone()[0]
         if not ledger_present:
-            return StatusReport(ledger_present=False, pending=migrations)
+            return StatusReport(
+                ledger_present=False,
+                pending=[m for m in migrations if not m.manual],
+                owed=[m for m in migrations if m.manual],
+            )
 
         ledger = _ledger_rows(conn)
         report = StatusReport(ledger_present=True)
@@ -815,7 +893,9 @@ def status(dsn: str, migrations_dir) -> StatusReport:
             for v, (_checksum, row_status) in sorted(ledger.items())
             if v in by_version and v not in flagged
         ]
-        report.pending = [m for m in migrations if m.version not in ledger]
+        unrecorded = [m for m in migrations if m.version not in ledger]
+        report.pending = [m for m in unrecorded if not m.manual]
+        report.owed = [m for m in unrecorded if m.manual]
         return report
     finally:
         conn.close()
@@ -833,7 +913,18 @@ def main(argv=None) -> int:
         default=str(MIGRATIONS_DIR),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
-    subparsers.add_parser("apply", help="apply every pending migration")
+    apply_parser = subparsers.add_parser(
+        "apply",
+        help="apply every pending migration (a runner:manual file is owed, not applied)",
+    )
+    apply_parser.add_argument(
+        "--manual",
+        type=int,
+        default=None,
+        metavar="VERSION",
+        help="apply ONE gated (runner:manual) file by version, below the head if"
+        " need be — the operator's door, never a deploy's",
+    )
     adopt_parser = subparsers.add_parser(
         "adopt",
         help="enter a pre-ledger live database into the ledger, probe-decided",
@@ -864,11 +955,23 @@ def main(argv=None) -> int:
         return 2
 
     try:
-        if args.command == "apply":
+        if args.command == "apply" and args.manual is not None:
+            report = apply_manual(args.database_url, args.migrations_dir, args.manual)
+            for migration in report.applied:
+                print(f"applied {migration.label}")
+            print(f"{len(report.applied)} applied (--manual)")
+        elif args.command == "apply":
             report = apply_pending(args.database_url, args.migrations_dir)
             for migration in report.applied:
                 print(f"applied {migration.label}")
+            for migration in report.owed:
+                print(f"owed (manual) {migration.label}")
             print(f"{len(report.applied)} applied")
+            if report.owed:
+                print(
+                    f"{len(report.owed)} owed (manual): waiting for an operator's"
+                    " `apply --manual <version>`; a deploy never runs them"
+                )
         elif args.command == "adopt":
             manifest = args.manifest or str(
                 Path(args.migrations_dir) / "adoption_manifest.json"
@@ -907,6 +1010,8 @@ def main(argv=None) -> int:
                 print(f"{row_status} {migration.label}")
             for migration in status_report.pending:
                 print(f"pending {migration.label} [{migration.execution_mode}]")
+            for migration in status_report.owed:
+                print(f"owed (manual) {migration.label}")
             for version, detail in status_report.discrepancies:
                 print(f"DISCREPANCY {version:03d}: {detail}")
             if status_report.discrepancies:

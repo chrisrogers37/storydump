@@ -373,6 +373,11 @@ class TestTheBoundaryIsDerivedAndLoud:
             # advertised DDL: it carries `runner:unadvertised`, so it is above
             # the move but outside the F.2 prefix.
             "078_legacy_snapshots_pre_cutover.sql",
+            # 079/080: the gated drop of `legacy` and the window's stand-down
+            # (the tear-out, phase 04). `runner:manual` AND `runner:unadvertised`:
+            # the deploy owes them and the prefix diff never sees them.
+            "079_drop_legacy_schema.sql",
+            "080_window_stand_down.sql",
         ], (
             f"the files above the move are {above}. If you are landing the next"
             " F.2 increment, add it here — deliberately, and at the end: arm (b)"
@@ -388,7 +393,17 @@ class TestTheBoundaryIsDerivedAndLoud:
             for m in discover_migrations(MIGRATIONS_DIR)
             if m.version > move.version and m.unadvertised
         ]
-        assert unadvertised == ["078_legacy_snapshots_pre_cutover.sql"]
+        assert unadvertised == [
+            "078_legacy_snapshots_pre_cutover.sql",
+            "079_drop_legacy_schema.sql",
+            "080_window_stand_down.sql",
+        ]
+        manual = [
+            m.path.name
+            for m in discover_migrations(MIGRATIONS_DIR)
+            if m.version > move.version and m.manual
+        ]
+        assert manual == ["079_drop_legacy_schema.sql", "080_window_stand_down.sql"]
         assert [p.name for p in target_lineage_files(MIGRATIONS_DIR)] == [
             name for name in above if name not in unadvertised
         ]
@@ -428,7 +443,14 @@ class TestTheLaneReplaysAcrossTheBoundary:
         report = run_lane(bootstrapped_db)
 
         applied = [m.version for m in report.applied]
-        assert applied == [m.version for m in discover_migrations(MIGRATIONS_DIR)]
+        corpus = discover_migrations(MIGRATIONS_DIR)
+        assert applied == [m.version for m in corpus if not m.manual]
+        # the lane's end state since phase 04: the gated pair OWED, never
+        # applied by a run the deploy could have made
+        assert [m.version for m in report.owed] == [
+            m.version for m in corpus if m.manual
+        ]
+        assert [m.version for m in report.owed] == [79, 80]
 
         implied = sorted(implied_target_tables())
         assert sorted(tables_in(bootstrapped_db, "public")) == implied, (
