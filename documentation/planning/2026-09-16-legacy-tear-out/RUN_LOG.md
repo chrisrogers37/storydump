@@ -1003,6 +1003,58 @@ gone), phase 02's dead-variable list (one home each), a positive control and an 
 test — and ran on the base: **24 of 43 live pages red**, about 95 mentions, the safety block's
 `posting_history` line in `CLAUDE.md` and `AGENTS.md` among them.
 
+**Built** (`b56b8ed`, on phase 04's head `29537a8`; four documentation agents on disjoint file groups in
+one worktree, each under one brief — describe what the code DOES with `path:line`, never touch the
+never-run fence, report what could not be verified — and the coordinator on the history-shaped files,
+the pin, the battery and the plans):
+
+- **The pin** (`tests/test_agent_docs.py`): legacy-only tables = the inventory minus the names the
+  target's metadata reuses (`category_post_case_mix`, `media_items`, `onboarding_sessions`, `users` —
+  pinned as today's value of the derivation); the deleted paths, checked to BE gone; phase 02's
+  `DEAD_VARIABLES`; a positive control (a planted page trips each arm; a target name and a snapshot's
+  name do not); a roots-coverage test; an exemption-staleness test. **Two reasoned exemptions:** the
+  landing app's own `TELEGRAM_BOT_TOKEN` / `ADMIN_TELEGRAM_CHAT_ID` on Vercel
+  (`landing/src/lib/telegram.ts:1-2`), and `posting-monitor.md`'s `TELEGRAM_BOT_TOKEN` — the environment
+  of `tg-post.sh`, the fleet host's pager script outside this repository.
+- **Rewritten against the code:** the five `.claude/rules/` files (`testing.md` too — it taught the
+  legacy `service.repo` mock and cited a test that does not exist), `PROJECT_CONTEXT.md` and
+  `QUICK_REFERENCE.md` (their never-run bullets byte-identical), the two slash commands onto real
+  `storydump` read verbs, the neon-analyst's reference, `AGENTS.md` (one tier, one sentence of history),
+  `CLAUDE.md` (the production line onto the ledger — `post_intents`, `jobs`, `channel_outbox` "and every
+  other table `src/models/target/` declares" — in both documents; the rules table), `README.md`, the
+  documentation index (92 links, 0 dead), eight runbooks and nine guides.
+- **Archived, not rewritten** (`git mv`, a status banner, an index row): the three update notes of
+  January 2026, the May Telegram postmortem, the July Cloudinary gap analysis, the legacy multi-account
+  dashboard plan, and the January security review — every finding of which names legacy code (five of
+  its six source files are gone). `documentation/updates/` and `documentation/cloudinary/` and the
+  top-level `planning/` are empty and gone from the tree; `tests/test_legacy_cli_gone.py`'s HISTORY no
+  longer lists the first.
+- **The plans:** `04-execution-sequence.md`'s M.3 line and the consolidated plan's Live status say what
+  is true today — 3f applied as 078 on 2026-09-18; 3g and step 8 are the gated files 079 and 080, owed
+  by every deploy, the owner's to apply. `meta-app-review.md`'s standing constraint is "discharged"
+  (its heading renamed with the key `tests/test_meta_runbook_markers.py` pins).
+- **What the agents corrected beyond names** (each verified in the tree): the fresh-database sequence in
+  both deployment guides omitted `tests/scripts/fixtures/legacy_by_hand.sql`, so the runner would fail
+  at 078; the Google client needs BOTH redirect URIs; `railway restart` (attested nowhere) →
+  `railway redeploy --service … --yes`; the bot token is set on BOTH services (the API reads it too);
+  `/start inv-…` is NOT a served lane (`build_router` registers `link-` and `bind-` only); media kind is
+  decided by MIME type, not suffix; CORS reads `WEB_APP_URL`; 26 commands, not 25; `ROLE_FLOOR`, not
+  `FLOORS`; the policy test lives at `tests/test_integration_coverage_policy.py`; the gates under
+  `tests/scripts/` ERROR without PostgreSQL rather than skip; the landing app reads neither
+  `JWT_SECRET` nor `NEXT_PUBLIC_SITE_URL` and its Telegram Login Widget is gone. Removed as
+  unverifiable: per-test lists, "56% coverage", cost and timing claims, the legacy dump cron, the
+  phase roadmap.
+- **A phase-04 defect the pass found, fixed on phase 04's branch before its merge** (`29537a8`):
+  `storydump doctor` called any checkout file the ledger lacks "not applied — deploy main" and exited
+  4 — which 079 and 080 are BY DESIGN from the merge until the window. doctor reads the `manual`
+  directive now (four tests red first, two battery mutations; the battery `ran 37 of 37`; CI green,
+  3,753 passed).
+
+**Window-dependent sentences, to update once the window has run** (each is true today and says so):
+the documentation index's tear-out row ("the owner's window has not run"), the consolidated plan's Live
+status and M.3 line, `meta-app-review.md`'s discharged-constraint section, the M.2 rehearsal spec's
+status line, `00_EPIC.md`'s `status:` and its goal condition.
+
 ## Owner-decision queue
 
 - **The PITR window is 24 hours, not 7 days.** The project's `history_retention_seconds` is 86400;
@@ -1041,6 +1093,28 @@ test — and ran on the base: **24 of 43 live pages red**, about 95 mentions, th
   session nothing holds. A comment-and-build-line edit, the owner's call on when.
 - **The Makefile's `APP_DB_URL` does not URL-encode `DB_PASSWORD`** (pre-existing): a password
   containing `@` mis-parses into the host. Local development only.
+- **Found by phase 05's documentation pass, outside a docs phase's scope (code, config, product copy) —
+  each with its evidence, none fixed here:** `storydump_cli/output.py:642` reads the pool keys `in_use`
+  and `peak`, `/health` emits `checked_out` and `checked_out_peak`, and the fixture at
+  `tests/storydump_cli/test_env.py:49` uses the renderer's spelling, so nothing catches it;
+  `src/worker.py:296` runs `reap_expired` every 6 h where `05` says 60 s — a lapsed lease holds its
+  serialization key until then, and a worker killed while holding `reap_expired` itself leaves a lease
+  nothing returns; `src/services/target/health.py:71-86` reads a replica that never wins the clock
+  election as stuck; `storydump_cli/main.py:70` sends the user to Settings › Integrations for a control
+  that lives under Accounts; docstrings that still call `/start inv-…` a served lane
+  (`telegram_dispatch.py:5-6,277`, `start_router.py`; `start_router.REFUSAL` is never sent); stale
+  legacy comments in `src/config/defaults.py:1-18`, `src/config/constants.py:8,15,19`,
+  `src/services/target/transit.py`'s docstring, `health.py`, `scheduling_health.py`,
+  `tests/scripts/test_migration_gate.py`, `tests/test_integration_coverage_policy.py:294-296` (the
+  clock skip it calls "queued" was fixed in #1317), `.github/workflows/schema-drift.yml:13`
+  ("dormant"); `Makefile:71-73`'s `test-quick` says "(no coverage)" and measures it;
+  `meta-app-review.md`'s `instagram_business_basic` justification describes calls nothing in the target
+  tier makes (the reconciler's `stories_check` seam is unwired) — copy to settle before submitting;
+  `PROJECT_MISSION.md`'s "Core Mental Model" is the legacy tenancy (Telegram identity → group-chat
+  instances); `README.md` says "MIT License — see LICENSE" and no LICENSE file was ever tracked; the
+  safety block's "All bot interactions go through the database or the user's own device" predates the
+  CLI; `landing/.env.local.example` still lists `JWT_SECRET` and `NEXT_PUBLIC_SITE_URL`, which nothing
+  reads.
 - **The epic's closure list (#1216's Blocks), measured 2026-09-18 — an agent closes none of them:**
   #1205 and #1222 closed with phase 02. #941 (the sixteenth legacy table "with no disposition") has
   one: `archive.posting_history_dedup_archive_pre_cutover_20260917` exists in production (078) and 079
