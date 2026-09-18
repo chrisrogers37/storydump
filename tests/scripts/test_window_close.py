@@ -2,7 +2,9 @@
 legacy tear-out, phase 04; forks F6, F7, F8 (a)).
 
 Two files carry `-- runner:manual`: 079 drops `legacy` behind an in-file
-precondition (every snapshot present, every count equal to its source), 080
+precondition (exactly the sixteen relations, nothing outside depending on
+them, every snapshot present, every count and every row's hash equal to its
+source), 080
 closes the window (the subject-identity guard, the `window_ddl` door dropped,
 `CREATE ON DATABASE` revoked from `svc_migration`) and keeps every membership
 a door file's `OWNER TO svc_*` needs. This file is the gate on both, on phase
@@ -12,9 +14,11 @@ variant).
 
 Three layers: the MECHANICAL GUARD (a plain `apply` leaves 079 and 080 owed
 and applies nothing else — the deploy cannot drop `legacy`); the DROP as the
-owner actor, with its two refusals; the STAND-DOWN as the owner actor, with
-its refusal, the gate's own lines answered as 080's comments say they answer,
-and F8's positive control — a door file's statement still lands afterwards.
+owner actor, with its refusals — a missing snapshot, a table changed in four
+ways, a stray relation, an outside dependent; the STAND-DOWN as the owner
+actor, with its three refusals, the gate's own lines answered as 080's
+comments say they answer, and F8's positive control — a door file's statement
+still lands afterwards.
 """
 
 from __future__ import annotations
@@ -293,6 +297,30 @@ class TestTheDropAsTheOwnerActor:
         assert "17 relations" in str(exc.value)
         assert _schema_present(as_owner, "legacy")
 
+    def test_079_refuses_when_something_outside_legacy_depends_on_it(
+        self, admin_conn, owner_actor, owner_window_db
+    ):
+        """CASCADE takes every dependent with the schema — a view, a foreign
+        key, a default, a function over a legacy row type — unseen; the drop
+        refuses, naming what depends on it (production measured none on
+        2026-09-18)."""
+        as_owner = _world_through_078(admin_conn, owner_actor, owner_window_db)
+        execute(
+            as_owner,
+            f"CREATE VIEW public.v_over_legacy AS SELECT * FROM legacy.{HAND_MADE[0]}",
+        )
+
+        with pytest.raises(MigrationRunnerError, match="079") as exc:
+            apply_manual(as_owner, MIGRATIONS_DIR, DROP_VERSION)
+        assert "outside legacy" in str(exc.value)
+        assert "v_over_legacy" in str(exc.value)
+        assert _schema_present(as_owner, "legacy")
+        # the drop never ran: the view is still there
+        assert fetch_one(
+            as_owner, "SELECT to_regclass('public.v_over_legacy') IS NOT NULL"
+        )[0]
+        assert [row[0] for row in fetch_ledger(as_owner)][-1] == SNAPSHOT_VERSION
+
 
 @pytest.mark.integration
 @pytest.mark.slow
@@ -388,16 +416,19 @@ class TestTheStandDownAsTheOwnerActor:
             "SELECT pg_has_role(current_user, 'svc_maintenance',"
             f" '{_owner_to_privilege(as_owner)}')"
         )
-        # every roleid-side svc_% row is the creator's auto-grant (ADMIN, 16+),
-        # the owner's explicit svc_migration membership, or svc_migration's
-        # four — an owner membership of any OTHER service role, admin or not,
-        # is a grant nobody made and fails here (on 15 the auto-grant clause
+        # every roleid-side svc_% row is the creator's auto-grant (ADMIN, 16+,
+        # granted by the bootstrap superuser — oid 10 on every cluster; Neon's
+        # is cloud_admin, measured 2026-09-18), the owner's explicit
+        # svc_migration membership, or svc_migration's four — an owner
+        # membership of any OTHER service role, with or without ADMIN, is a
+        # grant somebody else made and fails here (on 15 the auto-grant clause
         # matches nothing; the rest is exact)
         assert q(
             "SELECT count(*) = 0 FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.roleid"
             " WHERE r.rolname LIKE 'svc\\_%'"
             "   AND NOT (m.member = current_user::regrole"
-            "            AND (r.rolname = 'svc_migration' OR m.admin_option))"
+            "            AND (r.rolname = 'svc_migration'"
+            "                 OR (m.admin_option AND m.grantor = 10)))"
             "   AND NOT (m.member = 'svc_migration'::regrole"
             "            AND r.rolname IN ('svc_claim','svc_clock','svc_maintenance','svc_membership'))"
         )

@@ -18,12 +18,16 @@
 -- row count that no longer matches its source, and for CONTENT that differs
 -- from its snapshot — every row hashed (`md5(row::text)`), the multiset
 -- difference taken, so an update in place, a delete-and-insert or a column
--- added since 078 refuses too; a refusal leaves `legacy` intact (one
--- transaction: the file is `wrapped`). What it cannot see and the drop takes
--- anyway: indexes (77 in production), constraints, defaults and sequence
--- values — a snapshot is rows only (078's header). The sixteen names are
--- LEGACY_TABLES written out; the date is 078's;
--- tests/scripts/test_window_close.py pins both and drives every refusal.
+-- added since 078 refuses too — and when anything OUTSIDE `legacy` depends
+-- on a legacy relation, row type or function (a view, a foreign key, a
+-- default, a function signature: what CASCADE would take with the schema,
+-- unseen), naming it; measured in production on 2026-09-18: nothing does.
+-- A refusal leaves `legacy` intact (one transaction: the file is `wrapped`).
+-- What it cannot see and the drop takes anyway: the legacy tables' own
+-- indexes (77 in production), constraints, defaults and sequence values — a
+-- snapshot is rows only (078's header). The sixteen names are LEGACY_TABLES
+-- written out; the date is 078's; tests/scripts/test_window_close.py pins
+-- both and drives every refusal.
 --
 -- WHAT GOES WITH THE SCHEMA: the sixteen tables (42 MB), their indexes and
 -- constraints, and the uuid-ossp extension that rode into `legacy` with the
@@ -52,11 +56,37 @@ DECLARE
   src bigint;
   snap bigint;
   diff bigint;
+  deps text;
 BEGIN
   SELECT count(*) INTO n FROM pg_class c JOIN pg_namespace ns ON ns.oid = c.relnamespace
    WHERE ns.nspname = 'legacy' AND c.relkind IN ('r', 'p', 'v', 'm', 'f');
   IF n <> 16 THEN
     RAISE EXCEPTION '3g refused: legacy holds % relations, not the sixteen of the inventory — something has no snapshot', n;
+  END IF;
+  -- what CASCADE would take from OUTSIDE the schema: any dependent of a legacy
+  -- relation, row type or function whose own schema is not `legacy` (a view,
+  -- a foreign key, a default, a function signature); an object class this
+  -- CASE does not name counts too — a refusal to read, never a drop
+  SELECT count(DISTINCT (d.classid, d.objid)),
+         string_agg(DISTINCT pg_describe_object(d.classid, d.objid, d.objsubid), '; ')
+    INTO n, deps
+    FROM pg_depend d, pg_namespace rn
+   WHERE rn.nspname = 'legacy'
+     AND d.deptype IN ('n', 'a')
+     AND ((d.refclassid = 'pg_class'::regclass AND EXISTS (SELECT 1 FROM pg_class x WHERE x.oid = d.refobjid AND x.relnamespace = rn.oid))
+       OR (d.refclassid = 'pg_type'::regclass AND EXISTS (SELECT 1 FROM pg_type x WHERE x.oid = d.refobjid AND x.typnamespace = rn.oid))
+       OR (d.refclassid = 'pg_proc'::regclass AND EXISTS (SELECT 1 FROM pg_proc x WHERE x.oid = d.refobjid AND x.pronamespace = rn.oid)))
+     AND coalesce(CASE d.classid
+           WHEN 'pg_class'::regclass THEN (SELECT x.relnamespace FROM pg_class x WHERE x.oid = d.objid)
+           WHEN 'pg_constraint'::regclass THEN (SELECT x.connamespace FROM pg_constraint x WHERE x.oid = d.objid)
+           WHEN 'pg_rewrite'::regclass THEN (SELECT v.relnamespace FROM pg_rewrite x JOIN pg_class v ON v.oid = x.ev_class WHERE x.oid = d.objid)
+           WHEN 'pg_trigger'::regclass THEN (SELECT v.relnamespace FROM pg_trigger x JOIN pg_class v ON v.oid = x.tgrelid WHERE x.oid = d.objid)
+           WHEN 'pg_attrdef'::regclass THEN (SELECT v.relnamespace FROM pg_attrdef x JOIN pg_class v ON v.oid = x.adrelid WHERE x.oid = d.objid)
+           WHEN 'pg_type'::regclass THEN (SELECT x.typnamespace FROM pg_type x WHERE x.oid = d.objid)
+           WHEN 'pg_proc'::regclass THEN (SELECT x.pronamespace FROM pg_proc x WHERE x.oid = d.objid)
+         END, 0) <> rn.oid;
+  IF n <> 0 THEN
+    RAISE EXCEPTION '3g refused: % object(s) outside legacy depend on it and CASCADE would take them unseen: %', n, deps;
   END IF;
   FOREACH t IN ARRAY ARRAY[
     'api_tokens', 'audit_log', 'category_post_case_mix', 'chat_settings',

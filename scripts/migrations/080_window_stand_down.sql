@@ -9,7 +9,9 @@
 -- ledger, else RAISE: run early, a stand-down would certify a half-done
 -- window, and on a database that never held `legacy` — a fresh target-only
 -- one — the first two facts hold without any window; the ledger row is what
--- says 3g happened HERE); then DROP the #787 definer door (`window_ddl` is
+-- says 3g happened HERE: an `applied` row, or a `repaired` one, which only
+-- `repair` writes and only over a row the operator names — a deliberate act,
+-- never an accident); then DROP the #787 definer door (`window_ddl` is
 -- not `legacy`, so 3g does not take it — in production the door was never
 -- created, measured 2026-09-18, so this is a no-op there and the gate world's
 -- exercise of it is CI's); then REVOKE the window's CREATE ON DATABASE from
@@ -54,7 +56,7 @@
 --   SELECT count(*) = 0 FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.roleid
 --    WHERE r.rolname LIKE 'svc\_%'
 --      AND NOT (m.member = current_user::regrole
---               AND (r.rolname = 'svc_migration' OR m.admin_option))   -- the bootstrap's explicit grant, or the creator auto-grant (16+)
+--               AND (r.rolname = 'svc_migration' OR (m.admin_option AND m.grantor = 10)))   -- the bootstrap's explicit grant, or the creator auto-grant (16+: ADMIN, granted by the bootstrap superuser, oid 10 — an ADMIN grant anyone else made counts)
 --      AND NOT (m.member = 'svc_migration'::regrole
 --               AND r.rolname IN ('svc_claim','svc_clock','svc_maintenance','svc_membership')); -- t
 --   SELECT bool_and(NOT has_schema_privilege(r, 'public', 'CREATE')) FROM unnest(ARRAY[

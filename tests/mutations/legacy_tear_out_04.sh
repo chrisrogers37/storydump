@@ -83,6 +83,8 @@ check "a near miss reads as prose again (three dashes make the drop an ordinary 
                 raise MigrationRunnerError(' '            if False:
                 raise MigrationRunnerError(' "$UNIT" "$TRUN -k near_miss_is_refused"
 check "a byte-order mark hides a marker on line one" $RUNNER '            sql = raw.decode("utf-8-sig")' '            sql = raw.decode("utf-8")' "$UNIT" "$TRUN -k byte_order_mark_does_not_hide"
+check "a NUL-bearing file (UTF-16 without its mark) discovers as an ordinary marker-less file" $RUNNER '        if "\x00" in sql:' '        if False:' "$UNIT" "$TRUN -k nul_bytes_is_refused"
+check "a dash or an equals sign for the colon reads as prose again" $RUNNER 'runner\b\s*[:=\-]?\s*(' 'runner\b\s*:?\s*(' "$UNIT" "$TRUN -k near_miss_is_refused"
 check "--manual applies below the head no more (the operator door meets the deploy's rule)" $RUNNER '        _apply_guarded(conn, migration)
         report.applied.append(migration)
     finally:' '        if version < max(ledger, default=0):
@@ -126,6 +128,7 @@ check "079's precondition lets a missing snapshot through" $M079 "    IF to_regc
 check "079's precondition ignores a count that no longer matches" $M079 "    IF src <> snap THEN" "    IF src <> snap AND false THEN" "$GATE" "$TCLOSE -k 'no_longer_matches_its_snapshot and insert'"
 check "079's precondition ignores content that changed in place" $M079 "    IF diff <> 0 THEN" "    IF diff <> 0 AND false THEN" "$GATE" "$TCLOSE -k 'no_longer_matches_its_snapshot and update'"
 check "079's precondition ignores a relation nobody snapshotted" $M079 "  IF n <> 16 THEN" "  IF n <> 16 AND false THEN" "$GATE" "$TCLOSE -k relation_in_legacy_that_is_not_in_the_inventory"
+check "079's precondition ignores what depends on legacy from outside (CASCADE takes it unseen)" $M079 "  IF n <> 0 THEN" "  IF n <> 0 AND false THEN" "$GATE" "$TCLOSE -k something_outside_legacy_depends"
 check "080's guard cannot tell a completed 3g from a database that never held legacy" $M080 "     OR NOT EXISTS (SELECT 1 FROM runner.schema_migrations
                      WHERE version = 79 AND status IN ('applied', 'repaired')) THEN" "     THEN" "$GATE" "$TCLOSE -k 080_refuses_when_legacy_is_gone_but_079_was_never_recorded"
 check "080 grants the owner a membership nobody asked for" $M080 "DO \$\$
@@ -135,6 +138,14 @@ END \$\$;" "DO \$\$
 BEGIN
   EXECUTE format('REVOKE CREATE ON DATABASE %I FROM svc_migration', current_database());
   EXECUTE format('GRANT svc_worker TO %I', current_user);
+END \$\$;" "$GATE" "$TCLOSE -k 080_closes_the_window_and_the_gate_answers_as_printed"
+check "080 grants the owner an ADMIN membership nobody asked for (only its grantor tells it from the auto-grant)" $M080 "DO \$\$
+BEGIN
+  EXECUTE format('REVOKE CREATE ON DATABASE %I FROM svc_migration', current_database());
+END \$\$;" "DO \$\$
+BEGIN
+  EXECUTE format('REVOKE CREATE ON DATABASE %I FROM svc_migration', current_database());
+  EXECUTE format('GRANT svc_worker TO %I WITH ADMIN OPTION', current_user);
 END \$\$;" "$GATE" "$TCLOSE -k 080_closes_the_window_and_the_gate_answers_as_printed"
 check "080's guard passes on a present legacy schema" $M080 "     OR EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'legacy')
      OR NOT EXISTS (SELECT 1 FROM runner.schema_migrations" "     OR NOT EXISTS (SELECT 1 FROM runner.schema_migrations" "$GATE" "$TCLOSE -k 080_refuses_when_legacy_reappears_after_079"

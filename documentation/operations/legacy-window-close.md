@@ -37,7 +37,9 @@ wrong, closed below: `neonctl connection-string` with an EMPTY branch name resol
 project's default branch, which is production. So the branch name is demanded (`${NAME:?}`)
 wherever it is used, and the host guard fails closed. The Neon CLI is signed in to the account
 that owns the project (`npx --yes neonctl@latest me`); every call takes the organization and
-project ids. Run the block in one shell, top to bottom.
+project ids. Save the block as `rehearse.sh` and run it with `bash -eu rehearse.sh`, top to
+bottom: under `-e` a failed substitution ends the script, and the connection string never
+enters an interactive shell.
 
 ```bash
 P=ancient-grass-50759240; O=org-ancient-bush-46337162; PROD=br-square-frog-ai37r0qg
@@ -47,10 +49,11 @@ NAME=claude/window-rehearsal-$(date -u +%Y%m%d-%H%M)
 npx --yes neonctl@latest branches create --project-id $P --org-id $O --parent $PROD --name "${NAME:?}"
 
 # 2. the branch's OWNER connection string, into a variable — never echoed, never pasted.
-#    `${NAME:?}` stops the shell if the name is unset: an empty name would resolve to production.
+#    an unset name fails the substitution (`${NAME:?}`) — under `bash -eu` that ends the script;
+#    in a bare shell it leaves URL empty, which the guard below refuses.
 URL=$(npx --yes neonctl@latest connection-string "${NAME:?set NAME first — an empty name is production}" \
       --project-id $P --org-id $O --role-name neondb_owner --database-name neondb)
-# the host guard, FAIL-CLOSED: anything but a Neon branch endpoint unsets URL and ends the shell
+# the host guard, FAIL-CLOSED: anything but a Neon branch endpoint unsets URL and ends the script
 case "$(printf %s "$URL" | sed -E 's#^[^@]*@##; s#[:/?].*##')" in
   ep-hidden-shadow-aify76h5*|"") echo "REFUSED: production's endpoint, or none"; unset URL; exit 1 ;;
   ep-*.neon.tech) echo "branch endpoint ok" ;;
@@ -74,7 +77,7 @@ psql "$URL" -At -v ON_ERROR_STOP=1 -c "SELECT NOT has_database_privilege('svc_mi
 psql "$URL" -At -v ON_ERROR_STOP=1 -c "SELECT pg_has_role(current_user, 'svc_maintenance', 'SET')"   # t — the chain door files need
 psql "$URL" -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'archive' AND c.relkind = 'r' AND c.relname LIKE '%\_pre\_cutover\_%'"   # 16
 # the PG16+ shape only the rehearsal (17) and production (17) can show — CI's cluster is 15:
-psql "$URL" -At -v ON_ERROR_STOP=1 -c "SELECT count(*) = 0 FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.roleid WHERE r.rolname LIKE 'svc\_%' AND NOT (m.member = current_user::regrole AND (r.rolname = 'svc_migration' OR m.admin_option)) AND NOT (m.member = 'svc_migration'::regrole AND r.rolname IN ('svc_claim','svc_clock','svc_maintenance','svc_membership'))"   # t
+psql "$URL" -At -v ON_ERROR_STOP=1 -c "SELECT count(*) = 0 FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.roleid WHERE r.rolname LIKE 'svc\_%' AND NOT (m.member = current_user::regrole AND (r.rolname = 'svc_migration' OR (m.admin_option AND m.grantor = 10))) AND NOT (m.member = 'svc_migration'::regrole AND r.rolname IN ('svc_claim','svc_clock','svc_maintenance','svc_membership'))"   # t
 psql "$URL" -At -v ON_ERROR_STOP=1 -c "SELECT nspowner::regrole::text FROM pg_namespace WHERE nspname = 'public'"   # neondb_owner
 
 # 7. F8's positive control: 076's hand-off, bracket and all, still lands as the owner
@@ -155,7 +158,7 @@ forward in the tree, rehearse again on a fresh branch. Never re-run in place.
    SELECT 'owner_set_on_maintenance', pg_has_role(current_user, 'svc_maintenance', 'SET');                        -- t
    SELECT 'svc_migration_memberships', array_agg(r.rolname ORDER BY r.rolname) FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.roleid JOIN pg_roles g ON g.oid = m.member WHERE g.rolname = 'svc_migration';  -- {svc_claim,svc_clock,svc_maintenance,svc_membership}
    SELECT 'snapshots', count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'archive' AND c.relkind = 'r' AND c.relname LIKE '%\_pre\_cutover\_%';  -- 16
-   SELECT 'roleid_side_shape', count(*) = 0 FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.roleid WHERE r.rolname LIKE 'svc\_%' AND NOT (m.member = current_user::regrole AND (r.rolname = 'svc_migration' OR m.admin_option)) AND NOT (m.member = 'svc_migration'::regrole AND r.rolname IN ('svc_claim','svc_clock','svc_maintenance','svc_membership'));  -- t
+   SELECT 'roleid_side_shape', count(*) = 0 FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.roleid WHERE r.rolname LIKE 'svc\_%' AND NOT (m.member = current_user::regrole AND (r.rolname = 'svc_migration' OR (m.admin_option AND m.grantor = 10))) AND NOT (m.member = 'svc_migration'::regrole AND r.rolname IN ('svc_claim','svc_clock','svc_maintenance','svc_membership'));  -- t
    SELECT 'public_owner', nspowner::regrole::text FROM pg_namespace WHERE nspname = 'public';                    -- neondb_owner
    SELECT 'ledger_head', max(version), count(*) FROM runner.schema_migrations;                                    -- 80 | 80
    SQL

@@ -230,6 +230,8 @@ class TestMarkers:
             "-- runner manual",  # no colon
             "DROP TABLE t_gone; -- runner:manual",  # after code on the same line
             "-- RUNNER unadvertised",  # another word, upper case, no colon
+            "-- runner-manual",  # a dash for the colon
+            "-- runner=manual",  # an equals sign for the colon
         ],
     )
     def test_a_near_miss_is_refused_never_read_as_prose(self, tmp_path, line):
@@ -267,6 +269,17 @@ class TestMarkers:
         with pytest.raises(MigrationRunnerError, match="001") as exc:
             discover_migrations(tmp_path)
         assert "not UTF-8" in str(exc.value)
+
+    def test_a_file_with_nul_bytes_is_refused_naming_it(self, tmp_path):
+        """UTF-16 WITHOUT a byte-order mark is valid UTF-8 — ASCII with a NUL
+        after every character — so the decode passes and every marker in it
+        reads as prose. Refused at discovery, by name, like the undecodable
+        file; without this, psycopg2's NUL refusal at apply is the only guard."""
+        path = tmp_path / "001_utf16le.sql"
+        path.write_bytes("-- runner:manual\nDROP TABLE t_gone;".encode("utf-16-le"))
+        with pytest.raises(MigrationRunnerError, match="001") as exc:
+            discover_migrations(tmp_path)
+        assert "NUL" in str(exc.value)
 
     def test_manual_is_read_off_the_file(self, tmp_path):
         write_migration(tmp_path, 1, "-- runner:manual\nDROP TABLE t_gone;")

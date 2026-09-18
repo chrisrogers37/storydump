@@ -62,11 +62,12 @@ with the new checksum).
   The operator's sequence is `documentation/operations/legacy-window-close.md`.
 - A NEAR MISS — a comment opener followed straight by `runner` and a known word
   in a frame the grammar does not read (`--- runner:manual`, `-- -- runner:manual`,
-  `/* runner:manual */`, `# runner:manual`, `-- runner manual`, a marker after
-  code on its line) — is refused at discovery too. Each once read as prose,
-  which for a `manual` file is the whole hazard. A byte-order mark at the start
-  of a file is dropped before the first line is read; a file that is not UTF-8
-  is refused by name.
+  `/* runner:manual */`, `# runner:manual`, `-- runner manual`, `-- runner-manual`,
+  `-- runner=manual`, a marker after code on its line) — is refused at discovery
+  too. Each once read as prose, which for a `manual` file is the whole hazard. A
+  byte-order mark at the start of a file is dropped before the first line is
+  read; a file that is not UTF-8, or that holds a NUL byte (UTF-16 without its
+  mark decodes as UTF-8 and its markers as prose), is refused by name.
 - Any other `-- runner:<word>` — a hard failure at discovery, naming the file.
   Every door (`apply`, `adopt`, `status`, `parity`) and the test suite's
   collection refuse the corpus until it is fixed: a misspelt marker (a stray

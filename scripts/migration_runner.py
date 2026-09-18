@@ -109,14 +109,15 @@ _KNOWN_WORDS = {m.split(":", 1)[1] for m in KNOWN_MARKERS}
 #: A NEAR MISS: a comment opener followed straight by `runner` and a known word
 #: in a frame the grammar does not read — three dashes, a doubled `-- --` (an
 #: editor's "comment this line" on a comment), a `/* */` or `#` frame, a
-#: missing colon, a marker after code on the same line. Each of these once
+#: missing colon or a dash or `=` in its place, a marker after code on the
+#: same line. Each of these once
 #: read as PROSE, which for a `manual` file is the whole hazard: the next
 #: predeploy applies it. Refused at discovery instead. A mention mid-sentence
 #: (`-- the runner:schema-move marker is what …`) is not a near miss: the
 #: opener is followed by a word, not by `runner`.
 _NEAR_MISS_RE = re.compile(
-    r"(?:^|\s)(?:-{2,}|/\*|#)\s*runner\b\s*:?\s*("
-    + "|".join(re.escape(w) for w in sorted(KNOWN_MARKERS and _KNOWN_WORDS))
+    r"(?:^|\s)(?:-{2,}|/\*|#)\s*runner\b\s*[:=\-]?\s*("
+    + "|".join(re.escape(w) for w in sorted(_KNOWN_WORDS))
     + r")\b",
     re.IGNORECASE,
 )
@@ -279,6 +280,15 @@ def discover_migrations(migrations_dir, max_version: int | None = None) -> list:
                 f"{version:03d} ({path.name}): not UTF-8 ({exc.reason} at byte"
                 f" {exc.start}) — the runner reads nothing it cannot decode"
             ) from None
+        if "\x00" in sql:
+            # UTF-16 WITHOUT a byte-order mark is valid UTF-8 — ASCII with a NUL
+            # after every character — so the decode passes and every marker in
+            # it reads as prose. psycopg2 refuses a NUL at apply, so nothing
+            # applies; the refusal belongs here, by name, beside the other.
+            raise MigrationRunnerError(
+                f"{version:03d} ({path.name}): holds a NUL byte (at character"
+                f" {sql.index(chr(0))}) — not a text file the runner reads"
+            )
         try:
             (
                 no_transaction,

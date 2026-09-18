@@ -700,7 +700,7 @@ already recorded, then lock → ledger → integrity → `_apply_one`; `apply --
 `079_drop_legacy_schema.sql` (manual + unadvertised; the DO block over the sixteen names: snapshot
 present, source present, counts equal, else RAISE; two postconditions) and `080_window_stand_down.sql`
 (manual + unadvertised; the identity guard, `DROP SCHEMA IF EXISTS window_ddl CASCADE`, `REVOKE CREATE
-ON DATABASE … FROM svc_migration`; the gate's twelve lines as comments with their answers; two
+ON DATABASE … FROM svc_migration`; the gate's eleven lines as comments with their answers; two
 postconditions). The gate (three DB layers + the files' unit pins), the runbook
 `documentation/operations/legacy-window-close.md` (the rehearsal, production in order, the backout,
 what not to do), the D40 amendment beside `03:189`, `migration-runner.md`'s marker and door, the
