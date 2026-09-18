@@ -58,7 +58,7 @@ API service skipped the two kickoff commits — see the gate above).
 | Phase | Doc | Status | PR | CI |
 |---|---|---|---|---|
 | 01 delete the legacy code and its tests | `01_delete-the-code.md` | in progress (branch `tear-out/01-delete-the-code`) | — | — |
-| 02 retire the settings, the entry point and the config | `02_settings-and-entry-points.md` | round 1 folded (`5816b1b`); the re-verify below | #1319 | green at `facee3d` (3666 passed, 1 skipped); the fold's run below |
+| 02 retire the settings, the entry point and the config | `02_settings-and-entry-points.md` | round 1 folded (`5816b1b`), re-verified by a fresh lens, its findings folded; ready to merge | #1319 | green at `3649a4d` (3679 passed, 1 skipped) |
 | 03 the 3f snapshot migration and the ratchet's file rule | `03_snapshot-migrations.md` | pending | — | — |
 | 04 the gated drop and stand-down | `04_drop-and-stand-down.md` | pending (owner-gated window) | — | — |
 | 05 the documentation's end state | `05_docs-end-state.md` | pending | — | — |
@@ -411,6 +411,43 @@ Both lenses converged on the first four; closed in `5816b1b`:
   name: `operations/troubleshooting.md:23`, `monitoring.md:13`, `telegram-webhook.md:15` (the switch),
   `SECURITY_REVIEW.md:59` ("loaded via `settings.TELEGRAM_BOT_TOKEN`", now false).
 
+**Re-verify after the fold** (2026-09-18; no variable of either tier set in any run):
+
+- Units without a database: `2230 passed, 26 skipped`. The whole suite against the Docker test
+  database: `3640 passed, 1 skipped`. CI on `3649a4d`: every check green, `3679 passed, 1 skipped,
+  5 deselected`. `ruff format --check .` / `ruff check .` clean.
+- Battery on the committed tree, in its own worktree (so it cannot mutate files under a running
+  suite): **34 of 34 killed** at `3649a4d` — 33 by their named test's verdict, one by design at
+  collection. The first run on `5816b1b` had died at mutation 17: two mutation NAMES used the
+  single-quote escape idiom inside double quotes, which inverted the quoting for thirty lines and
+  aborted on a glob (`zsh -n` passed — parity returned). Found by reading the count of `killed` lines
+  against the expected 34, fixed in `3649a4d`. The battery now ends with `ran N of M mutations`, so a
+  mid-script abort has no last line.
+- A FRESH lens on `5816b1b` (it had not seen the work): items 1, 2, 5, 6 and 8 of the fold CLOSED
+  with evidence (the recipe and its files, the AST rule — it tried model dumps, aliased receivers,
+  variable `getattr`s and store-only "reads", and found no field resting on a blind spot but one,
+  below — the refusal tests' safety, the vocabulary move and the CLI boundary, no fold-introduced
+  failure by a differential against the pre-fold tree under the same sandbox); item 7 NOT CLOSED at
+  that commit — the battery defect above, already fixed when the report arrived; items 3 and 4
+  PARTLY, on prose. Its findings, folded in the commit after `3649a4d`:
+  - Two guide passages still implied `DB_*` points a deployed app at a database
+    (`cloud-deployment.md`'s troubleshooting row, `dev-environment-setup.md`'s Neon option) — only the
+    deleted property ever did that. They now name `TARGET_DATABASE_URL`, and say what `DB_*` DOES
+    steer: the harness and `make`, `reset-db` included.
+  - Class "a documented fresh-database sequence that cannot complete" (round 1's blocker, one level
+    out): three guides applied `setup_database.sql` and went straight to the runner, which stops at
+    migration 050 without step 0. Swept (`grep -rn setup_database.sql` over the live docs, the
+    README, the agent docs, the Makefile): 5 hits — the three guides now carry step 0, the Makefile
+    already did, the fifth is a dated update's prose. The README says what `make init-db` creates.
+  - `FACEBOOK_APP_SECRET` was labelled "Facebook Login OAuth", a flow that does not exist (its one
+    reader verifies Meta's signed callbacks); the sample webhook secret was a public string that would
+    arm the ingress if uncommented as written. Both fixed.
+  - The API's blank-URL path had no test (the shared function had): one added; the warning says
+    "unset or blank".
+  - RECORDED, not changed: the reader rule is syntactic, and `DB_NAME` survives on a read no caller
+    takes (`database or settings.DB_NAME`; every caller passes `database`). The guard's docstring says
+    so. Pre-existing and queued: the Makefile's `APP_DB_URL` does not URL-encode the password.
+
 **Deploy reachability:** Railway deploys `main` on merge; the worker takes it (SUCCESS at every commit
 since the cutover). The API service (`storydump`) has SKIPPED every deploy since `d8f5c72`
 (2026-09-16): `53ca6d6`, `4f2b36b`, `2369a9b`, `deb29c2` — each behind a red `main` check at deploy
@@ -442,6 +479,8 @@ settings.
 - **`railway.toml`'s residue** (F2: untouched here): the build command still runs `mkdir -p
   /tmp/media` for a directory nothing reads, and `drainingSeconds`' comment explains a Telegram polling
   session nothing holds. A comment-and-build-line edit, the owner's call on when.
+- **The Makefile's `APP_DB_URL` does not URL-encode `DB_PASSWORD`** (pre-existing): a password
+  containing `@` mis-parses into the host. Local development only.
 - **Phase 03's rebase owes the Makefile a line:** `init-db` must apply
   `tests/scripts/fixtures/legacy_by_hand.sql` once that file lands with 078.
 - The tear-out's own gates as they arise (phase 03's probe lines and the 078 rehearsal; phase 04's window).

@@ -17,6 +17,12 @@ environment is not a read of the field (round 1 of the review found the first
 version of this rule accepting the sentence "deliberately NOT read from
 `settings.DB_MAX_OVERFLOW`" as that field's reader).
 
+A KNOWN LIMIT, stated rather than hidden: the rule is syntactic. A read in a
+branch no caller takes still counts — `DB_NAME`'s one reader is
+`async_database_url`'s `database or settings.DB_NAME`, and every caller passes
+`database` (the re-verify of round 1 found it). The field stays because `make`
+reads the variable of the same name; the rule cannot see that either way.
+
 The landing app (`landing/src/lib/telegram.ts`) reads `TELEGRAM_BOT_TOKEN` and
 `ADMIN_TELEGRAM_CHAT_ID` from ITS OWN environment on Vercel — a different
 consumer, untouched here; the retirement is the Python settings and the
@@ -133,8 +139,9 @@ SETTERS = (
     "documentation/guides/ci-cd-pipeline.md",
 )
 
-#: The names a settings object travels under (`from … import settings`, and the
-#: `as _settings` spelling a composition root once used).
+#: The names a settings object travels under: `from … import settings` (the
+#: only spelling in the tree today, 44 sites) and `as _settings`, accepted so an
+#: aliased import can never hide a read from the rule.
 SETTINGS_RECEIVERS = frozenset({"settings", "_settings"})
 
 
@@ -426,6 +433,15 @@ def test_a_blank_database_url_is_refused_by_name_too(monkeypatch, capsys):
         worker.main()
     assert exc.value.code == 2
     assert "TARGET_DATABASE_URL" in capsys.readouterr().err
+
+
+def test_the_api_treats_a_blank_database_url_as_absent():
+    """The API's half of the same absence: no engine, 503 on every data route,
+    `/health` still answering — never a `create_engine("   ")` at import."""
+    from src.api.app import _engine_from_env
+
+    assert _engine_from_env({"TARGET_DATABASE_URL": "   "}) is None
+    assert _engine_from_env({}) is None
 
 
 def test_create_engine_takes_no_settings_built_fallback():

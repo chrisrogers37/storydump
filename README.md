@@ -62,7 +62,9 @@ Configuration (no variable is required to load settings; a process needs what it
 # Create database
 createdb storydump
 
-# Build the schema: the by-hand base, then every migration-runner file
+# Build the schema on the fresh database: step 0 (the svc_* service roles — they are
+# cluster-wide, so your DB user needs CREATEROLE — and the DDL door), the by-hand base,
+# then every migration-runner file
 make init-db
 
 ```

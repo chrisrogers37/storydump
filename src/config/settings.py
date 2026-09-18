@@ -222,7 +222,8 @@ class Settings(BaseSettings):
     # Meta app registration (deployment-level; one app, many tenants).
     # Per-tenant account selection lives in the target tier's `ig_accounts`
     # and `oauth_credentials`.
-    FACEBOOK_APP_SECRET: Optional[str] = None  # Facebook Login OAuth
+    # Meta's signed callbacks verify against INSTAGRAM_APP_SECRET, then this.
+    FACEBOOK_APP_SECRET: Optional[str] = None
     INSTAGRAM_APP_ID: Optional[str] = None  # Instagram Login OAuth (preferred)
     INSTAGRAM_APP_SECRET: Optional[str] = None  # Instagram Login OAuth (preferred)
     OAUTH_REDIRECT_BASE_URL: Optional[str] = None  # e.g., "https://api.storydump.app"

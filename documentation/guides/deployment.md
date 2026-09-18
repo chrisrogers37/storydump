@@ -63,6 +63,13 @@ TARGET_TELEGRAM_BOT_USERNAME=your_bot
 # Set your Neon connection string
 export DATABASE_URL="postgresql://user:pass@ep-xxx.neon.tech/storydump?sslmode=require"
 
+# A FRESH database needs step 0 and the by-hand base first — the service roles,
+# the DDL door migration 050 calls, then the legacy base; the runner stops at
+# 050 without them. (`make init-db` runs this same sequence locally.)
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
+  -f scripts/window/step0_bootstrap.sql -f scripts/window/step0_legacy_ddl_door.sql \
+  -f scripts/setup_database.sql
+
 # Apply the migrations through the runner — the same command the worker's
 # pre-deploy step runs (`railway.toml`); it keeps the ledger the API's
 # `storydump posture` and `storydump doctor` read. Never a psql loop.

@@ -42,13 +42,12 @@ cp .env.example .env
 brew install postgresql
 brew services start postgresql
 
-# Create database
-createdb storydump
-psql -d storydump -f scripts/setup_database.sql
-
-# Apply the migrations through the runner (never a psql loop): it keeps the
-# ledger `storydump doctor` compares the checkout against
-python -m scripts.migration_runner apply
+# Create the database and build the schema. `make init-db` applies step 0
+# (the seven cluster-wide svc_* roles, then the DDL door migration 050 calls),
+# the by-hand base, then every file through the runner (never a psql loop; it
+# keeps the ledger `storydump doctor` compares the checkout against). DB_USER
+# needs CREATEROLE. `setup_database.sql` alone stops the runner at migration 050.
+make create-db init-db
 ```
 
 **Option B: Connect to Neon (Shared Dev/Staging)**
@@ -57,14 +56,13 @@ python -m scripts.migration_runner apply
 # Connect directly using DATABASE_URL
 psql "$DATABASE_URL"
 
-# Or set individual vars in .env
-DB_HOST=ep-xxx.neon.tech
-DB_PORT=5432
-DB_NAME=storydump
-DB_USER=storydump_user
-DB_PASSWORD=neon_password
-DB_SSLMODE=require
+# Point the API and the worker at it: the run-time variable (see .env.example)
+TARGET_DATABASE_URL=postgresql://user:pass@ep-xxx.neon.tech/storydump?sslmode=require
 ```
+
+The `DB_*` components do NOT point the app anywhere: they steer only the test
+harness and `make` — `make reset-db` included, which DROPS `DB_NAME` on
+`DB_HOST`. Never aim them at a shared database.
 
 ---
 

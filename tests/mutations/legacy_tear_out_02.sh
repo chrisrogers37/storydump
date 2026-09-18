@@ -18,6 +18,10 @@ UNIT="env -u DB_HOST -u DB_USER -u DB_PASSWORD -u DB_NAME -u TEST_DB_NAME -u REQ
 # targets is what fails. (`env` takes its `-u` options first, then the assignments.)
 REARMED="${UNIT/ DB_PORT=65432/ TELEGRAM_BOT_TOKEN=x TELEGRAM_CHANNEL_ID=1 ADMIN_TELEGRAM_CHAT_ID=1 DB_PORT=65432}"
 mkdir -p /tmp/claude
+# Counted and printed at the end: a script that dies half-way (a quoting slip in a mutation's name
+# once skipped 18 of 34 silently) ends with NO last line, and a full run says so in numbers.
+RAN=0
+EXPECTED=$(grep -cE '^(check|collect|plant) "' "$0")
 
 verdict() {  # name rc — reads /tmp/claude/mut.log
   local name=$1 rc=$2
@@ -43,6 +47,7 @@ PY
 check() {  # name file old new runner test-selector
   local name=$1 file=$2 old=$3 new=$4 runner=$5 sel=$6
   if [ -n "${ONLY:-}" ] && ! [[ "$name" =~ $ONLY ]]; then return; fi
+  RAN=$((RAN + 1))
   if ! mutate "$file" "$old" "$new"; then echo "MUTATION NOT APPLIED: $name"; git checkout -- "$file"; return; fi
   rm -rf "$(dirname "$file")/__pycache__"
   eval "$runner $sel" > /tmp/claude/mut.log 2>&1; local rc=$?
@@ -53,6 +58,7 @@ check() {  # name file old new runner test-selector
 collect() {  # like check, but the expected kill is the mutated module refusing to IMPORT
   local name=$1 file=$2 old=$3 new=$4 runner=$5 sel=$6
   if [ -n "${ONLY:-}" ] && ! [[ "$name" =~ $ONLY ]]; then return; fi
+  RAN=$((RAN + 1))
   if ! mutate "$file" "$old" "$new"; then echo "MUTATION NOT APPLIED: $name"; git checkout -- "$file"; return; fi
   rm -rf "$(dirname "$file")/__pycache__"
   eval "$runner $sel" > /tmp/claude/mut.log 2>&1; local rc=$?
@@ -67,6 +73,7 @@ collect() {  # like check, but the expected kill is the mutated module refusing 
 plant() {  # name new-file content runner test-selector — a file that must NOT exist, re-created
   local name=$1 file=$2 content=$3 runner=$4 sel=$5
   if [ -n "${ONLY:-}" ] && ! [[ "$name" =~ $ONLY ]]; then return; fi
+  RAN=$((RAN + 1))
   if [ -e "$file" ]; then echo "MUTATION NOT APPLIED (exists): $name"; return; fi
   print -r -- "$content" > "$file"
   eval "$runner $sel" > /tmp/claude/mut.log 2>&1; local rc=$?
@@ -191,3 +198,5 @@ check "the boundary still redacts on the new specimen (the value never reaches t
 check "the boundary still catches the validation exit by name (the tail rung would swallow the field)" $SETTINGS '        except ValidationError as exc:
             error = _redact(exc)
 ' '' "$UNIT" "$ECHO -k field_names_survive_so_the_error_is_still_actionable"
+
+echo "ran $RAN of $EXPECTED mutations${ONLY:+ (ONLY=$ONLY)}"

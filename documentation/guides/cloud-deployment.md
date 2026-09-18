@@ -55,8 +55,13 @@ psql "postgresql://storydump_user:PASSWORD@ep-xxx.region.neon.tech/storydump?ssl
 Run the base schema and all migrations in order:
 
 ```bash
+# Step 0, once per database, as the database owner: the service roles, then
+# the DDL door migration 050 calls (without them the runner stops at 050)
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
+  -f scripts/window/step0_bootstrap.sql -f scripts/window/step0_legacy_ddl_door.sql
+
 # Base schema
-psql "$DATABASE_URL" -f scripts/setup_database.sql
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f scripts/setup_database.sql
 
 # All migrations, through the runner (never a psql loop): the worker's
 # pre-deploy step runs the same command and keeps the ledger
@@ -321,7 +326,7 @@ From a laptop with a token minted under Settings › API tokens:
 
 | Problem | Solution |
 |---------|----------|
-| Database connection fails | Check `DATABASE_URL` or `DB_*` vars. Ensure `DB_SSLMODE=require` for Neon. |
+| Database connection fails | Check `TARGET_DATABASE_URL` (the services) and `DATABASE_URL` (the migration runner); a Neon URL carries `?sslmode=require`. The `DB_*` components steer only the test harness and `make`. |
 | Neon connection limit exceeded | The pool is pinned in code (10 per process, no overflow); no variable sizes it. Count the processes against the plan's connection limit. |
 | Telegram bot not responding | Verify `TARGET_TELEGRAM_BOT_TOKEN` is the bot named by `TARGET_TELEGRAM_BOT_USERNAME`; `storydump health` reports the webhook. Check Railway worker logs. |
 | `ENCRYPTION_KEY not configured` | Generate one: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |

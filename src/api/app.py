@@ -378,8 +378,8 @@ def _engine_from_env(env: Mapping[str, str]) -> Optional[AsyncEngine]:
     url = engine_url_from_env(env)
     if url is None:
         logger.warning(
-            f"{DATABASE_URL_VAR} is unset: the API has no target engine and every "
-            "data route answers 503 until it is configured"
+            f"{DATABASE_URL_VAR} is unset or blank: the API has no target engine "
+            "and every data route answers 503 until it is configured"
         )
         return None
     # The API's pool waits `INGRESS_POOL_TIMEOUT_SEAM`, not the worker's 3 s:
