@@ -331,6 +331,7 @@ settings.
   it here; phase 02). Eight requirements with zero importers (the table above).
 - **After phase 02 deploys (owner-run):** remove `WORKER_IMPL`, `TELEGRAM_BOT_TOKEN`,
   `TELEGRAM_CHANNEL_ID` and `ADMIN_TELEGRAM_CHAT_ID` from BOTH Railway services (nothing reads them; the
-  landing app's own two on Vercel stay); replace `.claude/settings.json:54-59`'s four `storydump-cli`
-  deny rules (commands that no longer exist) — the `python -m src.main` rules stay.
+  landing app's own two on Vercel stay); replace `.claude/settings.json:54-59`'s four deny rules that
+  name the deleted legacy CLI's commands (commands that no longer exist) — the `python -m src.main`
+  rules stay.
 - The tear-out's own gates as they arise (phase 03's probe lines and the 078 rehearsal; phase 04's window).
