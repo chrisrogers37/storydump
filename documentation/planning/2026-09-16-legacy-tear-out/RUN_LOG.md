@@ -42,7 +42,7 @@ Re-checked after every merge; output pasted under the phase's entry.
 | I4 | the FC-2 ratchet baseline never grows; its core segment empty from phase 01 on | `python scripts/telegram_ratchet.py` → 4 / 0 / 0 / 0 |
 | I5 | no runner file on `main` is applied by a deploy unless it is meant to be; a manual file stays owed and does not wedge `apply` | `python -m scripts.migration_runner status` on a checkout; the runner's unit tests (phase 04) |
 | I6 | the never-run lists agree | `pytest tests/test_agent_docs.py -q` |
-| I7 | the worker entrypoint imports `src.worker` and nothing legacy | `tests/src/test_worker_impl_gate.py`, `scripts/target_reachability.py` |
+| I7 | the worker entrypoint imports `src.worker` and nothing else | `tests/src/test_worker_entrypoint.py` (renamed from `test_worker_impl_gate.py` in phase 02), `scripts/target_reachability.py` |
 | I8 | every `runner:` marker in the corpus is one the runner knows (from phase 03 on) | the runner's unknown-marker test |
 
 ## Merge topology
@@ -57,9 +57,9 @@ API service skipped the two kickoff commits — see the gate above).
 
 | Phase | Doc | Status | PR | CI |
 |---|---|---|---|---|
-| 01 delete the legacy code and its tests | `01_delete-the-code.md` | in progress (branch `tear-out/01-delete-the-code`) | — | — |
-| 02 retire the settings, the entry point and the config | `02_settings-and-entry-points.md` | round 1 folded (`5816b1b`), re-verified by a fresh lens, its findings folded; ready to merge | #1319 | green at `3649a4d` (3679 passed, 1 skipped) |
-| 03 the 3f snapshot migration and the ratchet's file rule | `03_snapshot-migrations.md` | pending | — | — |
+| 01 delete the legacy code and its tests | `01_delete-the-code.md` | **DONE** — merged `2369a9b` (2026-09-17 23:57 UTC); the worker deployed it (SUCCESS); the API service SKIPPED it behind a red `main` check (the midnight skip, below) | #1316 | green at `e6e854b` (3653 passed, 1 skipped) |
+| 02 retire the settings, the entry point and the config | `02_settings-and-entry-points.md` | **DONE** — merged `f59fe43` (2026-09-18 15:44 UTC); round 1 and a fresh re-verify folded; the deploys under the phase's entry | #1319 | green at `9d14304` (3680 passed, 1 skipped) |
+| 03 the 3f snapshot migration and the ratchet's file rule | `03_snapshot-migrations.md` | folded, rebased onto `f59fe43` as one commit, **owner-gated**: the merge waits on the 078 rehearsal (a Neon PITR branch, wall-clock) | #1318 | the rebase's run below |
 | 04 the gated drop and stand-down | `04_drop-and-stand-down.md` | pending (owner-gated window) | — | — |
 | 05 the documentation's end state | `05_docs-end-state.md` | pending | — | — |
 
@@ -215,6 +215,19 @@ docstrings in `src` (`api/routes/retired.py`, `exceptions/tenancy.py`, `config/d
 The checklist line "`grep … src.services.core … → 0 lines`" is unmet BY DESIGN: the survivors
 say "deleted in #1216", the ratchet's `CORE_SEGMENT` constant and its planted fixtures name the
 directory, and the guard lists the prefixes — the checklist is ticked with that note.
+
+## Phase 01 — merged
+
+`2369a9b`, squash-merged with `--admin` on 2026-09-17 23:57 UTC after the residue fold's CI (`e6e854b`:
+3653 passed, 1 skipped, nine checks). Invariants re-run on `main` at `2369a9b`: I4 the ratchet 4 / 0 / 0 / 0;
+I2/I3/I6/I7 and the guard — 114 tests green (the lane, the advertised-DDL pin at 35, `test_agent_docs`, the
+worker gate, the inventory pin). Deploy reachability: the worker deployed `2369a9b` (SUCCESS) — the deletion
+is live on the worker; the API service marked it `SKIPPED`, its third in a row, because `main`'s CI run for
+the merge FAILED on the skip ceiling: the merge landed at 23:57 UTC and `test_l5_pipeline_gate.py`'s
+cap-wait test skipped inside its 23:55–23:59 window (2 skipped, ceiling 1). That flake was queued after
+phase 01's kickoff; it now blocks the API's deploy of every merge landing in that window, so it was fixed
+outside the plan's phases as a test-only PR (`test/cap-wait-noon-tz`: the account gets the `Etc/GMT±N`
+zone where it is noon right now, nothing skips) and merged first; the API's deploy is followed from there.
 
 ## Phase 02 — retire the settings, the entry point and the config
 
@@ -457,10 +470,157 @@ moment; otherwise the owner's `railway redeploy --service storydump`. Until an A
 API-side changes of five merges are not live — the fold's API fixes, phase 01's deletion, this phase's
 settings.
 
+## Phase 02 — merged
+
+`f59fe43`, squash-merged with `--admin` on 2026-09-18 15:44 UTC after CI on the final commit `9d14304`
+(`3680 passed, 1 skipped`, every check) and the battery on that committed tree (`ran 34 of 34
+mutations`, 34 killed). Invariants re-run on `main` at `f59fe43`: I2 the lane and the advertised stream —
+36 passed; I3/I6/I7 and the settings guard — 122 passed with no variable of either tier set; I4 the
+ratchet 4 / 0 / 0 / 0; the instrument: worker closure +532, 35 target modules, both controls PASS; I1 the merge's own CI run on `main` green (`3680 passed, 1 skipped`). Deploy reachability
+(`storydump deploys --watch --commit f59fe43`): the worker deployed it — `SUCCESS` at 15:46 UTC, so the new
+boot refusal did not fire in production (both services carry `TARGET_DATABASE_URL`, checked by name before
+the merge). The API service: the API deployed it too — `SUCCESS` (a fresh process, `storydump health` ok on every surface, the webhook registered), its FIRST deployment since `d8f5c72` (2026-09-16). With it the 2026-09-16 review fold's API fixes, phase 01's deletion, #1317 and phase 02 are all live on both services. CLOSED.
+
+## Phase 03 — the 3f snapshot migration and the ratchet's file rule
+
+**Step 1, measured** (2026-09-17, the read-only probe via `railway run --service worker -- sh -c 'psql
+"$TARGET_DATABASE_URL" …'`, output in the scratchpad's `probe03.out`):
+
+- PostgreSQL 17.11. `current_user` under `TARGET_DATABASE_URL` is `neondb_owner` — the runtime login IS
+  the database owner (#751's posture is production's state; the runner's own `DATABASE_URL` is that same
+  owner login per `railway.toml`).
+- The `legacy` schema holds exactly the sixteen tables of `LEGACY_TABLES` — 42 MB in total (`media_items`
+  15 MB, `service_runs` 15 MB, `user_interactions` 7 MB, `posting_history` 2 MB, the rest under 1 MB);
+  `n_live_tup` reads 0 for all (stats not collected since the move — the postconditions count rows).
+- Schema owners: `legacy` → `svc_migration` (the bootstrap ran); `public`, `archive`, `runner` →
+  `neondb_owner`; the legacy TABLES are `neondb_owner`'s (built by hand as the owner). Memberships:
+  `svc_migration` is a MEMBER of `svc_claim`, `svc_clock`, `svc_maintenance` and `svc_membership` (the
+  bootstrap's leg 2, no admin — the rows phase 04's stand-down concerns); `neondb_owner` holds every
+  `svc_*` directly WITH ADMIN (it created them) and `svc_migration` (leg 4). A second probe (2026-09-17,
+  `probe03b.out`) answered the plan's owner-run lines under the same login: `pg_has_role(current_user,
+  'svc_maintenance', 'MEMBER'|'USAGE'|'SET')` all true, `has_schema_privilege(current_user, 'archive',
+  'CREATE')` true — so `OWNER TO svc_maintenance` is legal for the owner on PG17's SET rule with no
+  bracket, and 078 carries none. `rolbypassrls` is true for `neondb_owner` only among the app's roles.
+- A third probe (`probe03c.out`): every ledger row since the runner was armed, 066–077, was applied by
+  `neondb_owner` — the runner's actor is measured, not inferred from `railway.toml`'s comment;
+  `statement_timeout` is 0 and `idle_in_transaction_session_timeout` 5 min on that login's session;
+  `n_tup_ins/upd/del` are 0 on all sixteen legacy tables since the stats' last reset (nothing writes to
+  `legacy`); `archive`'s ACL is `neondb_owner=UC, svc_maintenance=UC` with no default ACL;
+  `posting_history` holds 4,642 rows and `media_items` 4,619.
+- The runner's ledger head is 077 (77 rows). `posting_history_dedup_archive`: 19 columns (uuid ids, naive
+  timestamps, `archived_at timestamptz`), no constraints, no indexes — now `tests/scripts/fixtures/
+  legacy_by_hand.sql`.
+- Owner-run, still owed and GATING THE MERGE (the plan's own step 1): the 078 rehearsal on a Neon PITR
+  branch with its wall-clock (42 MB of copies in one transaction; `statement_timeout` is 0, so the budget
+  is Railway's predeploy, which `railway.toml` does not bound). `runner status` under `DATABASE_URL` is
+  answered read-only by the ledger probe (`head 077`, every row `neondb_owner`).
+
+**Built:** `scripts/migrations/078_legacy_snapshots_pre_cutover.sql` (sixteen `CREATE TABLE … AS TABLE` +
+`OWNER TO svc_maintenance`, 32 postconditions, `-- runner:unadvertised`, no `07` block, no manifest row —
+the pin at `test_advertised_ddl.py:290` stays 35); the runner's `UNADVERTISED_MARKER`, `KNOWN_MARKERS` and
+the unknown-marker refusal at discovery (naming the file); `target_lineage_files` excludes an unadvertised
+file (one definition, both consumers); the lane's world seeds the hand-made table beside the legacy seed
+(`BY_HAND_SQL`, applied INTO `public` before the 051 move, as production's was) and its inventory literal
+is one list again (`LEGACY_TABLES`; `HAND_MADE` records provenance and is pinned equal to the fixture's
+`CREATE TABLE` names); the gate `tests/scripts/test_legacy_snapshots.py` applies 078 as the OWNER actor
+(production's shape) and as `svc_migration` (the lane's), on seeded tables (the hand-made one with a row,
+`schema_version` with the lineage's fifty), asserts existence, owner, row counts and no read for
+`svc_ingress`, that a second `apply` is a no-op, and that a missing table fails the file whole with no
+partial archive. Tests red first: the runner's marker tests, the ratchet's file rule, the lane's list and
+the gate all failed on the base (the gate could not even find a 078).
+
+**Premise findings:** the plan's F4 dispositions listed `HAND_MADE` as a subset the lane could not hold;
+the honest world holds it (production does), so `LINEAGE_TABLES` is gone and the lane compares all sixteen.
+The plan's "the runner applies files as `svc_migration`" was corrected by the lenses and is now measured
+false for production (the owner) — the gate's owner arm is the one that matches the next deploy.
+
+**Verification before the fold** (the worktree at `e738e2e`/`84b1a2f`): `tests/scripts` whole against the
+Docker test PostgreSQL — `1412 passed, 1 skipped` (the live-drift audit); the gate's six tests green in
+both actor arms; units `2225 passed` plus the environment's two loopback failures; CI on `84b1a2f`
+(the fixture, gitignored by `*.sql` at `e738e2e`, tracked with an exception): `3666 passed, 1 skipped`,
+nine checks green. Battery on `e738e2e`: 13 killed, one collection-time refusal reclassified.
+
+**Review round 1** (two lenses on `e738e2e`): no blocker for the next deploy. Lens 1 (structural): 4
+risks, 7 gaps, 7 simplifications. Lens 2 (adversarial): 6 risks, 8 gaps, 4 surviving mutants. Closed:
+- The marker grammar was narrower than F6 promised — `-- runner: manual` (a space after the colon),
+  `-- Runner:manual` and a bare `-- runner:postcondition` all read as prose. Now ONE dispatch on the word
+  after `runner:` (`_MARKER_RE` case-insensitive on `runner`, any spacing): an unknown word is refused, a
+  flag refuses an argument, a bare postcondition is refused; prose that merely mentions a marker
+  mid-line is not one. Seven new cases in `TestMarkers`; `Migration.unadvertised` has no default.
+- Fourteen of the sixteen row-count postconditions compared 0 = 0 in both DB arms (only the hand-made
+  table and `schema_version` carried rows), so the plan's own `WITH NO DATA` mutation on
+  `posting_history` would have survived — the ledger's earlier text did not say so. Closed by a UNIT PIN
+  of the file: its thirty-two statements and thirty-two postconditions are generated from
+  `LEGACY_TABLES` and compared exactly (`normalize_statements`), which kills `WITH NO DATA` on any
+  table, a dropped `OWNER TO`, a stray `GRANT`, a swapped row-count source, a mixed date and a second
+  transaction marker without a database; the DB arms keep the runtime facts, and the `svc_ingress`
+  denial is asserted on every snapshot, not one.
+- 078's header now states what was inferred: the actor and its rights as measured (the ledger's
+  `applied_by`, `pg_has_role … 'SET'`), the transient memberships F8's stand-down keeps and which any
+  stand-down must follow by phase order, the no-writer premise the same-transaction count check
+  rests on (measured), the one-transaction shape, that the retention clock runs from the NAME's date
+  (eligible 2026-12-16 whatever day 079 runs — "the drop-era date" was wrong) with the export option,
+  that the postconditions serve as adoption evidence only until 3g, that the date is frozen at merge
+  (the runner checksums bytes), and that a database built from the tree must pre-create the hand-made
+  table from the fixture. "Readable by nothing but the owner" → readable by `svc_maintenance`'s members
+  (the owner; `svc_migration` until the stand-down) — CHANGELOG and header alike.
+- The lane pins the two lists apart (the advertised lineage 052–077; the unadvertised files above the
+  move, `["078…"]`) under a heading that no longer calls them all "the target lineage".
+- Docs: `migration-runner.md`'s marker contract (schema-move, unadvertised, the refusal),
+  `backup-restore.md`'s F9 line, and phase 04's step 1 gains the two obligations the grammar imposes
+  (`manual` joins `KNOWN_MARKERS` in the same commit as the first manual file; 079/080 stay out of the
+  prefix diff by `unadvertised` or by the rule learning `manual`).
+- The ledger's own errors, fixed above: the membership direction was reversed (`svc_migration` is the
+  member); "the lane's actor" was wrong (the lane applies as the test admin; the `svc_migration` arm is
+  the gate's own, per the runbook); `schema_version` holds 48 rows in the replay, not fifty.
+- Declined, with reasons: seeding one row in every legacy table (the unit pin closes the hole without
+  sixteen INSERTs against a schema with foreign keys); `n_tup_ins` flatness as a pre-deploy owner step
+  (measured here, 0 on all sixteen — the header states the premise); a `statement_timeout` for the
+  runner (the plan sets none; a timeout mid-078 rolls back whole and aborts the deploy loudly — the
+  rehearsal sizes the copy instead).
+- Battery: 19 mutations (13 without a database, 4 under the DB gate, plus the lane's two-list pin).
+
+**Re-verify after the fold** (the fold commit `000da0e`, 2026-09-18): CI green on the fold (`3673 passed,
+1 skipped, 5 deselected`; every check passed); `main`'s re-run of the DB-gate teardown flake completed
+green. Battery on the committed tree: 18 of 19 killed — the parser arms (unknown marker, a stray space
+after the colon, a bare postcondition, `unadvertised` read off the file), the F.2 prefix rule and the
+snapshot file's own pin (not advertised, every table of the inventory, `WITH NO DATA` without a database,
+a stray `GRANT` without a database, a row-count postcondition per table and one compared to the wrong
+source, one transaction, a name dropped from the inventory, the hand-made subset) and the four DB gates
+(the owner hand-off to `svc_maintenance`, `WITH NO DATA` at runtime on the ledger's rows, `svc_ingress`
+denied on every table, the lane's world holding the hand-made table). ONE SURVIVED: "the lane keeps the
+two lists apart" mutated the LANE TEST's own derivation (`m.unadvertised` → `m.version == 78`), which is
+an EQUIVALENT mutant on this corpus — 078 is the only unadvertised file, so both predicates select the
+same list. Lesson recorded in the battery: a test-side mutation of a list the corpus makes coincide
+proves nothing. Re-pointed at the ratchet's filter (`not m.unadvertised` dropped) with the lane's pin as
+the checker — killed (`addfefb`).
+- Deploy reachability at this phase: the merge waits on the owner's rehearsal; Railway applies 078 at
+  BOTH services' next predeploy after the merge. The API service had SKIPPED every deploy since
+  `53ca6d6` behind red `main` checks; #1317 merged (`deb29c2`), the worker deployed it, the API skipped
+  again behind a DB-gate teardown flake on `main` (`role "svc_ingress" cannot be dropped` at a scratch
+  database's teardown — pre-existing, re-run requested); queued.
+
+**Rebased onto `f59fe43`** (2026-09-18, after phase 02 merged; the branch squashed to one commit
+first, so the changelog and this ledger conflicted once). What phase 02's merge asked of this branch:
+the battery's two recipes lose the three dummy variables (main's new guard refuses a recipe that sets a
+dead one) and the battery ends with `ran N of M`; `make init-db` gains
+`tests/scripts/fixtures/legacy_by_hand.sql` beside the by-hand base — 078 snapshots the hand-made
+table, so a database built from the tree must hold it — and the guard's sequence test learns the line.
+PROVEN on a throwaway `postgres:15` container (never the shared test cluster): `make create-db
+init-db` → `78 applied`; `legacy` 16 tables, `archive` 16 snapshots, every one owned by
+`svc_maintenance`; container removed. The whole suite against the Docker test database on the rebased
+tree, no variable of either tier set: `3661 passed, 1 skipped`. The battery and CI on the rebased commit
+are recorded in the PR.
+
 ## Owner-decision queue
 
-- **The API service's skipped deploys.** Railway marked `53ca6d6` and `4f2b36b` `SKIPPED` on the `storydump` (API) service while the worker deployed; the fold's API-side fixes (`ops_views.py`, the doctor/health paths) are not live until an API deploy lands. Phase 01's merge triggers one; sooner, by hand: `railway redeploy --service storydump`. Not run by the agent.
-- ~~**A latent CI flake: the skip ceiling meets a clock-of-day skip.**~~ CLOSED by #1317 (`deb29c2`): the test gives its account a noon timezone and no longer skips. The original entry: `tests/scripts/test_l5_pipeline_gate.py::TestTheFirstFetch::test_a_local_cap_wait_on_a_slot_today_promises_tomorrow` skips when the account's local time is 23:55–23:59; any CI run starting in that window breaches `MAX_EXPECTED_SKIPS`. A fix that removes the skip: set the fixture account's `tz` to a zone where the local hour is not 23 at test time (the test already reads `tz` from the row). Target-tier test hygiene, outside this plan's scope.
+- **The API service's skipped deploys.** Railway marked `53ca6d6`, `4f2b36b`, `2369a9b` and `deb29c2`
+  `SKIPPED` on the `storydump` (API) service while the worker deployed — each behind a red `main` check
+  at deploy time (the midnight skip-ceiling flake three times, then a DB-gate teardown flake); a later
+  re-run going green did NOT redeploy. Phase 02's merge `f59fe43` landed with `main` green: the API deployed it too — `SUCCESS` (a fresh process, `storydump health` ok on every surface, the webhook registered), its FIRST deployment since `d8f5c72` (2026-09-16). With it the 2026-09-16 review fold's API fixes, phase 01's deletion, #1317 and phase 02 are all live on both services. CLOSED.
+- ~~A latent CI flake: the skip ceiling meets a clock-of-day skip.~~ CLOSED by #1317 (`deb29c2`): the
+  cap-wait test gives its account a noon timezone and no longer skips, after the flake blocked the API's
+  deploy three times.
 - **A startup secret check for the target tier?** The legacy `ConfigValidator` (deleted with phase 01) checked `ENCRYPTION_KEY` at boot; nothing in the target tier does the same at import. A decision, not a regression.
 - **Phase 02 premise findings from round 1:** `unit_of_work.async_database_url()` falls back to the
   legacy `DB_*` fields when `TARGET_DATABASE_URL` is unset — with the legacy loops gone, a boot
@@ -481,6 +641,4 @@ settings.
   session nothing holds. A comment-and-build-line edit, the owner's call on when.
 - **The Makefile's `APP_DB_URL` does not URL-encode `DB_PASSWORD`** (pre-existing): a password
   containing `@` mis-parses into the host. Local development only.
-- **Phase 03's rebase owes the Makefile a line:** `init-db` must apply
-  `tests/scripts/fixtures/legacy_by_hand.sql` once that file lands with 078.
 - The tear-out's own gates as they arise (phase 03's probe lines and the 078 rehearsal; phase 04's window).
