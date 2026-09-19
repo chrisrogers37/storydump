@@ -41,8 +41,9 @@ storydump webhook deregister         # Detaches the bot's webhook — Telegram d
 
 ### Production
 
-Never run against production: the posting scheduler, or mutating SQL on
-`posting_history`.
+Never run against production: the posting scheduler, or mutating SQL against
+the ledger — `post_intents`, `jobs`, `channel_outbox` and every other table
+`src/models/target/` declares — or any `archive` snapshot.
 
 ### Reading this list correctly
 
@@ -66,33 +67,89 @@ many tenants, and the operator and a tenant are different parties — which is w
 per-tenant isolation is a product requirement rather than a hardening
 preference.
 
-**Tech stack:** Python 3.10+, FastAPI, PostgreSQL (Neon in cloud), Telegram Bot,
-Railway deployment, Next.js `landing/` site.
+**Tech stack:** Python 3.10+, FastAPI, PostgreSQL (Neon in cloud; hand-written
+SQL on asyncpg), the Telegram Bot API over HTTP (no bot framework), the
+Instagram Graph API, Google Drive, Cloudinary, Railway deployment, Next.js
+`landing/` site on Vercel.
 
-## Architecture: strict separation of concerns
+## Architecture: one tier, strict separation of concerns
+
+There is one tier. The design plan and the package names call it the *target*
+tier (`src/services/target/`, `src/models/target/`) because it was built beside
+the tier it replaced. The legacy tier was retired in the tear-out (#1216,
+September 2026); its data survives as the `archive.*_pre_cutover_20260917`
+snapshots (migration 078), and the `legacy` schema itself is dropped by the
+gated 079 in the owner's window
+(`documentation/operations/legacy-window-close.md`).
 
 Each layer is isolated. Do not violate the boundaries:
 
-- **CLI / API** → call Services (never Repositories or Models directly)
-- **UI** → calls the API (never Services directly)
-- **Services** → orchestrate business logic, call Repositories
-- **Repositories** → CRUD, return Models
-- **Models** → schema definitions only, no business logic
+- **CLI** (`storydump_cli/`) → calls the API over HTTP, never a database. The
+  one module it imports from `src` is `src/services/target/vocabulary.py`
+  (`tests/storydump_cli/test_import_boundary.py` pins that in a fresh
+  interpreter).
+- **UI** (`landing/`) → calls the API through its server-side client
+  (`landing/src/lib/target-api.ts`), never a service. The one table it owns
+  is the marketing waitlist (`landing/src/lib/schema.ts`, Drizzle), which no
+  Python migration manages.
+- **API** (`src/api/`) → authenticates a principal (`src/api/principal.py`:
+  a web session or an API token), then calls a module under
+  `src/services/target/`. Reads are resources; state changes are commands
+  (below).
+- **Worker** (`src/worker.py`, the composition root `src/main.py` dispatches
+  to) → runs the same services as jobs: the elected clock (`scheduler.py`),
+  the two claim lanes `interactive` and `bulk` over the kind→executor registry
+  (`work_loop.py`, `jobs.py`), the publish pipeline (`publish_pipeline.py`)
+  and the outbox sender (`outbox.py`). A kind whose seam the deployment lacks
+  is parked by name, never run against a fake.
+- **Services** (`src/services/target/`) → hand-written SQL under the
+  tenant-scoped unit of work (`unit_of_work.py`; unconstructible without a
+  tenant, it sets the `app.tenant_id` the RLS policies of migration 058
+  read). Cross-tenant work goes through the database's `SECURITY DEFINER`
+  doors (migration 059 onward), never a privileged session. A transaction
+  never spans a provider call: write the checkpoint, commit, then call Meta,
+  Telegram, Drive or Cloudinary through the egress floor (`egress.py`).
+- **Channels** (`src/channels/`) → the Telegram transport and the webhook
+  registration. Only the two composition roots import them (`src/worker.py`,
+  `src/api/app.py`); a service receives the transport as an injected callable.
+- **Models** (`src/models/target/`) → schema definitions only, kept for parity
+  with the migrations (`scripts/migrations/`, applied by
+  `scripts/migration_runner.py`). They are not an ORM: nothing under `src/` or
+  `storydump_cli/` imports them.
+
+**The database is the authority.** The legal edges of a story's state are rows
+of `post_intent_transitions` and a trigger refuses the rest (migration 055;
+`intent_ledger.py` issues the UPDATE and translates the refusal), one live
+lease per serialization key is a unique index on `jobs` (056), and every state
+change of a story writes its own `audit_events` row by trigger, which refuses
+an anonymous one. Do not add a Python pre-check that copies one of these: a
+second authority is how the two drift.
 
 ### The command port
 
-Writes in the target tier go through one closed vocabulary
-(`src/services/target/commands.py::VOCABULARY`, 25 commands). The web adapter
-exposes them as a single route — `POST /workspaces/{ws}/commands/{command}` —
-whose path segment is validated against that vocabulary, so the route table
-cannot drift from it. `create_workspace` is the one exception and has its own
-route.
+State changes go through one closed vocabulary
+(`src/services/target/commands.py::VOCABULARY`, re-exported from
+`vocabulary.py::COMMANDS` — 26 commands on 2026-09-18). The web adapter exposes
+them as a single route — `POST /api/v1/workspaces/{ws}/commands/{command}`
+(`src/api/routes/v1.py`) — whose path segment is validated against that
+vocabulary, so the route table cannot drift from it. `create_workspace` is the
+one exception and has its own route (`POST /api/v1/workspaces`). Three adapters
+hand the port the same `Command`: a web click and a `storydump` write verb
+through that route (admission channels `web` and `cli`), and a tap on a
+Telegram card through the webhook
+(`src/services/target/telegram_dispatch.py::TelegramDispatcher._tap`).
+
+What is NOT a command is a resource with its own route: adding a destination
+or a Drive folder, the Drive grant, the category mix, API tokens, accepting an
+invitation (`src/api/routes/v1.py`, `src/api/routes/tokens.py`).
 
 Two consequences worth knowing before reasoning about reach:
 
 - **Every built command in the vocabulary is reachable over the web API**,
-  subject to its role floor (`FLOORS`, per-command). There is no separate
-  web-exposed subset.
+  subject to its role floor (`commands.ROLE_FLOOR`, per command, over the
+  ladder `FLOORS`). There is no separate web-exposed subset. The `operator`
+  floor has no principal behind it yet (#1124), so a command on that floor is
+  refused as a role refusal for every caller.
 - A vocabulary command with no executor yet is a **named refusal**, not an
   absent name: it answers `CommandNotBuilt`, rendered `501`. Read the current
   unbuilt set from `commands.UNBUILT`, which is *derived* from the registry and
@@ -137,8 +194,8 @@ environment; the section below walks it.
 
 ## The `storydump` CLI (v2)
 
-`storydump` is the developer and agent console over the target API — a pure
-HTTP client, never a database connection
+`storydump` is the developer and agent console over the API — a pure HTTP
+client, never a database connection
 (`documentation/planning/2026-09-15-cli-v2/`). Install it with
 `pip install -e '.[cli]'`.
 
@@ -204,10 +261,10 @@ the two documents use to the registry, not the judgement of what is dangerous.
 ## Testing
 
 ```bash
-pytest                          # full suite (~4200 tests)
+pytest                          # full suite (~3,750 tests); pytest.ini turns coverage on
 pytest tests/src/services/      # one area
-pytest -m unit                  # unit tests only
-pytest --cov=src                # with coverage
+pytest -m unit                  # only the tests marked `unit`: a small subset, not every database-free test
+pytest --no-cov                 # skip coverage (faster)
 ```
 
 The suite needs a real PostgreSQL. CI sets `REQUIRE_TEST_DATABASE=1` so that a
@@ -232,8 +289,30 @@ DB_NAME=storyline_ai TEST_DB_NAME=storyline_test REQUIRE_TEST_DATABASE=1 \
 
 ## Services
 
-- **Worker:** `python -m src.main` (scheduler + Telegram bot) — see the safety rules.
-- **API:** `uvicorn src.api.app:app` → health at `GET /health`, schema at `/openapi.json`.
+The `Procfile` names the two deployed processes; both run the one tier.
+
+- **Worker:** `python -m src.main` — see the safety rules. `src/main.py` only
+  dispatches to `src.worker.main`, which elects the clock, claims jobs on two
+  lanes, runs the publish pipeline and sends the Telegram cards. It reads
+  `TARGET_DATABASE_URL` from the process environment and exits 2 without it
+  (`src/worker.py::main`); `make run` exports `.env`, a bare invocation does
+  not read it. It receives nothing from Telegram: nothing in `src` polls.
+- **API:** `uvicorn src.api.app:app` → health at `GET /health` (plus
+  `/health/scheduling` and `/health/posting`, the surfaces the fleet monitors
+  poll), schema at `/openapi.json`, the resource and command surface under
+  `/api/v1`, sign-in under `/auth`. Telegram's deliveries — `/start` links,
+  group joins, taps on a card — land here, on `POST /webhooks/telegram`. The
+  API registers that webhook on the bot at startup only in Railway's
+  `production` environment
+  (`src/channels/telegram_webhook_registration.py::autoregister_enabled`), so a
+  local API leaves the production bot alone unless
+  `TARGET_TELEGRAM_WEBHOOK_AUTOREGISTER` is switched on — never do that with
+  the production token.
+- **Schema:** `python -m scripts.migration_runner apply` is the
+  `preDeployCommand` of every deploy of either service (`railway.toml`), so a
+  merged migration is an applied one; `status` is the read-only report. The
+  gated files (`-- runner:manual`: 079, 080) are owed by a deploy and never run
+  by it (`documentation/operations/migration-runner.md`).
 - **Landing / dashboard:** `npm --prefix landing run dev` → http://localhost:3000;
   the BFF proxies to `BACKEND_URL`.
 
@@ -243,19 +322,26 @@ the worker and the API.
 ## What is deliberately not wired
 
 **Outbound email does not send.** `src/services/target/email_sender.py` ships
-inert by design: `sender_from_env` returns `None` when `RESEND_API_KEY` and the
-sender address are absent, and the job registry parks `send_email` with a reason
-naming what is missing. The provider choice is a flagged decision that has not
-been ratified, and deferring it is deliberate. An invitation created today
-therefore reports `delivery: {"channel": "email", "state": "not_configured"}` —
-the row and its token are real, the message is never delivered.
+inert by design: `sender_from_env` returns `None` unless `RESEND_API_KEY` and
+the sender address (`EMAIL_FROM`) are both set, and the job registry parks
+`send_email` with a reason naming what is missing. The provider choice is a
+flagged decision that has not been ratified, and deferring it is deliberate.
+An invitation created today therefore reports
+`delivery: {"channel": "email", "state": "not_configured"}` — the row and its
+token are real, the message is never delivered.
 
 Do not describe email as working, and do not wire a provider without the owner
 acknowledgement the design calls for.
 
 Publishing, dry run and pause are **per-workspace settings** in the ledger
-(`workspaces.dry_run_mode`, `is_paused`; the web's Settings › General), never
-environment variables.
+(`workspaces.api_publishing_enabled`, `dry_run_mode`, `is_paused`; the web's
+Settings › General), never environment variables.
+
+**Typed chat commands are not served.** The bot answers `/start` links, reads
+who is in a bound group, and executes taps on its cards; an "approve" or a
+`/pause` typed in a chat is not dispatched
+(`src/services/target/telegram_dispatch.py`, #854). The command surfaces are
+the card, the web Queue and Settings, and the `storydump` write verbs.
 
 ## Pre-commit and CI
 
@@ -263,14 +349,22 @@ environment variables.
 source venv/bin/activate && ruff check . && ruff format --check . && pytest
 ```
 
-**Always update `CHANGELOG.md`** when opening a PR — CI fails without it.
+**Always update `CHANGELOG.md`** when opening a PR — CI fails without it (the
+`changelog-check` job of `.github/workflows/ci.yml`; a PR that touches only
+`documentation/`, `.md` files or `.github/` is exempt).
 [Keep a Changelog](https://keepachangelog.com/) format, entries under
 `## [Unreleased]`.
 
 ## Documentation
 
 - Full docs: `documentation/README.md`
-- New docs go in `documentation/` subdirectories (`planning/`, `guides/`,
-  `updates/`, `operations/`, `cloudinary/`)
+- New docs go in `documentation/` subdirectories: `planning/` (plans and
+  specs), `guides/` (how-to), `operations/` (runbooks)
 - Bug fixes and patches: dated filenames in `documentation/updates/`
+- A finished, superseded or abandoned document moves to
+  `documentation/archive/` with a status banner and a row in
+  `documentation/archive/README.md`. `CLAUDE.md`, `AGENTS.md`, `README.md`,
+  `.claude/`, `documentation/operations/` and `documentation/guides/` are LIVE
+  pages: `tests/test_agent_docs.py` fails when one names a legacy-only table, a
+  deleted module path or a retired variable
 - **Never** scatter markdown files through source directories

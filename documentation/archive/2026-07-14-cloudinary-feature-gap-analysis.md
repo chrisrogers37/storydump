@@ -1,3 +1,5 @@
+> **Archived 2026-09-18 — STALE / PARKED.** Proposals evaluated against the LEGACY tier's Cloudinary use (its section 1 describes code deleted in the legacy tear-out, #1216). The target tier's Cloudinary path is the transit leg of the publish pipeline (`src/services/target/transit.py`); re-evaluate against that before reviving any proposal. See [`documentation/archive/README.md`](README.md) for the index.
+
 # Cloudinary Feature Gap Analysis & Enhancement Proposals
 
 **Status:** Proposed

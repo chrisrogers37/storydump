@@ -9,10 +9,11 @@ under Settings › API tokens), the fleet monitors under `scripts/`, and Railway
 own dashboard and logs. Nothing here reads the database directly: every
 question below has a read verb, and the verbs are the same ones an agent runs.
 
-This page is the target tier's — the only tier deployed: the worker dispatches
-to the target composition root (`WORKER_IMPL=target`, since 2026-08-24). The
-legacy code and the `legacy` schema survive undeployed until #1216 snapshots,
-drops and deletes them; nothing here reads them.
+This page is the target tier's, the only tier there is: the `worker` service
+runs `python -m src.main`, which dispatches to the target composition root,
+`src.worker`, and to nothing else (`src/main.py`). The legacy tier was retired
+in the tear-out (#1216, September 2026); its data survives as the
+`archive.*_pre_cutover_20260917` snapshots, and nothing here reads them.
 
 ---
 
@@ -85,7 +86,25 @@ storydump account <handle>                     # the cap, today's count, the nex
 storydump posture                  # the migration ledger, the connected role, RLS per table, the doors
 ```
 
-### 5. Error Rate
+### 5. The worker's own line
+
+```bash
+railway logs --service worker | grep "status:" | tail -3
+railway logs --service worker | grep -E "worker up|database role|telegram channel live" | tail -5
+```
+
+Once a minute the worker logs one `status:` line (`src/worker.py:414-481`): per
+lane `tasks processed parked failures exhausted fenced waits`, then
+`clock[elected ticks inserts errs]`, `heartbeat[beats short errs]`, the
+transport, the two sweepers, and the queue's depth and age per lane. Counters
+that stop moving between two lines are a stuck worker; `worker-recovery.md`
+reads the line field by field. At boot it logs the login it connected as
+(`worker database role: {...}`), the kinds it can run (`worker up: … live_kinds=…`
+— a kind missing there is parked, with a `parked kind` warning naming why) and
+the bot it sends as. `storydump posture`'s `role` is the API's connection, not
+the worker's.
+
+### 6. Error Rate
 
 ```bash
 railway logs --service worker | grep -c ERROR
@@ -120,7 +139,7 @@ directly.
 |-----|----------|
 | Worker logs | Railway dashboard or `railway logs --service worker` |
 | API logs | Railway dashboard or `railway logs --service storydump` |
-| Application logs | `LOG_LEVEL` env var (stdout, captured by Railway) |
+| Log levels | `WORKER_LOG_LEVEL` sets the worker's root logger (`src/worker.py:795`); `LOG_LEVEL` sets the shared `storydump` logger the API's routes write through (`src/utils/logger.py`). Both default to `INFO` and write to stdout, which Railway captures |
 | PostgreSQL logs | Neon dashboard |
 
 ---
@@ -128,9 +147,19 @@ directly.
 ## Restart Procedures
 
 ```bash
-railway restart --service worker
-railway restart --service storydump
+railway whoami && railway status              # the storydump project, environment production
+railway redeploy --service worker --yes       # re-runs the service's latest deployment
+railway redeploy --service storydump --yes
+storydump deploys --watch --timeout 900       # both services SUCCESS
 
-# Or via the Railway dashboard: Project → Service → Settings → Restart.
-# A redeploy is a push to main; `storydump deploys --watch --commit <sha>` follows it.
+# A push to main deploys both; `storydump deploys --watch --commit <sha>` follows it.
 ```
+
+`railway redeploy` acts on the **linked** environment and takes no
+`--environment`; another session's `railway login` silently drops the link, so
+check it first (`legacy-window-close.md`, step 0). Every deploy of either
+service runs the predeploy, `python -m scripts.migration_runner apply`
+(`railway.toml`). Restarting the production worker resumes whatever the ledger
+owes — approved stories publish — so it is a production action and an agent
+asks first; `worker-recovery.md` is the runbook. A restart does not stop
+posting: `storydump pause --workspace <ws>` does.

@@ -5,8 +5,16 @@ A guide for local development with cloud deployment (Railway + Neon).
 ## Current Architecture
 
 - **Local development**: Mac (code editing, tests, linting)
-- **Production**: Railway (worker + web services) with Neon PostgreSQL
-- **Deployment**: Push to `main` triggers Railway auto-deploy
+- **Production**: Railway — the `worker` service (`python -m src.main`, the
+  target worker) and the `storydump` service (the API) — with Neon PostgreSQL;
+  the web front end (`landing/`) on Vercel
+- **Deployment**: Push to `main` triggers Railway auto-deploy; each deploy
+  applies pending migrations first (`railway.toml`'s `preDeployCommand`)
+
+A local environment is for development and tests. `python -m src.main`
+(`make run`, `make dev`) starts the real worker — it sends Telegram cards and
+publishes to Instagram for whatever database it is pointed at — so it is not
+part of the everyday loop; see the safety rules in `AGENTS.md`.
 
 ---
 
@@ -24,14 +32,21 @@ cd storydump
 python3 -m venv venv
 source venv/bin/activate
 
-# Install dependencies
+# Install dependencies, the package and the `storydump` CLI (the `cli` extra;
+# `make install` does the same, and the Makefile's targets assume ./venv/)
 pip install -r requirements.txt
-pip install -e .
+pip install -e '.[cli]'
 
 # Copy and configure environment
 cp .env.example .env
-# Edit .env with your local or Neon database credentials
+# Edit .env — .env.example names every variable something reads
 ```
+
+No variable is required to load the settings (`src/config/settings.py`): the
+API, the tests and the `storydump` CLI load with an empty environment (the
+tests additionally need `ENCRYPTION_KEY`, a Fernet key). A process needs what
+it reads — the worker refuses to boot without `TARGET_DATABASE_URL`, and the
+API answers 503 on every data route without it.
 
 ### 2. Database Options
 
@@ -44,9 +59,12 @@ brew services start postgresql
 
 # Create the database and build the schema. `make init-db` applies step 0
 # (the seven cluster-wide svc_* roles, then the DDL door migration 050 calls),
-# the by-hand base, then every file through the runner (never a psql loop; it
-# keeps the ledger `storydump doctor` compares the checkout against). DB_USER
-# needs CREATEROLE. `setup_database.sql` alone stops the runner at migration 050.
+# the by-hand base with the one table production made by hand (migration 078
+# snapshots it), then every file through the runner (not a psql loop; the
+# runner keeps the ledger `storydump doctor` compares the checkout against).
+# DB_USER needs CREATEROLE. `setup_database.sql` alone stops the runner at
+# migration 050. The two gated files, 079 and 080, are listed as owed and not
+# applied (documentation/operations/migration-runner.md).
 make create-db init-db
 ```
 
@@ -88,15 +106,37 @@ alias sl-logs='railway logs --service worker'
 alias sl-logs-web='railway logs --service storydump'
 alias sl-health='storydump health'
 alias sl-restart='railway restart --service worker'
-
-# Production database queries (via Neon)
-alias sl-db-prod='psql "$DATABASE_URL"'
 ```
 
 After adding, reload:
 ```bash
 source ~/.zshrc
 ```
+
+#### Reading production
+
+There is deliberately no alias that opens `psql` on production, and
+`DATABASE_URL` in particular is the database **owner's** login — it is for the
+migration runner, not for queries. Production is read, in this order:
+
+1. **The `storydump` verbs** — `storydump story`, `floating`, `account`,
+   `jobs`, `outbox`, `burst`, `posture`: bounded, tenant-scoped reads through
+   the API under your own token
+   ([`reading-the-ledger.md`](../operations/reading-the-ledger.md)).
+2. **The escape hatch**, for a question the verbs do not answer — the service's
+   own runtime login, a file of `SELECT`s, and the connection string never
+   printed.
+
+   The command itself has one home, so it cannot drift between pages:
+   [`reading-the-ledger.md` › The escape hatch](../operations/reading-the-ledger.md#the-escape-hatch).
+
+`SELECT` only, inside `BEGIN TRANSACTION READ ONLY`. Nothing else enforces it:
+as measured on 2026-09-17 production's runtime login was still the database
+owner (`scripts/migrations/078_legacy_snapshots_pre_cutover.sql:14-15`), a role
+that holds `BYPASSRLS` — the move off it is
+[`runtime-database-roles.md`](../operations/runtime-database-roles.md) — so a
+stray write has nothing standing in its way. Writing the statements to a file
+first makes them reviewable before they run.
 
 ---
 
@@ -118,8 +158,10 @@ gh pr create
 # 4. After PR review and CI passes, merge to main
 gh pr merge --merge
 
-# 5. Railway auto-deploys from main
-# Monitor: railway logs --service worker
+# 5. Railway auto-deploys from main: the pre-deploy step applies pending
+#    migrations, then the new version of each service starts
+storydump deploys --watch --commit <sha>   # 0 when both reach SUCCESS, 6 on a failure
+railway logs --service worker
 ```
 
 ### Manual Deploy (if needed)
@@ -132,21 +174,41 @@ railway up --service storydump
 
 ---
 
-### 5. Environment File Standardization
+### 5. Running the Tests
 
-Create a `.env.dev` for local development:
+`pytest` runs from the repository root; how the suite is laid out, what needs a
+PostgreSQL and how to give it one is [`testing-guide.md`](testing-guide.md).
+The harness loads `.env.test` over the environment before any application
+import (`tests/conftest.py:39`), so its values win over `.env`'s.
+
+---
+
+### 6. Environment Files
+
+Two files are read, and both are gitignored: **`.env`** (copied from
+`.env.example`) and **`.env.test`** (the test harness loads it over the
+environment — `tests/conftest.py:39`). Nothing reads any other name, and a
+differently named file is not ignored by git — do not keep credentials in one.
+
+How `.env` is read (`.env.example`'s own header): the code loads only the
+`Settings` fields from it; the run-time reads — `TARGET_DATABASE_URL`, the bot
+token, the worker's knobs — come from the **process environment**. `make`
+exports `.env` into its targets; a bare `python -m src.main` does not read it.
 
 ```bash
-# .env.dev - Local development settings
+# .env - Local development settings
 DB_HOST=localhost
 DB_PORT=5432
 DB_NAME=storydump
 DB_USER=storydump_user
 DB_PASSWORD=your_local_password
 
-# The runtime login (the API and the worker) and the owner login (the runner)
+# The runtime login (the API and the worker)
 TARGET_DATABASE_URL=postgresql://storydump_user:your_local_password@localhost:5432/storydump
-DATABASE_URL=postgresql://storydump_user:your_local_password@localhost:5432/storydump
+# The owner login (the migration runner). Left commented, as in .env.example:
+# `make` exports this file into every target, and `make init-db` builds the
+# runner's URL from the DB_* components rather than trusting an ambient one.
+# DATABASE_URL=postgresql://storydump_user:your_local_password@localhost:5432/storydump
 
 # The bot the worker sends with (optional: without it the Telegram channel parks)
 TARGET_TELEGRAM_BOT_TOKEN=your_test_bot_token
@@ -160,7 +222,7 @@ Production environment variables are stored in the Railway dashboard (never in f
 
 ---
 
-### 6. Quick Reference Card
+### 7. Quick Reference Card
 
 ```
 === LOCAL COMMANDS ===
@@ -171,10 +233,9 @@ sl-precommit        - full pre-commit check (lint + format + test)
 
 === RAILWAY COMMANDS ===
 sl-logs             - follow worker service logs
-sl-logs-web         - follow web service logs
+sl-logs-web         - follow API service logs
 sl-health           - run health check on production
 sl-restart          - restart worker service
-sl-db-prod          - connect to Neon production database
 
 === DEPLOYMENT WORKFLOW ===
 1. Create feature branch
@@ -192,13 +253,13 @@ sl-db-prod          - connect to Neon production database
   ```bash
   cd ~/Projects/storydump
   python3 -m venv venv && source venv/bin/activate
-  pip install -r requirements.txt && pip install -e .
+  pip install -r requirements.txt && pip install -e '.[cli]'
   ```
 
 - [ ] **Mac: Set up local PostgreSQL** (optional, for offline dev)
   ```bash
   brew install postgresql && brew services start postgresql
-  createdb storydump
+  make create-db init-db     # the database, then the schema through the runner
   ```
 
 - [ ] **Mac: Add aliases to ~/.zshrc**
@@ -227,4 +288,4 @@ sl-db-prod          - connect to Neon production database
 
 ---
 
-*Last updated: 2026-03-03*
+*Last updated: 2026-09-18*

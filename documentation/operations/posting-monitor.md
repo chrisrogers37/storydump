@@ -272,6 +272,16 @@ urgent to say, which is the worst possible moment to find out — and failure (2
 above proves inspection is not enough, because a present token and an authorised
 token look identical in the file.
 
+**Whose variables these are.** `tg-post.sh` is the fleet host's pager: a script
+outside this repository, which the monitor knows only as its `--notify-command`
+(`scripts/posting_monitor.py`'s `notify` runs it with one argument, the
+message). `TELEGRAM_GROUP_CHAT_ID`, `TELEGRAM_STATE_DIR` and
+`TELEGRAM_BOT_TOKEN` below are **that script's** environment on that host — the
+token is whichever bot pages the operator group. They are not the deployment's:
+the worker and the API read the product bot's token as
+`TARGET_TELEGRAM_BOT_TOKEN`, and nothing under `src/`, `scripts/` or
+`storydump_cli/` reads the bare name.
+
 ```bash
 # Exactly the environment systemd gives it. rc=0 means DELIVERED -- tg-post.sh
 # parses `.ok` from the body and exits 0 only on a true, because Telegram

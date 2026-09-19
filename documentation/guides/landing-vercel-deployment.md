@@ -8,13 +8,17 @@ Set these in **Vercel → Project Settings → Environment Variables**:
 
 | Variable | Type | Description |
 |----------|------|-------------|
-| `DATABASE_URL` | Server | Neon PostgreSQL connection string (same DB as Python backend) |
-| `TELEGRAM_BOT_TOKEN` | Server | Telegram bot token — used for auth verification and waitlist notifications |
-| `ADMIN_TELEGRAM_CHAT_ID` | Server | Chat ID to receive waitlist signup notifications |
-| `JWT_SECRET` | Server | Random 32+ character string for signing session tokens |
-| `BACKEND_URL` | Server | FastAPI backend URL (e.g. `https://storydump-api.up.railway.app`) |
-| `NEXT_PUBLIC_SITE_URL` | Client | Public site URL (e.g. `https://storydump.app`) |
-| `NEXT_PUBLIC_TELEGRAM_BOT_NAME` | Client | Bot username without `@` (e.g. `storydump_bot`) — required for the Telegram Login Widget on `/login` |
+| `DATABASE_URL` | Server | Neon connection string for the ONE table the landing app owns: the marketing waitlist (`landing/src/lib/schema.ts`, Drizzle; `landing/src/lib/db.ts`). No Python migration manages it |
+| `TARGET_API_URL` (or `BACKEND_URL`) | Server | The API's base URL, called by the server-side client (`landing/src/lib/target-api.ts:31`: `TARGET_API_URL` wins, then `BACKEND_URL`, then `http://localhost:8000`) |
+| `TELEGRAM_BOT_TOKEN` | Server | The bot that posts WAITLIST-SIGNUP notifications (`landing/src/lib/telegram.ts`). This is the landing app's own variable: the API and the worker read the product bot's token under another name, `TARGET_TELEGRAM_BOT_TOKEN` |
+| `ADMIN_TELEGRAM_CHAT_ID` | Server | The chat that receives those notifications |
+| `NEXT_PUBLIC_TELEGRAM_BOT_NAME` | Client | The product bot's handle without `@`, for the site's `t.me` links (`landing/src/lib/telegram-bot.ts`); unset, the links are omitted rather than guessed |
+| `NEXT_PUBLIC_PLAUSIBLE_DOMAIN` | Client | Plausible analytics domain; omit to disable (`landing/src/app/layout.tsx:7`) |
+
+Sign-in is Google, through the API; the Telegram Login Widget is gone rather than hidden
+(`landing/src/app/login/page.tsx`), and with it every variable that signed a session here:
+nothing under `landing/src` reads `JWT_SECRET` or `NEXT_PUBLIC_SITE_URL` any more (measured
+2026-09-18; both still appear in `landing/.env.local.example`).
 
 ### Client vs Server Variables
 
@@ -23,9 +27,9 @@ Set these in **Vercel → Project Settings → Environment Variables**:
 
 ### Common Issues
 
-- **Login page shows "Telegram login is not configured"**: `NEXT_PUBLIC_TELEGRAM_BOT_NAME` is missing. Add it in Vercel env vars and redeploy (client vars require a rebuild).
-- **Login widget loads but auth fails**: `TELEGRAM_BOT_TOKEN` is missing or doesn't match the bot named in `NEXT_PUBLIC_TELEGRAM_BOT_NAME`.
-- **Dashboard API calls fail**: `BACKEND_URL` is missing or the Railway backend is down.
+- **Dashboard API calls fail**: `TARGET_API_URL` / `BACKEND_URL` is missing or wrong, or the Railway API service is down.
+- **A waitlist signup saves but no Telegram notification arrives**: `TELEGRAM_BOT_TOKEN` or `ADMIN_TELEGRAM_CHAT_ID` is missing — the notifier logs "Telegram notification skipped" and returns (`landing/src/lib/telegram.ts:5-10`) — or the bot is not a member of that chat.
+- **The site's Telegram links are missing**: `NEXT_PUBLIC_TELEGRAM_BOT_NAME` is unset (a client variable: set it, then rebuild).
 
 ## Vercel Project Settings
 

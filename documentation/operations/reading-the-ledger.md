@@ -73,7 +73,8 @@ not by the policy alone.
 ## The escape hatch
 
 ```bash
-railway run --service worker -- sh -c 'psql "$TARGET_DATABASE_URL" -At -F " | " -f /dev/stdin' < probe.sql \
+railway run --service worker --environment production -- \
+  sh -c 'psql "$TARGET_DATABASE_URL" -At -F " | " -f /dev/stdin' < probe.sql \
   | sed -E "s#postgres(ql)?://[^ ]+#postgres://<redacted>#g"
 ```
 

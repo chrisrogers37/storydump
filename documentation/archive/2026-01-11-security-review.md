@@ -1,3 +1,5 @@
+> **Archived 2026-09-18 — HISTORY of the legacy tier.** A security review of January–February 2026. Every finding is about the legacy tier's code, retired in the legacy tear-out (#1216): five of the six source files the findings name no longer exist, and the sixth, `src/api/app.py`, takes its CORS origin from `WEB_APP_URL` now. None of it reviews the target tier, and the "Secure" status below is not a statement about it — the target's security model is [`07-security-model.md`](../planning/2026-08-02-consolidated-design-plan/07-security-model.md). See [`documentation/archive/README.md`](README.md) for the index.
+
 # Security Review - Storydump
 
 **Date**: 2026-01-11 (Updated 2026-02-15)

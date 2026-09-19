@@ -60,8 +60,8 @@ API service skipped the two kickoff commits — see the gate above).
 | 01 delete the legacy code and its tests | `01_delete-the-code.md` | **DONE** — merged `2369a9b` (2026-09-17 23:57 UTC); the worker deployed it (SUCCESS); the API service SKIPPED it behind a red `main` check (the midnight skip, below) | #1316 | green at `e6e854b` (3653 passed, 1 skipped) |
 | 02 retire the settings, the entry point and the config | `02_settings-and-entry-points.md` | **DONE** — merged `f59fe43` (2026-09-18 15:44 UTC); round 1 and a fresh re-verify folded; the deploys under the phase's entry | #1319 | green at `9d14304` (3680 passed, 1 skipped) |
 | 03 the 3f snapshot migration and the ratchet's file rule | `03_snapshot-migrations.md` | **DONE** — rehearsed on a Neon PITR branch, merged `3ffa750` (2026-09-18 17:23 UTC), 078 applied in production by the deploy at 17:24 UTC; the probe under the phase's entry | #1318 | green at `6da8d00` (3700 passed, 1 skipped) |
-| 04 the gated drop and stand-down | `04_drop-and-stand-down.md` | **READY, merge owner-gated** — built `0ff46e9`; three review rounds folded through `6ab4253` (the entry below); the MERGE waits on #1202 closed by the owner (the plan's precondition); merging arms nothing — the deploy owes 079/080; the window itself is the owner's (F7) | #1321 | green at `6ab4253` (3749 passed, 1 skipped) |
-| 05 the documentation's end state | `05_docs-end-state.md` | pending | — | — |
+| 04 the gated drop and stand-down | `04_drop-and-stand-down.md` | **DONE — merged `c8482b3` (2026-09-19 19:44 UTC, by the owner); the worker deployed it (SUCCESS) and its predeploy owed 079/080 and applied nothing, measured; the API's deploy under the phase's merged entry; the window itself is the owner's (F7)** | #1321 | green at `29537a8` (3753 passed, 1 skipped) |
+| 05 the documentation's end state | `05_docs-end-state.md` | **READY** — built, two review rounds folded, rebased onto `main` after #1321's merge (51 files, phase 05's scope alone); the merge is the owner's (the session's admin merge is refused); its window-dependent sentences wait for the owner's window | #1322 | green at `165d588` on `main` (3760 passed, 1 skipped) — READY |
 
 ## Phase 01 — delete the legacy code and its tests
 
@@ -947,6 +947,340 @@ report), one low gap, seven observations; round 3 — one gap on a fail-closed p
 finding.
 
 
+## Phase 04 — merged
+
+**Merged by the owner at 19:44 UTC on 2026-09-19 as `c8482b3`** (the admin squash, the prepared subject
+and body; no issue closed by keyword), after this session's own merge was refused by its permission
+classifier. **The deploy owed the pair and applied nothing — measured, not assumed:** the worker's
+deployment `317826ff…` of `c8482b3` is `SUCCESS`, and its predeploy log reads
+
+```
+owed (manual) 079 (079_drop_legacy_schema.sql)
+owed (manual) 080 (080_window_stand_down.sql)
+0 applied
+2 owed (manual): waiting for an operator's `apply --manual <version>`; a deploy never runs them
+```
+
+The read-only production probe after it: the ledger's head is 78 with 78 rows and no row for 79 or
+80; `legacy` still holds its 16 tables; `archive` its 16 snapshots. The API service's deployment of
+`c8482b3` waited on `main`'s CI, as every API deploy does (phase 02's finding), and landed `SUCCESS`
+at 19:53 UTC once that run went green — **both services run the merge**. That is the epic's checklist
+clause 5, agent-run half: DONE.
+
+**The invariant registry on `main` at `c8482b3`:** I2 — 40 passed, the normative pin 35; I3 — 49
+passed; I4 — 4 / 0 / 0 / 0; I5 and I8 — the runner's suites, the window gate and the deploy
+guardrails 80 passed, doctor's 21; I6 — 11 passed (phase 05's wider pin arrives with #1322); I7 — 3
+passed. I1 — `main`'s CI run on the merge: green. **All eight hold on `main` at `c8482b3`.**
+
+**Phase 05 rebased** the same hour: `git rebase --onto origin/main 29537a8` — seven commits moved
+clean; `git diff origin/main..HEAD --stat` shows 51 files, every one a document, a rule, the ledger, the
+CHANGELOG, the two pin tests or the battery. The declared deviation is discharged; #1322 is a pull
+request against `main` with phase 05's scope alone.
+
+**The rehearsal — GREEN, run by the owner on 2026-09-19 at 19:48 UTC** (`bash -eu rehearse04.sh` from the
+checkout at `29537a8`, clean; 079 `a9e3cff0…`, 080 `bf9a15d6…`), on the branch
+`claude/window-rehearsal-20260919-1948` (`br-solitary-paper-aibcw8jf`, endpoint `ep-late-salad-ai7po457`),
+its timeline `41249fbafba987577c059d4cd003558c` measured not to be production's before anything ran:
+
+- Before: PostgreSQL 17.11 as `neondb_owner`; the ledger 78 / 78; `legacy` 16 tables + 77 indexes; 16
+  snapshots; no `window_ddl`; `svc_migration` holds `CREATE ON DATABASE`; uuid-ossp present; the
+  database 82,763,776 bytes. `status`: 077 and 078 applied, 079 and 080 owed.
+- **079 applied in 1.594 s wall-clock; 080 in 0.501 s.**
+- The gate: `0, 0, t, t, 16, t, neondb_owner` — every line as 080 prints it.
+- F8's positive control: 076's bracketed hand-off landed for `svc_clock` and for `svc_maintenance`;
+  the function's owner after it `svc_maintenance`.
+- A plain `apply` afterwards: `0 applied`.
+- After: the ledger's tail 78, 79, 80 `applied` by `neondb_owner`; the sixteen snapshots hold 30,132
+  rows in all; uuid-ossp gone and `gen_random_uuid()` answering; `public.jobs` present; the database
+  38,936,576 bytes — **43.8 MB smaller**.
+
+**One finding, fixed in the runbook before the production window:** `neonctl branches create` PRINTS the
+new branch's connection string in its default output — the same role password as production's. The
+harness redacted it; the runbook's step 1 and production's step 3 (the marker branch) as printed would
+have echoed it. Both lines now pass through the redaction.
+
+## Phase 04 — #1202 closed; the merge and the rehearsal refused by the session's permissions
+
+**2026-09-18, on the owner's instructions in chat** ("you can close it"; "yes sure please do this" for
+the merge; "you have full prod permissions to manage this" for the window): #1202 was CLOSED with the
+ruling of 2026-09-16 as the plan records it — its own words ("either leg satisfies it: record the Track 3
+videos, **or** arm and verify the target tier"), the "or" leg met, what guards 3g today and what that
+guard is not. The owner's verbatim ruling is not in the transcripts as quotable text, so the comment
+cites the plan and the ledger and says who posted it and on whose instruction.
+
+The two actions after it were REFUSED by the session's permission classifier, not by the owner and not
+by the runner, and were not worked around: the admin squash merge of #1321 ("Merge Without Review") and
+the window's rehearsal script against a scratch Neon branch ("Production Deploy"). A grant in chat does
+not change what the harness allows. Both commands were handed to the owner as printed (the merge with
+its subject and the squash body at `scratchpad/t04_squash.md`; the rehearsal as `bash -eu rehearse04.sh`
+from the phase-04 checkout — the runbook's block as printed plus a redaction on every output, a second
+provenance gate on the branch's Neon timeline, and before/after facts). The same limit will meet the
+production window's commands. Owner-queued, first in order.
+
+## Phase 05 — the documentation's end state
+
+**Topology — a declared deviation.** The ledger's rule is no stacking. Phase 05 is built on
+`tear-out/04-drop-and-stand-down`'s head (`524998a`) instead of `main`, because #1321's merge is refused
+to this session and eight of 05's files are files 04 also edits (the never-run satellites, `AGENTS.md`,
+`CLAUDE.md`, `migration-runner.md`, the CHANGELOG, this ledger, `tests/test_agent_docs.py`). The parent
+is final — reviewed over three rounds, green, nothing pending on it — and the squash's tree is
+`524998a`'s tree, so the planned move is mechanical: `git rebase --onto origin/main 524998a` the moment
+#1321 merges, then `git diff origin/main..HEAD --stat` must show phase 05's scope only. The PR stays a
+draft until that rebase.
+
+**Measured before building** (the plan's step-1 grep, on the phase-04 tree, 2026-09-18): **37 documents**,
+not the dozen the plan's Evidence lists. Read, not counted: `media_items`, `users`,
+`category_post_case_mix` and `onboarding_sessions` are TARGET tables too — derived from the target's own
+metadata (26 tables, `src/models/target/`), not listed.
+
+**Premise findings.** (1) The plan says "`audit_log`, `media_items` and `users` are also TARGET names":
+`audit_log` is not — the target's audit table is `audit_events`; `audit_log` is legacy-only, and the two
+reused names the plan did not list are `category_post_case_mix` and `onboarding_sessions`. The pin
+derives the set, so the plan's sentence cannot mislead it. (2) The plan's step-1 pattern has no leading
+word boundary on `TELEGRAM_BOT_TOKEN`, so it counts `TARGET_TELEGRAM_BOT_TOKEN` — the target's own, live
+variable — in four guides and the README; the pin uses boundaries on both sides. (3) A bare
+`TELEGRAM_BOT_TOKEN` and `ADMIN_TELEGRAM_CHAT_ID` ARE still read by something: the landing app on Vercel
+(`landing/src/lib/telegram.ts:1-2`) — its guide keeps them, as a reasoned exemption. (4) `src/main.py`
+is NOT a deleted path: it stays as the Procfile's dispatch to `src.worker` (fork F2). (5) The checklist's
+first line ("the step-1 grep → only archive, CHANGELOG, planning") and step 1's own "exempt (with why)"
+disagree; this phase reports every file with its row and treats a reasoned exemption as the plan's own
+option. (6) Six documents in the population are HISTORY shelved under live directories — three dated
+update notes of January 2026, the May 2026 Telegram postmortem, the July Cloudinary gap analysis, and a
+top-level `planning/multi-account-dashboard.md`: archived by the repository's convention (`git mv`, a
+status banner, an index row), with the two links the moves affect repaired.
+
+**Red first.** The pin went into `tests/test_agent_docs.py` before any page changed — the legacy-only
+tables (the inventory minus the names the target's metadata reuses), the deleted paths (checked to BE
+gone), phase 02's dead-variable list (one home each), a positive control and an exemption-staleness
+test — and ran on the base: **24 of 43 live pages red**, about 95 mentions, the safety block's
+`posting_history` line in `CLAUDE.md` and `AGENTS.md` among them.
+
+**Built** (`b56b8ed`, on phase 04's head `29537a8`; four documentation agents on disjoint file groups in
+one worktree, each under one brief — describe what the code DOES with `path:line`, never touch the
+never-run fence, report what could not be verified — and the coordinator on the history-shaped files,
+the pin, the battery and the plans):
+
+- **The pin** (`tests/test_agent_docs.py`): legacy-only tables = the inventory minus the names the
+  target's metadata reuses (`category_post_case_mix`, `media_items`, `onboarding_sessions`, `users` —
+  pinned as today's value of the derivation); the deleted paths, checked to BE gone; phase 02's
+  `DEAD_VARIABLES`; a positive control (a planted page trips each arm; a target name and a snapshot's
+  name do not); a roots-coverage test; an exemption-staleness test. **Two reasoned exemptions:** the
+  landing app's own `TELEGRAM_BOT_TOKEN` / `ADMIN_TELEGRAM_CHAT_ID` on Vercel
+  (`landing/src/lib/telegram.ts:1-2`), and `posting-monitor.md`'s `TELEGRAM_BOT_TOKEN` — the environment
+  of `tg-post.sh`, the fleet host's pager script outside this repository.
+- **Rewritten against the code:** the five `.claude/rules/` files (`testing.md` too — it taught the
+  legacy `service.repo` mock and cited a test that does not exist), `PROJECT_CONTEXT.md` and
+  `QUICK_REFERENCE.md` (their never-run bullets byte-identical), the two slash commands onto real
+  `storydump` read verbs, the neon-analyst's reference, `AGENTS.md` (one tier, one sentence of history),
+  `CLAUDE.md` (the production line onto the ledger — `post_intents`, `jobs`, `channel_outbox` "and every
+  other table `src/models/target/` declares" — in both documents; the rules table), `README.md`, the
+  documentation index (92 links, 0 dead), eight runbooks and nine guides.
+- **Archived, not rewritten** (`git mv`, a status banner, an index row): the three update notes of
+  January 2026, the May Telegram postmortem, the July Cloudinary gap analysis, the legacy multi-account
+  dashboard plan, and the January security review — every finding of which names legacy code (five of
+  its six source files are gone). `documentation/updates/` and `documentation/cloudinary/` and the
+  top-level `planning/` are empty and gone from the tree; `tests/test_legacy_cli_gone.py`'s HISTORY no
+  longer lists the first.
+- **The plans:** `04-execution-sequence.md`'s M.3 line and the consolidated plan's Live status say what
+  is true today — 3f applied as 078 on 2026-09-18; 3g and step 8 are the gated files 079 and 080, owed
+  by every deploy, the owner's to apply. `meta-app-review.md`'s standing constraint is "discharged"
+  (its heading renamed with the key `tests/test_meta_runbook_markers.py` pins).
+- **What the agents corrected beyond names** (each verified in the tree): the fresh-database sequence in
+  both deployment guides omitted `tests/scripts/fixtures/legacy_by_hand.sql`, so the runner would fail
+  at 078; the Google client needs BOTH redirect URIs; `railway restart` (attested nowhere) →
+  `railway redeploy --service … --yes`; the bot token is set on BOTH services (the API reads it too);
+  `/start inv-…` is NOT a served lane (`build_router` registers `link-` and `bind-` only); media kind is
+  decided by MIME type, not suffix; CORS reads `WEB_APP_URL`; 26 commands, not 25; `ROLE_FLOOR`, not
+  `FLOORS`; the policy test lives at `tests/test_integration_coverage_policy.py`; the gates under
+  `tests/scripts/` ERROR without PostgreSQL rather than skip; the landing app reads neither
+  `JWT_SECRET` nor `NEXT_PUBLIC_SITE_URL` and its Telegram Login Widget is gone. Removed as
+  unverifiable: per-test lists, "56% coverage", cost and timing claims, the legacy dump cron, the
+  phase roadmap.
+- **A phase-04 defect the pass found, fixed on phase 04's branch before its merge** (`29537a8`):
+  `storydump doctor` called any checkout file the ledger lacks "not applied — deploy main" and exited
+  4 — which 079 and 080 are BY DESIGN from the merge until the window. doctor reads the `manual`
+  directive now (four tests red first, two battery mutations; the battery `ran 37 of 37`; CI green,
+  3,753 passed).
+
+**Verification** (2026-09-18, `c50e395`): the pin and the pins beside it green; `ruff` clean; every
+relative link on the 56 live and changed pages resolves; battery `tests/mutations/legacy_tear_out_05.sh`
+on the committed tree in its own worktree — `ran 15 of 15`, 15 killed; the whole suite against the test
+database — `3720 passed, 1 skipped`; CI on the draft (#1322, merged with `main`) — green, run
+35402026360, `3759 passed, 1 skipped`.
+
+**Review round 1** (two lenses on `c50e395`, read-only). The adversarial lens checked about 178 claims
+against the tree — 93 citations across the five rules, 70 across the runbooks, the safety surface by
+hand — and could not falsify ONE cited behavioural claim; the never-run fence is byte-identical in both
+documents and unchanged from the parent; both slash commands name read verbs only. "Every false
+sentence I found is a sentence written WITHOUT a `path:line`." The structural lens: the pin is the right
+shape, the scope is clean (no code outside `tests/`), the archive moves follow the convention. What they
+found, folded:
+
+- **RISK (adversarial): three pages documented a bug the parent commit had fixed.** `db-status.md`,
+  `troubleshooting.md` and `worker-recovery.md` told the reader `storydump doctor` calls 079/080 "not
+  applied — deploy main"; true when the agents wrote it, false since `29537a8`. Class sweep — every live
+  sentence about doctor and the gated files (`grep -rni doctor … | grep -i "gated|not applied|owed|079"`):
+  four hits; the three corrected with the code cited (`env.py`, `_gated_in`), the fourth
+  (`migration-runner.md`) already true.
+- **RISK (adversarial): a pasteable block ended in a never-run command.** `telegram-webhook.md`'s
+  diagnostic fence ended with `storydump webhook register --drop-pending`, guarded by a trailing comment
+  (it predates this phase). Lifted out: the pasteable block only reads; arming the bot is its own
+  block, named the owner's.
+- **GAP (both): the pin was narrower than its comment.** A table in capitals (`POSTING_HISTORY` in a SQL
+  example), a deleted module in its dotted spelling (`src.services.core`) and `documentation/*.md`
+  passed unseen; the deleted paths were a hand-copy of phase 01's lists, already missing
+  `src/services/domain` and every deleted FILE; one assertion could not fail, and the `archive` filter
+  read ABSOLUTE parts — a checkout under a directory named `archive` would have had no live pages and
+  a pin passing over nothing. Now: tables case-insensitive (variables NOT — `workspaces.dry_run_mode` is
+  a live column), paths matched with `[/.]`, `documentation/`'s own pages a root, the paths imported
+  from `tests/src/test_legacy_tier_gone.py` (its redundant twin test deleted here), the filter on
+  relative parts with a real test of both directions. No new offender under the wider predicate.
+- **GAP (adversarial): an exemption covered every future mention of its name on the page.** Each
+  exemption now pins the COUNT of mentions it was read for (3, 2, 2): one more — a stale line about the
+  worker's token hiding beside the pager's — or one fewer fails and the page is read again.
+- **GAP (adversarial): the backup page had traded a documented 30-day copy for a documented 24-hour
+  window without saying so.** The rewrite dropped the scheduled off-Neon dump and the partial-restore
+  commands because the old script's `BACKUP_DIR` is a dead APPLICATION variable — the pin matched an
+  operator's own shell variable. Restored with the script's own names, framed honestly (nothing in the
+  tree schedules it; whether the owner's host still does is not something the tree can say), and the
+  restore into a SCRATCH database only.
+- **GAP/observations (adversarial):** `database.md` cited a function as a manifest key; `testing.md`
+  said a warning fails the test without the three classes `pytest.ini` ignores; four citations off by
+  one; `resume` and `posted` offered as fixes without the owner's-decision caution their neighbour
+  `cancel` carried — all corrected.
+- **Simplify (structural) — one home each:** the production read recipe stood in four pages in two
+  spellings (`--service worker` and `--service storydump`, with and without `--environment
+  production`): it lives in `reading-the-ledger.md` › The escape hatch now, with links; the four-file
+  fresh-database sequence, duplicated across both deployment guides (the agents had fixed the same
+  omission in both), lives in `cloud-deployment.md`; the Docker gate recipe lives in `AGENTS.md` ›
+  Testing, as the repository's rule says shared guidance does. `.claude/rules/database.md` loaded 172
+  lines for every one of 64 service files: its migration rules are their own rule now
+  (`.claude/rules/migrations.md`, loaded for `scripts/migrations/**` only), and `CLAUDE.md`'s table
+  lists it. The documentation index's counts re-measured (archive 49) and its two rows for directories
+  this PR deleted removed.
+- **Battery**: rewritten for the pin's new shape — 21 mutations (the three arms, the boundary, the
+  case fold, the dotted spelling, a live column read as a dead variable, the derivation, both roots,
+  the exemptions honoured, an unused exemption, a stale mention beside an exempt one, the archive
+  filter in both directions, six legacy names planted back into live pages); an interrupt no longer
+  leaves a planted page behind.
+- **Declined, with reasons:** a required-substring form of exemption (the count does the same work
+  and is simpler to read); `.github/**`, `landing/**` and non-Markdown files as roots (code and config
+  comments are the owner queue's — a documentation pin that reads YAML comments is a different
+  instrument); `test_the_names_both_tiers_use_are_not_legacy_names` stays — it is the only test that
+  fires when the target grows a table with a legacy name.
+- **Queued for the owner, from the lenses:** `src/services/target/webhook_ingress.py`'s docstring
+  ("the legacy adapter already gets this right") beside the code comments already queued; the
+  post-window pass over about ten sentences ("is dropped by 079 in the owner's window", the three
+  doctor sentences, the never-run line's comment) belongs on the window's own checklist.
+
+**Verification on `63714e9`** (the fold of round 1): the pin and the pins beside it — 134 passed; links
+and anchors on every live and changed page — 0 dead; battery `ran 21 of 21`, 21 killed, on the committed
+tree; CI green — run 35403440369, `3759 passed, 1 skipped`.
+
+**Re-verify after the fold** (a fresh lens on `63714e9`, read-only): every claim it tried to falsify
+held — the three doctor sentences match `env.py`'s `missing` / `owed` split and the class is swept; the
+hardened pin has no false positive constructible from the target's metadata (zero target tables or
+COLUMNS collide case-insensitively with the twelve legacy-only tables) or from any tracked path (all 33
+path patterns against `git ls-files` and every tracked module's dotted spelling: zero hits); the `ROOT`
+monkeypatch does not leak (the exemption test runs after it and still reads 3/2/2 off the real tree);
+the battery is internally consistent (21 = 21, every anchor once, every selector collects); the rule
+split lost no migration rule and a migration author still gets the RLS line; nothing outside the
+phase's scope in the diff. **Verdict: ready to merge.** Three gaps and five observations, folded in the
+commit after this entry:
+
+- **GAP: the restored cron recipe could not run.** `railway run` resolves the linked project from the
+  working directory and cron starts in `$HOME` (the repository's own record of that gotcha is the
+  neon-analyst's reference); the script had no shebang. Both added. The `sh -c` quoting was checked and
+  is right: the inner shell expands `$DATABASE_URL`, the outer one `$DUMP_DIR` and the date.
+- **GAP: "one home" was not true.** The neon-analyst's reference kept its own spelling of the
+  production read recipe (`--service storydump`, `-f "$0"`) beside a pointer. Its fence is the pointer
+  now; the old spelling is one sentence of history on that page. (`backup-restore.md`'s read as the
+  OWNER login is a different door — the window's gate uses it — and stays.)
+- **GAP: a counted exemption could still rot** — a count of 0, or a name in no list, passed. The check
+  is a function now (`_exemption_errors`) with a unit test of every direction on a page of its own:
+  exact, one more, one fewer, zero, a name that is no legacy name, a page that is gone.
+- **Observations:** the deleted-path pattern gained a trailing boundary (`src/services/domain` is not
+  a future `src/services/domain_events.py`; zero false positives today either way); the `register`
+  fence got its in-fence warning back; `deployment.md` names `apply` on the page again; the pin's
+  unmutated behaviours the lens listed have mutations — the `.py` suffix, `rglob` on the nested roots,
+  `glob` on the flat one, the exemption's one-fewer direction and both guards. Pre-existing and left:
+  a dead link inside `CHANGELOG.md` (history) to a plan directory archived before this epic.
+- **Not re-lensed:** the fold is two guards, one lookahead, a shebang and a `cd`, three sentences and
+  seven battery lines; its verification is the battery and CI below.
+
+**Verification on `82c55b3`** (the fold of the re-verify, and one commit after it): the battery on
+`99d7081` `ran 28 of 28` with **two SURVIVORS** — the two new guards of `_exemption_errors` (a name in
+no list; a count below one) could be removed and the new unit test still passed, because its
+scenarios failed the COUNT comparison anyway. The test was wrong, not the guard: the page now names
+the unknown name once, and the zero-count case uses a legacy name the page does not carry, so each
+guard is the only thing between its case and a pass. On `82c55b3`: **`ran 28 of 28`, 28 killed**; the
+pin and the pins beside it green (18 in `tests/test_agent_docs.py`); CI green — run 35404263398,
+`3760 passed, 1 skipped`.
+
+**After the rebase onto `main`** (#1321 merged): CI green on the rebased head `00f10f6` (run 35465461764) and on
+the current head `165d588` (run 35465736580) — `3760 passed, 1 skipped` each; #1322 marked READY on
+2026-09-19; its merge is the owner's.
+
+**Convergence:** round 1 — two risks, four gaps, a simplify list, observations; the re-verify — three
+gaps, five observations, "ready to merge"; each round closed everything the one before it found, none
+reopened a closed finding. **Status: READY as a change; a DRAFT as a pull request** until #1321 merges
+and this branch is rebased onto `main` (`git rebase --onto origin/main 29537a8`) — and its own merge,
+like #1321's, is refused to this session by the permission classifier: the owner's.
+
+**Window-dependent sentences, to update once the window has run** (each is true today and says so):
+the documentation index's tear-out row ("the owner's window has not run"), the consolidated plan's Live
+status and M.3 line, `meta-app-review.md`'s discharged-constraint section, the M.2 rehearsal spec's
+status line, `00_EPIC.md`'s `status:` and its goal condition.
+
+## The sprint's state at the end of 2026-09-18
+
+**Phase rows.** 01, 02, 03 — DONE and live. 04 — READY; its merge is the owner's, because this session's
+admin merge was refused by its permission classifier. 05 — READY as a change, a DRAFT as a pull
+request until #1321 merges and the branch is rebased onto `main`. The window — the owner's (F7), its
+rehearsal prepared and refused to this session the same way.
+
+**The invariant registry, run PRE-MERGE on phase 05's head** (`82c55b3`, which holds phases 04 and 05; the
+registry's own rule is after every merge, so this run is to be repeated after each of the two): I1 —
+CI `3760 passed, 1 skipped`, the one skip the ceiling allows; I2 — `test_advertised_ddl.py` +
+`test_lineage_lane.py` 40 passed, the normative pin still 35; I3 — `test_legacy_tier_gone.py` 49
+passed; I4 — `telegram_ratchet.py` 4 / 0 / 0 / 0; I5 and I8 — the runner's suites, the window gate and
+the deploy guardrails 80 passed (a manual file is owed and wedges nothing; every marker known); I6 —
+`test_agent_docs.py` 18 passed; I7 — `test_worker_entrypoint.py` 3 passed, `target_reachability.py` ran.
+
+**The goal condition — #1216's acceptance list through the epic's checklist — is NOT met yet, and what
+is left is the owner's.** Agent-run clauses: (1) the import grep is unmet BY DESIGN, as phase 01's entry
+records — today's hits are four provenance docstrings in `src`, two scripts and the guards themselves;
+the AST predicate is the standing guard and is green; (2) the three entrypoints import with no
+`TELEGRAM_*` variable — measured today on this head; (3) the ratchet passes with its core segment empty;
+(4) the suite green at every phase, nothing newly skipped — CI's counts 3,653 → 3,680 → 3,700 → 3,753 →
+3,760; (5) **BLOCKED** — `status` owing 079/080 on a checkout at phase 04's merge, and a predeploy log
+naming them, need that merge: the smallest unblocking action is the owner's merge command below (the
+gate test and the CLI test assert the behaviour today); (6) the step-1 grep after phase 05 lists 18
+files, every hit a TARGET table, the target's own `TARGET_TELEGRAM_BOT_TOKEN`, a snapshot's name, one of
+two reasoned exemptions or `ROADMAP.md`'s dated migration FILE names — the clause as literally written
+cannot be met by a pattern that matches `media_items`; the pin is the bounded form of the same rule and
+is green. Owner-run clauses: the probes before phase 03 and the evidence after its deploy — DONE, in
+phase 03's entry; the rehearsal of 079/080 — **BLOCKED**, prepared (`scratchpad/rehearse04.sh`), refused
+to this session, the owner's to run; production — the owner's window.
+
+**The owner's queue, first things first:**
+
+1. Merge #1321 (admin squash; the subject and body are prepared, no closing keyword in either):
+   `gh pr merge 1321 --squash --admin --subject "<the PR's title> (#1321)" --body-file <scratchpad>/t04_squash.md`.
+   Then read `storydump deploys` for BOTH services and one predeploy log: `owed (manual) 079 …`, `owed
+   (manual) 080 …`, exit 0. The build session re-runs the invariants on `main` when it next runs.
+2. #1322 is rebased by the build session the moment #1321 is on `main` (`git rebase --onto origin/main
+   29537a8`; the diff must then show phase 05's scope only), marked ready, and merged by the owner the
+   same way. Every sentence in it is true before the window and after it.
+3. The rehearsal, from phase 04's checkout: `STATE=<file> bash -eu <scratchpad>/rehearse04.sh` — the
+   runbook's block as printed, plus a redaction on every output and a second provenance gate (the
+   branch's Neon timeline is not production's). Read the log; then the runbook's step 9 retires the
+   branch. Any red: retire the branch, fix forward, rehearse again.
+4. The window, from `documentation/operations/legacy-window-close.md`, in its order.
+5. After the window: the build session updates the window-dependent sentences listed above, the epic's
+   `status:` and its goal condition with the owner's pasted gate output — one small documentation PR —
+   and the epic's issue (#1216) and #941 close on the owner's word.
+
 ## Owner-decision queue
 
 - **The PITR window is 24 hours, not 7 days.** The project's `history_retention_seconds` is 86400;
@@ -985,6 +1319,28 @@ finding.
   session nothing holds. A comment-and-build-line edit, the owner's call on when.
 - **The Makefile's `APP_DB_URL` does not URL-encode `DB_PASSWORD`** (pre-existing): a password
   containing `@` mis-parses into the host. Local development only.
+- **Found by phase 05's documentation pass, outside a docs phase's scope (code, config, product copy) —
+  each with its evidence, none fixed here:** `storydump_cli/output.py:642` reads the pool keys `in_use`
+  and `peak`, `/health` emits `checked_out` and `checked_out_peak`, and the fixture at
+  `tests/storydump_cli/test_env.py:49` uses the renderer's spelling, so nothing catches it;
+  `src/worker.py:296` runs `reap_expired` every 6 h where `05` says 60 s — a lapsed lease holds its
+  serialization key until then, and a worker killed while holding `reap_expired` itself leaves a lease
+  nothing returns; `src/services/target/health.py:71-86` reads a replica that never wins the clock
+  election as stuck; `storydump_cli/main.py:70` sends the user to Settings › Integrations for a control
+  that lives under Accounts; docstrings that still call `/start inv-…` a served lane
+  (`telegram_dispatch.py:5-6,277`, `start_router.py`; `start_router.REFUSAL` is never sent); stale
+  legacy comments in `src/config/defaults.py:1-18`, `src/config/constants.py:8,15,19`,
+  `src/services/target/transit.py`'s docstring, `health.py`, `scheduling_health.py`,
+  `tests/scripts/test_migration_gate.py`, `tests/test_integration_coverage_policy.py:294-296` (the
+  clock skip it calls "queued" was fixed in #1317), `.github/workflows/schema-drift.yml:13`
+  ("dormant"); `Makefile:71-73`'s `test-quick` says "(no coverage)" and measures it;
+  `meta-app-review.md`'s `instagram_business_basic` justification describes calls nothing in the target
+  tier makes (the reconciler's `stories_check` seam is unwired) — copy to settle before submitting;
+  `PROJECT_MISSION.md`'s "Core Mental Model" is the legacy tenancy (Telegram identity → group-chat
+  instances); `README.md` says "MIT License — see LICENSE" and no LICENSE file was ever tracked; the
+  safety block's "All bot interactions go through the database or the user's own device" predates the
+  CLI; `landing/.env.local.example` still lists `JWT_SECRET` and `NEXT_PUBLIC_SITE_URL`, which nothing
+  reads.
 - **The epic's closure list (#1216's Blocks), measured 2026-09-18 — an agent closes none of them:**
   #1205 and #1222 closed with phase 02. #941 (the sixteenth legacy table "with no disposition") has
   one: `archive.posting_history_dedup_archive_pre_cutover_20260917` exists in production (078) and 079

@@ -1,38 +1,56 @@
 # Cloud Deployment Guide
 
-Deploy Storydump to cloud infrastructure (Railway + Neon) for multi-tenant SaaS operation.
+How the hosted deployment is put together: two Railway services, one Neon
+database, the variables each process reads, and the providers around them.
+Storydump is one deployment that serves many workspaces
+([`deployment-options.md`](deployment-options.md)); this is the operator's
+reference for that deployment, and for standing up a second environment
+(staging, a preview) shaped like it. The step-by-step checklist is
+[`deployment.md`](deployment.md).
 
-**Estimated time:** 2-3 hours for complete setup
-**Prerequisites:** GitHub account, Railway account, Neon account
+**Prerequisites:** GitHub, Railway and Neon accounts; a Meta developer app, a
+Google Cloud project and a Cloudinary account for the providers.
 
 ---
 
 ## Architecture Overview
 
 ```
-GitHub Repo
+GitHub repo (main)
     |
-    ├──► Railway (worker)     python -m src.main
-    |    - Telegram bot polling
-    |    - Posting scheduler loop
-    |    - Lock cleanup loop
-    |    - Media sync loop
+    ├──► Railway service `worker`       python -m src.main  ->  src.worker
+    |    - the clock: one elected leader, a tick every 15 s, mints each
+    |      account's due slot and the recurring jobs
+    |    - two job lanes (interactive, bulk): plan a slot, send cards, publish
+    |      to Instagram, sync Drive folders, refresh credentials, reap
+    |    - sends Telegram messages; it does not poll
+    |    - /health on $PORT
     |
-    ├──► Railway (web)        uvicorn src.api.app:app
-    |    - OAuth callbacks (Instagram, Google Drive)
-    |    - Onboarding Mini App
-    |    - API endpoints
+    ├──► Railway service `storydump`    uvicorn src.api.app:app   (the API)
+    |    - /api/v1             the web's reads, and the command port
+    |    - /auth               Google sign-in; the Drive and Instagram callbacks
+    |    - /webhooks/telegram  the bot's one inbound door
+    |    - /webhooks/meta      Meta's deauthorize and data-deletion callbacks
+    |    - /health, /health/scheduling, /health/posting
     |
-    └──► Neon (PostgreSQL)
-         - All application data
-         - SSL required
+    ├──► Vercel (landing/)              the web front end
+    |                                   (landing-vercel-deployment.md)
+    └──► Neon (PostgreSQL)              the ledger; SSL required
 
-External APIs:
-  - Telegram Bot API (polling, free)
-  - Instagram Graph API (OAuth tokens, free)
-  - Google Drive API (user OAuth, free)
-  - Cloudinary (media hosting, free tier)
+Providers:
+  - Telegram Bot API   (the webhook in; cards and notices out)
+  - Instagram Login / Graph API (per-workspace OAuth tokens)
+  - Google            (sign-in, and Drive read-only per workspace)
+  - Cloudinary        (a story's frame in transit to Meta)
 ```
+
+`python -m src.main` is the `Procfile`'s worker line and only dispatches to
+`src.worker` (`src/main.py:18-22`). The job kinds are the registry in
+`src/services/target/work_loop.py` (`build_registry`); the clock is
+`src/services/target/scheduler.py`. The legacy tier, whose worker ran a polling
+bot and the posting, lock-cleanup and media-sync loops, was retired in the
+tear-out (#1216, September 2026); its data survives as the
+`archive.*_pre_cutover_20260917` snapshots.
 
 ---
 
@@ -44,215 +62,294 @@ External APIs:
 2. Create a new project (name: `storydump`)
 3. Note your connection details from the dashboard
 
-### Run Schema Setup
+### Two logins
 
-Connect via `psql` using the Neon connection string:
+| Variable | Login | Used by |
+|---|---|---|
+| `DATABASE_URL` | the database **owner** — it applies DDL | the migration runner only: `railway.toml`'s `preDeployCommand`, or you at a terminal |
+| `TARGET_DATABASE_URL` | the **runtime** login | the API and the worker, at run time |
+
+The design is `svc_ingress` for the API and `svc_worker` for the worker, so that
+row-level security binds them; moving a deployment off the owner login is
+[`runtime-database-roles.md`](../operations/runtime-database-roles.md). Which
+login a service actually holds is reported, not assumed: `/health` carries
+`db_role`, and the worker logs `worker database role: …` at boot
+(`src/worker.py:650-651`).
+
+### Build the schema on a fresh database
+
+Everything goes through the migration runner (`scripts/migration_runner.py`,
+[`migration-runner.md`](../operations/migration-runner.md)). A **fresh** database
+needs four files applied by hand first, as the database owner, because the
+corpus still begins with the legacy lineage (001–050) and replays it:
 
 ```bash
-psql "postgresql://storydump_user:PASSWORD@ep-xxx.region.neon.tech/storydump?sslmode=require"
-```
+export DATABASE_URL="postgresql://owner:PASSWORD@ep-xxx.region.neon.tech/storydump?sslmode=require"
 
-Run the base schema and all migrations in order:
+# Step 0 (the seven svc_* roles, then the DDL door migration 050 calls), the
+# by-hand base, and the one table production made by hand — migration 078
+# snapshots it by name, so a database built from the tree must hold it.
+# This is `make init-db`'s own sequence (Makefile:105-113).
+psql "$DATABASE_URL" -q -v ON_ERROR_STOP=1 \
+  -f scripts/window/step0_bootstrap.sql -f scripts/window/step0_legacy_ddl_door.sql \
+  -f scripts/setup_database.sql -f tests/scripts/fixtures/legacy_by_hand.sql
 
-```bash
-# Step 0, once per database, as the database owner: the service roles, then
-# the DDL door migration 050 calls (without them the runner stops at 050)
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
-  -f scripts/window/step0_bootstrap.sql -f scripts/window/step0_legacy_ddl_door.sql
-
-# Base schema
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f scripts/setup_database.sql
-
-# All migrations, through the runner (never a psql loop): the worker's
-# pre-deploy step runs the same command and keeps the ledger
+# Every migration, through the runner — the same command each deploy runs
 python -m scripts.migration_runner apply
 ```
 
-### Verify Schema
+`apply` ends by listing `owed (manual) 079 …` and `owed (manual) 080 …`. Those
+two files drop the `legacy` schema and stand the migration window down; they
+are gated (`-- runner:manual`), so a deploy owes them and does not apply them.
+The operator's sequence for them is
+[`legacy-window-close.md`](../operations/legacy-window-close.md).
 
-```sql
--- Check schema version
-SELECT * FROM schema_version ORDER BY version;
+An existing database needs none of the four files: every deploy of either
+service applies what is pending.
 
--- Should show version 21 as latest
+### Verify the schema
 
--- Check uuid-ossp extension
-SELECT extname FROM pg_extension WHERE extname = 'uuid-ossp';
+```bash
+# The ledger against this checkout — read-only
+python -m scripts.migration_runner status
+
+# The same through the API, with the connected role and the tables under RLS
+storydump posture
 ```
+
+The ledger is `runner.schema_migrations`; `storydump doctor` compares it with
+the checkout.
 
 ### Connection Pool Sizing
 
 The pool is pinned in code — 10 connections per process, no overflow
-(`src/services/target/unit_of_work.py`) — and no variable sizes it. Count the
-processes (the API and the worker) against the plan's connection limit.
+(`POOL_SIZE_SEAM`, `MAX_OVERFLOW_SEAM`, `src/services/target/unit_of_work.py:83-91`)
+— and no variable sizes it. Count the processes (the worker, and one API process
+per `WEB_CONCURRENCY`) against the plan's connection limit.
 
 ---
 
 ## 2. Railway Deployment
 
-### Two-Process Architecture
+### Two services, one repository
 
-Storydump requires **two processes** on Railway:
+| Service | Start command | What it is |
+|---|---|---|
+| `worker` | `python -m src.main` | the target worker (`src.worker`) |
+| `storydump` | `uvicorn src.api.app:app --host 0.0.0.0 --port ${PORT:-8000}` | the API |
 
-1. **Worker** (`python -m src.main`): Telegram bot + scheduler + background loops
-2. **Web** (`uvicorn src.api.app:app`): OAuth callbacks + onboarding Mini App
+The names matter: `storydump deploys` reads exactly these two
+(`storydump_cli/railway.py:38`), and the runbooks address them with
+`--service worker` and `--service storydump`. The `Procfile` lists both start
+commands.
 
-The included `Procfile` defines both:
+`railway.toml` is shared by both services and carries the rest:
 
-```
-worker: python -m src.main
-web: uvicorn src.api.app:app --host 0.0.0.0 --port ${PORT:-8000}
-```
+| Key | Value | Effect |
+|---|---|---|
+| `buildCommand` | `pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media` | no `[cli]` extra: `keyring` does not ship to a service (`setup.py`) |
+| `preDeployCommand` | `python -m scripts.migration_runner apply` | every deploy of either service applies pending migrations first; the runner's advisory lock serializes the two, and a failing migration aborts the deploy with the old version still serving |
+| `healthcheckPath` | `/health` | both services answer it (below) |
+| `restartPolicyType` | `ON_FAILURE`, 10 retries | |
+| `drainingSeconds` | `60` | the old deployment gets 60 s after SIGTERM |
 
 ### Setup Steps
 
-1. **Connect GitHub repo** in Railway dashboard
-2. **Create two services** from the same repo:
-   - Service 1: Set start command to `python -m src.main` (worker)
-   - Service 2: Set start command to `uvicorn src.api.app:app --host 0.0.0.0 --port ${PORT:-8000}` (web)
-3. **Set build command** for both: `pip install -r requirements.txt && pip install -e .`
-4. **Generate a domain** for the web service (needed for OAuth callbacks)
-5. **Configure environment variables** (see Section 3 below)
+1. **Connect the GitHub repo** in the Railway dashboard
+2. **Create the two services** from the same repo, named `worker` and
+   `storydump`, each with its start command from the table above
+3. **Generate a domain** for the `storydump` service — OAuth callbacks and
+   Telegram's webhook need it. Production's is `https://api.storydump.app`
+4. **Configure the variables** (Section 3). `DATABASE_URL` must be on both
+   services before the first deploy: the pre-deploy step reads it
 
 ### Health Checks
 
-- **Worker**: Railway monitors the process — if it exits, it restarts automatically. The app has built-in SIGTERM handling for graceful shutdown.
-- **Web**: Railway health checks hit the web service automatically. FastAPI responds to requests by default.
+- **Worker**: a small listener answers `/health` on `$PORT`
+  (`src/services/target/health.py:145-166`), bound before the first database
+  connection so a slow start is not marked failed. The worker is fail-fast — a
+  supervised task that dies takes the process down with exit 1
+  (`src/worker.py:860-861`) and Railway restarts it; `/health` answers 503 only
+  for a clock that is alive and no longer advancing. It stops on SIGTERM and
+  SIGINT (`src/worker.py:633-637`).
+- **API**: `GET /health` (`src/api/app.py:681`) reports whether a target engine
+  is configured, the connected role, the pool, and the webhook this process
+  registered at startup. It opens no connection, by design.
+  `GET /health/scheduling` and `GET /health/posting` are the two surfaces the
+  fleet monitors poll ([`monitoring.md`](../operations/monitoring.md)).
 
 ---
 
 ## 3. Environment Variables
 
-Configure these in the Railway dashboard for **both** services:
+`.env.example` is the reference: it names every variable something reads, and
+`tests/src/test_legacy_settings_gone.py` fails if it names one nothing does, or
+misses one. No variable is required to *load* settings; a process needs what it
+reads. Variables are per service on Railway.
 
-### Required (All Deployments)
-
-| Variable | Description | Example |
-|---|---|---|
-| `DATABASE_URL` | The database-OWNER Neon connection string the migration runner applies with (includes SSL) | `postgresql://owner:pass@ep-xxx.neon.tech/storydump?sslmode=require` |
-| `TARGET_DATABASE_URL` | The runtime login the API and the worker run as (no DDL rights) | `postgresql://app:pass@ep-xxx.neon.tech/storydump?sslmode=require` |
-| `TARGET_TELEGRAM_BOT_TOKEN` | The bot the worker sends with, from BotFather | `123456:ABC-DEF1234ghIkl` |
-| `TARGET_TELEGRAM_BOT_USERNAME` | That bot's @username, without the @ | `storydump_app_bot` |
-| `TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN` | The secret the API expects Telegram to echo on every delivery | a long random string |
-| `ENCRYPTION_KEY` | Fernet key for token encryption | Generate with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
-
-### Database (the components)
-
-There is no `DB_*` alternative for a deployed service: the worker refuses to
-boot without `TARGET_DATABASE_URL` and the API answers 503 on every data route
-without it. The `DB_*` components serve the test harness and `make` only.
-
-### OAuth & API (Web Service)
+### Both services
 
 | Variable | Description | Example |
 |---|---|---|
-| `OAUTH_REDIRECT_BASE_URL` | Railway web service URL | `https://your-app.up.railway.app` |
-| `FACEBOOK_APP_SECRET` | Meta Developer App Secret | `abc123...` |
-| `GOOGLE_CLIENT_ID` | Google OAuth Client ID | `xxx.apps.googleusercontent.com` |
-| `GOOGLE_CLIENT_SECRET` | Google OAuth Client Secret | `GOCSPX-...` |
+| `DATABASE_URL` | The database-OWNER connection string the pre-deploy migration runner applies with | `postgresql://owner:pass@ep-xxx.neon.tech/storydump?sslmode=require` |
+| `TARGET_DATABASE_URL` | The runtime login. The worker refuses to boot without it (exit 2, naming it); the API answers 503 on every data route | `postgresql://app:pass@ep-xxx.neon.tech/storydump?sslmode=require` |
+| `TARGET_TELEGRAM_BOT_TOKEN` | The one bot. The worker sends with it; the API registers the webhook and answers taps with it. Without it the worker runs with its Telegram channel parked | `123456:ABC-DEF1234ghIkl` |
+| `TARGET_TELEGRAM_BOT_USERNAME` | That bot's @username, without the @. A token whose bot is not this one parks the channel too | `storydump_app_bot` |
+| `ENCRYPTION_KEY` | Fernet key for the stored OAuth credentials (`ENCRYPTION_KEYS`, newest first, for rotation) | Generate with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | The one Google OAuth client: sign-in and the Drive grant on the API, the hourly Drive token refresh on the worker (#1247) — the worker warns at boot without both | `xxx.apps.googleusercontent.com`, `GOCSPX-...` |
+| `WEB_APP_URL` | The web front end's origin: the one origin CORS admits, where a finished sign-in or OAuth leg lands, and the origin of the links the worker sends | `https://app.example.com` |
 
-### Cloudinary (the frame's transit to Meta)
+### The API (`storydump`)
 
 | Variable | Description | Example |
 |---|---|---|
-| `CLOUDINARY_CLOUD_NAME` | Cloudinary cloud name | `dxyz123` |
-| `CLOUDINARY_API_KEY` | Cloudinary API key | `123456789012345` |
-| `CLOUDINARY_API_SECRET` | Cloudinary API secret | `abc_secret...` |
+| `TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN` | The secret the API expects Telegram to echo on every delivery. Unset, the ingress refuses every delivery | a long random string |
+| `OAUTH_REDIRECT_BASE_URL` | The API's public origin — the base of every OAuth redirect URI | `https://api.storydump.app` |
+| `INSTAGRAM_APP_ID`, `INSTAGRAM_APP_SECRET` | The Meta app, for Instagram Login ([`instagram-login-setup.md`](instagram-login-setup.md)) | |
+| `FACEBOOK_APP_SECRET` | Optional. The second secret Meta's signed policy callbacks are verified against (`src/services/target/meta_callbacks.py:116`); set it only if those callbacks are registered under another Meta app | |
+| `SESSION_COOKIE_DOMAIN` | The registrable domain the API and the front end share, so the front end's server side can read the session cookie | `example.com` |
 
-### Media, schedule and dry run
+### The worker
 
-Not variables: the media source (a connected Google Drive folder), the schedule
-and **Dry Run Mode** are per-workspace settings in the ledger, set on the web
-(Settings › Integrations and Settings › General).
+| Variable | Description | Example |
+|---|---|---|
+| `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET` | The transit store. Without all three the worker parks the publish kind by name (`src/worker.py:92-100`) | `dxyz123`, … |
+| `TARGET_USAGE_PRECHECK_ENABLED` | Optional, default off: the advisory read of Meta's publishing quota before a publish | `true` |
+| `WORKER_LOG_LEVEL` | Optional; the API's is `LOG_LEVEL` | `INFO` |
 
-`.env.example` is the reference for every variable the code reads — a test
-keeps it in exact agreement with the tree.
+Railway sets `PORT` and `RAILWAY_ENVIRONMENT_NAME` itself. The second is
+load-bearing: unless `TARGET_TELEGRAM_WEBHOOK_AUTOREGISTER` says otherwise, the
+API registers the Telegram webhook at startup only where it reads `production`
+(`_register_webhook`, `src/api/app.py:401`), so a laptop or a preview holding
+the token does not re-point production's webhook.
+
+There is no `DB_*` alternative for a deployed service. The `DB_*` components
+serve the test harness and `make` only.
+
+### Not variables
+
+The media source (a connected Google Drive folder), the schedule, **Pause
+Posting**, **Dry Run Mode** and **Instagram API** publishing are per-workspace
+settings in the ledger, set on the web (Settings › Integrations and
+Settings › General).
+
+### Reading a service's variables
+
+List the **names**, not the values — the values are production's credentials,
+and a bare `railway variables` prints them:
+
+```bash
+railway variables --service <svc> --environment production --json \
+  | python -c "import sys,json; print(sorted(json.load(sys.stdin)))"
+```
 
 ---
 
 ## 4. Telegram Bot Setup
 
-### BotFather Configuration
+The deployment runs **one** bot.
 
-1. Message [@BotFather](https://t.me/botfather) on Telegram
-2. `/newbot` and follow prompts to get your bot token
-3. `/setcommands` to register commands:
+### BotFather
 
-```
-start - Open Storydump (setup & config)
-status - System health & media overview
-setup - Quick settings & toggles
-queue - View upcoming posts
-next - Send next post now
-pause - Pause delivery
-resume - Resume delivery
-history - Recent post history
-sync - Sync media from Drive
-cleanup - Delete recent bot messages
-help - Show available commands
-```
+1. Message [@BotFather](https://t.me/botfather) and `/newbot`; keep the token
+2. `/setjoingroups` → the bot → *Enable* — without it a workspace cannot add
+   the bot to its group
+3. `/setprivacy` → the bot → *Disable* (or make the bot an admin of each
+   group): under Telegram's default privacy mode the bot sees too little of a
+   group for members to be recognized
 
-4. Add the bot as admin to your Telegram channel/group
-5. Get the channel ID (send a message, check via `https://api.telegram.org/bot<TOKEN>/getUpdates`)
+No command list is registered with `/setcommands`. The bot serves `/start` with
+the two deep-link payloads the web mints — `link-` (a person's Telegram
+identity) and `bind-` (a group joins a workspace), the lanes `build_router`
+registers (`src/services/target/telegram_dispatch.py:274-282`) — group
+membership, and the buttons on the cards it sends. Commands typed in a chat are
+not dispatched (#854), and an invitation is accepted on the web, not in the
+chat.
 
-### Polling vs Webhooks
+### The webhook
 
-The target-tier bot is **webhook-fed**: the API registers the webhook itself at startup in production (`documentation/operations/telegram-webhook.md`), and `storydump webhook status` checks it. Polling is the legacy worker's mode only (retired with #1216). If you want to switch to webhooks later, set the webhook URL to your Railway domain.
+The bot is **webhook-fed**: Telegram delivers to `POST /webhooks/telegram` on
+the API, authenticated by `TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN`. In Railway's
+`production` environment the API registers the webhook itself at startup, on
+every deploy; `storydump webhook status` checks the bot, the registration and
+the door. The runbook, with the order of operations, is
+[`telegram-webhook.md`](../operations/telegram-webhook.md).
+
+### Groups
+
+There is no channel id to configure. Each workspace binds its own group on the
+web — Settings › Integrations → **Link Telegram**, then **Add a Telegram
+group** — and its approval cards go there.
 
 ---
 
 ## 5. Instagram OAuth Setup
 
-Instagram account connection uses browser-based OAuth, which requires the web service (FastAPI) to be running.
-
-### Meta Developer Setup
+An Instagram account is connected on the web (Settings › Accounts → **Connect
+Instagram**) through Instagram Login; the callback runs on the API. The full
+walkthrough — the Meta app, the redirect URI, the variables, the failure
+reasons — is [`instagram-login-setup.md`](instagram-login-setup.md). In short:
 
 1. Create an app at [developers.facebook.com](https://developers.facebook.com)
 2. Add the **Instagram** product and use **API setup with Instagram business login**
-3. Configure the OAuth redirect URI: `https://<your API host>/auth/instagram-login/callback`
-   (production: `https://api.storydump.app/auth/instagram-login/callback`; see
-   [`instagram-login-setup.md`](instagram-login-setup.md) Step 3)
-4. Required permissions: `pages_show_list`, `pages_read_engagement`, `instagram_basic`, `instagram_content_publish`, `business_management`
-5. Set `INSTAGRAM_APP_ID` and `INSTAGRAM_APP_SECRET` (Instagram Login); set `FACEBOOK_APP_SECRET` too if Meta signs this app's callbacks with the Facebook app's secret (`src/services/target/meta_callbacks.py` tries both)
-
-### How It Works (Post-Phase 04)
-
-1. User sends `/connect` in Telegram
-2. Bot replies with an "Connect Instagram" button (OAuth link)
-3. User clicks, authorizes in browser, Meta redirects to callback
-4. Callback exchanges code for long-lived token, stores encrypted in DB
-5. Bot notifies user of successful connection
+3. Add the OAuth redirect URI `https://<your API host>/auth/instagram-login/callback`
+   (production: `https://api.storydump.app/auth/instagram-login/callback`)
+4. The scopes the flow requests are `instagram_business_basic` and
+   `instagram_business_content_publish`
+   (`src/services/target/ig_login_oauth.py:83`)
+5. Set `INSTAGRAM_APP_ID`, `INSTAGRAM_APP_SECRET` and `OAUTH_REDIRECT_BASE_URL`
+   on the API
 
 ### App Review
 
-Without Meta App Review, only users with roles on the Meta app (admins, developers, testers) can use the API. For a single-brand use case, this is sufficient.
+Until Meta's App Review grants Advanced Access on those two scopes, only
+accounts with a role on the Meta app — and the ones Meta has allowlisted — can
+connect; every other tenant's account is refused at Meta's eligibility gate.
+The runbook is [`meta-app-review.md`](../operations/meta-app-review.md).
 
 ---
 
-## 6. Google Drive OAuth Setup
+## 6. Google OAuth Setup
 
-Google Drive is the recommended media source for cloud deployments.
+One Google OAuth client serves two legs (`src/api/google_client.py`): **sign-in**
+(scope `openid email profile`) and the workspace's **Drive grant** (scope
+`drive.readonly`). Google Drive is the media source.
 
 ### Google Cloud Setup
 
 1. Create a project at [console.cloud.google.com](https://console.cloud.google.com)
 2. Enable the **Google Drive API**
-3. Create **OAuth 2.0 Client ID** (Web application type)
-4. Add authorized redirect URI: `https://your-app.up.railway.app/auth/google-drive/callback`
-5. Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` env vars on the **API and the worker** — both read Google Drive through the same credential door, and the worker refreshes the hourly access token from the stored refresh token (#1247); a service without them refuses by naming the variables
+3. Create an **OAuth 2.0 Client ID** (Web application type)
+4. Add **both** authorized redirect URIs, on the API's host:
+   - `https://<your API host>/auth/google/callback`
+   - `https://<your API host>/auth/google-drive/callback`
+5. Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` on the **API and the
+   worker**, and `OAUTH_REDIRECT_BASE_URL` on the API. The worker refreshes the
+   hourly Drive access token from the stored refresh token (#1247) and warns at
+   boot without the pair (`src/worker.py:835-845`)
 
-### How It Works (Post-Phase 05)
+Verification of the Google app for outside users is its own runbook:
+[`google-oauth-verification.md`](../operations/google-oauth-verification.md).
 
-1. User connects Google Drive via the onboarding wizard (`/start`)
-2. Bot replies with "Connect Google Drive" button (OAuth link)
-3. User clicks, authorizes Google account access
-4. Callback exchanges code for tokens, stores encrypted per-tenant in DB
-5. User's Google Drive folders become available as media sources
-6. Media sync pulls files from the user's shared folder
+### How It Works
+
+1. A person signs in on the web with Google (`GET /auth/google`); the API sets
+   the session cookie
+2. An admin opens Settings › Integrations and connects Google Drive — one grant
+   per workspace (`POST /api/v1/workspaces/{ws}/drive/connect`,
+   `src/api/routes/v1.py:822`)
+3. The callback stores the grant, encrypted, in `oauth_credentials`
+4. The admin picks folders under the grant (**Add folder**); each is a row in
+   `media_sources`
+5. The worker's `sync_media_source` job walks each folder to any depth and
+   indexes every `image/*` and `video/*` file into `media_items`; a file's
+   category is the name of the top-level folder it sits under
+   (`src/services/target/google_drive_adapter.py:296-330`)
 
 ### User Experience
 
-End users just need a Google account with a Drive folder containing their media. They never interact with GCP or service accounts. The GCP project setup is a one-time task for the app operator.
+End users need a Google account with a Drive folder of media. They do not touch
+GCP; the project is a one-time task for the operator.
 
 ---
 
@@ -262,7 +359,7 @@ Required for publishing: without all three variables the worker parks the publis
 
 1. Create account at [cloudinary.com](https://cloudinary.com) (free tier: 25 credits/month)
 2. Get credentials from Dashboard: Cloud Name, API Key, API Secret
-3. Set env vars: `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET`
+3. Set `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET` on the worker
 
 The worker's transit store (`src/services/target/transit.py`) uploads a story's frame for Meta to fetch, and the `reap_transit_assets` job removes it afterwards.
 
@@ -272,32 +369,48 @@ The worker's transit store (`src/services/target/transit.py`) uploads a story's 
 
 ### Logs
 
-Railway provides log streaming in the dashboard. The app logs to stdout via the console handler, which Railway captures automatically.
+Both processes log to the console, which Railway captures: the API through
+`src/utils/logger.py` at `LOG_LEVEL`, the worker through `logging.basicConfig`
+at `WORKER_LOG_LEVEL` (`src/worker.py:794-797`).
+
+```bash
+railway logs --service worker
+railway logs --service storydump
+```
 
 ### Database Backups
 
-- **Neon**: Automatic point-in-time recovery (paid plans). Free tier has limited retention.
+- **Neon**: point-in-time restore, within the project's history retention.
 - **Manual**: `pg_dump "$DATABASE_URL" > backup_$(date +%Y%m%d).sql`
+- The legacy tier's rows survive only as the `archive.*_pre_cutover_20260917`
+  snapshots; their lifetime is in
+  [`backup-restore.md`](../operations/backup-restore.md).
 
 ### Health Monitoring
 
 From a laptop with a token minted under Settings › API tokens:
 - `storydump health` — the API's three health surfaces and the bot's webhook, judged (exit 4 when not well)
 - `storydump deploys` — the latest deployment of each service; `storydump doctor` for the local setup
-- see `documentation/operations/monitoring.md`
+- see [`monitoring.md`](../operations/monitoring.md)
 
 ### Service Management
 
-- **Restart**: Via Railway dashboard or `railway restart`
-- **Logs**: `railway logs` or dashboard
-- **Shell**: `railway shell` for running CLI commands
+- **Restart**: the Railway dashboard, or `railway restart --service <svc>`. A
+  restart does not stop posting; `storydump pause --workspace <ws>` does
+- **Logs**: `railway logs --service <svc>` or the dashboard
+- **Variables**: names only, as in Section 3. `railway shell` and `railway run`
+  export every production credential into a local process — use them only for
+  the documented escape hatch in
+  [`reading-the-ledger.md`](../operations/reading-the-ledger.md)
+- **The `storydump` CLI is a client of the API**, run from a laptop under your
+  own token; nothing it does needs a shell on a service
 
 ### Cost Estimates
 
 | Service | Tier | Cost |
 |---------|------|------|
 | Neon | Free | $0 (0.5 GB, 190 compute-hours) |
-| Railway | Starter | ~$5-10/month (worker + web) |
+| Railway | Starter | ~$5-10/month (worker + API) |
 | Cloudinary | Free | $0 (25 credits/month) |
 | Telegram Bot API | Free | $0 |
 | Instagram/Meta API | Free | $0 (rate-limited) |
@@ -309,16 +422,15 @@ From a laptop with a token minted under Settings › API tokens:
 ## 9. Security Checklist
 
 - [ ] All secrets stored as Railway environment variables (never in code)
-- [ ] `ENCRYPTION_KEY` generated and set (for token encryption in DB)
-- [ ] Database password is strong and unique
-- [ ] Telegram bot token is kept secret
-- [ ] Instagram/Facebook app secret is kept secret
-- [ ] Cloudinary API secret is kept secret
-- [ ] Google OAuth client secret is kept secret
+- [ ] `ENCRYPTION_KEY` generated and set on both services
+- [ ] `TARGET_DATABASE_URL` is a runtime login, not the owner (`/health` → `db_role`)
+- [ ] `TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN` is long and random; the bot token is kept secret
+- [ ] `TARGET_TELEGRAM_WEBHOOK_AUTOREGISTER` is not `1` anywhere that holds the production token outside production
+- [ ] The Meta app secret, the Google client secret and the Cloudinary API secret are kept secret
 - [ ] `.env` file is NOT committed (verified in `.gitignore`)
 - [ ] SSL/TLS for all connections (Neon requires it, all APIs use HTTPS)
-- [ ] Connection pool sizing appropriate for Neon tier
-- [ ] `OAUTH_REDIRECT_BASE_URL` points to your Railway HTTPS domain
+- [ ] `OAUTH_REDIRECT_BASE_URL` is the API's HTTPS origin, and `WEB_APP_URL` the front end's
+- [ ] Variables are listed by name only (Section 3)
 
 ---
 
@@ -326,31 +438,33 @@ From a laptop with a token minted under Settings › API tokens:
 
 | Problem | Solution |
 |---------|----------|
+| The worker exits at boot with `FATAL: TARGET_DATABASE_URL is unset` | Set it on the `worker` service (`src/worker.py:800-810`). |
+| Every API data route answers 503 | `TARGET_DATABASE_URL` is unset on the `storydump` service; `/health` shows `target_database: false`. |
+| A deploy fails in the pre-deploy step | A migration failed, or `DATABASE_URL` is missing or is not the owner. The old version keeps serving; fix forward with a new file ([`migration-runner.md`](../operations/migration-runner.md)). |
 | Database connection fails | Check `TARGET_DATABASE_URL` (the services) and `DATABASE_URL` (the migration runner); a Neon URL carries `?sslmode=require`. The `DB_*` components steer only the test harness and `make`. |
 | Neon connection limit exceeded | The pool is pinned in code (10 per process, no overflow); no variable sizes it. Count the processes against the plan's connection limit. |
-| Telegram bot not responding | Verify `TARGET_TELEGRAM_BOT_TOKEN` is the bot named by `TARGET_TELEGRAM_BOT_USERNAME`; `storydump health` reports the webhook. Check Railway worker logs. |
+| No cards arrive in the group | `storydump health` reports the webhook and scheduling; `storydump outbox --since 3h` shows what is owed or lost on the chats; verify `TARGET_TELEGRAM_BOT_TOKEN` is the bot named by `TARGET_TELEGRAM_BOT_USERNAME`. Check the worker's log for a parked channel. |
+| Taps on a card do nothing | `storydump webhook status`: the registration must include `callback_query`, and the door must accept the secret ([`telegram-webhook.md`](../operations/telegram-webhook.md)). |
 | `ENCRYPTION_KEY not configured` | Generate one: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
-| OAuth callback fails | Check `OAUTH_REDIRECT_BASE_URL` matches your Railway web domain. |
-| Mini App won't load | Ensure web service is running and domain has HTTPS. Check `OAUTH_REDIRECT_BASE_URL`. |
-| Service restarts frequently | Check memory limits in Railway. Review logs for OOM or crash loops. |
-| "idle in transaction" | Built-in cleanup runs every 30 seconds. Reduce pool size if persistent. |
+| An OAuth leg answers `503 … oauth not configured: set …` | Set the variables the message names on the API (`src/api/oauth_client.py:23-32`). |
+| OAuth callback fails with Meta's or Google's "redirect_uri" error | `OAUTH_REDIRECT_BASE_URL` must be the API's public origin, and the exact callback URI must be registered with the provider. |
+| An old Telegram button opens the web's sign-in page | That is the retired Mini App's URL answering as designed (`src/api/routes/retired.py`). |
+| Service restarts frequently | Check memory limits in Railway. Review logs for OOM or crash loops; the worker exits 1 when a supervised task dies. |
 | Instagram API rate limited | Meta caps API publishing per account over a rolling 24 h window; the limit is Meta's and no variable overrides it. The worker's advisory pre-check (`TARGET_USAGE_PRECHECK_ENABLED`, default off) reads the account's live quota (`GET /{ig-user}/content_publishing_limit`), and `storydump story <id>` shows what Meta answered for a refused publish. |
 
 ---
 
 ## Quick Start Checklist
 
-1. [ ] Create the Neon database and apply the migrations with `python -m scripts.migration_runner apply`
+1. [ ] Create the Neon database; on a fresh one apply the four by-hand files, then `python -m scripts.migration_runner apply`
 2. [ ] Create the Railway project with two services (`worker` + `storydump`, the API)
-3. [ ] Set all required environment variables
-4. [ ] Create Telegram bot via BotFather, get token
-5. [ ] Add bot to your channel/group as admin
-6. [ ] Generate Railway domain for web service
-7. [ ] Set `OAUTH_REDIRECT_BASE_URL` to the Railway HTTPS domain
-8. [ ] Configure Meta Developer App (Instagram OAuth redirect URI)
-9. [ ] Configure Google Cloud OAuth (Google Drive redirect URI)
-10. [ ] Deploy and verify bot responds to `/start`
-11. [ ] Test onboarding wizard opens from `/start`
-12. [ ] Test Instagram OAuth flow (via `/connect` or wizard)
-13. [ ] Test Google Drive OAuth flow (via onboarding wizard)
-14. [ ] Turn the workspace's **Dry Run Mode** off (the web, Settings › General) when ready for live posting
+3. [ ] Generate the API's domain; set `OAUTH_REDIRECT_BASE_URL` and `WEB_APP_URL`
+4. [ ] Set the variables of Section 3, `DATABASE_URL` on both services first
+5. [ ] Create the Telegram bot via BotFather; enable groups, disable privacy mode
+6. [ ] Configure the Meta app (the Instagram Login redirect URI)
+7. [ ] Configure the Google client (both redirect URIs)
+8. [ ] Deploy; `storydump health` and `storydump webhook status` are well
+9. [ ] Sign in on the web, create a workspace
+10. [ ] Settings › Integrations: link Telegram, add a Telegram group, connect Google Drive, add a folder, Sync Now
+11. [ ] Settings › Accounts: Connect Instagram
+12. [ ] Settings › General: set the schedule. **Instagram API** is off on a new workspace (cards offer **Posted myself**, not **Post now**); turn it on when the workspace should publish through the API. **Dry Run Mode** with it on runs the whole publish leg without calling Meta — and spends the media's rotation as a real post would (`src/services/target/publish_pipeline.py:318-327`)

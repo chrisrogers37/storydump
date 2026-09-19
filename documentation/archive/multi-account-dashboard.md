@@ -1,3 +1,5 @@
+> **Archived 2026-09-18 — SUPERSEDED.** A plan for the legacy dashboard's instance picker over `chat_settings` and `user_chat_memberships`. The target tier replaced the model: a person's memberships are `workspace_members` rows over `workspaces`, and the dashboard was rebuilt on the target schema (#1032). Moved here from the repository's top-level `planning/` directory. See [`documentation/archive/README.md`](README.md) for the index.
+
 # Multi-Account Dashboard Migration
 
 **Status:** Planning (consolidated 2026-04-17)

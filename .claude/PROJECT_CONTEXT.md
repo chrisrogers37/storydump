@@ -1,18 +1,27 @@
 # Storydump - Project Context
 
-**Copy this into Claude web/phone sessions for context.**
+**Copy this into Claude web/phone sessions for context.** The canonical guide is
+`AGENTS.md`; this page is the short version of it.
 
 ---
 
 ## What This Project Does
 
-Storydump is a hosted, multi-tenant Instagram Story scheduling service with Telegram-based workflow:
-1. Media files are indexed from Google Drive (or local filesystem)
-2. A JIT scheduler checks if a posting slot is due each tick
-3. At each slot, the bot either:
-   - Posts directly via Instagram Graph API (Phase 2), or
-   - Sends the image to Telegram for manual posting (Phase 1)
-4. Users interact via Telegram bot commands (/start, /status, /setup, /next, /cleanup, /help)
+Storydump is a hosted, multi-tenant Instagram Story scheduling service. A
+tenant is a **workspace**; people sign in on the web with Google and can link
+Telegram.
+
+1. A workspace connects Google Drive folders (`media_sources`); the worker syncs
+   what is inside them into the media pool (`media_items`).
+2. For each Instagram account the clock plans slots — the account's posts per
+   day spread across its posting hours — and mints one story per slot
+   (`post_intents`), drawn from the connected folders by the workspace's mix.
+3. The workspace decides. An approval card goes to every Telegram chat bound to
+   the workspace, and the same queue is on the web: approve (the worker
+   publishes through the Instagram API), post by hand and mark it posted, skip,
+   or reject.
+4. Every write goes through one command port, and every state change is an
+   audited row in the ledger. `storydump` reads that ledger from a terminal.
 
 ---
 
@@ -24,22 +33,24 @@ Storydump is a hosted, multi-tenant Instagram Story scheduling service with Tele
 │  • storydump_cli/ - the storydump CLI│
 │  • src/api/ - the API (FastAPI)     │
 │  • src/channels/ - Telegram transport│
+│  • landing/ - the web app (Next.js) │
 └───────────────┬─────────────────────┘
                 │
 ┌───────────────▼─────────────────────┐
-│  Service Layer (the target tier)    │
+│  Service Layer                      │
 │  • src/services/target/             │
 │    - work_loop, jobs, scheduler     │
 │    - publish_pipeline, media_sync   │
-│    - command_executors, ops_views   │
+│    - commands, command_executors    │
+│    - outbox, prompts, ops_views     │
 │    - telegram_dispatch, *_adapter   │
 │  • src/worker.py - composition root │
 └───────────────┬─────────────────────┘
                 │
 ┌───────────────▼─────────────────────┐
 │  Data Layer                         │
-│  • SQL in the target services       │
-│    (readers, executors, unit_of_work)│
+│  • SQL in the services, by hand,    │
+│    under unit_of_work               │
 │  • src/models/target/ - declarative │
 │    models, for schema parity        │
 │  • scripts/migrations/ + the runner │
@@ -47,29 +58,50 @@ Storydump is a hosted, multi-tenant Instagram Story scheduling service with Tele
 └─────────────────────────────────────┘
 ```
 
-**RULE**: the CLI never imports `src` except `src/services/target/vocabulary.py`; SQL lives in the target services under the unit of work; the API's routes call the services, never the database directly. (The legacy tier — `src/services/core`, `src/repositories`, the legacy models — was deleted in the tear-out, phase 01; #1216.)
+**RULE**: the CLI never imports `src` except `src/services/target/vocabulary.py`; SQL lives in the services under the unit of work; the API's routes call the services. There is one tier: the legacy tier was retired in the tear-out (#1216, September 2026), and its data survives only as the `archive.*_pre_cutover_20260917` snapshots.
 
 ---
 
 ## Key Database Tables
 
+Twenty-six tables in `public`, all under row-level security keyed on the
+workspace. The ones a conversation usually needs:
+
 | Table | Purpose |
 |-------|---------|
-| `media_items` | All indexed media (source of truth) |
-| `posting_queue` | Scheduled posts (ephemeral work items) |
-| `posting_history` | Permanent audit log of all posts |
-| `instagram_accounts` | Multi-account support (Phase 1.5) |
-| `chat_settings` | Per-Telegram-chat configuration |
-| `api_tokens` | Encrypted OAuth tokens |
+| `workspaces` | The tenant, and its settings (`dry_run_mode`, `is_paused`, `api_publishing_enabled`, the schedule) |
+| `workspace_members`, `users`, `user_identities` | Who belongs to a workspace, and how they sign in |
+| `ig_accounts` | A workspace's Instagram accounts; the slot cursor (`next_slot_at`) and per-account schedule overrides |
+| `media_sources`, `media_items` | Connected Drive folders and the media synced from them |
+| `post_intents` | The ledger: one story, for one account, at one slot — its state and publish step |
+| `audit_events` | Every state change, with who made it and through which channel |
+| `jobs` | The worker's queue: kind, lane, lease |
+| `channel_bindings`, `channel_outbox` | The Telegram chats bound to a workspace, and every message sent to them |
+| `provider_operations` | One permit per Instagram container-create and publish call, written before the call |
+| `oauth_credentials` | Encrypted Instagram and Drive grants |
+| `service_tokens` | API tokens for the CLI (hashed) |
+
+The full list and the rules for touching it: `.claude/rules/database.md`.
 
 ---
 
 ## Settings Resolution
 
-**Database overrides .env for per-chat settings:**
-- `chat_settings.dry_run_mode` overrides `DRY_RUN_MODE`
-- `chat_settings.enable_instagram_api` overrides `ENABLE_INSTAGRAM_API`
-- `chat_settings.active_instagram_account_id` selects which account to post from
+Publishing, dry run, pause and the schedule are **per-workspace rows in the
+ledger**, changed on the web (Settings) or through the command port — never
+environment variables:
+
+- `workspaces.dry_run_mode` — a dry run walks the whole flow and posts nowhere
+- `workspaces.api_publishing_enabled` — off means the card offers "Posted
+  myself" and `approve` is refused as `manual_mode`
+- `workspaces.is_paused` — `storydump pause` / `storydump resume`; a paused
+  workspace plans no slots
+- `ig_accounts.posts_per_day`, posting hours, `tz` — per-account overrides; NULL
+  inherits the workspace
+
+Environment variables configure the DEPLOYMENT (`TARGET_DATABASE_URL`, the bot
+token and webhook secret, the Cloudinary trio, the Google client). `.env.example`
+names every one something reads.
 
 ---
 
@@ -79,14 +111,18 @@ Storydump is a hosted, multi-tenant Instagram Story scheduling service with Tele
 |------|---------|
 | `src/worker.py` | The worker's composition root (lanes, the clock, the publish pipeline) |
 | `src/api/app.py` | The API (FastAPI): the command port, the ops views, health |
-| `src/services/target/work_loop.py` | The lanes and the job registry |
-| `src/services/target/publish_pipeline.py` | Publishing a story to Instagram |
-| `src/services/target/scheduler.py` | The clock and the slots |
-| `src/services/target/media_sync.py` | Drive sync into the media pool |
+| `src/services/target/commands.py` | The command port: the closed vocabulary and the role floors |
 | `src/services/target/command_executors.py` | The command port's verbs |
-| `src/services/target/ops_views.py` | The ledger read views the CLI shows |
-| `src/services/target/telegram_dispatch.py` | The Telegram channel (cards, taps) |
+| `src/services/target/unit_of_work.py` | The tenant-scoped transaction every query runs under |
+| `src/services/target/work_loop.py` | The lanes and the job registry |
+| `src/services/target/scheduler.py` | The clock and the slots |
+| `src/services/target/publish_pipeline.py` | Publishing a story to Instagram |
+| `src/services/target/media_sync.py` | Drive sync into the media pool |
+| `src/services/target/prompts.py`, `outbox.py` | The approval card and its delivery record |
+| `src/services/target/telegram_dispatch.py` | Inbound Telegram: taps, `/start`, group joins |
 | `src/channels/telegram_transport.py` | The Telegram HTTP transport |
+| `src/services/target/ops_views.py` | The ledger read views the CLI shows |
+| `src/services/target/vocabulary.py` | The closed vocabularies and the CLI's wire contract |
 | `storydump_cli/main.py` | The `storydump` CLI |
 | `scripts/migration_runner.py` | The migration runner (every deploy's predeploy) |
 
@@ -106,38 +142,55 @@ Storydump is a hosted, multi-tenant Instagram Story scheduling service with Tele
 The canonical list is the safety block in `CLAUDE.md`; this copy is pinned to
 it by `tests/test_agent_docs.py`.
 
+Not on that list does not mean safe: `storydump skip`, `reject`, `posted`,
+`pause`, `resume` and `sync` also write through the command port, and a skip or
+a reject is final for that story. Ask before suggesting any of them.
+
 **SAFE to suggest:**
-- `storydump floating` / `storydump story <id>` / `storydump health` / `storydump doctor` (reads)
+- `storydump whoami` / `storydump story <id>` / `storydump cards <id>` / `storydump floating` / `storydump account <handle>` (reads)
+- `storydump jobs` / `storydump outbox` / `storydump burst` / `storydump posture` (reads)
+- `storydump health` / `storydump deploys` / `storydump doctor` / `storydump webhook status` (the deployment; nothing changes)
 - `pytest tests/`
-- Database SELECT queries
+- A read-only `psql` probe through Railway, when no verb answers the question (`documentation/operations/reading-the-ledger.md` › The escape hatch)
 
 ---
 
-## Current Version: v1.6.0
+## State of the System
 
-- ✅ Phase 1: Telegram manual posting
-- ✅ Phase 1.5: Multi-account support
-- ✅ Phase 1.6: Settings & Telegram UX
-- ✅ Phase 2: Instagram API automation
-- 🔲 Phase 3: Shopify integration
-- 🔲 Phase 4+: Web UI, analytics
+- The target tier is the only tier. Version: `src/__init__.py`; changes:
+  `CHANGELOG.md` under `## [Unreleased]`.
+- **Outbound email does not send**: no provider is wired, by design
+  (`AGENTS.md` › What is deliberately not wired). An invitation's row and token
+  are real; the message is not delivered.
+- Some vocabulary commands have no executor yet and answer 501
+  (`commands.UNBUILT`); two job kinds have none (`work_loop.UNBUILT_KINDS`).
+- The `legacy` schema is dropped by the gated migration 079, in the owner's
+  window (`documentation/operations/legacy-window-close.md`). An agent does not
+  apply it.
 
 ---
 
 ## Common Patterns
 
-**Adding a new setting:**
-1. Add column to `chat_settings` model
-2. Create migration in `scripts/migrations/`
-3. Add to `SettingsService.TOGGLEABLE_SETTINGS` if it's a toggle
-4. Update Telegram /settings handler
+**Adding a workspace setting:**
+1. A migration adds the column to `workspaces` (next number, with
+   postconditions); the model in `src/models/target/` and the plan's advertised
+   DDL change in the same PR
+2. Add the key to `workspaces.SETTINGS_COLUMNS` so `settings_change` may set it
+3. Surface it on the web's Settings page
 
-**Adding a new command:**
-1. Create handler method in the appropriate handler module (e.g., `telegram_commands.py`)
-2. Register in `TelegramService.initialize()` via `_register_handlers()`
-3. Update help text in `telegram_commands.py`
+**Adding a write:**
+1. Name it in the vocabulary (`vocabulary.COMMANDS`, pinned to the architecture
+   document) and give it a floor in `commands.ROLE_FLOOR`
+2. Write the executor in `command_executors.py` — read the row `FOR UPDATE`,
+   decide from that read, let the database refuse what is illegal
+3. If the CLI should expose it, add the verb to
+   `storydump_cli/commands/writes.py` and classify it for the safety block
+   before it ships
 
 **Testing:**
-- All services should have unit tests in `tests/src/services/`
-- Unit tests mock the seams; the DB gates under `tests/scripts/` run against the replayed schema
+- Unit tests live in `tests/src/services/target/` and script their executors
+- The DB gates under `tests/scripts/` run against the replayed schema and need a
+  real PostgreSQL (`AGENTS.md` › Testing); set `REQUIRE_TEST_DATABASE=1` when a
+  green result will be reported
 - Run with `pytest tests/ -v`

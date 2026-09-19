@@ -19,11 +19,18 @@ shell` has no `-c`; to read a variable on a service, use
 `railway run --service worker --environment production -- sh -c 'echo "$NAME"'` — and never print a
 secret's value.
 
-This page is the target tier's — the only tier deployed: the worker dispatches
-to the target composition root (`WORKER_IMPL=target`, since 2026-08-24). The
-legacy tables (`posting_queue`, `chat_settings`, `api_tokens`) survive in the
-`legacy` schema, undeployed, until #1216 snapshots and drops them; nothing here
-reads them.
+This page is the target tier's, the only tier there is: `python -m src.main`
+runs the target composition root, `src.worker`, and nothing else
+(`src/main.py`). The legacy tier was retired in the tear-out (#1216, September
+2026); its data survives as the `archive.*_pre_cutover_20260917` snapshots, and
+nothing here reads them.
+
+`storydump doctor`'s ledger check compares the checkout's migration files with
+the ledger. A GATED file (`runner:manual` — 079 and 080 until the owner's window
+has run, `legacy-window-close.md`) is reported on the `ok` line as "owed to the
+owner's window", never as missing (`storydump_cli/commands/env.py`, `_gated_in`);
+an ordinary file the ledger lacks is "not applied — deploy main", and that one
+is real (`migration-runner.md`).
 
 ---
 
@@ -44,10 +51,13 @@ railway logs --service storydump | tail -50
 
 | Error | Cause | Fix |
 |-------|-------|-----|
-| `ModuleNotFoundError` | Missing dependency | Check `requirements.txt` and the build command |
-| `Connection refused` | Database not reachable | Check `TARGET_DATABASE_URL` / `DATABASE_URL` and Neon status |
-| a migration refused at pre-deploy | the runner found drift | `documentation/operations/migration-runner.md` |
-| `Permission denied` | Environment misconfiguration | Verify the variables in the Railway dashboard |
+| `FATAL: TARGET_DATABASE_URL is unset … Refusing to boot` (the worker, exit 2) | the variable is missing or blank on the worker service (`src/worker.py:799-810`) | set it on the service. The API does not refuse to start without it: `/health` reports `"target_database": false` and every data route answers 503 |
+| `ValueError: … exceeds the pool of 10` (the worker) | the lane concurrency does not fit the pool (`src/services/target/work_loop.py:159-182`) | lower `TARGET_WORKER_INTERACTIVE_CONCURRENCY` / `TARGET_WORKER_BULK_CONCURRENCY` |
+| `background task <name> DIED` (the worker, exit 1) | a supervised task raised; the worker is fail-fast | `worker-recovery.md` |
+| the predeploy fails | a migration or its postcondition failed, or an applied file no longer matches its checksum. The deploy aborts with the old version still serving (`railway.toml`) | `migration-runner.md`; fix forward, never edit an applied file |
+| `ModuleNotFoundError` | a missing dependency | `requirements.txt` and `railway.toml`'s build command |
+| `Connection refused`, or a timeout, at startup | the database is not reachable | `TARGET_DATABASE_URL` (the runtime login) and `DATABASE_URL` (the runner's, the owner's connection) on that service; Neon's status |
+| `permission denied for …` from Postgres | the runtime login lacks a grant the code needs | the log line names the object; `runtime-database-roles.md` |
 
 ---
 
@@ -67,12 +77,13 @@ storydump account <handle>              # the cap, today's count, the next slot
 
 | Cause | Check | Fix |
 |-------|-------|-----|
-| Posting paused for the workspace | `storydump story <id>` shows no permits since the pause | `storydump resume --workspace <ws>` (an operator token) |
+| Posting paused for the workspace | `storydump story <id>` shows no permits since the pause | `storydump resume --workspace <ws>` (an operator token) — it restarts POSTING: the owner's decision, an agent asks first |
 | Instagram API posting off | the port refuses `approve` with `manual_mode` | Settings › General on the web |
 | The account's cap reached | `storydump account <handle>`: today's count at the cap | Wait for the next slot, or raise the cap on the web |
 | The frame not ready, or the container not ready | `floating` shows `fetch/<rung>` or `container/<rung>`, the rung climbing | Let the ladder run; `burst --watch` follows it |
 | A publish answer was lost | the story is `publishing_ambiguous`; `resolve` refuses with `may_have_posted` | Look at Instagram, then `storydump resolve <story> retry --not-posted` or `resolve <story> posted` (never-run list: ask the user) |
-| The worker is down | `storydump health`: scheduling `worker-down` | `railway logs --service worker`, restart |
+| The publish kind is parked | the worker's log: `parked kind publish_pipeline …` naming the missing seam | set the `CLOUDINARY_*` trio on the worker (`worker-recovery.md`) |
+| The worker is down or stuck | `storydump health`: scheduling `worker-down` or `stalled` | `worker-recovery.md` |
 
 ---
 
@@ -96,6 +107,7 @@ railway logs --service storydump | grep -i telegram
 | The API refuses the secret (`403` at the door) | `TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN` differs between the API and the shell |
 | A backlog behind a delivery error | `railway logs --service storydump` for the failing route; the backlog drains once it answers |
 | Outbox rows failed | `storydump outbox --since 24h`, then `storydump cards <story>` for the card's attempts |
+| Cards are owed and never sent: `storydump outbox` shows `pending` growing | the worker's sender is parked — no `TARGET_TELEGRAM_BOT_TOKEN`, a token Telegram rejects (`Telegram credential is DEAD at startup`), or a token that is not the configured bot's (`src/worker.py:370-411`). Fix the variable on the worker and redeploy it (`worker-recovery.md`) |
 
 ---
 
@@ -129,6 +141,13 @@ storydump whoami                         # who the token is, its role, its works
 storydump jobs --since 24h               # `sync_media_source` jobs by state, with the failed samples
 ```
 
+**Common Causes**:
+
+| Cause | Fix |
+|-------|-----|
+| Google no longer accepts the workspace's grant: the source flips to `error` and the workspace is told once (`src/services/target/media_sync.py`) | Reconnect Google Drive under Settings › Integrations |
+| The worker cannot refresh a Drive grant — its boot log warns `Drive read leg armed without GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET` (`src/worker.py:835-843`) | set both on the worker service |
+
 **Re-sync**:
 ```bash
 storydump sync <source_id> --workspace <ws>   # or Sync Now under Settings › Integrations
@@ -151,10 +170,11 @@ railway logs --service storydump | grep -iE 'pool|connect'
 
 | Cause | Fix |
 |-------|-----|
-| Neon endpoint sleeping | The first connection wakes it (cold start ~1-2 s) |
-| The pool saturated (a 503 naming `pool_saturated`, with Retry-After) | Wait; a watch retries three times before giving up |
+| `TARGET_DATABASE_URL` absent on the API | every data route answers 503 and `/health` reports `"target_database": false`; set it on the `storydump` service |
+| Neon endpoint suspended | The first connection wakes it |
+| The pool saturated (a 503 naming `pool_saturated`, with `Retry-After: 1`) | Wait; a watch retries three times before giving up |
 | Wrong credentials | Check the database variables in the Railway dashboard |
-| Neon free-tier limit | Neon dashboard, compute hours |
+| The Neon plan's compute limit | the Neon console |
 
 ---
 
@@ -170,6 +190,9 @@ railway logs --service storydump | grep -iE 'exception|traceback|refused'
 | `refused <METHOD> <path>: …` | the API refused a request (the reason follows) |
 | `pool_saturated` | the API is shedding load |
 | `telegram webhook not registered` | the startup registration failed; `storydump webhook status` |
+| `status: interactive[…] bulk[…] clock[…] heartbeat[…]` | the worker's one-a-minute status line; counters that stop moving are a stuck worker (`worker-recovery.md`) |
+| `clock tick failed (N consecutive) — NO JOBS WERE MINTED` | a clock tick raised and minted nothing. Once is a blip; on every tick it is a row the schema refuses — the deployed code ahead of the migration ledger (`worker-recovery.md`) |
+| `parked kind <kind> (job <id>): <reason>` | a kind this worker cannot run, and the variable or seam it is missing |
 
 ---
 
@@ -182,7 +205,8 @@ storydump pause --workspace <ws>          # per workspace, through the command p
 ```
 
 `pause` is a workspace verb: run it for each workspace that must stop. It is
-idempotent and safe to repeat; `storydump resume --workspace <ws>` lifts it.
+idempotent and safe to repeat; `storydump resume --workspace <ws>` lifts it — that
+restarts posting, so it is the owner's decision and an agent asks first.
 Restarting the worker does NOT stop posting — the ledger's jobs survive a
 restart by design.
 
@@ -197,6 +221,12 @@ storydump story <id>                      # where it is
 ### Force Service Restart
 
 ```bash
-railway restart --service worker
-railway restart --service storydump
+railway whoami && railway status                 # the storydump project, environment production
+railway redeploy --service worker --yes
+railway redeploy --service storydump --yes
+storydump deploys --watch --timeout 900
 ```
+
+`railway redeploy` acts on the linked environment and takes no `--environment`
+(`legacy-window-close.md`, step 0). Restarting the production worker resumes
+whatever the ledger owes, so it is a production action: an agent asks first.

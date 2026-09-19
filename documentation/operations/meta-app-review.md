@@ -29,22 +29,11 @@ As of this draft **exactly one section is WALKED** — *Why App Review is requir
 
 ---
 
-## ⚠ STANDING CONSTRAINT — do not drop the `legacy` schema before the demo videos are recorded
+## The `legacy` drop and the demo videos — constraint discharged
 
-**Read this if you are working on migrations, not just if you are working on App Review.**
+**Discharged — this is no longer a constraint.** It asked that the M.3 cutover's last step, 3g (`DROP SCHEMA legacy CASCADE`), wait until the Track 3 demo videos were recorded *or* the target tier was armed and verified. The owner ruled the "or" leg met on 2026-09-16 — the target tier is armed and serving with a connected destination — and [#1202](https://github.com/chrisrogers37/storydump/issues/1202), the guard filed for it, was closed on that ruling on 2026-09-18.
 
-Track 3 requires **demo videos of a real Instagram publish**, recorded against a running system. That system is the **target** tier: the worker was armed on 2026-08-24, the API cut over on 2026-08-31, and the legacy tier's code was deleted in the tear-out (#1216) — there is no other runnable system. The owner ruled #1202's "or" leg met on 2026-09-16.
-
-The M.3 cutover's last step is **3g `DROP SCHEMA legacy CASCADE`** (`documentation/planning/2026-08-02-consolidated-design-plan/04-execution-sequence.md:194`). Running it before the videos exist removes the only tier that can produce them.
-
-**Precisely what is and is not at risk**, because the crude version of this warning is wrong and would be dismissed:
-
-- **The data is not at risk.** Step 3f snapshots every legacy table to `archive.<t>_pre_cutover_<YYYYMMDD>` *before* anything is dropped.
-- **The runnable system is.** A demo video needs a working publish path with a real account and real media, not a table you can `SELECT` from. After 3g, the legacy lineage is gone as a *running* thing, and the target tier can only replace it once it is actually serving.
-
-**So the ordering constraint is: record the Track 3 videos, or arm and verify the target tier, before 3g runs.** Either satisfies it; neither is currently done.
-
-**This paragraph is not sufficient protection and should not be treated as such.** A migration author executing the cutover reads `04-execution-sequence.md` and `scripts/m1_preflight.py`, not this runbook. A durable guard belongs at the 3g site — a preflight check that refuses while `#410` is open, or at minimum a note at `04-execution-sequence.md:194` pointing here. Filed as [#1202](https://github.com/chrisrogers37/storydump/issues/1202) rather than left as prose; until that lands, this is a convention, and conventions are exactly what get tidied away by someone acting in good faith.
+Track 3's demo videos are to be recorded on the target tier, which is the only tier there is: the legacy tier's code was deleted in the tear-out (#1216), and its data survives as the `archive.*_pre_cutover_20260917` snapshots (migration 078). The `legacy` schema itself is dropped by 079 in the owner's window — a gated file (`-- runner:manual`) that every deploy owes and none runs ([`legacy-window-close.md`](legacy-window-close.md)).
 
 ---
 
@@ -62,7 +51,7 @@ The gate is keyed off the app's **use case** in the Meta Developer Portal — *"
 
 | Permission | Declared at | Used for |
 |---|---|---|
-| `instagram_business_basic` | `src/services/target/ig_login_oauth.py:72` | Reading the connected account's own profile and its own media |
+| `instagram_business_basic` | `src/services/target/ig_login_oauth.py:83` | Reading the connected account's own profile and its own media |
 | `instagram_business_content_publish` | same | Creating and publishing media containers to the connected account |
 
 Nothing else is requested. There is no messaging permission anywhere in the tree.
@@ -170,7 +159,7 @@ This is the longest track and the one that gates everything else, so its inputs 
 
 > Publishing is the product. A user points Storydump at a folder of their own media and sets a posting schedule; at each scheduled slot the app publishes one item to that user's own Instagram Business account as a Story. We use the standard two-step container flow: `POST /{ig-user-id}/media` with `media_type=STORIES` and an `image_url` or `video_url` pointing at the user's own media, then `POST /{ig-user-id}/media_publish` with the returned `creation_id`, polling `GET /{container_id}?fields=status_code,status` in between until the container is ready. Every publish is initiated by a schedule the account owner configured and can pause or cancel at any time; the app never publishes to an account other than the one whose owner connected it, and never publishes content the user did not place in their own connected media source.
 
-*(Both are written against what the code actually calls — see `src/services/target/meta_adapter.py` and `publish_pipeline.py` (the legacy `src/services/integrations/instagram_api.py` went with the legacy tier, #1216). If the API usage changes, change these; a justification that describes a call the app no longer makes is a rejection waiting to happen.)*
+*(Both are meant to describe what the code actually calls; check them against it before submitting. The container flow is `src/services/target/instagram_graph.py` — `create_container`, `container_status`, `publish` — driven by `src/services/target/publish_pipeline.py`, and the profile read is `GET /me?fields=user_id,username` at connect (`src/services/target/ig_login_oauth.py:636-642`). **The second use in the `instagram_business_basic` copy has no caller today:** as of 2026-09-18 nothing in the target tier reads the account's media or stories — the legacy tier's backfill did, and went with it (#1216), and the reconciler's `stories_check` seam (`src/services/target/reconciler.py:377`) is wired to nothing. Revise that copy or build the read first: a justification that describes a call the app no longer makes is a rejection waiting to happen.)*
 
 ### Demo video script
 

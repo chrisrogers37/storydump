@@ -5,6 +5,8 @@
 **Next Version**: TBD
 
 > **Status (2026-09-02): historical.** This roadmap records the phase-1/2 product (v1.0.0 – v1.6.0) and pre-dates the 2026-08 multi-tenant refactor. The forward plan is [`planning/2026-08-02-consolidated-design-plan/`](planning/2026-08-02-consolidated-design-plan/README.md); the "Phase 3" and backlog sections below are not the current program. The version history table remains accurate.
+>
+> **2026-09-18:** the legacy tier this page describes — the polling Telegram bot and its commands, the legacy CLI, per-chat settings, the queue, history and lock tables — was retired in the legacy tear-out (#1216); its data survives as the `archive.*_pre_cutover_20260917` snapshots. The current system is the target tier — see [`AGENTS.md`](../AGENTS.md).
 
 ---
 

@@ -1,3 +1,5 @@
+> **Archived 2026-09-18 — HISTORY of the legacy tier.** Category scheduling as the legacy tier shipped it (v1.4.0). The target tier's posting mix is keyed on the connected folder (#1262, migration 071) and lives in `category_post_case_mix`; the legacy implementation went with the legacy tear-out (#1216). See [`documentation/archive/README.md`](../README.md) for the index.
+
 # Category-Based Scheduling Feature
 
 **Date**: 2026-01-10
@@ -272,4 +274,4 @@ Type 2 SCD design enables:
 
 ---
 
-*For the complete CHANGELOG entry, see [CHANGELOG.md](../../CHANGELOG.md)*
+*For the complete CHANGELOG entry, see [CHANGELOG.md](../../../CHANGELOG.md)*

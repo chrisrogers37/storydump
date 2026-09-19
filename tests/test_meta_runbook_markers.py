@@ -60,7 +60,7 @@ _SECTION = re.compile(r"^## (.+)$", re.M)
 #: leave a stale exemption behind quietly.
 EXEMPT = {
     "How to read the status markers": "defines the markers; labelling it would be circular",
-    "⚠ STANDING CONSTRAINT — do not drop the `legacy` schema before the demo videos are recorded": "a constraint this team imposes, not a claim about Meta",
+    "The `legacy` drop and the demo videos — constraint discharged": "a constraint this team imposed and discharged (#1202), not a claim about Meta",
     "See also": "pointers only",
     "Related issues": "pointers only",
 }

@@ -33,5 +33,10 @@ activity; revive by filing an issue).
 | `phases/07_dashboard_ui.md` | SUPERSEDED | Delivered via `web-app-migration-plan.md`, then rebuilt on the target schema (#1032) |
 | `feed-queue-features/01_live_story_visibility.md` | STALE | "Ready" since 2026-03, no code or issue since; targets the legacy Telegram `/status` |
 | `feed-queue-features/02_feed_reset.md` | PARKED | Instagram has no story-delete API (the document says so) |
+| `updates/` (3 files: `2026-01-04-bugfixes.md`, `2026-01-10-category-scheduling.md`, `2026-01-11-force-posting-queue-shift.md`) | HISTORY of the legacy tier | Dated update notes of January 2026 over the legacy scheduler, queue and bot, deleted in the legacy tear-out (#1216). Moved from `documentation/updates/` on 2026-09-18 (the tear-out's phase 05) |
+| `2026-05-telegram-delivery-burst-postmortem.md` | HISTORY of the legacy tier | The May 2026 postmortem of the legacy Telegram delivery path; the target delivers through `channel_outbox`. Moved from `documentation/operations/` on 2026-09-18 |
+| `2026-07-14-cloudinary-feature-gap-analysis.md` | STALE / PARKED | Proposals measured against the legacy tier's Cloudinary use; the target's path is `src/services/target/transit.py`. Moved from `documentation/cloudinary/` on 2026-09-18 |
+| `2026-01-11-security-review.md` | HISTORY of the legacy tier | The January–February 2026 security review; every finding names legacy code deleted in the tear-out (#1216). The target's model is the plan's `07-security-model.md`. Moved from `documentation/SECURITY_REVIEW.md` on 2026-09-18 |
+| `multi-account-dashboard.md` | SUPERSEDED | The legacy dashboard's instance picker; replaced by the target's `workspaces` / `workspace_members` and the dashboard rebuilt on the target schema (#1032). Moved from the top-level `planning/` on 2026-09-18 |
 
 Earlier archives (Jan–Mar 2026 plans) were deleted in #311 (2026-04-28) and exist only in git history.
