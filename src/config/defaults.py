@@ -1,41 +1,22 @@
-"""The starting values of a workspace's product settings.
+"""The fallbacks the target tier reads for the two TTL columns that may be NULL.
 
-The database is the source of truth at runtime: a workspace's settings are
-columns on `workspaces` (`workspaces.SETTINGS_COLUMNS`), an account's
-overrides columns on `ig_accounts`, and both move only through the command
-port. These constants are read in two places of the target tier
-(`command_executors.py`, `intent_ledger.py`): the values a workspace starts
-with, and the fallback for a column that is NULL. Once a person changes a
-setting on the web the column holds an explicit value and the constant is
-not consulted again. There is no environment-variable override for a
-product setting (`02` §4).
+A workspace's product settings are columns on `workspaces`
+(`workspaces.SETTINGS_COLUMNS`), an account's overrides columns on
+`ig_accounts`, and both move only through the command port. The values a
+workspace STARTS with are the DDL's defaults (053: `posts_per_day` 3,
+`posting_hours_start` 14, `tz` 'UTC' ...), never a Python constant. What
+this module holds is the fallback for the two columns 053 declares NULL:
+`command_executors.py` reads `DEFAULT_SKIP_TTL_DAYS` for a skip on a
+workspace with no `skip_ttl_days`, `intent_ledger.py` reads
+`DEFAULT_REPOST_TTL_DAYS` for a repost lock with no `repost_ttl_days`. Once
+a person sets either on the web the column holds a value and the constant is
+not consulted. There is no environment-variable override for a product
+setting (`02` §4). `tests/src/config/test_defaults.py` keeps this file at
+what is read: twelve constants nothing consulted (a posting cadence that
+disagreed with the DDL, the toggles, a caption style, a deep link) were
+deleted with the legacy tier that read them.
 """
 
-# Posting cadence
-DEFAULT_POSTS_PER_DAY = 3
-DEFAULT_POSTING_HOURS_START = 9  # User-local time (interpreted via posting_timezone)
-DEFAULT_POSTING_HOURS_END = 22  # User-local time (interpreted via posting_timezone)
-DEFAULT_POSTING_TIMEZONE = "America/New_York"
-
-# Lock TTLs (days)
+# Lock TTLs (days): the fallback for a NULL column
 DEFAULT_REPOST_TTL_DAYS = 30
 DEFAULT_SKIP_TTL_DAYS = 45
-
-# Toggles
-DEFAULT_DRY_RUN_MODE = False
-DEFAULT_ENABLE_INSTAGRAM_API = False
-DEFAULT_SHOW_VERBOSE_NOTIFICATIONS = True
-DEFAULT_MEDIA_SYNC_ENABLED = False
-DEFAULT_SEND_LIFECYCLE_NOTIFICATIONS = True
-
-# Caption rendering
-DEFAULT_CAPTION_STYLE = "enhanced"  # or "simple"
-
-# Media source (NULL/None forces the user through the setup wizard)
-DEFAULT_MEDIA_SOURCE_TYPE = "local"
-
-# Instagram deep-link fallback used by the bot keyboard's "Open Instagram"
-# button when an active account has no `instagram_username` set. The
-# plain instagram.com URL works on every device; a per-username deep
-# link (instagram://user?username=...) is preferred when available.
-DEFAULT_INSTAGRAM_DEEPLINK_URL = "https://www.instagram.com/"

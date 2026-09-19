@@ -218,7 +218,7 @@ export function refusalCopy(reason: unknown): string {
     case "manual_mode":
       return "This workspace posts by hand. Post the story on Instagram, then tap Posted myself.";
     case "not_connected":
-      return "Instagram is not connected for this account. Connect it in Settings › Integrations, or post by hand.";
+      return "Instagram is not connected for this account. Connect it in Settings › Accounts, or post by hand.";
     case "nothing_to_confirm":
       return "Instagram did not post this one — it was never asked, or it answered no — so there is nothing to confirm. Post again, or give up.";
     case "may_have_posted":
