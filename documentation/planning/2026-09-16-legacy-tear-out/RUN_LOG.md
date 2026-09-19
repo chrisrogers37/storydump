@@ -61,7 +61,7 @@ API service skipped the two kickoff commits — see the gate above).
 | 02 retire the settings, the entry point and the config | `02_settings-and-entry-points.md` | **DONE** — merged `f59fe43` (2026-09-18 15:44 UTC); round 1 and a fresh re-verify folded; the deploys under the phase's entry | #1319 | green at `9d14304` (3680 passed, 1 skipped) |
 | 03 the 3f snapshot migration and the ratchet's file rule | `03_snapshot-migrations.md` | **DONE** — rehearsed on a Neon PITR branch, merged `3ffa750` (2026-09-18 17:23 UTC), 078 applied in production by the deploy at 17:24 UTC; the probe under the phase's entry | #1318 | green at `6da8d00` (3700 passed, 1 skipped) |
 | 04 the gated drop and stand-down | `04_drop-and-stand-down.md` | **DONE — merged `c8482b3` (2026-09-19 19:44 UTC, by the owner); the worker deployed it (SUCCESS) and its predeploy owed 079/080 and applied nothing, measured; the API's deploy under the phase's merged entry; the window itself is the owner's (F7)** | #1321 | green at `29537a8` (3753 passed, 1 skipped) |
-| 05 the documentation's end state | `05_docs-end-state.md` | **READY** — built, two review rounds folded, rebased onto `main` after #1321's merge (51 files, phase 05's scope alone); the merge is the owner's (the session's admin merge is refused); its window-dependent sentences wait for the owner's window | #1322 | green at `4d465af` before the rebase; the rebased head's run under the phase's entry |
+| 05 the documentation's end state | `05_docs-end-state.md` | **READY** — built, two review rounds folded, rebased onto `main` after #1321's merge (51 files, phase 05's scope alone); the merge is the owner's (the session's admin merge is refused); its window-dependent sentences wait for the owner's window | #1322 | green at `165d588` on `main` (3760 passed, 1 skipped) — READY |
 
 ## Phase 01 — delete the legacy code and its tests
 
@@ -1216,6 +1216,10 @@ the unknown name once, and the zero-count case uses a legacy name the page does 
 guard is the only thing between its case and a pass. On `82c55b3`: **`ran 28 of 28`, 28 killed**; the
 pin and the pins beside it green (18 in `tests/test_agent_docs.py`); CI green — run 35404263398,
 `3760 passed, 1 skipped`.
+
+**After the rebase onto `main`** (#1321 merged): CI green on the rebased head `00f10f6` (run 35465461764) and on
+the current head `165d588` (run 35465736580) — `3760 passed, 1 skipped` each; #1322 marked READY on
+2026-09-19; its merge is the owner's.
 
 **Convergence:** round 1 — two risks, four gaps, a simplify list, observations; the re-verify — three
 gaps, five observations, "ready to merge"; each round closed everything the one before it found, none
