@@ -963,13 +963,14 @@ owed (manual) 080 (080_window_stand_down.sql)
 
 The read-only production probe after it: the ledger's head is 78 with 78 rows and no row for 79 or
 80; `legacy` still holds its 16 tables; `archive` its 16 snapshots. The API service's deployment of
-`c8482b3` is `WAITING` on `main`'s CI, as every API deploy is (phase 02's finding); its result is
-recorded below when it lands. That is the epic's checklist clause 5, agent-run half: DONE.
+`c8482b3` waited on `main`'s CI, as every API deploy does (phase 02's finding), and landed `SUCCESS`
+at 19:53 UTC once that run went green — **both services run the merge**. That is the epic's checklist
+clause 5, agent-run half: DONE.
 
 **The invariant registry on `main` at `c8482b3`:** I2 — 40 passed, the normative pin 35; I3 — 49
 passed; I4 — 4 / 0 / 0 / 0; I5 and I8 — the runner's suites, the window gate and the deploy
 guardrails 80 passed, doctor's 21; I6 — 11 passed (phase 05's wider pin arrives with #1322); I7 — 3
-passed. I1 is `main`'s CI run on the merge, in progress at the time of writing.
+passed. I1 — `main`'s CI run on the merge: green. **All eight hold on `main` at `c8482b3`.**
 
 **Phase 05 rebased** the same hour: `git rebase --onto origin/main 29537a8` — seven commits moved
 clean; `git diff origin/main..HEAD --stat` shows 51 files, every one a document, a rule, the ledger, the
