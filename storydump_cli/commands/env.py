@@ -465,6 +465,37 @@ def _versions_in(directory: Path) -> Optional[set[int]]:
     return versions
 
 
+#: The runner's frame for a marker: `-- runner:<word>` alone on its line
+#: (`scripts/migration_runner.py`, `_MARKER_RE`).
+_RUNNER_MARKER = re.compile(r"^--\s*runner\s*:\s*(\S+)(.*)$", re.IGNORECASE)
+
+
+def _gated_in(directory: Path) -> set[int]:
+    """The versions whose file carries the runner's ``manual`` directive.
+
+    A gated file is OWED by every deploy and applied only by the owner
+    (``apply --manual``), so its absence from the ledger is not a deployment
+    behind the repository. Read here rather than imported: the runner depends
+    on psycopg2 and this package does not. ``test_env.py`` pins the two
+    readings equal over the real corpus. A file that cannot be read is not
+    gated — the runner's own discovery is what refuses it."""
+    gated = set()
+    for path in directory.iterdir():
+        name = _MIGRATION_FILE.match(path.name)
+        if not name:
+            continue
+        try:
+            text = path.read_bytes().decode("utf-8-sig")
+        except (OSError, UnicodeDecodeError):
+            continue
+        for line in text.splitlines():
+            marker = _RUNNER_MARKER.match(line.strip())
+            if marker and marker.group(1) == "manual" and not marker.group(2).strip():
+                gated.add(int(name.group(1)))
+                break
+    return gated
+
+
 def _storage_name(runtime: Any) -> str:
     if (runtime.env.get(TOKEN_ENV) or "").strip():
         return f"env ({TOKEN_ENV})"
@@ -659,7 +690,10 @@ def doctor(ctx: click.Context) -> int:
                     "",
                 )
             else:
-                missing = sorted(repo - applied)
+                # a gated file (`-- runner:manual`) is owed by design, never missing
+                gated = _gated_in(runtime.migrations_dir)
+                missing = sorted(repo - applied - gated)
+                owed = sorted((repo & gated) - applied)
                 extra = sorted(applied - repo)
                 if missing:
                     checks["ledger"] = (
@@ -676,9 +710,16 @@ def doctor(ctx: click.Context) -> int:
                         "git pull — the checkout is behind the deployment",
                     )
                 else:
+                    note = (
+                        f"; {len(owed)} gated file(s) owed to the owner's window,"
+                        f" never to a deploy: {', '.join(f'{v:03d}' for v in owed)}"
+                        if owed
+                        else ""
+                    )
                     checks["ledger"] = (
                         "ok",
-                        f"{len(applied)} migrations applied, latest {latest}, matching the checkout",
+                        f"{len(applied)} migrations applied, latest {latest},"
+                        f" matching the checkout{note}",
                         "",
                     )
 

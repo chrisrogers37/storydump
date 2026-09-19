@@ -164,6 +164,10 @@ def test_the_never_run_list_is_not_empty_and_covers_the_worker_and_the_cli():
     assert not any("storydump-cli" in line for line in block), (
         "the legacy CLI is gone; a guard pointing at it protects nothing"
     )
+    assert any("scripts.migration_runner apply --manual" in line for line in block), (
+        "the gated door — the one command that drops the legacy schema — is"
+        " not in the NEVER-run list (the tear-out, phase 04; fork F7)"
+    )
 
 
 def test_a_never_run_entry_under_a_group_names_the_subcommand():

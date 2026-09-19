@@ -334,11 +334,19 @@ class TestTheLineageFileRule:
             "-- runner:unadvertised\nCREATE TABLE archive_a AS TABLE legacy_a;",
         )
         write_migration(tmp_path, 5, "CREATE TABLE target_b (id INT);")
+        # a gated file (the tear-out, phase 04): manual, and outside the prefix
+        # by that fact alone — a drop cannot be a prefix of a stream that
+        # replays from an empty database
+        write_migration(tmp_path, 6, "-- runner:manual\nDROP TABLE legacy_a;")
 
     def test_an_unadvertised_file_above_the_move_is_not_in_the_lineage(self, tmp_path):
         self._corpus(tmp_path)
         names = [p.name for p in target_lineage_files(tmp_path)]
         assert names == ["003_m.sql", "005_m.sql"]
+
+    def test_a_manual_file_above_the_move_is_not_in_the_lineage_either(self, tmp_path):
+        self._corpus(tmp_path)
+        assert "006_m.sql" not in [p.name for p in target_lineage_files(tmp_path)]
 
     def test_the_lineage_statements_skip_it_too(self, tmp_path):
         from scripts.advertised_ddl import target_lineage_statements

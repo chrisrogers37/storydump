@@ -1132,6 +1132,65 @@ def test_doctor_names_the_migrations_the_ledger_lacks(tmp_path):
     assert "078" in checks["ledger"]["value"]
 
 
+def gate(directory: Path, *versions: int) -> None:
+    """Rewrite these files as GATED ones: the runner's `manual` directive."""
+    for version in versions:
+        (directory / f"{version:03d}_something.sql").write_text(
+            "-- the deploy owes this file and never runs it\n-- runner:manual\nSELECT 1;\n"
+        )
+
+
+def test_doctor_reports_a_gated_migration_as_owed_not_as_a_deployment_behind(
+    tmp_path,
+):
+    """079 and 080 carry the runner's `manual` directive: every deploy owes
+    them and only the owner applies them (`apply --manual`), so until that
+    window runs they are in the checkout and not in the ledger BY DESIGN.
+    "Deploy main" would be the wrong fix, and exit 4 a standing false alarm."""
+    rt = env_runtime(tmp_path, health_api())
+    rt.migrations_dir = repo_migrations(tmp_path, *range(1, 80))
+    gate(rt.migrations_dir, 78, 79)
+    result = run(rt, "--json", "doctor")
+    assert result.exit_code == EXIT_OK, result.output
+    ledger = checks_of(one_envelope(result))["ledger"]
+    assert ledger["state"] == "ok"
+    assert "owed" in ledger["value"] and "078, 079" in ledger["value"]
+    assert ledger["fix"] == ""
+
+
+def test_doctor_still_names_an_ordinary_migration_beside_a_gated_one(tmp_path):
+    rt = env_runtime(tmp_path, health_api())
+    rt.migrations_dir = repo_migrations(tmp_path, *range(1, 80))
+    gate(rt.migrations_dir, 79)
+    result = run(rt, "--json", "doctor")
+    assert result.exit_code == EXIT_API_UNREACHABLE
+    ledger = checks_of(one_envelope(result))["ledger"]
+    assert ledger["state"] == "wrong"
+    assert "1 migration(s)" in ledger["value"] and "078" in ledger["value"]
+    assert "deploy main" in ledger["fix"]
+
+
+def test_a_mention_of_the_directive_in_prose_does_not_gate_a_file(tmp_path):
+    rt = env_runtime(tmp_path, health_api())
+    rt.migrations_dir = repo_migrations(tmp_path, *range(1, 79))
+    (rt.migrations_dir / "078_something.sql").write_text(
+        "-- the runner:manual directive is what gates the NEXT file\nSELECT 1;\n"
+    )
+    ledger = checks_of(one_envelope(run(rt, "--json", "doctor")))["ledger"]
+    assert ledger["state"] == "wrong" and "078" in ledger["value"]
+
+
+def test_doctor_reads_the_directive_as_the_runner_does():
+    """The CLI does not import the runner (it depends on psycopg2; this
+    package does not), so it reads the directive itself — and this pins the
+    two readings equal over the real corpus."""
+    from scripts.migration_runner import MIGRATIONS_DIR, discover_migrations
+    from storydump_cli.commands.env import _gated_in
+
+    by_the_runner = {m.version for m in discover_migrations(MIGRATIONS_DIR) if m.manual}
+    assert _gated_in(MIGRATIONS_DIR) == by_the_runner == {79, 80}
+
+
 def test_doctor_outside_a_checkout_skips_the_ledger_comparison(tmp_path):
     rt = env_runtime(tmp_path, health_api())
     rt.migrations_dir = tmp_path / "nowhere"
