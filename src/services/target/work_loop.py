@@ -681,11 +681,12 @@ FAILURE_NOTICES: dict[str, str] = {
     ),
     "refresh_credential": (
         "Renewing a connection to Instagram or Google Drive failed and won't"
-        " retry on its own; open Settings › Integrations on the web to reconnect."
+        " retry on its own; reconnect on the web — Instagram under Settings ›"
+        " Accounts, Google Drive under Settings › Integrations."
     ),
     "reauth_prompt": (
         "We could not tell you about a connection that needs attention; open"
-        " Settings › Integrations on the web."
+        " Settings on the web — Accounts for Instagram, Integrations for Drive."
     ),
     "publish_pipeline": (
         "Posting a story to Instagram hit an unexpected error and stopped;"

@@ -256,9 +256,7 @@ def test_sync_of_an_unknown_source_says_source_not_story(tmp_path):
     assert result.exit_code == EXIT_NOT_FOUND, result.output
     assert "media source" in result.stderr
     assert "story" not in result.stderr.split("fix:")[0]
-    # the connect control lives under Accounts (landing/src/components/dashboard/settings/accounts-tab.tsx);
-    # Integrations is read-only (#1063)
-    assert "Settings › Accounts" in result.stderr
+    assert "Settings › Integrations" in result.stderr
 
 
 def test_a_settled_story_answers_with_its_state(tmp_path):
@@ -460,6 +458,25 @@ def test_a_refusal_prints_the_reason_sentence_and_the_fixing_verb_exit_2(tmp_pat
     assert REASON_SENTENCES["manual_mode"] in result.stderr
     assert "the adapter's own words" not in result.stderr
     assert "fix:" in result.stderr
+
+
+def test_a_not_connected_refusal_points_at_the_accounts_tab(tmp_path):
+    """The Instagram connect control lives under Settings › Accounts
+    (`landing/src/components/dashboard/settings/accounts-tab.tsx`, "Connect
+    Instagram"); the Integrations tab holds the Drive folders and the Telegram
+    link. The hint once sent people to Integrations."""
+    api = write_api(
+        {
+            route(WS, "approve"): (
+                409,
+                {"reason": "not_connected", "detail": "the adapter's own words"},
+            )
+        }
+    )
+    result = run(write_runtime(tmp_path, api), "approve", INTENT, "--workspace", WS)
+    assert result.exit_code == EXIT_REFUSED, result.output
+    fix = result.stderr.split("fix:", 1)[1]
+    assert "Settings › Accounts" in fix and "Integrations" not in fix
 
 
 def test_a_lost_publish_answer_names_the_resolve_verb(tmp_path):

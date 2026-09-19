@@ -36,7 +36,8 @@ are diagnostic here, not a gate.
 
 **No startup grace constant, and that is derived rather than copied.** The
 legacy root needed one because it reported tick-based staleness that read
-stale before the first tick. This endpoint's staleness clock starts at the first observation of a
+stale before the first tick. This endpoint's staleness clock starts at the first
+observation of a
 STARTED clock, so a booting worker is healthy by construction — there is no
 window to paper over. The listener also binds before the first database
 connection, so it answers during startup regardless of how slow that is.

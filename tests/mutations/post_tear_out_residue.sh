@@ -1,7 +1,8 @@
 #!/bin/zsh
 # Mutation battery for the post-tear-out residue PR: each behaviour it changes has one named mutation
-# that must make its test FAIL ("killed"); files are restored from the COMMITTED tree after each, so
-# commit first. Needs no database. `STORYDUMP_ROOT` points the battery at a worktree.
+# that must make its test FAIL ("killed") — and must PASS on the clean tree first, or the verdict is
+# BASELINE RED, not a kill; files are restored from the COMMITTED tree after each, so commit first.
+# Needs no database. `STORYDUMP_ROOT` points the battery at a worktree.
 set -u
 ROOT=${STORYDUMP_ROOT:-/Users/chris/Projects/storydump}
 PY=/Users/chris/Projects/storydump/.venv/bin/python
@@ -32,6 +33,10 @@ check() {  # name file old new test-selector
   local name=$1 file=$2 old=$3 new=$4 sel=$5
   if [ -n "${ONLY:-}" ] && ! [[ "$name" =~ $ONLY ]]; then return; fi
   RAN=$((RAN + 1))
+  # BASELINE first: a test that is red on the clean tree cannot kill anything, and a battery that
+  # counted it as a kill once (the residue's own hint test, structural lens finding 2) is why.
+  eval "$UNIT $sel" > /tmp/claude/mut.log 2>&1; local base=$?
+  if [ $base -ne 0 ]; then echo "BASELINE RED (bad): $name  [$(grep -E '^=+ .*(passed|failed|error)' /tmp/claude/mut.log | tail -1)]"; return; fi
   if ! mutate "$file" "$old" "$new"; then echo "MUTATION NOT APPLIED: $name"; git checkout -- "$file"; return; fi
   rm -rf "$(dirname "$file")/__pycache__"
   eval "$UNIT $sel" > /tmp/claude/mut.log 2>&1; local rc=$?
@@ -41,7 +46,7 @@ check() {  # name file old new test-selector
 
 check "the health renderer reads pool keys the API never emits again" storydump_cli/output.py 'POOL_FACTS = ("size", "checked_out", "checked_out_peak")' 'POOL_FACTS = ("size", "in_use", "peak")' "tests/storydump_cli/test_env.py -k pools_real_keys"
 check "the renderer stops reading the named tuple (a second spelling of the keys)" storydump_cli/output.py '                _facts(pool, *POOL_FACTS),' '                _facts(pool, "size", "in_use", "peak"),' "tests/storydump_cli/test_env.py -k pools_real_keys"
-check "the not_connected hint sends the user to the read-only tab again" storydump_cli/main.py '"connect the Instagram account under Settings › Accounts"' '"connect the Instagram account under Settings › Integrations"' "tests/storydump_cli/test_writes.py -k unknown_source_says_source_not_story"
+check "the not_connected hint sends the user to the read-only tab again" storydump_cli/main.py '"connect the Instagram account under Settings › Accounts"' '"connect the Instagram account under Settings › Integrations"' "tests/storydump_cli/test_writes.py -k not_connected_refusal_points_at_the_accounts_tab"
 check "the Facebook Graph host returns to the egress allow-list (FC-4)" src/services/target/egress.py '        "graph.instagram.com",
         "api.instagram.com",' '        "graph.instagram.com",
         "graph.facebook.com",
