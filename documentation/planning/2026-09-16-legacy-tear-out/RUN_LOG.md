@@ -1243,10 +1243,51 @@ worker's predeploy owed 079 and 080 and applied nothing, as with phase 04.
 the merge green; I2 — 40 passed, the normative pin 35; I3 — 49 passed; I4 — 4 / 0 / 0 / 0; I5 and I8 — 80
 passed; I6 — 27 passed (the wider pin, the legacy-CLI pin and the App Review markers); I7 — 3 passed.
 
-The five phases are on `main`; the worktrees and branches of 04 and 05 are removed. What the epic still
-owes is the owner's window (079 and 080 in production) and, after it, this document's closeout: the
-dated sentences phase 05 left true-for-now, the epic's `status:` and its goal condition with the owner's
-pasted gate output.
+The five phases are on `main`; the worktrees and branches of 04 and 05 are removed. The window ran the
+same evening (the entry below).
+
+## The window — run by the owner on 2026-09-19
+
+**Two attempts, one script.** The runbook's steps 0–8 as one script (`scratchpad/window04.sh`: the rehearsal
+harness's discipline — every check before any change, every output redacted, the applies timed, the
+gate compared to what 080 prints), typed by the owner at 21:2x UTC from the checkout at `3c8efd4`,
+clean, both services `SUCCESS` there (079 `a9e3cff0…`, 080 `bf9a15d6…`). The first attempt stopped at
+step 1: `railway down` timed out against Railway's API — and had taken effect: the worker read
+`REMOVING`, then `REMOVED`, with nothing yet changed in the database. The script was adapted to accept
+an already-stopped worker and typed again at 21:34 UTC.
+
+**What ran** (the log at `scratchpad/window04.log`; every line below is from it or from the read-only
+probe after it):
+
+- The marker: `pre-3g-20260919-2134` (`br-round-mud-aikp3w1c`, endpoint `ep-twilight-boat-ais65dz9`),
+  created at 21:34:04 UTC, its connection string redacted. **It stays until the worker has run a day.**
+- Before: the ledger 78 / 78, 079 and 080 owed; `legacy` 16 tables; 16 snapshots; no `window_ddl`;
+  `svc_migration` holding `CREATE ON DATABASE`; the database 82,788,352 bytes.
+- **079 applied in 1.341 s wall-clock; 080 in 1.019 s** (21:34:07 UTC by the ledger's own clock).
+- The gate, as the runner's login: `0, 0, t, t, {svc_claim,svc_clock,svc_maintenance,svc_membership},
+  16, t, neondb_owner, 80|80` — **GREEN, every line as 080 prints it.**
+- After: the ledger's tail 78, 79, 80 `applied` by `neondb_owner`; uuid-ossp gone; `gen_random_uuid()`
+  answering; `public.jobs` present; the database 38,961,152 bytes — **43.8 MB smaller**; the schemas
+  left: `archive`, `public`, `runner`; the sixteen snapshots 9,064 kB.
+
+**The restart went wrong, and was put right in four minutes.** Step 8's `railway redeploy --service
+worker --yes` neither refused nor re-ran the removed deployment: it re-ran an OLD one — `3d94cd2`, a
+commit of 2026-09-03 — and the worker came back `SUCCESS` on stale code. The script's last check saw
+the wrong commit and stopped with a "worker still down" message that was itself wrong: the worker was
+up. Its log showed why nothing worse happened: `WORKER_IMPL=target` is still set on the service (an
+owner-queue item never done), so the old entrypoint dispatched to the target root, elected the clock
+and served; had the variable been removed, that commit's default was the legacy scheduler. The way
+back was the runbook's own fallback, an empty commit to `main` (`3d54b72`, pushed 21:37 UTC under the
+owner's bypass): the worker deployed it at 21:39 UTC — its predeploy `0 applied`, nothing owed, the
+current worker up with its five lanes — and the API's deployment waited on `main`'s CI as every API
+deploy does. The runbook's step 8 now says never `railway redeploy` after a `down`, and its backout
+uses the same push; step 1 records the timeout.
+
+**The goal condition — #1216's acceptance list through the epic's checklist — is MET**, every clause
+ticked in `00_EPIC.md` with its evidence: A1 by the AST guard and the reachability probe; A2 by the
+window above and the read-only probe after it (`legacy` gone, the sixteen snapshots present, 079/080
+`applied`); A3 moot since the legacy CLI's deletion; A4 by every phase's suite, green with the legacy
+tests deleted, not skipped. The epic's `status:` is `completed`.
 
 ## The sprint's state at the end of 2026-09-18
 
@@ -1369,6 +1410,13 @@ to this session, the owner's to run; production — the owner's window.
   (the callback signature accepts either app secret, the Facebook one annotated legacy) — a ruling on
   those, not a close. #1216 itself closes with phase 05. Phase 04's PR body is worded so that no issue
   closes by keyword at the merge (its first draft would have auto-closed #1202).
+- **After the window (2026-09-19):** the marker branch `pre-3g-20260919-2134` is retired a day after
+  the worker has run clean (`neonctl branches delete pre-3g-20260919-2134 --project-id … --org-id …`);
+  `WORKER_IMPL` on the worker service is what made a stale redeploy harmless — remove it only once
+  every deployment Railway can re-run is a post-tear-out commit, or accept that a stale redeploy
+  would then fail to boot rather than run the legacy scheduler (that commit's default); the issues:
+  #1216 (the epic) and #941 close on this ledger; #739 stays open (five target-tier references
+  measured); #1046 / #1113 to be read against a database with no `legacy` schema.
 - **Phase 04, in this order (the owner's):** (1) close #1202 on GitHub with the ruling of 2026-09-16
   (its "or" leg: the target tier is armed and serving, with a connected destination) — the plan's
   precondition for the merge, and the only thing between #1321 and `main`. (2) The merge (admin squash,
