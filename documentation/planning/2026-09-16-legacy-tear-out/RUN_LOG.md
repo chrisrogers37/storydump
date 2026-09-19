@@ -976,6 +976,28 @@ clean; `git diff origin/main..HEAD --stat` shows 51 files, every one a document,
 CHANGELOG, the two pin tests or the battery. The declared deviation is discharged; #1322 is a pull
 request against `main` with phase 05's scope alone.
 
+**The rehearsal — GREEN, run by the owner on 2026-09-19 at 19:48 UTC** (`bash -eu rehearse04.sh` from the
+checkout at `29537a8`, clean; 079 `a9e3cff0…`, 080 `bf9a15d6…`), on the branch
+`claude/window-rehearsal-20260919-1948` (`br-solitary-paper-aibcw8jf`, endpoint `ep-late-salad-ai7po457`),
+its timeline `41249fbafba987577c059d4cd003558c` measured not to be production's before anything ran:
+
+- Before: PostgreSQL 17.11 as `neondb_owner`; the ledger 78 / 78; `legacy` 16 tables + 77 indexes; 16
+  snapshots; no `window_ddl`; `svc_migration` holds `CREATE ON DATABASE`; uuid-ossp present; the
+  database 82,763,776 bytes. `status`: 077 and 078 applied, 079 and 080 owed.
+- **079 applied in 1.594 s wall-clock; 080 in 0.501 s.**
+- The gate: `0, 0, t, t, 16, t, neondb_owner` — every line as 080 prints it.
+- F8's positive control: 076's bracketed hand-off landed for `svc_clock` and for `svc_maintenance`;
+  the function's owner after it `svc_maintenance`.
+- A plain `apply` afterwards: `0 applied`.
+- After: the ledger's tail 78, 79, 80 `applied` by `neondb_owner`; the sixteen snapshots hold 30,132
+  rows in all; uuid-ossp gone and `gen_random_uuid()` answering; `public.jobs` present; the database
+  38,936,576 bytes — **43.8 MB smaller**.
+
+**One finding, fixed in the runbook before the production window:** `neonctl branches create` PRINTS the
+new branch's connection string in its default output — the same role password as production's. The
+harness redacted it; the runbook's step 1 and production's step 3 (the marker branch) as printed would
+have echoed it. Both lines now pass through the redaction.
+
 ## Phase 04 — #1202 closed; the merge and the rehearsal refused by the session's permissions
 
 **2026-09-18, on the owner's instructions in chat** ("you can close it"; "yes sure please do this" for

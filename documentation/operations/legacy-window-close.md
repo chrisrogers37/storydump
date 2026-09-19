@@ -28,7 +28,9 @@ transaction).
   child branch pins its parent's branch-point and is a durable copy (documented, not measured
   here — measure it once by restoring from a rehearsal branch older than a day); the retention
   matters only for a restore to an arbitrary timestamp.
-- The rehearsal below has run green on a fresh PITR branch, end to end, with wall-clock recorded.
+- The rehearsal below has run green on a fresh PITR branch, end to end, with wall-clock recorded —
+  it did, on 2026-09-19 (the tear-out's ledger, phase 04): 079 in 1.6 s, 080 in 0.5 s, every gate
+  line as printed, the positive control landed, the database 82.8 MB → 38.9 MB.
 
 ## The rehearsal on a Neon PITR branch
 
@@ -48,8 +50,10 @@ enters an interactive shell.
 P=ancient-grass-50759240; O=org-ancient-bush-46337162; PROD=br-square-frog-ai37r0qg
 NAME=claude/window-rehearsal-$(date -u +%Y%m%d-%H%M)
 
-# 1. the branch, at production's head
-npx --yes neonctl@latest branches create --project-id $P --org-id $O --parent $PROD --name "${NAME:?}"
+# 1. the branch, at production's head. neonctl PRINTS the new branch's connection string on create —
+#    the same role password as production's — so the output goes through the redaction, always
+npx --yes neonctl@latest branches create --project-id $P --org-id $O --parent $PROD --name "${NAME:?}" \
+  2>&1 | sed -E 's#postgres(ql)?://[^ ]+#postgres://<redacted>#g'
 
 # 2. the branch's OWNER connection string, into a variable — never echoed, never pasted.
 #    an unset name fails the substitution (`${NAME:?}`) — under `bash -eu` that ends the script;
@@ -126,7 +130,8 @@ forward in the tree, rehearse again on a fresh branch. Never re-run in place.
    ```bash
    P=ancient-grass-50759240; O=org-ancient-bush-46337162; PROD=br-square-frog-ai37r0qg
    MARKER=pre-3g-$(date -u +%Y%m%d-%H%M)
-   npx --yes neonctl@latest branches create --project-id $P --org-id $O --parent $PROD --name $MARKER
+   npx --yes neonctl@latest branches create --project-id $P --org-id $O --parent $PROD --name $MARKER \
+     2>&1 | sed -E 's#postgres(ql)?://[^ ]+#postgres://<redacted>#g'   # create prints a connection string
    ```
 4. **Before:** head 078, the pair owed — and the two facts 080 changes, recorded so the window
    shows before → after (phase 03's probes never read the database privilege).
