@@ -256,7 +256,9 @@ def test_sync_of_an_unknown_source_says_source_not_story(tmp_path):
     assert result.exit_code == EXIT_NOT_FOUND, result.output
     assert "media source" in result.stderr
     assert "story" not in result.stderr.split("fix:")[0]
-    assert "Settings › Integrations" in result.stderr
+    # the connect control lives under Accounts (landing/src/components/dashboard/settings/accounts-tab.tsx);
+    # Integrations is read-only (#1063)
+    assert "Settings › Accounts" in result.stderr
 
 
 def test_a_settled_story_answers_with_its_state(tmp_path):

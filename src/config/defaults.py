@@ -1,21 +1,14 @@
-"""Hardcoded defaults for per-chat settings.
+"""The starting values of a workspace's product settings.
 
-The DB is the single source of truth at runtime — every per-chat setting
-lives on `chat_settings`. These constants are used in two places:
-
-1. **Bootstrap** — when a brand new chat first interacts with the bot we
-   need *some* starting values; these are them (the legacy
-   `ChatSettingsRepository.get_or_create` that read them went with the legacy
-   tier, #1216; the target's provisioning reads the same constants).
-
-2. **Runtime fallback** — when an older chat_settings row predates a
-   migration (column NULL), services read the per-chat value with these
-   constants as the fallback. Once the user touches the dashboard the
-   NULL becomes an explicit value and the constant stops being consulted.
-
-Operators wanting deployment-wide overrides should set the values once
-via the dashboard for the admin chat — there is no longer an env-var
-escape hatch for per-chat settings.
+The database is the source of truth at runtime: a workspace's settings are
+columns on `workspaces` (`workspaces.SETTINGS_COLUMNS`), an account's
+overrides columns on `ig_accounts`, and both move only through the command
+port. These constants are read in two places of the target tier
+(`command_executors.py`, `intent_ledger.py`): the values a workspace starts
+with, and the fallback for a column that is NULL. Once a person changes a
+setting on the web the column holds an explicit value and the constant is
+not consulted again. There is no environment-variable override for a
+product setting (`02` §4).
 """
 
 # Posting cadence

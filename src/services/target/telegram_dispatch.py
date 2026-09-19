@@ -2,9 +2,11 @@
 
 Two things are served, and the bound is still worth stating:
 
-- **`/start <payload>`** — `link-` (identity), `bind-` (a group joins a
-  workspace) and `inv-` (an invitation). The payload carries its own
-  resolution, so these never needed a resolver.
+- **`/start <payload>`** — `link-` (identity) and `bind-` (a group joins a
+  workspace); `build_router` registers those two lanes and no other. The
+  `inv-` lane (an invitation) is designed in `start_router.py` and not
+  registered — an invitation is accepted on the web (#1172 is unbuilt). The
+  payload carries its own resolution, so these never needed a resolver.
 - **A message in a group** — the `06` Telegram join path: the people the bot
   can see (the sender; the people a `new_chat_members` service message names)
   become members of the workspace the group is bound to, through the
@@ -274,8 +276,9 @@ MEMBERSHIP_SYNC_FAILED = "membership_sync_failed"
 def build_router() -> StartRouter:
     """The one `/start` door, with every lane registered into it.
 
-    Lane C registers `inv-` here too (#1172). Registration is how a lane joins
-    the door; a second door would break D33/D35's disjointness.
+    Registration is how a lane joins the door; a second door would break
+    D33/D35's disjointness. Lane C's `inv-` (#1172) is not registered: nothing
+    below serves it, and the docstring at the top says so.
     """
     router = StartRouter()
     identity_link.register(router)
