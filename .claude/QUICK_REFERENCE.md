@@ -14,9 +14,14 @@
 The canonical list, with what each command does, is the safety block in
 `CLAUDE.md`; this copy is pinned to it by `tests/test_agent_docs.py`.
 
+Not on that list does not mean safe: `storydump skip`, `reject`, `posted`,
+`pause`, `resume` and `sync` also write through the command port — a skip or a
+reject is final for that story. Ask first.
+
 **SAFE commands** (read-only):
-- `storydump floating` / `storydump story <id>` / `storydump cards <id>` / `storydump jobs`
-- `storydump health` / `storydump doctor` / `storydump deploys`
+- `storydump whoami` / `storydump story <id>` / `storydump cards <id>` / `storydump floating` / `storydump account <handle>`
+- `storydump jobs` / `storydump outbox` / `storydump burst` / `storydump posture`
+- `storydump health` / `storydump doctor` / `storydump deploys` / `storydump webhook status`
 - `pytest` (all tests)
 
 ---
@@ -33,6 +38,7 @@ worker (src/worker.py) ────────────┘
 - The CLI (`storydump_cli/`) is an HTTP client of the API; its one `src` import is the vocabulary
 - The API and the worker call the target services (`src/services/target/`)
 - The services own the SQL, under the unit of work; `src/models/target/` exists for schema parity
+- Writes go through the command port (`commands.py`); a transaction never spans a provider call
 
 ---
 
@@ -46,6 +52,7 @@ worker (src/worker.py) ────────────┘
 | `src/models/target/` | Declarative models (schema parity with the migrations) |
 | `scripts/migrations/` | The migration corpus; `scripts/migration_runner.py` applies it |
 | `storydump_cli/` | The `storydump` CLI (an HTTP client of the API) |
+| `landing/` | The web app (Next.js); its BFF proxies to the API |
 | `tests/` | Mirrors src/ structure; `tests/scripts/` holds the DB gates |
 
 ---
@@ -55,25 +62,44 @@ worker (src/worker.py) ────────────┘
 | Task | Command/Action |
 |------|----------------|
 | Run tests | `pytest tests/ -v` |
-| Check linting | `ruff check src/ tests/` |
-| Format code | `ruff format src/ tests/` |
-| Check bot status | `/telegram-status` skill |
-| Check DB status | `/db-status` skill |
-| Pre-commit check | `ruff check src/ tests/ && ruff format --check src/ tests/ && pytest` |
+| Check linting | `ruff check .` |
+| Format code | `ruff format .` |
+| Check the bot and its chats | `/telegram-status` skill |
+| Check the ledger and the deployment | `/db-status` skill |
+| Pre-commit check | `ruff check . && ruff format --check . && pytest` |
 
 ---
 
-## Database (Neon PostgreSQL)
+## Reading Production
+
+Read the ledger with `storydump` first — every verb is a bounded,
+tenant-scoped read through the API under your token, never a database
+connection (`documentation/operations/reading-the-ledger.md`):
 
 ```bash
-# Connect to production database
-psql "$DATABASE_URL"
-
-# Safe queries
-psql "$DATABASE_URL" -c "SELECT * FROM posting_queue WHERE status = 'pending';"
-psql "$DATABASE_URL" -c "SELECT * FROM posting_history ORDER BY posted_at DESC LIMIT 10;"
-psql "$DATABASE_URL" -c "SELECT * FROM instagram_accounts WHERE is_active = true;"
+storydump floating                 # approved stories waiting between attempts
+storydump jobs --since 3h          # the queue by kind, lane and state
+storydump account <handle>         # cap, zone, next slot, recent outcomes
+storydump posture                  # the migration ledger, the role, RLS, the doors
 ```
+
+`psql` through Railway is the escape hatch for a question no verb answers.
+Production is the user's to open: ask first, SELECT only, and the connection
+string is never printed.
+
+The command is in ONE place — `documentation/operations/reading-the-ledger.md` › *The escape
+hatch* — so it cannot drift between pages: `railway run` against the worker service in the
+production environment, a file of SELECTs on stdin, the output through a redaction.
+
+```sql
+-- probe.sql: target tables only
+SELECT state, count(*) FROM post_intents GROUP BY state ORDER BY state;
+SELECT kind, lane, state, count(*) FROM jobs GROUP BY kind, lane, state ORDER BY 1, 2, 3;
+SELECT handle, state, next_slot_at FROM ig_accounts ORDER BY created_at;
+```
+
+The legacy tier's data survives only as the `archive.*_pre_cutover_20260917`
+snapshots (078); no code reads them.
 
 ---
 
@@ -83,18 +109,25 @@ psql "$DATABASE_URL" -c "SELECT * FROM instagram_accounts WHERE is_active = true
 |------|----------|
 | `src/worker.py` | The worker's composition root |
 | `src/api/app.py` | The API |
+| `src/services/target/commands.py` | The command port and its role floors |
+| `src/services/target/unit_of_work.py` | The tenant-scoped transaction |
 | `src/services/target/work_loop.py` | Lanes and the job registry |
 | `src/services/target/publish_pipeline.py` | Publishing to Instagram |
-| `src/services/target/telegram_dispatch.py` | The Telegram channel |
+| `src/services/target/telegram_dispatch.py` | Inbound Telegram: taps, `/start`, group joins |
+| `src/services/target/outbox.py` | Outbound Telegram: the delivery record |
 
 ---
 
 ## Settings Flow
 
-**Database overrides .env for these:**
-- `dry_run_mode` → `chat_settings.dry_run_mode`
-- `enable_instagram_api` → `chat_settings.enable_instagram_api`
-- `active_instagram_account_id` → per-chat account selection
+**Per-workspace rows in the ledger — never environment variables:**
+- `workspaces.dry_run_mode` — rehearse the whole flow, post nowhere
+- `workspaces.api_publishing_enabled` — off means manual posting (`approve` is refused as `manual_mode`)
+- `workspaces.is_paused` — `storydump pause` / `storydump resume`
+- `ig_accounts` schedule overrides — NULL inherits the workspace
+
+Changed on the web (Settings) or through the command port (`settings_change`,
+`account_settings_change`).
 
 ---
 
