@@ -61,7 +61,7 @@ API service skipped the two kickoff commits — see the gate above).
 | 02 retire the settings, the entry point and the config | `02_settings-and-entry-points.md` | **DONE** — merged `f59fe43` (2026-09-18 15:44 UTC); round 1 and a fresh re-verify folded; the deploys under the phase's entry | #1319 | green at `9d14304` (3680 passed, 1 skipped) |
 | 03 the 3f snapshot migration and the ratchet's file rule | `03_snapshot-migrations.md` | **DONE** — rehearsed on a Neon PITR branch, merged `3ffa750` (2026-09-18 17:23 UTC), 078 applied in production by the deploy at 17:24 UTC; the probe under the phase's entry | #1318 | green at `6da8d00` (3700 passed, 1 skipped) |
 | 04 the gated drop and stand-down | `04_drop-and-stand-down.md` | **DONE — merged `c8482b3` (2026-09-19 19:44 UTC, by the owner); the worker deployed it (SUCCESS) and its predeploy owed 079/080 and applied nothing, measured; the API's deploy under the phase's merged entry; the window itself is the owner's (F7)** | #1321 | green at `29537a8` (3753 passed, 1 skipped) |
-| 05 the documentation's end state | `05_docs-end-state.md` | **READY** — built, two review rounds folded, rebased onto `main` after #1321's merge (51 files, phase 05's scope alone); the merge is the owner's (the session's admin merge is refused); its window-dependent sentences wait for the owner's window | #1322 | green at `165d588` on `main` (3760 passed, 1 skipped) — READY |
+| 05 the documentation's end state | `05_docs-end-state.md` | **DONE — merged `3c8efd4` (2026-09-19 21:06 UTC, by the owner); both services deployed it (SUCCESS); its window-dependent sentences and the epic's closeout wait for the owner's window** | #1322 | green at `2c82168` (3760 passed, 1 skipped) |
 
 ## Phase 01 — delete the legacy code and its tests
 
@@ -1232,12 +1232,28 @@ the documentation index's tear-out row ("the owner's window has not run"), the c
 status and M.3 line, `meta-app-review.md`'s discharged-constraint section, the M.2 rehearsal spec's
 status line, `00_EPIC.md`'s `status:` and its goal condition.
 
+## Phase 05 — merged
+
+**Merged by the owner at 21:06 UTC on 2026-09-19 as `3c8efd4`** (the admin squash, the prepared subject
+and body; no issue closed by keyword). Both services deployed it: the worker `SUCCESS` at once, the
+API `SUCCESS` at 21:16 UTC once `main`'s CI on the merge went green (the phase-02 finding, again). The
+worker's predeploy owed 079 and 080 and applied nothing, as with phase 04.
+
+**The invariant registry on `main` at `3c8efd4` — after the final phase, all eight:** I1 — `main`'s CI on
+the merge green; I2 — 40 passed, the normative pin 35; I3 — 49 passed; I4 — 4 / 0 / 0 / 0; I5 and I8 — 80
+passed; I6 — 27 passed (the wider pin, the legacy-CLI pin and the App Review markers); I7 — 3 passed.
+
+The five phases are on `main`; the worktrees and branches of 04 and 05 are removed. What the epic still
+owes is the owner's window (079 and 080 in production) and, after it, this document's closeout: the
+dated sentences phase 05 left true-for-now, the epic's `status:` and its goal condition with the owner's
+pasted gate output.
+
 ## The sprint's state at the end of 2026-09-18
 
-**Phase rows.** 01, 02, 03 — DONE and live. 04 — READY; its merge is the owner's, because this session's
-admin merge was refused by its permission classifier. 05 — READY as a change, a DRAFT as a pull
-request until #1321 merges and the branch is rebased onto `main`. The window — the owner's (F7), its
-rehearsal prepared and refused to this session the same way.
+**Phase rows (updated 2026-09-19).** 01, 02, 03, 04, 05 — DONE and live: 04 merged `c8482b3` and 05 merged
+`3c8efd4`, both by the owner's hand after this session's admin merges were refused by its permission
+classifier; both services deployed each. The rehearsal — DONE, green, run by the owner. The window —
+the owner's (F7), still owed.
 
 **The invariant registry, run PRE-MERGE on phase 05's head** (`82c55b3`, which holds phases 04 and 05; the
 registry's own rule is after every merge, so this run is to be repeated after each of the two): I1 —
