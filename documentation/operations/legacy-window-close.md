@@ -123,6 +123,8 @@ forward in the tree, rehearse again on a fresh branch. Never re-run in place.
    railway down --service worker --environment production --yes
    storydump deploys        # the worker's latest row reads REMOVED
    ```
+   The CLI can time out against Railway's API and the `down` still take effect (2026-09-19): if
+   it errors, read `storydump deploys` before sending it again.
 2. **Announce** the window (the approval group, or the channel the team watches). The API keeps
    serving; taps and web approvals land in the ledger as usual and would be lost by a backout.
 3. **Take the marker** — a branch off production at this moment, kept until the window is
@@ -175,14 +177,18 @@ forward in the tree, rehearse again on a fresh branch. Never re-run in place.
    lists read `public` only — the step-0 door lived in its own schema precisely to stay out of
    that census, and `legacy` never appeared in it — so they say nothing about the window; the
    `pg_namespace` lines above are the evidence.
-8. **Restart the worker** — the link checked again (step 0). `redeploy` re-runs the latest
-   deployment; if Railway refuses because the latest is the REMOVED one, the fallback is the
-   dashboard's Redeploy on the worker's last SUCCESS deployment, or an empty commit to `main`
-   (`git commit --allow-empty -m "redeploy" && git push`), which deploys both services and runs
-   the predeploy — which now owes nothing.
+8. **Restart the worker** — NOT with `railway redeploy`. In the window of 2026-09-19 it did not
+   refuse and did not re-run the removed deployment: it re-ran an OLD one, a commit of 2026-09-03,
+   and the worker came back on stale code (it booted the target root only because the retired
+   tier switch was still set to the target on the service — the pin in `tests/test_agent_docs.py`
+   keeps that variable's name off this page; the tear-out's ledger has it). The way back is a push to `main` — an empty commit — which
+   deploys both services through the normal path and runs the predeploy, which now owes nothing.
+   The alternative is the dashboard's Redeploy on the worker's last SUCCESS deployment *at the
+   deployed commit*, chosen by hand. Then read the commit `storydump deploys` shows for the
+   worker: it must be `main`'s head.
    ```bash
-   railway redeploy --service worker --yes
-   storydump deploys --watch --timeout 900     # both services SUCCESS
+   git commit --allow-empty -m "redeploy: the worker after the window" && git push origin main
+   storydump deploys                           # both services SUCCESS at main's head (the API after CI)
    storydump health                            # every surface ok; the worker's last success age falls
    ```
 9. **Close the issues** with this PR and the gate's output: #1216 (the epic), #941 (the
@@ -200,7 +206,7 @@ P=ancient-grass-50759240; O=org-ancient-bush-46337162; PROD=br-square-frog-ai37r
 npx --yes neonctl@latest branches restore $PROD $MARKER --project-id $P --org-id $O \
   --preserve-under-name failed-3g-$(date -u +%Y%m%d-%H%M)
 railway run --service worker --environment production -- python -m scripts.migration_runner status | tail -4   # head 078, the pair owed again
-railway environment production && railway redeploy --service worker --yes
+git commit --allow-empty -m "redeploy: the worker" && git push origin main   (never `railway redeploy` after a `down` — step 8)
 ```
 
 The preserved branch holds the failed state for forensics. Retire the marker branch a day after

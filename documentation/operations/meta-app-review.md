@@ -33,7 +33,7 @@ As of this draft **exactly one section is WALKED** — *Why App Review is requir
 
 **Discharged — this is no longer a constraint.** It asked that the M.3 cutover's last step, 3g (`DROP SCHEMA legacy CASCADE`), wait until the Track 3 demo videos were recorded *or* the target tier was armed and verified. The owner ruled the "or" leg met on 2026-09-16 — the target tier is armed and serving with a connected destination — and [#1202](https://github.com/chrisrogers37/storydump/issues/1202), the guard filed for it, was closed on that ruling on 2026-09-18.
 
-Track 3's demo videos are to be recorded on the target tier, which is the only tier there is: the legacy tier's code was deleted in the tear-out (#1216), and its data survives as the `archive.*_pre_cutover_20260917` snapshots (migration 078). The `legacy` schema itself is dropped by 079 in the owner's window — a gated file (`-- runner:manual`) that every deploy owes and none runs ([`legacy-window-close.md`](legacy-window-close.md)).
+Track 3's demo videos are to be recorded on the target tier, which is the only tier there is: the legacy tier's code was deleted in the tear-out (#1216), and its data survives as the `archive.*_pre_cutover_20260917` snapshots (migration 078). The `legacy` schema itself was dropped by 079 in the owner's window on 2026-09-19 — a gated file (`-- runner:manual`) that every deploy owed and none ran ([`legacy-window-close.md`](legacy-window-close.md)).
 
 ---
 

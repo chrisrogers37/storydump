@@ -1,6 +1,6 @@
 # M.2 rehearsal spec — the window, proven on a branch
 
-> **Status (2026-09-02): NOT EXECUTED.** The window's steps 3a–3d were applied to production by hand as `neondb_owner` across 2026-08-24 and 2026-08-26 (#1195, #1014) without this rehearsal (`00` FC-7 §7); 3e is abandoned (M.1 spec), and 3f, 3g and the step-8 stand-down have not run. The success/abandon stand-down legs (§4–§5) still govern 3g when it is scheduled, which is why this spec is retained.
+> **Status (2026-09-19): EXECUTED, differently than written.** The window's steps 3a–3d were applied to production by hand as `neondb_owner` across 2026-08-24 and 2026-08-26 (#1195, #1014) without this rehearsal (`00` FC-7 §7); 3e is abandoned (M.1 spec); 3f, 3g and the step-8 stand-down ran through the migration runner as files 078 (2026-09-18) and 079/080 (2026-09-19), the last two rehearsed first on a PITR branch — this spec's discipline, one branch and one owner login — under the legacy tear-out (#1216, phase 04; its ledger records both runs). The stand-down is the success leg (§4), partial by the tear-out's fork F8 (a): every membership stays. Retained as the record of the protocol.
 
 **Status:** draft for review (#790 M.2). Planning artifact only — no implementation, no branch created, nothing executed. Same discipline as the M.1 spec (merged, #827/#830): everything ruled is made executable; every open input is **marked, with per-option deltas, and picked by nobody here**.
 

@@ -61,7 +61,7 @@ API service skipped the two kickoff commits — see the gate above).
 | 02 retire the settings, the entry point and the config | `02_settings-and-entry-points.md` | **DONE** — merged `f59fe43` (2026-09-18 15:44 UTC); round 1 and a fresh re-verify folded; the deploys under the phase's entry | #1319 | green at `9d14304` (3680 passed, 1 skipped) |
 | 03 the 3f snapshot migration and the ratchet's file rule | `03_snapshot-migrations.md` | **DONE** — rehearsed on a Neon PITR branch, merged `3ffa750` (2026-09-18 17:23 UTC), 078 applied in production by the deploy at 17:24 UTC; the probe under the phase's entry | #1318 | green at `6da8d00` (3700 passed, 1 skipped) |
 | 04 the gated drop and stand-down | `04_drop-and-stand-down.md` | **DONE — merged `c8482b3` (2026-09-19 19:44 UTC, by the owner); the worker deployed it (SUCCESS) and its predeploy owed 079/080 and applied nothing, measured; the API's deploy under the phase's merged entry; the window itself is the owner's (F7)** | #1321 | green at `29537a8` (3753 passed, 1 skipped) |
-| 05 the documentation's end state | `05_docs-end-state.md` | **READY** — built, two review rounds folded, rebased onto `main` after #1321's merge (51 files, phase 05's scope alone); the merge is the owner's (the session's admin merge is refused); its window-dependent sentences wait for the owner's window | #1322 | green at `165d588` on `main` (3760 passed, 1 skipped) — READY |
+| 05 the documentation's end state | `05_docs-end-state.md` | **DONE — merged `3c8efd4` (2026-09-19 21:06 UTC, by the owner); both services deployed it (SUCCESS); its window-dependent sentences and the epic's closeout wait for the owner's window** | #1322 | green at `2c82168` (3760 passed, 1 skipped) |
 
 ## Phase 01 — delete the legacy code and its tests
 
@@ -1232,12 +1232,69 @@ the documentation index's tear-out row ("the owner's window has not run"), the c
 status and M.3 line, `meta-app-review.md`'s discharged-constraint section, the M.2 rehearsal spec's
 status line, `00_EPIC.md`'s `status:` and its goal condition.
 
+## Phase 05 — merged
+
+**Merged by the owner at 21:06 UTC on 2026-09-19 as `3c8efd4`** (the admin squash, the prepared subject
+and body; no issue closed by keyword). Both services deployed it: the worker `SUCCESS` at once, the
+API `SUCCESS` at 21:16 UTC once `main`'s CI on the merge went green (the phase-02 finding, again). The
+worker's predeploy owed 079 and 080 and applied nothing, as with phase 04.
+
+**The invariant registry on `main` at `3c8efd4` — after the final phase, all eight:** I1 — `main`'s CI on
+the merge green; I2 — 40 passed, the normative pin 35; I3 — 49 passed; I4 — 4 / 0 / 0 / 0; I5 and I8 — 80
+passed; I6 — 27 passed (the wider pin, the legacy-CLI pin and the App Review markers); I7 — 3 passed.
+
+The five phases are on `main`; the worktrees and branches of 04 and 05 are removed. The window ran the
+same evening (the entry below).
+
+## The window — run by the owner on 2026-09-19
+
+**Two attempts, one script.** The runbook's steps 0–8 as one script (`scratchpad/window04.sh`: the rehearsal
+harness's discipline — every check before any change, every output redacted, the applies timed, the
+gate compared to what 080 prints), typed by the owner at 21:2x UTC from the checkout at `3c8efd4`,
+clean, both services `SUCCESS` there (079 `a9e3cff0…`, 080 `bf9a15d6…`). The first attempt stopped at
+step 1: `railway down` timed out against Railway's API — and had taken effect: the worker read
+`REMOVING`, then `REMOVED`, with nothing yet changed in the database. The script was adapted to accept
+an already-stopped worker and typed again at 21:34 UTC.
+
+**What ran** (the log at `scratchpad/window04.log`; every line below is from it or from the read-only
+probe after it):
+
+- The marker: `pre-3g-20260919-2134` (`br-round-mud-aikp3w1c`, endpoint `ep-twilight-boat-ais65dz9`),
+  created at 21:34:04 UTC, its connection string redacted. **It stays until the worker has run a day.**
+- Before: the ledger 78 / 78, 079 and 080 owed; `legacy` 16 tables; 16 snapshots; no `window_ddl`;
+  `svc_migration` holding `CREATE ON DATABASE`; the database 82,788,352 bytes.
+- **079 applied in 1.341 s wall-clock; 080 in 1.019 s** (21:34:07 UTC by the ledger's own clock).
+- The gate, as the runner's login: `0, 0, t, t, {svc_claim,svc_clock,svc_maintenance,svc_membership},
+  16, t, neondb_owner, 80|80` — **GREEN, every line as 080 prints it.**
+- After: the ledger's tail 78, 79, 80 `applied` by `neondb_owner`; uuid-ossp gone; `gen_random_uuid()`
+  answering; `public.jobs` present; the database 38,961,152 bytes — **43.8 MB smaller**; the schemas
+  left: `archive`, `public`, `runner`; the sixteen snapshots 9,064 kB.
+
+**The restart went wrong, and was put right in four minutes.** Step 8's `railway redeploy --service
+worker --yes` neither refused nor re-ran the removed deployment: it re-ran an OLD one — `3d94cd2`, a
+commit of 2026-09-03 — and the worker came back `SUCCESS` on stale code. The script's last check saw
+the wrong commit and stopped with a "worker still down" message that was itself wrong: the worker was
+up. Its log showed why nothing worse happened: `WORKER_IMPL=target` is still set on the service (an
+owner-queue item never done), so the old entrypoint dispatched to the target root, elected the clock
+and served; had the variable been removed, that commit's default was the legacy scheduler. The way
+back was the runbook's own fallback, an empty commit to `main` (`3d54b72`, pushed 21:37 UTC under the
+owner's bypass): the worker deployed it at 21:39 UTC — its predeploy `0 applied`, nothing owed, the
+current worker up with its five lanes — and the API's deployment waited on `main`'s CI as every API
+deploy does, landing `SUCCESS` at 21:49 UTC — both services on `main`'s head, `storydump health` ok. The runbook's step 8 now says never `railway redeploy` after a `down`, and its backout
+uses the same push; step 1 records the timeout.
+
+**The goal condition — #1216's acceptance list through the epic's checklist — is MET**, every clause
+ticked in `00_EPIC.md` with its evidence: A1 by the AST guard and the reachability probe; A2 by the
+window above and the read-only probe after it (`legacy` gone, the sixteen snapshots present, 079/080
+`applied`); A3 moot since the legacy CLI's deletion; A4 by every phase's suite, green with the legacy
+tests deleted, not skipped. The epic's `status:` is `completed`.
+
 ## The sprint's state at the end of 2026-09-18
 
-**Phase rows.** 01, 02, 03 — DONE and live. 04 — READY; its merge is the owner's, because this session's
-admin merge was refused by its permission classifier. 05 — READY as a change, a DRAFT as a pull
-request until #1321 merges and the branch is rebased onto `main`. The window — the owner's (F7), its
-rehearsal prepared and refused to this session the same way.
+**Phase rows (updated 2026-09-19).** 01, 02, 03, 04, 05 — DONE and live: 04 merged `c8482b3` and 05 merged
+`3c8efd4`, both by the owner's hand after this session's admin merges were refused by its permission
+classifier; both services deployed each. The rehearsal — DONE, green, run by the owner. The window —
+the owner's (F7), still owed.
 
 **The invariant registry, run PRE-MERGE on phase 05's head** (`82c55b3`, which holds phases 04 and 05; the
 registry's own rule is after every merge, so this run is to be repeated after each of the two): I1 —
@@ -1353,6 +1410,13 @@ to this session, the owner's to run; production — the owner's window.
   (the callback signature accepts either app secret, the Facebook one annotated legacy) — a ruling on
   those, not a close. #1216 itself closes with phase 05. Phase 04's PR body is worded so that no issue
   closes by keyword at the merge (its first draft would have auto-closed #1202).
+- **After the window (2026-09-19):** the marker branch `pre-3g-20260919-2134` is retired a day after
+  the worker has run clean (`neonctl branches delete pre-3g-20260919-2134 --project-id … --org-id …`);
+  `WORKER_IMPL` on the worker service is what made a stale redeploy harmless — remove it only once
+  every deployment Railway can re-run is a post-tear-out commit, or accept that a stale redeploy
+  would then fail to boot rather than run the legacy scheduler (that commit's default); the issues:
+  #1216 (the epic) and #941 close on this ledger; #739 stays open (five target-tier references
+  measured); #1046 / #1113 to be read against a database with no `legacy` schema.
 - **Phase 04, in this order (the owner's):** (1) close #1202 on GitHub with the ruling of 2026-09-16
   (its "or" leg: the target tier is armed and serving, with a connected destination) — the plan's
   precondition for the merge, and the only thing between #1321 and `main`. (2) The merge (admin squash,
