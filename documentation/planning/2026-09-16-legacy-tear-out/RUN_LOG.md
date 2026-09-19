@@ -1280,7 +1280,7 @@ and served; had the variable been removed, that commit's default was the legacy 
 back was the runbook's own fallback, an empty commit to `main` (`3d54b72`, pushed 21:37 UTC under the
 owner's bypass): the worker deployed it at 21:39 UTC — its predeploy `0 applied`, nothing owed, the
 current worker up with its five lanes — and the API's deployment waited on `main`'s CI as every API
-deploy does. The runbook's step 8 now says never `railway redeploy` after a `down`, and its backout
+deploy does, landing `SUCCESS` at 21:49 UTC — both services on `main`'s head, `storydump health` ok. The runbook's step 8 now says never `railway redeploy` after a `down`, and its backout
 uses the same push; step 1 records the timeout.
 
 **The goal condition — #1216's acceptance list through the epic's checklist — is MET**, every clause
