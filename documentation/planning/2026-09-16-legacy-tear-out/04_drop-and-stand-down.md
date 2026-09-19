@@ -177,7 +177,7 @@ instruments, #1046 and #1113 close with it (#945 closes in phase 01 as stale).
 - [ ] `python -m scripts.migration_runner status` on a checkout at the merge lists 079 and 080 as `owed (manual)`; owner-run, pasted: the next deploy's predeploy log shows both skipped by name.
 - [ ] Owner-run, pasted: the rehearsal on a Neon branch green end to end, wall-clock recorded, one door-replacing file applied after the stand-down.
 - [ ] Owner-run, pasted: production — `SELECT count(*) FROM pg_namespace WHERE nspname = 'legacy'` → 0; the 16 snapshots present; the stand-down gate's queries answer as printed.
-- [ ] Owner-run, pasted: `storydump posture` — 079/080 `applied`, no `window_ddl` door in `doors` (the RLS list is `public`-only and says nothing about `legacy`; the `pg_namespace` line above is that evidence).
+- [ ] Owner-run, pasted: `storydump posture` — 079/080 `applied`. (Its `doors` and RLS lists read `public` only — the step-0 door lived in its own schema to stay out of that census — so neither says anything about `window_ddl` or `legacy`; the `pg_namespace` lines above are the evidence. Corrected in phase 04's build: the first draft of this item asked `doors` for a door it never listed.)
 - [ ] #1202 closed by the owner's ruling before the merge; `meta-app-review.md:32-47` rewritten in phase 05 to cite it.
 - [ ] #941, #739 (and #1046/#1113 where they concern `legacy`) closed with references to this PR.
 

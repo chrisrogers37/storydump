@@ -101,6 +101,7 @@ Storydump is a hosted, multi-tenant Instagram Story scheduling service with Tele
 - `storydump tokens revoke <id>`
 - `storydump webhook register` / `storydump webhook deregister` (the production bot's webhook)
 - `python -m src.main` (starts the bot)
+- `python -m scripts.migration_runner apply --manual <version>` (applies a gated file; 079 drops the legacy schema — the owner's window)
 
 The canonical list is the safety block in `CLAUDE.md`; this copy is pinned to
 it by `tests/test_agent_docs.py`.

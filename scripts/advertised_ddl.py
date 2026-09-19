@@ -308,18 +308,20 @@ def target_lineage_files(migrations_dir) -> list:
     """The F.2 migration files: numbered files ABOVE the 051 schema-move (the
     target lineage) that are advertised DDL. Uses the runner's own move-marker
     discovery so it cannot drift from the boundary the runner enforces, and
-    the runner's own `runner:unadvertised` marker for the files above the move
-    that are NOT a prefix of the stream — a snapshot of `legacy` into
+    the runner's own markers for the files above the move that are NOT a
+    prefix of the stream: `runner:unadvertised` — a snapshot of `legacy` into
     `archive`, a drop, a stand-down act on schemas the stream's empty-database
-    replay never holds (the legacy tear-out, phase 03). ONE definition: the
-    prefix diff and the lane's tenancy slice both derive from this list."""
+    replay never holds (the legacy tear-out, phase 03) — and `runner:manual`,
+    a gated file the deploy owes rather than runs (phase 04), which cannot be
+    a prefix of anything a deploy replays. ONE definition: the prefix diff
+    and the lane's tenancy slice both derive from this list."""
     from scripts.migration_runner import discover_migrations, schema_move_migration
 
     move = schema_move_migration(migrations_dir)
     return [
         m.path
         for m in discover_migrations(migrations_dir)
-        if m.version > move.version and not m.unadvertised
+        if m.version > move.version and not m.unadvertised and not m.manual
     ]
 
 
