@@ -60,8 +60,8 @@ API service skipped the two kickoff commits — see the gate above).
 | 01 delete the legacy code and its tests | `01_delete-the-code.md` | **DONE** — merged `2369a9b` (2026-09-17 23:57 UTC); the worker deployed it (SUCCESS); the API service SKIPPED it behind a red `main` check (the midnight skip, below) | #1316 | green at `e6e854b` (3653 passed, 1 skipped) |
 | 02 retire the settings, the entry point and the config | `02_settings-and-entry-points.md` | **DONE** — merged `f59fe43` (2026-09-18 15:44 UTC); round 1 and a fresh re-verify folded; the deploys under the phase's entry | #1319 | green at `9d14304` (3680 passed, 1 skipped) |
 | 03 the 3f snapshot migration and the ratchet's file rule | `03_snapshot-migrations.md` | **DONE** — rehearsed on a Neon PITR branch, merged `3ffa750` (2026-09-18 17:23 UTC), 078 applied in production by the deploy at 17:24 UTC; the probe under the phase's entry | #1318 | green at `6da8d00` (3700 passed, 1 skipped) |
-| 04 the gated drop and stand-down | `04_drop-and-stand-down.md` | **READY, merge owner-gated** — built `0ff46e9`; three review rounds folded through `6ab4253` (the entry below); the MERGE waits on #1202 closed by the owner (the plan's precondition); merging arms nothing — the deploy owes 079/080; the window itself is the owner's (F7) | #1321 | green at `6ab4253` (3749 passed, 1 skipped) |
-| 05 the documentation's end state | `05_docs-end-state.md` | **READY as a change, DRAFT as a PR** — built `b56b8ed`, two review rounds folded through `82c55b3`; stacked on phase 04's head by a declared deviation: rebase onto `main` when #1321 merges, then ready; its window-dependent sentences wait for the owner's window | #1322 (draft) | green at `82c55b3` (3760 passed, 1 skipped) |
+| 04 the gated drop and stand-down | `04_drop-and-stand-down.md` | **DONE — merged `c8482b3` (2026-09-19 19:44 UTC, by the owner); the worker deployed it (SUCCESS) and its predeploy owed 079/080 and applied nothing, measured; the API's deploy under the phase's merged entry; the window itself is the owner's (F7)** | #1321 | green at `29537a8` (3753 passed, 1 skipped) |
+| 05 the documentation's end state | `05_docs-end-state.md` | **READY** — built, two review rounds folded, rebased onto `main` after #1321's merge (51 files, phase 05's scope alone); the merge is the owner's (the session's admin merge is refused); its window-dependent sentences wait for the owner's window | #1322 | green at `4d465af` before the rebase; the rebased head's run under the phase's entry |
 
 ## Phase 01 — delete the legacy code and its tests
 
@@ -946,6 +946,35 @@ report), one low gap, seven observations; round 3 — one gap on a fail-closed p
 "ready to merge". Each round closed everything the one before it found; none reopened a closed
 finding.
 
+
+## Phase 04 — merged
+
+**Merged by the owner at 19:44 UTC on 2026-09-19 as `c8482b3`** (the admin squash, the prepared subject
+and body; no issue closed by keyword), after this session's own merge was refused by its permission
+classifier. **The deploy owed the pair and applied nothing — measured, not assumed:** the worker's
+deployment `317826ff…` of `c8482b3` is `SUCCESS`, and its predeploy log reads
+
+```
+owed (manual) 079 (079_drop_legacy_schema.sql)
+owed (manual) 080 (080_window_stand_down.sql)
+0 applied
+2 owed (manual): waiting for an operator's `apply --manual <version>`; a deploy never runs them
+```
+
+The read-only production probe after it: the ledger's head is 78 with 78 rows and no row for 79 or
+80; `legacy` still holds its 16 tables; `archive` its 16 snapshots. The API service's deployment of
+`c8482b3` is `WAITING` on `main`'s CI, as every API deploy is (phase 02's finding); its result is
+recorded below when it lands. That is the epic's checklist clause 5, agent-run half: DONE.
+
+**The invariant registry on `main` at `c8482b3`:** I2 — 40 passed, the normative pin 35; I3 — 49
+passed; I4 — 4 / 0 / 0 / 0; I5 and I8 — the runner's suites, the window gate and the deploy
+guardrails 80 passed, doctor's 21; I6 — 11 passed (phase 05's wider pin arrives with #1322); I7 — 3
+passed. I1 is `main`'s CI run on the merge, in progress at the time of writing.
+
+**Phase 05 rebased** the same hour: `git rebase --onto origin/main 29537a8` — seven commits moved
+clean; `git diff origin/main..HEAD --stat` shows 51 files, every one a document, a rule, the ledger, the
+CHANGELOG, the two pin tests or the battery. The declared deviation is discharged; #1322 is a pull
+request against `main` with phase 05's scope alone.
 
 ## Phase 04 — #1202 closed; the merge and the rehearsal refused by the session's permissions
 
