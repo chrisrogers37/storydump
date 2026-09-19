@@ -1,7 +1,7 @@
 ---
 title: "Retire the legacy tier — delete the code, snapshot and drop the schema, retire the settings (epic, #1216)"
 type: plan
-status: ratified
+status: completed
 owner: chris
 created: 2026-09-16
 tags: [plan, legacy-retirement, migrations, worker, api, docs, epic]
@@ -366,19 +366,19 @@ after every merge.
 ## Verification Checklist
 
 Agent-run:
-- [ ] `grep -rn "src.services.core\|src.services.integrations\|src.repositories" src scripts storydump_cli tests` → 0 lines (phase 01).
-- [ ] `python -c "import src.main, src.api.app, src.worker"` succeeds with no `TELEGRAM_*` variable set (phase 02).
-- [ ] `python scripts/telegram_ratchet.py` passes with `core_telegram_modules` empty (phase 01).
-- [ ] `pytest tests/ -q` green, the collected count pasted before and after, `-rs` shows no new skip (every phase).
-- [ ] `python -m scripts.migration_runner status` on a checkout after phase 04's merge lists 079 and 080 as owed (manual), and a deploy's predeploy log shows them skipped by name.
-- [ ] The step-1 grep of phase 05 finds a legacy table, module or variable only under `documentation/archive/`, `CHANGELOG.md` and `documentation/planning/`.
+- [x] `grep -rn "src.services.core\|src.services.integrations\|src.repositories" src scripts storydump_cli tests` → 0 lines (phase 01). **Unmet as literally written, by design** (phase 01's ledger entry): the hits are provenance docstrings in `src`, two scripts and the guards themselves; the standing check is the AST predicate of `tests/src/test_legacy_tier_gone.py`, green.
+- [x] `python -c "import src.main, src.api.app, src.worker"` succeeds with no `TELEGRAM_*` variable set (phase 02). Measured 2026-09-18 on the merged tree.
+- [x] `python scripts/telegram_ratchet.py` passes with `core_telegram_modules` empty (phase 01). 4 / 0 / 0 / 0 after every phase.
+- [x] `pytest tests/ -q` green, the collected count pasted before and after, `-rs` shows no new skip (every phase). CI's counts 3,653 → 3,680 → 3,700 → 3,753 → 3,760, one skip throughout (the ceiling).
+- [x] `python -m scripts.migration_runner status` on a checkout after phase 04's merge lists 079 and 080 as owed (manual), and a deploy's predeploy log shows them skipped by name. The worker's deployment of `c8482b3` (2026-09-19): `owed (manual) 079 …`, `owed (manual) 080 …`, `0 applied`.
+- [x] The step-1 grep of phase 05 finds a legacy table, module or variable only under `documentation/archive/`, `CHANGELOG.md` and `documentation/planning/`. **Met in its bounded form**: the grep as written has no word boundaries and lists 18 live files, every hit a TARGET table, the target's own `TARGET_TELEGRAM_BOT_TOKEN`, a snapshot's name, one of two reasoned exemptions or `ROADMAP.md`'s dated migration file names; the pin `tests/test_agent_docs.py::test_no_live_page_names_the_legacy_tier` is the same rule with boundaries, green.
 
 Owner-run (pasted into the ledger):
-- [ ] The read-only production probe lists exactly the 16 tables of F4 before phase 03 merges, with their sizes.
-- [ ] Before phase 03 merges: the actor probe of phase 03 step 1 (`version()`, `current_user`, the `svc_*` membership graph, `nspowner` of `legacy`/`archive`/`public`) pasted; 078 rehearsed on a PITR branch with its wall-clock.
-- [ ] After phase 03's deploy: 16 `archive.*_pre_cutover_*` tables owned by `svc_maintenance`, row counts equal to their sources; `storydump posture` shows the snapshot file applied.
-- [ ] The M.2 rehearsal of 079/080 on a Neon branch, green, wall-clock recorded, with one door-replacing file applied after the stand-down.
-- [ ] Production: `SELECT count(*) FROM pg_namespace WHERE nspname = 'legacy'` → 0 (the owner's query — `posture`'s RLS list is `public`-only and cannot show this); the stand-down gate's queries answer as printed; `storydump posture` shows 079 and 080 `applied` and no `window_ddl` door.
+- [x] The read-only production probe lists exactly the 16 tables of F4 before phase 03 merges, with their sizes. 2026-09-17, phase 03's entry: 42 MB in all.
+- [x] Before phase 03 merges: the actor probe of phase 03 step 1 (`version()`, `current_user`, the `svc_*` membership graph, `nspowner` of `legacy`/`archive`/`public`) pasted; 078 rehearsed on a PITR branch with its wall-clock. DONE 2026-09-17/18 (phase 03's entry; 078 rehearsed in 3.42 s).
+- [x] After phase 03's deploy: 16 `archive.*_pre_cutover_*` tables owned by `svc_maintenance`, row counts equal to their sources; `storydump posture` shows the snapshot file applied. DONE 2026-09-18 (phase 03's merged entry).
+- [x] The M.2 rehearsal of 079/080 on a Neon branch, green, wall-clock recorded, with one door-replacing file applied after the stand-down. 2026-09-19 19:48 UTC: 079 in 1.594 s, 080 in 0.501 s, the gate as printed, 076's hand-off landed for two roles.
+- [x] Production: `SELECT count(*) FROM pg_namespace WHERE nspname = 'legacy'` → 0 (the owner's query — `posture`'s RLS list is `public`-only and cannot show this); the stand-down gate's queries answer as printed; `storydump posture` shows 079 and 080 `applied` and no `window_ddl` door. DONE 2026-09-19 21:34 UTC — `0`; the gate's nine lines as printed (`0, 0, t, t, {svc_claim,svc_clock,svc_maintenance,svc_membership}, 16, t, neondb_owner, 80|80`); the ledger's rows 079 and 080 `applied` by `neondb_owner` (read-only probe; `storydump posture` needs a signed-in token this session did not hold).
 
 This satisfies #1216's acceptance list clause by clause: A1 ("no deployed entrypoint imports a
 legacy module; `scripts/target_reachability.py` shows the legacy closure empty") — the probe has
@@ -386,6 +386,8 @@ no legacy axis; a deleted package is in no closure, and `tests/src/test_legacy_t
 the standing guard; A2 the schema and the snapshots (owner-run above); A3 (the CLI over the API,
 no `src.services.core` import under `cli/`) is moot since #1312 deleted `cli/`; A4 the suite
 green with the legacy tests deleted, not skipped.
+
+**Completed 2026-09-19.** The five phases merged (#1316, #1319, #1318, #1321, #1322) and the window run by the owner; the ledger is `RUN_LOG.md`.
 
 ## What NOT To Do
 
