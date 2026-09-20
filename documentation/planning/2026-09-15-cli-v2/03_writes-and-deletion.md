@@ -18,6 +18,8 @@ groups.
 
 ## Evidence
 
+*(State on 2026-09-15, before this PR: `cli/`, its Makefile targets and its baseline entries were deleted by it.)*
+
 - `src/api/routes/v1.py:932` `POST /workspaces/{ws}/commands/{command}`; `:112-116` the web's
   key `<command>:<intent_id>`; `src/api/app.py:324-327` a replay answers `{"outcome":
   "replayed"}` with no data; `:279-291` only `CommandRefused` carries `reason`.
@@ -34,7 +36,7 @@ groups.
   imports legacy modules; `setup.py:32-34`; `Makefile:131-149` six targets.
 - `storydump-cli` is named in `CLAUDE.md:30-33`, `AGENTS.md:21-24` and `:116-122`, the three
   `documentation/operations/` runbooks (troubleshooting, monitoring, backup-restore),
-  `documentation/guides/*` (#1205), `SECURITY_REVIEW.md`, `ROADMAP.md`, and
+  `documentation/guides/*` (#1205), `SECURITY_REVIEW.md` (since archived as `documentation/archive/2026-01-11-security-review.md`), `ROADMAP.md`, and
   `07-security-model.md`.
 - `tests/test_agent_docs.py:42` `_INVOCATION` captures one word; `:70` imports `cli.main`;
   `_registry()` reads top-level commands; `:59` the never-run block; `:76`, `:89` the two
@@ -75,7 +77,7 @@ Phases 01 and 02.
    5 with a plain sentence. Tests use a version-stamped fixture of the real JSON; `doctor`
    reports the detected `railway` version.
 4. **`webhook status|register|deregister`**: `scripts/telegram_webhook.py`'s behaviour moves into
-   `storydump_cli/commands/webhook.py` (same variables, same redaction); the script is deleted in
+   `storydump_cli/webhook.py` as built (same variables, same redaction); the script is deleted in
    this PR and every doc that named it points at the verb.
 5. **`doctor`**: the token (present, valid via `GET /me/principal`, role, expiry), the API
    (reachable, version), the storage backend in use, the `railway` binary, login and linked
@@ -216,7 +218,7 @@ area: CLI, API client, docs and safety rules, legacy retirement · effort: M · 
   exempts the archive, the dated updates, this plan and the owner's `.claude/settings*.json`
   (queued to the owner, not the repository's to edit); its `import cli` check pins the ORIGIN,
   because a sibling checkout installed editable can still answer. The SYSTEM_SCOPE census pin
-  (`test_f1_fail_closed.py`) moved 49 → 40 with `cli/`'s nine sites. The seams module for
+  (`test_f1_fail_closed.py`) moved 49 → 40 with `cli/`'s nine sites *(the pin went with the legacy tier, #1316)*. The seams module for
   `v1._open_tenant`/`_member` is not built (five call sites in `tokens.py`, two in `ops.py`, and
   both earlier batteries anchor on the names) — a recorded follow-up.
 - Tests: `tests/storydump_cli/test_writes.py`, `test_env.py`, `test_webhook.py` (the script's

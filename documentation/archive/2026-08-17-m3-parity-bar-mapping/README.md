@@ -1,8 +1,8 @@
 # The M.3 parity bar — the legacy→target command mapping
 
-> **Status (2026-09-02): DEFERRED.** The window opened without the bar: the web queue became the act-on-it surface (#1033) and Telegram a second channel rather than a gate (#1090 G8). General chat-inbound dispatch is #854 (open). FC-7 §3's *"Telegram works after"* end state is still owed and this mapping is the reference for it; the two forks in §7 are unruled.
+> **Archived 2026-09-20 — SUPERSEDED.** The parity bar was retired as a window precondition on 2026-09-02 (`00` FC-7 §8; ruling 3): the web queue became the act-on-it surface and Telegram a second channel. Its two forks were settled by the W3 rulings of 2026-08-21 (`src/services/target/prompts.py`): the card's "Post now" tap IS `approve` (`autopost_now` is unbuilt), and parity with the legacy button set is out — `cancel`, `sync_now`, `pause`/`resume` and `settings_change` are served on the web and by the `storydump` CLI, not on Telegram. Every one of the 14 bar items is served on at least one target surface today; what is still owed under FC-7 §3 is chat-inbound typed commands (#854; `src/services/target/telegram_dispatch.py`). The legacy dispatch surface it enumerates was deleted in the legacy tear-out (#1216), so the mapping cannot be re-derived. See [`README.md`](../README.md) for the index.
 
-**Status:** filed, not ratified. The mapping below is derived; **two forks are open and marked
+**Original status (2026-08-17):** filed, not ratified — see the banner above. The mapping below is derived; **two forks are open and marked
 blocked pending ruling** (§7). Nothing here decides them.
 
 **Why it exists at all.** The bar's operative content is a mapping from the target's command

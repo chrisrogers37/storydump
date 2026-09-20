@@ -17,8 +17,14 @@ Set these in **Vercel → Project Settings → Environment Variables**:
 
 Sign-in is Google, through the API; the Telegram Login Widget is gone rather than hidden
 (`landing/src/app/login/page.tsx`), and with it every variable that signed a session here:
-nothing under `landing/src` reads `JWT_SECRET` or `NEXT_PUBLIC_SITE_URL` any more (measured
-2026-09-18; both still appear in `landing/.env.local.example`).
+nothing under `landing/src` reads `JWT_SECRET` or `NEXT_PUBLIC_SITE_URL` any more, and
+`landing/.env.local.example` names neither (`tests/test_landing_env_example.py` keeps the example
+file and the reads in agreement both ways).
+
+The waitlist table is created by drizzle-kit, not by any Python migration: `npm run db:push`
+(or `db:generate` + `db:migrate`) in `landing/`, against the `DATABASE_URL` that
+`landing/drizzle.config.ts` reads; `scripts/migrations/NOTE_waitlist_table.md` says the same from
+the runner's side.
 
 ### Client vs Server Variables
 
@@ -27,7 +33,7 @@ nothing under `landing/src` reads `JWT_SECRET` or `NEXT_PUBLIC_SITE_URL` any mor
 
 ### Common Issues
 
-- **Dashboard API calls fail**: `TARGET_API_URL` / `BACKEND_URL` is missing or wrong, or the Railway API service is down.
+- **Dashboard API calls fail**: `TARGET_API_URL` / `BACKEND_URL` is missing or wrong, or the Railway API service is down. On Vercel it must be the API's public origin (`https://api.storydump.app` in production); the example file's `http://localhost:8000` is the laptop value.
 - **A waitlist signup saves but no Telegram notification arrives**: `TELEGRAM_BOT_TOKEN` or `ADMIN_TELEGRAM_CHAT_ID` is missing — the notifier logs "Telegram notification skipped" and returns (`landing/src/lib/telegram.ts:5-10`) — or the bot is not a member of that chat.
 - **The site's Telegram links are missing**: `NEXT_PUBLIC_TELEGRAM_BOT_NAME` is unset (a client variable: set it, then rebuild).
 
@@ -35,5 +41,9 @@ nothing under `landing/src` reads `JWT_SECRET` or `NEXT_PUBLIC_SITE_URL` any mor
 
 - **Root Directory**: `landing`
 - **Framework Preset**: Next.js
-- **Build Command**: `next build` (default)
-- **Node.js Version**: 20.x
+- **Build Command**: `npm run build` (= `next build`), pinned with the install command and the framework in `landing/vercel.json`
+- **Node.js Version**: 22.x (`landing/package.json` `engines`, mirrored by CI's `node-version: '22'`)
+
+Vercel builds every pull request as a preview deployment, which is why CI runs no `next build`
+of its own; [`operations/fetching-preview-deployments.md`](../operations/fetching-preview-deployments.md)
+covers reading a preview headlessly.

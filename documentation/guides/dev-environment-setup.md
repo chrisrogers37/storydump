@@ -36,6 +36,7 @@ source venv/bin/activate
 # `make install` does the same, and the Makefile's targets assume ./venv/)
 pip install -r requirements.txt
 pip install -e '.[cli]'
+make install-dev          # + ruff, bandit, pip-audit — what CI's lint and security jobs run; the aliases below need ruff
 
 # Copy and configure environment
 cp .env.example .env
@@ -53,9 +54,10 @@ API answers 503 on every data route without it.
 **Option A: Local PostgreSQL (Recommended for Development)**
 
 ```bash
-# macOS
-brew install postgresql
-brew services start postgresql
+# macOS — the 15 keg: CI's service container is postgres:15, and AGENTS.md ›
+# Testing puts /opt/homebrew/opt/postgresql@15/bin on the PATH for the DB gates
+brew install postgresql@15
+brew services start postgresql@15
 
 # Create the database and build the schema. `make init-db` applies step 0
 # (the seven cluster-wide svc_* roles, then the DDL door migration 050 calls),
@@ -167,10 +169,18 @@ railway logs --service worker
 ### Manual Deploy (if needed)
 
 ```bash
-# Trigger a manual redeploy on Railway
-railway up --service worker
-railway up --service storydump
+# Re-run a service's latest deployment (nothing local is uploaded or rebuilt)
+railway redeploy --service worker --yes
+railway redeploy --service storydump --yes
+# or push to main (an empty commit will do) — the normal path, CI included
 ```
+
+Never `railway up`: it uploads and deploys the laptop's working tree —
+uncommitted edits included — bypassing `main`, the PR flow and CI. And
+`redeploy` re-runs whatever Railway holds as the latest deployment, which after
+a `railway down` can be an old build (`../operations/legacy-window-close.md`,
+step 8): when in doubt, push to `main` and confirm the commit with
+`storydump deploys`.
 
 ---
 
@@ -253,7 +263,7 @@ sl-restart          - restart worker service
   ```bash
   cd ~/Projects/storydump
   python3 -m venv venv && source venv/bin/activate
-  pip install -r requirements.txt && pip install -e '.[cli]'
+  pip install -r requirements.txt && pip install -e '.[cli]' && make install-dev
   ```
 
 - [ ] **Mac: Set up local PostgreSQL** (optional, for offline dev)
@@ -288,4 +298,4 @@ sl-restart          - restart worker service
 
 ---
 
-*Last updated: 2026-09-18*
+*Last updated: 2026-09-20*

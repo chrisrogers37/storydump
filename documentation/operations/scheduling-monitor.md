@@ -14,15 +14,20 @@ detector nobody polls raises no alert either.
 
 So the poller runs on the **fleet host**, and the alert path shares nothing with
 its subject: different machine, process, network path, clock and notification
-channel. It touches none of the jobs table, `ck_jobs_kind`, `fn_clock_tick`, the
-outbox, `channel_bindings`, the worker, or the app's own notification routing —
-which has no writer, so an alert delivered there would vanish silently.
+channel. It touches none of `fn_clock_tick`, the outbox, `channel_bindings`, the
+worker process, or the app's own notification routing — which has no writer, so
+an alert delivered there would vanish silently. The worker axis (#1120) does
+read job rows — through the API, and only what the worker has already finished
+or left unclaimed — so a dead worker produces the signal rather than
+suppressing it.
 
-## The four states
+## The six states
 
 | reading | state | what happens |
 |---|---|---|
-| `200`, `accounts_active == 0` | **`no-signal`** | says so once, then quiet; re-states weekly. **Never an alert, never an all-clear.** |
+| `200`, `worker.max_overdue_seconds > 900` or `worker.last_success_age_seconds > 13 h` — whatever the cursors say | **`worker-down`** | FLEET ALERT on the **first** reading; repeats every 6h; ranked above every cursor reading, because a dead worker explains a stalled cursor and is invisible to the cursor axis on an empty estate |
+| `200`, `accounts_active == 0`, and no system job has ever finished (or no `worker` block) | **`worker-unknown`** | says so once, then quiet; re-states weekly. Neither axis can answer: **not an alert, not an all-clear** |
+| `200`, `accounts_active == 0`, the worker provably alive | **`no-signal`** | says so once, then quiet; re-states weekly. **Never an alert, never an all-clear.** |
 | `200`, `accounts_active > 0`, lag ≤ threshold or null | `healthy` | quiet; announces RECOVERED / SIGNAL ACQUIRED on entry from another state |
 | `200`, `accounts_active > 0`, lag > threshold | **`stalled`** | FLEET ALERT on the **first** reading; repeats every 6h |
 | anything else — non-200, timeout, malformed body | **`unreachable`** | FLEET ALERT on the **second consecutive** reading; repeats every 6h |
@@ -64,6 +69,11 @@ hours.
 The margin is deliberate. The gap between a healthy 15-second lag and a 19-hour
 outage is four orders of magnitude; a threshold near the noise floor buys nothing
 and costs false alarms.
+
+The worker axis has two thresholds of its own (#1120): `--worker-overdue-threshold`,
+default **900 s** — how long a due system job may sit unclaimed — and
+`--worker-stale-threshold`, default **13 h** — how old the last finished system
+job may be. Either breached is `worker-down`.
 
 ## Deploying it
 
@@ -117,8 +127,10 @@ authorised token look identical in the file.
 ```bash
 # Exactly the environment systemd gives it. rc=0 means DELIVERED. Every other
 # code is a NON-delivery and they have different remedies:
-#   1  TELEGRAM_STATE_DIR points at a dir with no .env  (reachable via the very
-#      variable this section tells you to set — check the path before the token)
+#   1  no bot token anywhere — the variable unset AND neither TELEGRAM_STATE_DIR
+#      nor the generic channel dir holds one (a missing .env under
+#      TELEGRAM_STATE_DIR does NOT give 1: it falls back and you get 3 —
+#      measured in posting-monitor.md)
 #   2  TELEGRAM_GROUP_CHAT_ID unset                     (fails before the network)
 #   3  the send was REJECTED by Telegram                (token wrong/unauthorised)
 # `%h` is a UNIT-FILE specifier and does NOT expand in systemd-run — using it
@@ -165,11 +177,12 @@ The timer must point at a **pinned checkout used by nothing else**.
 - **A missing checkout must fail loudly at enrollment**, not leave a timer firing
   into nothing.
 
-## Bound: this cannot be validated against real traffic yet
+## Bound: what real traffic has and has not validated
 
-Nobody has run the target tier end to end; sign-in needs a real Google account,
-and production has no workspaces and no destinations. Every path here is
-exercised against captured payloads, mutation checks, and the live endpoint's
+As of 2026-08-31 nobody had run the target tier end to end and production had
+no workspaces and no destinations; since 2026-09-02 it has held active
+destinations, since 2026-09-07 intents, and on 2026-09-15 it posted. Every path
+here is exercised against captured payloads, mutation checks, and the live endpoint's
 `no-signal` answer — but **the `stalled` path has never seen a real stalled
 cursor.**
 
@@ -184,5 +197,6 @@ that the pager works, not that the dead-clock verdict arrives — necessary, and
 not sufficient.
 
 That is a bound on this work, not a defect in it. A later reader must not mistake
-*tested* for *seen in production*. The first real destination is what turns this
-from a monitor that is correct into a monitor that is proven.
+*tested* for *seen in production*. The first real destination arrived on
+2026-09-02; what remains unproven is a real `stalled` or `worker-down` verdict
+reaching a human — `--status` on the fleet host is where that would show.

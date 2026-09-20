@@ -41,7 +41,7 @@ jobs:
 | Formatting | `ruff format . --check` | Consistent code formatting |
 | FC-2 ratchet | `scripts/telegram_ratchet.py` | An allowlist of the modules permitted to reference Telegram: a reference outside it fails. Stdlib-only, so it runs without the app's dependencies |
 | Tests | `pytest` | The whole suite against a PostgreSQL 15 service. `REQUIRE_TEST_DATABASE=1` makes a database that failed to come up a failure instead of a silent skip ([`TEST_COVERAGE.md`](TEST_COVERAGE.md)). Coverage of `src` and `storydump_cli` is measured and uploaded to Codecov; no threshold is enforced |
-| Security | `pip-audit`, `bandit` | Vulnerability scanning. Both steps are advisory (`continue-on-error`); the bandit report is uploaded as an artifact |
+| Security | `pip-audit`, `bandit` | Vulnerability scanning. Both steps are advisory — each is `\|\| true` *and* `continue-on-error`, so the job cannot go red; a green Security Scan is not evidence of a clean scan, the uploaded bandit report is |
 | Front end | `npm test`, `tsc --noEmit`, `npm run lint` | The web app in `landing/` (Node 22). `next build` is left to Vercel, which builds every PR |
 | Changelog | Custom check | A pull request must change `CHANGELOG.md`, unless it touches only `documentation/`, `*.md` files or `.github/` |
 
@@ -190,8 +190,14 @@ railway logs --service worker
 
 ---
 
+## Runtimes CI pins
+
+- **Python 3.10** in every job (`setup.py` `python_requires=">=3.10"`); Railway
+  builds with NIXPACKS' default Python, so the pin is CI's, not the deploy's
+- **Node 22** for the front end (mirrored by `engines` in `landing/package.json`)
+- **PostgreSQL 15** as the Test job's service container
+
 ## Cost
 
-- **GitHub Actions**: Free for public repos (unlimited minutes)
-- **Railway**: ~$5-10/month (worker + API services)
-- **Neon**: Free tier (0.5 GB, 190 compute-hours)
+GitHub Actions is free for public repositories; Railway and Neon bill by
+usage (their pricing pages, not this guide, are the reference).

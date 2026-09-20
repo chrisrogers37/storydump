@@ -8,6 +8,8 @@ tags: [investigation, drive, media-sync, telegram, production]
 
 # The first real Drive sync reported success and the library stayed empty
 
+> **Archived 2026-09-20 — RESOLVED.** The full-depth Drive walk shipped as #1256 (070) and the posting mix keyed on the connected folder as #1262 (071), re-ruled 2026-09-08 ("Sources are the groups"). Two follow-ups it names were never filed as issues. See [`../../README.md`](../../README.md) for the index.
+
 **Symptom (owner, 2026-09-06):** Settings › Integrations showed the picked folder
 "storydump-media" with *Last synced 9/6/2026, 10:34 AM*; Media Library showed
 0 items. Separately, nothing had reached the bound Telegram group since it was

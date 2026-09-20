@@ -12,19 +12,25 @@ Railway automatically deploys when changes are pushed to `main`:
 
 1. Push to `main` (or merge a PR)
 2. Railway detects the change via GitHub integration
-3. Railway builds both services (worker + web)
-4. Railway restarts services with new code
-5. Health checks verify the deployment
+3. Railway builds both services (`worker` + `storydump`, the API) with
+   `railway.toml`'s `buildCommand`
+4. Each service's pre-deploy step applies pending migrations
+   (`railway.toml`: `python -m scripts.migration_runner apply`); a failing
+   migration aborts the deploy with the old version still serving
+5. The new version starts and must answer `GET /health` within 30 s
+
+`railway.toml` (build, pre-deploy, health check, restart and draining policy)
+and the `Procfile` (the two process commands) are the whole deployment
+configuration; `cloud-deployment.md` §2 walks through them.
 
 ### Pros
 - **Automated** -- deploy on every push to main
 - **Safe for public repos** -- no self-hosted runners
 - **Simple** -- no SSH keys, VPNs, or tunneling
 - **Reliable** -- Railway manages restarts and health checks
-- **Fast** -- builds typically complete in 1-2 minutes
 
 ### Cons
-- Monthly cost (~$5-10/month for Railway)
+- Monthly cost (Railway's usage-based plan)
 - Dependent on Railway infrastructure
 
 ---
@@ -33,10 +39,19 @@ Railway automatically deploys when changes are pushed to `main`:
 
 ### Continuous Integration (Automated)
 
-GitHub Actions runs automatically on every push/PR:
-- **Linting** (ruff) -- code style checks
-- **Tests** (pytest) -- unit and integration tests
-- **Security** (pip-audit, bandit) -- vulnerability scanning
+GitHub Actions runs automatically on every push/PR (`.github/workflows/ci.yml`):
+- **Linting** (ruff) -- code style checks over the whole repository
+- **FC-2 ratchet** (`scripts/telegram_ratchet.py`) -- the allowlist of modules
+  that may reference Telegram
+- **Tests** (pytest) -- unit and integration tests against a PostgreSQL 15
+  service container
+- **Security** (pip-audit, bandit) -- vulnerability scanning, advisory only
+- **Front end** (`landing/`: vitest, `tsc --noEmit`, eslint)
+- **Changelog** -- a PR must touch `CHANGELOG.md` unless it is docs-only
+
+A second workflow, `schema-drift.yml`, runs daily at 06:00 UTC and compares a
+live database's schema with the one the repository declares; it is an audit,
+not a PR gate.
 
 All CI runs on **GitHub cloud runners** (`ubuntu-latest`) -- safe for public repos.
 
@@ -47,12 +62,20 @@ Railway deploys automatically when CI passes and changes land on `main`. No manu
 ### Manual Deployment (if needed)
 
 ```bash
-# Force a redeploy via Railway CLI
-railway up --service worker
-railway up --service storydump
+# Re-run a service's latest deployment (nothing local is uploaded or rebuilt)
+railway redeploy --service worker --yes
+railway redeploy --service storydump --yes
 
-# Or trigger via Railway dashboard
+# Or push to main (an empty commit will do) -- the normal path, CI included;
+# or trigger via the Railway dashboard
 ```
+
+Never `railway up`: it uploads and deploys the laptop's working tree --
+uncommitted edits included -- bypassing GitHub and CI. And `redeploy` re-runs
+whatever Railway holds as the service's latest deployment, which after a
+`railway down` can be an old build (`operations/legacy-window-close.md`
+step 8); when in doubt, push to `main` and confirm the commit with
+`storydump deploys`.
 
 ---
 
@@ -92,7 +115,7 @@ deploys".
 | **Check deploy status** | Railway dashboard or `railway logs` |
 | **View worker logs** | `railway logs --service worker` |
 | **View web logs** | `railway logs --service storydump` |
-| **Force redeploy** | `railway up` or push to `main` |
+| **Force redeploy** | `railway redeploy --service <svc> --yes`, or push to `main` |
 | **Run health check** | `storydump health` |
 | **Run tests locally** | `pytest tests/ -v` |
 | **View CI status** | GitHub Actions tab in repo |

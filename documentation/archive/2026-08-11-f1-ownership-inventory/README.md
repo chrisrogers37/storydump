@@ -1,6 +1,6 @@
 # F.1 — Ownership inventory and fail-closed interface spec
 
-> **Status (2026-09-02):** spec ratified and **built** — `src/repositories/tenant_scope.py` (#846) is its implementation, `tests/src/repositories/test_f1_fail_closed.py` its gate. The residual burn-down is tracked on #841: keyword-only tenant params landed for 22 of 72 methods (#962), 8 `if chat_settings_id` sites remain unclassified, and the web-boundary dependency is #869. The legacy repositories this governs retire with the legacy tier.
+> **Archived 2026-09-20 — COMPLETED as legacy, then SUPERSEDED.** The fail-closed interface it specifies was built as `src/repositories/tenant_scope.py` (#846) and deleted with the legacy repositories in the legacy tear-out (phase 01, #1316); #841's residual burn-down is moot. The contract survives at the transaction layer — `src/services/target/unit_of_work.py` (a `UnitOfWork` is unconstructible without a tenant id) — and at the resolver (`src/services/target/tenant_resolution.py`, F.3). §4's recommendation is `scripts/telegram_ratchet.py` (the predicate is the code; the core segment is empty). The 14-table inventory survives as `tests/scripts/legacy_inventory.py`; the legacy models it read are gone. See [`README.md`](../README.md) for the index.
 
 Verification against the ratified plan, per `04` F.1. **Documentation only — no schema, no
 migration, no production-table change.** Classification is read off the plan, not invented here.

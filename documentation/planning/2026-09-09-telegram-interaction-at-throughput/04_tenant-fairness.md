@@ -1,7 +1,7 @@
 ---
 title: "Phase 4 — Tenant fairness (flagged; built only on evidence)"
 type: plan
-status: active
+status: deferred
 owner: chris
 created: 2026-09-09
 tags: [plan, worker, fairness, flagged]
@@ -9,6 +9,8 @@ links: []
 ---
 
 # Phase 4 — Tenant fairness
+
+> **Deferred by ruling (F9 (c), 2026-09-09) — evidence-gated, not scheduled.** Trigger: the worker status line's `ws_oldest_wait=` past a lane's deadline or `tg_global_paced=` sustained (`src/services/target/backpressure.py`), or a second live workspace.
 
 ## Summary
 

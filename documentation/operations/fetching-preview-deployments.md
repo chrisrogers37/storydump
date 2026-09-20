@@ -12,7 +12,9 @@ storydump project, and the header form below returns real application HTML.
 
 Measured on a live preview: a plain request returns `302` with
 `location: vercel.com/sso-api`; the same request carrying the bypass header
-returns the app — `/login` at `200`, ~14 KB, `<title>Login — Storydump</title>`.
+returns the app — `/login` at `200`, ~14 KB, `<title>Login — Storydump</title>` (measured on
+the pre-2026-08-25 front end; today's title is `Sign in — Storydump`,
+`landing/src/app/login/page.tsx`).
 
 ## When a correct command still returns 302
 
@@ -50,8 +52,9 @@ from the file for a one-off call. Matching fingerprints mean the secret in play
 is the one on disk, and a `302` then points at the credential itself rather than
 at your process.
 
-`lib/env-tiers.sh` prints the tier files in the order the runtime reads them, if
-you need to find which one holds the key.
+(The "fleet" here is the operator's own agent host, not this repository: the
+secret and its tier files live there, and nothing under `landing/` or `.vercel/`
+holds it.)
 
 ## How to fetch, once it is enabled
 
@@ -115,7 +118,6 @@ done
 
 ## The web sign-up surface on previews
 
-`webSignupEnabled()` (`landing/src/lib/web-signup.ts`) is ON for preview
-deployments and OFF everywhere else, production included. An explicit
-`WEB_SIGNUP_ENABLED` wins in either direction. So a preview shows the sign-up
-screens without anyone changing a dashboard setting, and production is unaffected.
+Previews sign in the way production does — Google sign-in through the API
+(`/auth/google`). There is no preview-only sign-up switch: the flag-gated
+`webSignupEnabled()` went with the pre-2026-08-25 front end (#1032).

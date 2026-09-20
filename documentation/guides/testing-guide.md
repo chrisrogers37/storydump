@@ -2,8 +2,8 @@
 
 How the suite is laid out, how to run it, what needs a PostgreSQL, and the
 patterns the tests follow. What is covered and how coverage is measured is
-[`TEST_COVERAGE.md`](TEST_COVERAGE.md) (3,756 tests in 157 files on
-2026-09-18; that page has the command that re-counts them).
+[`TEST_COVERAGE.md`](TEST_COVERAGE.md) (3,675 tests in 156 files on
+2026-09-20; that page has the command that re-counts them).
 
 The suite tests the target tier only. The legacy tier's tests — the
 repositories, the polling bot's handlers, the old CLI, `tests/integration/` —
@@ -35,7 +35,7 @@ The `make` targets wrap the same commands and assume the virtualenv is `./venv/`
 | `make test` | `pytest -v --cov=src --cov-report=term-missing` |
 | `make test-unit` | `pytest -v -m unit` |
 | `make test-integration` | `pytest -v -m integration` |
-| `make test-quick` | `pytest -v` — coverage is still measured, because `pytest.ini` adds it; `pytest --no-cov` is the run without |
+| `make test-quick` | `pytest -v --no-cov` — the run without coverage |
 | `make test-failed` | `pytest -v --lf` |
 | `make test-watch` | `ptw -- -v` — needs `pytest-watch`, which `requirements.txt` does not install |
 

@@ -27,9 +27,9 @@ so **merged is applied**. The ledger is `runner.schema_migrations`.
   `postcondition`, `no-transaction`, `reapply-safe`, `schema-move`,
   `unadvertised`, `manual`. A misspelt one is a hard failure at discovery, and a
   comment must not open with `runner` plus a marker word.
-- `-- runner:manual` files (079, 080) are owed by the deploy, not applied by it;
-  `apply --manual <version>` is the owner's door and is in `CLAUDE.md`'s safety
-  block.
+- A `-- runner:manual` file is owed by the deploy, never applied by it (079 and
+  080 were, by the owner, in the window of 2026-09-19); `apply --manual <version>`
+  is the owner's door and is in `CLAUDE.md`'s safety block.
 - Schema DDL is **advertised**: the target lineage must stay an ordered prefix
   of the fenced `sql` blocks in the consolidated plan's `02-domain-model.md`
   and `07-security-model.md`, classified in

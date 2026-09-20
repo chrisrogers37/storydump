@@ -1,7 +1,7 @@
 ---
 title: "The story frame's first fetch, continued — what Meta is answered, and by whom (2026-09-13)"
 type: audit
-status: in-progress
+status: completed
 owner: chris
 created: 2026-09-13
 ---
@@ -195,4 +195,4 @@ The owner tapped through the open board — 20 cards: 13 approved, 7 skipped —
 - [x] Legacy record read: 1,609 API posts, 20 `permanent_reject` locks (§7).
 - [x] F4′, F5, F6, F8 and F9 landed together as one change — the float (`03_the-float_2026-09-14.md`, 2026-09-14): the owner ruled them one behaviour, not five patches. The l5 gate reproduces the refused fetch: a first call refused `9004`, the next url accepted; three refusals in a row, the story steps back and waits; six waits, the review card.
 - [x] The float measured live once (2026-09-15, above): 8 of 8 refusals cleared by a fresh url, one retryable answer floated out of the slot, 13 of 13 posted, none lost.
-- [ ] F1 (the frame served from our own API) is decided after a week of `float_wait` rows; today's read says hold. F7 (burst serialization at claim time) stays later.
+- [ ] F1 (the frame served from our own API) is decided after a week of `float_wait` rows; today's read says hold. F7 (burst serialization at claim time) stays later. *(2026-09-20: the investigation's questions are answered and its fixes are on `main` (#1302, #1306); F1 remains the owner's decision from the `float_wait` read, F7 later — neither has a tracker.)*

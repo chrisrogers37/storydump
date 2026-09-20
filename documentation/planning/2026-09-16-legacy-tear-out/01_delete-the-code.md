@@ -1,12 +1,14 @@
 ---
 title: "Legacy tear-out — phase 01: delete the legacy code and its tests (PR 1)"
 type: plan
-status: draft
+status: completed
 owner: chris
 created: 2026-09-16
 tags: [plan, legacy-retirement, worker, tests]
 links: [https://github.com/chrisrogers37/storydump/issues/1216]
 ---
+
+> **Built 2026-09-17 as #1316 (`2369a9b`).** The ledger is `RUN_LOG.md`; its phase-01 entry records where the build departed from this text (118 files, not 117; `tests/integration/` deleted whole; the Makefile's `init-db`/`setup-db` kept and rebuilt in phase 02 — they never ran `init_db.py`).
 
 ## Summary
 

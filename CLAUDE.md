@@ -27,7 +27,7 @@ does not have. Nothing else here is shared, and nothing else needs guarding.
 
 ```bash
 python -m src.main                   # Starts the posting scheduler + Telegram bot
-python -m scripts.migration_runner apply --manual <version>   # Applies a gated file: 079 DROPS the legacy schema — the owner runs the window (F7)
+python -m scripts.migration_runner apply --manual <version>   # Applies a gated (runner:manual) file by hand: 079 dropped the legacy schema in the owner's window (2026-09-19); a fresh database still owes both
 storydump approve <story>            # Posts a story to Instagram — the user's decision, never an agent's
 storydump cancel <story>             # Cancels a story: refunds its debit, destroys its upload
 storydump resolve <story> cancel     # Gives up on a story parked for review; its debit is retained
@@ -73,6 +73,18 @@ that write despite reading as inspection.
 | `scheduler.md` | The worker: the clock, the jobs, the publish pipeline |
 | `telegram.md` | The Telegram adapter: the webhook, the outbox, the approval card |
 | `testing.md` | Test requirements, layout and markers |
+
+## The other Claude Code files
+
+- `.claude/commands/db-status.md` and `telegram-status.md` — the `/db-status`
+  and `/telegram-status` slash commands, read-only `storydump` reads.
+- `.claude/PROJECT_CONTEXT.md` and `.claude/QUICK_REFERENCE.md` — satellite
+  context pages; each carries its own copy of the never-run list, which
+  `tests/test_agent_docs.py` holds equal to the block above.
+- `.claude/settings.json` — Claude Code's permission lists. They are **not**
+  the safety rule: the block above is. (Its allow and deny entries still name
+  the verbs of the legacy CLI deleted in September 2026, and deny none of the
+  `storydump` never-run verbs; bringing it in line is an owner edit.)
 
 ## Working here
 

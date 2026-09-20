@@ -1,12 +1,14 @@
 ---
 title: "Legacy tear-out — sprint run log (build-all)"
 type: plan
-status: in-progress
+status: completed
 owner: chris
 created: 2026-09-17
 tags: [legacy-retirement, migrations, worker, api, docs, run-log]
 links: ["https://github.com/chrisrogers37/storydump/issues/1216", "https://github.com/chrisrogers37/storydump/pull/1315"]
 ---
+
+> **Closed 2026-09-20.** Five phases merged (#1316, #1319, #1318, #1321, #1322), the window run on 2026-09-19, the residue #1324 and the docs PR #1325 merged 2026-09-20, the marker branch retired and the dead variables deleted. What the owner-decision queue still lists is outside the tear-out: #751 (the runtime logins), #739 (the Facebook secret fallback), the PITR floor (`05` §DR 7 d vs Neon's 24 h), the l8 admission flake, `.claude/settings.json`'s legacy rules, `railway.toml`'s `mkdir -p /tmp/media`. The 2026-12-16 expiry of the `archive.*_pre_cutover_20260917` snapshots is tracked at #1326; the sweeper it would need (`retention_sweep`, unbuilt) at #1327; the PITR floor at #1328.
 
 ## Summary
 
@@ -1289,7 +1291,7 @@ window above and the read-only probe after it (`legacy` gone, the sixteen snapsh
 `applied`); A3 moot since the legacy CLI's deletion; A4 by every phase's suite, green with the legacy
 tests deleted, not skipped. The epic's `status:` is `completed`.
 
-## The sprint's state at the end of 2026-09-18
+## (superseded) The sprint's state at the end of 2026-09-18 — kept as the dated snapshot; the window entry above is the outcome
 
 **Phase rows (updated 2026-09-19).** 01, 02, 03, 04, 05 — DONE and live: 04 merged `c8482b3` and 05 merged
 `3c8efd4`, both by the owner's hand after this session's admin merges were refused by its permission

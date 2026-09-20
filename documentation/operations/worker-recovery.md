@@ -72,7 +72,7 @@ kind alone (`src/services/target/scheduler.py:508-540`), which this root asks th
 every **6 hours** (`src/worker.py:296`; the plan's `05` row says 60 s — the number above is the one
 that runs). Until then the job's serialization key is held: the claim door skips a `ready` row
 whose key has a `leased` holder without reading the lease's expiry (`059:103-104`), and the sender
-sweep mints no second `deliver_outbox` job for that binding (`work_loop.py:1109-1111`). No verb
+sweep mints no second `deliver_outbox` job for that binding (`work_loop.py:1110-1112`). No verb
 returns a lapsed lease sooner; if the wait is not acceptable, that is the owner's decision and a
 hand-written statement against `jobs`, never an agent's.
 
@@ -104,7 +104,7 @@ heartbeat beats, and it schedules nothing.
 The listener answers 200 with the counters (`lanes`, `clock`, `heartbeat`) and 503 —
 `"reason": "clock has not advanced; the worker is alive but stuck"` — when `clock.ticks` has not
 moved between two probes more than 30 s apart (twice the clock interval;
-`src/services/target/health.py:71-86`). The failure counters are reported and never gate it: a
+`src/services/target/health.py:74-89`). The failure counters are reported and never gate it: a
 database blip must not spend the restart budget. `ticks` advances only on the process that holds
 the election, so a second replica that never wins it would read as stuck here.
 
@@ -123,10 +123,11 @@ Three bounds on those verbs. `storydump jobs` never shows the system singletons
 (`workspace_id IS NULL` — `reap_expired`, `reconcile_ambiguous` and the rest); the `worker` block
 of `/health/scheduling` is what reads them, and `storydump health` is how to see it.
 `storydump posture`'s `role` is the **API's** connection, not the worker's — the worker states its
-own in its boot line. And `storydump doctor`'s ledger check reports the gated 079 and 080 as
-"owed to the owner's window" on its `ok` line until that window has run
-(`storydump_cli/commands/env.py`, `_gated_in`; `migration-runner.md`) — only an ORDINARY file the
-ledger lacks is "not applied".
+own in its boot line. And `storydump doctor`'s ledger check reports a gated file (`runner:manual`)
+as "owed to the owner's window" on its `ok` line rather than as missing
+(`storydump_cli/commands/env.py`, `_gated_in`; `migration-runner.md`) — none is owed today: 079
+and 080 were applied in the owner's window on 2026-09-19 (`legacy-window-close.md`). Only an
+ORDINARY file the ledger lacks is "not applied".
 
 In the logs:
 

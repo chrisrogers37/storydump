@@ -2,9 +2,9 @@
 
 Welcome to the Storydump documentation hub. All project documentation is organized here by purpose.
 
-**Last Updated**: 2026-09-18
+**Last Updated**: 2026-09-20
 **Current Version**: 1.6.0 (`src/__init__.py`, and the CHANGELOG's last release heading, 2026-02-09); everything since — the multi-tenant rebuild and the legacy tear-out included — is under `[Unreleased]`
-**Current program**: the [consolidated design plan](planning/2026-08-02-consolidated-design-plan/README.md) — Phases 0, F and L built; the legacy tier retired (the tear-out, #1216), with M.3's last two steps shipped as the gated migrations 079 and 080 and owed to the owner's window; **Phase X.3 (multi-workspace UX) in progress**; Phase S partly built. Per-increment scoreboard in that README's *Live status*.
+**Current program**: the [consolidated design plan](planning/2026-08-02-consolidated-design-plan/README.md) — Phases 0, F and L built; the legacy tier retired (the tear-out, #1216), with M.3's last two steps run in the owner's window on 2026-09-19 as the gated migrations 079 and 080; **Phase X.3 (multi-workspace UX) in progress**; Phase S partly built. Per-increment scoreboard in that README's *Live status*.
 **One tier**: the system these pages describe is the tier the plan calls *target* (`src/services/target/`). The legacy tier was retired in the tear-out (#1216, September 2026); its data survives as the `archive.*_pre_cutover_20260917` snapshots. Pages under `archive/`, `planning/` and `updates/` are history and keep the legacy names; `guides/` and `operations/` are live, and `tests/test_agent_docs.py` fails when one of them names a legacy-only table, a deleted module path or a retired variable.
 **Deployment**: Railway (worker + API) + Neon PostgreSQL; landing site and dashboard on Vercel
 
@@ -16,16 +16,11 @@ documentation/
 ├── ROADMAP.md                     # Historical: the v1.0.0 – v1.6.0 product roadmap and version history
 ├── planning/                       # Live plans and increment specs
 │   ├── 2026-08-02-consolidated-design-plan/   # THE authoritative plan (ratified, in execution)
-│   ├── 2026-08-11-f1-ownership-inventory/     # F.1 spec — built (#846), retired with the legacy repositories (#1216)
-│   ├── 2026-08-14-f2-increment-split/         # F.2 split — complete (migrations 052–060)
-│   ├── 2026-08-17-m1-transform-spec/          # M.1 — abandoned (legacy data not migrated)
-│   ├── 2026-08-17-m2-rehearsal-spec/          # M.2 — not executed
-│   ├── 2026-08-17-m3-parity-bar-mapping/      # M.3 parity bar — deferred
 │   ├── 2026-09-09-telegram-interaction-at-throughput/  # the Telegram tap, built for throughput
 │   ├── 2026-09-15-cli-v2/                     # the `storydump` CLI — completed (spec: 2026-09-15-cli-v2-spec.md)
 │   ├── 2026-09-16-cli-v2-audit/               # the system review of the CLI surface
 │   ├── 2026-09-16-legacy-tear-out/            # retiring the legacy tier (#1216): five phases and the RUN_LOG
-│   └── investigations/                        # production investigations, one folder per incident
+│   └── investigations/                        # production investigations, one folder per incident (resolved ones move to archive/investigations/)
 ├── archive/                        # Completed, superseded and abandoned plans, and the legacy tier's pages (see archive/README.md)
 ├── guides/                         # How-to guides and tutorials
 └── operations/                     # Operational runbooks
@@ -35,20 +30,15 @@ documentation/
 
 ## Planning & Architecture
 
-- `planning/investigations/` — production investigations (`/investigate-app`): one folder per incident, the record plus its fix plans.
+- `planning/investigations/` — production investigations (`/investigate-app`): one folder per incident, the record plus its fix plans — [2026-09-11 approved but never posted: the first fetch](planning/investigations/publish-first-fetch_2026-09-11/00_INVESTIGATION.md) (with its three follow-ups: the failure reporting, the fetch path, the float). Resolved: [2026-09-04 the sign-in bounce and the Instagram redirect](archive/investigations/2026-09-04-signin-bounce-and-instagram-redirect/00_INVESTIGATION.md) and [2026-09-06 the empty library after the first sync](archive/investigations/2026-09-06-empty-library-after-first-sync/00_INVESTIGATION.md), archived 2026-09-20.
 
 ### Consolidated design plan (2026-08-02) — authoritative
 **[2026-08-02-consolidated-design-plan/](planning/2026-08-02-consolidated-design-plan/README.md)** - RATIFIED, IN EXECUTION
 - The single plan for the multi-tenant refactor: fixed constraints FC-0..FC-9, target architecture, executable domain model, decision record D1–D41, the increment sequence (Phases 0 → F → L → M → X → S), operational numbers, product lifecycles, security model
-- Read `README.md` → `00` → `04`; the README's *Live status* carries the position (2026-09-18: the legacy tier is retired) and the per-increment scoreboard with one tracker per increment
-- Position: Phases 0, F and L built · the M.3 window applied by hand; 3f ran as migration 078, 3g and the stand-down are the gated 079 and 080, owed to the owner's window ([operations/legacy-window-close.md](operations/legacy-window-close.md)) · X.3 in progress (#1172) · S partly built
+- Read `README.md` → `00` → `04`; the README's *Live status* carries the position (2026-09-19: the legacy tier is retired) and the per-increment scoreboard with one tracker per increment
+- Position: Phases 0, F and L built · the M.3 window applied by hand; 3f ran as migration 078; 3g and the stand-down ran as the gated 079 and 080 in the owner's window on 2026-09-19 ([operations/legacy-window-close.md](operations/legacy-window-close.md)) · X.3 in progress (#1172) · S partly built
 
 ### Increment specs (live; each carries a status banner)
-- **[2026-08-11-f1-ownership-inventory/](planning/2026-08-11-f1-ownership-inventory/README.md)** — F.1 ownership inventory and fail-closed interface spec — BUILT (#846) as the legacy repository layer's fail-closed interface, and RETIRED with that layer in the tear-out (phase 01, #1316); the target's equivalent is the unit of work, unconstructible without a tenant (`src/services/target/unit_of_work.py`)
-- **[2026-08-14-f2-increment-split/](planning/2026-08-14-f2-increment-split/README.md)** — F.2 migration split — COMPLETED (migrations 052–060)
-- **[2026-08-17-m1-transform-spec/](planning/2026-08-17-m1-transform-spec/README.md)** — M.1 legacy → target transform — ABANDONED by owner ruling 2026-09-02 (legacy data not migrated; spec retained as the record)
-- **[2026-08-17-m2-rehearsal-spec/](planning/2026-08-17-m2-rehearsal-spec/README.md)** — M.2 window rehearsal — NOT EXECUTED (its stand-down legs still govern 3g; the window's runbook is [operations/legacy-window-close.md](operations/legacy-window-close.md))
-- **[2026-08-17-m3-parity-bar-mapping/](planning/2026-08-17-m3-parity-bar-mapping/README.md)** — M.3 Telegram parity bar — DEFERRED (#854)
 - **[2026-09-09-telegram-interaction-at-throughput/](planning/2026-09-09-telegram-interaction-at-throughput/00_EPIC.md)** — the Telegram tap (W4) built for throughput: the tap, the API under load, worker throughput, tenant fairness (flagged) — RATIFIED 2026-09-09 (forks F1–F12 locked); phases 1, 2, 3a and 3b BUILT (2026-09-10/11, per the consolidated plan's *Live status*); phase 4 (tenant fairness) stays evidence-gated
 - **[2026-09-15-cli-v2/](planning/2026-09-15-cli-v2/00_EPIC.md)** — the `storydump` v2 CLI: API tokens, the eight read views, the write verbs, `health`/`deploys`/`webhook`/`doctor`, and the deletion of the legacy `cli/` — COMPLETED 2026-09-15 (spec: [2026-09-15-cli-v2-spec.md](planning/2026-09-15-cli-v2-spec.md), approved; the production probes the read views were built from are under `probes/`)
 - **[2026-09-16-cli-v2-audit/](planning/2026-09-16-cli-v2-audit/00_AUDIT.md)** — the system review of the v2 CLI surface and the fold of its findings
@@ -56,6 +46,13 @@ documentation/
 
 ### Archive
 **[archive/README.md](archive/README.md)** — index of completed, superseded and abandoned plans, moved out of `planning/` on 2026-09-02: the two 2026-07-29 design packages the consolidated plan adjudicated, the 2026-07 full-system review, the 2026-05/06 Instagram investigations, the pre-refactor product phases (Shopify, Printify, LLM, order email, dashboard) and roadmap, and the completed credential-refactor, session-isolation, web-app-migration and Meta-launch plans.
+
+Moved on 2026-09-20 (this audit), the five window-era increment specs — each with an archived banner:
+- **[2026-08-11-f1-ownership-inventory/](archive/2026-08-11-f1-ownership-inventory/README.md)** — F.1 ownership inventory and fail-closed interface spec — COMPLETED as legacy, then SUPERSEDED by `unit_of_work.py` / `tenant_resolution.py`; BUILT (#846) as the legacy repository layer's fail-closed interface, and RETIRED with that layer in the tear-out (phase 01, #1316); the target's equivalent is the unit of work, unconstructible without a tenant (`src/services/target/unit_of_work.py`)
+- **[2026-08-14-f2-increment-split/](archive/2026-08-14-f2-increment-split/README.md)** — F.2 migration split — COMPLETED (migrations 052–060)
+- **[2026-08-17-m1-transform-spec/](archive/2026-08-17-m1-transform-spec/README.md)** — M.1 legacy → target transform — ABANDONED by owner ruling 2026-09-02 (legacy data not migrated; spec retained as the record)
+- **[2026-08-17-m2-rehearsal-spec/](archive/2026-08-17-m2-rehearsal-spec/README.md)** — M.2 window rehearsal — EXECUTED DIFFERENTLY THAN WRITTEN (its banner, 2026-09-19): 3a–3d by hand on 2026-08-24/26, 3f/3g/step 8 as migrations 078–080, rehearsed on a PITR branch first; the window's runbook is [operations/legacy-window-close.md](operations/legacy-window-close.md)
+- **[2026-08-17-m3-parity-bar-mapping/](archive/2026-08-17-m3-parity-bar-mapping/README.md)** — M.3 Telegram parity bar — SUPERSEDED (its forks ruled 2026-08-21; every bar item served on a target surface; chat-inbound commands #854 remain owed)
 
 Moved there on 2026-09-18 (the tear-out's phase 05), because each describes the legacy tier:
 - **[archive/updates/](archive/updates/)** — the three update notes of January 2026: [bug fixes](archive/updates/2026-01-04-bugfixes.md), [category scheduling](archive/updates/2026-01-10-category-scheduling.md), [force posting and the queue shift](archive/updates/2026-01-11-force-posting-queue-shift.md) (from `updates/`)
@@ -65,7 +62,7 @@ Moved there on 2026-09-18 (the tear-out's phase 05), because each describes the 
 
 ### Test Coverage
 **[TEST_COVERAGE.md](guides/TEST_COVERAGE.md)** - CURRENT (rewritten 2026-09-18)
-- The suite's shape by directory (about 3,750 tests: the DB gates under `tests/scripts/`, the services and the API under `tests/src/`, `tests/storydump_cli/`), with the command that re-measures it
+- The suite's shape by directory (about 3,700 tests: the DB gates under `tests/scripts/`, the services and the API under `tests/src/`, `tests/storydump_cli/`), with the command that re-measures it
 - How coverage is measured, the integration-coverage policy (a green run must not claim coverage it never took), and what is not covered
 - The per-file table of the legacy tier's tests it used to be went with those tests in the tear-out (#1216)
 
@@ -165,7 +162,7 @@ a guide walking a reader through it contradicted a fixed constraint.
 ### Closing the Legacy Window (the owner's runbook)
 **[operations/legacy-window-close.md](operations/legacy-window-close.md)**
 - The last two M.3 steps, shipped as gated migrations the deploy owes and never runs: 079 drops the `legacy` schema behind an in-file precondition, 080 stands the window down
-- Irreversible, and the owner's to run: `apply --manual` is on the never-run list for agents
+- Irreversible, and the owner's to run: `apply --manual` is on the never-run list for agents; run by the owner on 2026-09-19 (the tear-out's RUN_LOG records it) — kept as the record, and for a fresh database, where both files are still owed
 
 ### Telegram Webhook
 **[operations/telegram-webhook.md](operations/telegram-webhook.md)**
@@ -206,7 +203,7 @@ a guide walking a reader through it contradicted a fixed constraint.
 
 There is no live update note. The running record of changes is [../CHANGELOG.md](../CHANGELOG.md); an incident gets a folder under `planning/investigations/`.
 
-The three notes of January 2026 — [bug fixes](archive/updates/2026-01-04-bugfixes.md), [category scheduling](archive/updates/2026-01-10-category-scheduling.md), [force posting and the queue shift](archive/updates/2026-01-11-force-posting-queue-shift.md) — describe the legacy scheduler, queue, bot and CLI, all deleted in the tear-out (#1216), and moved to `archive/updates/` on 2026-09-18. A new dated note (`YYYY-MM-DD-description.md`) goes in `updates/`, which holds nothing today.
+The three notes of January 2026 — [bug fixes](archive/updates/2026-01-04-bugfixes.md), [category scheduling](archive/updates/2026-01-10-category-scheduling.md), [force posting and the queue shift](archive/updates/2026-01-11-force-posting-queue-shift.md) — describe the legacy scheduler, queue, bot and CLI, all deleted in the tear-out (#1216), and moved to `archive/updates/` on 2026-09-18. `updates/` no longer exists; the changelog and an investigation folder are where a change or an incident is recorded.
 
 ---
 
@@ -263,7 +260,7 @@ The design is the consolidated plan's `01-target-architecture.md` (the interacti
 1. Read **[../AGENTS.md](../AGENTS.md)** (the layer boundaries, testing, pre-commit and CI) and the safety rules, repeated in root **[CLAUDE.md](../CLAUDE.md)**
 2. Review **[testing-guide.md](guides/testing-guide.md)** (test requirements — every feature needs tests)
 3. Check the consolidated plan's `04-execution-sequence.md` for the increment your change belongs to
-4. Run pre-commit: `source venv/bin/activate && ruff check . && ruff format --check . && pytest` (what CI's lint job runs, over the whole tree)
+4. Run pre-commit: `source venv/bin/activate && ruff check . && ruff format --check . && pytest` (the two `ruff` commands are CI's Lint job over the whole tree; `pytest` is its Test job, run against a PostgreSQL service)
 
 ---
 
@@ -294,7 +291,7 @@ When adding new documentation:
    - Planning/design → `planning/`
    - How-to guides → `guides/`
    - Operations → `operations/`
-   - Bug fixes/patches → `updates/` (use dated filenames: `YYYY-MM-DD-description.md`)
+   - Bug fixes/patches → `../CHANGELOG.md`; a production incident → a folder under `planning/investigations/`
    - Completed, superseded or abandoned plans, and any page that describes something the
      tree no longer holds → `git mv` to `archive/` (same layout), add a one-line status
      banner at the top, and add a row to `archive/README.md`
@@ -319,8 +316,8 @@ When adding new documentation:
 
 | Area | Status | Files | Notes |
 |------|--------|-------|-------|
-| **Planning** | Current | 41 Markdown files: the 10-file consolidated plan, 5 increment specs, the Telegram tap plan, the CLI plan with its spec and audit, the legacy tear-out plan, 3 investigations | Plan ratified and in execution (Phase X.3 current); each spec carries a status banner |
-| **Archive** | Historical | 49 Markdown files | Completed, superseded and abandoned plans and the legacy tier's pages, indexed in `archive/README.md` |
+| **Planning** | Current | 34 Markdown files: the 10-file consolidated plan, the Telegram tap plan, the CLI plan with its spec and audit, the legacy tear-out plan, 3 investigations | Plan ratified and in execution (Phase X.3 current); each spec carries a status banner |
+| **Archive** | Historical | 56 Markdown files | Completed, superseded and abandoned plans and the legacy tier's pages, indexed in `archive/README.md` |
 | **Guides** | Live | 10 guides | Quick start, deployment, cloud deployment, testing, test coverage, Instagram Login, dev env, deployment options, CI/CD, landing deploy |
 | **Operations** | Live | 15 files | Monitoring, the two outage monitors, worker recovery, backup, the migration runner, the legacy window's close, the Telegram webhook, runtime database roles, reading the ledger, troubleshooting, Meta App Review + callbacks, Google OAuth verification, preview deployments |
 | **API Docs** | Served | — | `GET /openapi.json` on a running API |
@@ -351,4 +348,4 @@ Counted on 2026-09-18 (`find documentation/<area> -name '*.md'`).
 
 ---
 
-*Last updated: 2026-09-18*
+*Last updated: 2026-09-20*

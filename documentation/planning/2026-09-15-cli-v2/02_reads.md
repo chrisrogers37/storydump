@@ -107,7 +107,7 @@ Written red first; one named mutation per behaviour in `tests/mutations/cli_v2_0
 - **Route gates**: each `/ops` route answers the envelope for a member's token, 403 for a
   service identity of another workspace, 401 without a token; `readonly` is admitted; a session
   is admitted.
-- **CLI tests** (`tests/src/cli/`): each verb against the in-process app with a token fixture:
+- **CLI tests** (`tests/storydump_cli/` as built): each verb against the in-process app with a token fixture:
   the envelope and its error variant on a 404/403/connection error, the loop over two
   memberships, `--workspace`, exit codes 1/3/4, `--watch` prints only changed rows and its
   `--json` framing (a fake clock and a scripted API), redaction of an `sdt_` value in a row.

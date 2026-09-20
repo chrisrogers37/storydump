@@ -180,7 +180,7 @@ Meta's reviewers are looking for one thing: *does the app use this permission th
 
 **Do not** speed up, cut between steps, or show a mocked screen. A video that skips the consent screen or shows a stubbed publish is the most common rejection.
 
-**Prerequisite:** step 6 needs a running publish path — see the standing constraint at the top of this file.
+**Prerequisite:** step 6 needs a running publish path — the target tier's, armed and serving since 2026-09-16 (the discharged constraint at the top of this file).
 
 ---
 
@@ -236,7 +236,7 @@ Meta has the equivalent of Google's test-user list: accounts added under **App D
 
 - [`google-oauth-verification.md`](google-oauth-verification.md) — sibling runbook for Google Drive's `drive.readonly`. Same shape; the scope-justification section there is the model for Track 3 here.
 - [`documentation/archive/2026-03-31-meta-app-launch-design.md`](../archive/2026-03-31-meta-app-launch-design.md) — the original Meta/Instagram OAuth design.
-- `src/services/target/meta_adapter.py`, `src/services/target/publish_pipeline.py` — every Graph call the justification copy describes.
+- `src/services/target/instagram_graph.py` (`create_container`, `container_status`, `publish` — every Graph call the justification copy describes), `src/services/target/publish_pipeline.py` (the driver), `src/services/target/meta_adapter.py` (the error taxonomy the pipeline routes on, and the sandbox stub).
 
 ## Related issues
 

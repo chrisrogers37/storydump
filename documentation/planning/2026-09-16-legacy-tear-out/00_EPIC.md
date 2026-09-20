@@ -275,7 +275,7 @@ picks (b) knowing its cost is a door change. Ratifier: owner. Status: locked (ch
 
 - `../2026-08-02-consolidated-design-plan/04-execution-sequence.md` — the M.3 window (3f, 3g,
   step 8) this epic completes; `00-fixed-constraints.md` FC-7 §6–§8 (legacy data untransformed).
-- `../2026-08-17-m2-rehearsal-spec/README.md` — the rehearsal that governs 3g.
+- `../../archive/2026-08-17-m2-rehearsal-spec/README.md` — the rehearsal that governs 3g (archived 2026-09-20).
 - `../2026-09-15-cli-v2/` — the CLI that replaced the legacy one (step 4, done).
 - `../2026-09-16-cli-v2-audit/00_AUDIT.md` — the docs population this epic's last phase finishes;
   it lands with PR #1314 (the audit fold), which merges before this plan's first phase begins —
@@ -285,7 +285,7 @@ picks (b) knowing its cost is a door change. Ratifier: owner. Status: locked (ch
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| A target module reaches a deleted module transitively (a lazy import the grep cannot see) | the API or worker fails at boot | phase 01 imports every entrypoint in CI (`scripts/target_reachability.py` and the existing `test_worker_impl_gate`); the closure counts are pasted |
+| A target module reaches a deleted module transitively (a lazy import the grep cannot see) | the API or worker fails at boot | phase 01 imports every entrypoint in CI (`scripts/target_reachability.py` and `tests/src/test_worker_entrypoint.py` (was `test_worker_impl_gate`)); the closure counts are pasted |
 | A deleted legacy test was the only cover of a shared utility | a regression in `src/utils` | the kept utilities keep their tests; coverage of `src/utils` measured before and after |
 | `archive` schema absent or owned wrongly in production | 3f fails at predeploy, deploy aborts with the old version serving | the replay gate creates the schema exactly as production has it; `storydump posture` reads the ledger before the merge |
 | The snapshots copy large tables (`posting_history`, `user_interactions`) | Neon storage and a slow predeploy | sizes measured with `pg_total_relation_size` on the read-only probe before the merge; `CREATE TABLE … AS` is one statement per table |

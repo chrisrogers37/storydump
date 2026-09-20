@@ -1,6 +1,6 @@
 # Archive — completed, superseded and abandoned plans
 
-Moved out of `documentation/planning/` on 2026-09-02 after an audit of every plan against `main`, the
+Moved out of `documentation/planning/` on 2026-09-02 (and again on 2026-09-20) after an audit of every plan against `main`, the
 GitHub tracker and the recorded production probes (issue #1212). Each file carries a one-line status
 banner at its top; this index says why it is here and where its successor lives. Nothing in this
 directory is normative — the authoritative plan is
@@ -19,6 +19,13 @@ activity; revive by filing an issue).
 | `investigations/ig-oauth-cross-flow-reconnect_2026-05-25/` | RESOLVED | Reconnect-loop fix shipped as PR #441; the token-corruption half was answered by the host-routing investigation |
 | `investigations/ig-posting-persistent-failure_2026-05-26/` | SUPERSEDED | Storage-corruption theory replaced by the host-routing root cause; its recommendations became plan decision D31 (#732 closed) |
 | `investigations/ig-host-routing_2026-06-02/` | RESOLVED | PRs #462, #476–#479 merged 2026-06-02 → 06-04; issue #468 closed |
+| `2026-08-11-f1-ownership-inventory/` | COMPLETED as legacy → SUPERSEDED | F.1's fail-closed interface was built as `src/repositories/tenant_scope.py` (#846) and deleted with the legacy repositories (#1316); the contract lives on in `unit_of_work.py` (a tenant id is required to construct one) and `tenant_resolution.py` (F.3); the 14-table inventory is `tests/scripts/legacy_inventory.py`. Moved 2026-09-20 |
+| `2026-08-14-f2-increment-split/` | COMPLETED | All nine segments landed as migrations 052–060 (#806), replayed in CI by the lineage lane and the advertised-DDL gate, applied to production 2026-08-26. Moved 2026-09-20 |
+| `2026-08-17-m1-transform-spec/` | ABANDONED | Owner ruling 2026-09-02: legacy data is not migrated, the target is greenfield (`00` FC-7 §6). Its inputs are gone — the legacy models (#1316) and the `legacy` schema (079, 2026-09-19); the lineage survives only as the `archive.*_pre_cutover_20260917` snapshots (90 days). Moved 2026-09-20 |
+| `2026-08-17-m2-rehearsal-spec/` | SUPERSEDED (executed differently than written) | 3a–3d by hand (2026-08-24/26), 3e abandoned, 3f/3g/step 8 as migrations 078–080 rehearsed on a PITR branch under `operations/legacy-window-close.md`; 080 is the partial stand-down (F8 (a)). The record is `planning/2026-09-16-legacy-tear-out/RUN_LOG.md`. Moved 2026-09-20 |
+| `2026-08-17-m3-parity-bar-mapping/` | SUPERSEDED | The parity bar was retired as a window precondition (`00` FC-7 §8, 2026-09-02); its two forks were ruled 2026-08-21 (`src/services/target/prompts.py`: the tap IS `approve`; parity is out); every bar item is served on a target surface today; chat-inbound typed commands (#854) remain owed. Moved 2026-09-20 |
+| `investigations/2026-09-04-signin-bounce-and-instagram-redirect/` | RESOLVED | `OAUTH_REDIRECT_BASE_URL` restored and the Meta redirect-URI list corrected (2026-09-04); the entry-page fix #1236. Unbuilt: `/health`'s OAuth-presence booleans (#1229). Moved 2026-09-20 |
+| `investigations/2026-09-06-empty-library-after-first-sync/` | RESOLVED | The full-depth Drive walk (#1256, 070) and the posting mix keyed on the connected folder (#1262, 071), re-ruled 2026-09-08. Moved 2026-09-20 |
 | `2026-03-31-meta-app-launch-design.md` | COMPLETED as legacy → SUPERSEDED | Instagram-Login OAuth shipped in the legacy tier; FC-4 rules out Facebook Login; target rebuild is `src/services/target/ig_login_oauth.py` (#863). App Review: #410, `../operations/meta-app-review.md` |
 | `2026-05-18-instagram-credential-refactor.md` | COMPLETED as legacy → SUPERSEDED | Migrations 035–041 (#468 closed; parent #380 still open). Target tier: `ig_accounts` / `oauth_credentials` |
 | `per-request-session-isolation.md` | COMPLETED (different mechanism) | `concurrent_updates(8)` + ContextVar sessions in PR #573; async unit of work is the target tier's `unit_of_work.py` (L.0) |

@@ -136,8 +136,11 @@ the pre-deploy migration step, the `/health` check and the restart policy.
 
 ### Configure Environment Variables
 
-The full table, by service, is `cloud-deployment.md` §3; `.env.example` is the
-reference. The core:
+The table, by service, is `cloud-deployment.md` §3; `.env.example` names every
+variable the tree reads and is the reference. A second environment (staging, a
+preview) must also set `TARGET_TELEGRAM_WEBHOOK_URL` — its default is
+production's `https://api.storydump.app/webhooks/telegram` — and use its own
+bot: one bot holds one webhook. The core:
 
 ```bash
 # BOTH services
@@ -321,7 +324,7 @@ behind: a posted story locks its media for that account for the workspace's
 repost period (30 days by default; `posted_effects`,
 `src/services/target/intent_ledger.py:184`), **Skip** locks it for the skip
 period (45 days by default), **Reject** locks it for good
-(`src/services/target/command_executors.py:461-515`, `src/config/defaults.py:28-29`).
+(`src/services/target/command_executors.py:461-515`, `src/config/defaults.py:21-22`).
 
 ---
 

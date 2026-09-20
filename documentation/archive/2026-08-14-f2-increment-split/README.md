@@ -1,6 +1,8 @@
 # F.2 — the increment split, reshaped under Fork 1 ruling (a)
 
-**Status:** ratified — and **complete (2026-08-19)**: all nine segments landed as migrations 052–060 (#806, PRs #813/#822/#828/#844–#851) and were applied to production on 2026-08-26. Retained as the record of the split; the tracker's title was never updated past 2 of 9. Fork 1 locked to option (a) on
+> **Archived 2026-09-20 — COMPLETED.** All nine segments landed as migrations 052–060 (#806; PRs #813/#822/#828/#844–#851), replayed in CI by `tests/scripts/test_lineage_lane.py` and `test_advertised_ddl_replay.py` (both halves of §6 wired), and applied to production on 2026-08-26 (the hand-run M.3 step 3d). `scripts/tenancy_gate.py` still has no operator door (§7) and no longer needs one: the window is closed (079/080, 2026-09-19). See [`README.md`](../README.md) for the index.
+
+**Original status:** ratified — and **complete (2026-08-19)**: all nine segments landed as migrations 052–060 (#806, PRs #813/#822/#828/#844–#851) and were applied to production on 2026-08-26. Retained as the record of the split; the tracker's title was never updated past 2 of 9. Fork 1 locked to option (a) on
 [#806](https://github.com/chrisrogers37/storydump/issues/806#issuecomment-5287041579).
 This document supersedes the split filed in a #746 comment.
 
@@ -36,7 +38,7 @@ no other file satisfies that index. So the order below is binding, not advisory.
 
 ## 2. The split
 
-257 statements, cut into contiguous segments. `052` has shipped; the rest are in order.
+257 statements, cut into contiguous segments. `052` shipped first; the other eight followed in order as 053–060 (2026-08-19).
 
 | Increment | Stream | Stmts | Tables | Contents |
 |---|---|---|---|---|

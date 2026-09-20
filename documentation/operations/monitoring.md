@@ -41,6 +41,20 @@ railway logs --service storydump
 configuration, the Railway login and link, and the migration ledger against the
 checkout — the first thing to run on a laptop that cannot reach anything.
 
+The three surfaces, by key (`storydump health --json` prints them verbatim):
+
+| Surface | Keys | Source |
+|---|---|---|
+| `/health` | `status`, `version`, `uptime_seconds`, `target_database` (the variable is set — presence, not liveness), `db_role`, `pool`, `ingress_workers`, `taps`, `webhook`, `webhook_live` | `src/api/app.py` |
+| `/health/scheduling` | `stalled`, `accounts_active`, `max_lag_seconds`, `worker{succeeded_ever, last_success_age_seconds, overdue_ready, max_overdue_seconds}`, `backpressure` | `src/services/target/scheduling_health.py` |
+| `/health/posting` | `posted_ever`, `last_post_age_seconds`, `intents_ever`, `oldest_intent_age_seconds`, `debited_total`, `ledger_days`, `accounts_active`, `oldest_active_destination_age_seconds` | `src/services/target/posting_health.py` |
+
+The **worker** has a `/health` of its own on `PORT` — the one Railway's probe
+hits on the worker service; it answers 503 only when the clock has stopped
+advancing (`worker-recovery.md` › *The worker's own `/health`*). The API's
+`/health` says nothing about the worker; `/health/scheduling`'s `worker` block
+does.
+
 ### Common Status Indicators
 
 | `storydump deploys` status | Meaning | Action |
@@ -157,7 +171,12 @@ storydump deploys --watch --timeout 900       # both services SUCCESS
 
 `railway redeploy` acts on the **linked** environment and takes no
 `--environment`; another session's `railway login` silently drops the link, so
-check it first (`legacy-window-close.md`, step 0). Every deploy of either
+check it first (`legacy-window-close.md`, step 0). It re-runs whatever Railway
+holds as the service's latest deployment — after a `railway down` that was an
+OLD build (2026-09-19: a commit of 2026-09-03 came back `SUCCESS`), so after a
+`down` push an empty commit to `main` instead, and after any redeploy read the
+commit `storydump deploys` shows and require `main`'s head
+(`legacy-window-close.md`, step 8). Every deploy of either
 service runs the predeploy, `python -m scripts.migration_runner apply`
 (`railway.toml`). Restarting the production worker resumes whatever the ledger
 owes — approved stories publish — so it is a production action and an agent

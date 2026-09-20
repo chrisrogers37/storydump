@@ -1,12 +1,14 @@
 ---
 title: "Legacy tear-out — phase 03: the 3f snapshot migration, and the ratchet's rule for a file outside the advertised stream (PR 3)"
 type: plan
-status: draft
+status: completed
 owner: chris
 created: 2026-09-16
 tags: [plan, legacy-retirement, migrations, data]
 links: [https://github.com/chrisrogers37/storydump/issues/1216, https://github.com/chrisrogers37/storydump/issues/941]
 ---
+
+> **Built 2026-09-18 as #1318 (`3ffa750`); 078 applied in production by the deploy of 17:24 UTC (ledger, phase 03).** The shipped names carry `20260917`, not this text's `20260916` placeholder; no `GRANT` bracket was needed (078's header).
 
 ## Summary
 

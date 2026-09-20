@@ -48,7 +48,7 @@ same way.
 ## Related
 
 - `../00_EPIC.md` — fork F2, locked with this record as evidence.
-- `../01_tokens.md` — step 8 (the storage backend, the extra, `login`).
+- `../01_tokens.md` — step 11 (the storage backend, the extra, `login`).
 
 ## Origin
 

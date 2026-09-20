@@ -29,8 +29,8 @@ table — the one the 001–050 files stamp themselves into, with known gaps; a
 replay still stamps it and the runner never reads it
 (`scripts/migration_runner.py:793`). In production that table rode into
 `legacy` with the rest at the 051 move, is snapshotted as
-`archive.schema_version_pre_cutover_20260917` (078), and is dropped with
-`legacy` by 079 in the owner's window (`legacy-window-close.md`).
+`archive.schema_version_pre_cutover_20260917` (078), and was dropped with
+`legacy` by 079 in the owner's window on 2026-09-19 (`legacy-window-close.md`).
 
 Checksums are SHA256 of the file bytes. An applied file that no longer
 matches its recorded checksum is a hard failure everywhere: fix forward with

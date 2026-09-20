@@ -18,7 +18,7 @@ Telegram on behalf of paying tenants.
 
 ```bash
 python -m src.main                   # Starts the posting scheduler + Telegram bot
-python -m scripts.migration_runner apply --manual <version>   # Applies a gated file: 079 DROPS the legacy schema — the owner runs the window (F7)
+python -m scripts.migration_runner apply --manual <version>   # Applies a gated (runner:manual) file by hand: 079 dropped the legacy schema in the owner's window (2026-09-19); a fresh database still owes both
 storydump approve <story>            # Posts a story to Instagram — the user's decision, never an agent's
 storydump cancel <story>             # Cancels a story: refunds its debit, destroys its upload
 storydump resolve <story> cancel     # Gives up on a story parked for review; its debit is retained
@@ -78,9 +78,10 @@ There is one tier. The design plan and the package names call it the *target*
 tier (`src/services/target/`, `src/models/target/`) because it was built beside
 the tier it replaced. The legacy tier was retired in the tear-out (#1216,
 September 2026); its data survives as the `archive.*_pre_cutover_20260917`
-snapshots (migration 078), and the `legacy` schema itself is dropped by the
-gated 079 in the owner's window
-(`documentation/operations/legacy-window-close.md`).
+snapshots (migration 078), and the `legacy` schema itself was dropped by the
+gated 079 in the owner's window on 2026-09-19
+(`documentation/operations/legacy-window-close.md`); production's ledger
+stands at 080, and only a fresh local database still owes 079 and 080.
 
 Each layer is isolated. Do not violate the boundaries:
 
@@ -167,12 +168,20 @@ pip install -r requirements.txt && pip install -e '.[cli]'
 The repo's `Makefile` targets assume `./venv/`. (`.venv/` is also gitignored, so
 a local one will not be committed, but the Makefile will not find it.)
 
+Then the database: `make create-db init-db` builds the schema on a fresh
+PostgreSQL the way the lineage lane proves it — step 0 (the service roles and
+the DDL door), the by-hand base, then every runner file. It needs `psql` on
+your `PATH` and a `DB_USER` with `CREATEROLE`; `README.md` §3 walks through it,
+and `make validate-env` loads the settings the way every process does. Neither
+the worker nor the database-gated tests run before this.
+
 `src/config/settings.py` requires **no variable** (the tear-out's phase 02;
 #1222): every field has a default, so the web service, the tests and the
 `storydump` CLI load with an empty environment. A process needs what it reads:
 the worker refuses to boot without `TARGET_DATABASE_URL` (exit 2, naming it),
-the API answers 503 on every data route without it, and the CLI imports only
-`src/services/target/vocabulary.py` and needs no variable but its token. Tests
+the API answers 503 on every data route without it, and the CLI imports from
+`src` only `src/services/target/vocabulary.py` (plus the two stdlib-only fleet
+monitors under `scripts/`, for `health`) and needs no variable but its token. Tests
 additionally need `ENCRYPTION_KEY`, a Fernet key. `.env.example` names every
 variable something reads, and a test fails if it names one nothing does.
 
@@ -261,7 +270,7 @@ the two documents use to the registry, not the judgement of what is dangerous.
 ## Testing
 
 ```bash
-pytest                          # full suite (~3,750 tests); pytest.ini turns coverage on
+pytest                          # full suite (~3,700 tests); pytest.ini turns coverage on
 pytest tests/src/services/      # one area
 pytest -m unit                  # only the tests marked `unit`: a small subset, not every database-free test
 pytest --no-cov                 # skip coverage (faster)
@@ -312,9 +321,10 @@ The `Procfile` names the two deployed processes; both run the one tier.
   `preDeployCommand` of every deploy of either service (`railway.toml`), so a
   merged migration is an applied one; `status` is the read-only report. The
   gated files (`-- runner:manual`: 079, 080) are owed by a deploy and never run
-  by it (`documentation/operations/migration-runner.md`).
+  by it (`documentation/operations/migration-runner.md`) — production applied
+  both by hand on 2026-09-19; a fresh database still owes them.
 - **Landing / dashboard:** `npm --prefix landing run dev` → http://localhost:3000;
-  the BFF proxies to `BACKEND_URL`.
+  the BFF proxies to `TARGET_API_URL` (`BACKEND_URL` is the fallback).
 
 Environment variables are per-service in cloud deployment — set them on **both**
 the worker and the API.
@@ -349,6 +359,17 @@ the card, the web Queue and Settings, and the `storydump` write verbs.
 source venv/bin/activate && ruff check . && ruff format --check . && pytest
 ```
 
+CI (`.github/workflows/ci.yml`) runs six jobs on every push and PR: Lint (ruff
+check + format over the whole repository), the FC-2 Telegram ratchet
+(`scripts/telegram_ratchet.py`), Test (Python 3.10 against a PostgreSQL 15
+service with `REQUIRE_TEST_DATABASE=1`, coverage of `src` and `storydump_cli`),
+Security Scan (pip-audit and bandit, both advisory), Front End (`npm test`,
+`npx tsc --noEmit`, `npm run lint` in `landing/`) and Changelog Check. A
+scheduled `schema-drift.yml` compares the live schema with the tree daily.
+`scripts/lint.sh` is the local lint pass; `scripts/pr_ready.sh` answers whether
+a PR is really ready — it catches a check that was never scheduled, which a
+green rollup hides (`documentation/guides/ci-cd-pipeline.md`).
+
 **Always update `CHANGELOG.md`** when opening a PR — CI fails without it (the
 `changelog-check` job of `.github/workflows/ci.yml`; a PR that touches only
 `documentation/`, `.md` files or `.github/` is exempt).
@@ -360,7 +381,9 @@ source venv/bin/activate && ruff check . && ruff format --check . && pytest
 - Full docs: `documentation/README.md`
 - New docs go in `documentation/` subdirectories: `planning/` (plans and
   specs), `guides/` (how-to), `operations/` (runbooks)
-- Bug fixes and patches: dated filenames in `documentation/updates/`
+- Bug fixes and patches: `CHANGELOG.md`; a production incident gets a folder
+  under `documentation/planning/investigations/` (`documentation/updates/` was
+  emptied into `archive/updates/` on 2026-09-18 and no longer exists)
 - A finished, superseded or abandoned document moves to
   `documentation/archive/` with a status banner and a row in
   `documentation/archive/README.md`. `CLAUDE.md`, `AGENTS.md`, `README.md`,
