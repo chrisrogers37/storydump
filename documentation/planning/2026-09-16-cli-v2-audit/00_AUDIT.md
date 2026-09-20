@@ -1,7 +1,7 @@
 ---
 title: "System review of the v2 CLI surface — findings and their fold"
 type: audit
-status: in-progress
+status: completed
 owner: chris
 created: 2026-09-16
 tags: [system, cli, audit]
@@ -43,12 +43,12 @@ state, not attributed to the surface: two `test_egress_floor.py` tests need
 | Map: architecture | done | 32 components, 7 `Unverified` | `system-map.md` (scratch) |
 | Map: code | done | 13 flows, 6 `Unverified` | `code-map.md` (scratch) |
 | Map: data model | done | 15 relations | `data-model-map.md` (scratch) |
-| Security & secrets | done | 0/0/2/8 | `findings-security.md` |
-| Correctness at rest | done | 0/2/9/10 | `findings-correctness.md` |
-| Reliability & operations | done | 0/3/11/11 | `findings-reliability.md` |
+| Security & secrets | done | 0/0/2/8 | `findings-security.md` (scratch, not committed) |
+| Correctness at rest | done | 0/2/9/10 | `findings-correctness.md` (scratch, not committed) |
+| Reliability & operations | done | 0/3/11/11 | `findings-reliability.md` (scratch, not committed) |
 | Test quality | partial — killed by the session rate limit after its ten hand-picked mutants had run (nine SURVIVED; the results were salvaged and each mutant now has a test) | — | `repros/tests-lane/` |
-| Architecture & maintainability | done (re-dispatched after the reset) | 0/2/7/8 | `findings-architecture.md` |
-| Access-path consistency | done (re-dispatched after the reset) | 0/0/5/3 + 16 appropriate differences | `findings-access-path.md` |
+| Architecture & maintainability | done (re-dispatched after the reset) | 0/2/7/8 | `findings-architecture.md` (scratch, not committed) |
+| Access-path consistency | done (re-dispatched after the reset) | 0/0/5/3 + 16 appropriate differences | `findings-access-path.md` (scratch, not committed) |
 
 The maps corrected the intake brief twice (the exit-code contract; the env
 variable names) — the brief was written from memory and the maps from source,
@@ -255,6 +255,10 @@ admin squash. The ledger of that run is below.
   The evidence for the fold is therefore the two lens rounds, the 193
   mutations on `cda31a2`, and CI — not an independent read. The owner decides
   whether that is enough to merge or whether the re-verify runs first.
+- Merged 2026-09-16 as #1314 (`53ca6d6`) on the two lens rounds, the 193
+  mutations and CI; no independent re-verify (the owner's call).
+- The sixteen findings still queued below are tracked as one issue, #1330
+  (2026-09-20), until each gets its own.
 
 ## Owner queue
 
@@ -262,4 +266,4 @@ admin squash. The ledger of that run is below.
 - S-M2 a workspace-scoped person token — a feature.
 - S-L3 `posture` for service identities; S-L4 a rate limit on 401s (edge).
 - R-M6 / R-L1 index changes (measure with EXPLAIN on the replayed schema first); D-2 the envelope CHECK.
-- The tear-out's documentation phase: every live doc that still describes the legacy tables (the population above).
+- The tear-out's documentation phase: every live doc that still describes the legacy tables (the population above) — done in the tear-out's phase 05, #1322 (2026-09-19).

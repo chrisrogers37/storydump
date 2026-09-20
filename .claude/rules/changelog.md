@@ -7,7 +7,7 @@ paths:
 
 **Format**: [Keep a Changelog](https://keepachangelog.com/) with [Semantic Versioning](https://semver.org/).
 
-**Every PR** must include an entry under `## [Unreleased]`.
+**Every PR that touches code or config** must include an entry under `## [Unreleased]` — CI's `changelog-check` (`.github/workflows/ci.yml`) fails without it; a docs-only PR (`documentation/`, `*.md`, `.github/`) is exempt.
 
 ## Version Bump Rules
 
@@ -21,14 +21,20 @@ paths:
 ## [Unreleased]
 
 ### Added
-- **Feature Name** - Brief description of what was added
-  - Implementation detail if needed
+
+- **A sentence naming the change, with its refs (#NNNN).** Prose in the same bullet: what it does, why, what a reader must know.
 
 ### Fixed
-- **Bug Name** - What was broken and how it was fixed
+
+- **What was broken, named as the behaviour (#NNNN).** How it was fixed, in the same bullet.
 ```
 
-Categories: `Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, `Security`.
+One bullet per change: a bold sentence ending in a period, the issue or PR refs
+inside the bold, then prose — no ` - ` separator and no nested bullets.
+
+Categories: `Added`, `Changed`, `Removed`, `Fixed`, `Security` (and `Deprecated`
+when it applies); `Documentation` and `Tests` are in use for changes with no
+user-facing behaviour.
 
 ## Best Practices
 

@@ -64,8 +64,10 @@ Telegram.
 
 ## Key Database Tables
 
-Twenty-six tables in `public`, all under row-level security keyed on the
-workspace. The ones a conversation usually needs:
+Twenty-six tables in `public`, every one under row-level security; nineteen
+are keyed on the workspace, the rest are the user plane, the machinery counters
+and reference data (`.claude/rules/database.md` › Tenancy). The ones a
+conversation usually needs:
 
 | Table | Purpose |
 |-------|---------|
@@ -137,7 +139,7 @@ names every one something reads.
 - `storydump tokens revoke <id>`
 - `storydump webhook register` / `storydump webhook deregister` (the production bot's webhook)
 - `python -m src.main` (starts the bot)
-- `python -m scripts.migration_runner apply --manual <version>` (applies a gated file; 079 drops the legacy schema — the owner's window)
+- `python -m scripts.migration_runner apply --manual <version>` (applies a `-- runner:manual` file by name — 079 and 080, the legacy drop and the stand-down, were applied by the owner on 2026-09-19; any future manual file is the owner's the same way)
 
 The canonical list is the safety block in `CLAUDE.md`; this copy is pinned to
 it by `tests/test_agent_docs.py`.
@@ -164,9 +166,11 @@ a reject is final for that story. Ask before suggesting any of them.
   are real; the message is not delivered.
 - Some vocabulary commands have no executor yet and answer 501
   (`commands.UNBUILT`); two job kinds have none (`work_loop.UNBUILT_KINDS`).
-- The `legacy` schema is dropped by the gated migration 079, in the owner's
-  window (`documentation/operations/legacy-window-close.md`). An agent does not
-  apply it.
+- The `legacy` schema is gone: the owner ran the window on 2026-09-19
+  (`documentation/operations/legacy-window-close.md` — 079 dropped it, 080
+  stood the window down; both `applied` in the ledger). Its data survives only
+  as the sixteen `archive.*_pre_cutover_20260917` snapshots, which no code
+  reads. An agent never applies a `-- runner:manual` file.
 
 ---
 

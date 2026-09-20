@@ -1,12 +1,14 @@
 ---
 title: "Legacy tear-out — phase 05: the documentation's end state (PR 5)"
 type: plan
-status: draft
+status: completed
 owner: chris
 created: 2026-09-16
 tags: [plan, legacy-retirement, docs]
 links: [https://github.com/chrisrogers37/storydump/issues/1216, https://github.com/chrisrogers37/storydump/issues/1205]
 ---
+
+> **Built 2026-09-19 as #1322 (`3c8efd4`); the residue #1324 and the docs PR #1325 followed on 2026-09-20.** Every deliverable is on `main`; `tests/test_agent_docs.py` pins the end state.
 
 ## Summary
 
@@ -22,7 +24,7 @@ population; this PR finishes it.
   documents still naming `posting_queue`, `chat_settings` or `api_tokens`:
   `.claude/rules/database.md` (4 + 2 + 1 mentions), `.claude/PROJECT_CONTEXT.md` (6 + 1),
   `.claude/QUICK_REFERENCE.md` (3 + 1), `.claude/commands/telegram-status.md`,
-  `documentation/operations/worker-recovery.md`, `documentation/SECURITY_REVIEW.md`,
+  `documentation/operations/worker-recovery.md`, `documentation/SECURITY_REVIEW.md` (moved by this phase to `documentation/archive/2026-01-11-security-review.md`),
   `documentation/ROADMAP.md`, `documentation/operations/migration-runner.md`,
   `documentation/guides/instagram-login-setup.md`, and the marked sections of
   `documentation/operations/backup-restore.md`; `documentation/guides/cloud-deployment.md` still
@@ -82,7 +84,7 @@ The epic's goal condition (5).
    per F9 and the date they become eligible.
 6. **The plans**: `04-execution-sequence.md:97` updated to "3f applied <date> (078), 3g and step
    8 run by the owner <date> (079/080), gate green"; the README's Live status position moved to
-   the retirement; `2026-08-17-m2-rehearsal-spec/README.md:3-7`'s status line (the rehearsal ran
+   the retirement; `2026-08-17-m2-rehearsal-spec/README.md:3-7`'s status line (now under `documentation/archive/`) (the rehearsal ran
    for 3g and step 8 on <date>); `00_EPIC.md` of this plan `status: completed` with the
    verification checklist ticked.
 7. **Pins**: `tests/test_agent_docs.py` gains a legacy-name check — no live document under

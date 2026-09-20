@@ -26,7 +26,9 @@ tests/
 ```
 
 The legacy tier's tests went with it (#1216, September 2026); there is no
-`tests/integration/` and no repository layer to mock.
+`tests/integration/` and no repository layer to mock. (An empty
+`tests/integration/` directory holding only `__pycache__` may survive on a
+checkout that predates the deletion — nothing is tracked there.)
 
 ## Two kinds of test
 
@@ -168,7 +170,8 @@ value passes against a query that names the wrong tenant.
 
 ## Mutation batteries (`tests/mutations/`)
 
-One zsh script per plan phase (`cli_v2_03.sh`, `legacy_tear_out_04.sh`). Each
+One zsh script per plan phase or audit (`cli_v2_03.sh`, `legacy_tear_out_04.sh`,
+`cli_v2_audit.sh`, `post_tear_out_residue.sh`). Each
 behaviour the phase pins has ONE named mutation that must make its named test
 FAIL. `check <name> <file> <old> <new> <runner> <selector>` applies the edit
 (exactly one match, else `MUTATION NOT APPLIED`), purges the file's

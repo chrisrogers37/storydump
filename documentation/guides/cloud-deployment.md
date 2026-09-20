@@ -208,6 +208,12 @@ reads. Variables are per service on Railway.
 | `INSTAGRAM_APP_ID`, `INSTAGRAM_APP_SECRET` | The Meta app, for Instagram Login ([`instagram-login-setup.md`](instagram-login-setup.md)) | |
 | `FACEBOOK_APP_SECRET` | Optional. The second secret Meta's signed policy callbacks are verified against (`src/services/target/meta_callbacks.py:116`); set it only if those callbacks are registered under another Meta app | |
 | `SESSION_COOKIE_DOMAIN` | The registrable domain the API and the front end share, so the front end's server side can read the session cookie | `example.com` |
+| `SESSION_COOKIE_SECURE` | Optional, default `true`: the session cookie is HTTPS-only. Only a plain-http laptop setup turns it off | `true` |
+| `TRUSTED_PROXY_HOSTS` | Optional; the proxies whose `X-Forwarded-For` the API believes (private ranges by default). **Never `*`** — it lets a caller choose its own IP and defeats every IP-keyed control (#726) | `10.0.0.0/8,…` |
+| `TARGET_TELEGRAM_WEBHOOK_URL` | Optional; the URL the API registers with Telegram. **The default is production's** `https://api.storydump.app/webhooks/telegram` (`src/services/target/vocabulary.py`), so a staging or preview API that registers a webhook — by hand with `storydump webhook register`, or by autoregistering — must set its own, and needs its own bot: one bot holds one webhook | `https://staging.example.com/webhooks/telegram` |
+| `TARGET_TELEGRAM_WEBHOOK_AUTOREGISTER` | Optional; `0` stops the API registering the webhook at startup even where `RAILWAY_ENVIRONMENT_NAME` is `production` | `0` |
+| `TARGET_TELEGRAM_WEBHOOK_MAX_CONNECTIONS` | Optional, default 10: `setWebhook`'s `max_connections`, the ingress's connection budget (Telegram's own default of 40 is deliberately not used) | `10` |
+| `TARGET_TAP_ADMISSION_PER_MINUTE` | Optional, default 120: commands one workspace may execute from Telegram taps per minute | `120` |
 
 ### The worker
 
@@ -215,7 +221,14 @@ reads. Variables are per service on Railway.
 |---|---|---|
 | `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET` | The transit store. Without all three the worker parks the publish kind by name (`src/worker.py:92-100`) | `dxyz123`, … |
 | `TARGET_USAGE_PRECHECK_ENABLED` | Optional, default off: the advisory read of Meta's publishing quota before a publish | `true` |
+| `TARGET_WORKER_INTERACTIVE_CONCURRENCY`, `TARGET_WORKER_BULK_CONCURRENCY` | Optional, defaults 3 and 2: claim-and-run tasks per lane; the worker refuses a sum the pool cannot fit (`src/worker.py`) | `3`, `2` |
+| `META_GRAPH_VERSION` | Optional; overrides the Graph API version the publish adapter calls (`src/worker.py`) | `v21.0` |
+| `RESEND_API_KEY`, `EMAIL_FROM` | The notification-email sender (`src/services/target/email_sender.py`). Deliberately unset today: outbound email does not send, and the worker logs that no provider is configured | |
 | `WORKER_LOG_LEVEL` | Optional; the API's is `LOG_LEVEL` | `INFO` |
+
+`TARGET_TELEGRAM_API_BASE` (a test double for `api.telegram.org`) is the load
+harness's seam and is refused where `RAILWAY_ENVIRONMENT_NAME` is `production`
+(`src/channels/telegram_transport.py`); it never goes on a service.
 
 Railway sets `PORT` and `RAILWAY_ENVIRONMENT_NAME` itself. The second is
 load-bearing: unless `TARGET_TELEGRAM_WEBHOOK_AUTOREGISTER` says otherwise, the
@@ -225,6 +238,12 @@ the token does not re-point production's webhook.
 
 There is no `DB_*` alternative for a deployed service. The `DB_*` components
 serve the test harness and `make` only.
+
+Two variables must agree on the API's public origin: `OAUTH_REDIRECT_BASE_URL`
+(the base of every OAuth redirect URI registered with Google and Meta) and the
+webhook URL the API registers with Telegram (`TARGET_TELEGRAM_WEBHOOK_URL`, or
+its production default). An environment that is not production sets both, or
+it registers production's URLs.
 
 ### Not variables
 
@@ -357,7 +376,7 @@ GCP; the project is a one-time task for the operator.
 
 Required for publishing: without all three variables the worker parks the publish kind by name.
 
-1. Create account at [cloudinary.com](https://cloudinary.com) (free tier: 25 credits/month)
+1. Create account at [cloudinary.com](https://cloudinary.com)
 2. Get credentials from Dashboard: Cloud Name, API Key, API Secret
 3. Set `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET` on the worker
 
@@ -395,8 +414,12 @@ From a laptop with a token minted under Settings › API tokens:
 
 ### Service Management
 
-- **Restart**: the Railway dashboard, or `railway restart --service <svc>`. A
-  restart does not stop posting; `storydump pause --workspace <ws>` does
+- **Restart**: the Railway dashboard, or `railway redeploy --service <svc>
+  --yes` ([`monitoring.md`](../operations/monitoring.md)). Both re-run the
+  service's *latest* deployment, which after a `railway down` can be an old
+  build — then push to `main` instead and confirm the commit with
+  `storydump deploys`. A restart does not stop posting;
+  `storydump pause --workspace <ws>` does
 - **Logs**: `railway logs --service <svc>` or the dashboard
 - **Variables**: names only, as in Section 3. `railway shell` and `railway run`
   export every production credential into a local process — use them only for
@@ -405,17 +428,12 @@ From a laptop with a token minted under Settings › API tokens:
 - **The `storydump` CLI is a client of the API**, run from a laptop under your
   own token; nothing it does needs a shell on a service
 
-### Cost Estimates
+### Cost
 
-| Service | Tier | Cost |
-|---------|------|------|
-| Neon | Free | $0 (0.5 GB, 190 compute-hours) |
-| Railway | Starter | ~$5-10/month (worker + API) |
-| Cloudinary | Free | $0 (25 credits/month) |
-| Telegram Bot API | Free | $0 |
-| Instagram/Meta API | Free | $0 (rate-limited) |
-| Google Drive API | Free | $0 (quota-limited) |
-| **Total** | | **~$5-10/month** |
+Neon, Railway and Cloudinary each have a free or starter tier and bill by
+usage above it — see their pricing pages, which this guide does not track. The
+Telegram Bot API, the Instagram Graph API and the Google Drive API are free and
+rate- or quota-limited.
 
 ---
 

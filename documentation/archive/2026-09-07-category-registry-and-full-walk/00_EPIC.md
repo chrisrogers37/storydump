@@ -118,7 +118,7 @@ area: sync · scheduler · api · web · docs — effort: M + L + M + M — risk
 - `documentation/planning/2026-08-02-consolidated-design-plan/02-domain-model.md` §2 (`media_items`, `media_sources.config`/`sync_checkpoint` contract, `category_post_case_mix`; `:654-659` states the one-level rule this epic supersedes), §7 (tenant tables, RLS), `03-decision-record.md` (D23; the 2026-09-05 and 2026-09-06 rulings, the latter superseded here), `06-product-lifecycles.md` §3 (media selection; `:45` one level), `07-security-model.md` (§14/§15 as the block-and-manifest recipe; §16 is this epic's block), `05-operational-numbers.md:36` (a lease covers one checkpointed step).
 - `.claude/rules/scheduler.md:12-15` (stale `_pick_category_for_slot`), docstrings `src/services/target/category_mix.py:19-20` and `landing/src/lib/category-mix.ts:4-9`, the marketing guide `landing/src/app/(marketing)/setup/media-organize/page.tsx:32-50` — all restate the one-level rule and are updated in phase 3.
 - #1251 (superseded in part), #1252 (notice timer), #1253 (picker counts), #1248 (shared drives), #1220 (publish leg); the ironclad cycle-1 review on PR #1254.
-- `documentation/planning/investigations/2026-09-06-empty-library-after-first-sync/00_INVESTIGATION.md` (finding 1: nested media never synced).
+- `documentation/archive/investigations/2026-09-06-empty-library-after-first-sync/00_INVESTIGATION.md` (finding 1: nested media never synced).
 
 ## Risks
 

@@ -1,12 +1,14 @@
 ---
 title: "Legacy tear-out — phase 02: retire the legacy settings, the worker variable and the config surfaces (PR 2)"
 type: plan
-status: draft
+status: completed
 owner: chris
 created: 2026-09-16
 tags: [plan, legacy-retirement, config, worker, docs]
 links: [https://github.com/chrisrogers37/storydump/issues/1222, https://github.com/chrisrogers37/storydump/issues/1205]
 ---
+
+> **Built 2026-09-18 as #1319 (`f59fe43`).** Ledger: `RUN_LOG.md`. The four Railway variables were deleted 2026-09-20; `.claude/settings.json`'s rules for the deleted legacy CLI's verbs are still the owner's to replace.
 
 ## Summary
 

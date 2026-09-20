@@ -9,7 +9,7 @@
 - `storydump tokens revoke <id>`
 - `storydump webhook register` / `storydump webhook deregister` (the production bot's webhook)
 - `python -m src.main`
-- `python -m scripts.migration_runner apply --manual <version>` (applies a gated file; 079 drops the legacy schema — the owner's window)
+- `python -m scripts.migration_runner apply --manual <version>` (applies a `-- runner:manual` file by name — 079 and 080, the legacy drop and the stand-down, were applied by the owner on 2026-09-19; any future manual file is the owner's the same way)
 
 The canonical list, with what each command does, is the safety block in
 `CLAUDE.md`; this copy is pinned to it by `tests/test_agent_docs.py`.
@@ -133,4 +133,4 @@ Changed on the web (Settings) or through the command port (`settings_change`,
 
 ## CHANGELOG Reminder
 
-Every PR must update `CHANGELOG.md` under `## [Unreleased]`
+Every PR that touches code or config must update `CHANGELOG.md` under `## [Unreleased]` — CI's `changelog-check` fails without it; a docs-only PR (`documentation/`, `*.md`, `.github/`) is exempt

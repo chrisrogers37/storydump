@@ -1,7 +1,7 @@
 ---
 title: The Telegram tap, built for throughput (epic)
 type: plan
-status: active
+status: completed
 owner: chris
 created: 2026-09-09
 tags: [plan, telegram, ingress, worker, throughput, admission, epic]
@@ -19,6 +19,8 @@ Phase 1 alone satisfies "build for 2 teams today" (`PROJECT_MISSION.md:36`): the
 Hardening: ironclad cycle 1 (2026-09-09, nine lenses) is folded into this body. Its two blockers — taps never delivered, and a worker pool arithmetic that could not close — are resolved in phase 1's Dependencies and in F7.
 
 ## Evidence
+
+*(State on 2026-09-09. The script named below was replaced by `storydump webhook` in #1312, registration became automatic at API startup in #1273 (`src/api/app.py` `_register_webhook`, gated by `TARGET_TELEGRAM_WEBHOOK_AUTOREGISTER`), `ALLOWED_UPDATES` lives in `src/services/target/vocabulary.py`, and the worker numbers below were replaced by phases 3a/3b — the phase docs record the as-built values.)*
 
 The current state, verified 2026-09-09 against the working tree (`main` @ `d5eea5d`; re-verified on `docs/plan-telegram-tap-throughput` after cycle 1):
 
@@ -158,7 +160,7 @@ Ratifier: owner. Status: **locked** (owner, 2026-09-09 — "go with the plan; if
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| The webhook registration is not re-run after phase 1 deploys; taps never arrive | H — the phase ships dead, silently | Re-registration is a phase 1 deploy step and checklist item; `verify` prints `allowed_updates`; `/health` surfaces `pending_update_count`. |
+| The webhook registration is not re-run after phase 1 deploys; taps never arrive | H — the phase ships dead, silently | Re-registration was a phase 1 deploy step; since #1273 the API registers at startup, `storydump webhook status` prints `allowed_updates`, and `/health.webhook_live` surfaces `pending_update_count`. |
 | A tap refused before admission is unanswered until Telegram redelivers — the ~30 s spinner death (#557) | H — the hang the owner forbids | F1 (d): answer "Busy — tap again" within the budget, 200, not admitted; the harness counts pre-admission refusals and measures tap→answer end-to-end including redelivery. |
 | A poisoned update (a `callback_query` without `message`, an unexpected exception) 503s and redelivers forever through the per-bot FIFO | H — every workspace stalls | Only database errors around commit map to 503; everything else is committed as `tap_failed`, logged with `update_id`, alarmed. |
 | A member's tap takes the operator's `review_required → approved` edge | H — an audit edge the member does not hold | `_settle` answers on any state other than `awaiting_approval`, as `mark_posted`'s CTE does. |
@@ -194,7 +196,7 @@ Critical path per F11: (a) 1 → #1220 step 3 → 2 → 3a → 3b, or (b) 1 → 
 
 - The webhook re-registration: `allowed_updates` gains `callback_query` and `max_connections` is set in the same `setWebhook` call, re-run per `documentation/operations/telegram-webhook.md` — a phase 1 deploy step, harmless before phase 1 deploys (the dispatcher names a callback `NOT_A_START` today).
 - #1220 step 3 for the wedge (F11 places it; the epic closes on it).
-- Migration 072 only if F1 locks (b) (`telegram_update` job kind). A leased `(lane, workspace_id)` index on `jobs` (the next free migration number) in 3b, before phase 4.
+- Migration 072 became `ix_outbox_intent` (phase 1); the `telegram_update` kind was never needed (F1 locked (a)+(d)). The leased `(lane, workspace_id)` index on `jobs` landed as 074 (3b).
 
 ### Blocks
 
@@ -218,12 +220,12 @@ Each phase carries its own tests-first list. The epic's own proof is the phase 2
 ## Verification Checklist
 
 - [x] Every fork F1–F12 reads `Status: locked` with a ratifier and the ruling text (owner, 2026-09-09).
-- [ ] Webhook re-registered: `python -m scripts.telegram_webhook verify` shows `allowed_updates` including `callback_query`, `max_connections` = ingress workers × pool, and `pending` draining.
-- [ ] Phase 1 merged: `pytest tests/scripts/test_w4_tap_gate.py` green; in the owner's bound group a tap answers within 2 s, its buttons are gone at once, the outcome line lands, and a second tap answers "Already …"; #1260 and #1040 closed with citing comments.
-- [ ] Phase 3a merged: the status line prints `ready=`, `oldest_age=`, `tg_global_paced=` and `ws_oldest_wait=` per lane; the jobs-lease gate covers the per-lane attempt and deadline budgets; a 429 writes a hold and reschedules, never sleeps.
-- [ ] Phase 2 merged: the harness report is committed under `tests/scripts/load/reports/` with end-to-end answer p95 < 2 s, zero 5xx and a bounded pre-admission refusal count for `taps_1000_across_50_workspaces`; `/health` reports the pool arithmetic, `pending_update_count` and the tap counters.
-- [ ] Phase 3b merged: the startup log prints the lanes and pool; the measured pool peak ≤ `POOL_SIZE_SEAM` with zero `TimeoutError` in the gate; `one_slow_chat` re-run under K.
-- [ ] Closing conjunct: #1220 step 3 merged — a `post` tap in the owner's group posts; until then the `post` answer says publishing is not live (F11).
+- [x] Registration is automatic at API startup (`_register_webhook`, #1273); `storydump webhook status` shows `callback_query` in `allowed_updates` and `max_connections` from `TARGET_TELEGRAM_WEBHOOK_MAX_CONNECTIONS`.
+- [x] Phase 1 merged (#1271, 2026-09-10): `pytest tests/scripts/test_w4_tap_gate.py` green; in the owner's bound group a tap answers within 2 s, its buttons are gone at once, the outcome line lands, and a second tap answers "Already …"; #1260 and #1040 closed with citing comments.
+- [x] Phase 3a merged (#1288): the status line prints `ready=`, `oldest_age=`, `tg_global_paced=` and `ws_oldest_wait=` per lane; the jobs-lease gate covers the per-lane attempt and deadline budgets; a 429 writes a hold and reschedules, never sleeps.
+- [x] Phase 2 merged (#1280, #1287; the report re-read after #1290): the harness report is committed under `tests/scripts/load/reports/` with end-to-end answer p95 < 2 s, zero 5xx and a bounded pre-admission refusal count for `taps_1000_across_50_workspaces`; `/health` reports the pool arithmetic, `pending_update_count` and the tap counters.
+- [x] Phase 3b merged (#1291): the startup log prints the lanes and pool; the measured pool peak ≤ `POOL_SIZE_SEAM` with zero `TimeoutError` in the gate; `one_slow_chat` re-run under K.
+- [x] Closing conjunct: #1220 step 3 merged (#1276, 2026-09-10) — a `post` tap in the owner's group posts; until then the `post` answer says publishing is not live (F11).
 
 ## What NOT To Do
 

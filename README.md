@@ -24,6 +24,8 @@ A hosted, multi-tenant Instagram Story scheduling service with Telegram-based te
 
 There is one tier. The legacy tier was retired in the tear-out (#1216, September 2026); its data survives as the `archive.*_pre_cutover_20260917` snapshots. [`AGENTS.md`](AGENTS.md) carries the architecture and the layer boundaries.
 
+Where it runs: the worker and the API are two Railway services from this repository (`Procfile`, `railway.toml`), the database is Neon PostgreSQL, and the web front end in `landing/` deploys to Vercel — `documentation/guides/cloud-deployment.md`. Python 3.10 or newer (`setup.py`; CI runs 3.10).
+
 ## Local Development Setup
 
 These steps stand up a development environment for working on storydump. They
@@ -93,6 +95,10 @@ The runner replays the whole lineage, so a fresh database also holds the
 replayed `legacy` schema and its empty `archive` snapshots: migrations 079 (the
 drop of `legacy`) and 080 are gated (`-- runner:manual`), so `apply` reports
 them as owed and never runs them. Nothing under `src/` reads either schema.
+Production is past that point — the owner applied 079 and 080 by hand on
+2026-09-19 — so "owed" on a fresh laptop is expected, not a defect.
+`make validate-env` loads the settings the way every process does, and
+`make check-health` asks the deployed API.
 
 ### 4. Run the API and the worker
 
@@ -111,7 +117,8 @@ make run
 ```
 
 The web front end is `npm --prefix landing run dev` (http://localhost:3000); it
-calls the API at `BACKEND_URL` (`landing/.env.local.example`).
+calls the API at `TARGET_API_URL` (`BACKEND_URL` is the fallback when that is
+unset; `landing/.env.local.example`).
 
 ### 5. Connect media and set the schedule on the web
 
@@ -138,7 +145,9 @@ storydump doctor
 
 `storydump --help` lists every verb by section (auth, reads, writes,
 environment); `documentation/operations/reading-the-ledger.md` is the guide.
-Everything goes through the API — the CLI never opens a database.
+Everything goes over HTTP — the storydump API, and for `deploys`, `doctor` and
+`webhook` your own Railway login and Telegram's Bot API; the CLI never opens a
+database.
 
 ## Telegram
 
@@ -180,7 +189,7 @@ that fails to come up is a failure, never a silent skip; [`AGENTS.md`](AGENTS.md
 has the throwaway-server recipe.
 
 ```bash
-# Everything (about 3,750 tests; pytest.ini turns coverage on)
+# Everything (about 3,700 tests; pytest.ini turns coverage on)
 pytest
 
 # One area

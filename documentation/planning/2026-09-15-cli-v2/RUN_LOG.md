@@ -578,4 +578,6 @@ would differ from the CLI's module defaults.
   `filterwarnings = error` when the loop's last reference is dropped mid-run; reproduced on
   `main` at `218c864` with `tests/src/api/test_token_principal.py::TestRequireSession` paired
   with `test_operator_floor_preconditions.py`. Not seen in CI's ordering; a one-line follow-up
-  (close the loop in the asyncio test's fixture) if it ever surfaces there.
+  (close the loop in the asyncio test's fixture) if it ever surfaces there. *(It surfaced in CI on
+  #1314 and was fixed at the root on 2026-09-16: `tests/conftest.py::pytest_sessionstart` sets
+  `asyncio.set_event_loop(None)`.)*

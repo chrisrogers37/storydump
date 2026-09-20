@@ -23,6 +23,8 @@ plan health): six blockers and eleven risks folded, ten forks locked, converged.
 
 ## Evidence
 
+*(State on 2026-09-15. The legacy tier named here — the worker switch, `src/services/core`, the `cli/` package — was deleted 2026-09-15→17 by this plan's phase 03 and the tear-out, #1216.)*
+
 - Nothing deployed runs the legacy tier (the worker on `WORKER_IMPL=target` since 2026-08-24,
   the API since 2026-08-31); `src/main.py` is the only importer of `src/services/core`; the
   legacy CLI (`cli/`, 31 commands, `setup.py:32-34`) is its last consumer.
