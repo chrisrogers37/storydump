@@ -138,15 +138,6 @@ from typing import Any
 
 from sqlalchemy import text
 
-#: The one `posted` row `ck_posted_complete` accepts with NO provider evidence.
-#: Excluded from every posting signal — see the module docstring. Nothing
-#: produces these today (the transform was cancelled, FC-7 §6); the filter
-#: guards what the schema still permits, not a migration that is coming. The
-#: filter LIVES in `fn_health_posting_freshness` (081) since the read became a
-#: door; this spelling is the one the docs and the monitor's tests name, and
-#: the doors gate pins the door's body to it.
-_REAL_POST = "state = 'posted' AND published_via NOT IN ('legacy_backfill', 'dry_run')"
-
 
 async def posting_freshness(executor) -> dict[str, Any]:
     """Has a post LANDED, and how long ago — estate-wide.

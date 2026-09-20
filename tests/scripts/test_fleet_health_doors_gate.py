@@ -30,9 +30,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from src.services.target import backpressure, posting_health, scheduling_health
-from tests.scripts.conftest import MIGRATIONS_DIR
 from tests.scripts.conftest import (
-    _dsn,
     _scratch,
     as_user,
     replay_advertised_stream,
@@ -68,7 +66,6 @@ def world(admin_conn, owner_actor):
             chain = seed_workspace_chain(conn, "fleet")
             ws, iga, media = chain["ws"], chain["iga"], chain["media"]
             with conn.cursor() as cur:
-                cur.execute("SET app.actor_kind = 'migration'")
                 cur.execute(
                     "INSERT INTO post_intents (workspace_id, ig_account_id,"
                     " media_item_id, provider_account_ref, approval_mode,"
@@ -109,9 +106,11 @@ def world(admin_conn, owner_actor):
         yield {
             "ingress": as_user(db, "svc_ingress"),
             "worker": as_user(db, "svc_worker"),
-            # the suite's superuser: BYPASSRLS like the owner login production
-            # connected as before the switch — the control arm
-            "bypass": _dsn(db.rsplit("/", 1)[-1]),
+            # The database-owner actor: the login production still connects as,
+            # which owns the tables (so reads them past the policies) and holds
+            # EXECUTE on the doors only through its memberships — the path the
+            # deploy of 081 depends on BEFORE any switch, and the control arm.
+            "owner": as_user(db, owner_actor),
         }
     finally:
         gen.close()
@@ -154,35 +153,46 @@ async def _worker_signal(dsn: str) -> dict:
         await engine.dispose()
 
 
+_TABLES = ("post_intents", "ig_accounts", "daily_post_counts", "jobs", "channel_outbox")
+
+
 async def _plain_counts(dsn: str) -> dict:
     engine = create_async_engine(_async_url(dsn))
     try:
         async with engine.connect() as c:
             return {
                 t: (await c.execute(text(f"SELECT count(*) FROM {t}"))).scalar()
-                for t in (
-                    "post_intents",
-                    "ig_accounts",
-                    "daily_post_counts",
-                    "channel_outbox",
-                )
+                for t in _TABLES
             }
+    finally:
+        await engine.dispose()
+
+
+async def _door_source(dsn: str) -> str:
+    engine = create_async_engine(_async_url(dsn))
+    try:
+        async with engine.connect() as c:
+            return (
+                await c.execute(
+                    text(
+                        "SELECT prosrc FROM pg_proc"
+                        " WHERE proname = 'fn_health_posting_freshness'"
+                    )
+                )
+            ).scalar()
     finally:
         await engine.dispose()
 
 
 def test_the_plain_reads_are_hidden_from_the_ingress_login(world):
     """The vacuity guard: if `svc_ingress` could read the tables directly the
-    doors would prove nothing. It cannot — every one is policy-covered and no
-    tenant is set."""
-    assert _run(_plain_counts(world["ingress"])) == {
-        "post_intents": 0,
-        "ig_accounts": 0,
-        "daily_post_counts": 0,
-        "channel_outbox": 0,
-    }
-    seen = _run(_plain_counts(world["bypass"]))
+    doors would prove nothing. It cannot — every table a door reads is
+    policy-covered and no tenant is set (the seeded job carries a workspace,
+    so `p_jobs` hides it too). The owner sees the estate."""
+    assert _run(_plain_counts(world["ingress"])) == {t: 0 for t in _TABLES}
+    seen = _run(_plain_counts(world["owner"]))
     assert seen["post_intents"] == 2 and seen["ig_accounts"] == 1
+    assert seen["jobs"] == 1 and seen["channel_outbox"] == 1
 
 
 def test_the_posting_surfaces_see_the_estate_as_svc_ingress(world):
@@ -212,35 +222,37 @@ def test_the_worker_login_reads_the_backpressure_signal_too(world):
     assert got["ws_oldest_wait"] is not None
 
 
-def test_the_owner_login_and_the_ingress_login_agree(world):
-    """The control: what the doors answer is what a bypassing read answers."""
-    ingress = _run(_surfaces(world["ingress"]))
-    bypass = _run(_surfaces(world["bypass"]))
-
-    # The COUNTS, not the ages: two reads a few milliseconds apart legitimately
-    # disagree on an age by a tick, and an age is not what the door could lie about.
-    def counts(got: dict) -> dict:
-        return {
-            "posted_ever": got["posting"]["posted_ever"],
-            "intents_ever": got["posting"]["intents_ever"],
-            "attempts": got["attempts"],
-            "accounts_active": got["destinations"]["accounts_active"],
-            "stalled": got["lag"]["stalled"],
-            "lag_accounts": got["lag"]["accounts_active"],
-            "ready": {k: v["ready"] for k, v in got["pressure"]["lanes"].items()},
-            "outbox_pending": got["pressure"]["outbox_pending"],
-        }
-
-    assert counts(ingress) == counts(bypass)
+def test_the_doors_answer_what_a_direct_read_by_the_owner_answers(world):
+    """The control: the counts the doors give `svc_ingress` are the counts the
+    owner reads straight off the tables — the doors add reach, never a
+    different answer. (Counts, not ages: an age ticks between two reads.)"""
+    doors = _run(_surfaces(world["ingress"]))
+    direct = _run(_plain_counts(world["owner"]))
+    assert doors["posting"]["intents_ever"] == direct["post_intents"]
+    assert doors["destinations"]["accounts_active"] == direct["ig_accounts"]
+    assert doors["lag"]["accounts_active"] == direct["ig_accounts"]
+    assert doors["attempts"]["ledger_days"] == direct["daily_post_counts"]
+    assert doors["pressure"]["outbox_pending"] == direct["channel_outbox"]
+    ready = sum(lane["ready"] for lane in doors["pressure"]["lanes"].values())
+    assert ready == direct["jobs"]
 
 
-def test_the_door_filters_landings_the_way_the_module_says():
-    """`posting_health._REAL_POST` is the spelling the docs and the monitor's
-    tests name; the filter itself lives in the door's body since 081. The
-    two must not drift: a `posted` row with no provider evidence is excluded
-    by exactly that predicate, and nowhere else."""
-    ddl = (MIGRATIONS_DIR / "081_fleet_health_doors.sql").read_text()
-    body = ddl.split("CREATE FUNCTION fn_health_posting_freshness()", 1)[1].split(
-        "$$;", 1
-    )[0]
-    assert body.count(posting_health._REAL_POST) == 2
+def test_the_owner_login_executes_the_doors_it_deploys(world):
+    """Production still connects as the owner; 081 lands under that login and
+    the consumers call the doors unconditionally. The owner holds EXECUTE only
+    through its memberships (the bootstrap's grants) — proved here on the
+    owner actor, not on a superuser."""
+    got = _run(_surfaces(world["owner"]))
+    assert got["posting"]["posted_ever"] == 1
+    assert got["destinations"]["accounts_active"] == 1
+
+
+def test_the_live_door_filters_landings_as_the_monitor_documents(world):
+    """The one `posted` row `ck_posted_complete` accepts with no provider
+    evidence (`legacy_backfill`) and a dry run are excluded from every posting
+    signal — the filter the monitor's pair-decoupling guard names as its
+    precedent. It lives in the door's body, read here from the LIVE function
+    in the replayed world rather than from the migration file: a later
+    DROP+CREATE with another filter would pass a file pin and fail this one."""
+    src = _run(_door_source(world["owner"]))
+    assert src.count("published_via NOT IN ('legacy_backfill', 'dry_run')") == 2

@@ -1247,8 +1247,8 @@ CREATE INDEX ix_service_tokens_user ON service_tokens (user_id) WHERE user_id IS
 **Why:** `/health/scheduling` and `/health/posting` are the surfaces the fleet monitors poll, and
 each counts across every workspace — stalled cursors and active destinations, landings and the
 debited cap ledger, the ready lanes and the pending outbox. Their reads went at the tenant tables
-with no tenant set, which worked only because the owner login production connected as bypasses
-row-level security; both modules said so and named #751 as the place a door would have to close
+with no tenant set, which worked only because the login production connects as — the database
+owner — bypasses row-level security; both modules said so and named #751 as the place a door would have to close
 it. The first switch of the API to `svc_ingress` (2026-09-20) proved them right: every
 policy-covered table read empty, `/health/posting` answered *never-posted* for an estate with 104
 landings, `/health/scheduling` *no-signal* for two active accounts, and the monitors — built on the

@@ -995,23 +995,6 @@ class TestDoorsAreExercisedAndExclusive:
                 f" expected exactly {sorted(allowed)}"
             )
 
-    def test_the_health_doors_answer_as_their_logins_and_refuse_the_other(self, target):
-        """081's seven doors run as the login(s) they are granted to and are
-        refused, by name, to the login they are not — the API's four are not
-        the worker's, and nothing here is executable by PUBLIC."""
-        health = {k: v for k, v in DOORS.items() if k.startswith("fn_health_")}
-        assert len(health) == 7
-        for door, (permitted, call) in health.items():
-            allowed = {permitted} if isinstance(permitted, str) else set(permitted)
-            for login in ("svc_ingress", "svc_worker"):
-                dsn = target["ingress" if login == "svc_ingress" else "worker"]
-                if login in allowed:
-                    rows = _exec(dsn, call, fetch=True)
-                    assert rows is not None, f"{door} as {login} answered nothing"
-                else:
-                    with pytest.raises(psycopg2.errors.InsufficientPrivilege):
-                        _exec(dsn, call, fetch=True)
-
 
 class TestDirectPathsAreShut:
     """The grant matrix gives the logins no DELETE anywhere — asserted as a

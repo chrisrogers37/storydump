@@ -32,9 +32,11 @@
 --
 -- Adoption evidence + post-apply verification. Catalog-only: has_*_privilege probes RAISE when their
 -- role is absent and the runner treats a raising probe as a hard failure. Four reads, one per
--- structural thing this file does.
--- runner:postcondition SELECT count(*) = 7 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace JOIN pg_roles r ON r.oid = p.proowner WHERE n.nspname = 'public' AND p.proname LIKE 'fn\_health\_%' AND r.rolname = 'svc_maintenance' AND p.prosecdef
--- runner:postcondition SELECT count(*) = 10 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace, aclexplode(p.proacl) a JOIN pg_roles g ON g.oid = a.grantee WHERE n.nspname = 'public' AND p.proname LIKE 'fn\_health\_%' AND a.privilege_type = 'EXECUTE' AND g.rolname IN ('svc_ingress', 'svc_worker')
+-- structural thing this file does — the seven doors by NAME (a later fn_health_* door must not flip
+-- this file's probe: an applied file is immutable) and the EXECUTE rows as a floor a later grant
+-- may raise.
+-- runner:postcondition SELECT count(*) = 7 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace JOIN pg_roles r ON r.oid = p.proowner WHERE n.nspname = 'public' AND p.proname IN ('fn_health_posting_freshness', 'fn_health_publish_attempts', 'fn_health_destinations', 'fn_health_scheduling_lag', 'fn_health_ready_lanes', 'fn_health_outbox_pending', 'fn_health_oldest_tenant_wait') AND r.rolname = 'svc_maintenance' AND p.prosecdef
+-- runner:postcondition SELECT count(*) >= 10 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace, aclexplode(p.proacl) a JOIN pg_roles g ON g.oid = a.grantee WHERE n.nspname = 'public' AND p.proname IN ('fn_health_posting_freshness', 'fn_health_publish_attempts', 'fn_health_destinations', 'fn_health_scheduling_lag', 'fn_health_ready_lanes', 'fn_health_outbox_pending', 'fn_health_oldest_tenant_wait') AND a.privilege_type = 'EXECUTE' AND g.rolname IN ('svc_ingress', 'svc_worker')
 -- runner:postcondition SELECT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = 'public' AND tablename = 'ig_accounts' AND policyname = 'p_maint_accts')
 -- runner:postcondition SELECT NOT EXISTS (SELECT 1 FROM pg_namespace n, aclexplode(n.nspacl) a JOIN pg_roles r ON r.oid = a.grantee WHERE n.nspname = 'public' AND r.rolname = 'svc_maintenance' AND a.privilege_type = 'CREATE')
 
