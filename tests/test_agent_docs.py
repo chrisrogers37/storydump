@@ -294,6 +294,7 @@ def test_no_other_file_carries_an_unpinned_never_run_list():
 
 #: Where a page is LIVE — read as a description of the system that exists.
 LIVE_ROOTS = (
+    "PROJECT_MISSION.md",
     "CLAUDE.md",
     "AGENTS.md",
     "README.md",
