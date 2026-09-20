@@ -4,6 +4,8 @@
 other's lookup:
 
 - ``inv-<token>``  resolves ONLY against ``workspace_invitations.token_hash``
+  (designed here; not registered by `telegram_dispatch.build_router` — an
+  invitation is accepted on the web, #1172)
 - ``link-<state>`` resolves ONLY against ``oauth_states`` rows with
   ``purpose='link', provider='telegram'``
 

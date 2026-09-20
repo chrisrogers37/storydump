@@ -44,6 +44,13 @@ TELEGRAM_TOKEN_PATTERN = re.compile(r"(?<![\w-])(?:bot)?\d{5,}:[A-Za-z0-9_-]{20,
 PIPE_WIDTH = 200
 
 
+#: The keys of `/health`'s pool block, as `PoolWatch.snapshot()` emits them
+#: (`src/services/target/unit_of_work.py`); a test binds the two, because the
+#: first spelling here (`in_use`, `peak`) matched nothing the API sent and
+#: rendered blank cells that looked like a quiet pool.
+POOL_FACTS = ("size", "checked_out", "checked_out_peak")
+
+
 def redact(text: str) -> str:
     """*text* with every token, database URL and webhook secret replaced."""
     text = TOKEN_PATTERN.sub("sdt_…", text)
@@ -639,7 +646,7 @@ def _render_health(console: Console, data: Any) -> None:
             part
             for part in (
                 _facts(api, "version", "db_role", "uptime_seconds", "ingress_workers"),
-                _facts(pool, "size", "in_use", "peak"),
+                _facts(pool, *POOL_FACTS),
                 _facts(api.get("taps"), "executed", "replayed", "answer_failed"),
                 f"webhook {_cell(webhook.get('bot'))} {_cell(webhook.get('ok'))}"
                 if webhook

@@ -51,7 +51,7 @@ Those are counted separately below rather than folded in.
 
     python -m scripts.fork_e_lock_cost
 
-Package-imported like ``m1_preflight``, so ``python scripts/fork_e_lock_cost.py``
+Package-imported (``scripts`` is a package), so ``python scripts/fork_e_lock_cost.py``
 does NOT work from a bare shell — a direct path invocation puts ``scripts/`` on
 ``sys.path`` rather than the repo root. Stated because the obvious invocation is
 the one that fails.

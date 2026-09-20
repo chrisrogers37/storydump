@@ -423,7 +423,7 @@ async def approve(session, command: Command) -> CommandResult:
         raise CommandRefused(
             "not_connected",
             "Instagram is not connected for this account — connect it in"
-            " Settings › Integrations, or post by hand and use mark_posted",
+            " Settings › Accounts, or post by hand and use mark_posted",
         )
     await _flip(session, str(intent["id"]), "approved")
     await jobs.enqueue(
@@ -700,7 +700,7 @@ async def resolve_review(session, command: Command) -> CommandResult:
         raise CommandRefused(
             "not_connected",
             "Instagram is not connected for this account — connect it in"
-            " Settings › Integrations, or post by hand",
+            " Settings › Accounts, or post by hand",
         )
     if op is not None and op["state"] in ("ambiguous", "permitted"):
         if command.args.get("verdict") != NOT_POSTED:

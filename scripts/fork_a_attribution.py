@@ -53,7 +53,7 @@ disagreement is itself informative.
 
     python -m scripts.fork_a_attribution
 
-Package-imported like ``m1_preflight``, so ``python scripts/fork_a_attribution.py``
+Package-imported (``scripts`` is a package), so ``python scripts/fork_a_attribution.py``
 does NOT work from a bare shell — a direct path invocation puts ``scripts/`` on
 ``sys.path`` rather than the repo root.
 

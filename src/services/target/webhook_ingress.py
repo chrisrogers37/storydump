@@ -119,7 +119,7 @@ def verify_secret_token(presented: Optional[str], expected: Optional[str]) -> bo
     `hmac.compare_digest`, not `==`: a short-circuiting comparison leaks the
     length of the matching prefix through timing. An absent expected value is
     a misconfiguration and refuses everything rather than accepting everything
-    — the direction matters, and the legacy adapter already gets this right.
+    — the direction matters.
     """
     if not expected or not presented:
         return False

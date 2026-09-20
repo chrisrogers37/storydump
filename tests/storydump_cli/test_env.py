@@ -46,7 +46,7 @@ HEALTH = {
     "uptime_seconds": 120,
     "target_database": True,
     "db_role": "svc_ingress",
-    "pool": {"size": 10, "in_use": 1, "peak": 3},
+    "pool": {"size": 10, "checked_out": 1, "checked_out_peak": 3},
     "ingress_workers": 1,
     "taps": {"executed": 12, "replayed": 1, "answer_failed": 0},
     "webhook": {"ok": True, "bot": "storydump_app_bot", "url": "https://api/x"},
@@ -1227,3 +1227,23 @@ def test_doctor_reads_a_bad_config_file_as_wrong(tmp_path):
     checks = checks_of(one_envelope(result))
     assert checks["config"]["state"] == "wrong"
     assert result.exit_code != EXIT_OK
+
+
+def test_the_health_renderer_reads_the_pools_real_keys(tmp_path):
+    """`/health`'s pool block is `PoolWatch.snapshot()` — `size`, `checked_out`,
+    `checked_out_peak` (`src/services/target/unit_of_work.py`). The renderer
+    once read `in_use` and `peak`, keys the API never emits, and the fixture
+    above spelled them the renderer's way, so nothing caught the blank cells."""
+    from src.services.target.unit_of_work import PoolWatch
+    from storydump_cli.output import POOL_FACTS
+
+    class _NoEngine:
+        sync_engine = None
+
+    emitted = set(PoolWatch(_NoEngine()).snapshot())
+    assert set(POOL_FACTS) <= emitted, (
+        f"the renderer reads {set(POOL_FACTS) - emitted} — the API emits {sorted(emitted)}"
+    )
+    rt = env_runtime(tmp_path, health_api())
+    result = run(rt, "health")
+    assert "checked_out 1" in result.output and "checked_out_peak 3" in result.output

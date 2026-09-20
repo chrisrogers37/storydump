@@ -70,7 +70,7 @@ test-integration: ## Run integration tests only
 
 test-quick: ## Run tests without coverage (faster)
 	@echo "$(GREEN)Running tests (no coverage)...$(NC)"
-	./venv/bin/pytest -v
+	./venv/bin/pytest -v --no-cov
 
 test-failed: ## Re-run only failed tests
 	@echo "$(GREEN)Re-running failed tests...$(NC)"

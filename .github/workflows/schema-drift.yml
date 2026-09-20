@@ -10,7 +10,8 @@
 # deploy, so prod-versus-repo is legitimately red for every migration PR from
 # merge until deploy — red would be this check's NORMAL state, and a gate whose
 # normal state is red gets weakened by whoever hits it first. The blocking
-# version belongs at deploy time (`railway.toml`'s dormant `preDeployCommand`),
+# version is at deploy time (`railway.toml`'s `preDeployCommand` runs the migration runner
+# on every deploy of either service),
 # which is an operator decision, not a CI one.
 #
 # It reads live schema, never the migration ledger. The ledger read perfectly
