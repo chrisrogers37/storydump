@@ -36,6 +36,7 @@ check() {  # name file old new test-selector
   # BASELINE first: a test that is red on the clean tree cannot kill anything, and a battery that
   # counted it as a kill once (the residue's own hint test, structural lens finding 2) is why.
   eval "$UNIT $sel" > /tmp/claude/mut.log 2>&1; local base=$?
+  if grep -qE '/ 0 selected|no tests ran' /tmp/claude/mut.log; then echo "NO TEST SELECTED (bad): $name  [$(grep -E '^=+ .*(selected|no tests ran)' /tmp/claude/mut.log | tail -1)]"; return; fi
   if [ $base -ne 0 ]; then echo "BASELINE RED (bad): $name  [$(grep -E '^=+ .*(passed|failed|error)' /tmp/claude/mut.log | tail -1)]"; return; fi
   if ! mutate "$file" "$old" "$new"; then echo "MUTATION NOT APPLIED: $name"; git checkout -- "$file"; return; fi
   rm -rf "$(dirname "$file")/__pycache__"
@@ -50,7 +51,8 @@ checkv() {  # name file old new vitest-file test-name-pattern — the landing's 
   RAN=$((RAN + 1))
   [ -e landing/node_modules ] || { echo "SKIPPED (no landing/node_modules): $name"; return; }
   (cd landing && npx vitest run "$vfile" -t "$pat") > /tmp/claude/mut.log 2>&1; local base=$?
-  if grep -qE 'No test files found|no tests' /tmp/claude/mut.log; then echo "NO TEST SELECTED (bad): $name"; return; fi
+  # `-t` matching nothing is exit 0 with every test skipped ("Tests  17 skipped (17)"), not an error
+  if grep -qE 'No test files found|^ +Tests +(no tests|[0-9]+ skipped \([0-9]+\)$)' /tmp/claude/mut.log; then echo "NO TEST SELECTED (bad): $name  [$(grep -E '^ +Tests ' /tmp/claude/mut.log | tail -1 | sed 's/^ *//')]"; return; fi
   if [ $base -ne 0 ]; then echo "BASELINE RED (bad): $name  [$(grep -E '^ +Tests ' /tmp/claude/mut.log | tail -1)]"; return; fi
   if ! mutate "$file" "$old" "$new"; then echo "MUTATION NOT APPLIED: $name"; git checkout -- "$file"; return; fi
   (cd landing && npx vitest run "$vfile" -t "$pat") > /tmp/claude/mut.log 2>&1; local rc=$?
@@ -77,6 +79,8 @@ check "the defaults pin stops finding readers (an empty search tree passes vacuo
 check "the landing example drops the variable the landing reads first" landing/.env.local.example 'TARGET_API_URL=http://localhost:8000
 ' '' "tests/test_landing_env_example.py -k every_variable_the_landing_reads_is_in_the_example"
 check "the landing reads a variable the example does not name" landing/src/lib/target-api.ts 'process.env.TARGET_API_URL || process.env.BACKEND_URL' 'process.env.TARGET_API_URL || process.env.GOOGLE_CLIENT_ID || process.env.BACKEND_URL' "tests/test_landing_env_example.py -k every_variable_the_landing_reads_is_in_the_example"
+check "a root config reads a variable the example does not name" landing/drizzle.config.ts 'process.env.DATABASE_URL' 'process.env.DRIZZLE_DATABASE_URL' "tests/test_landing_env_example.py -k every_variable_the_landing_reads_is_in_the_example"
+check "the pin stops scanning the landing's root configs" tests/test_landing_env_example.py 'for p in LANDING.glob(f"*.{ext}")' 'for p in (LANDING / "nowhere").glob(f"*.{ext}")' "tests/test_landing_env_example.py -k finder_scans_the_root_configs"
 check "the landing example names a variable nothing reads" landing/.env.local.example 'BACKEND_URL=' 'BACKEND_URL=
 JWT_SECRET=' "tests/test_landing_env_example.py -k every_example_line_is_read"
 

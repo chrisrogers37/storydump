@@ -25,12 +25,13 @@ _LINE = re.compile(r"^([A-Z][A-Z0-9_]*)=", re.MULTILINE)
 
 
 def _sources() -> list[Path]:
-    return sorted(
-        p
-        for ext in ("ts", "tsx")
-        for p in (LANDING / "src").rglob(f"*.{ext}")
-        if ".test." not in p.name
+    """`landing/src`, and the root configs that run outside it (`drizzle.config.ts`
+    reads `DATABASE_URL` for the migration tool; `next.config.ts` could)."""
+    under_src = (
+        p for ext in ("ts", "tsx") for p in (LANDING / "src").rglob(f"*.{ext}")
     )
+    at_root = (p for ext in ("ts", "mjs") for p in LANDING.glob(f"*.{ext}"))
+    return sorted(p for p in (*under_src, *at_root) if ".test." not in p.name)
 
 
 def _read_names() -> set[str]:
@@ -47,6 +48,12 @@ def _example_names() -> set[str]:
 def test_the_finder_sees_a_known_read():
     """Positive control: `lib/db.ts` reads `DATABASE_URL`."""
     assert "DATABASE_URL" in _read_names()
+
+
+def test_the_finder_scans_the_root_configs():
+    """`drizzle.config.ts` runs outside `src/`; a scan of `src/` alone would
+    miss a variable only it reads."""
+    assert LANDING / "drizzle.config.ts" in _sources()
 
 
 def test_every_variable_the_landing_reads_is_in_the_example():
