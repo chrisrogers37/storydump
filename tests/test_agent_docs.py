@@ -407,6 +407,7 @@ def test_the_live_roots_cover_the_pages_an_agent_and_an_operator_read():
     turns every page under it into one nobody checks."""
     pages = {str(p.relative_to(ROOT)) for p in _live_pages()}
     assert {
+        "PROJECT_MISSION.md",
         "CLAUDE.md",
         "AGENTS.md",
         "README.md",

@@ -1427,7 +1427,8 @@ The branch and the three worktrees are removed.
 **The queue, worked down the same afternoon on the owner's word in chat:**
 
 - **The marker branch is retired.** `pre-3g-20260919-2134` (`br-round-mud-aikp3w1c`) deleted at
-  ~16:25 UTC, 19 hours after the window, on the evidence the runbook asked for: the worker's
+  ~16:25 UTC, 19 hours after the window — short of the runbook's "a day", on the owner's word
+  ("retire the branch"), with the evidence the day was for: the worker's
   deployment of `b2d4f6b` ran from 22:12 UTC on the 19th to 16:16 UTC on the 20th with zero
   `permission denied` or traceback lines in its retained log, 31 interactive tasks processed, 0
   failures, and a clean stop when `a85f6db` replaced it. `neonctl branches list` shows the project's
@@ -1490,7 +1491,7 @@ The branch and the three worktrees are removed.
   `make run`) and the Makefile's `run`/`dev`/`init-db` describe the legacy tier (phase 02).
   `railway.toml`'s `drainingSeconds` rationale (Telegram polling) is stale (F2 forbids touching
   it here; phase 02). Eight requirements with zero importers (the table above).
-- **After phase 02 deploys (owner-run):** remove `WORKER_IMPL` from the worker service and
+- **After phase 02 deploys (owner-run) — DONE 2026-09-20, the entry above:** remove `WORKER_IMPL` from the worker service and
   `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHANNEL_ID`, `ADMIN_TELEGRAM_CHAT_ID` from BOTH services — measured by
   name on 2026-09-18, these are the only dead variables set on either (nothing reads them; the landing
   app's own two on Vercel stay); replace `.claude/settings.json:54-59`'s four deny rules that
@@ -1541,7 +1542,7 @@ The branch and the three worktrees are removed.
   test trips the production 1 s pool wait on a slow CI runner (three times in four days, on `main`,
   the phase-04 branch and #1324; green on every re-run). Re-run, not chased; the fix — a
   runner-aware wait, or a smaller burst — is the owner's call, outside the tear-out.
-- **After the window (2026-09-19):** the marker branch `pre-3g-20260919-2134` is retired a day after
+- **After the window (2026-09-19) — the marker and the variables DONE 2026-09-20, the entry above:** the marker branch `pre-3g-20260919-2134` is retired a day after
   the worker has run clean (`neonctl branches delete pre-3g-20260919-2134 --project-id … --org-id …`);
   `WORKER_IMPL` on the worker service is what made a stale redeploy harmless — remove it only once
   every deployment Railway can re-run is a post-tear-out commit, or accept that a stale redeploy

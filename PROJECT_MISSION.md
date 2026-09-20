@@ -40,16 +40,20 @@ Person (Google sign-in; optionally a linked Telegram identity; personal API toke
 
 **Surfaces map directly to this model:**
 
-- **Web dashboard** = workspace picker → that workspace's Queue, Media Library
-  and Settings (General, Accounts, Integrations, API tokens). Management lives
-  here; a member joins by an invitation link, or by speaking in a bound group
-  with a linked Telegram identity.
+- **Web dashboard** = workspace picker → that workspace's Overview, Queue,
+  Calendar, Media Library, Analytics and Settings (General, Accounts,
+  Integrations, API tokens). Management lives here; a member joins by an
+  invitation link, or by speaking in a bound group with a linked Telegram
+  identity.
 - **A bound Telegram group** = where the workspace's team decides: one card per
-  story awaiting approval (Post now · Posted myself · Skip · Reject), and a
-  review card for a story whose outcome is unknown. Nothing is typed in the
-  chat; a tap is the whole interface.
-- **The `storydump` console and the API** = the same reads and the same writes
-  for a developer or an agent, under a person-bound or a workspace-bound token.
+  story awaiting approval (Post now where API publishing is on · Posted myself
+  · Skip · Reject, and an Open Instagram link), and a review card for a story
+  whose outcome is unknown. Nothing is typed in the chat; a tap is the whole
+  interface.
+- **The `storydump` console and the API** = the same reads for a developer or
+  an agent, under a person-bound token or a workspace service token; the
+  writes only under a person-bound token minted with the operator role — a
+  service token reads only, and a read-only person token never writes.
 
 Every command, screen and endpoint knows whether it operates at the person
 level (sign-in, tokens, memberships) or the workspace level (everything a
