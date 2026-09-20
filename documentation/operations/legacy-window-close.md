@@ -1,5 +1,14 @@
 # Closing the legacy window — 3g and the stand-down (the owner's runbook)
 
+> **This window ran on 2026-09-19 at 21:34 UTC** (the tear-out's ledger,
+> [`RUN_LOG.md`](../planning/2026-09-16-legacy-tear-out/RUN_LOG.md)): 079 applied in 1.341 s,
+> 080 in 1.019 s, the gate green on every line, the database 43.8 MB smaller, the schemas left
+> `archive`, `public`, `runner`; the marker branch `pre-3g-20260919-2134` was retired on
+> 2026-09-20. **Nothing below is to be run again** — `apply --manual` refuses a version the
+> ledger already records. The page stays as the record of the sequence, of the rehearsal's shape
+> (`backup-restore.md` reuses it) and of the backout; step 0's checkout-and-link check and step
+> 8's "never `railway redeploy` after a `down`" are the parts still live for any production work.
+
 The last two M.3 steps ship as runner files the deploy cannot run: `079_drop_legacy_schema.sql`
 drops `legacy` behind an in-file precondition, `080_window_stand_down.sql` closes the window (fork
 F8 (a): the `window_ddl` door dropped, `CREATE ON DATABASE` revoked from `svc_migration`, every

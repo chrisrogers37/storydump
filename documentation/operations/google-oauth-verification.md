@@ -1,6 +1,6 @@
 # Google OAuth Verification — Runbook
 
-**Status:** Pending submission. **Owner:** chrisrogers37. **Closes:** #333.
+**Status:** Pending submission (as of 2026-09-17, the last time this page was touched; the console is the source of truth). **Owner:** chrisrogers37. **Closes:** #333.
 
 The Google OAuth consent screen shows users a red **"Google hasn't verified this app"** warning when they connect Google Drive. They must click *Advanced → Go to storydump (unsafe)* to proceed. This blocks any tenant who isn't a developer of the project. This document walks through everything needed to clear it.
 
@@ -11,7 +11,7 @@ Google flags **sensitive scopes** for verification before they can be used in Pr
 | Scope | File | Class |
 |---|---|---|
 | `https://www.googleapis.com/auth/drive.readonly` | `src/services/target/google_drive_oauth.py:90` (`SCOPE`) | **Sensitive** |
-| `https://www.googleapis.com/auth/userinfo.email` | not requested by the target flow — the legacy flow's second scope was dropped with it (`google_drive_oauth.py:28`; the widget it served is #327) | Standard |
+| `https://www.googleapis.com/auth/userinfo.email` (with `openid` and `userinfo.profile`) | `src/services/target/google_oidc.py:54` (`SCOPE = "openid email profile"`) — Google sign-in, not the Drive flow; the Drive leg dropped the older `userinfo.email` scope because nothing in the target schema stores the granting account's email (`google_drive_oauth.py:28`) | Standard |
 
 The `drive.readonly` scope is what triggers the warning. Issue [#327](https://github.com/chrisrogers37/storydump/issues/327) audited the alternatives (`drive.file`, `drive.metadata.readonly`) and concluded that `drive.readonly` is the minimum viable scope — `drive.file` would break folder browsing (user media predates the app), and `drive.metadata.readonly` blocks file downloads (which we need to upload to Instagram). With scope-narrowing off the table, **verification submission is the only path to clear the warning** for non-developer users.
 
@@ -24,7 +24,7 @@ Before opening the OAuth Brand / consent screen submission form:
 - [x] **Terms of Service URL** — `https://storydump.app/terms` (`landing/src/app/(marketing)/terms/page.tsx`)
 - [ ] **App icon** — 120×120 PNG, no transparency. Need to design.
 - [ ] **Authorized domain** — `storydump.app` verified via Google Search Console.
-- [ ] **OAuth Redirect URI registered** — `${OAUTH_REDIRECT_BASE_URL}/auth/google-drive/callback`. Currently `https://storyline-ai-production.up.railway.app/auth/google-drive/callback` on Railway. Add it under **APIs & Services → Credentials → [OAuth 2.0 Client] → Authorized redirect URIs**. (`OAUTH_REDIRECT_BASE_URL` is documented in [`documentation/guides/cloud-deployment.md`](../guides/cloud-deployment.md).)
+- [ ] **OAuth Redirect URI registered** — `${OAUTH_REDIRECT_BASE_URL}/auth/google-drive/callback`. With `OAUTH_REDIRECT_BASE_URL = https://api.storydump.app` (the API's public origin, `guides/cloud-deployment.md`) that is `https://api.storydump.app/auth/google-drive/callback` (`src/api/routes/auth.py:300`). Add it under **APIs & Services → Credentials → [OAuth 2.0 Client] → Authorized redirect URIs**. (`OAUTH_REDIRECT_BASE_URL` is documented in [`documentation/guides/cloud-deployment.md`](../guides/cloud-deployment.md).)
 - [ ] **Scope justification copy** — short text explaining why we need `drive.readonly` (see template below).
 - [ ] **Demo video** — screencast (≤ 5 min) demonstrating each requested scope in use. YouTube unlisted is fine.
 
@@ -67,8 +67,8 @@ Save.
 
 Under **Scopes**, make sure these are listed:
 
-- `.../auth/userinfo.email`
-- `.../auth/drive.readonly`
+- `openid`, `.../auth/userinfo.email`, `.../auth/userinfo.profile` (sign-in)
+- `.../auth/drive.readonly` (Drive)
 
 For each, click **Edit scope** → fill in the justification. **`drive.readonly` is the one Google will scrutinize.** Suggested copy:
 

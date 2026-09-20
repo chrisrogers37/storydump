@@ -9,6 +9,8 @@ tags: [investigation, auth, instagram, deploy]
 
 # Investigation — 2026-09-04
 
+> **Archived 2026-09-20 — RESOLVED.** `OAUTH_REDIRECT_BASE_URL` restored by the owner and the Meta redirect-URI list corrected (2026-09-04); the entry-page fix landed as #1236. Still unbuilt: `/health`'s OAuth-presence booleans (#1229) and the `RAILWAY_DEPLOYMENT_OVERLAP_SECONDS` proposal. See [`../../README.md`](../../README.md) for the index.
+
 **Reported.** After the day's merges (#1232, #1233) the owner drove production: (1) the first Google
 sign-in authenticated at Google (Google's new-sign-in email arrived) and then landed on the login
 screen; a second attempt worked. (2) *Connect Instagram* from Settings › Accounts reached Instagram's

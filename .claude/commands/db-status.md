@@ -30,8 +30,8 @@ storydump health --json
 
 Needs no token. From `data.api`: `target_database` (false means every data
 route answers 503), `db_role` (the login the API holds, and whether it bypasses
-RLS), `pool` (`size`, `checked_out`, `checked_out_peak`; read them from the
-JSON — the table view does not print the last two). `data.verdicts` judges `api`,
+RLS), `pool` (`size`, `checked_out`, `checked_out_peak` — in the table's `api`
+facts and in the JSON). `data.verdicts` judges `api`,
 `scheduling`, `posting` and `webhook` with the fleet monitors' own rules; exit 4
 when one is not well — the report is still printed, so read it.
 
@@ -49,16 +49,18 @@ login and `bypassrls`; `data.rls` every tenant table with `enabled`/`forced`;
 Compare the highest applied version with the tree:
 
 ```bash
-ls scripts/migrations/ | tail -5
+ls scripts/migrations/*.sql | tail -3
 grep -l "^-- runner:manual" scripts/migrations/*.sql
 ```
 
-A file the second command lists (079, 080) is GATED: the deploy owes it and does
-not apply it; the owner applies it in a window
-(`documentation/operations/legacy-window-close.md`). Its absence from the ledger
-is expected, not drift. `storydump doctor` reads the same directive
-(`storydump_cli/commands/env.py`, `_gated_in`): its ledger line stays `ok` and
-names those files as "owed to the owner's window". Any OTHER file in the tree
+A file the second command lists carries `-- runner:manual`: the deploy owes it
+and does not apply it; the owner applies it in a window. Both such files today,
+079 and 080, are `applied` — the window ran on 2026-09-19
+(`documentation/operations/legacy-window-close.md`) — so the ledger's highest
+version should read 080. A manual file that lands later and is absent from the
+ledger is expected, not drift: `storydump doctor` reads the same directive
+(`storydump_cli/commands/env.py`, `_gated_in`), keeps its ledger line `ok` and
+names it as "owed to the owner's window". Any OTHER file in the tree
 that the ledger lacks is what doctor calls "not applied — deploy main": a deploy
 that has not happened or a predeploy that failed. Report it.
 

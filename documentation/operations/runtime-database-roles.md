@@ -4,7 +4,7 @@
 
 Production connects to Neon as `neondb_owner`. That role owns every table and
 holds `BYPASSRLS`, so every row-level-security policy the target schema
-installs (`058`, 58 policies) is inert on the deployed path: the database
+installs (`058` and `060`, 58 policies between them) is inert on the deployed path: the database
 enforces no tenant boundary at all today, the application code is the only
 thing keeping one workspace's rows away from another's. Measured 2026-08-25
 on #751.

@@ -13,7 +13,7 @@ the tree is the list, and the command below prints it.
 
 ## The suite's shape
 
-Collected on 2026-09-18: **3,756 tests in 157 files**, plus the 5 load-harness
+Collected on 2026-09-20: **3,675 tests in 156 files**, plus the 5 load-harness
 scenarios, which are deselected by default. Re-measure in about a second, with
 no database:
 
@@ -23,15 +23,15 @@ pytest --collect-only -qqq --no-cov tests/    # one `path: count` line per file
 
 | Directory | What it covers | Files | Tests |
 |---|---|---|---|
-| `tests/scripts/` | The DB gates: the migration runner and the lineage lane, the advertised DDL, row-level security, the command port, the job lanes, the publish pipeline, the outbox, the ops views, and the real `storydump` CLI against the real app — on scratch PostgreSQL databases, one per test or module. A few files here need no database (the two monitors' `classify`, the ratchets, `test_pr_ready.py`) | 69 | 1,454 |
-| `tests/src/services/target/` | The target tier's services with their seams patched (the egress floor, Meta, Drive, Telegram) | 46 | 1,125 |
-| `tests/storydump_cli/` | The `storydump` console against a scripted API — no network, no database | 11 | 420 |
+| `tests/scripts/` | The DB gates: the migration runner and the lineage lane, the advertised DDL, row-level security, the command port, the job lanes, the publish pipeline, the outbox, the ops views, and the real `storydump` CLI against the real app — on scratch PostgreSQL databases, one per test or module. A few files here need no database (the two monitors' `classify`, the ratchets, `test_pr_ready.py`) | 66 | 1,363 |
+| `tests/src/services/target/` | The target tier's services with their seams patched (the egress floor, Meta, Drive, Telegram) | 47 | 1,127 |
+| `tests/storydump_cli/` | The `storydump` console against a scripted API — no network, no database | 11 | 426 |
 | `tests/src/api/` | The API's routes over a fake engine whose session refuses SQL (`tests/src/api/conftest.py`) | 9 | 327 |
 | `tests/src/` (top level) | The worker's composition root and entrypoint, the worker's `/health`, and the two tear-out guards (`test_legacy_tier_gone.py`, `test_legacy_settings_gone.py`) | 5 | 167 |
-| `tests/` (top level) | The harness's own policy (`test_integration_coverage_policy.py`, `test_session_database_isolation.py`, `test_stray_database_reaping.py`), the documentation pins (`test_agent_docs.py`, `test_legacy_cli_gone.py`, `test_meta_runbook_markers.py`) and `test_deploy_guardrails.py` | 7 | 106 |
+| `tests/` (top level) | The harness's own policy (`test_integration_coverage_policy.py`, `test_session_database_isolation.py`, `test_stray_database_reaping.py`), the documentation pins (`test_agent_docs.py`, `test_legacy_cli_gone.py`, `test_meta_runbook_markers.py`), `test_deploy_guardrails.py` and `test_landing_env_example.py` (the landing's example environment names only what the front end reads) | 8 | 111 |
 | `tests/src/channels/` | The Telegram transport and the webhook registration | 2 | 66 |
 | `tests/src/utils/` | Encryption, datetime helpers, the logger | 4 | 47 |
-| `tests/src/config/` | Settings and constants | 3 | 39 |
+| `tests/src/config/` | Settings and constants | 3 | 36 |
 | `tests/src/exceptions/` | The exception base | 1 | 5 |
 
 Outside that count:
@@ -49,8 +49,8 @@ Outside that count:
 
 Markers are declared in `pytest.ini` (`unit`, `integration`, `slow`, `load`)
 and `--strict-markers` refuses any other. They are not a reliable "needs a
-database" switch: on the same collection `-m unit` selects 134 tests and
-`-m integration` 1,041, most tests carry neither, and some gates that take a
+database" switch: on the same collection `-m unit` selects 127 tests and
+`-m integration` 950, most tests carry neither, and some gates that take a
 database fixture are unmarked (`tests/scripts/test_w4_tap_gate.py`). The
 directory is the better guide — the database lives in `tests/scripts/`.
 
@@ -71,7 +71,7 @@ directory is the better guide — the database lives in `tests/scripts/`.
   never gated.
 
 This page states no percentage. A meaningful one needs the database-backed run
-(most of the 1,454 tests under `tests/scripts/` need a PostgreSQL), and the
+(most of the 1,363 tests under `tests/scripts/` need a PostgreSQL), and the
 current figure is whatever CI's `Test` job last printed — a number copied here
 would be stale at the next merge.
 

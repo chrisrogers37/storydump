@@ -97,7 +97,8 @@ code without a tenant context. An endpoint that queried anyway would answer
 ## The app secret is not one setting
 
 `settings` carries two — `INSTAGRAM_APP_SECRET` (annotated *preferred*) and
-`FACEBOOK_APP_SECRET` (annotated *legacy*). Which one signs these callbacks is
+`FACEBOOK_APP_SECRET` (the older Facebook-app secret; `settings.py`'s note says the
+callbacks verify against `INSTAGRAM_APP_SECRET`, then this). Which one signs these callbacks is
 decided by **which Meta app the URLs are registered under**, a submission-time
 fact the code cannot read. Keying to the wrong one refuses 100% of Meta's
 requests and fails App Review, with no symptom beyond a warning line.

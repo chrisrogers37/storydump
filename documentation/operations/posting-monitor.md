@@ -147,8 +147,10 @@ exists to catch. **That is this issue's own shape, one layer inward.**
 `post_intents.state = 'posted'` is the landing, and the database refuses such a
 row unless it carries proof: `ck_posted_complete` requires
 `ig_container_id IS NOT NULL AND publish_step = 'effect_confirmed'` for an API
-post, or a debited cap for a confirmed manual one. The strongest assertion
-available is a constraint a row cannot violate.
+post, or a debited cap for a confirmed manual one, or — since 073 — a `dry_run`
+row with `effect_confirmed` and a debited cap, which this monitor excludes
+(below). The strongest assertion available is a constraint a row cannot
+violate.
 
 The ledger earns its place in the **contrast**, which goes in the alert text:
 
@@ -160,7 +162,7 @@ The ledger earns its place in the **contrast**, which goes in the alert text:
 
 The middle row is invisible to either number alone and is the sharper diagnosis.
 
-### `legacy_backfill` rows are excluded — for a live schema reason
+### `legacy_backfill` and `dry_run` rows are excluded — for a live schema reason
 
 The obvious justification is the M.3 history transform, and it is **wrong**: no
 M.1/M.3 transform file was ever written and none will be (FC-7 §6, owner ruling
@@ -175,6 +177,12 @@ reached Instagram**, which is exactly the row this check must not count. Any
 bulk insert of them carries a fresh `entered_state_at` and would read as *a post
 just landed*: a recovery nobody observed, followed by a full threshold of
 silence. The filter is the module refusing to be an instance of its own subject.
+
+`dry_run` is excluded for the opposite reason: the row carries every proof the
+constraint asks for (073's disjunct) and still reached nothing — Dry Run Mode
+(Settings › General) completes a story as if published. A workspace that only
+dry-runs is silent to this monitor on purpose; its `debited_total` rises while
+`posted_ever` does not.
 
 ## The thresholds
 
@@ -307,11 +315,14 @@ systemd-run --user --wait --collect --pipe --quiet \
 
 ### Expect it to alert on the first run
 
-Production has never posted through the target tier — `daily_post_counts` holds
-**zero rows, ever** — so the first poll will classify `never-posted-overdue` and
-page. **That is the instrument working**, not a misconfiguration, and it is the
-condition #1268 was filed about. It will keep repeating every 6h until a post
-lands or the timer is stopped.
+Production first posted through the target tier on 2026-09-15 (thirteen
+stories in one burst). When this monitor was deployed (2026-09-09) it had not —
+`daily_post_counts` held zero rows — and the first poll classified
+`never-posted-overdue` and paged. **That was the instrument working**, not a
+misconfiguration, and it is the condition #1268 was filed about. A fresh
+enrolment today reads `posting`, or `silent` if the last landing is older than
+the threshold, and either repeats every 6h until the state changes or the timer
+is stopped. Either way, dry-run the poll first:
 
 Confirm before enrolling, so the first page is not a surprise:
 
@@ -358,11 +369,13 @@ reads as a fresh run forever.
 
 ## Bounds
 
-**No verdict here has been raised by real posting traffic.** `posting` and
-`silent` are exercised against captured payloads and mutation checks — never a
-real landing (see *Expect it to alert on the first run* for why). A later reader
-must not read *tested* for *seen in production*; this file's own subject is that
-the difference is easy to miss.
+**As of its deployment (2026-09-09) no verdict here had been raised by real
+posting traffic.** Production has posted since 2026-09-15, so `posting` is now
+reachable in production — `--status` on the fleet host says whether the poller
+has seen it. `silent` and `never-posted-overdue` remain exercised only against
+captured payloads and mutation checks. A later reader must not read *tested*
+for *seen in production*; this file's own subject is that the difference is
+easy to miss.
 
 **Cross-tenant reach rests on a tracked gap.** Production connects as
 `neondb_owner`, which owns these tables and bypasses RLS, so `p_tenant` is inert

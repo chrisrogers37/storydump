@@ -20,6 +20,8 @@ Everything a later phase reads or writes through the API authenticates this way.
 
 ## Evidence
 
+*(State on 2026-09-15: the lineage now ends at 080, `07` §23 is 077, and `setup.py` carries only `storydump=storydump_cli.main:main`.)*
+
 - `scripts/migrations/060_auth_plane_tables.sql` — `CREATE TABLE service_tokens (id, name,
   token_hash, role CHECK IN ('operator','readonly'), workspace_id UUID NULL, expires_at,
   revoked_at, last_used_at, created_at, updated_at, UNIQUE (token_hash))`; line 152
@@ -60,7 +62,7 @@ Phases 02 and 03.
 
 ### Steps
 
-1. **Migration `scripts/migrations/077_service_token_subjects.sql`**, mirrored as `07` §23 with a
+1. **Migration `scripts/migrations/077_service_token_subject.sql`**, mirrored as `07` §23 with a
    manifest row (ordinal 21; `test_advertised_ddl` pin 34 → 35), appended to the lineage list:
    - `ALTER TABLE service_tokens ADD COLUMN user_id UUID NULL REFERENCES users(id) ON DELETE CASCADE;`
    - `ALTER TABLE service_tokens ADD CONSTRAINT ck_service_token_subject CHECK ((user_id IS NULL) <> (workspace_id IS NULL));`
@@ -81,7 +83,7 @@ Phases 02 and 03.
    `{"v": 1, "kind": <verb>, "data": <shape> | null, "error": null | {"code", "reason",
    "detail", "fix"}}` and its per-verb `data` shapes; the CLI's sentences per reason and outcome
    (never the Telegram adapter's words). `commands.py` imports and re-exports `REASONS`. Unit
-   tests: the sets equal the migrations' `CHECK` lists (`tests/src/models/test_enum_ssot_parity.py`);
+   tests: the sets equal the migrations' `CHECK` lists (as built `tests/src/services/target/test_vocabulary.py` — the models test went with the legacy tier);
    the envelope and error shapes are schema-tested.
 4. **`src/services/target/service_tokens.py`** — `mint(conn, *, name, role, user_id=None,
    workspace_id=None, expires_in_days=90) -> tuple[str, dict]` (secret `sdt_` + 32 url-safe random

@@ -26,11 +26,12 @@ runs the target composition root, `src.worker`, and nothing else
 nothing here reads them.
 
 `storydump doctor`'s ledger check compares the checkout's migration files with
-the ledger. A GATED file (`runner:manual` — 079 and 080 until the owner's window
-has run, `legacy-window-close.md`) is reported on the `ok` line as "owed to the
-owner's window", never as missing (`storydump_cli/commands/env.py`, `_gated_in`);
-an ordinary file the ledger lacks is "not applied — deploy main", and that one
-is real (`migration-runner.md`).
+the ledger. A GATED file (`runner:manual`) would be reported on the `ok` line as
+"owed to the owner's window", never as missing (`storydump_cli/commands/env.py`,
+`_gated_in`); none is gated today — 079 and 080 were applied in the owner's
+window on 2026-09-19 (`legacy-window-close.md`). An ordinary file the ledger
+lacks is "not applied — deploy main", and that one is real
+(`migration-runner.md`).
 
 ---
 

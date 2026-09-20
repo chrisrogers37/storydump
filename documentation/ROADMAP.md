@@ -1,12 +1,14 @@
 # Storydump - Product Roadmap
 
-**Last Updated**: 2026-03-28
+**Last Updated**: 2026-09-20 (status notes; content frozen at 2026-03-28)
 **Current Version**: v1.6.0 (Phase 2 Complete, Phase 1.8 Complete)
 **Next Version**: TBD
 
 > **Status (2026-09-02): historical.** This roadmap records the phase-1/2 product (v1.0.0 – v1.6.0) and pre-dates the 2026-08 multi-tenant refactor. The forward plan is [`planning/2026-08-02-consolidated-design-plan/`](planning/2026-08-02-consolidated-design-plan/README.md); the "Phase 3" and backlog sections below are not the current program. The version history table remains accurate.
 >
-> **2026-09-18:** the legacy tier this page describes — the polling Telegram bot and its commands, the legacy CLI, per-chat settings, the queue, history and lock tables — was retired in the legacy tear-out (#1216); its data survives as the `archive.*_pre_cutover_20260917` snapshots. The current system is the target tier — see [`AGENTS.md`](../AGENTS.md).
+> **2026-09-18:** the legacy tier this page describes — the polling Telegram bot and its commands, the legacy CLI, per-chat settings, the queue, history and lock tables — was retired in the legacy tear-out (#1216); its data survives as the `archive.*_pre_cutover_20260917` snapshots (kept 90 days — fork F9). The current system is the target tier — see [`AGENTS.md`](../AGENTS.md).
+>
+> **2026-09-20:** every phase this page lists as shipped was shipped in the legacy tier and later deleted; the backlog items ticked below were delivered by the target tier, not by this roadmap. The position of record is the consolidated plan's *Live status*.
 
 ---
 
@@ -242,7 +244,7 @@ Build a delightful Instagram Story automation system that:
 
 ---
 
-## Phase 3: Advanced Features 🔮 FUTURE
+## Phase 3: Advanced Features 🔮 FUTURE (not the current program — see the note at the top)
 
 **Status**: 🔮 Exploratory
 **Timeframe**: Q2 2026 and beyond
@@ -274,8 +276,8 @@ Build a delightful Instagram Story automation system that:
 - Trending topic integration
 
 **Team Features**:
-- Role-based permissions
-- Approval workflows
+- Role-based permissions — delivered by the target tier (workspace roles, `ROLE_FLOOR` in `src/services/target/commands.py`)
+- Approval workflows — delivered by the target tier (the intent ledger, `post_intents`)
 - Content calendar view
 - Collaboration tools
 
@@ -284,7 +286,7 @@ Build a delightful Instagram Story automation system that:
 ## Backlog & Future Enhancements
 
 ### High Priority
-- [ ] **Instagram Story Camera Deep Link** (Phase 1.5+)
+- [x] **Instagram Story Camera Deep Link** — built as `docs/index.html` (PR #116), never activated (#528)
   - Self-hosted redirect service for true deep linking
   - GitHub Pages or Vercel hosting
   - Alternative to URLgenius/Branch.io (security concerns)
@@ -292,7 +294,7 @@ Build a delightful Instagram Story automation system that:
   - Nice-to-have, not critical
 
 ### Medium Priority
-- [ ] Web dashboard for queue management
+- [x] Web dashboard for queue management — delivered by the target tier (the web Queue, #1033; `landing/`)
 - [ ] Backup/restore automation
 - [x] Multi-account support ✅ (Completed in Phase 2)
 - [ ] Content templates system
@@ -302,7 +304,7 @@ Build a delightful Instagram Story automation system that:
 - [ ] Desktop app (Electron)
 - [ ] Browser extension
 - [ ] Mobile app (React Native)
-- [ ] API for third-party integrations
+- [x] API for third-party integrations — delivered by the target tier (the v1 API with API tokens, 077; `storydump tokens`)
 
 ### Research Items
 - [ ] Instagram API limitations and best practices

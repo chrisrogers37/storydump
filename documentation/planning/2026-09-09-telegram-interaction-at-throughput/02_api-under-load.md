@@ -1,7 +1,7 @@
 ---
 title: "Phase 2 — The API under load: admission, a timeout boundary, the process shape, and the harness that proves it"
 type: plan
-status: active
+status: completed
 owner: chris
 created: 2026-09-09
 tags: [plan, ingress, admission, load, harness]
@@ -18,8 +18,8 @@ Thousands of taps arriving at once must never turn into 500s that Telegram redel
 
 - `src/api/routes/webhooks.py:114-197` — no timeout boundary; the seam refuses 503 **before** admission only when no dispatcher is wired (`:156-168`); a pool `TimeoutError` at `runtime.connect()` (`:170`) is a 500; after admission any exception is a 500. `tests/scripts/test_l8_webhook_admission.py:371` `TestAnAbortedWinnerDoesNotPoisonTheKey` is the precedent for a rolled-back admission.
 - `src/services/target/unit_of_work.py:81` `MAX_OVERFLOW_SEAM = 0`, `:89` `POOL_SIZE_SEAM = 10`, `:110` `POOL_TIMEOUT_SEAM = 3.0` ("the saturation policy" — the boundary already exists, unmapped); `create_engine` (`:180-189`) pins all three; `05-operational-numbers.md:52` "DB connections 50 total (3×10 workers + 2×10 ingress)".
-- `Procfile:2` `web: uvicorn src.api.app:app --host 0.0.0.0 --port ${PORT:-8000}` — one process; `railway.toml` sets no `startCommand`. `Procfile:1` is the legacy `python -m src.main`; the target worker is `python -m src.worker` (`src/worker.py:3`).
-- `scripts/telegram_webhook.py:245-254` — `setWebhook` without `max_connections` (Telegram default 40, max 100): the route never sees more than that many simultaneous deliveries; the rest queue at Telegram as `pending_update_count` (`:192`). `src/api/app.py:454` `/health`, `:467` `/health/scheduling` (`scheduling_health.scheduling_lag`/`worker_freshness`, `:530-531`).
+- `Procfile:2` `web: uvicorn src.api.app:app --host 0.0.0.0 --port ${PORT:-8000}` — one process; `railway.toml` sets no `startCommand`. `Procfile:1` `python -m src.main` is the target worker's entrypoint (since the tear-out a dispatch to `src.worker`); the harness spawns `src.worker` directly (`tests/scripts/load/processes.py`).
+- *(state on 2026-09-09; the script was deleted in #1312 — `max_connections` is now sent by `_register_webhook`, `src/api/app.py`, from `TARGET_TELEGRAM_WEBHOOK_MAX_CONNECTIONS`)* `scripts/telegram_webhook.py:245-254` — `setWebhook` without `max_connections` (Telegram default 40, max 100): the route never sees more than that many simultaneous deliveries; the rest queue at Telegram as `pending_update_count` (`:192`). `src/api/app.py:454` `/health`, `:467` `/health/scheduling` (`scheduling_health.scheduling_lag`/`worker_freshness`, `:530-531`).
 - `src/services/target/rate_counters.py:43-` `increment(scope, key, window_start, limit)` returns `None` over the limit; its `ON CONFLICT … WHERE rc.count < :limit` (`:65-69`) is the fail-closed backstop; `02-domain-model.md` §6 names scope `ws_admission` (`scripts/migrations/056_machinery_tables.sql:231-232`); `05:51` "30 commands/min/workspace; no global ceiling" (D22, `03:99`) — a *per-workspace abuse guard*. The web route's single call site is `src/api/routes/v1.py:210` (`commands.ingest`).
 - `src/services/target/telegram_dispatch.py:17-25` — never raise after admission (a raise rolls the admission back; Telegram redelivers the same update forever through a per-bot FIFO); #985 — refuse before admission, never after.
 - `tests/scripts/test_l8_webhook_admission.py` — admission gate: `TestTwoSimultaneousDeliveriesProduceExactlyOneAdmission` (`:256`), `test_the_race_was_genuinely_concurrent` (`:330`), `TestTheGatesOwnNumber` (`:424`, 200 replays of one `update_id`); no concurrent-distinct-update or latency scenario. `tests/src/api/test_webhook_ingress_route.py` drives the route with an in-process ASGI client — one process, one pool — so a process-shape decision cannot be measured there. `tests/scripts/conftest.py:623` `seed_workspace_chain`, `:650` `seed_intent_chain` seed one card each; no seeder for 50 × 20 sent cards.
@@ -91,11 +91,11 @@ measured). Read against the deciding run:
 
 - [x] `pytest tests/scripts/test_l8_webhook_admission.py -q` green.
 - [x] `RUN_LOAD_HARNESS=1 pytest tests/scripts/load -q -m load` produces a report; `taps_1000_across_50_workspaces`: 5xx = 0, end-to-end answer p95 < 2 s, pre-admission refusals within the ratified bound, `pending_update_count` peak reported; `taps_across_many_cards`: 200 flips over 10 workspaces; `one_slow_chat`: other chats' answer p95 < 2 s and within 200 ms of the same run's `taps_across_many_cards` p95.
-- [ ] `double_tap_one_card`: exactly one flip, zero 5xx — met; **p95 < 2 s — missed by 27 ms at the deciding RTT (owner ruling pending, above).**
+- [x] `double_tap_one_card`: exactly one flip, zero 5xx; answer p95 1.733 s at ≈ 20 ms RTT after #1290 (`reports/2026-09-11-rtt10ms.md`) — the owner's 2026-09-10 exception was superseded by the fix.
 - [ ] `one_slow_chat`: other chats' edit-landed p95 within one poller cadence (2 s) plus pacing — not met (the sender's throughput; phase 3a/3b).
 - [x] The report names the container settings, the RTT of the run, and which latency each number is.
 - [x] `/health` reports the pool arithmetic, `max_connections`, `pending_update_count` and the tap counters; the startup log prints the arithmetic; the Procfile matches the F5 ruling.
-- [x] F1, F5 and F12 locked in `00_EPIC.md` with the report cited (F2's exception awaits the owner).
+- [x] F1, F5 and F12 locked in `00_EPIC.md` with the report cited (F2's exception, ratified 2026-09-10, was superseded by #1290). Open: #1292 (edit-landed is not readable from the harness).
 
 ## What NOT To Do
 
@@ -103,7 +103,7 @@ measured). Read against the deciding run:
 - Never answer 200 for an update that was neither executed nor answered by name; never 503 after admission for anything but a database error.
 - Never `asyncio.wait_for` a pool checkout.
 - Do not debit `ws_admission` for an `answered` outcome or a refusal.
-- Do not run the harness against production; do not run `python -m src.main` anywhere in it.
+- Do not run the harness against production; do not run the deployed entrypoint (`python -m src.main`) against anything but the scratch database; the harness spawns `src.worker`.
 - Do not decide F1 or F5 on a run whose client exceeds `max_connections` or whose database is Docker fsync alone.
 
 ## Context

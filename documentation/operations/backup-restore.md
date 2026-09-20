@@ -29,7 +29,7 @@ in that history or the production branch **restored in place** to one.
 | History retention (the PITR window) | ≥ 7 days, "verified at 0.2's gate" | **24 hours** — the project's `history_retention_seconds` is 86400 (read 2026-09-18; the tear-out's `RUN_LOG.md`, and `legacy-window-close.md`). Raising it in Neon or amending the plan is the owner's open decision |
 | RPO | Neon's continuous WAL, "~minutes", no additional mechanism | not measured here |
 | RTO target | 1 h — restore, repoint, smoke suite | not measured here |
-| Restore drill | quarterly: PITR branch → runner parity → smoke suite | none of that shape is recorded in the tree (`04`: M.2, which was to be the first, was not run). What is recorded on a branch of production is the 078 rehearsal at production's head (2026-09-18, `RUN_LOG.md`) |
+| Restore drill | quarterly: PITR branch → runner parity → smoke suite | none of that shape is recorded in the tree (`04`: M.2, which was to be the first, was not run). What is recorded on branches of production: the 078 rehearsal at production's head (2026-09-18) and the 079/080 rehearsal on a fresh PITR branch (2026-09-19), both in the tear-out's `RUN_LOG.md`; the window itself ran behind a marker branch (`pre-3g-20260919-2134`), which is the plan's drill shape without the smoke suite |
 | Tenant-level recovery | a PITR branch, then a per-workspace copy keyed on `workspace_id` | no runbook or tool for it exists in the tree |
 
 So: a restore to an **arbitrary** moment reaches back 24 hours and no further. A **marker branch**
@@ -59,7 +59,8 @@ owner's act; an agent does not run it.
 
 1. **Stop the worker**, so nothing keeps writing past the point:
    `railway down --service worker --environment production --yes`, then `storydump deploys` shows
-   the worker's latest row `REMOVED`.
+   the worker's latest row `REMOVED`. (`railway whoami && railway status` first — `down` acts on
+   the linked project and environment.)
 2. **Announce it.** The API keeps serving; taps and web approvals landing now are lost.
 3. **Restore to the marker**, keeping the present state under a name for forensics:
    ```bash
@@ -86,9 +87,15 @@ owner's act; an agent does not run it.
    `storydump cancel` (never-run list: the user's decision). Only then `storydump resume`.
    `posted` and `resume` write too — `resume` restarts posting — so during a restore every one
    of these is the owner's decision, not an agent's.
-6. **Restart the worker** (`railway whoami && railway status` first — `redeploy` acts on the
-   linked environment): `railway redeploy --service worker --yes`, then
-   `storydump deploys --watch --timeout 900` and `storydump health`.
+6. **Restart the worker** — NOT with `railway redeploy` after a `down`: on 2026-09-19 it re-ran an
+   OLD deployment (a commit of 2026-09-03) and the worker came back on stale code
+   (`legacy-window-close.md`, step 8). Push an empty commit to `main`, which deploys both services
+   through the normal path and runs the predeploy (which applies whatever the restore owes):
+   `git commit --allow-empty -m "redeploy: the worker after the restore" && git push origin main`,
+   then `storydump deploys --watch --timeout 900` (the API lands after CI) and `storydump health`;
+   read the commit `storydump deploys` shows for the worker — it must be `main`'s head. The
+   alternative is the dashboard's Redeploy on the worker's last SUCCESS deployment *at the deployed
+   commit*, chosen by hand.
 
 An in-place restore keeps the branch and its endpoint, so `DATABASE_URL` and `TARGET_DATABASE_URL`
 stay as they are. Cutting over to a *different* branch instead means repointing both variables on
@@ -171,14 +178,15 @@ that role's members only, with no grant to anything else. Its postconditions com
 row count to its source in the same transaction.
 
 - **Rows only.** `CREATE TABLE … AS` copies rows — not indexes, constraints, defaults or sequence
-  values. The `legacy` schema itself, with its 77 indexes, is dropped by 079 in the owner's window
-  (`legacy-window-close.md`); what that drop takes and no snapshot holds is exactly that list.
+  values. The `legacy` schema itself, with its 77 indexes, was dropped by 079 in the owner's window
+  on 2026-09-19 (`legacy-window-close.md`); what that drop took and no snapshot holds is exactly
+  that list.
 - **For reading, not for running.** The code that read those tables was deleted in the tear-out's
   phase 01. A snapshot answers a question about the past; nothing can be restored *into service*
   from it.
 - **Lifetime (fork F9).** The snapshots carry the `archive_snapshots` retention class: 90 days
-  from the date in their names, so they are eligible from **2026-12-16**, whatever day 079 runs —
-  once the `retention_sweep` executor exists. It is unbuilt (`work_loop.UNBUILT_KINDS`), so
+  from the date in their names, so they are eligible from **2026-12-16** — the clock is the date in
+  their names, not the day 079 ran (2026-09-19) — once the `retention_sweep` executor exists. The export-or-lapse decision is #1326; the executor is #1327. It is unbuilt (`work_loop.UNBUILT_KINDS`), so
   nothing drops them today; the door it will call reads the date from the table's name
   (`fn_retention_batch`, `059_security_definer_doors.sql:440-456`).
 - **The owner's export, before then.** An owner who wants them longer exports first:
@@ -272,7 +280,8 @@ Quarterly, or after any change to the Neon plan:
 
 - [ ] The project's history retention read from Neon, and this page's table corrected to it
 - [ ] A branch of production read back through the host guard: `migration_runner status` owes
-      nothing but the gated files
+      nothing (079 and 080 are applied; a future `runner:manual` file would show as owed, never
+      missing)
 - [ ] The sixteen snapshots still present until their export or their sweep:
       `SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'archive' AND c.relkind = 'r' AND c.relname LIKE '%\_pre\_cutover\_%'` → 16
 - [ ] The owner's variable export is current, and the key ring is in it
