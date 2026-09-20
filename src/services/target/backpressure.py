@@ -36,17 +36,20 @@ async def snapshot(
     """The signal. *identify* adds the waiting workspace's id to
     `ws_oldest_wait` — for the worker's own log, never for a public surface
     (`/health/scheduling` is unauthenticated and promises nothing identifying:
-    `scheduling_health.py`, `posting_health.py`)."""
+    `scheduling_health.py`, `posting_health.py`).
+
+    The three tenant-wide reads (the ready lanes, the pending outbox, the
+    longest-waiting tenant) are doors owned by `svc_maintenance` (081) so the
+    signal holds under `svc_ingress` and `svc_worker`; the `tg_global` counter
+    is read direct, `p_rate` being `USING (true)` for both."""
     lanes: dict[str, dict[str, Any]] = {
         lane: {"ready": 0, "oldest_age_s": 0.0} for lane in LANES
     }
     rows = (
         await executor.execute(
             text(
-                "SELECT lane, count(*) AS ready,"
-                "       EXTRACT(EPOCH FROM max(now() - run_at)) AS oldest_age"
-                "  FROM jobs WHERE state = 'ready' AND run_at <= now()"
-                " GROUP BY lane"
+                "SELECT o_lane AS lane, o_ready AS ready, o_oldest_age AS oldest_age"
+                "  FROM fn_health_ready_lanes()"
             )
         )
     ).mappings()
@@ -56,9 +59,7 @@ async def snapshot(
             "oldest_age_s": round(float(r["oldest_age"] or 0.0), 1),
         }
     pending = (
-        await executor.execute(
-            text("SELECT count(*) FROM channel_outbox WHERE state = 'pending'")
-        )
+        await executor.execute(text("SELECT fn_health_outbox_pending()"))
     ).scalar()
     current = window_start(now, global_window_seconds)
     paced = (
@@ -89,10 +90,8 @@ async def snapshot(
         (
             await executor.execute(
                 text(
-                    "SELECT workspace_id, EXTRACT(EPOCH FROM now() - min(run_at)) AS wait"
-                    "  FROM jobs"
-                    " WHERE state = 'ready' AND run_at <= now() AND workspace_id IS NOT NULL"
-                    " GROUP BY workspace_id ORDER BY wait DESC LIMIT 1"
+                    "SELECT o_workspace_id AS workspace_id, o_wait AS wait"
+                    "  FROM fn_health_oldest_tenant_wait()"
                 )
             )
         )

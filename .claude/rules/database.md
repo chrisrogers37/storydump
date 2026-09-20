@@ -69,12 +69,17 @@ pinned at `tests/scripts/test_tenancy_gate.py:377`-`:378`):
   `svc_maintenance` and `svc_membership` (059 onward) — `fn_claim_job`,
   `fn_clock_tick`, `fn_reaper_sweep`, `fn_resolve_binding`, … There is no
   privileged unit of work, and none should be added.
-- **Policies are not the only fence.** Production's runtime login was still the
-  database owner, which bypasses RLS, when last measured (2026-09-17, 078's
-  header; the switch is `documentation/operations/runtime-database-roles.md`).
-  `storydump posture` and `/health`'s `db_role` report the live answer. So every
-  query names its tenant: an explicit `workspace_id = :ws` predicate on each
-  table it touches, as `ops_views.py` and `command_executors._intent_row` do.
+- **Policies are not the only fence.** Production's runtime login is still the
+  database owner, which bypasses RLS: the owner switched the API to
+  `svc_ingress` on 2026-09-20 and rolled it back the same hour, because the
+  fleet health surfaces read the tenant tables directly and went blind under
+  the policies. 081 gives those reads doors; the switch is repeated after it
+  (`documentation/operations/runtime-database-roles.md`). `storydump posture`
+  and `/health`'s `db_role` report the live answer. So every query names its
+  tenant: an explicit `workspace_id = :ws` predicate on each table it touches,
+  as `ops_views.py` and `command_executors._intent_row` do — and an
+  estate-wide read that has no tenant is a door, never a direct read that
+  happens to work as the owner.
 - **The tenancy gate** (`scripts/tenancy_gate.py`,
   `tests/scripts/test_tenancy_gate.py`) replays the migrations and fails when a
   tenant-keyed table — one with a `workspace_id` column, or `workspaces` itself

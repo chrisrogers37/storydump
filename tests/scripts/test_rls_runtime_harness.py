@@ -124,6 +124,14 @@ POLICY_CENSUS = {
     ("p_tenant", "ig_accounts", "ALL", T): "matrix",
     ("p_clock_acct_s", "ig_accounts", "SELECT", ("svc_clock",)): "door:fn_clock_tick",
     ("p_clock_acct_u", "ig_accounts", "UPDATE", ("svc_clock",)): "door:fn_clock_tick",
+    # 081: the one table svc_maintenance lacked for the fleet-health doors
+    # (fn_health_destinations and fn_health_scheduling_lag read it).
+    (
+        "p_maint_accts",
+        "ig_accounts",
+        "SELECT",
+        ("svc_maintenance",),
+    ): "door:fn_health_destinations",
     ("p_tenant", "provider_quarantine", "ALL", T): "matrix",
     (
         "p_claim_quar",
@@ -345,6 +353,39 @@ DOORS = {
     "fn_memberships_for_caller": (
         "svc_ingress",
         "SELECT * FROM fn_memberships_for_caller()",
+    ),
+    # The fleet-health doors (081, `07` §24, #751): the estate-wide reads behind
+    # /health/posting and /health/scheduling, each the module's former query.
+    # The four posting/lag reads are the API's alone; the three backpressure
+    # reads are shared with the worker, whose status line renders the same
+    # snapshot — the one place a door has TWO permitted logins.
+    "fn_health_posting_freshness": (
+        "svc_ingress",
+        "SELECT * FROM fn_health_posting_freshness()",
+    ),
+    "fn_health_publish_attempts": (
+        "svc_ingress",
+        "SELECT * FROM fn_health_publish_attempts()",
+    ),
+    "fn_health_destinations": (
+        "svc_ingress",
+        "SELECT * FROM fn_health_destinations()",
+    ),
+    "fn_health_scheduling_lag": (
+        "svc_ingress",
+        "SELECT * FROM fn_health_scheduling_lag()",
+    ),
+    "fn_health_ready_lanes": (
+        ("svc_ingress", "svc_worker"),
+        "SELECT * FROM fn_health_ready_lanes()",
+    ),
+    "fn_health_outbox_pending": (
+        ("svc_ingress", "svc_worker"),
+        "SELECT fn_health_outbox_pending()",
+    ),
+    "fn_health_oldest_tenant_wait": (
+        ("svc_ingress", "svc_worker"),
+        "SELECT * FROM fn_health_oldest_tenant_wait()",
     ),
 }
 
@@ -692,7 +733,7 @@ class TestRuntimeTenantIsolationMatrix:
             f"policy census drift: only-in-catalog={sorted(catalog - census)},"
             f" only-in-census={sorted(census - catalog)}"
         )
-        assert len(POLICY_CENSUS) == 58
+        assert len(POLICY_CENSUS) == 59
 
     def test_every_census_row_has_a_disposition_and_the_split_is_honest(self):
         by_kind = {}
@@ -709,7 +750,9 @@ class TestRuntimeTenantIsolationMatrix:
         }
         # Exact split, so a re-tagged disposition is a visible diff:
         assert len(by_kind["matrix"]) == 16
-        assert len(by_kind["door"]) == 29
+        assert (
+            len(by_kind["door"]) == 30
+        )  # 081: p_maint_accts under fn_health_destinations
         assert len(by_kind["auth"]) == 5
         # every door named in a disposition exists in the DOORS registry
         for row, disp in POLICY_CENSUS.items():
@@ -906,11 +949,18 @@ class TestDoorsAreExercisedAndExclusive:
         a bare door() would 42883 and prove nothing (and does, if mistyped:
         UndefinedFunction is not InsufficientPrivilege)."""
         permitted, call = DOORS[door]
-        other = target["ingress"] if permitted == "svc_worker" else target["worker"]
-        with pytest.raises(psycopg2.errors.InsufficientPrivilege):
-            _exec(other, call)
+        allowed = {permitted} if isinstance(permitted, str) else set(permitted)
+        others = {"svc_ingress", "svc_worker"} - allowed
+        # 081's three backpressure doors are granted to BOTH logins — the one
+        # shape with no other login to deny; their denial to PUBLIC is the
+        # catalog test's (grantees == exactly the permitted set).
+        assert others or door.startswith("fn_health_"), door
+        for login in others:
+            other = target["ingress" if login == "svc_ingress" else "worker"]
+            with pytest.raises(psycopg2.errors.InsufficientPrivilege):
+                _exec(other, call)
 
-    def test_the_catalog_agrees_fourteen_doors_and_these_grants(self, target):
+    def test_the_catalog_agrees_on_every_door_and_its_grants(self, target):
         rows = _exec(
             target["owner_stream"],
             "SELECT p.proname, r.rolname FROM pg_proc p"
@@ -939,10 +989,28 @@ class TestDoorsAreExercisedAndExclusive:
             # a blanket four-role subtraction would hide a stray grant to a
             # different door-owner role.
             grantees = {g[0] for g in grants} - {owner_of[door]}
-            assert grantees == {permitted}, (
+            allowed = {permitted} if isinstance(permitted, str) else set(permitted)
+            assert grantees == allowed, (
                 f"{door}: EXECUTE grantees {sorted(grantees)},"
-                f" expected exactly {{{permitted}}}"
+                f" expected exactly {sorted(allowed)}"
             )
+
+    def test_the_health_doors_answer_as_their_logins_and_refuse_the_other(self, target):
+        """081's seven doors run as the login(s) they are granted to and are
+        refused, by name, to the login they are not — the API's four are not
+        the worker's, and nothing here is executable by PUBLIC."""
+        health = {k: v for k, v in DOORS.items() if k.startswith("fn_health_")}
+        assert len(health) == 7
+        for door, (permitted, call) in health.items():
+            allowed = {permitted} if isinstance(permitted, str) else set(permitted)
+            for login in ("svc_ingress", "svc_worker"):
+                dsn = target["ingress" if login == "svc_ingress" else "worker"]
+                if login in allowed:
+                    rows = _exec(dsn, call, fetch=True)
+                    assert rows is not None, f"{door} as {login} answered nothing"
+                else:
+                    with pytest.raises(psycopg2.errors.InsufficientPrivilege):
+                        _exec(dsn, call, fetch=True)
 
 
 class TestDirectPathsAreShut:

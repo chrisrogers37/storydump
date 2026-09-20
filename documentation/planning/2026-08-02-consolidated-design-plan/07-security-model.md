@@ -1241,3 +1241,160 @@ ALTER TABLE service_tokens ADD COLUMN user_id UUID NULL REFERENCES users(id) ON 
 ALTER TABLE service_tokens ADD CONSTRAINT ck_service_token_subject CHECK ((user_id IS NULL) <> (workspace_id IS NULL));
 CREATE INDEX ix_service_tokens_user ON service_tokens (user_id) WHERE user_id IS NOT NULL;
 ```
+
+### §24. The fleet-health doors: the two health surfaces read the estate through svc_maintenance (081, #751)
+
+**Why:** `/health/scheduling` and `/health/posting` are the surfaces the fleet monitors poll, and
+each counts across every workspace — stalled cursors and active destinations, landings and the
+debited cap ledger, the ready lanes and the pending outbox. Their reads went at the tenant tables
+with no tenant set, which worked only because the owner login production connected as bypasses
+row-level security; both modules said so and named #751 as the place a door would have to close
+it. The first switch of the API to `svc_ingress` (2026-09-20) proved them right: every
+policy-covered table read empty, `/health/posting` answered *never-posted* for an estate with 104
+landings, `/health/scheduling` *no-signal* for two active accounts, and the monitors — built on the
+rule that a permanent no-signal must not excuse an outage — went blind while nothing else changed.
+Seven SECURITY DEFINER doors, one per read and each the module's own query moved verbatim, owned by
+`svc_maintenance`, which already held `USING (true)` on every table involved but `ig_accounts`;
+`EXECUTE` for `svc_ingress` and for `svc_worker`, whose own status line renders the same
+backpressure snapshot. The two reads a policy already answers without a tenant — the system lane's
+jobs (`workspace_id IS NULL`, `p_jobs`) and the `tg_global` rate counter (`p_rate`) — stay direct.
+
+```sql
+-- [§24 the fleet-health doors: the two health surfaces read the estate through svc_maintenance]
+-- /health/scheduling and /health/posting count across every workspace, and both rested on the
+-- owner login's BYPASSRLS: under svc_ingress with no tenant set every policy-covered table reads
+-- empty, the surfaces answer never-posted / no-signal for a live estate, and the fleet monitors go
+-- blind (met in production on 2026-09-20, #751). Seven definer doors, one per read, each the
+-- module's own query moved verbatim; owned by svc_maintenance, which held USING (true) on every
+-- table but ig_accounts. EXECUTE for svc_ingress on all seven; the three backpressure reads also
+-- for svc_worker, whose status line renders the same snapshot — the four posting and lag reads
+-- are the API's alone.
+-- The CREATE bracket is 062's, for the reason it gave.
+GRANT SELECT ON ig_accounts TO svc_maintenance;
+
+CREATE POLICY p_maint_accts ON ig_accounts FOR SELECT TO svc_maintenance USING (true);
+
+GRANT CREATE ON SCHEMA public TO svc_maintenance;
+
+CREATE FUNCTION fn_health_posting_freshness()
+RETURNS TABLE (o_posted_ever bigint, o_last_post_age_seconds numeric, o_intents_ever bigint, o_oldest_intent_age_seconds numeric)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+  SELECT count(*) FILTER (WHERE state = 'posted' AND published_via NOT IN ('legacy_backfill', 'dry_run')),
+         min(EXTRACT(EPOCH FROM now() - entered_state_at))
+           FILTER (WHERE state = 'posted' AND published_via NOT IN ('legacy_backfill', 'dry_run')),
+         count(*),
+         max(EXTRACT(EPOCH FROM now() - created_at))
+    FROM post_intents
+$$;
+
+COMMENT ON FUNCTION fn_health_posting_freshness() IS
+  'Landings and their freshness, estate-wide, for /health/posting: confirmed posts (never a legacy_backfill or dry_run row), the age of the freshest, every intent ever and the age of the oldest. A SECURITY DEFINER read owned by svc_maintenance; EXECUTE for svc_ingress, the surface''s login. Exists because p_tenant hides every row from a tenant-less read (081, #751).';
+
+ALTER FUNCTION fn_health_posting_freshness() OWNER TO svc_maintenance;
+
+REVOKE ALL ON FUNCTION fn_health_posting_freshness() FROM PUBLIC;
+
+GRANT EXECUTE ON FUNCTION fn_health_posting_freshness() TO svc_ingress;
+
+CREATE FUNCTION fn_health_publish_attempts()
+RETURNS TABLE (o_debited_total bigint, o_ledger_days bigint)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+  SELECT coalesce(sum(count), 0), count(*)
+    FROM daily_post_counts
+$$;
+
+COMMENT ON FUNCTION fn_health_publish_attempts() IS
+  'The cap ledger''s attempt record for /health/posting: what was debited in total and how many (workspace, account, day) buckets ever debited. Owned by svc_maintenance; EXECUTE for svc_ingress (081, #751).';
+
+ALTER FUNCTION fn_health_publish_attempts() OWNER TO svc_maintenance;
+
+REVOKE ALL ON FUNCTION fn_health_publish_attempts() FROM PUBLIC;
+
+GRANT EXECUTE ON FUNCTION fn_health_publish_attempts() TO svc_ingress;
+
+CREATE FUNCTION fn_health_destinations()
+RETURNS TABLE (o_accounts_active bigint, o_oldest_active_destination_age_seconds numeric)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+  SELECT count(*), max(EXTRACT(EPOCH FROM now() - created_at))
+    FROM ig_accounts WHERE state = 'active'
+$$;
+
+COMMENT ON FUNCTION fn_health_destinations() IS
+  'The destinations that could receive a post, for /health/posting: a count and the age of the oldest. Owned by svc_maintenance; EXECUTE for svc_ingress (081, #751).';
+
+ALTER FUNCTION fn_health_destinations() OWNER TO svc_maintenance;
+
+REVOKE ALL ON FUNCTION fn_health_destinations() FROM PUBLIC;
+
+GRANT EXECUTE ON FUNCTION fn_health_destinations() TO svc_ingress;
+
+CREATE FUNCTION fn_health_scheduling_lag()
+RETURNS TABLE (o_stalled bigint, o_accounts_active bigint, o_max_lag_seconds numeric)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+  SELECT count(*) FILTER (WHERE next_slot_at IS NOT NULL AND next_slot_at <= now()),
+         count(*),
+         max(EXTRACT(EPOCH FROM now() - next_slot_at))
+           FILTER (WHERE next_slot_at IS NOT NULL AND next_slot_at <= now())
+    FROM ig_accounts WHERE state = 'active'
+$$;
+
+COMMENT ON FUNCTION fn_health_scheduling_lag() IS
+  'The cursor lag for /health/scheduling: active accounts whose slot is due and unadvanced, every active account, and the worst lag. Owned by svc_maintenance; EXECUTE for svc_ingress (081, #751).';
+
+ALTER FUNCTION fn_health_scheduling_lag() OWNER TO svc_maintenance;
+
+REVOKE ALL ON FUNCTION fn_health_scheduling_lag() FROM PUBLIC;
+
+GRANT EXECUTE ON FUNCTION fn_health_scheduling_lag() TO svc_ingress;
+
+CREATE FUNCTION fn_health_ready_lanes()
+RETURNS TABLE (o_lane text, o_ready bigint, o_oldest_age numeric)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+  SELECT lane, count(*), EXTRACT(EPOCH FROM max(now() - run_at))
+    FROM jobs WHERE state = 'ready' AND run_at <= now()
+   GROUP BY lane
+$$;
+
+COMMENT ON FUNCTION fn_health_ready_lanes() IS
+  'The backpressure signal''s ready lanes: due, unclaimed jobs per lane and the oldest wait, every tenant''s included. Owned by svc_maintenance; EXECUTE for svc_ingress (/health/scheduling) and svc_worker (its own status line) (081, #751).';
+
+ALTER FUNCTION fn_health_ready_lanes() OWNER TO svc_maintenance;
+
+REVOKE ALL ON FUNCTION fn_health_ready_lanes() FROM PUBLIC;
+
+GRANT EXECUTE ON FUNCTION fn_health_ready_lanes() TO svc_ingress, svc_worker;
+
+CREATE FUNCTION fn_health_outbox_pending()
+RETURNS bigint
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+  SELECT count(*) FROM channel_outbox WHERE state = 'pending'
+$$;
+
+COMMENT ON FUNCTION fn_health_outbox_pending() IS
+  'The backpressure signal''s pending outbox rows, every tenant''s included. Owned by svc_maintenance; EXECUTE for svc_ingress and svc_worker (081, #751).';
+
+ALTER FUNCTION fn_health_outbox_pending() OWNER TO svc_maintenance;
+
+REVOKE ALL ON FUNCTION fn_health_outbox_pending() FROM PUBLIC;
+
+GRANT EXECUTE ON FUNCTION fn_health_outbox_pending() TO svc_ingress, svc_worker;
+
+CREATE FUNCTION fn_health_oldest_tenant_wait()
+RETURNS TABLE (o_workspace_id uuid, o_wait numeric)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+  SELECT workspace_id, EXTRACT(EPOCH FROM now() - min(run_at))
+    FROM jobs WHERE state = 'ready' AND run_at <= now() AND workspace_id IS NOT NULL
+   GROUP BY workspace_id ORDER BY 2 DESC LIMIT 1
+$$;
+
+COMMENT ON FUNCTION fn_health_oldest_tenant_wait() IS
+  'The backpressure signal''s longest-waiting tenant: the workspace and its wait. The worker''s log names the workspace; the unauthenticated surface never does (backpressure.py''s identify gate). Owned by svc_maintenance; EXECUTE for svc_ingress and svc_worker (081, #751).';
+
+ALTER FUNCTION fn_health_oldest_tenant_wait() OWNER TO svc_maintenance;
+
+REVOKE ALL ON FUNCTION fn_health_oldest_tenant_wait() FROM PUBLIC;
+
+GRANT EXECUTE ON FUNCTION fn_health_oldest_tenant_wait() TO svc_ingress, svc_worker;
+
+REVOKE CREATE ON SCHEMA public FROM svc_maintenance;
+```

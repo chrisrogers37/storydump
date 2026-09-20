@@ -108,13 +108,16 @@ poller must not consult it for the verdict.
 
 ## Bounds, stated because they will not be obvious later
 
-**Cross-tenant reach rests on a tracked gap.** Production connects as
-`neondb_owner`, which owns these tables and bypasses RLS, so `p_tenant` is inert
-(#751) — the same footing `scheduling_lag` documents and the same door whoever
-closes #751 must provide. Under a role the policy covers, a tenant-less read
-returns zero rows, and zero rows here reads as *nothing has posted*: this module
-fails toward the ALARM rather than toward good news, which is the survivable
-direction, but it would be alarming for the wrong reason.
+**Cross-tenant reach is a door, not a privilege.** Each read here is a
+SECURITY DEFINER function owned by `svc_maintenance` (081, `07` §24) with
+EXECUTE for the runtime logins — the same footing `scheduling_lag` and the
+backpressure snapshot stand on. The gap it closed was met in production: the
+first switch of the API to `svc_ingress` (2026-09-20, #751) made every
+policy-covered table read empty to these tenant-less queries, `posted_ever`
+read 0 for an estate with 104 landings, and the poller's verdict became
+*never-posted* — the alarm direction, but for the wrong reason, and blind to
+a real silence meanwhile. `tests/scripts/test_fleet_health_doors_gate.py`
+runs this module as `svc_ingress` against a seeded estate.
 
 **A retention door exists for the cap ledger, and nothing runs it today.**
 `059`'s `fn_retention_purge` holds a `DELETE FROM daily_post_counts`, but
@@ -138,7 +141,10 @@ from sqlalchemy import text
 #: The one `posted` row `ck_posted_complete` accepts with NO provider evidence.
 #: Excluded from every posting signal — see the module docstring. Nothing
 #: produces these today (the transform was cancelled, FC-7 §6); the filter
-#: guards what the schema still permits, not a migration that is coming.
+#: guards what the schema still permits, not a migration that is coming. The
+#: filter LIVES in `fn_health_posting_freshness` (081) since the read became a
+#: door; this spelling is the one the docs and the monitor's tests name, and
+#: the doors gate pins the door's body to it.
 _REAL_POST = "state = 'posted' AND published_via NOT IN ('legacy_backfill', 'dry_run')"
 
 
@@ -161,18 +167,15 @@ async def posting_freshness(executor) -> dict[str, Any]:
         (
             await executor.execute(
                 text(
-                    "SELECT"
-                    f"   count(*) FILTER (WHERE {_REAL_POST}) AS posted_ever,"
-                    # min-of-ages, not max-of-times: FILTER binds to the
-                    # AGGREGATE, so `EXTRACT(... max(...)) FILTER (...)` is a
-                    # syntax error. The freshest landing is the SMALLEST age.
-                    "   min(EXTRACT(EPOCH FROM now() - entered_state_at))"
-                    f"     FILTER (WHERE {_REAL_POST})"
-                    "     AS last_post_age_seconds,"
-                    "   count(*) AS intents_ever,"
-                    "   max(EXTRACT(EPOCH FROM now() - created_at))"
-                    "     AS oldest_intent_age_seconds"
-                    " FROM post_intents"
+                    # The door's body is this module's former query, verbatim
+                    # (081): min-of-ages, not max-of-times, because FILTER
+                    # binds to the AGGREGATE — the freshest landing is the
+                    # SMALLEST age.
+                    "SELECT o_posted_ever AS posted_ever,"
+                    "   o_last_post_age_seconds AS last_post_age_seconds,"
+                    "   o_intents_ever AS intents_ever,"
+                    "   o_oldest_intent_age_seconds AS oldest_intent_age_seconds"
+                    " FROM fn_health_posting_freshness()"
                 )
             )
         )
@@ -206,10 +209,9 @@ async def publish_attempts(executor) -> dict[str, Any]:
         (
             await executor.execute(
                 text(
-                    "SELECT"
-                    "   coalesce(sum(count), 0) AS debited_total,"
-                    "   count(*) AS ledger_days"
-                    " FROM daily_post_counts"
+                    "SELECT o_debited_total AS debited_total,"
+                    "   o_ledger_days AS ledger_days"
+                    " FROM fn_health_publish_attempts()"
                 )
             )
         )
@@ -263,13 +265,13 @@ async def destinations(executor) -> dict[str, Any]:
         (
             await executor.execute(
                 text(
-                    "SELECT count(*) AS accounts_active,"
-                    # max-of-ages, not min-of-times: the OLDEST destination is
-                    # the LARGEST age, and it is the rung that dates the
-                    # estate's expectation to post.
-                    "   max(EXTRACT(EPOCH FROM now() - created_at))"
+                    # max-of-ages, not min-of-times, inside the door (081):
+                    # the OLDEST destination is the LARGEST age, and it is the
+                    # rung that dates the estate's expectation to post.
+                    "SELECT o_accounts_active AS accounts_active,"
+                    "   o_oldest_active_destination_age_seconds"
                     "     AS oldest_active_destination_age_seconds"
-                    " FROM ig_accounts WHERE state = 'active'"
+                    " FROM fn_health_destinations()"
                 )
             )
         )

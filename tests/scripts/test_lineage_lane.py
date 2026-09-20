@@ -378,6 +378,8 @@ class TestTheBoundaryIsDerivedAndLoud:
             # the deploy owes them and the prefix diff never sees them.
             "079_drop_legacy_schema.sql",
             "080_window_stand_down.sql",
+            # 081 appends §24, the fleet-health doors, to the stream (#751).
+            "081_fleet_health_doors.sql",
         ], (
             f"the files above the move are {above}. If you are landing the next"
             " F.2 increment, add it here — deliberately, and at the end: arm (b)"

@@ -52,13 +52,15 @@ production right now** — dead in exactly the situation it exists to detect.
 **It cannot see a failure PAST the mint.** Cursors advancing while nothing posts
 is a different outage and wants its own signal.
 
-**It reads across tenants, and today that works for a reason that is itself a
-tracked gap.** The aggregate is estate-wide by nature. Production connects as
-`neondb_owner`, which owns these tables and holds BYPASSRLS, so `p_tenant` is
-inert (#751). Under the F.4 posture this would need a definer door — a migration.
-So the query is correct today and its cross-tenant reach rests on a gap someone
-intends to close; whoever closes #751 must give this a door rather than discover
-it returning a reassuring zero.
+**It reads across tenants through a door.** The aggregate is estate-wide by
+nature, and `scheduling_lag` reads it through `fn_health_scheduling_lag`, a
+SECURITY DEFINER function owned by `svc_maintenance` (081, `07` §24). The
+reassuring zero this paragraph once warned of was met in production: the first
+switch of the API to `svc_ingress` (2026-09-20, #751) read `accounts_active 0`
+for two active accounts and the poller's verdict became `no-signal`, which it
+never pages on. `worker_freshness` stays a direct read: its rows carry
+`workspace_id IS NULL` and `p_jobs` admits them to every runtime login.
+`tests/scripts/test_fleet_health_doors_gate.py` runs both as `svc_ingress`.
 
 **Nothing identifying is returned** — counts and a lag, never a workspace, an
 account or a handle. The endpoint that serves this is unauthenticated by design,
@@ -92,18 +94,13 @@ async def scheduling_lag(executor) -> dict[str, Any]:
         (
             await executor.execute(
                 text(
-                    "SELECT"
-                    "   count(*) FILTER ("
-                    "     WHERE next_slot_at IS NOT NULL AND next_slot_at <= now()"
-                    "   ) AS stalled,"
-                    "   count(*) AS accounts_active,"
-                    # FILTER binds to the AGGREGATE, never to an expression
-                    # wrapping it: `EXTRACT(... max(...)) FILTER (...)` is a
-                    # syntax error. The seconds are computed inside the max.
-                    "   max(EXTRACT(EPOCH FROM now() - next_slot_at)) FILTER ("
-                    "     WHERE next_slot_at IS NOT NULL AND next_slot_at <= now()"
-                    "   ) AS max_lag_seconds"
-                    " FROM ig_accounts WHERE state = 'active'"
+                    # The door's body is this module's former query, verbatim
+                    # (081): FILTER binds to the AGGREGATE, so the seconds are
+                    # computed inside the max.
+                    "SELECT o_stalled AS stalled,"
+                    "   o_accounts_active AS accounts_active,"
+                    "   o_max_lag_seconds AS max_lag_seconds"
+                    " FROM fn_health_scheduling_lag()"
                 )
             )
         )
